@@ -11870,6 +11870,516 @@ theorem parser_disp_lt57 {op : Nat} {s : X86Int.St}
     rw [len_with_rip, len_set]; exact ht3len
   · rw [ht4]; exact ht3k
 
+/-- A subtraction of distinct in-range values is nonzero. -/
+theorem sub_fst_ne_zero {op k : Nat} (hop : op < W) (hk : k < W)
+    (hne : op ≠ k) : (aluF .sub op k).1 ≠ 0 := by
+  rw [aluF_sub_fst]
+  by_cases h : k ≤ op
+  · rw [show op + W - k = (op - k) + W by omega, Nat.add_mod_right,
+      Nat.mod_eq_of_lt (by omega)]
+    omega
+  · rw [Nat.mod_eq_of_lt (by omega)]
+    omega
+
+/-- A self-subtraction is zero. -/
+theorem sub_fst_self (k : Nat) : (aluF .sub k k).1 = 0 := by
+  rw [aluF_sub_fst, Nat.add_sub_cancel_left, Nat.mod_self]
+
+/-- One unconditional jump step with full frame. -/
+theorem jmp_step {a t len : Nat} {s : X86Int.St}
+    (hdec : stage1Im a = some (.jmp t, len)) (hrip : s.rip = a) :
+    ∃ s' : X86Int.St,
+      run stage1Im 1 (Out.ok s) = Out.ok s' ∧ s'.rip = t ∧
+      (∀ i, s'.reg i = s.reg i) ∧ s'.mem = s.mem ∧
+      s'.regs.length = s.regs.length ∧ s'.k = s.k := by
+  have e1 : X86Int.step stage1Im s = .ok { s with rip := t } :=
+    step_jmp (by rw [hrip]; exact hdec)
+  obtain ⟨t1, ht1⟩ : ∃ u : X86Int.St, u = { s with rip := t } :=
+    ⟨_, rfl⟩
+  have r1 : run stage1Im 1 (Out.ok s) = Out.ok t1 := by
+    rw [run_succ_ok stage1Im 0 s, e1, ← ht1, run_zero]
+  refine ⟨t1, r1, ?_, ?_, ?_, ?_, ?_⟩
+  · rw [ht1]
+  · intro i
+    rw [ht1]
+    show ({ s with rip := t }).reg i = s.reg i
+    rw [reg_with_rip]
+  · rw [ht1]
+  · rw [ht1]
+  · rw [ht1]
+
+/-- One `movI` step with full frame. -/
+theorem movI_step {a d imm len : Nat} {s : X86Int.St}
+    (hdec : stage1Im a = some (.movI d imm, len)) (hrip : s.rip = a)
+    (hd : d < s.regs.length) :
+    ∃ s' : X86Int.St,
+      run stage1Im 1 (Out.ok s) = Out.ok s' ∧
+      s'.rip = a + len ∧ s'.reg d = some (imm % W) ∧
+      (∀ i, i ≠ d → s'.reg i = s.reg i) ∧ s'.mem = s.mem ∧
+      s'.regs.length = s.regs.length ∧ s'.k = s.k := by
+  have e1 : X86Int.step stage1Im s =
+      .ok { s.set d (some (imm % W)) with rip := s.rip + len } :=
+    step_movI (by rw [hrip]; exact hdec)
+  obtain ⟨t1, ht1⟩ : ∃ u : X86Int.St, u =
+      { s.set d (some (imm % W)) with rip := s.rip + len } := ⟨_, rfl⟩
+  have r1 : run stage1Im 1 (Out.ok s) = Out.ok t1 := by
+    rw [run_succ_ok stage1Im 0 s, e1, ← ht1, run_zero]
+  refine ⟨t1, r1, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  · rw [ht1]; show s.rip + len = a + len; rw [hrip]
+  · rw [ht1]
+    show ({ s.set d (some (imm % W)) with rip := s.rip + len }).reg d =
+      some (imm % W)
+    rw [reg_with_rip, reg_set_self hd]
+  · intro i hi
+    rw [ht1]
+    show ({ s.set d (some (imm % W)) with rip := s.rip + len }).reg i =
+      s.reg i
+    rw [reg_with_rip, reg_set_other hi]
+  · rw [ht1]
+    show ({ s.set d (some (imm % W)) with rip := s.rip + len }).mem =
+      s.mem
+    rw [mem_with_rip, mem_set]
+  · rw [ht1]
+    show ({ s.set d (some (imm % W)) with
+      rip := s.rip + len }).regs.length = s.regs.length
+    rw [len_with_rip, len_set]
+  · rw [ht1]; exact rfl
+
+/-- One `cmpI`+`jcc` pair with a given condition outcome. -/
+theorem cmpI_jcc_pair {a t k op clen cc : Nat} {b : Bool}
+    {s : X86Int.St}
+    (hcmp : stage1Im a = some (.cmpI 0 k, clen))
+    (hjcc : stage1Im (a + clen) = some (.jcc cc t, 2))
+    (hrip : s.rip = a) (hr0 : s.reg 0 = some op)
+    (hfl : X86Int.cond (aluF .sub op (k % W)).2 cc = some b) :
+    ∃ s' : X86Int.St,
+      run stage1Im 2 (Out.ok s) = Out.ok s' ∧
+      s'.rip = (if b then t else a + clen + 2) ∧
+      (∀ i, s'.reg i = s.reg i) ∧ s'.mem = s.mem ∧
+      s'.regs.length = s.regs.length ∧ s'.k = s.k := by
+  have e1 : X86Int.step stage1Im s =
+      .ok { s with fl := (aluF .sub op (k % W)).2, rip := s.rip + clen } :=
+    step_cmpI (by rw [hrip]; exact hcmp) hr0
+  obtain ⟨t1, ht1⟩ : ∃ u : X86Int.St, u =
+      { s with fl := (aluF .sub op (k % W)).2, rip := s.rip + clen } :=
+    ⟨_, rfl⟩
+  have ht1rip : t1.rip = a + clen := by
+    rw [ht1]; show s.rip + clen = a + clen; rw [hrip]
+  have ht1fl : X86Int.cond t1.fl cc = some b := by
+    rw [ht1]
+    show X86Int.cond (aluF .sub op (k % W)).2 cc = some b
+    exact hfl
+  have e2 : X86Int.step stage1Im t1 =
+      .ok { t1 with rip := if b then t else t1.rip + 2 } := by
+    have h := step_jcc (im := stage1Im) (s := t1)
+      (by rw [ht1rip]; exact hjcc) ht1fl
+    exact h
+  obtain ⟨t2, ht2⟩ : ∃ u : X86Int.St, u =
+      { t1 with rip := if b then t else t1.rip + 2 } := ⟨_, rfl⟩
+  have r1 : run stage1Im 1 (Out.ok s) = Out.ok t1 := by
+    rw [run_succ_ok stage1Im 0 s, e1, ← ht1, run_zero]
+  have r2 : run stage1Im 1 (Out.ok t1) = Out.ok t2 := by
+    rw [run_succ_ok stage1Im 0 t1, e2, ← ht2, run_zero]
+  have hrun : run stage1Im 2 (Out.ok s) = Out.ok t2 := by
+    rw [show (2 : Nat) = 1 + 1 by omega, run_add stage1Im 1 1, r1, r2]
+  refine ⟨t2, hrun, ?_, ?_, ?_, ?_, ?_⟩
+  · rw [ht2]
+    show (if b then t else t1.rip + 2) = if b then t else a + clen + 2
+    rw [ht1rip]
+  · intro i
+    rw [ht2]
+    show ({ t1 with rip := if b then t else t1.rip + 2 }).reg i =
+      s.reg i
+    rw [reg_with_rip, ht1]
+    show s.reg i = s.reg i
+    exact rfl
+  · rw [ht2]
+    show ({ t1 with rip := if b then t else t1.rip + 2 }).mem = s.mem
+    rw [mem_with_rip, ht1]
+  · rw [ht2]
+    show ({ t1 with rip := if b then t else t1.rip + 2 }).regs.length =
+      s.regs.length
+    rw [len_with_rip, ht1]
+  · rw [ht2]
+    show ({ t1 with rip := if b then t else t1.rip + 2 }).k = s.k
+    rw [ht1]
+
+/-- Condition outcome for `cmp op, k` with `op ≠ k` under cc5. -/
+theorem fl_jne {op k : Nat} (hop : op < W) (hk : k < W)
+    (hne : op ≠ k) :
+    X86Int.cond (aluF .sub op (k % W)).2 5 = some true := by
+  have hkmod : k % W = k := Nat.mod_eq_of_lt hk
+  have hzf : (aluF .sub op (k % W)).2.zf = some false := by
+    rw [aluF_zf, hkmod]
+    have hbeq : ((aluF .sub op k).1 == 0) = false := by
+      cases h : ((aluF .sub op k).1 == 0) with
+      | false => rfl
+      | true =>
+        rw [beq_iff_eq] at h
+        exact absurd h (sub_fst_ne_zero hop hk hne)
+    rw [hbeq]
+  have hcc := cond_cc5 hzf
+  simpa using hcc
+
+/-- Condition outcome for `cmp op, k` with `op = k` under cc5. -/
+theorem fl_je {op k : Nat} (hk : k < W) (heq : op = k) :
+    X86Int.cond (aluF .sub op (k % W)).2 5 = some false := by
+  have hkmod : k % W = k := Nat.mod_eq_of_lt hk
+  have hzf : (aluF .sub op (k % W)).2.zf = some true := by
+    rw [aluF_zf, hkmod, heq]
+    have hbeq : ((aluF .sub k k).1 == 0) = true := by
+      rw [beq_iff_eq]; exact sub_fst_self k
+    rw [hbeq]
+  have hcc := cond_cc5 hzf
+  simpa using hcc
+
+/-- Condition outcome for `cmp op, k` with `k ≤ op` under cc3. -/
+theorem fl_jae {op k : Nat} (hk : k < W) (h : ¬ op < k) :
+    X86Int.cond (aluF .sub op (k % W)).2 3 = some true := by
+  have hkmod : k % W = k := Nat.mod_eq_of_lt hk
+  have hcf : (aluF .sub op (k % W)).2.cf = some false := by
+    rw [hkmod]; exact aluF_sub_cf h
+  have hcc := cond_cc3 hcf
+  simpa using hcc
+
+/-- Condition outcome for `cmp op, k` with `op < k` under cc3. -/
+theorem fl_jb {op k : Nat} (hk : k < W) (h : op < k) :
+    X86Int.cond (aluF .sub op (k % W)).2 3 = some false := by
+  have hkmod : k % W = k := Nat.mod_eq_of_lt hk
+  have hcf : (aluF .sub op (k % W)).2.cf = some true := by
+    rw [hkmod]; exact aluF_sub_cf_true h
+  have hcc := cond_cc3 hcf
+  simpa using hcc
+
+/-- Condition outcome for `cmp op, k` with `op ≤ k` under cc6. -/
+theorem fl_jbe {op k : Nat} (hop : op < W) (hk : k < W)
+    (h : op ≤ k) :
+    X86Int.cond (aluF .sub op (k % W)).2 6 = some true := by
+  have hkmod : k % W = k := Nat.mod_eq_of_lt hk
+  by_cases hlt : op < k
+  · have hcf : (aluF .sub op (k % W)).2.cf = some true := by
+      rw [hkmod]; exact aluF_sub_cf_true hlt
+    have hzf : (aluF .sub op (k % W)).2.zf =
+        some ((aluF .sub op (k % W)).1 == 0) :=
+      aluF_zf .sub _ _
+    simp [X86Int.cond, hcf, hzf]
+  · have heq : op = k := by omega
+    have hcf : (aluF .sub op (k % W)).2.cf = some false := by
+      rw [hkmod]; exact aluF_sub_cf (by omega)
+    have hzf : (aluF .sub op (k % W)).2.zf = some true := by
+      rw [aluF_zf, hkmod, heq]
+      have hbeq : ((aluF .sub k k).1 == 0) = true := by
+        rw [beq_iff_eq]; exact sub_fst_self k
+      rw [hbeq]
+    simp [X86Int.cond, hcf, hzf]
+
+/-- Length dispatch, literal opcode `0x80`: length 9. -/
+theorem parser_disp_128 {op : Nat} {s : X86Int.St}
+    (hrip : s.rip = base + 0x330) (hr0 : s.reg 0 = some op)
+    (heq : op = 128) (hlen16 : s.regs.length = 16) :
+    ∃ s' : X86Int.St,
+      run stage1Im 7 (Out.ok s) = Out.ok s' ∧
+      s'.rip = base + 0x3b3 ∧ s'.reg 10 = some 9 ∧
+      s'.reg 0 = some op ∧
+      (∀ i, i ≠ 10 → s'.reg i = s.reg i) ∧
+      s'.mem = s.mem ∧ s'.regs.length = 16 ∧ s'.k = s.k := by
+  have hc := stage1_parserCode
+  obtain ⟨s1, hrun1, hs1rip, hs1fr, hs1mem, hs1len, hs1k⟩ :=
+    cmpI_jcc_pair hc.p330 hc.p334 hrip hr0
+      (fl_jae (by decide) (by omega))
+  have hs1rip' : s1.rip = base + 0x33b := hs1rip
+  have hs1r0 : s1.reg 0 = some op := by rw [hs1fr 0]; exact hr0
+  obtain ⟨s2, hrun2, hs2rip, hs2fr, hs2mem, hs2len, hs2k⟩ :=
+    cmpI_jcc_pair hc.p33b hc.p342 hs1rip' hs1r0
+      (fl_je (by decide) heq)
+  have hs2rip' : s2.rip = base + 0x344 := hs2rip
+  obtain ⟨s3, hrun3, hs3rip, hs3fr, hs3mem, hs3len, hs3k⟩ :=
+    jmp_step hc.p344 hs2rip'
+  have hs3len16 : s3.regs.length = 16 := by
+    rw [hs3len, hs2len, hs1len]; exact hlen16
+  obtain ⟨s4, hrun4, hs4rip, hs4r10, hs4fr, hs4mem, hs4len, hs4k⟩ :=
+    movI_step hc.p3a5 hs3rip (by rw [hs3len16]; decide)
+  have hs4rip' : s4.rip = base + 0x3ab := hs4rip
+  obtain ⟨s5, hrun5, hs5rip, hs5fr, hs5mem, hs5len, hs5k⟩ :=
+    jmp_step hc.p3ab hs4rip'
+  have hrun : run stage1Im 7 (Out.ok s) = Out.ok s5 := by
+    rw [show (7 : Nat) = 2 + 5 by omega, run_add stage1Im 2 5, hrun1,
+      show (5 : Nat) = 2 + 3 by omega, run_add stage1Im 2 3, hrun2,
+      show (3 : Nat) = 1 + 2 by omega, run_add stage1Im 1 2, hrun3,
+      show (2 : Nat) = 1 + 1 by omega, run_add stage1Im 1 1, hrun4,
+      hrun5]
+  have h9W : 9 % W = 9 := Nat.mod_eq_of_lt (by unfold W; decide)
+  refine ⟨s5, hrun, hs5rip, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  · rw [hs5fr 10, hs4r10, h9W]
+  · rw [hs5fr 0, hs4fr 0 (by decide), hs3fr 0, hs2fr 0, hs1fr 0]
+    exact hr0
+  · intro i hi
+    rw [hs5fr i, hs4fr i hi, hs3fr i, hs2fr i, hs1fr i]
+  · rw [hs5mem, hs4mem, hs3mem, hs2mem, hs1mem]
+  · rw [hs5len, hs4len]; exact hs3len16
+  · rw [hs5k, hs4k, hs3k, hs2k, hs1k]
+
+/-- Length dispatch, 5-byte opcodes (`129..139` except the
+1-byte specials): the whole compare chain, ending at the
+length-5 assignment. -/
+theorem parser_disp_5 {op : Nat} {s : X86Int.St}
+    (hrip : s.rip = base + 0x330) (hr0 : s.reg 0 = some op)
+    (hlo : 129 ≤ op) (hhi : op ≤ 139)
+    (h131 : op ≠ 131) (h132 : op ≠ 132) (h133 : op ≠ 133)
+    (hlen16 : s.regs.length = 16) :
+    ∃ s' : X86Int.St,
+      run stage1Im 18 (Out.ok s) = Out.ok s' ∧
+      s'.rip = base + 0x3b3 ∧ s'.reg 10 = some 5 ∧
+      s'.reg 0 = some op ∧
+      (∀ i, i ≠ 10 → s'.reg i = s.reg i) ∧
+      s'.mem = s.mem ∧ s'.regs.length = 16 ∧ s'.k = s.k := by
+  have hc := stage1_parserCode
+  have hopW : op < W := Nat.lt_of_le_of_lt hhi (by decide)
+  obtain ⟨s1, hrun1, hs1rip, hs1fr, hs1mem, hs1len, hs1k⟩ :=
+    cmpI_jcc_pair hc.p330 hc.p334 hrip hr0
+      (fl_jae (by decide) (by omega))
+  have hs1rip' : s1.rip = base + 0x33b := hs1rip
+  have hs1r0 : s1.reg 0 = some op := by rw [hs1fr 0]; exact hr0
+  obtain ⟨s2, hrun2, hs2rip, hs2fr, hs2mem, hs2len, hs2k⟩ :=
+    cmpI_jcc_pair hc.p33b hc.p342 hs1rip' hs1r0
+      (fl_jne hopW (by decide) (by omega))
+  have hs2rip' : s2.rip = base + 0x349 := hs2rip
+  have hs2r0 : s2.reg 0 = some op := by rw [hs2fr 0]; exact hs1r0
+  obtain ⟨s3, hrun3, hs3rip, hs3fr, hs3mem, hs3len, hs3k⟩ :=
+    cmpI_jcc_pair hc.p349 hc.p350 hs2rip' hs2r0
+      (fl_jne hopW (by decide) h131)
+  have hs3rip' : s3.rip = base + 0x357 := hs3rip
+  have hs3r0 : s3.reg 0 = some op := by rw [hs3fr 0]; exact hs2r0
+  obtain ⟨s4, hrun4, hs4rip, hs4fr, hs4mem, hs4len, hs4k⟩ :=
+    cmpI_jcc_pair hc.p357 hc.p35e hs3rip' hs3r0
+      (fl_jne hopW (by decide) h132)
+  have hs4rip' : s4.rip = base + 0x365 := hs4rip
+  have hs4r0 : s4.reg 0 = some op := by rw [hs4fr 0]; exact hs3r0
+  obtain ⟨s5, hrun5, hs5rip, hs5fr, hs5mem, hs5len, hs5k⟩ :=
+    cmpI_jcc_pair hc.p365 hc.p36c hs4rip' hs4r0
+      (fl_jne hopW (by decide) h133)
+  have hs5rip' : s5.rip = base + 0x373 := hs5rip
+  have hs5r0 : s5.reg 0 = some op := by rw [hs5fr 0]; exact hs4r0
+  obtain ⟨s6, hrun6, hs6rip, hs6fr, hs6mem, hs6len, hs6k⟩ :=
+    cmpI_jcc_pair hc.p373 hc.p37a hs5rip' hs5r0
+      (fl_jne hopW (by decide) (by omega))
+  have hs6rip' : s6.rip = base + 0x381 := hs6rip
+  have hs6r0 : s6.reg 0 = some op := by rw [hs6fr 0]; exact hs5r0
+  obtain ⟨s7, hrun7, hs7rip, hs7fr, hs7mem, hs7len, hs7k⟩ :=
+    cmpI_jcc_pair hc.p381 hc.p388 hs6rip' hs6r0
+      (fl_jae (by decide) (by omega))
+  have hs7rip' : s7.rip = base + 0x38f := hs7rip
+  have hs7r0 : s7.reg 0 = some op := by rw [hs7fr 0]; exact hs6r0
+  obtain ⟨s8, hrun8, hs8rip, hs8fr, hs8mem, hs8len, hs8k⟩ :=
+    cmpI_jcc_pair hc.p38f hc.p396 hs7rip' hs7r0
+      (fl_jbe hopW (by decide) hhi)
+  have hs8rip' : s8.rip = base + 0x39d := hs8rip
+  have hs8len16 : s8.regs.length = 16 := by
+    rw [hs8len, hs7len, hs6len, hs5len, hs4len, hs3len, hs2len,
+      hs1len]; exact hlen16
+  obtain ⟨s9, hrun9, hs9rip, hs9r10, hs9fr, hs9mem, hs9len, hs9k⟩ :=
+    movI_step hc.p39d hs8rip' (by rw [hs8len16]; decide)
+  have hs9rip' : s9.rip = base + 0x3a3 := hs9rip
+  obtain ⟨s10, hrun10, hs10rip, hs10fr, hs10mem, hs10len, hs10k⟩ :=
+    jmp_step hc.p3a3 hs9rip'
+  have hrun : run stage1Im 18 (Out.ok s) = Out.ok s10 := by
+    rw [show (18 : Nat) = 2 + 16 by omega, run_add stage1Im 2 16, hrun1,
+      show (16 : Nat) = 2 + 14 by omega, run_add stage1Im 2 14, hrun2,
+      show (14 : Nat) = 2 + 12 by omega, run_add stage1Im 2 12, hrun3,
+      show (12 : Nat) = 2 + 10 by omega, run_add stage1Im 2 10, hrun4,
+      show (10 : Nat) = 2 + 8 by omega, run_add stage1Im 2 8, hrun5,
+      show (8 : Nat) = 2 + 6 by omega, run_add stage1Im 2 6, hrun6,
+      show (6 : Nat) = 2 + 4 by omega, run_add stage1Im 2 4, hrun7,
+      show (4 : Nat) = 2 + 2 by omega, run_add stage1Im 2 2, hrun8,
+      show (2 : Nat) = 1 + 1 by omega, run_add stage1Im 1 1, hrun9,
+      hrun10]
+  have h5W : 5 % W = 5 := Nat.mod_eq_of_lt (by unfold W; decide)
+  refine ⟨s10, hrun, hs10rip, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  · rw [hs10fr 10, hs9r10, h5W]
+  · rw [hs10fr 0, hs9fr 0 (by decide), hs8fr 0, hs7fr 0, hs6fr 0,
+      hs5fr 0, hs4fr 0, hs3fr 0, hs2fr 0, hs1fr 0]
+    exact hr0
+  · intro i hi
+    rw [hs10fr i, hs9fr i hi, hs8fr i, hs7fr i, hs6fr i, hs5fr i,
+      hs4fr i, hs3fr i, hs2fr i, hs1fr i]
+  · rw [hs10mem, hs9mem, hs8mem, hs7mem, hs6mem, hs5mem, hs4mem,
+      hs3mem, hs2mem, hs1mem]
+  · rw [hs10len, hs9len]; exact hs8len16
+  · rw [hs10k, hs9k, hs8k, hs7k, hs6k, hs5k, hs4k, hs3k, hs2k, hs1k]
+
+/-- Length dispatch, 1-byte special opcodes `131, 132, 133, 140`:
+the chain falls out at the matching equality test to the
+length-1 assignment. -/
+theorem parser_disp_spec {op : Nat} {s : X86Int.St}
+    (hrip : s.rip = base + 0x330) (hr0 : s.reg 0 = some op)
+    (hspec : op = 131 ∨ op = 132 ∨ op = 133 ∨ op = 140)
+    (hlen16 : s.regs.length = 16) :
+    ∃ n s', run stage1Im n (Out.ok s) = Out.ok s' ∧
+      s'.rip = base + 0x3b3 ∧ s'.reg 10 = some 1 ∧
+      s'.reg 0 = some op ∧
+      (∀ i, i ≠ 10 → s'.reg i = s.reg i) ∧
+      s'.mem = s.mem ∧ s'.regs.length = 16 ∧ s'.k = s.k := by
+  have hc := stage1_parserCode
+  have hopW : op < W := by
+    have h1 : op ≤ 140 := by omega
+    exact Nat.lt_of_le_of_lt h1 (by decide)
+  have h1W : 1 % W = 1 := Nat.mod_eq_of_lt (by unfold W; decide)
+  obtain ⟨s1, hrun1, hs1rip, hs1fr, hs1mem, hs1len, hs1k⟩ :=
+    cmpI_jcc_pair hc.p330 hc.p334 hrip hr0
+      (fl_jae (by decide) (by omega))
+  have hs1rip' : s1.rip = base + 0x33b := hs1rip
+  have hs1r0 : s1.reg 0 = some op := by rw [hs1fr 0]; exact hr0
+  obtain ⟨s2, hrun2, hs2rip, hs2fr, hs2mem, hs2len, hs2k⟩ :=
+    cmpI_jcc_pair hc.p33b hc.p342 hs1rip' hs1r0
+      (fl_jne hopW (by decide) (by omega))
+  have hs2rip' : s2.rip = base + 0x349 := hs2rip
+  have hs2r0 : s2.reg 0 = some op := by rw [hs2fr 0]; exact hs1r0
+  rcases hspec with h131 | h132 | h133 | h140
+  · obtain ⟨s3, hrun3, hs3rip, hs3fr, hs3mem, hs3len, hs3k⟩ :=
+      cmpI_jcc_pair hc.p349 hc.p350 hs2rip' hs2r0
+        (fl_je (by decide) h131)
+    have hs3rip' : s3.rip = base + 0x352 := hs3rip
+    obtain ⟨s4, hrun4, hs4rip, hs4fr, hs4mem, hs4len, hs4k⟩ :=
+      jmp_step hc.p352 hs3rip'
+    have hs4len16 : s4.regs.length = 16 := by
+      rw [hs4len, hs3len, hs2len, hs1len]; exact hlen16
+    obtain ⟨s5, hrun5, hs5rip, hs5r10, hs5fr, hs5mem, hs5len, hs5k⟩ :=
+      movI_step hc.p3ad hs4rip (by rw [hs4len16]; decide)
+    have hrun : run stage1Im 8 (Out.ok s) = Out.ok s5 := by
+      rw [show (8 : Nat) = 2 + 6 by omega, run_add stage1Im 2 6, hrun1,
+        show (6 : Nat) = 2 + 4 by omega, run_add stage1Im 2 4, hrun2,
+        show (4 : Nat) = 2 + 2 by omega, run_add stage1Im 2 2, hrun3,
+        show (2 : Nat) = 1 + 1 by omega, run_add stage1Im 1 1, hrun4,
+        hrun5]
+    refine ⟨8, s5, hrun, hs5rip, ?_, ?_, ?_, ?_, ?_, ?_⟩
+    · rw [hs5r10, h1W]
+    · rw [hs5fr 0 (by decide), hs4fr 0, hs3fr 0, hs2fr 0, hs1fr 0]
+      exact hr0
+    · intro i hi
+      rw [hs5fr i hi, hs4fr i, hs3fr i, hs2fr i, hs1fr i]
+    · rw [hs5mem, hs4mem, hs3mem, hs2mem, hs1mem]
+    · rw [hs5len]; exact hs4len16
+    · rw [hs5k, hs4k, hs3k, hs2k, hs1k]
+  · obtain ⟨s3, hrun3, hs3rip, hs3fr, hs3mem, hs3len, hs3k⟩ :=
+      cmpI_jcc_pair hc.p349 hc.p350 hs2rip' hs2r0
+        (fl_jne hopW (by decide) (by omega))
+    have hs3rip' : s3.rip = base + 0x357 := hs3rip
+    have hs3r0 : s3.reg 0 = some op := by rw [hs3fr 0]; exact hs2r0
+    obtain ⟨s4, hrun4, hs4rip, hs4fr, hs4mem, hs4len, hs4k⟩ :=
+      cmpI_jcc_pair hc.p357 hc.p35e hs3rip' hs3r0
+        (fl_je (by decide) h132)
+    have hs4rip' : s4.rip = base + 0x360 := hs4rip
+    obtain ⟨s5, hrun5, hs5rip, hs5fr, hs5mem, hs5len, hs5k⟩ :=
+      jmp_step hc.p360 hs4rip'
+    have hs5len16 : s5.regs.length = 16 := by
+      rw [hs5len, hs4len, hs3len, hs2len, hs1len]; exact hlen16
+    obtain ⟨s6, hrun6, hs6rip, hs6r10, hs6fr, hs6mem, hs6len, hs6k⟩ :=
+      movI_step hc.p3ad hs5rip (by rw [hs5len16]; decide)
+    have hrun : run stage1Im 10 (Out.ok s) = Out.ok s6 := by
+      rw [show (10 : Nat) = 2 + 8 by omega, run_add stage1Im 2 8, hrun1,
+        show (8 : Nat) = 2 + 6 by omega, run_add stage1Im 2 6, hrun2,
+        show (6 : Nat) = 2 + 4 by omega, run_add stage1Im 2 4, hrun3,
+        show (4 : Nat) = 2 + 2 by omega, run_add stage1Im 2 2, hrun4,
+        show (2 : Nat) = 1 + 1 by omega, run_add stage1Im 1 1, hrun5,
+        hrun6]
+    refine ⟨10, s6, hrun, hs6rip, ?_, ?_, ?_, ?_, ?_, ?_⟩
+    · rw [hs6r10, h1W]
+    · rw [hs6fr 0 (by decide), hs5fr 0, hs4fr 0, hs3fr 0, hs2fr 0,
+        hs1fr 0]
+      exact hr0
+    · intro i hi
+      rw [hs6fr i hi, hs5fr i, hs4fr i, hs3fr i, hs2fr i, hs1fr i]
+    · rw [hs6mem, hs5mem, hs4mem, hs3mem, hs2mem, hs1mem]
+    · rw [hs6len]; exact hs5len16
+    · rw [hs6k, hs5k, hs4k, hs3k, hs2k, hs1k]
+  · obtain ⟨s3, hrun3, hs3rip, hs3fr, hs3mem, hs3len, hs3k⟩ :=
+      cmpI_jcc_pair hc.p349 hc.p350 hs2rip' hs2r0
+        (fl_jne hopW (by decide) (by omega))
+    have hs3rip' : s3.rip = base + 0x357 := hs3rip
+    have hs3r0 : s3.reg 0 = some op := by rw [hs3fr 0]; exact hs2r0
+    obtain ⟨s4, hrun4, hs4rip, hs4fr, hs4mem, hs4len, hs4k⟩ :=
+      cmpI_jcc_pair hc.p357 hc.p35e hs3rip' hs3r0
+        (fl_jne hopW (by decide) (by omega))
+    have hs4rip' : s4.rip = base + 0x365 := hs4rip
+    have hs4r0 : s4.reg 0 = some op := by rw [hs4fr 0]; exact hs3r0
+    obtain ⟨s5, hrun5, hs5rip, hs5fr, hs5mem, hs5len, hs5k⟩ :=
+      cmpI_jcc_pair hc.p365 hc.p36c hs4rip' hs4r0
+        (fl_je (by decide) h133)
+    have hs5rip' : s5.rip = base + 0x36e := hs5rip
+    obtain ⟨s6, hrun6, hs6rip, hs6fr, hs6mem, hs6len, hs6k⟩ :=
+      jmp_step hc.p36e hs5rip'
+    have hs6len16 : s6.regs.length = 16 := by
+      rw [hs6len, hs5len, hs4len, hs3len, hs2len, hs1len]
+      exact hlen16
+    obtain ⟨s7, hrun7, hs7rip, hs7r10, hs7fr, hs7mem, hs7len, hs7k⟩ :=
+      movI_step hc.p3ad hs6rip (by rw [hs6len16]; decide)
+    have hrun : run stage1Im 12 (Out.ok s) = Out.ok s7 := by
+      rw [show (12 : Nat) = 2 + 10 by omega, run_add stage1Im 2 10,
+        hrun1, show (10 : Nat) = 2 + 8 by omega, run_add stage1Im 2 8,
+        hrun2, show (8 : Nat) = 2 + 6 by omega, run_add stage1Im 2 6,
+        hrun3, show (6 : Nat) = 2 + 4 by omega, run_add stage1Im 2 4,
+        hrun4, show (4 : Nat) = 2 + 2 by omega, run_add stage1Im 2 2,
+        hrun5, show (2 : Nat) = 1 + 1 by omega, run_add stage1Im 1 1,
+        hrun6, hrun7]
+    refine ⟨12, s7, hrun, hs7rip, ?_, ?_, ?_, ?_, ?_, ?_⟩
+    · rw [hs7r10, h1W]
+    · rw [hs7fr 0 (by decide), hs6fr 0, hs5fr 0, hs4fr 0, hs3fr 0,
+        hs2fr 0, hs1fr 0]
+      exact hr0
+    · intro i hi
+      rw [hs7fr i hi, hs6fr i, hs5fr i, hs4fr i, hs3fr i, hs2fr i,
+        hs1fr i]
+    · rw [hs7mem, hs6mem, hs5mem, hs4mem, hs3mem, hs2mem, hs1mem]
+    · rw [hs7len]; exact hs6len16
+    · rw [hs7k, hs6k, hs5k, hs4k, hs3k, hs2k, hs1k]
+  · obtain ⟨s3, hrun3, hs3rip, hs3fr, hs3mem, hs3len, hs3k⟩ :=
+      cmpI_jcc_pair hc.p349 hc.p350 hs2rip' hs2r0
+        (fl_jne hopW (by decide) (by omega))
+    have hs3rip' : s3.rip = base + 0x357 := hs3rip
+    have hs3r0 : s3.reg 0 = some op := by rw [hs3fr 0]; exact hs2r0
+    obtain ⟨s4, hrun4, hs4rip, hs4fr, hs4mem, hs4len, hs4k⟩ :=
+      cmpI_jcc_pair hc.p357 hc.p35e hs3rip' hs3r0
+        (fl_jne hopW (by decide) (by omega))
+    have hs4rip' : s4.rip = base + 0x365 := hs4rip
+    have hs4r0 : s4.reg 0 = some op := by rw [hs4fr 0]; exact hs3r0
+    obtain ⟨s5, hrun5, hs5rip, hs5fr, hs5mem, hs5len, hs5k⟩ :=
+      cmpI_jcc_pair hc.p365 hc.p36c hs4rip' hs4r0
+        (fl_jne hopW (by decide) (by omega))
+    have hs5rip' : s5.rip = base + 0x373 := hs5rip
+    have hs5r0 : s5.reg 0 = some op := by rw [hs5fr 0]; exact hs4r0
+    obtain ⟨s6, hrun6, hs6rip, hs6fr, hs6mem, hs6len, hs6k⟩ :=
+      cmpI_jcc_pair hc.p373 hc.p37a hs5rip' hs5r0
+        (fl_je (by decide) h140)
+    have hs6rip' : s6.rip = base + 0x37c := hs6rip
+    obtain ⟨s7, hrun7, hs7rip, hs7fr, hs7mem, hs7len, hs7k⟩ :=
+      jmp_step hc.p37c hs6rip'
+    have hs7len16 : s7.regs.length = 16 := by
+      rw [hs7len, hs6len, hs5len, hs4len, hs3len, hs2len, hs1len]
+      exact hlen16
+    obtain ⟨s8, hrun8, hs8rip, hs8r10, hs8fr, hs8mem, hs8len, hs8k⟩ :=
+      movI_step hc.p3ad hs7rip (by rw [hs7len16]; decide)
+    have hrun : run stage1Im 14 (Out.ok s) = Out.ok s8 := by
+      rw [show (14 : Nat) = 2 + 12 by omega, run_add stage1Im 2 12,
+        hrun1, show (12 : Nat) = 2 + 10 by omega, run_add stage1Im 2 10,
+        hrun2, show (10 : Nat) = 2 + 8 by omega, run_add stage1Im 2 8,
+        hrun3, show (8 : Nat) = 2 + 6 by omega, run_add stage1Im 2 6,
+        hrun4, show (6 : Nat) = 2 + 4 by omega, run_add stage1Im 2 4,
+        hrun5, show (4 : Nat) = 2 + 2 by omega, run_add stage1Im 2 2,
+        hrun6, show (2 : Nat) = 1 + 1 by omega, run_add stage1Im 1 1,
+        hrun7, hrun8]
+    refine ⟨14, s8, hrun, hs8rip, ?_, ?_, ?_, ?_, ?_, ?_⟩
+    · rw [hs8r10, h1W]
+    · rw [hs8fr 0 (by decide), hs7fr 0, hs6fr 0, hs5fr 0, hs4fr 0,
+        hs3fr 0, hs2fr 0, hs1fr 0]
+      exact hr0
+    · intro i hi
+      rw [hs8fr i hi, hs7fr i, hs6fr i, hs5fr i, hs4fr i, hs3fr i,
+        hs2fr i, hs1fr i]
+    · rw [hs8mem, hs7mem, hs6mem, hs5mem, hs4mem, hs3mem, hs2mem,
+        hs1mem]
+    · rw [hs8len]; exact hs7len16
+    · rw [hs8k, hs7k, hs6k, hs5k, hs4k, hs3k, hs2k, hs1k]
+
 /-- EXISTENCE TARGET: with room, some oracle makes the final
 theorem non-vacuous.  The witness is `stage1Oracle f A` for the
 `A` given by `Room`.  What remains is the loader-prefix invariant:
