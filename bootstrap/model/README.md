@@ -21,7 +21,7 @@ no library beyond core, and the evidence that it says what the CPU does.
 | `formal/Bootstrap/X86DecFuzzModel.lean`, `x86dec_fuzz_cpu.cpp`, `x86dec_fuzz_gate.sh` | Hamming-1/2 (`X86Dec.altsAt`) and byte-boundary differential fuzzer of `X86Dec.decode` and `X86Int.step` against the CPU. |
 | `formal/Bootstrap/TMRBoundCheck.lean`, `tmr_fault_inject.cpp`, `tmr_fault_gate.sh` | Physical 4-site machine-code fault injection of the 38-byte TMR voter against kernel-checked `TMRVoter` and `TMRExposure` bounds. |
 | `formal/Bootstrap/X86Uni.lean`, `X86UniDiffModel.lean` (`x86uni-diff`), `x86uni_diff_cpu.cpp`, `x86uni_diff_gate.sh` | One machine for the whole chain: `X86Int` plus the seeds' narrow forms, equal to `X86Int` on its instructions (`ofInt_step`, `ofInt_prun`), with forward simulation from `X86Min` on images without `jmp r64`, and a CPU differential over every form. |
-| `formal/Bootstrap/SeedUniBridge.lean` | `seed-a` and `seed-b` correctness and refusal over every listing, lifted to `X86Uni`; built with the seed proofs (`BootstrapSeeds`, nightly). |
+| `formal/Bootstrap/SeedUniBridge.lean` | `seed-a` and `seed-b` correctness and refusal over every listing, lifted to `X86Uni`; built and audited by `seed_proofs.sh` with the seed proofs (`BootstrapSeeds`); no CI workflow runs it. |
 
 ## What the model says
 

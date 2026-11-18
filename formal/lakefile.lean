@@ -71,7 +71,8 @@ lean_lib Bootstrap where
 
 -- The two seeds on every listing (about 20 minutes of kernel time, the two in parallel), and
 -- their lifting to the unified machine X86Uni (SeedUniBridge, which imports both); built by
--- bootstrap/model/seed_proofs.sh and the nightly job, not on every pull request.
+-- bootstrap/model/seed_proofs.sh (run by hand or on the lab cluster; no CI workflow runs it),
+-- not on every pull request.
 lean_lib BootstrapSeeds where
   roots := #[`Bootstrap.SeedA, `Bootstrap.SeedB, `Bootstrap.SeedUniBridge]
 

@@ -15,7 +15,9 @@
 # It also checks the theorems about every listing, Bootstrap/SeedA.lean and
 # Bootstrap/SeedB.lean (seedA_correct, seedA_refuses, seedB_correct,
 # seedB_refuses), and that they rest on no axiom beyond propext,
-# Classical.choice and Quot.sound. All six checks run in parallel.
+# Classical.choice and Quot.sound. All six checks run in parallel. Then it builds
+# Bootstrap/SeedUniBridge.lean (the same four theorems and the fault-free `prun` runs,
+# lifted to X86Uni) and audits those six theorems the same way.
 #
 #   bootstrap/model/seed_proofs.sh [outdir]
 set -euo pipefail
@@ -59,13 +61,29 @@ done
 fail=0
 for pid in "${pids[@]}"; do wait "$pid" || fail=1; done
 
+# The same theorems lifted to the unified machine X86Uni (Bootstrap/SeedUniBridge.lean). It
+# imports SeedA and SeedB, so it runs after them, with the X86Int side of the model first.
 if [ "$fail" = 0 ]; then
-  printf '%s\n' 'import Bootstrap.SeedA' 'import Bootstrap.SeedB' \
+  for m in PDist X86Env X86Int X86Dec X86Uni SeedUniBridge; do
+    start=$(date +%s)
+    if "$lean" "Bootstrap/$m.lean" -o "$work/olean/Bootstrap/$m.olean" > "$work/$m.log" 2>&1; then
+      echo "PROOF_OK $m $(( $(date +%s) - start ))s"
+    else
+      echo "PROOF_FAIL $m"; head -c 2000 "$work/$m.log"; fail=1; break
+    fi
+  done
+fi
+
+if [ "$fail" = 0 ]; then
+  printf '%s\n' 'import Bootstrap.SeedA' 'import Bootstrap.SeedB' 'import Bootstrap.SeedUniBridge' \
     '#print axioms X86Min.SeedA.seedA_correct' '#print axioms X86Min.SeedA.seedA_refuses' \
-    '#print axioms X86Min.SeedB.seedB_correct' '#print axioms X86Min.SeedB.seedB_refuses' > "$work/axioms.lean"
+    '#print axioms X86Min.SeedB.seedB_correct' '#print axioms X86Min.SeedB.seedB_refuses' \
+    '#print axioms X86Uni.seedA_uni_correct' '#print axioms X86Uni.seedA_uni_refuses' \
+    '#print axioms X86Uni.seedB_uni_correct' '#print axioms X86Uni.seedB_uni_refuses' \
+    '#print axioms X86Uni.seedA_uni_prun' '#print axioms X86Uni.seedB_uni_prun' > "$work/axioms.lean"
   "$lean" "$work/axioms.lean" > "$work/axioms.log" 2>&1 || fail=1
   cat "$work/axioms.log"
-  [ "$(grep -c "depends on axioms: \[propext, Classical.choice, Quot.sound\]" "$work/axioms.log")" = 4 ] \
+  [ "$(grep -c "depends on axioms: \[propext, Classical.choice, Quot.sound\]" "$work/axioms.log")" = 10 ] \
     || { echo "a theorem about every listing rests on another axiom"; fail=1; }
 fi
 
