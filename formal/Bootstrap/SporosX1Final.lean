@@ -5514,6 +5514,237 @@ theorem run_reg_some_ne11 {im : Nat → Option (Ins × Nat)} :
       rw [hs] at h
       cases n <;> simp [X86Int.run] at h
 
+/-- A byte write succeeds exactly when `find` hits a writable
+region (the written value is irrelevant). -/
+theorem wr_isSome_iff {m : Mem} {a u : Nat} :
+    (m.wr a u).isSome ↔
+      ∃ i r, Mem.find m a 0 = some (i, r) ∧ r.rw = true := by
+  constructor
+  · intro h
+    cases hf : Mem.find m a 0 with
+    | none => simp [Mem.wr, hf] at h
+    | some p =>
+      obtain ⟨i, r⟩ := p
+      refine ⟨i, r, rfl, ?_⟩
+      by_cases hrw : r.rw = true
+      · exact hrw
+      · simp [Mem.wr, hf, hrw] at h
+  · rintro ⟨i, r, hf, hrw⟩
+    simp [Mem.wr, hf, hrw]
+
+/-- `find` in an append whose last region is the first hit. -/
+theorem find_append_last : ∀ (m : Mem) (k : Nat) {r : Region}
+    {a : Nat},
+    (∀ r' ∈ m, ¬ (r'.base ≤ a ∧ a < r'.hi)) →
+    r.base ≤ a ∧ a < r.hi →
+    Mem.find (m ++ [r]) a k = some (k + m.length, r) := by
+  intro m
+  induction m with
+  | nil =>
+    intro k r a _ hr
+    show Mem.find [r] a k = some (k, r)
+    unfold Mem.find
+    rw [if_pos hr]
+  | cons r0 rest ih =>
+    intro k r a hm hr
+    have h0 : ¬ (r0.base ≤ a ∧ a < r0.hi) := hm r0 (.head _)
+    have hg : Mem.find ((r0 :: rest) ++ [r]) a k =
+        (if r0.base ≤ a ∧ a < r0.hi then some (k, r0)
+          else Mem.find (rest ++ [r]) a (k + 1)) := rfl
+    have hih := ih (k + 1) (fun r' hr' => hm r' (.tail _ hr')) hr
+    have eidx : k + (r0 :: rest).length = k + 1 + rest.length := by
+      simp only [List.length_cons]; omega
+    rw [hg, if_neg h0, hih, eidx]
+
+/-- One step of a successful `wrN`. -/
+theorem wrN_cons_isSome {m : Mem} {a b : Nat} {bs : List Nat}
+    (h : (m.wrN a (b :: bs)).isSome) :
+    ∃ m1, m.wr a b = some m1 ∧ (m1.wrN (a + 1) bs).isSome := by
+  have h2 : ((m.wr a b).bind (fun mm => mm.wrN (a + 1) bs)).isSome := h
+  obtain ⟨m', hm'⟩ := Option.isSome_iff_exists.mp h2
+  rw [Option.bind_eq_some_iff] at hm'
+  obtain ⟨m1, h1, h3⟩ := hm'
+  exact ⟨m1, h1, Option.isSome_iff_exists.mpr ⟨m', h3⟩⟩
+
+/-- From a successful `wrN`, every byte offset is writable with
+any value. -/
+theorem wrN_isSome_decomp : ∀ (bs : List Nat) {m : Mem} {a : Nat},
+    (m.wrN a bs).isSome → ∀ (j : Nat), j < bs.length → ∀ u,
+      (m.wr (a + j) u).isSome := by
+  intro bs
+  induction bs with
+  | nil => intro m a _ j hj _; simp at hj
+  | cons b bs ih =>
+    intro m a h j hj u
+    obtain ⟨m1, h1, hrest⟩ := wrN_cons_isSome h
+    cases j with
+    | zero =>
+      have hh : (m.wr a b).isSome :=
+        Option.isSome_iff_exists.mpr ⟨m1, h1⟩
+      have hf := wr_isSome_iff.mp hh
+      exact wr_isSome_iff.mpr hf
+    | succ j =>
+      have hj' : j < bs.length := by
+        simp only [List.length_cons] at hj; omega
+      have hh := ih hrest j hj' u
+      have hsh : wshape m = wshape m1 := (wr_wshape h1).symm
+      have hw := wr_some_of_wshape hsh hh
+      rwa [show a + 1 + j = a + (j + 1) by omega] at hw
+
+/-- Assemble a `wrN` over a same-shape memory from per-byte
+writability in the original. -/
+theorem wrN_isSome_of_forall_wr : ∀ (bs : List Nat) {m m' : Mem}
+    {a : Nat},
+    wshape m' = wshape m →
+    (∀ (j : Nat), j < bs.length → ∀ u, (m.wr (a + j) u).isSome) →
+    (m'.wrN a bs).isSome := by
+  intro bs
+  induction bs with
+  | nil =>
+    intro m m' a _ _
+    exact Option.isSome_iff_exists.mpr ⟨m', rfl⟩
+  | cons b bs ih =>
+    intro m m' a hsh h
+    have hw : (m'.wr a b).isSome :=
+      wr_some_of_wshape hsh (h 0 (by simp) b)
+    obtain ⟨m'', hm''⟩ := Option.isSome_iff_exists.mp hw
+    have h2 : ((m'.wr a b).bind (fun mm => mm.wrN (a + 1) bs)).isSome := by
+      rw [hm'']
+      show (m''.wrN (a + 1) bs).isSome
+      have hsh2 : wshape m'' = wshape m := (wr_wshape hm'').trans hsh
+      refine ih hsh2 (fun j hj u => ?_)
+      have hh := h (j + 1) (by simp only [List.length_cons]; omega) u
+      rwa [show a + 1 + j = a + (j + 1) by omega]
+    exact h2
+
+theorem bytes8_length (v : Nat) : (bytes8 v).length = 8 := by
+  simp [bytes8]
+
+/-- A `wr64` from per-byte writability. -/
+theorem wr64_isSome_of_forall_wr {m : Mem} {a v : Nat}
+    (h : ∀ (j : Nat), j < 8 → ∀ u, (m.wr (a + j) u).isSome) :
+    (wr64 m a v).isSome := by
+  show (m.wrN a (bytes8 v)).isSome
+  exact wrN_isSome_of_forall_wr (bs := bytes8 v) rfl
+    (fun j hj u => h j (by rw [bytes8_length] at hj; exact hj) u)
+
+/-- From a successful `wr64`, every byte offset is writable. -/
+theorem wr_isSome_of_wr64 {m : Mem} {a v : Nat}
+    (h : (wr64 m a v).isSome) {j : Nat} (hj : j < 8) (u : Nat) :
+    (m.wr (a + j) u).isSome := by
+  have h2 : (m.wrN a (bytes8 v)).isSome := h
+  exact wrN_isSome_decomp _ h2 j (by rw [bytes8_length]; exact hj) u
+
+/-- `StackRoom` is monotone in the depth. -/
+theorem stackRoom_mono {s : X86Int.St} {k k' : Nat}
+    (h : StackRoom s k) (hle : k' ≤ k) : StackRoom s k' := by
+  intro sp hr4 i hi v
+  exact h sp hr4 i (by omega) v
+
+/-- `StackRoom` transports to a same-shape memory with the
+stack pointer lowered by whole slots. -/
+theorem stackRoom_transport {s s' : X86Int.St}
+    {k k' t sp : Nat}
+    (hsh : wshape s'.mem = wshape s.mem)
+    (hr4 : s.reg 4 = some sp) (hr4' : s'.reg 4 = some (sp - 8 * t))
+    (hroom : StackRoom s k) (hk : t + k' ≤ k)
+    (hge : 8 * k ≤ sp) (hspW : sp < W) :
+    StackRoom s' k' := by
+  intro sp'' h4'' i hi v
+  have hsp'' : sp'' = sp - 8 * t := by
+    rw [hr4'] at h4''
+    exact (Option.some.inj h4'').symm
+  have hmod : ∀ d : Nat, d ≤ sp → (sp + W - d) % W = sp - d := by
+    intro d hd
+    have hh : sp + W - d = (sp - d) + W := by omega
+    rw [hh, Nat.add_mod_right, Nat.mod_eq_of_lt (by omega)]
+  have hA : (sp'' + W - 8 * (i + 1)) % W = sp - 8 * (t + i + 1) := by
+    have ee : sp - 8 * t + W - 8 * (i + 1) =
+        sp + W - 8 * (t + i + 1) := by omega
+    rw [hsp'', ee, hmod (8 * (t + i + 1)) (by omega)]
+  have hw64 := hroom sp hr4 (t + i) (by omega) v
+  rw [hmod (8 * (t + i + 1)) (by omega)] at hw64
+  rw [hA]
+  exact wr64_isSome_of_forall_wr (fun j hj u =>
+    wr_some_of_wshape hsh (wr_isSome_of_wr64 hw64 hj u))
+
+/-- A read succeeds when `find` hits a region. -/
+theorem rd_isSome_of_find {m : Mem} {a : Nat}
+    (h : ∃ i r, Mem.find m a 0 = some (i, r)) :
+    (m.rd a).isSome := by
+  obtain ⟨i, r, hf⟩ := h
+  obtain ⟨-, hle, hlt⟩ := find_some_mem hf
+  have hidx : a - r.base < r.data.length := by
+    unfold X86Env.Region.hi at hlt
+    omega
+  have hv : ∃ v, r.data[a - r.base]? = some v :=
+    ⟨r.data[a - r.base]'hidx, List.getElem?_eq_getElem hidx⟩
+  obtain ⟨v, hv⟩ := hv
+  refine Option.isSome_iff_exists.mpr ⟨v, ?_⟩
+  have he : m.rd a =
+      (do let x ← Mem.find m a 0; x.2.data[a - x.2.base]?) := rfl
+  rw [he, hf]
+  exact hv
+
+/-- An `rdN` from per-byte readability. -/
+theorem rdN_isSome_of_forall_rd : ∀ (n : Nat) {m : Mem} {a : Nat},
+    (∀ (j : Nat), j < n → (m.rd (a + j)).isSome) →
+    (m.rdN a n).isSome := by
+  intro n
+  induction n with
+  | zero => intro m a _; exact Option.isSome_iff_exists.mpr ⟨[], rfl⟩
+  | succ n ih =>
+    intro m a h
+    have h0 := h 0 (by omega)
+    obtain ⟨b, hb⟩ := Option.isSome_iff_exists.mp h0
+    have hr := ih (a := a + 1) (fun j hj => by
+      have hh := h (j + 1) (by omega)
+      rwa [show a + 1 + j = a + (j + 1) by omega])
+    obtain ⟨bs, hbs⟩ := Option.isSome_iff_exists.mp hr
+    exact Option.isSome_iff_exists.mpr
+      ⟨b :: bs, rdN_cons_some hb hbs⟩
+
+/-- An `rd64` from per-byte readability. -/
+theorem rd64_some_of_forall_rd {m : Mem} {a : Nat}
+    (h : ∀ (j : Nat), j < 8 → (m.rd (a + j)).isSome) :
+    ∃ v, rd64 m a = some v := by
+  have h8 := rdN_isSome_of_forall_rd 8 h
+  obtain ⟨bs, hbs⟩ := Option.isSome_iff_exists.mp h8
+  exact ⟨leVal bs, by rw [rd64, hbs]; rfl⟩
+
+/-- `StackRoom` for a three-region memory whose second region
+is the writable stack, disjoint from the first. -/
+theorem stackRoom_of_c2 {s : X86Int.St} {c1 c2 buf : Region}
+    {sp k : Nat}
+    (hmem : s.mem = [c1, c2, buf]) (hr4 : s.reg 4 = some sp)
+    (hrw : c2.rw = true) (hdisj : c1.hi ≤ c2.base)
+    (hlo : c2.base + 8 * k ≤ sp) (hhi : sp ≤ c2.hi)
+    (hspW : sp < W) :
+    StackRoom s k := by
+  have hfind : ∀ a : Nat, c2.base ≤ a → a < c2.hi →
+      Mem.find [c1, c2, buf] a 0 = some (1, c2) := by
+    intro a h1 h2
+    have hg : Mem.find [c1, c2, buf] a 0 =
+        (if c1.base ≤ a ∧ a < c1.hi then some (0, c1)
+          else if c2.base ≤ a ∧ a < c2.hi then some (1, c2)
+            else Mem.find [buf] a 2) := rfl
+    rw [hg, if_neg (by omega), if_pos ⟨h1, h2⟩]
+  intro sp' h4' i hi v
+  have hsp' : sp' = sp := by
+    rw [hr4] at h4'
+    exact (Option.some.inj h4').symm
+  rw [hsp']
+  have hmod : (sp + W - 8 * (i + 1)) % W = sp - 8 * (i + 1) := by
+    have hh : sp + W - 8 * (i + 1) = (sp - 8 * (i + 1)) + W := by
+      omega
+    rw [hh, Nat.add_mod_right, Nat.mod_eq_of_lt (by omega)]
+  rw [hmod]
+  have hslot : c2.base ≤ sp - 8 * (i + 1) := by omega
+  refine wr64_isSome_of_forall_wr (fun j hj u => ?_)
+  rw [hmem]
+  exact wr_isSome_iff.mpr ⟨1, c2,
+    hfind _ (by omega) (by omega), hrw⟩
+
 set_option maxRecDepth 8192 in
 /-- Entry to `loaded` under the witness: the 21-step prefix, the
 initial `mmap` (oracle-legal at its site) and the whole read
@@ -5550,7 +5781,8 @@ theorem loader_init_to_loaded {f path argv0 stdin : List Nat}
       s'.regs.length = 16 ∧
       (∃ t, run stage1Im 21
         (Out.ok (stage1Init f path argv0 stdin (stage1Oracle f A)
-          top)) = Out.ok t ∧ OracleLegalAt t) := by
+          top)) = Out.ok t ∧ OracleLegalAt t) ∧
+      StackRoom s' 10 := by
   obtain ⟨hfB, -, -, hpath0, -, hpathlen, -, htop47, hleInit,
     hstkhi⟩ := hinit
   obtain ⟨A, hAmod, hApos, hAbound, hfree⟩ := hroom
@@ -5756,7 +5988,44 @@ theorem loader_init_to_loaded {f path argv0 stdin : List Nat}
         simp only [Prod.mk.injEq] at h
         rw [h.2.2]
         exact rfl⟩, hs3content, hs3len,
-    ⟨s1, hrun1, hlegal⟩⟩
+    ⟨s1, hrun1, hlegal⟩, by
+      have hc2rw : c2.rw = true := by
+        have h := hshape3.2
+        simp only [Prod.mk.injEq] at h
+        rw [h.2.2]
+        exact rfl
+      have hsp0 : (X86Env.initStack top [argv0, path]).2 =
+          c2.base + 4096 := by
+        have h1 := initStack_sp top argv0 path
+        rw [← hc2b] at h1
+        have hsr : X86Env.stackRoom = 4096 := rfl
+        rw [hsr] at h1
+        exact h1
+      have hhi2 : (X86Env.initStack top [argv0, path]).2 + 24 ≤
+          c2.hi := by
+        have hlen := initStack_data_length top argv0 path
+        have hp : 4096 ≤ X86Env.pages
+            (56 + ((argv0.length + 1) + (path.length + 1)) + 1) := by
+          unfold X86Env.pages X86Env.page
+          have h1 : 1 ≤ (56 + ((argv0.length + 1) +
+              (path.length + 1)) + 1 + 4095) / 4096 :=
+            Nat.div_pos (by omega) (by decide)
+          omega
+        have hh : c2.hi = c2.base +
+            (X86Env.initStack top [argv0, path]).1.data.length := by
+          have e : (X86Env.initStack top [argv0, path]).1.hi =
+              (X86Env.initStack top [argv0, path]).1.base +
+                (X86Env.initStack top [argv0, path]).1.data.length :=
+            rfl
+          rw [hc2hi, e, ← hc2b]
+        have hsr : X86Env.stackRoom = 4096 := rfl
+        omega
+      refine stackRoom_of_c2 hs3mem hs3r4 hc2rw ?_ ?_ hhi2 ?_
+      · rw [hc1hi, hc2b]; exact hdisjInit
+      · omega
+      · have hW : W = 2 ^ 64 := rfl
+        have ht : c2.hi = top := by rw [hc2hi]; exact hstkhi
+        omega⟩
 
 /-- Layout of the parser region `base + 0x134` to `aCheckStart`
 (`base + 0x452`): every instruction of the header checks, the two
