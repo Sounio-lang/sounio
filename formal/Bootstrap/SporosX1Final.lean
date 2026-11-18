@@ -5942,6 +5942,73 @@ theorem exit2_of_fail2 {sp : Nat} (hsp32 : 32 ≤ sp) (hspW : sp < W) :
     (by unfold W; decide) (by omega) hspW s hrip hr4 hregs hroom
   exact ⟨k, by simpa using hk⟩
 
+/-! ### Parser segment infrastructure -/
+
+theorem rdN_length {m : Mem} : ∀ {a n : Nat} {bs : List Nat},
+    m.rdN a n = some bs → bs.length = n := by
+  intro a n
+  induction n generalizing a with
+  | zero =>
+    intro bs h
+    have h2 : m.rdN a 0 = some [] := rfl
+    rw [h2] at h
+    have hbs : bs = [] := (Option.some.inj h).symm
+    rw [hbs]; rfl
+  | succ n ih =>
+    intro bs h
+    cases bs with
+    | nil =>
+      exfalso
+      have h1 : (do let b ← m.rd a; let r ← Mem.rdN m (a + 1) n; pure (b :: r)) = some ([] : List Nat) := h
+      obtain ⟨b, hb, h2⟩ := bind_some h1
+      obtain ⟨r, hr, h3⟩ := bind_some h2
+      simp at h3
+    | cons b bs =>
+      obtain ⟨-, hr⟩ := rdN_cons h
+      rw [List.length_cons, ih hr]
+
+theorem rdN_slice {m : Mem} {a n o k : Nat} {bs : List Nat}
+    (h : m.rdN a n = some bs) (hok : o + k ≤ n) :
+    m.rdN (a + o) k = some ((bs.drop o).take k) := by
+  have hlen : bs.length = n := rdN_length h
+  have hsplit1 : bs = bs.take o ++ bs.drop o :=
+    (List.take_append_drop o bs).symm
+  have h1 : m.rdN a ((bs.take o).length + (bs.drop o).length) =
+      some (bs.take o ++ bs.drop o) := by
+    have hl : (bs.take o).length + (bs.drop o).length = n := by
+      rw [← List.length_append, List.take_append_drop]; exact hlen
+    rw [hl, ← hsplit1]; exact h
+  obtain ⟨-, h2⟩ := rdN_append h1
+  have htake : (bs.take o).length = o := by
+    rw [List.length_take, hlen, Nat.min_eq_left (by omega)]
+  rw [htake] at h2
+  have hsplit2 : bs.drop o = (bs.drop o).take k ++ (bs.drop o).drop k :=
+    (List.take_append_drop k (bs.drop o)).symm
+  have h3 : m.rdN (a + o)
+      (((bs.drop o).take k).length + ((bs.drop o).drop k).length) =
+      some ((bs.drop o).take k ++ (bs.drop o).drop k) := by
+    have hl : ((bs.drop o).take k).length + ((bs.drop o).drop k).length =
+        (bs.drop o).length := by
+      rw [← List.length_append, List.take_append_drop]
+    rw [hl, ← hsplit2]; exact h2
+  obtain ⟨h4, -⟩ := rdN_append h3
+  have hklen : ((bs.drop o).take k).length = k := by
+    rw [List.length_take, List.length_drop, hlen,
+      Nat.min_eq_left (by omega)]
+  rw [hklen] at h4
+  exact h4
+
+theorem leVal_take4_mod32 {xs : List Nat} (h8 : xs.length = 8) :
+    leVal xs % 2 ^ 32 = leVal (xs.take 4) % 2 ^ 32 := by
+  have hsplit : xs = xs.take 4 ++ xs.drop 4 :=
+    (List.take_append_drop 4 xs).symm
+  have hlen4 : (xs.take 4).length = 4 := by
+    rw [List.length_take, h8]; decide
+  have h256 : 256 ^ 4 = 2 ^ 32 := by decide
+  have hdecomp := leVal_append (xs.take 4) (xs.drop 4)
+  rw [← hsplit, hlen4, h256] at hdecomp
+  rw [hdecomp, Nat.add_mul_mod_self_left]
+
 /-- The `RDC` body at `aRDC`, success case, with the frame the
 parser composition needs (the exported `RDCSpec` post is too weak
 on preserved registers): only `rax`, `rdx`, `rsp` and `rsi`
