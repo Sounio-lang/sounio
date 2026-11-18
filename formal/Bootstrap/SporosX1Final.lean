@@ -5113,7 +5113,8 @@ theorem loader_read_loop : ∀ rem : Nat,
         s'.k.oracle = tail ∧
         s'.k.fds = [some ⟨f, f.length⟩] ∧
         (∃ buf', s'.mem = [c1, c2, buf'] ∧ buf'.base = A ∧
-          (∃ cap', buf'.hi = A + cap') ∧ buf'.rw = true) ∧
+          (∃ cap', buf'.hi = A + cap' ∧ cap' ≤ capB) ∧
+          buf'.rw = true) ∧
         s'.mem.rdN A f.length = some f ∧
         s'.regs.length = 16 := by
   intro rem
@@ -5199,7 +5200,8 @@ theorem loader_read_loop : ∀ rem : Nat,
         omega
     refine ⟨11, s2, hrun, by rw [hs2], ?_, ⟨cap, ?_⟩, ?_, ?_, ?_,
       ⟨n, ?_⟩, ?_, ?_, ?_, ?_, ?_,
-      ⟨buf1, ?_, hbuf1base, ⟨cap, hbuf1hi⟩, hbuf1rw⟩, hcontent2, ?_⟩
+      ⟨buf1, ?_, hbuf1base, ⟨cap, hbuf1hi, by omega⟩, hbuf1rw⟩,
+      hcontent2, ?_⟩
     · rw [hs2]
       show ({ s1 with rip := base + 0x134 }).reg 3 = some A
       rw [reg_with_rip]; exact hs1r3
@@ -5541,8 +5543,9 @@ theorem loader_init_to_loaded {f path argv0 stdin : List Nat}
         c1.base = base ∧ c1.hi = base + stage1Code.length ∧
         c2.base = (X86Env.initStack top [argv0, path]).1.base ∧
         c2.hi = (X86Env.initStack top [argv0, path]).1.hi ∧
-        buf'.base = A ∧ (∃ cap', buf'.hi = A + cap') ∧
-        buf'.rw = true) ∧
+        buf'.base = A ∧ (∃ cap', buf'.hi = A + cap' ∧
+          cap' ≤ arenaFileBytes f) ∧
+        buf'.rw = true ∧ c2.rw = true) ∧
       s'.mem.rdN A f.length = some f ∧
       s'.regs.length = 16 ∧
       (∃ t, run stage1Im 21
@@ -5729,7 +5732,8 @@ theorem loader_init_to_loaded {f path argv0 stdin : List Nat}
     omega
   obtain ⟨k, s3, hrun3, hs3rip, hs3r3, ⟨cap', hs3r12⟩, hs3r13, hs3r14,
     hs3r4, hs3r0, hs3r10, hs3r8, hs3r9, hs3oracle, hs3fds,
-    ⟨buf3, hs3mem, hbuf3base, ⟨cap'', hbuf3hi⟩, hbuf3rw⟩, hs3content,
+    ⟨buf3, hs3mem, hbuf3base, ⟨cap'', hbuf3hi, hbuf3bound⟩, hbuf3rw⟩,
+    hs3content,
     hs3len⟩ :=
     loader_read_loop (f.length - 0) (by rw [Nat.sub_zero]) hs2rip
       hs2len hs2r3 hs2r12 hs2r13 hs2r14 hs2r4 hs2r0 hs2r10 hs2r8 hs2r9
@@ -5747,7 +5751,11 @@ theorem loader_init_to_loaded {f path argv0 stdin : List Nat}
     hs3r3, ⟨cap', hs3r12⟩, hs3r13, hs3r14, hs3r4, hs3r0, hs3r10, hs3r8,
     hs3r9, hs3oracle, hs3fds,
     ⟨c1, c2, buf3, hs3mem, hc1b, hc1hi, hc2b, hc2hi, hbuf3base,
-      ⟨cap'', hbuf3hi⟩, hbuf3rw⟩, hs3content, hs3len,
+      ⟨cap'', hbuf3hi, hbuf3bound⟩, hbuf3rw, by
+        have h := hshape3.2
+        simp only [Prod.mk.injEq] at h
+        rw [h.2.2]
+        exact rfl⟩, hs3content, hs3len,
     ⟨s1, hrun1, hlegal⟩⟩
 
 /-- Layout of the parser region `base + 0x134` to `aCheckStart`
@@ -9176,7 +9184,8 @@ theorem parser_mmap1_ok {c nw sp T : Nat} {s : X86Int.St}
       rd64 s'.mem (sp - 8) = some (c % W) ∧
       (∀ i, i ≠ 0 → i ≠ 1 → i ≠ 2 → i ≠ 4 → i ≠ 6 → i ≠ 7 → i ≠ 8 →
         i ≠ 9 → i ≠ 10 → i ≠ 11 → i ≠ 14 → s'.reg i = s.reg i) ∧
-      s'.regs.length = 16 ∧ s'.k = (Kern.next s.k).2 := by
+      s'.regs.length = 16 ∧ s'.k = (Kern.next s.k).2 ∧
+      wshape m2 = wshape s.mem := by
   have hc := stage1_parserCode
   have hlen : ∀ i : Nat, i < 16 → i < s.regs.length := by
     intro i hi; omega
@@ -10002,7 +10011,8 @@ theorem parser_mmap1_ok {c nw sp T : Nat} {s : X86Int.St}
       true⟩ : Region)]).rdN (sp - 8) 8).map leVal = some (c % W)
     rw [rdN_append_left hbs8]
     simp [hle]
-  refine ⟨t20, m2, hrun, ?_, ?_, ?_, ?_, hm2fr, hrd64cur, ?_, ?_, ?_⟩
+  refine ⟨t20, m2, hrun, ?_, ?_, ?_, ?_, hm2fr, hrd64cur, ?_, ?_, ?_,
+    hw2⟩
   · rw [ht20]; show t19.rip + 3 = base + 0x22d; rw [ht19rip]
   · rw [ht20]
     show ({ t19.set 14 (some T) with rip := t19.rip + 3 }).reg 14 =
@@ -10056,7 +10066,8 @@ theorem parser_mmap2_ok {L sp1 S : Nat} {s : X86Int.St}
         m1.rdN x k = s.mem.rdN x k) ∧
       (∀ i, i ≠ 0 → i ≠ 1 → i ≠ 2 → i ≠ 4 → i ≠ 6 → i ≠ 7 → i ≠ 8 →
         i ≠ 9 → i ≠ 10 → i ≠ 11 → s'.reg i = s.reg i) ∧
-      s'.regs.length = 16 ∧ s'.k = (Kern.next s.k).2 := by
+      s'.regs.length = 16 ∧ s'.k = (Kern.next s.k).2 ∧
+      wshape m1 = wshape s.mem := by
   have hc := stage1_parserCode
   have hlen : ∀ i : Nat, i < 16 → i < s.regs.length := by
     intro i hi; omega
@@ -10627,7 +10638,7 @@ theorem parser_mmap2_ok {L sp1 S : Nat} {s : X86Int.St}
     rcases hdis with h | h
     · exact Or.inr h
     · exact Or.inl (by omega)
-  refine ⟨t12, m1, hrun, ?_, ?_, ?_, ?_, hm1fr, ?_, ?_, ?_⟩
+  refine ⟨t12, m1, hrun, ?_, ?_, ?_, ?_, hm1fr, ?_, ?_, ?_, hw1⟩
   · rw [ht12]; show t11.rip + 3 = base + 0x258; rw [ht11rip]
   · rw [ht12]
     show ({ t11.set 11 (some S) with rip := t11.rip + 3 }).reg 11 =
