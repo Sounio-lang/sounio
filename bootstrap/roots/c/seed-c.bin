@@ -1,0 +1,141 @@
+: seed-c: the first loader of bootstrap root C. Written by hand, byte by byte,
+: separately from seed-a and seed-b, in its own format and architecture (AArch64).
+:
+: What it does: reads a listing from standard input and writes the bytes it
+: describes to standard output.
+:
+: Format C, the format of this file:
+:   - a byte is a group of exactly eight contiguous binary digits, '0' or '1',
+:     most significant bit first (00000000 to 11111111);
+:   - the eight digits of a group are contiguous: nothing may stand between them;
+:   - between groups: space (0x20), tab (0x09), newline (0x0a), or ':', which
+:     starts a comment that runs to the end of the line or end of input.
+: Anything else is refused: any byte other than '0'/'1'/space/tab/newline/':'
+: outside a comment (including '2'-'9', letters, '#', ';', carriage return 0x0d),
+: a separator or ':' inside a group, and an incomplete group at end of input.
+:
+: Exit status: 0 when the whole input was valid and every byte was written;
+: 1 on a refused input, a failed read or a short write. Output is written as
+: it is decoded, so on exit 1 the bytes already written must be discarded.
+:
+: Self-reproduction: `seed-c < seed-c.bin` writes exactly the bytes of `seed-c`.
+: Cross-check: `seed-c < seed-a.bin` writes `seed-a`; `seed-c < seed-b.bin` writes `seed-b`.
+:
+: Layout: one ELF64 header (0x00-0x3f), one program header (0x40-0x77), code
+: (0x78-0x153). The file is loaded at virtual address 0x400000, so file offset
+: X is address 0x400000 + X. Every AArch64 instruction is 32-bit little-endian,
+: and branch offsets are PC-relative in multiples of 4 bytes. Total 340 bytes (0x154).
+:
+: Machine state at entry: only sp is used as given by the kernel. Every register
+: the code reads is set first (x19, x20, x21) or set before use (x0, x1, x2, x8):
+:   x19  accumulator of the current 8-bit group (0..255)
+:   x20  digits read in the current group (0..7; 8 triggers write)
+:   x21  1 inside a comment, 0 outside
+:   [sp] one-byte buffer for read and for write
+
+: ---------------------------------------------------------------- ELF header
+01111111 01000101 01001100 01000110                                       : 0x00  e_ident: magic 0x7f 'E' 'L' 'F'
+00000010                                                                  : 0x04  EI_CLASS   = ELFCLASS64
+00000001                                                                  : 0x05  EI_DATA    = little endian
+00000001                                                                  : 0x06  EI_VERSION = 1
+00000000                                                                  : 0x07  EI_OSABI   = System V
+00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000   : 0x08  EI_ABIVERSION and padding
+00000010 00000000                                                         : 0x10  e_type      = ET_EXEC
+10110111 00000000                                                         : 0x12  e_machine   = EM_AARCH64 (183 = 0xb7)
+00000001 00000000 00000000 00000000                                       : 0x14  e_version   = 1
+01111000 00000000 01000000 00000000 00000000 00000000 00000000 00000000   : 0x18  e_entry     = 0x400078 (start of the code)
+01000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000   : 0x20  e_phoff     = 0x40
+00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000   : 0x28  e_shoff     = 0 (no section headers)
+00000000 00000000 00000000 00000000                                       : 0x30  e_flags     = 0
+01000000 00000000                                                         : 0x34  e_ehsize    = 64
+00111000 00000000                                                         : 0x36  e_phentsize = 56
+00000001 00000000                                                         : 0x38  e_phnum     = 1
+00000000 00000000                                                         : 0x3a  e_shentsize = 0
+00000000 00000000                                                         : 0x3c  e_shnum     = 0
+00000000 00000000                                                         : 0x3e  e_shstrndx  = 0
+
+: ----------------------------------------------------------- program header
+00000001 00000000 00000000 00000000                                       : 0x40  p_type   = PT_LOAD
+00000101 00000000 00000000 00000000                                       : 0x44  p_flags  = PF_R | PF_X
+00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000   : 0x48  p_offset = 0
+00000000 00000000 01000000 00000000 00000000 00000000 00000000 00000000   : 0x50  p_vaddr  = 0x400000
+00000000 00000000 01000000 00000000 00000000 00000000 00000000 00000000   : 0x58  p_paddr  = 0x400000
+01010100 00000001 00000000 00000000 00000000 00000000 00000000 00000000   : 0x60  p_filesz = 0x154 = 340 (the whole file)
+01010100 00000001 00000000 00000000 00000000 00000000 00000000 00000000   : 0x68  p_memsz  = 0x154 = 340
+00000000 00010000 00000000 00000000 00000000 00000000 00000000 00000000   : 0x70  p_align  = 0x1000
+
+: --------------------------------------------------------------------- code
+: start
+00010011 00000000 10000000 11010010                                       : 0x078  movz x19, #0               accumulator = 0
+00010100 00000000 10000000 11010010                                       : 0x07c  movz x20, #0               digits in current group = 0
+00010101 00000000 10000000 11010010                                       : 0x080  movz x21, #0               not in a comment
+
+: loop: read one byte into [sp]
+11101000 00000111 10000000 11010010                                       : 0x084  movz x8, #63               syscall 63 = read
+00000000 00000000 10000000 11010010                                       : 0x088  movz x0, #0                fd 0 = stdin
+11100001 00000011 00000000 10010001                                       : 0x08c  add x1, sp, #0             buffer = sp
+00100010 00000000 10000000 11010010                                       : 0x090  movz x2, #1                count = 1
+00000001 00000000 00000000 11010100                                       : 0x094  svc #0
+00011111 00000000 00000000 11110001                                       : 0x098  cmp x0, #0
+01101011 00000101 00000000 01010100                                       : 0x09c  b.lt fail                  0x09c + 0xac = 0x148: read failed
+11000000 00000100 00000000 01010100                                       : 0x0a0  b.eq eof                   0x0a0 + 0x98 = 0x138: end of input
+11100000 00000011 01000000 00111001                                       : 0x0a4  ldrb w0, [sp, #0]
+
+: inside a comment: skip everything up to and including the newline
+10110101 00000000 00000000 10110100                                       : 0x0a8  cbz x21, notc              0x0a8 + 0x14 = 0x0bc
+00011111 00101000 00000000 01110001                                       : 0x0ac  cmp w0, #10                '\n'
+10100001 11111110 11111111 01010100                                       : 0x0b0  b.ne loop                  0x0b0 - 0x2c = 0x084
+00010101 00000000 10000000 11010010                                       : 0x0b4  movz x21, #0               newline ends the comment
+11110011 11111111 11111111 00010111                                       : 0x0b8  b loop                     0x0b8 - 0x34 = 0x084
+
+: notc: ':', space, newline, tab are allowed only between groups
+00011111 11101000 00000000 01110001                                       : 0x0bc  cmp w0, #58                ':'
+00100000 00000011 00000000 01010100                                       : 0x0c0  b.eq is_sep                0x0c0 + 0x64 = 0x124
+00011111 10000000 00000000 01110001                                       : 0x0c4  cmp w0, #32                ' '
+11100000 00000010 00000000 01010100                                       : 0x0c8  b.eq is_sep                0x0c8 + 0x5c = 0x124
+00011111 00101000 00000000 01110001                                       : 0x0cc  cmp w0, #10                '\n'
+10100000 00000010 00000000 01010100                                       : 0x0d0  b.eq is_sep                0x0d0 + 0x54 = 0x124
+00011111 00100100 00000000 01110001                                       : 0x0d4  cmp w0, #9                 '\t'
+01100000 00000010 00000000 01010100                                       : 0x0d8  b.eq is_sep                0x0d8 + 0x4c = 0x124
+
+: bit: '0' (48) or '1' (49) only
+00000000 11000000 00000000 01010001                                       : 0x0dc  sub w0, w0, #48            '0' -> 0, '1' -> 1
+00011111 00000100 00000000 01110001                                       : 0x0e0  cmp w0, #1
+00101000 00000011 00000000 01010100                                       : 0x0e4  b.hi fail                  0x0e4 + 0x64 = 0x148 (not '0' or '1')
+00010011 00000100 00010011 10001011                                       : 0x0e8  add x19, x0, x19, lsl #1   acc = (acc << 1) + bit
+10010100 00000110 00000000 10010001                                       : 0x0ec  add x20, x20, #1           cnt += 1
+10011111 00100010 00000000 11110001                                       : 0x0f0  cmp x20, #8
+10000001 11111100 11111111 01010100                                       : 0x0f4  b.ne loop                  0x0f4 - 0x70 = 0x084 (group not complete)
+
+: eighth bit: write the accumulator as one byte
+11110011 00000011 00000000 00111001                                       : 0x0f8  strb w19, [sp, #0]
+00001000 00001000 10000000 11010010                                       : 0x0fc  movz x8, #64               syscall 64 = write
+00100000 00000000 10000000 11010010                                       : 0x100  movz x0, #1                fd 1 = stdout
+11100001 00000011 00000000 10010001                                       : 0x104  add x1, sp, #0             buffer = sp
+00100010 00000000 10000000 11010010                                       : 0x108  movz x2, #1                count = 1
+00000001 00000000 00000000 11010100                                       : 0x10c  svc #0
+00011111 00000100 00000000 11110001                                       : 0x110  cmp x0, #1
+10100001 00000001 00000000 01010100                                       : 0x114  b.ne fail                  0x114 + 0x34 = 0x148 (write failed)
+00010011 00000000 10000000 11010010                                       : 0x118  movz x19, #0               acc = 0
+00010100 00000000 10000000 11010010                                       : 0x11c  movz x20, #0               cnt = 0
+11011001 11111111 11111111 00010111                                       : 0x120  b loop                     0x120 - 0x9c = 0x084
+
+: is_sep: allowed only at a group boundary
+00110100 00000001 00000000 10110101                                       : 0x124  cbnz x20, fail             0x124 + 0x24 = 0x148 (separator inside a group)
+00011111 11101000 00000000 01110001                                       : 0x128  cmp w0, #58                ':'
+11000001 11111010 11111111 01010100                                       : 0x12c  b.ne loop                  0x12c - 0xa8 = 0x084
+00110101 00000000 10000000 11010010                                       : 0x130  movz x21, #1               ':' opens a comment
+11010100 11111111 11111111 00010111                                       : 0x134  b loop                     0x134 - 0xb0 = 0x084
+
+: eof: accept only on a group boundary
+10010100 00000000 00000000 10110101                                       : 0x138  cbnz x20, fail             0x138 + 0x10 = 0x148 (incomplete group)
+10101000 00001011 10000000 11010010                                       : 0x13c  movz x8, #93               syscall 93 = exit
+00000000 00000000 10000000 11010010                                       : 0x140  movz x0, #0                status 0
+00000001 00000000 00000000 11010100                                       : 0x144  svc #0
+
+: fail
+10101000 00001011 10000000 11010010                                       : 0x148  movz x8, #93               syscall 93 = exit
+00100000 00000000 10000000 11010010                                       : 0x14c  movz x0, #1                status 1
+00000001 00000000 00000000 11010100                                       : 0x150  svc #0
+
+: 0x154 end of file (340 bytes)
