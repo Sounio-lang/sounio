@@ -18077,6 +18077,374 @@ theorem parser_accept_ok {f path argv0 stdin : List Nat} {top : Nat}
       by rw [hc1hi, hc2b]; exact hdisjInit⟩,
     hlegal, hAmod, hApos, hAbound, hfreeA⟩
 
+/-- `AnnLayB` is `AnnLayout` at the same state (repackaged). -/
+theorem AnnLayout_of_AnnLayB {s : X86Int.St} {p : Nat}
+    {ann : List (Nat × Height)} (h : AnnLayB s.mem p ann) :
+    AnnLayout s ann p := by
+  intro i hi
+  obtain ⟨h1, h2, h3, h4⟩ := h i hi
+  exact ⟨⟨h1, h2, h3⟩, h4⟩
+
+/-- Byte-bounded instructions have byte-bounded immediates. -/
+theorem ImmOk_of_InstrBound : ∀ {ins : Instr}, InstrBound ins →
+    ImmOk ins := by
+  intro ins h
+  cases ins <;> first | exact h | trivial
+
+/-- Primitive effects are byte-sized. -/
+theorem prim_eff_le : ∀ p : Prim, p.eff.1 ≤ 255 ∧ p.eff.2 ≤ 255 := by
+  intro p
+  cases p <;> decide
+
+/-- A looked-up annotation height inherits the annotation bounds. -/
+theorem ann_lookup_bounds {ann : List (Nat × Height)} {i : Nat}
+    {h : Height} (hl : ann.lookup i = some h)
+    (hb : ∀ x ∈ ann, AnnBound x) :
+    h.d < 256 ^ 4 ∧ h.a < 256 ^ 4 := by
+  obtain ⟨l1, l2, hann, -⟩ := List.lookup_eq_some_iff.mp hl
+  have hmem : (i, h) ∈ ann := by
+    rw [hann]; exact List.mem_append_right _ (.head _)
+  have hb2 := hb (i, h) hmem
+  exact ⟨hb2.2.1, hb2.2.2⟩
+
+set_option maxHeartbeats 0 in
+/-- Every height `hBnd` meets is below `W`: each `hstep` adds at
+most `256^4 - 1` to either component, annotation heights and the
+entry height are at most `256^4 - 1`, and there are fewer than
+`256^4` instructions, so heights stay below `(256^4)^2 = W`. -/
+theorem hBnd_of_bounds : ∀ (code : List Instr) {pr : Prog}
+    {wd : Word} {i : Nat} {cur : Height},
+    i + code.length < 256 ^ 4 →
+    cur.d ≤ (i + 1) * (256 ^ 4 - 1) →
+    cur.a ≤ (i + 1) * (256 ^ 4 - 1) →
+    (∀ x ∈ wd.ann, AnnBound x) →
+    (∀ w ∈ pr.words, w.outs < 256 ^ 4) →
+    hBnd pr wd code i cur := by
+  intro code
+  induction code with
+  | nil =>
+    intro pr wd i cur _ _ _ _ _
+    trivial
+  | cons ins rest ih =>
+    intro pr wd i cur hlen hcd hca hann houts
+    have hB1 : 255 ≤ 256 ^ 4 - 1 := by decide
+    have hkey : ∀ x : Nat, x ≤ (i + 1) * (256 ^ 4 - 1) → x + 2 < W := by
+      intro x hx
+      have h1 : (i + 1) * (256 ^ 4 - 1) ≤
+          (256 ^ 4 - 1) * (256 ^ 4 - 1) :=
+        Nat.mul_le_mul_right _ (by
+          simp only [List.length_cons] at hlen; omega)
+      have h2 : (256 ^ 4 - 1) * (256 ^ 4 - 1) + 2 < W := by
+        have hW : W = 2 ^ 64 := rfl
+        rw [hW]; decide
+      omega
+    have hkey1 : ∀ x : Nat, x ≤ (i + 1) * (256 ^ 4 - 1) → x + 1 < W :=
+      fun x hx => by have h := hkey x hx; omega
+    have hgetD : ∀ (j : Nat) (dflt : Height),
+        dflt.d ≤ (i + 1) * (256 ^ 4 - 1) →
+        dflt.a ≤ (i + 1) * (256 ^ 4 - 1) →
+        ((wd.ann.lookup j).getD dflt).d ≤ (i + 1) * (256 ^ 4 - 1) ∧
+          ((wd.ann.lookup j).getD dflt).a ≤ (i + 1) * (256 ^ 4 - 1) := by
+      intro j dflt hd ha
+      cases hl : wd.ann.lookup j with
+      | none =>
+        exact ⟨hd, ha⟩
+      | some hh =>
+        simp only [Option.getD_some]
+        obtain ⟨hbd, hba⟩ := ann_lookup_bounds hl hann
+        have hge : 256 ^ 4 - 1 ≤ (i + 1) * (256 ^ 4 - 1) := by
+          have e : (i + 1) * (256 ^ 4 - 1) =
+              (256 ^ 4 - 1) + i * (256 ^ 4 - 1) := by
+            rw [Nat.succ_mul, Nat.add_comm]
+          omega
+        exact ⟨by omega, by omega⟩
+    obtain ⟨hhd, hha⟩ := hgetD i cur hcd hca
+    have hstepB : ∀ {h h' : Height},
+        hstep pr wd h ins = some (some h') →
+        h'.d ≤ h.d + (256 ^ 4 - 1) ∧ h'.a ≤ h.a + (256 ^ 4 - 1) := by
+      intro h h' hs
+      cases ins with
+      | prim p =>
+        simp only [hstep] at hs
+        split at hs
+        · split at hs
+          · simp at hs
+          · obtain rfl : h' = ⟨h.d - p.eff.1 + p.eff.2, h.a⟩ :=
+              (Option.some.inj (Option.some.inj hs)).symm
+            have he := prim_eff_le p
+            exact ⟨by dsimp only; omega, by dsimp only; omega⟩
+        · simp at hs
+      | lit n =>
+        simp only [hstep] at hs
+        obtain rfl : h' = ⟨h.d + 1, h.a⟩ := (Option.some.inj (Option.some.inj hs)).symm
+        exact ⟨by dsimp only; omega, by dsimp only; omega⟩
+      | str n =>
+        simp only [hstep] at hs
+        obtain rfl : h' = ⟨h.d + 2, h.a⟩ := (Option.some.inj (Option.some.inj hs)).symm
+        exact ⟨by dsimp only; omega, by dsimp only; omega⟩
+      | pick n =>
+        simp only [hstep] at hs
+        split at hs
+        · obtain rfl : h' = ⟨h.d + 1, h.a⟩ := (Option.some.inj (Option.some.inj hs)).symm
+          exact ⟨by dsimp only; omega, by dsimp only; omega⟩
+        · simp at hs
+      | tor =>
+        simp only [hstep] at hs
+        split at hs
+        · obtain rfl : h' = ⟨h.d - 1, h.a + 1⟩ := (Option.some.inj (Option.some.inj hs)).symm
+          exact ⟨by dsimp only; omega, by dsimp only; omega⟩
+        · simp at hs
+      | fromr =>
+        simp only [hstep] at hs
+        split at hs
+        · obtain rfl : h' = ⟨h.d + 1, h.a - 1⟩ := (Option.some.inj (Option.some.inj hs)).symm
+          exact ⟨by dsimp only; omega, by dsimp only; omega⟩
+        · simp at hs
+      | rfetch =>
+        simp only [hstep] at hs
+        split at hs
+        · obtain rfl : h' = ⟨h.d + 1, h.a⟩ := (Option.some.inj (Option.some.inj hs)).symm
+          exact ⟨by dsimp only; omega, by dsimp only; omega⟩
+        · simp at hs
+      | locget n =>
+        simp only [hstep] at hs
+        split at hs
+        · obtain rfl : h' = ⟨h.d + 1, h.a⟩ := (Option.some.inj (Option.some.inj hs)).symm
+          exact ⟨by dsimp only; omega, by dsimp only; omega⟩
+        · simp at hs
+      | locset n =>
+        simp only [hstep] at hs
+        split at hs
+        · obtain rfl : h' = ⟨h.d - 1, h.a⟩ := (Option.some.inj (Option.some.inj hs)).symm
+          exact ⟨by dsimp only; omega, by dsimp only; omega⟩
+        · simp at hs
+      | jmp t =>
+        simp only [hstep] at hs
+        split at hs <;> simp at hs
+      | jz t =>
+        simp only [hstep] at hs
+        split at hs
+        · obtain rfl : h' = ⟨h.d - 1, h.a⟩ := (Option.some.inj (Option.some.inj hs)).symm
+          exact ⟨by dsimp only; omega, by dsimp only; omega⟩
+        · simp at hs
+      | jnz t =>
+        simp only [hstep] at hs
+        split at hs
+        · obtain rfl : h' = ⟨h.d - 1, h.a⟩ := (Option.some.inj (Option.some.inj hs)).symm
+          exact ⟨by dsimp only; omega, by dsimp only; omega⟩
+        · simp at hs
+      | call w =>
+        cases hww : pr.words[w]? with
+        | none =>
+          simp only [hstep, hww] at hs
+          simp at hs
+        | some c =>
+          by_cases hcond : c.ins ≤ h.d
+          · have hs2 : hstep pr wd h (.call w) =
+                some (some ⟨h.d - c.ins + c.outs, h.a⟩) := by
+              simp only [hstep, hww, if_pos hcond]
+            rw [hs2] at hs
+            obtain rfl : h' = ⟨h.d - c.ins + c.outs, h.a⟩ :=
+              (Option.some.inj (Option.some.inj hs)).symm
+            obtain ⟨hlt, hget⟩ := List.getElem?_eq_some_iff.mp hww
+            have hcmem : c ∈ pr.words := by
+              rw [← hget]; exact List.getElem_mem hlt
+            have hco := houts c hcmem
+            exact ⟨by dsimp only; omega, by dsimp only; omega⟩
+          · have hs2 : hstep pr wd h (.call w) = none := by
+              simp only [hstep, hww, if_neg hcond]
+            rw [hs2] at hs
+            simp at hs
+      | ret =>
+        simp only [hstep] at hs
+        split at hs <;> simp at hs
+    have hlen' : i + 1 + rest.length < 256 ^ 4 := by
+      simp only [List.length_cons] at hlen; omega
+    show hBnd pr wd (ins :: rest) i cur
+    unfold hBnd
+    refine ⟨hkey _ hhd, hkey1 _ hha, ?_⟩
+    cases hs : hstep pr wd ((wd.ann.lookup i).getD cur) ins with
+    | none =>
+      trivial
+    | some o =>
+      cases o with
+      | none =>
+        obtain ⟨hnd, hna⟩ := hgetD (i + 1) ⟨0, 0⟩
+          (by dsimp only; omega) (by dsimp only; omega)
+        have e : (i + 1 + 1) * (256 ^ 4 - 1) =
+            (i + 1) * (256 ^ 4 - 1) + (256 ^ 4 - 1) := by
+          rw [Nat.succ_mul]
+        exact ih hlen'
+          (by rw [e]; exact Nat.le_trans hnd (Nat.le_add_right _ _))
+          (by rw [e]; exact Nat.le_trans hna (Nat.le_add_right _ _))
+          hann houts
+      | some h' =>
+        obtain ⟨hbd, hba⟩ := hstepB hs
+        have e : (i + 1 + 1) * (256 ^ 4 - 1) =
+            (i + 1) * (256 ^ 4 - 1) + (256 ^ 4 - 1) := by
+          rw [Nat.succ_mul]
+        refine ⟨?_, ?_, ih hlen' (by omega) (by omega) hann houts⟩
+        · have h1 : h'.d ≤ (i + 1 + 1) * (256 ^ 4 - 1) := by omega
+          have h2 : (i + 1 + 1) * (256 ^ 4 - 1) ≤
+              256 ^ 4 * (256 ^ 4 - 1) :=
+            Nat.mul_le_mul_right _ (by omega)
+          have h3 : 256 ^ 4 * (256 ^ 4 - 1) + 2 < W := by
+            have hW : W = 2 ^ 64 := rfl
+            rw [hW]; decide
+          omega
+        · have h1 : h'.a ≤ (i + 1 + 1) * (256 ^ 4 - 1) := by omega
+          have h2 : (i + 1 + 1) * (256 ^ 4 - 1) ≤
+              256 ^ 4 * (256 ^ 4 - 1) :=
+            Nat.mul_le_mul_right _ (by omega)
+          have h3 : 256 ^ 4 * (256 ^ 4 - 1) + 2 < W := by
+            have hW : W = 2 ^ 64 := rfl
+            rw [hW]; decide
+          omega
+
+/-- Per-index contents of a laid-out words table. -/
+theorem TabLay_at : ∀ (wds : List Word) {m : Mem} {B S tbl c : Nat},
+    TabLay m B S tbl c wds → c + wordsBytes wds < W →
+    ∀ j (hj : j < wds.length), ∃ cj,
+      c ≤ cj ∧
+      cj + 20 + codeBytes wds[j].code + 12 * wds[j].ann.length ≤
+        c + wordsBytes wds ∧
+      rd64 m (tbl + 64 * j) = some wds[j].ins ∧
+      rd64 m (tbl + 64 * j + 8) = some wds[j].outs ∧
+      rd64 m (tbl + 64 * j + 16) = some wds[j].locals ∧
+      rd64 m (tbl + 64 * j + 24) = some wds[j].code.length ∧
+      rd64 m (tbl + 64 * j + 32) = some wds[j].ann.length ∧
+      rd64 m (tbl + 64 * j + 40) = some (cj + 20) ∧
+      rd64 m (tbl + 64 * j + 48) =
+        some (cj + 20 + codeBytes wds[j].code) ∧
+      CodeSeq m (cj + 20) wds[j].code ∧
+      AnnLayB m (cj + 20 + codeBytes wds[j].code) wds[j].ann := by
+  intro wds
+  induction wds with
+  | nil =>
+    intro m B S tbl c _ _ j hj
+    simp at hj
+  | cons wd wds ih =>
+    intro m B S tbl c htab hcW j hj
+    obtain ⟨h0, h8, h16, h24, h32, h40, h48, hseq, -, hann, hrest⟩ :=
+      htab
+    have hwb : wordsBytes (wd :: wds) =
+        (20 + codeBytes wd.code + 12 * wd.ann.length) +
+          wordsBytes wds := rfl
+    cases j with
+    | zero =>
+      refine ⟨c, Nat.le_refl _, by
+        show c + 20 + codeBytes wd.code + 12 * wd.ann.length ≤
+          c + wordsBytes (wd :: wds)
+        omega, ?_, ?_, ?_, ?_, ?_, ?_, ?_, hseq, hann⟩
+      · simpa using h0
+      · simpa using h8
+      · simpa using h16
+      · simpa using h24
+      · simpa using h32
+      · have hlt : c + 20 < W := by omega
+        rw [Nat.mod_eq_of_lt hlt] at h40
+        simpa using h40
+      · have hlt : c + 20 + codeBytes wd.code < W := by omega
+        rw [Nat.mod_eq_of_lt hlt] at h48
+        simpa using h48
+    | succ j =>
+      have hj' : j < wds.length := by
+        simp only [List.length_cons] at hj; omega
+      have hcW' : c + 20 + codeBytes wd.code + 12 * wd.ann.length +
+          wordsBytes wds < W := by omega
+      obtain ⟨cj, hcj1, hcj2, t0, t8, t16, t24, t32, t40, t48, tseq,
+        tann⟩ := ih hrest hcW' j hj'
+      refine ⟨cj, by omega, by
+        rw [List.getElem_cons_succ]
+        omega, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+      · rw [show tbl + 64 * (j + 1) = tbl + 64 + 64 * j by omega,
+          List.getElem_cons_succ]
+        exact t0
+      · rw [show tbl + 64 * (j + 1) + 8 = tbl + 64 + 64 * j + 8 by omega,
+          List.getElem_cons_succ]
+        exact t8
+      · rw [show tbl + 64 * (j + 1) + 16 = tbl + 64 + 64 * j + 16 by
+          omega, List.getElem_cons_succ]
+        exact t16
+      · rw [show tbl + 64 * (j + 1) + 24 = tbl + 64 + 64 * j + 24 by
+          omega, List.getElem_cons_succ]
+        exact t24
+      · rw [show tbl + 64 * (j + 1) + 32 = tbl + 64 + 64 * j + 32 by
+          omega, List.getElem_cons_succ]
+        exact t32
+      · rw [show tbl + 64 * (j + 1) + 40 = tbl + 64 + 64 * j + 40 by
+          omega]
+        exact t40
+      · rw [show tbl + 64 * (j + 1) + 48 = tbl + 64 + 64 * j + 48 by
+          omega, List.getElem_cons_succ]
+        exact t48
+      · rwa [List.getElem_cons_succ]
+      · rwa [List.getElem_cons_succ]
+
+/-- The parser's table layout is the checker's `WordTab`, given
+the arena disjointness the real layout provides. -/
+theorem WordTab_of_TabLay {pr : Prog} {s : X86Int.St}
+    {B S tbl c sp : Nat}
+    (htab : TabLay s.mem B S tbl c pr.words)
+    (hcW : c + wordsBytes pr.words < W)
+    (hc0 : 0 < c)
+    (hwB : ∀ w ∈ pr.words, WordBound w)
+    (hsp48 : 48 ≤ sp) (hspW : sp < W)
+    (htblW : tbl + 64 * pr.words.length < W)
+    (hdisjT : sp ≤ tbl ∨ tbl + 64 * pr.words.length ≤ sp - 48)
+    (hdisjB : sp ≤ c ∨ c + wordsBytes pr.words ≤ sp - 48)
+    (hdisjEff : aEff + 114 ≤ sp - 48 ∨ sp ≤ aEff) :
+    WordTab pr tbl sp s := by
+  have h256W : ∀ {n : Nat}, n < 256 ^ 4 → n < W := by
+    intro n hn
+    have hW : W = 2 ^ 64 := rfl
+    exact Nat.lt_trans hn (by rw [hW]; decide)
+  intro j hj
+  obtain ⟨cj, hcj1, hcj2, t0, t8, t16, t24, t32, t40, t48, tseq,
+    tann⟩ := TabLay_at pr.words htab hcW j hj
+  have hwBw := hwB pr.words[j] (List.getElem_mem hj)
+  obtain ⟨hbins, hbouts, -, hbcodelen, -, hbcode, hbann⟩ := hwBw
+  have hws : WalkStatic pr pr.words[j] (tbl + 64 * j)
+      (cj + 20 + codeBytes pr.words[j].code) sp tbl := by
+    refine ⟨h256W hbcodelen, by omega, by omega, by omega, by omega,
+      hspW, ?_, ?_, ?_, ?_⟩
+    · rcases hdisjT with h | h
+      · exact Or.inl (by omega)
+      · exact Or.inr (by omega)
+    · rcases hdisjB with h | h
+      · exact Or.inl (by omega)
+      · exact Or.inr (by omega)
+    · rcases hdisjEff with h | h
+      · exact Or.inl (by omega)
+      · exact Or.inr h
+    · intro n hn
+      refine ⟨by omega, ?_⟩
+      rcases hdisjT with h | h
+      · exact Or.inl (by omega)
+      · exact Or.inr (by omega)
+  have hok : WordOk pr pr.words[j] (tbl + 64 * j)
+      (cj + 20 + codeBytes pr.words[j].code) (cj + 20) sp tbl := by
+    refine ⟨hws, h256W hbins, ?_, ?_, ?_, ?_, by omega, ?_, ?_⟩
+    · intro x hx
+      have hb := hbann x hx
+      exact ⟨h256W hb.2.1, h256W hb.2.2⟩
+    · intro x hx
+      exact ImmOk_of_InstrBound (hbcode x hx)
+    · exact hBnd_of_bounds pr.words[j].code (by omega)
+        (by dsimp only; omega) (by dsimp only; omega) hbann
+        (fun w hw => (hwB w hw).2.1)
+    · rcases hdisjB with h | h
+      · exact Or.inr (by omega)
+      · exact Or.inl (by omega)
+    · rcases hdisjT with h | h
+      · exact Or.inl (by omega)
+      · exact Or.inr (by omega)
+    · rcases hdisjB with h | h
+      · exact Or.inl (by omega)
+      · exact Or.inr (by omega)
+  exact ⟨cj + 20, cj + 20 + codeBytes pr.words[j].code, t0, t8, t16,
+    t24, t32, t40, t48, tseq, AnnLayout_of_AnnLayB tann, hok⟩
+
 /-- EXISTENCE TARGET: with room, some oracle makes the final
 theorem non-vacuous.  The witness is `stage1Oracle f A` for the
 `A` given by `Room`.  What remains is the loader-prefix invariant:
