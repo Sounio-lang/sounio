@@ -15121,6 +15121,131 @@ theorem parser_trailing_ok {c e mn nw T : Nat} {s : X86Int.St}
     show t13.k = s.k
     exact ht13k
 
+/-- `leBytes` has the requested length. -/
+theorem leBytes_length (n k : Nat) : (leBytes n k).length = k := by
+  simp [leBytes]
+
+/-- Head/tail decomposition of `leBytes`. -/
+theorem leBytes_succ (n k : Nat) :
+    leBytes n (k + 1) = (n % 256) :: leBytes (n / 256) k := by
+  apply List.ext_getElem
+  · simp [leBytes]
+  · intro i hi1 _
+    cases i with
+    | zero => simp [leBytes]
+    | succ j =>
+      have hj : j < k := by
+        have h := hi1
+        simp [leBytes] at h
+        omega
+      have e1 : (leBytes n (k + 1))[j + 1]'(by
+            simpa [leBytes] using hi1) = n / 256 ^ (j + 1) % 256 := by
+        simp [leBytes, hj]
+      have e2 : ((n % 256) :: leBytes (n / 256) k)[j + 1]'(by
+            simp [leBytes, hj]) = n / 256 / 256 ^ j % 256 := by
+        simp [leBytes, hj]
+      rw [e1, e2, Nat.div_div_eq_div_mul]
+      congr 1
+      rw [Nat.pow_succ']
+
+/-- A byte-bounded list has `leVal` below the place bound. -/
+theorem leVal_bound : ∀ {bs : List Nat}, (∀ b ∈ bs, b < 256) →
+    leVal bs < 256 ^ bs.length
+  | [], _ => by decide
+  | b :: bs, h => by
+    have hb : b < 256 := h b (.head _)
+    have ih := leVal_bound (fun x hx => h x (.tail _ hx))
+    show leVal (b :: bs) < 256 ^ (b :: bs).length
+    simp only [leVal, List.length_cons, Nat.pow_succ]
+    omega
+
+/-- `leBytes` of a byte-bounded list's `leVal` is the list. -/
+theorem leBytes_leVal : ∀ {bs : List Nat}, (∀ b ∈ bs, b < 256) →
+    leBytes (leVal bs) bs.length = bs
+  | [], _ => by simp [leBytes, leVal]
+  | b :: bs, h => by
+    have hb : b < 256 := h b (.head _)
+    have ih := leBytes_leVal (fun x hx => h x (.tail _ hx))
+    show leBytes (leVal (b :: bs)) (b :: bs).length = b :: bs
+    simp only [List.length_cons]
+    rw [show leVal (b :: bs) = b + 256 * leVal bs from rfl,
+      leBytes_succ]
+    congr 1
+    · rw [Nat.add_mul_mod_self_left, Nat.mod_eq_of_lt hb]
+    · have e : (b + 256 * leVal bs) / 256 = leVal bs := by
+        rw [Nat.add_mul_div_left _ _ (by decide : 0 < 256),
+          Nat.div_eq_of_lt hb, Nat.zero_add]
+      rw [e]; exact ih
+
+/-- The `rdLE` fold is `leVal`, at a shifted range. -/
+theorem fold_zip_range'_aux : ∀ (l : List Nat) (s acc : Nat),
+    (l.zip (List.range' s l.length)).foldl
+      (fun acc x => acc + x.1 * 256 ^ x.2) acc =
+      acc + 256 ^ s * leVal l
+  | [], _, _ => by
+    rw [show leVal [] = 0 from rfl]; simp
+  | b :: bs, s, acc => by
+    have ih := fold_zip_range'_aux bs (s + 1) (acc + b * 256 ^ s)
+    show (((b :: bs).zip
+      (List.range' s (b :: bs).length)).foldl _ acc) = _
+    simp only [List.length_cons, List.range'_succ, List.zip_cons_cons,
+      List.foldl_cons]
+    rw [ih]
+    have e1 : 256 ^ (s + 1) * leVal bs = 256 ^ s * (256 * leVal bs) := by
+      rw [Nat.pow_succ', Nat.mul_assoc, Nat.mul_left_comm (256 ^ s) 256]
+    have e2 : leVal (b :: bs) = b + 256 * leVal bs := rfl
+    rw [e1, e2, Nat.mul_add, Nat.mul_comm b (256 ^ s)]
+    omega
+
+/-- The `rdLE` fold is `leVal`. -/
+theorem fold_zip_range (l : List Nat) :
+    (l.zip (List.range l.length)).foldl
+      (fun acc x => acc + x.1 * 256 ^ x.2) 0 = leVal l := by
+  rw [List.range_eq_range']
+  have h := fold_zip_range'_aux l 0 0
+  simpa using h
+
+/-- What a successful `rdLE` says. -/
+theorem rdLE_eq {bs : List Nat} {k v : Nat} {rest : List Nat}
+    (h : rdLE bs k = some (v, rest)) :
+    v = leVal (bs.take k) ∧ rest = bs.drop k ∧ k ≤ bs.length := by
+  unfold rdLE at h
+  by_cases hlt : bs.length < k
+  · rw [if_pos hlt] at h
+    exact absurd h (by simp)
+  · rw [if_neg hlt] at h
+    obtain ⟨hv, hr⟩ := Prod.mk.inj (Option.some.inj h)
+    refine ⟨?_, hr.symm, by omega⟩
+    have hlen : (bs.take k).length = k := by
+      rw [List.length_take]
+      omega
+    have h2 := fold_zip_range (bs.take k)
+    rw [hlen] at h2
+    rw [← h2]
+    exact hv.symm
+
+/-- A successful `rdLE` on bounded bytes re-encodes exactly. -/
+theorem rdLE_inv {bs : List Nat} {k v : Nat} {rest : List Nat}
+    (h : rdLE bs k = some (v, rest)) (hb : ∀ b ∈ bs, b < 256) :
+    bs = leBytes v k ++ rest ∧ v < 256 ^ k ∧ k ≤ bs.length := by
+  obtain ⟨hv, hr, hk⟩ := rdLE_eq h
+  have hlen : (bs.take k).length = k := by
+    rw [List.length_take]; omega
+  have hmem : ∀ b ∈ bs.take k, b < 256 := fun b hbmem =>
+    hb b (List.mem_of_mem_take hbmem)
+  have htake : leBytes v k = bs.take k := by
+    have ht := leBytes_leVal hmem
+    rw [hlen, ← hv] at ht
+    exact ht
+  have hbound : v < 256 ^ k := by
+    have ht := leVal_bound hmem
+    rw [hlen] at ht
+    rw [hv]
+    exact ht
+  refine ⟨?_, hbound, hk⟩
+  calc bs = bs.take k ++ bs.drop k := (List.take_append_drop k bs).symm
+    _ = leBytes v k ++ rest := by rw [← htake, ← hr]
+
 /-- EXISTENCE TARGET: with room, some oracle makes the final
 theorem non-vacuous.  The witness is `stage1Oracle f A` for the
 `A` given by `Room`.  What remains is the loader-prefix invariant:
