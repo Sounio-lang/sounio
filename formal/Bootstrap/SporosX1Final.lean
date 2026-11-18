@@ -15429,6 +15429,125 @@ theorem decInstr_inv {bs rest : List Nat} {x : Instr}
           h89 h8a h8b h8c] at h
         simp at h
 
+/-- Inversion of `decMany`: the consumed bytes are the flat
+encodings of the items, the count matches, and every item
+satisfies the per-item predicate. -/
+theorem decMany_inv {α : Type} {f : List Nat → Option (α × List Nat)}
+    {e : α → List Nat} {P : α → Prop}
+    (hf : ∀ {bs rest} {x : α}, f bs = some (x, rest) →
+      (∀ b ∈ bs, b < 256) → bs = e x ++ rest ∧ P x) :
+    ∀ {n bs rest} {xs : List α}, decMany f n bs = some (xs, rest) →
+      (∀ b ∈ bs, b < 256) →
+      bs = (xs.flatMap e) ++ rest ∧ xs.length = n ∧ ∀ x ∈ xs, P x := by
+  intro n
+  induction n with
+  | zero =>
+    intro bs rest xs h hb
+    rw [show decMany f 0 bs = some ([], bs) from rfl] at h
+    obtain ⟨hx, hr⟩ := Prod.mk.inj (Option.some.inj h)
+    subst hx; subst hr
+    exact ⟨rfl, rfl, fun x hx => by simp at hx⟩
+  | succ n ih =>
+    intro bs rest xs h hb
+    have hstep : decMany f (n + 1) bs =
+        (f bs).bind (fun p =>
+          (decMany f n p.2).bind (fun q => some (p.1 :: q.1, q.2))) := rfl
+    rw [hstep, Option.bind_eq_some_iff] at h
+    obtain ⟨⟨x, bs1⟩, h1, h2⟩ := h
+    rw [Option.bind_eq_some_iff] at h2
+    obtain ⟨⟨xs', bs2⟩, h3, h4⟩ := h2
+    have h3' : decMany f n bs1 = some (xs', bs2) := h3
+    have hx : x :: xs' = xs :=
+      congrArg Prod.fst (Option.some.inj h4)
+    have hr : bs2 = rest :=
+      congrArg Prod.snd (Option.some.inj h4)
+    subst hx; subst hr
+    obtain ⟨he1, hPx⟩ := hf h1 hb
+    have hb1 : ∀ b ∈ bs1, b < 256 := fun b hbmem =>
+      hb b (he1.symm ▸ List.mem_append_right _ hbmem)
+    obtain ⟨he2, hlen, hP⟩ := ih h3' hb1
+    refine ⟨?_, by simp [hlen], ?_⟩
+    · calc bs = e x ++ bs1 := he1
+        _ = e x ++ ((xs'.flatMap e) ++ bs2) := by rw [he2]
+        _ = ((x :: xs').flatMap e) ++ bs2 := by
+          rw [List.flatMap_cons, List.append_assoc]
+    · intro z hz
+      simp only [List.mem_cons] at hz
+      rcases hz with rfl | hz
+      · exact hPx
+      · exact hP z hz
+
+/-- The per-annotation byte bounds. -/
+def AnnBound (x : Nat × Height) : Prop :=
+  x.1 < 256 ^ 4 ∧ x.2.d < 256 ^ 4 ∧ x.2.a < 256 ^ 4
+
+/-- Inversion of `decAnn`. -/
+theorem decAnn_inv {bs rest : List Nat} {x : Nat × Height}
+    (h : decAnn bs = some (x, rest)) (hb : ∀ b ∈ bs, b < 256) :
+    bs = (leBytes x.1 4 ++ leBytes x.2.d 4 ++ leBytes x.2.a 4) ++
+      rest ∧ AnnBound x := by
+  have hstep : decAnn bs =
+      (rdLE bs 4).bind (fun p =>
+        (rdLE p.2 4).bind (fun q =>
+          (rdLE q.2 4).bind
+            (fun r => some ((p.1, ⟨q.1, r.1⟩), r.2)))) := rfl
+  rw [hstep, Option.bind_eq_some_iff] at h
+  obtain ⟨⟨i, bs1⟩, h1, h⟩ := h
+  rw [Option.bind_eq_some_iff] at h
+  obtain ⟨⟨d, bs2⟩, h2, h⟩ := h
+  rw [Option.bind_eq_some_iff] at h
+  obtain ⟨⟨a, bs3⟩, h3, h4⟩ := h
+  have h2' : rdLE bs1 4 = some (d, bs2) := h2
+  have h3' : rdLE bs2 4 = some (a, bs3) := h3
+  have hx : (i, (⟨d, a⟩ : Height)) = x :=
+    congrArg Prod.fst (Option.some.inj h4)
+  have hr : bs3 = rest :=
+    congrArg Prod.snd (Option.some.inj h4)
+  subst hr
+  obtain ⟨he1, hbi, -⟩ := rdLE_inv h1 hb
+  have hb1 : ∀ b ∈ bs1, b < 256 := fun b hbmem =>
+    hb b (he1.symm ▸ List.mem_append_right _ hbmem)
+  obtain ⟨he2, hbd, -⟩ := rdLE_inv h2' hb1
+  have hb2 : ∀ b ∈ bs2, b < 256 := fun b hbmem =>
+    hb1 b (he2.symm ▸ List.mem_append_right _ hbmem)
+  obtain ⟨he3, hba, -⟩ := rdLE_inv h3' hb2
+  subst hx
+  refine ⟨?_, hbi, hbd, hba⟩
+  calc bs = leBytes i 4 ++ bs1 := he1
+    _ = leBytes i 4 ++ (leBytes d 4 ++ bs2) := by rw [he2]
+    _ = leBytes i 4 ++ (leBytes d 4 ++ (leBytes a 4 ++ bs3)) := by
+      rw [he3]
+    _ = (leBytes i 4 ++ leBytes d 4 ++ leBytes a 4) ++ bs3 := by
+      simp only [List.append_assoc]
+
+/-- Inversion of `decData`. -/
+theorem decData_inv {bs rest d : List Nat}
+    (h : decData bs = some (d, rest)) (hb : ∀ b ∈ bs, b < 256) :
+    bs = (leBytes d.length 4 ++ d) ++ rest ∧ d.length < 256 ^ 4 := by
+  have hstep : decData bs =
+      (rdLE bs 4).bind (fun p =>
+        if p.2.length < p.1 then none
+        else some (p.2.take p.1, p.2.drop p.1)) := rfl
+  rw [hstep, Option.bind_eq_some_iff] at h
+  obtain ⟨⟨n, bs1⟩, h1, h⟩ := h
+  by_cases hlt : bs1.length < n
+  · rw [if_pos hlt] at h
+    exact absurd h (by simp)
+  · rw [if_neg hlt] at h
+    have hd : bs1.take n = d := congrArg Prod.fst (Option.some.inj h)
+    have hr : bs1.drop n = rest := congrArg Prod.snd (Option.some.inj h)
+    obtain ⟨he1, hbn, -⟩ := rdLE_inv h1 hb
+    have hdlen : d.length = n := by
+      rw [← hd, List.length_take]
+      omega
+    refine ⟨?_, by rw [hdlen]; exact hbn⟩
+    calc bs = leBytes n 4 ++ bs1 := he1
+      _ = leBytes n 4 ++ (bs1.take n ++ bs1.drop n) := by
+        rw [List.take_append_drop]
+      _ = (leBytes d.length 4 ++ d) ++ rest := by
+        rw [hdlen, ← hd, ← hr]
+        simp only [List.append_assoc]
+
 /-- EXISTENCE TARGET: with room, some oracle makes the final
 theorem non-vacuous.  The witness is `stage1Oracle f A` for the
 `A` given by `Room`.  What remains is the loader-prefix invariant:
