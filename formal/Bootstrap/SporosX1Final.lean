@@ -15246,6 +15246,189 @@ theorem rdLE_inv {bs : List Nat} {k v : Nat} {rest : List Nat}
   calc bs = bs.take k ++ bs.drop k := (List.take_append_drop k bs).symm
     _ = leBytes v k ++ rest := by rw [← htake, ← hr]
 
+/-- Immediate bounds forced by the fixed-width encodings. -/
+def InstrBound : Instr → Prop
+  | .prim _ => True
+  | .lit n => n < 256 ^ 8
+  | .str i => i < 256 ^ 4
+  | .pick n => n < 256 ^ 4
+  | .tor => True
+  | .fromr => True
+  | .rfetch => True
+  | .locget i => i < 256 ^ 4
+  | .locset i => i < 256 ^ 4
+  | .jmp t => t < 256 ^ 4
+  | .jz t => t < 256 ^ 4
+  | .jnz t => t < 256 ^ 4
+  | .call w => w < 256 ^ 4
+  | .ret => True
+
+/-- There are 57 primitives. -/
+theorem prim_all_length : Prim.all.length = 57 := by decide
+
+/-- The code of the `op`-th primitive is `op`. -/
+theorem prim_code_get (op : Nat) (h : op < Prim.all.length) :
+    (Prim.all[op]'h).code = op := by
+  have h57 : op < 57 := by
+    rw [prim_all_length] at h; exact h
+  have e : Prim.all[op]? = some (Prim.all[op]'h) :=
+    List.getElem?_eq_getElem h
+  have chk : (List.range 57).all
+      (fun i => (Prim.all[i]?.map Prim.code) == some i) = true := by decide
+  have hm := List.all_eq_true.mp chk op (List.mem_range.mpr h57)
+  rw [e] at hm
+  simp at hm
+  exact hm
+
+/-- An opcode that is not a primitive and not a known opcode
+decodes to nothing. -/
+theorem decInstr_none_of {op : Nat} {r : List Nat}
+    (hop : ¬ op < Prim.all.length)
+    (h80 : op ≠ 0x80) (h81 : op ≠ 0x81) (h82 : op ≠ 0x82)
+    (h83 : op ≠ 0x83) (h84 : op ≠ 0x84) (h85 : op ≠ 0x85)
+    (h86 : op ≠ 0x86) (h87 : op ≠ 0x87) (h88 : op ≠ 0x88)
+    (h89 : op ≠ 0x89) (h8a : op ≠ 0x8a) (h8b : op ≠ 0x8b)
+    (h8c : op ≠ 0x8c) :
+    decInstr (op :: r) = none := by
+  unfold decInstr
+  split
+  · simp_all
+  · split
+    · simp_all <;> omega
+    · split <;> simp_all
+
+/-- Inversion of an immediate-carrying decode. -/
+theorem imm_inv {k op : Nat} {f : Nat → Instr}
+    {r rest : List Nat} {x : Instr}
+    (hb : ∀ b ∈ r, b < 256)
+    (h : (rdLE r k).map (fun y => (f y.1, y.2)) = some (x, rest))
+    (henc : ∀ v, (f v).enc = op :: leBytes v k) :
+    ∃ v, x = f v ∧ v < 256 ^ k ∧ op :: r = x.enc ++ rest := by
+  rw [Option.map_eq_some_iff] at h
+  obtain ⟨⟨v, r2⟩, hr, hfx⟩ := h
+  have hx : f v = x := congrArg Prod.fst hfx
+  have hr2 : r2 = rest := congrArg Prod.snd hfx
+  obtain ⟨hr0, hbnd, -⟩ := rdLE_inv hr hb
+  refine ⟨v, hx.symm, hbnd, ?_⟩
+  calc op :: r = op :: (leBytes v k ++ r2) := by rw [hr0]
+    _ = (op :: leBytes v k) ++ rest := by
+      simp only [List.cons_append, hr2]
+    _ = x.enc ++ rest := by rw [← henc v, hx]
+
+/-- A decoded instruction re-encodes to exactly the bytes it
+consumed, with bounded immediates. -/
+theorem decInstr_inv {bs rest : List Nat} {x : Instr}
+    (h : decInstr bs = some (x, rest)) (hb : ∀ b ∈ bs, b < 256) :
+    bs = x.enc ++ rest ∧ InstrBound x := by
+  cases bs with
+  | nil => simp [decInstr] at h
+  | cons op rest0 =>
+    have hb0 : ∀ b ∈ rest0, b < 256 := fun b hbmem =>
+      hb b (.tail _ hbmem)
+    by_cases hop : op < Prim.all.length
+    · have e : decInstr (op :: rest0) =
+          some (Instr.prim (Prim.all[op]'hop), rest0) := by
+        unfold decInstr
+        split
+        · simp_all
+        · split
+          · simp_all
+          · simp_all <;> omega
+      rw [e] at h
+      obtain ⟨hx, hr⟩ := Prod.mk.inj (Option.some.inj h)
+      subst hx; subst hr
+      refine ⟨?_, trivial⟩
+      show op :: rest0 = (Instr.prim (Prim.all[op]'hop)).enc ++ rest0
+      show op :: rest0 = [(Prim.all[op]'hop).code] ++ rest0
+      simp only [prim_code_get op hop, List.singleton_append]
+    · have hcases : op = 0x80 ∨ op = 0x81 ∨ op = 0x82 ∨ op = 0x83 ∨
+          op = 0x84 ∨ op = 0x85 ∨ op = 0x86 ∨ op = 0x87 ∨ op = 0x88 ∨
+          op = 0x89 ∨ op = 0x8a ∨ op = 0x8b ∨ op = 0x8c ∨
+          (op ≠ 0x80 ∧ op ≠ 0x81 ∧ op ≠ 0x82 ∧ op ≠ 0x83 ∧ op ≠ 0x84 ∧
+          op ≠ 0x85 ∧ op ≠ 0x86 ∧ op ≠ 0x87 ∧ op ≠ 0x88 ∧ op ≠ 0x89 ∧
+          op ≠ 0x8a ∧ op ≠ 0x8b ∧ op ≠ 0x8c) := by omega
+      rcases hcases with rfl | rfl | rfl | rfl | rfl | rfl | rfl |
+        rfl | rfl | rfl | rfl | rfl | rfl |
+        ⟨h80, h81, h82, h83, h84, h85, h86, h87, h88, h89, h8a, h8b,
+          h8c⟩
+      · have e : decInstr (0x80 :: rest0) =
+            (rdLE rest0 8).map (fun y => (.lit y.1, y.2)) := rfl
+        rw [e] at h
+        obtain ⟨v, hx, hbnd, hbs⟩ :=
+          imm_inv hb0 h (fun v => rfl)
+        exact ⟨hbs, hx.symm ▸ hbnd⟩
+      · have e : decInstr (0x81 :: rest0) =
+            (rdLE rest0 4).map (fun y => (.str y.1, y.2)) := rfl
+        rw [e] at h
+        obtain ⟨v, hx, hbnd, hbs⟩ :=
+          imm_inv hb0 h (fun v => rfl)
+        exact ⟨hbs, hx.symm ▸ hbnd⟩
+      · have e : decInstr (0x82 :: rest0) =
+            (rdLE rest0 4).map (fun y => (.pick y.1, y.2)) := rfl
+        rw [e] at h
+        obtain ⟨v, hx, hbnd, hbs⟩ :=
+          imm_inv hb0 h (fun v => rfl)
+        exact ⟨hbs, hx.symm ▸ hbnd⟩
+      · have e : decInstr (0x83 :: rest0) = some (.tor, rest0) := rfl
+        rw [e] at h
+        obtain ⟨hx, hr⟩ := Prod.mk.inj (Option.some.inj h)
+        subst hx; subst hr
+        exact ⟨rfl, trivial⟩
+      · have e : decInstr (0x84 :: rest0) = some (.fromr, rest0) := rfl
+        rw [e] at h
+        obtain ⟨hx, hr⟩ := Prod.mk.inj (Option.some.inj h)
+        subst hx; subst hr
+        exact ⟨rfl, trivial⟩
+      · have e : decInstr (0x85 :: rest0) = some (.rfetch, rest0) := rfl
+        rw [e] at h
+        obtain ⟨hx, hr⟩ := Prod.mk.inj (Option.some.inj h)
+        subst hx; subst hr
+        exact ⟨rfl, trivial⟩
+      · have e : decInstr (0x86 :: rest0) =
+            (rdLE rest0 4).map (fun y => (.locget y.1, y.2)) := rfl
+        rw [e] at h
+        obtain ⟨v, hx, hbnd, hbs⟩ :=
+          imm_inv hb0 h (fun v => rfl)
+        exact ⟨hbs, hx.symm ▸ hbnd⟩
+      · have e : decInstr (0x87 :: rest0) =
+            (rdLE rest0 4).map (fun y => (.locset y.1, y.2)) := rfl
+        rw [e] at h
+        obtain ⟨v, hx, hbnd, hbs⟩ :=
+          imm_inv hb0 h (fun v => rfl)
+        exact ⟨hbs, hx.symm ▸ hbnd⟩
+      · have e : decInstr (0x88 :: rest0) =
+            (rdLE rest0 4).map (fun y => (.jmp y.1, y.2)) := rfl
+        rw [e] at h
+        obtain ⟨v, hx, hbnd, hbs⟩ :=
+          imm_inv hb0 h (fun v => rfl)
+        exact ⟨hbs, hx.symm ▸ hbnd⟩
+      · have e : decInstr (0x89 :: rest0) =
+            (rdLE rest0 4).map (fun y => (.jz y.1, y.2)) := rfl
+        rw [e] at h
+        obtain ⟨v, hx, hbnd, hbs⟩ :=
+          imm_inv hb0 h (fun v => rfl)
+        exact ⟨hbs, hx.symm ▸ hbnd⟩
+      · have e : decInstr (0x8a :: rest0) =
+            (rdLE rest0 4).map (fun y => (.jnz y.1, y.2)) := rfl
+        rw [e] at h
+        obtain ⟨v, hx, hbnd, hbs⟩ :=
+          imm_inv hb0 h (fun v => rfl)
+        exact ⟨hbs, hx.symm ▸ hbnd⟩
+      · have e : decInstr (0x8b :: rest0) =
+            (rdLE rest0 4).map (fun y => (.call y.1, y.2)) := rfl
+        rw [e] at h
+        obtain ⟨v, hx, hbnd, hbs⟩ :=
+          imm_inv hb0 h (fun v => rfl)
+        exact ⟨hbs, hx.symm ▸ hbnd⟩
+      · have e : decInstr (0x8c :: rest0) = some (.ret, rest0) := rfl
+        rw [e] at h
+        obtain ⟨hx, hr⟩ := Prod.mk.inj (Option.some.inj h)
+        subst hx; subst hr
+        exact ⟨rfl, trivial⟩
+      · rw [decInstr_none_of hop h80 h81 h82 h83 h84 h85 h86 h87 h88
+          h89 h8a h8b h8c] at h
+        simp at h
+
 /-- EXISTENCE TARGET: with room, some oracle makes the final
 theorem non-vacuous.  The witness is `stage1Oracle f A` for the
 `A` given by `Room`.  What remains is the loader-prefix invariant:
