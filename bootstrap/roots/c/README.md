@@ -10,7 +10,6 @@
 | `seed-c.oct` | The same bytes in format B, for the cross-check (`seed-b` assembles it) |
 | `seed-a.bin` | `../a/seed-a`'s bytes in format C, for the cross-check (`seed-c` assembles it) |
 | `seed-b.bin` | `../b/seed-b`'s bytes in format C, for the cross-check (`seed-c` assembles it) |
-| `spr1-check.bin` | `spr1_check`'s bytes in format C (optional hook in `root_c_seed_gate.sh`; appended once `spr1_check` lands) |
 | `seed_c_ref.cpp` | A reference model of the decoder, used by the gate as a test oracle only; it is not on the bootstrap path |
 
 ## Format C
