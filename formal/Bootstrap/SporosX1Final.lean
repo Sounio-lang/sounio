@@ -2866,6 +2866,22 @@ theorem step_mov32 {im : Nat → Option (Ins × Nat)} {s : X86Int.St}
       .ok { s.set d (some (v % 2 ^ 32)) with rip := s.rip + len } := by
   simp only [X86Int.step, exec, hi, hr, lift, bind, Option.bind, pure]
 
+theorem step_st {im : Nat → Option (Ins × Nat)} {s : X86Int.St}
+    {b disp r len x v : Nat} {m : Mem}
+    (hi : im s.rip = some (.st b disp r, len)) (hx : s.reg b = some x)
+    (hv : s.reg r = some v) (hm : wr64 s.mem (ea x disp) v = some m) :
+    X86Int.step im s =
+      .ok { s with mem := m, rip := s.rip + len } := by
+  simp only [X86Int.step, exec, hi, hx, hv, hm, lift, bind, Option.bind, pure]
+
+theorem step_st8 {im : Nat → Option (Ins × Nat)} {s : X86Int.St}
+    {b disp r len x v : Nat} {m : Mem}
+    (hi : im s.rip = some (.st8 b disp r, len)) (hx : s.reg b = some x)
+    (hv : s.reg r = some v) (hm : s.mem.wr (ea x disp) (v % 256) = some m) :
+    X86Int.step im s =
+      .ok { s with mem := m, rip := s.rip + len } := by
+  simp only [X86Int.step, exec, hi, hx, hv, hm, lift, bind, Option.bind, pure]
+
 theorem pages_mono {a b : Nat} (h : a ≤ b) :
     X86Env.pages a ≤ X86Env.pages b := by
   unfold X86Env.pages
@@ -10940,6 +10956,172 @@ theorem parser_setup_ok {sp1 c T B v w1 w2 w3 w4 w5 w6 : Nat}
   · rw [ht11]
     show ({ t10 with rip := base + 0x2c9 }).k = s.k
     exact ht10k'
+
+/-- Word-loop entry: copy `nwords` from `r13` into the loop
+counter `rcx`. -/
+theorem parser_words_init {nw : Nat} {s : X86Int.St}
+    (hrip : s.rip = base + 0x2c9) (hr13 : s.reg 13 = some nw)
+    (hlen16 : s.regs.length = 16) :
+    ∃ s' : X86Int.St,
+      run stage1Im 1 (Out.ok s) = Out.ok s' ∧
+      s'.rip = base + 0x2cc ∧ s'.reg 1 = some nw ∧
+      (∀ i, i ≠ 1 → s'.reg i = s.reg i) ∧
+      s'.mem = s.mem ∧ s'.regs.length = 16 ∧ s'.k = s.k := by
+  have hc := stage1_parserCode
+  have e1 : X86Int.step stage1Im s =
+      .ok { s.set 1 (some nw) with rip := s.rip + 3 } :=
+    step_mov (by rw [hrip]; exact hc.p2c9) hr13
+  obtain ⟨t1, ht1⟩ : ∃ t : X86Int.St, t =
+      { s.set 1 (some nw) with rip := s.rip + 3 } := ⟨_, rfl⟩
+  have r1 : run stage1Im 1 (Out.ok s) = Out.ok t1 := by
+    rw [run_succ_ok stage1Im 0 s, e1, ← ht1, run_zero]
+  refine ⟨t1, r1, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  · rw [ht1]; show s.rip + 3 = base + 0x2cc; rw [hrip]
+  · rw [ht1]
+    show ({ s.set 1 (some nw) with rip := s.rip + 3 }).reg 1 = some nw
+    rw [reg_with_rip, reg_set_self (by omega)]
+  · intro i hi
+    rw [ht1]
+    show ({ s.set 1 (some nw) with rip := s.rip + 3 }).reg i = s.reg i
+    rw [reg_with_rip, reg_set_other hi]
+  · rw [ht1]
+    show ({ s.set 1 (some nw) with rip := s.rip + 3 }).mem = s.mem
+    rw [mem_with_rip, mem_set]
+  · rw [ht1]
+    show ({ s.set 1 (some nw) with rip := s.rip + 3 }).regs.length = 16
+    rw [len_with_rip, len_set]; exact hlen16
+  · rw [ht1]; exact rfl
+
+/-- Word-loop head with words remaining: enter the body. -/
+theorem parser_words_head_pos {n : Nat} {s : X86Int.St}
+    (hrip : s.rip = base + 0x2cc) (hr1 : s.reg 1 = some n)
+    (hn : n ≠ 0) (hnW : n < W) :
+    ∃ s' : X86Int.St,
+      run stage1Im 2 (Out.ok s) = Out.ok s' ∧
+      s'.rip = base + 0x2d6 ∧
+      (∀ i, s'.reg i = s.reg i) ∧
+      s'.mem = s.mem ∧ s'.regs.length = s.regs.length ∧ s'.k = s.k := by
+  have hc := stage1_parserCode
+  have e1 : X86Int.step stage1Im s =
+      .ok { s with fl := (aluF .and n n).2, rip := s.rip + 3 } :=
+    step_test (by rw [hrip]; exact hc.p2cc) hr1 hr1
+  obtain ⟨t1, ht1⟩ : ∃ t : X86Int.St, t =
+      { s with fl := (aluF .and n n).2, rip := s.rip + 3 } := ⟨_, rfl⟩
+  have ht1rip : t1.rip = base + 0x2cf := by
+    rw [ht1]; show s.rip + 3 = base + 0x2cf; rw [hrip]
+  have ht1fl : X86Int.cond t1.fl 5 = some true := by
+    have hzf : t1.fl.zf = some false := by
+      rw [ht1]
+      show (aluF .and n n).2.zf = some false
+      rw [aluF_zf, aluF_and_fst_self]
+      simp [Nat.mod_eq_of_lt hnW, hn]
+    have hcc := cond_cc5 hzf
+    simpa using hcc
+  have e2 : X86Int.step stage1Im t1 =
+      .ok { t1 with rip := base + 0x2d6 } := by
+    have h := step_jcc (im := stage1Im) (s := t1)
+      (by rw [ht1rip]; exact hc.p2cf) ht1fl
+    simpa using h
+  obtain ⟨t2, ht2⟩ : ∃ t : X86Int.St, t =
+      { t1 with rip := base + 0x2d6 } := ⟨_, rfl⟩
+  have r1 : run stage1Im 1 (Out.ok s) = Out.ok t1 := by
+    rw [run_succ_ok stage1Im 0 s, e1, ← ht1, run_zero]
+  have r2 : run stage1Im 1 (Out.ok t1) = Out.ok t2 := by
+    rw [run_succ_ok stage1Im 0 t1, e2, ← ht2, run_zero]
+  have hrun : run stage1Im 2 (Out.ok s) = Out.ok t2 := by
+    rw [show (2 : Nat) = 1 + 1 by omega, run_add stage1Im 1 1, r1, r2]
+  refine ⟨t2, hrun, ?_, ?_, ?_, ?_, ?_⟩
+  · rw [ht2]
+  · intro i
+    rw [ht2]
+    show ({ t1 with rip := base + 0x2d6 }).reg i = s.reg i
+    rw [reg_with_rip]
+    rw [ht1]
+    show s.reg i = s.reg i
+    exact rfl
+  · rw [ht2]
+    show ({ t1 with rip := base + 0x2d6 }).mem = s.mem
+    rw [ht1]
+  · rw [ht2]
+    show ({ t1 with rip := base + 0x2d6 }).regs.length = s.regs.length
+    rw [len_with_rip, ht1]
+  · rw [ht2]
+    show ({ t1 with rip := base + 0x2d6 }).k = s.k
+    rw [ht1]
+
+/-- Word-loop head with no words remaining: jump to the trailing
+check. -/
+theorem parser_words_head_zero {s : X86Int.St}
+    (hrip : s.rip = base + 0x2cc) (hr1 : s.reg 1 = some 0) :
+    ∃ s' : X86Int.St,
+      run stage1Im 3 (Out.ok s) = Out.ok s' ∧
+      s'.rip = base + 0x419 ∧
+      (∀ i, s'.reg i = s.reg i) ∧
+      s'.mem = s.mem ∧ s'.regs.length = s.regs.length ∧ s'.k = s.k := by
+  have hc := stage1_parserCode
+  have e1 : X86Int.step stage1Im s =
+      .ok { s with fl := (aluF .and 0 0).2, rip := s.rip + 3 } :=
+    step_test (by rw [hrip]; exact hc.p2cc) hr1 hr1
+  obtain ⟨t1, ht1⟩ : ∃ t : X86Int.St, t =
+      { s with fl := (aluF .and 0 0).2, rip := s.rip + 3 } := ⟨_, rfl⟩
+  have ht1rip : t1.rip = base + 0x2cf := by
+    rw [ht1]; show s.rip + 3 = base + 0x2cf; rw [hrip]
+  have ht1fl : X86Int.cond t1.fl 5 = some false := by
+    have hzf : t1.fl.zf = some true := by
+      rw [ht1]
+      show (aluF .and 0 0).2.zf = some true
+      rw [aluF_zf, aluF_and_fst_self]
+      simp
+    have hcc := cond_cc5 hzf
+    simpa using hcc
+  have e2 : X86Int.step stage1Im t1 =
+      .ok { t1 with rip := t1.rip + 2 } := by
+    have h := step_jcc (im := stage1Im) (s := t1)
+      (by rw [ht1rip]; exact hc.p2cf) ht1fl
+    simpa using h
+  obtain ⟨t2, ht2⟩ : ∃ t : X86Int.St, t =
+      { t1 with rip := t1.rip + 2 } := ⟨_, rfl⟩
+  have ht2rip : t2.rip = base + 0x2d1 := by
+    rw [ht2]; show t1.rip + 2 = base + 0x2d1; rw [ht1rip]
+  have e3 : X86Int.step stage1Im t2 =
+      .ok { t2 with rip := base + 0x419 } :=
+    step_jmp (by rw [ht2rip]; exact hc.p2d1)
+  obtain ⟨t3, ht3⟩ : ∃ t : X86Int.St, t =
+      { t2 with rip := base + 0x419 } := ⟨_, rfl⟩
+  have r1 : run stage1Im 1 (Out.ok s) = Out.ok t1 := by
+    rw [run_succ_ok stage1Im 0 s, e1, ← ht1, run_zero]
+  have r2 : run stage1Im 1 (Out.ok t1) = Out.ok t2 := by
+    rw [run_succ_ok stage1Im 0 t1, e2, ← ht2, run_zero]
+  have r3 : run stage1Im 1 (Out.ok t2) = Out.ok t3 := by
+    rw [run_succ_ok stage1Im 0 t2, e3, ← ht3, run_zero]
+  have hrun : run stage1Im 3 (Out.ok s) = Out.ok t3 := by
+    rw [show (3 : Nat) = 1 + 2 by omega, run_add stage1Im 1 2, r1,
+      show (2 : Nat) = 1 + 1 by omega, run_add stage1Im 1 1, r2, r3]
+  refine ⟨t3, hrun, ?_, ?_, ?_, ?_, ?_⟩
+  · rw [ht3]
+  · intro i
+    rw [ht3]
+    show ({ t2 with rip := base + 0x419 }).reg i = s.reg i
+    rw [reg_with_rip, ht2]
+    show ({ t1 with rip := t1.rip + 2 }).reg i = s.reg i
+    rw [reg_with_rip, ht1]
+    show s.reg i = s.reg i
+    exact rfl
+  · rw [ht3]
+    show ({ t2 with rip := base + 0x419 }).mem = s.mem
+    rw [ht2]
+    show ({ t1 with rip := t1.rip + 2 }).mem = s.mem
+    rw [ht1]
+  · rw [ht3]
+    show ({ t2 with rip := base + 0x419 }).regs.length = s.regs.length
+    rw [len_with_rip, ht2]
+    show ({ t1 with rip := t1.rip + 2 }).regs.length = s.regs.length
+    rw [len_with_rip, ht1]
+  · rw [ht3]
+    show ({ t2 with rip := base + 0x419 }).k = s.k
+    rw [ht2]
+    show ({ t1 with rip := t1.rip + 2 }).k = s.k
+    rw [ht1]
 
 /-- EXISTENCE TARGET: with room, some oracle makes the final
 theorem non-vacuous.  The witness is `stage1Oracle f A` for the
