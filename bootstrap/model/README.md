@@ -13,7 +13,8 @@ no library beyond core, and the evidence that it says what the CPU does.
 | `formal/Bootstrap/Refine.lean`, `Loop.lean` | Refinement of machine states, `step_mono`, runs cut at a loop head, a decidable check for refinement. |
 | `formal/Bootstrap/SeedA.lean`, `SeedB.lean` | Each seed on every listing (`seedA_correct`, `seedB_correct`, and the refusals). |
 | `seed_proofs.sh` | Generates and checks the four whole-run theorems. |
-| `formal/Bootstrap/X86DiffModel.lean`, `x86diff_cpu.cpp`, `x86diff_gate.sh` | Instruction-level differential test of the model against the CPU. |
+| `formal/Bootstrap/X86DiffModel.lean`, `x86diff_cpu.cpp`, `x86diff_gate.sh` | Instruction-level differential test of `X86Min` against the CPU. |
+| `formal/Bootstrap/X86IntDiffModel.lean`, `x86diff_cpu.cpp`, `x86int_diff_gate.sh` | Instruction-level differential test of `X86Int` and `X86Dec` against the CPU. |
 
 ## What the model says
 

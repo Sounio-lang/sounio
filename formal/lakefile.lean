@@ -81,3 +81,6 @@ lean_exe «sporos-examples» where
 
 lean_exe x86run where
   root := `Bootstrap.RunHex
+
+lean_exe «x86int-diff» where
+  root := `Bootstrap.X86IntDiffModel
