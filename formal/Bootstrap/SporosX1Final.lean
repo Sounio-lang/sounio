@@ -18713,6 +18713,138 @@ theorem witness_exit0 {f path argv0 stdin : List Nat} {top : Nat}
       (by omega) hregs hs2room (EffTable_of_code hs2code) htab2
   exact ⟨A, k0 + k1, by rw [run_add, hrun0, hrun1]⟩
 
+/-- `mmap` never exits. -/
+theorem syscall9_ne_exit {k : Kern} {m : Mem}
+    {a1 a2 a3 a4 a5 a6 c : Nat} :
+    X86Env.syscall k m 9 a1 a2 a3 a4 a5 a6 ≠ some (.exit c) := by
+  intro h
+  simp only [X86Env.syscall] at h
+  split at h
+  · simp at h
+  · split at h
+    · simp at h
+    · cases hnext : Kern.next k with
+      | mk oc k1 =>
+        rw [hnext] at h
+        simp only [] at h
+        cases hp : X86Env.place m oc (X86Env.pages a2) with
+        | none => simp [hp] at h
+        | some o =>
+          cases o with
+          | none => simp [hp] at h
+          | some a => simp [hp] at h
+
+/-- `mremap` never exits. -/
+theorem syscall25_ne_exit {k : Kern} {m : Mem}
+    {a1 a2 a3 a4 a5 a6 c : Nat} :
+    X86Env.syscall k m 25 a1 a2 a3 a4 a5 a6 ≠ some (.exit c) := by
+  intro h
+  cases hf : m.find a1 0 with
+  | none =>
+    simp only [X86Env.syscall, hf] at h
+    split at h <;> simp at h
+  | some ir =>
+    obtain ⟨i, r⟩ := ir
+    simp only [X86Env.syscall, hf] at h
+    split at h
+    · simp at h
+    · split at h
+      · simp at h
+      · split at h
+        · simp at h
+        · cases hp : X86Env.place (m.eraseIdx i) (Kern.next k).1
+              (X86Env.pages a3) with
+          | none => simp [hp] at h
+          | some o =>
+            cases o with
+            | none => simp [hp] at h
+            | some a => simp [hp] at h
+
+/-- A state whose step is not stuck is oracle-legal: at a memory
+syscall the step succeeding (or even exiting, which the syscall
+numbers exclude) forces every argument register to read and the
+environment call to return a value. -/
+theorem oracleLegalAt_of_step_ne_stuck {s : X86Int.St}
+    (h : X86Int.step stage1Im s ≠ .stuck) : OracleLegalAt s := by
+  intro hmem
+  obtain ⟨hrip, hnr⟩ := hmem
+  have hstep : X86Int.step stage1Im s =
+      X86Int.exec .syscall 2 s := by
+    simp only [X86Int.step, hrip]
+  have hsome : ∀ {i : Nat},
+      i = 0 ∨ i = 7 ∨ i = 6 ∨ i = 2 ∨ i = 10 ∨ i = 8 ∨ i = 9 →
+      ∃ v, s.reg i = some v := by
+    intro i hi
+    cases hv : s.reg i with
+    | some v => exact ⟨v, rfl⟩
+    | none =>
+      exfalso
+      apply h
+      rw [hstep]
+      rcases hi with rfl | rfl | rfl | rfl | rfl | rfl | rfl <;>
+        simp [X86Int.exec, hv]
+  obtain ⟨nr, h0⟩ := hsome (Or.inl rfl)
+  obtain ⟨a1, h7⟩ := hsome (Or.inr (Or.inl rfl))
+  obtain ⟨a2, h6⟩ := hsome (Or.inr (Or.inr (Or.inl rfl)))
+  obtain ⟨a3, h2⟩ := hsome (Or.inr (Or.inr (Or.inr (Or.inl rfl))))
+  obtain ⟨a4, h10⟩ :=
+    hsome (Or.inr (Or.inr (Or.inr (Or.inr (Or.inl rfl)))))
+  obtain ⟨a5, h8⟩ :=
+    hsome (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inl rfl))))))
+  obtain ⟨a6, h9⟩ :=
+    hsome (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr rfl))))))
+  cases hsc : X86Env.syscall s.k s.mem nr a1 a2 a3 a4 a5 a6 with
+  | none =>
+    exfalso
+    apply h
+    rw [hstep]
+    simp [X86Int.exec, h0, h7, h6, h2, h10, h8, h9, hsc]
+  | some r =>
+    cases r with
+    | ret rax k' m' =>
+      exact ⟨nr, a1, a2, a3, a4, a5, a6, rax, k', m',
+        h0, h7, h6, h2, h10, h8, h9, hsc⟩
+    | exit c =>
+      rcases hnr with hn | hn
+      · have hnr9 : nr = 9 := Option.some.inj (h0.symm.trans hn)
+        subst hnr9
+        exact absurd hsc syscall9_ne_exit
+      · have hnr25 : nr = 25 := Option.some.inj (h0.symm.trans hn)
+        subst hnr25
+        exact absurd hsc syscall25_ne_exit
+
+/-- A run from `stuck` stays stuck. -/
+theorem run_stuck (n : Nat) :
+    run stage1Im n .stuck = .stuck := by
+  cases n <;> rfl
+
+/-- A state on a run that continues without getting stuck is
+oracle-legal. -/
+theorem oracleLegalAt_of_continues {s : X86Int.St} {m : Nat}
+    (hm : 0 < m) (h2 : run stage1Im m (Out.ok s) ≠ .stuck) :
+    OracleLegalAt s := by
+  apply oracleLegalAt_of_step_ne_stuck
+  intro hstuck
+  obtain ⟨m', rfl⟩ : ∃ m', m = m' + 1 := ⟨m - 1, by omega⟩
+  have he : run stage1Im (m' + 1) (Out.ok s) =
+      run stage1Im m' (X86Int.step stage1Im s) := rfl
+  rw [hstuck, run_stuck] at he
+  exact h2 he
+
+/-- Every state strictly before an ok-reached milestone is
+oracle-legal. -/
+theorem oracleLegalAt_of_prefix {s0 s sT : X86Int.St} {k K : Nat}
+    (hk : k < K) (h1 : run stage1Im k (Out.ok s0) = Out.ok s)
+    (hT : run stage1Im K (Out.ok s0) = Out.ok sT) :
+    OracleLegalAt s := by
+  have h2 : run stage1Im (K - k) (Out.ok s) = Out.ok sT := by
+    have h := hT
+    rw [show K = k + (K - k) by omega, run_add, h1] at h
+    exact h
+  refine oracleLegalAt_of_continues (m := K - k) (by omega) ?_
+  rw [h2]
+  simp
+
 /-- EXISTENCE TARGET: with room, some oracle makes the final
 theorem non-vacuous.  The witness is `stage1Oracle f A` for the
 `A` given by `Room`.  What remains is the loader-prefix invariant:
