@@ -35,10 +35,8 @@ for arg in "$@"; do
   fi
 done
 
-lean="${LEAN_BIN:+$LEAN_BIN/}lean"
 lake="${LEAN_BIN:+$LEAN_BIN/}lake"
-if ! command -v "$lean" >/dev/null 2>&1 && [[ -x "$HOME/.elan/bin/lean" ]]; then
-  lean="$HOME/.elan/bin/lean"
+if ! command -v "$lake" >/dev/null 2>&1 && [[ -x "$HOME/.elan/bin/lake" ]]; then
   lake="$HOME/.elan/bin/lake"
 fi
 cxx="${CXX:-g++}"
@@ -50,39 +48,13 @@ cpu="$work/tmr_burst_straddle_cpu"
 "$cxx" -std=c++23 -O2 \
   -o "$cpu" "$root/bootstrap/model/tmr_burst_straddle_cpu.cpp"
 
-if command -v "$lake" >/dev/null 2>&1 && grep -q 'tmr-burst-check' "$root/formal/lakefile.lean"; then
-  (cd "$root/formal" && "$lake" build tmr-burst-check >/dev/null)
-  "$root/formal/.lake/build/bin/tmr-burst-check" \
-    gen "$seed_groups" "$seed" "$work/straddle_cases.txt" "$work/straddle_stats.txt"
-  cpu_rc=0
-  "$cpu" "$seed" "$work/straddle_cases.txt" "$mc_trials" ${neg_flag:+"$neg_flag"} > "$work/cpu_report.txt" || cpu_rc=$?
-  "$root/formal/.lake/build/bin/tmr-burst-check" \
-    verify "$work/cpu_report.txt" "$work/straddle_stats.txt"
-  if [[ $cpu_rc -ne 0 ]]; then
-    exit "$cpu_rc"
-  fi
-else
-  olean_dir="${TMR_BURST_OLEAN_DIR:-$work/olean}"
-  mkdir -p "$olean_dir/Bootstrap"
-  (
-    cd "$root/formal"
-    for m in PDist TMR TMRExposure X86Env X86Int X86Dec TMRVoter TMRBurst; do
-      if [[ ! -f "$root/formal/.lake/build/lib/lean/Bootstrap/$m.olean" && ! -f "$olean_dir/Bootstrap/$m.olean" ]]; then
-        LEAN_PATH="$olean_dir:$root/formal/.lake/build/lib/lean" \
-          "$lean" "Bootstrap/$m.lean" -o "$olean_dir/Bootstrap/$m.olean" >/dev/null
-      fi
-    done
-    LEAN_PATH="$olean_dir:$root/formal/.lake/build/lib/lean" "$lean" --run Bootstrap/TMRBurstCheck.lean \
-      gen "$seed_groups" "$seed" "$work/straddle_cases.txt" "$work/straddle_stats.txt"
-  )
-  cpu_rc=0
-  "$cpu" "$seed" "$work/straddle_cases.txt" "$mc_trials" ${neg_flag:+"$neg_flag"} > "$work/cpu_report.txt" || cpu_rc=$?
-  (
-    cd "$root/formal"
-    LEAN_PATH="$olean_dir:$root/formal/.lake/build/lib/lean" "$lean" --run Bootstrap/TMRBurstCheck.lean \
-      verify "$work/cpu_report.txt" "$work/straddle_stats.txt"
-  )
-  if [[ $cpu_rc -ne 0 ]]; then
-    exit "$cpu_rc"
-  fi
+command -v "$lake" >/dev/null 2>&1 || { echo "FAIL: lake not found" >&2; exit 1; }
+(cd "$root/formal" && "$lake" build tmr-burst-check >/dev/null)
+check="$root/formal/.lake/build/bin/tmr-burst-check"
+"$check" gen "$seed_groups" "$seed" "$work/straddle_cases.txt" "$work/straddle_stats.txt"
+cpu_rc=0
+"$cpu" "$seed" "$work/straddle_cases.txt" "$mc_trials" ${neg_flag:+"$neg_flag"} > "$work/cpu_report.txt" || cpu_rc=$?
+"$check" verify "$work/cpu_report.txt" "$work/straddle_stats.txt"
+if [[ $cpu_rc -ne 0 ]]; then
+  exit "$cpu_rc"
 fi

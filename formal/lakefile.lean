@@ -67,6 +67,8 @@ lean_lib Bootstrap where
     .one `Bootstrap.X86Int,
     .one `Bootstrap.X86Min,
     .one `Bootstrap.TMRMemExposure,
+    .one `Bootstrap.TMRBurst,
+    .one `Bootstrap.TMRBurstCheck,
     .submodules `Sporos]
 
 -- The two seeds on every listing (about 20 minutes of kernel time, the two in parallel); built by
@@ -96,3 +98,6 @@ lean_exe «x86dec-fuzz» where
 
 lean_exe «tmr-bound-check» where
   root := `Bootstrap.TMRBoundCheck
+
+lean_exe «tmr-burst-check» where
+  root := `Bootstrap.TMRBurstCheck
