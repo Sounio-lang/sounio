@@ -17348,6 +17348,12 @@ theorem parser_back_ok {f path argv0 : List Nat} {top A : Nat}
         (A + arenaFileBytes f)
         (A + 16 + dataBytes pr.data) pr.words ∧
       StackRoom s' 6 ∧ s'.regs.length = 16 ∧
+      wshape s'.mem = wshape ([c1, c2, buf'] ++
+        [⟨A + arenaFileBytes f,
+          List.replicate (X86Env.pages (64 * pr.words.length)) 0,
+          true⟩,
+         ⟨A + (arenaFileBytes f + arenaTableBytes f),
+          List.replicate (X86Env.pages f.length) 0, true⟩]) ∧
       s'.k = (Kern.next s.k).2 := by
   obtain ⟨hfenc, hbmn, hbnw, hbnd, hwB, hdB⟩ := decode_inv hdec hfB
   obtain ⟨hmn, hins0⟩ := checkProg_main hchk
@@ -17963,7 +17969,113 @@ theorem parser_back_ok {f path argv0 : List Nat} {top A : Nat}
     hs11r 13 _ (by decide) (by decide) hs10r13,
     hs11r 4 _ (by decide) (by decide) hs10r4,
     by rw [hs11mem, hs10mem]; exact hs9tab,
-    hroom11, hs11len, hk11⟩
+    hroom11, hs11len, hsh11, hk11⟩
+
+set_option maxHeartbeats 0 in
+/-- The whole accept path from process entry to the checker
+entry, under the witness oracle: loader, parser front half and
+parser back half composed. -/
+theorem parser_accept_ok {f path argv0 stdin : List Nat} {top : Nat}
+    {pr : Prog}
+    (hinit : Stage1InitOk f path argv0 top)
+    (hroom : Room f path argv0 top)
+    (hdec : Sporos.decode f = some pr)
+    (hchk : Sporos.checkProg pr = true) :
+    ∃ (A k : Nat) (s' : X86Int.St),
+      run stage1Im k
+        (Out.ok (stage1Init f path argv0 stdin (stage1Oracle f A)
+          top)) = Out.ok s' ∧
+      s'.rip = base + 0x452 ∧
+      s'.reg 14 = some (A + arenaFileBytes f) ∧
+      s'.reg 13 = some pr.words.length ∧
+      s'.reg 4 =
+        some ((X86Env.initStack top [argv0, path]).2 + 24 + 48) ∧
+      TabLay s'.mem A
+        (A + (arenaFileBytes f + arenaTableBytes f))
+        (A + arenaFileBytes f)
+        (A + 16 + dataBytes pr.data) pr.words ∧
+      StackRoom s' 6 ∧ s'.regs.length = 16 ∧
+      s'.k.oracle = [] ∧
+      (∃ c1 c2 buf', wshape s'.mem = wshape ([c1, c2, buf'] ++
+        [⟨A + arenaFileBytes f,
+          List.replicate (X86Env.pages (64 * pr.words.length)) 0,
+          true⟩,
+         ⟨A + (arenaFileBytes f + arenaTableBytes f),
+          List.replicate (X86Env.pages f.length) 0, true⟩]) ∧
+        c1.base = base ∧ c1.hi = base + stage1Code.length ∧
+        c2.base = (X86Env.initStack top [argv0, path]).1.base ∧
+        c2.hi = (X86Env.initStack top [argv0, path]).1.hi ∧
+        c2.rw = true ∧ c1.hi ≤ c2.base) ∧
+      (∃ t, run stage1Im 21
+        (Out.ok (stage1Init f path argv0 stdin (stage1Oracle f A)
+          top)) = Out.ok t ∧ OracleLegalAt t) ∧
+      A % page = 0 ∧ 0 < A ∧ A + stage1Mf f ≤ 2 ^ 47 ∧
+      (stage1Init f path argv0 [] [] top).mem.free A (stage1Mf f) =
+        true := by
+  obtain ⟨A, k0, s0, hAmod, hApos, hAbound, hfreeA, hrun0, hs0rip,
+    hs0r3, -, hs0r13, -, hs0r4, -, -, -, hs0r9, hs0oracle, -,
+    hmem0, hs0rdN, hs0len, hlegal, hs0room⟩ :=
+    loader_init_to_loaded hinit hroom
+  have hfB : ∀ b ∈ f, b < 256 := hinit.1
+  have htop47 : top ≤ 2 ^ 47 := hinit.2.2.2.2.2.2.2.1
+  have hleInit : phVaddr + phMemsz ≤
+      (X86Env.initStack top [argv0, path]).1.base :=
+    hinit.2.2.2.2.2.2.2.2.1
+  have hstkhi : (X86Env.initStack top [argv0, path]).1.hi = top :=
+    hinit.2.2.2.2.2.2.2.2.2
+  have hdisjInit : base + stage1Code.length ≤
+      (X86Env.initStack top [argv0, path]).1.base := by
+    have h := hleInit
+    rw [phVaddr_eq, phMemsz_eq] at h
+    exact h
+  obtain ⟨c1, c2, buf', hmem0eq, hc1b, hc1hi, hc2b, hc2hi, hbufb,
+    ⟨cap', hbufhi, hbufbound⟩, hbufrw, hc2rw⟩ := hmem0
+  have hr7 : ∃ v, s0.reg 7 = some v :=
+    run_reg_some_ne11 _ (by decide)
+      (stage1Init_reg_ne4 (i := 7) f path argv0 stdin
+        (stage1Oracle f A) top (by decide) (by decide)) hrun0
+  obtain ⟨k1, s1, m2, hrun1, hs1rip, hs1r14, hs1r4, hs1r3, hs1r12,
+    hs1r13, hs1r15, hs1mem, hm2sh, hs1rdN, hs1cur, hs1oracle,
+    -, -, -, -, hs1r7, hs1r9, hs1room, hs1len, -⟩ :=
+    parser_front_ok hdec hchk hfB hAmod hApos hAbound hfreeA
+      hdisjInit hstkhi htop47 hs0rip hs0r3 hs0r13 hs0r4 hr7 hs0r9
+      hs0oracle
+      ⟨c1, c2, buf', hmem0eq, hc1b, hc1hi, hc2b, hc2hi, hbufb,
+        ⟨cap', hbufhi, hbufbound⟩, hbufrw, hc2rw⟩
+      hs0rdN hs0len hs0room
+  have hwsh1 : wshape s1.mem = wshape (([c1, c2, buf'] ++
+      [⟨A + arenaFileBytes f,
+        List.replicate (X86Env.pages (64 * pr.words.length)) 0,
+        true⟩])) := by
+    have happ : ∀ (m : Mem) (r : Region),
+        wshape (m ++ [r]) = wshape m ++ [(r.base, r.hi, r.rw)] := by
+      intro m r
+      simp [wshape]
+    rw [hs1mem, happ, hm2sh, hmem0eq, happ]
+  obtain ⟨k2, s2, hrun2, hs2rip, hs2r14, hs2r13, hs2r4, hs2tab,
+    hs2room, hs2len, hs2sh, hs2k⟩ :=
+    parser_back_ok hdec hchk hfB hAmod hApos hAbound hfreeA
+      hdisjInit hstkhi htop47 hs1rip hs1r14 hs1r4 hs1r3 hs1r12
+      hs1r13 hs1r15 hwsh1 hc1b hc1hi hc2b hc2hi hbufb hbufhi
+      hbufbound hc2rw hs1rdN hs1cur hs1oracle hs1r7 hs1r9 hs1room
+      hs1len
+  have hrunA : run stage1Im (k0 + k1)
+      (Out.ok (stage1Init f path argv0 stdin (stage1Oracle f A)
+        top)) = Out.ok s1 := by
+    rw [run_add, hrun0, hrun1]
+  have hrunTot : run stage1Im (k0 + k1 + k2)
+      (Out.ok (stage1Init f path argv0 stdin (stage1Oracle f A)
+        top)) = Out.ok s2 := by
+    rw [show k0 + k1 + k2 = (k0 + k1) + k2 from rfl, run_add, hrunA,
+      hrun2]
+  have hor2 : s2.k.oracle = [] := by
+    rw [hs2k]
+    exact next_oracle_tail hs1oracle
+  exact ⟨A, k0 + k1 + k2, s2, hrunTot, hs2rip, hs2r14, hs2r13, hs2r4,
+    hs2tab, hs2room, hs2len, hor2,
+    ⟨c1, c2, buf', hs2sh, hc1b, hc1hi, hc2b, hc2hi, hc2rw,
+      by rw [hc1hi, hc2b]; exact hdisjInit⟩,
+    hlegal, hAmod, hApos, hAbound, hfreeA⟩
 
 /-- EXISTENCE TARGET: with room, some oracle makes the final
 theorem non-vacuous.  The witness is `stage1Oracle f A` for the
