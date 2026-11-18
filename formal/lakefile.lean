@@ -66,6 +66,7 @@ lean_lib Bootstrap where
     .one `Bootstrap.X86Env,
     .one `Bootstrap.X86Int,
     .one `Bootstrap.X86Min,
+    .one `Bootstrap.TMRMemExposure,
     .submodules `Sporos]
 
 -- The two seeds on every listing (about 20 minutes of kernel time, the two in parallel); built by
