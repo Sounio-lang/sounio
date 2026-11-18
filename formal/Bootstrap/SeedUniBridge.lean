@@ -56,7 +56,11 @@ private theorem seedA_exec_sim {F : Nat} {L : List Nat} (hL : ∀ c ∈ L, c < 2
     intro a ins len hdec w
     rw [him_eq] at hdec
     exact seedA_imageOk.noXor11 a ins len hdec w
-  have hsim := exec_min_sim seedA_imageOk.bytesLt256 hL hload hcanon hno11 hx
+  have hnoJmp : ∀ a r len, X86Min.SeedA.imA.decodeAt a = some (.jmpReg r, len) → False := by
+    intro a r len hdec
+    rw [him_eq] at hdec
+    exact seedA_imageOk.noJmpReg a r len hdec
+  have hsim := exec_min_sim seedA_imageOk.bytesLt256 hL hload hcanon hno11 hnoJmp hx
   rw [seedA_load_meta.1] at hsim
   change run seedAImage F (.ok (initSt X86Min.SeedA.s0.rip L)) = .exit code ∧
     ∃ k < F, ∃ mf if_,
@@ -94,7 +98,11 @@ private theorem seedB_exec_sim {F : Nat} {L : List Nat} (hL : ∀ c ∈ L, c < 2
     intro a ins len hdec w
     rw [him_eq] at hdec
     exact seedB_imageOk.noXor11 a ins len hdec w
-  have hsim := exec_min_sim seedB_imageOk.bytesLt256 hL hload hcanon hno11 hx
+  have hnoJmp : ∀ a r len, X86Min.SeedB.imB.decodeAt a = some (.jmpReg r, len) → False := by
+    intro a r len hdec
+    rw [him_eq] at hdec
+    exact seedB_imageOk.noJmpReg a r len hdec
+  have hsim := exec_min_sim seedB_imageOk.bytesLt256 hL hload hcanon hno11 hnoJmp hx
   rw [seedB_load_meta.1] at hsim
   change run seedBImage F (.ok (initSt X86Min.SeedB.s0.rip L)) = .exit code ∧
     ∃ k < F, ∃ mf if_,
@@ -138,7 +146,11 @@ private theorem seedA_exec_prun_sim (alts : Alts) (r : Rates) (hr : r.ok)
     intro a ins len hdec w
     rw [him_eq] at hdec
     exact seedA_imageOk.noXor11 a ins len hdec w
-  have hp := exec_prun_min_sim alts r hr seedA_imageOk.bytesLt256 hL hload hcanon hno11 hx
+  have hnoJmp : ∀ a r len, X86Min.SeedA.imA.decodeAt a = some (.jmpReg r, len) → False := by
+    intro a r len hdec
+    rw [him_eq] at hdec
+    exact seedA_imageOk.noJmpReg a r len hdec
+  have hp := exec_prun_min_sim alts r hr seedA_imageOk.bytesLt256 hL hload hcanon hno11 hnoJmp hx
   rw [seedA_load_meta.1] at hp
   dsimp only at hp
   rw [seedA_load_meta.2] at hp
@@ -174,7 +186,11 @@ private theorem seedB_exec_prun_sim (alts : Alts) (r : Rates) (hr : r.ok)
     intro a ins len hdec w
     rw [him_eq] at hdec
     exact seedB_imageOk.noXor11 a ins len hdec w
-  have hp := exec_prun_min_sim alts r hr seedB_imageOk.bytesLt256 hL hload hcanon hno11 hx
+  have hnoJmp : ∀ a r len, X86Min.SeedB.imB.decodeAt a = some (.jmpReg r, len) → False := by
+    intro a r len hdec
+    rw [him_eq] at hdec
+    exact seedB_imageOk.noJmpReg a r len hdec
+  have hp := exec_prun_min_sim alts r hr seedB_imageOk.bytesLt256 hL hload hcanon hno11 hnoJmp hx
   rw [seedB_load_meta.1] at hp
   dsimp only at hp
   rw [seedB_load_meta.2] at hp

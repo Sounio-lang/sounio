@@ -36,25 +36,13 @@ cases_file="$work/cases.txt"
 build_log="$work/lake_build.log"
 
 CXX="${CXX:-g++}"
-"$CXX" -O2 -std=c++20 -Wall -Wextra -Werror "$CPU_SRC" -o "$cpu_bin"
+"$CXX" -O2 -std=c++23 -Wall -Wextra -Werror "$CPU_SRC" -o "$cpu_bin"
 "$cpu_bin" "$cases_file" "$CASES" "$SEED"
 
-UNI_DIFF_BIN="$FORMAL_DIR/.lake/build/bin/x86uni-diff"
-if [ -x "$UNI_DIFF_BIN" ] && [ "${X86UNI_FORCE_LEAN_RUN:-0}" != "1" ] &&
-   [ "$UNI_DIFF_BIN" -nt "$FORMAL_DIR/Bootstrap/X86Uni.lean" ] &&
-   [ "$UNI_DIFF_BIN" -nt "$MODEL_LEAN" ]; then
-  "$UNI_DIFF_BIN" "$cases_file" "$CASES"
-else
-  # Build upstream Bootstrap oleans quietly (surfacing build log only on failure),
-  # ensure Bootstrap.X86Uni.olean is up to date, and run the model evaluator.
-  if ! (cd "$FORMAL_DIR" && "$LAKE_BIN" build Bootstrap >"$build_log" 2>&1); then
-    cat "$build_log" >&2
-    exit 1
-  fi
-  uni_olean="$FORMAL_DIR/.lake/build/lib/lean/Bootstrap/X86Uni.olean"
-  if [ ! -f "$uni_olean" ] || [ "$FORMAL_DIR/Bootstrap/X86Uni.lean" -nt "$uni_olean" ]; then
-    mkdir -p "$(dirname "$uni_olean")"
-    (cd "$FORMAL_DIR" && "$LAKE_BIN" env lean -o "$uni_olean" "Bootstrap/X86Uni.lean")
-  fi
-  (cd "$FORMAL_DIR" && "$LAKE_BIN" env lean --run "Bootstrap/X86UniDiffModel.lean" "$cases_file" "$CASES")
+# The model side is the registered executable `x86uni-diff` (Bootstrap.X86UniDiffModel);
+# lake rebuilds it when X86Uni or the model changed. The build log is shown only on failure.
+if ! (cd "$FORMAL_DIR" && "$LAKE_BIN" build x86uni-diff >"$build_log" 2>&1); then
+  cat "$build_log" >&2
+  exit 1
 fi
+"$FORMAL_DIR/.lake/build/bin/x86uni-diff" "$cases_file" "$CASES"

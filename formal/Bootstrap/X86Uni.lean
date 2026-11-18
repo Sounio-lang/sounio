@@ -48,7 +48,7 @@ inductive NarrowAlu8 where
 deriving DecidableEq, Repr
 
 inductive NarrowRR32 where
-  | xor | or | test | mov
+  | xor | or | test | mov | add | sub
 deriving DecidableEq, Repr
 
 inductive Ins where
@@ -56,10 +56,13 @@ inductive Ins where
   | ofInt (ins : X86Int.Ins)
   /-- `op al, imm8` (`04` add, `2c` sub, `3c` cmp): preserves upper 56 bits of `rax`. -/
   | alImm8 (op : NarrowAlu8) (imm : Nat)
-  /-- 32-bit `op r32, r32` (`31` xor, `09` or, `85` test, `89` mov). -/
+  /-- 32-bit `op r32, r32` (`31` xor, `09` or, `85` test, `89` mov, `01` add, `29` sub). -/
   | rr32 (op : NarrowRR32) (d s : Reg)
   /-- 32-bit `cmp r32, imm` (`81 /7`, `83 /7`). -/
   | cmpI32 (d imm : Nat)
+  /-- 32-bit `add`/`sub r32, imm` (`81 /0`, `81 /5`, `83 /0`, `83 /5`): the destination is
+  written zero-extended. `op` is never `cmp` (that is `cmpI32`). -/
+  | aluI32 (op : NarrowAlu8) (d imm : Nat)
   /-- 32-bit `shl r32, imm8` (`c1 /4`). -/
   | shl32 (d c : Nat)
   /-- `inc r32/r64` (`ff /0`). -/
@@ -144,10 +147,26 @@ def exec (ins : Ins) (len : Nat) (s : St) : Out :=
         let b ← s.reg r
         let (_, f) := aluW .test 32 (a % 2 ^ 32) (b % 2 ^ 32)
         pure (go { s with fl := f })
+      | .add =>
+        let a ← s.reg d
+        let b ← s.reg r
+        let (res, f) := aluW .add 32 (a % 2 ^ 32) (b % 2 ^ 32)
+        pure (go { s.set d (some res) with fl := f })
+      | .sub =>
+        let a ← s.reg d
+        let b ← s.reg r
+        let (res, f) := aluW .sub 32 (a % 2 ^ 32) (b % 2 ^ 32)
+        pure (go { s.set d (some res) with fl := f })
   | .cmpI32 d imm => X86Int.lift do
       let a ← s.reg d
       let (_, f) := aluW .cmp 32 (a % 2 ^ 32) (imm % 2 ^ 32)
       pure (go { s with fl := f })
+  | .aluI32 op d imm => X86Int.lift do
+      let a ← s.reg d
+      let (res, f) := aluW op.toAluOp 32 (a % 2 ^ 32) (imm % 2 ^ 32)
+      match op with
+      | .cmp => pure (go { s with fl := f })
+      | .add | .sub => pure (go { s.set d (some res) with fl := f })
   | .shl32 d c => X86Int.lift do
       let a ← (s.reg d).map (· % 2 ^ 32)
       let cnt := c % 32
@@ -179,7 +198,14 @@ def run (im : Nat → Option (Ins × Nat)) : Nat → Out → Out
 
 /-! ### Decoder -/
 
-/-- Decode the five narrow `X86Min` forms omitted by `X86Dec.decode`. -/
+/-- The 32-bit `op r32, imm` instruction: `cmp` is `cmpI32`, `add` and `sub` are `aluI32`. -/
+def narrowRI (op : NarrowAlu8) (d imm : Nat) : Ins :=
+  match op with
+  | .cmp => .cmpI32 d imm
+  | op => .aluI32 op d imm
+
+/-- Decode the narrow `X86Min` forms omitted by `X86Dec.decode` (8-bit AL arithmetic, 32-bit
+register and immediate ALU forms, 32-bit `shl`, `inc`), and `jmp r64` (`ff /4`, mod 11). -/
 def decodeNarrow (b : Nat → Option Nat) : Option (Ins × Nat) := do
   let b0 ← b 0
   let hasRex := 0x40 ≤ b0 && b0 ≤ 0x4f
@@ -196,13 +222,14 @@ def decodeNarrow (b : Nat → Option Nat) : Option (Ins × Nat) := do
     let i ← b 1
     let op := if o == 0x04 then NarrowAlu8.add else if o == 0x3c then NarrowAlu8.cmp else NarrowAlu8.sub
     pure (.alImm8 op i, 2)
-  else if o == 0x31 || o == 0x09 || o == 0x85 || o == 0x89 then
+  else if o == 0x01 || o == 0x29 || o == 0x31 || o == 0x09 || o == 0x85 || o == 0x89 then
     if w || x then none else
     let m ← b (p + 1)
     if m / 64 != 3 then none else
     let d := m % 8 + bb
     let s := m / 8 % 8 + r
-    let op := if o == 0x31 then NarrowRR32.xor else if o == 0x09 then NarrowRR32.or
+    let op := if o == 0x01 then NarrowRR32.add else if o == 0x29 then NarrowRR32.sub
+      else if o == 0x31 then NarrowRR32.xor else if o == 0x09 then NarrowRR32.or
       else if o == 0x85 then NarrowRR32.test else NarrowRR32.mov
     pure (.rr32 op d s, p + 2)
   else if o == 0xc1 then
@@ -214,19 +241,23 @@ def decodeNarrow (b : Nat → Option Nat) : Option (Ins × Nat) := do
   else if o == 0x81 || o == 0x83 then
     if w || r != 0 || x then none else
     let m ← b (p + 1)
-    if m / 64 != 3 || m / 8 % 8 != 7 then none else
+    let f := m / 8 % 8
+    if m / 64 != 3 || (f != 0 && f != 5 && f != 7) then none else
     let d := m % 8 + bb
+    let op : NarrowAlu8 := if f == 0 then .add else if f == 5 then .sub else .cmp
     if o == 0x81 then
       let i ← X86Dec.leB b (p + 2) 4
-      pure (.cmpI32 d (X86Dec.sx32 i % 2 ^ 32), p + 6)
+      pure (narrowRI op d (X86Dec.sx32 i % 2 ^ 32), p + 6)
     else
       let i ← b (p + 2)
-      pure (.cmpI32 d (X86Dec.sx8 i % 2 ^ 32), p + 3)
+      pure (narrowRI op d (X86Dec.sx8 i % 2 ^ 32), p + 3)
   else if o == 0xff then
     if r != 0 || x then none else
     let m ← b (p + 1)
-    if m / 64 != 3 || m / 8 % 8 != 0 then none else
-    pure (.inc wd (m % 8 + bb), p + 2)
+    if m / 64 != 3 then none else
+    if m / 8 % 8 == 0 then pure (.inc wd (m % 8 + bb), p + 2) else
+    if m / 8 % 8 == 4 then pure (.ofInt (.jmpR (m % 8 + bb)), p + 2) else
+    none
   else none
 
 /-- Unified byte decoder: tries `X86Dec.decode` first, then `decodeNarrow`. -/
@@ -502,9 +533,17 @@ def toUniIns (a len : Nat) : X86Min.Ins → Ins
   | .rr .test _ d src => .rr32 .test d src
   | .rr .mov 64 d src => .ofInt (.mov d src)
   | .rr .mov _ d src => .ofInt (.mov32 d src)
+  | .rr .add 64 d src => .ofInt (.alu .add d src)
+  | .rr .add _ d src => .rr32 .add d src
+  | .rr .sub 64 d src => .ofInt (.alu .sub d src)
+  | .rr .sub _ d src => .rr32 .sub d src
   | .rr _ _ d src => .ofInt (.mov d src)
   | .ri .cmp 64 d imm => .ofInt (.cmpI d imm)
   | .ri .cmp 32 d imm => .cmpI32 d imm
+  | .ri .add 64 d imm => .ofInt (.aluI .add d imm)
+  | .ri .sub 64 d imm => .ofInt (.aluI .sub d imm)
+  | .ri .add 32 d imm => .aluI32 .add d imm
+  | .ri .sub 32 d imm => .aluI32 .sub d imm
   | .ri .add _ _ imm => .alImm8 .add imm
   | .ri .sub _ _ imm => .alImm8 .sub imm
   | .ri .cmp _ _ imm => .alImm8 .cmp imm
@@ -517,6 +556,7 @@ def toUniIns (a len : Nat) : X86Min.Ins → Ins
   | .stRsp8 src => .ofInt (.st8 4 0 src)
   | .jcc cc rel => .ofInt (.jcc cc ((a + len + rel) % W))
   | .jmp rel => .ofInt (.jmp ((a + len + rel) % W))
+  | .jmpReg r => .ofInt (.jmpR r)
   | .syscall => .ofInt .syscall
 
 /-- Structural well-formedness satisfied by every instruction produced by `X86Min.decode`
@@ -525,10 +565,11 @@ def InsWf : X86Min.Ins → Prop
   | .movImm d imm => d < 16 ∧ imm < 2 ^ 32
   | .rr op w d src =>
     d < 16 ∧ src < 16 ∧ (w = 32 ∨ w = 64) ∧
-    (op = .xor ∨ op = .or ∨ op = .test ∨ op = .mov)
+    (op = .xor ∨ op = .or ∨ op = .test ∨ op = .mov ∨ op = .add ∨ op = .sub)
   | .ri op w d imm =>
     (op = .cmp ∧ (w = 32 ∨ w = 64) ∧ d < 16 ∧ imm < X86Min.pow2 w) ∨
-    ((op = .add ∨ op = .sub ∨ op = .cmp) ∧ w = 8 ∧ d = 0 ∧ imm < 256)
+    ((op = .add ∨ op = .sub ∨ op = .cmp) ∧ w = 8 ∧ d = 0 ∧ imm < 256) ∨
+    ((op = .add ∨ op = .sub) ∧ (w = 32 ∨ w = 64) ∧ d < 16 ∧ imm < X86Min.pow2 w)
   | .shlI w d c => w = 32 ∧ d < 16 ∧ c < 256
   | .inc w d => (w = 32 ∨ w = 64) ∧ d < 16
   | .push imm => imm < W
@@ -537,6 +578,7 @@ def InsWf : X86Min.Ins → Prop
   | .stRsp8 src => src < 16
   | .jcc _ rel => rel < W
   | .jmp rel => rel < W
+  | .jmpReg r => r < 16
   | .syscall => True
 
 private theorem rex_parts (b0 : Nat) :
@@ -553,6 +595,7 @@ private theorem if_none_eq_some {α : Type _} {c : Bool} {t : Option α} {x : α
     (h : (if c = true then none else t) = some x) : c ≠ true ∧ t = some x := by
   cases c <;> simp_all
 
+set_option maxHeartbeats 1600000 in
 private theorem decode_min_agree_aux {b : Nat → Option Nat} {a b0 o : Nat}
     (hb : ∀ i v, b i = some v → v < 256)
     (hb0 : b 0 = some b0)
@@ -603,9 +646,91 @@ private theorem decode_min_agree_aux {b : Nat → Option Nat} {a b0 o : Nat}
       have hmovb : 0xb8 ≤ o ∧ o ≤ 0xbf := by simpa [Bool.and_eq_true, decide_eq_true_eq] using hmovI
       omega
   rw [if_neg hmovI] at hm
-  by_cases hrr : (o == 0x31 || o == 0x09 || o == 0x85 || o == 0x89) = true
-  · -- 0x31 || 0x09 || 0x85 || 0x89: rr
-    rw [if_pos hrr] at hm
+  by_cases hrr6 : (o == 0x01 || o == 0x29 || o == 0x31 || o == 0x09 || o == 0x85 || o == 0x89) = true
+  · -- 0x01 || 0x29 || 0x31 || 0x09 || 0x85 || 0x89: rr
+    rw [if_pos hrr6] at hm
+    by_cases hnew : (o == 0x01 || o == 0x29) = true
+    · -- 0x01 add, 0x29 sub: 64-bit through `X86Dec` (`alu`), 32-bit through `decodeNarrow` (`rr32`)
+      have hnew' : o = 0x01 ∨ o = 0x29 := by simpa [Bool.or_eq_true, beq_iff_eq] using hnew
+      cases hm_b : b (p + 1) with
+      | none => rw [hm_b] at hm; cases hm
+      | some m =>
+        rw [hm_b] at hm
+        dsimp only at hm
+        have hm_lt := hb (p + 1) m hm_b
+        obtain ⟨hbad, hm⟩ := if_none_eq_some hm
+        simp only [Bool.or_eq_true, bne_iff_ne, ne_eq, not_or, Decidable.not_not] at hbad
+        obtain ⟨hm64, hxf⟩ := hbad
+        simp only [pure, Option.some.injEq, Prod.mk.injEq] at hm
+        obtain ⟨rfl, rfl⟩ := hm
+        have hd16 : m % 8 + bb < 16 := by omega
+        have hs16 : m / 8 % 8 + r < 16 := by omega
+        have hwd : wd = 32 ∨ wd = 64 := by dsimp [wd]; cases w <;> simp
+        have hmx : ¬((m / 64 != 3 || x) = true) := by
+          intro h; simp only [Bool.or_eq_true, bne_iff_ne, ne_eq] at h
+          rcases h with h | h; exact h hm64; exact hxf h
+        have hmn : ¬((m / 64 != 3) = true) := by
+          intro h; simp only [bne_iff_ne, ne_eq] at h; exact h hm64
+        refine ⟨?_, by omega, ⟨hd16, hs16, hwd, by rcases hnew' with rfl | rfl <;> simp⟩⟩
+        have hw' : (w = true) ↔ ((if (0x40 ≤ b0 && b0 ≤ 0x4f) then b0 - 0x40 else 0) / 8 % 2 = 1) := by
+          simp [w, rex, hasRex]
+        cases hw : w
+        · -- 32-bit: `X86Dec` refuses, `decodeNarrow` gives `rr32`
+          have hwd32 : wd = 32 := by simp [wd, hw]
+          have hw0 : (if (0x40 ≤ b0 && b0 ≤ 0x4f) then b0 - 0x40 else 0) / 8 % 2 ≠ 1 := by
+            intro h; have := hw'.mpr h; rw [hw] at this; cases this
+          have hwx : ¬((w || x) = true) := by
+            simp only [Bool.or_eq_true, hw, Bool.false_eq_true, false_or]; exact hxf
+          have hdec_none : X86Dec.decode b a = none := by
+            unfold X86Dec.decode
+            rw [hb0]; simp only [Bind.bind, Option.bind]; rw [hbp]; dsimp only
+            rcases hnew' with rfl | rfl <;>
+            · repeat (first | rw [if_pos (by decide)] | rw [if_neg (by decide)])
+              rw [hm_b]; dsimp only
+              rw [if_neg hmx]
+              have hw0' := Nat.mod_two_ne_one.mp hw0
+              simp only [Bool.and_eq_true, decide_eq_true_eq] at hw0'
+              simp [X86Dec.aluOfRR, hw0']
+          have hnar : decodeNarrow b = some (.rr32 (if o = 0x01 then .add else .sub)
+              (m % 8 + bb) (m / 8 % 8 + r), p + 2) := by
+            unfold decodeNarrow
+            rw [hb0]; simp only [Bind.bind, Option.bind]; rw [hbp]; dsimp only
+            rcases hnew' with rfl | rfl <;>
+            · rw [if_neg (by decide), if_pos (by decide), if_neg hwx]
+              rw [hm_b]; dsimp only
+              rw [if_neg hmn]
+              simp [bb, r, p, rex, hasRex]
+          dsimp only [wd] at hwd32
+          rw [hwd32]
+          simp only [decode, hdec_none, hnar]
+          rcases hnew' with rfl | rfl <;> simp [toUniIns, bb, r, p, rex, hasRex]
+        · -- 64-bit: `X86Dec` gives `alu`
+          have hwd64 : wd = 64 := by simp [wd, hw]
+          have hw1 : (if (0x40 ≤ b0 && b0 ≤ 0x4f) then b0 - 0x40 else 0) / 8 % 2 = 1 := hw'.mp hw
+          have hdec : X86Dec.decode b a = some (.alu (if o = 0x01 then .add else .sub)
+              (m % 8 + bb) (m / 8 % 8 + r), p + 2) := by
+            unfold X86Dec.decode
+            rw [hb0]; simp only [Bind.bind, Option.bind]; rw [hbp]; dsimp only
+            rcases hnew' with rfl | rfl <;>
+            · repeat (first | rw [if_pos (by decide)] | rw [if_neg (by decide)])
+              rw [hm_b]; dsimp only
+              rw [if_neg hmx]
+              have hw1' := hw1
+              simp only [Bool.and_eq_true, decide_eq_true_eq] at hw1'
+              simp [X86Dec.aluOfRR, hw1', bb, r, p, rex, hasRex]
+          have hres := decode_of_dec hdec
+          dsimp only [wd] at hwd64
+          rw [hwd64]
+          rcases hnew' with rfl | rfl <;> simpa [toUniIns, bb, r, p, rex, hasRex] using hres
+    have h01 : ¬((o == 0x01) = true) := by intro h; apply hnew; simp [h]
+    have h29 : ¬((o == 0x29) = true) := by intro h; apply hnew; simp [h]
+    have hrr : (o == 0x31 || o == 0x09 || o == 0x85 || o == 0x89) = true := by
+      rcases (by simpa [Bool.or_eq_true, beq_iff_eq, or_assoc] using hrr6 :
+          o = 0x01 ∨ o = 0x29 ∨ o = 0x31 ∨ o = 0x09 ∨ o = 0x85 ∨ o = 0x89) with h | h | h | h | h | h
+      · exact absurd (by simp [h]) h01
+      · exact absurd (by simp [h]) h29
+      all_goals simp [h]
+    rw [if_neg h01, if_neg h29] at hm
     cases hm_b : b (p + 1) with
     | none => rw [hm_b] at hm; cases hm
     | some m =>
@@ -808,7 +933,7 @@ private theorem decode_min_agree_aux {b : Nat → Option Nat} {a b0 o : Nat}
           rw [hwd64]
           simp only [toUniIns]
           exact hres
-  rw [if_neg hrr] at hm
+  rw [if_neg hrr6] at hm
   by_cases ho88 : (o == 0x88) = true
   · -- 0x88: stRsp8
     rw [if_pos ho88] at hm
@@ -1134,7 +1259,11 @@ private theorem decode_min_agree_aux {b : Nat → Option Nat} {a b0 o : Nat}
       obtain ⟨hbad, hm'⟩ := if_none_eq_some hm
       clear hm
       simp only [Bool.or_eq_true, bne_iff_ne, ne_eq, not_or, Decidable.not_not] at hbad
-      obtain ⟨⟨⟨hm64, hm8⟩, hr0⟩, hxf⟩ := hbad
+      obtain ⟨⟨⟨hm64, hf⟩, hr0⟩, hxf⟩ := hbad
+      have hf057 : m / 8 % 8 = 0 ∨ m / 8 % 8 = 5 ∨ m / 8 % 8 = 7 := by
+        simp only [Bool.and_eq_true, bne_iff_ne, ne_eq] at hf; omega
+      have hm648 : ¬((m / 64 != 3 || (m / 8 % 8 != 0 && m / 8 % 8 != 5 && m / 8 % 8 != 7)) = true) := by
+        simp only [Bool.or_eq_true, Bool.and_eq_true, bne_iff_ne, ne_eq]; omega
       have hnot_movI : ¬((0xb8 ≤ o && o ≤ 0xbf) = true) := by
         rcases (by simpa [Bool.or_eq_true, beq_iff_eq] using hcmp : o = 0x81 ∨ o = 0x83) with rfl | rfl <;> decide
       have hnot_rr : ¬((o == 0x01 || o == 0x29 || o == 0x21 || o == 0x09 || o == 0x31) = true) := by
@@ -1151,15 +1280,157 @@ private theorem decode_min_agree_aux {b : Nat → Option Nat} {a b0 o : Nat}
         rcases (by simpa [Bool.or_eq_true, beq_iff_eq] using hcmp : o = 0x81 ∨ o = 0x83) with rfl | rfl <;> decide
       have hm64_ne : ¬((m / 64 != 3) = true) := by
         intro h; simp only [bne_iff_ne, ne_eq] at h; exact h hm64
+      by_cases hm8n : m / 8 % 8 ≠ 7
+      · -- 0x81 || 0x83 with /0 add or /5 sub
+        have hf05 : m / 8 % 8 = 0 ∨ m / 8 % 8 = 5 := by omega
+        rcases hf05 with hfv | hfv <;>
+        · cases hw : w
+          · -- w = false (32-bit): `X86Dec` refuses, `decodeNarrow` gives `aluI32`
+            have hw' : ((if (decide (64 ≤ b0) && decide (b0 ≤ 79)) = true then b0 - 64 else 0) / 8 % 2 == 1) = false := hw
+            have hwrx : ¬((w || r != 0 || x) = true) := by
+              intro h; simp only [Bool.or_eq_true, bne_iff_ne, ne_eq, hw, Bool.false_eq_true, false_or] at h
+              rcases h with h | h; exact h hr0; exact hxf h
+            have hdec_none : X86Dec.decode b a = none := by
+              unfold X86Dec.decode
+              rw [hb0]; simp only [Bind.bind, Option.bind]; rw [hbp]; dsimp only
+              rw [if_neg hnot_movI, if_neg hnot_rr, if_neg hnot_89, if_neg hnot_85,
+                if_neg hnot_6a, if_neg hnot_39, if_pos hcmp_dec]
+              have hbad_cmp : ((!w || r != 0 || x) = true) := by
+                simp only [Bool.or_eq_true, Bool.not_eq_true']; exact .inl (.inl hw)
+              rw [if_pos hbad_cmp]
+            by_cases ho81 : (o == 0x81) = true
+            · rw [if_pos ho81] at hm'
+              have ho81' : o = 0x81 := eq_of_beq ho81; subst ho81'
+              cases hle : X86Min.le b (p + 2) 4 with
+              | none => rw [hle] at hm'; cases hm'
+              | some i =>
+                rw [hle] at hm'
+                simp only [pure] at hm'
+                obtain ⟨rfl, rfl⟩ := hm'
+                have hnar : decodeNarrow b = some (narrowRI (if (m / 8 % 8 == 0) = true then .add
+                    else if (m / 8 % 8 == 5) = true then .sub else .cmp) (m % 8 + bb)
+                    (X86Dec.sx32 i % 2 ^ 32), p + 6) := by
+                  unfold decodeNarrow
+                  rw [hb0]; simp only [Bind.bind, Option.bind]; rw [hbp]; dsimp only
+                  repeat (first | rw [if_pos (by decide)] | rw [if_neg (by decide)])
+                  rw [if_neg hwrx, hm_b]; dsimp only
+                  rw [if_neg hm648, if_pos (by decide), leB_eq_le, hle]
+                  rfl
+                refine ⟨?_, by omega, ?_⟩
+                · simp only [decode, hdec_none, hnar]
+                  dsimp only [toUniIns, wd]; rw [hw']
+                  simp [hfv, narrowRI, sx32_eq, pow2_32_eq, bb, p, r, rex, hasRex]
+                · dsimp only [InsWf, wd]; rw [hw']
+                  simp only [Bool.false_eq_true, if_false, pow2_32_eq]
+                  exact .inr (.inr ⟨by simp [hfv], .inl trivial, by omega, Nat.mod_lt _ (by decide)⟩)
+            · rw [if_neg ho81] at hm'
+              cases hbi : b (p + 2) with
+              | none => rw [hbi] at hm'; cases hm'
+              | some i =>
+                rw [hbi] at hm'
+                simp only [pure] at hm'
+                obtain ⟨rfl, rfl⟩ := hm'
+                have ho83 : o = 0x83 := by
+                  rcases (by simpa [Bool.or_eq_true, beq_iff_eq] using hcmp : o = 0x81 ∨ o = 0x83) with rfl | rfl
+                  · simp at ho81
+                  · rfl
+                subst ho83
+                have hnar : decodeNarrow b = some (narrowRI (if (m / 8 % 8 == 0) = true then .add
+                    else if (m / 8 % 8 == 5) = true then .sub else .cmp) (m % 8 + bb)
+                    (X86Dec.sx8 i % 2 ^ 32), p + 3) := by
+                  unfold decodeNarrow
+                  rw [hb0]; simp only [Bind.bind, Option.bind]; rw [hbp]; dsimp only
+                  repeat (first | rw [if_pos (by decide)] | rw [if_neg (by decide)])
+                  rw [if_neg hwrx, hm_b]; dsimp only
+                  rw [if_neg hm648, if_neg (by decide), hbi]
+                  rfl
+                refine ⟨?_, by omega, ?_⟩
+                · simp only [decode, hdec_none, hnar]
+                  dsimp only [toUniIns, wd]; rw [hw']
+                  simp [hfv, narrowRI, sx8_eq, pow2_32_eq, bb, p, r, rex, hasRex]
+                · dsimp only [InsWf, wd]; rw [hw']
+                  simp only [Bool.false_eq_true, if_false, pow2_32_eq]
+                  exact .inr (.inr ⟨by simp [hfv], .inl trivial, by omega, Nat.mod_lt _ (by decide)⟩)
+          · -- w = true (64-bit): `X86Dec` gives `aluI`
+            have hw' : ((if (decide (64 ≤ b0) && decide (b0 ≤ 79)) = true then b0 - 64 else 0) / 8 % 2 == 1) = true := hw
+            have hnwrx : ¬((!w || r != 0 || x) = true) := by
+              intro h; simp only [Bool.or_eq_true, bne_iff_ne, ne_eq, Bool.not_eq_true', hw] at h
+              rcases h with (h | h) | h; cases h; exact h hr0; exact hxf h
+            by_cases ho81 : (o == 0x81) = true
+            · rw [if_pos ho81] at hm'
+              have ho81' : o = 0x81 := eq_of_beq ho81; subst ho81'
+              cases hle : X86Min.le b (p + 2) 4 with
+              | none => rw [hle] at hm'; cases hm'
+              | some i =>
+                rw [hle] at hm'
+                simp only [pure] at hm'
+                obtain ⟨rfl, rfl⟩ := hm'
+                have hi_lt : i < 2 ^ 32 := by simpa using le_lt_pow256 hb hle
+                have hsx_lt : X86Min.sx32 i < W := sx32_lt_W hi_lt
+                have hsx_mod : X86Min.sx32 i % X86Min.pow2 64 = X86Min.sx32 i := by
+                  rw [pow2_64_eq_W]; exact Nat.mod_eq_of_lt hsx_lt
+                have hdec : X86Dec.decode b a = some (.aluI (if m / 8 % 8 = 0 then .add else .sub)
+                    (m % 8 + bb) (X86Dec.sx32 i), p + 6) := by
+                  unfold X86Dec.decode
+                  rw [hb0]; simp only [Bind.bind, Option.bind]; rw [hbp]; dsimp only
+                  rw [if_neg hnot_movI, if_neg hnot_rr, if_neg hnot_89, if_neg hnot_85,
+                    if_neg hnot_6a, if_neg hnot_39, if_pos hcmp_dec]
+                  rw [if_neg hnwrx, hm_b]; dsimp only
+                  rw [if_neg hm64_ne]
+                  rw [if_neg (by decide), leB_eq_le, hle]
+                  simp [X86Dec.aluOfExt, hfv, bb, p, r, rex, hasRex]
+                refine ⟨?_, by omega, ?_⟩
+                · have hres := decode_of_dec hdec
+                  dsimp only [toUniIns, wd]; rw [hw']
+                  simpa [hfv, hsx_mod, sx32_eq, bb, p, r, rex, hasRex] using hres
+                · dsimp only [InsWf, wd]; rw [hw']; simp only [if_true]
+                  exact .inr (.inr ⟨by simp [hfv], .inr trivial, by omega,
+                    by rw [hsx_mod, pow2_64_eq_W]; exact hsx_lt⟩)
+            · rw [if_neg ho81] at hm'
+              cases hbi : b (p + 2) with
+              | none => rw [hbi] at hm'; cases hm'
+              | some i =>
+                rw [hbi] at hm'
+                simp only [pure] at hm'
+                obtain ⟨rfl, rfl⟩ := hm'
+                have ho83 : o = 0x83 := by
+                  rcases (by simpa [Bool.or_eq_true, beq_iff_eq] using hcmp : o = 0x81 ∨ o = 0x83) with rfl | rfl
+                  · simp at ho81
+                  · rfl
+                subst ho83
+                have hi_lt := hb (p + 2) i hbi
+                have hsx_lt : X86Min.sx8 i < W := sx8_lt_W hi_lt
+                have hsx_mod : X86Min.sx8 i % X86Min.pow2 64 = X86Min.sx8 i := by
+                  rw [pow2_64_eq_W]; exact Nat.mod_eq_of_lt hsx_lt
+                have hdec : X86Dec.decode b a = some (.aluI (if m / 8 % 8 = 0 then .add else .sub)
+                    (m % 8 + bb) (X86Dec.sx8 i), p + 3) := by
+                  unfold X86Dec.decode
+                  rw [hb0]; simp only [Bind.bind, Option.bind]; rw [hbp]; dsimp only
+                  rw [if_neg hnot_movI, if_neg hnot_rr, if_neg hnot_89, if_neg hnot_85,
+                    if_neg hnot_6a, if_neg hnot_39, if_pos hcmp_dec]
+                  rw [if_neg hnwrx, hm_b]; dsimp only
+                  rw [if_neg hm64_ne]
+                  rw [if_pos (by decide), hbi]
+                  simp [X86Dec.aluOfExt, hfv, bb, p, r, rex, hasRex]
+                refine ⟨?_, by omega, ?_⟩
+                · have hres := decode_of_dec hdec
+                  dsimp only [toUniIns, wd]; rw [hw']
+                  simpa [hfv, hsx_mod, sx8_eq, bb, p, r, rex, hasRex] using hres
+                · dsimp only [InsWf, wd]; rw [hw']; simp only [if_true]
+                  exact .inr (.inr ⟨by simp [hfv], .inr trivial, by omega,
+                    by rw [hsx_mod, pow2_64_eq_W]; exact hsx_lt⟩)
+      -- /7 cmp: the operation chain of `X86Min.decode` selects `cmp`
+      have hm8 : m / 8 % 8 = 7 := by omega
+      have hop : (if (m / 8 % 8 == 0) = true then X86Min.Op.add
+          else if (m / 8 % 8 == 5) = true then X86Min.Op.sub else X86Min.Op.cmp) = .cmp := by
+        simp [hm8]
+      rw [hop] at hm'
       cases hw : w
       · -- w = false (32-bit)
         have hw' : ((if (decide (64 ≤ b0) && decide (b0 ≤ 79)) = true then b0 - 64 else 0) / 8 % 2 == 1) = false := hw
         have hwrx : ¬((w || r != 0 || x) = true) := by
           intro h; simp only [Bool.or_eq_true, bne_iff_ne, ne_eq, hw, Bool.false_eq_true, false_or] at h
           rcases h with h | h; exact h hr0; exact hxf h
-        have hm648 : ¬((m / 64 != 3 || m / 8 % 8 != 7) = true) := by
-          intro h; simp only [Bool.or_eq_true, bne_iff_ne, ne_eq] at h
-          rcases h with h | h; exact h hm64; exact h hm8
         have hdec_none : X86Dec.decode b a = none := by
           unfold X86Dec.decode
           rw [hb0]; simp only [Bind.bind, Option.bind]; rw [hbp]; dsimp only
@@ -1184,7 +1455,7 @@ private theorem decode_min_agree_aux {b : Nat → Option Nat} {a b0 o : Nat}
               repeat (first | rw [if_pos (by decide)] | rw [if_neg (by decide)])
               rw [if_neg hwrx, hm_b]; dsimp only
               rw [if_neg hm648, if_pos (by decide), leB_eq_le, hle]
-              simp only [pure]; rfl
+              simp [narrowRI, hm8, bb, p, r, rex, hasRex]
             refine ⟨?_, by omega, ?_⟩
             · simp only [decode, hdec_none, hnar]
               dsimp only [toUniIns, wd]; rw [hw']
@@ -1211,7 +1482,7 @@ private theorem decode_min_agree_aux {b : Nat → Option Nat} {a b0 o : Nat}
               repeat (first | rw [if_pos (by decide)] | rw [if_neg (by decide)])
               rw [if_neg hwrx, hm_b]; dsimp only
               rw [if_neg hm648, if_neg (by decide), hbi]
-              rfl
+              simp [narrowRI, hm8, bb, p, r, rex, hasRex]
             refine ⟨?_, by omega, ?_⟩
             · simp only [decode, hdec_none, hnar]
               dsimp only [toUniIns, wd]; rw [hw']
@@ -1301,35 +1572,57 @@ private theorem decode_min_agree_aux {b : Nat → Option Nat} {a b0 o : Nat}
       have hm_lt := hb (p + 1) m hm_b
       obtain ⟨hbad, hm⟩ := if_none_eq_some hm
       simp only [Bool.or_eq_true, bne_iff_ne, ne_eq, not_or, Decidable.not_not] at hbad
-      obtain ⟨⟨⟨hm64, hm8⟩, hr0⟩, hxf⟩ := hbad
-      simp only [pure, Option.some.injEq, Prod.mk.injEq] at hm
-      obtain ⟨rfl, rfl⟩ := hm
+      obtain ⟨⟨hm64, hr0⟩, hxf⟩ := hbad
+      have hrx : ¬((r != 0 || x) = true) := by
+        intro h; simp only [Bool.or_eq_true, bne_iff_ne, ne_eq] at h
+        rcases h with h | h; exact h hr0; exact hxf h
+      have hm64n : ¬((m / 64 != 3) = true) := by
+        intro h; simp only [bne_iff_ne, ne_eq] at h; exact h hm64
+      -- `jmp qword [..]` in `X86Dec` needs a memory operand, so with mod 11 it refuses
       have hdec_none : X86Dec.decode b a = none := by
         unfold X86Dec.decode
         rw [hb0]; simp only [Bind.bind, Option.bind]; rw [hbp]; dsimp only
         repeat (first | rw [if_pos (by decide)] | rw [if_neg (by decide)])
         rw [hm_b]; dsimp only
         have hbad_jtab : (m / 8 % 8 != 4 || m / 64 == 3 || m % 8 != 4) = true := by
-          simp only [Bool.or_eq_true, hm8, hm64]; exact .inl (.inr rfl)
+          simp only [Bool.or_eq_true, hm64]; exact .inl (.inr rfl)
         rw [if_pos hbad_jtab]
         simp only [ite_self]
-      have hnar : decodeNarrow b = some (.inc wd (m % 8 + bb), p + 2) := by
-        unfold decodeNarrow
-        rw [hb0]; simp only [Bind.bind, Option.bind]; rw [hbp]; dsimp only
-        repeat (first | rw [if_pos (by decide)] | rw [if_neg (by decide)])
-        have hrx : ¬((r != 0 || x) = true) := by
-          intro h; simp only [Bool.or_eq_true, bne_iff_ne, ne_eq] at h
-          rcases h with h | h; exact h hr0; exact hxf h
-        have hm648 : ¬((m / 64 != 3 || m / 8 % 8 != 0) = true) := by
-          intro h; simp only [Bool.or_eq_true, bne_iff_ne, ne_eq] at h
-          rcases h with h | h; exact h hm64; exact h hm8
-        rw [if_neg hrx, hm_b]; dsimp only
-        rw [if_neg hm648]
-        rfl
-      refine ⟨?_, by omega, ?_⟩
-      · simp only [decode, hdec_none, hnar, toUniIns]; rfl
-      · have hwd : wd = 32 ∨ wd = 64 := by dsimp [wd]; cases w <;> simp
-        exact ⟨hwd, by omega⟩
+      by_cases hm0 : (m / 8 % 8 == 0) = true
+      · -- ff /0: inc
+        rw [if_pos hm0] at hm
+        simp only [pure, Option.some.injEq, Prod.mk.injEq] at hm
+        obtain ⟨rfl, rfl⟩ := hm
+        have hnar : decodeNarrow b = some (.inc wd (m % 8 + bb), p + 2) := by
+          unfold decodeNarrow
+          rw [hb0]; simp only [Bind.bind, Option.bind]; rw [hbp]; dsimp only
+          repeat (first | rw [if_pos (by decide)] | rw [if_neg (by decide)])
+          rw [if_neg hrx, hm_b]; dsimp only
+          rw [if_neg hm64n, if_pos hm0]
+          rfl
+        refine ⟨?_, by omega, ?_⟩
+        · simp only [decode, hdec_none, hnar, toUniIns]; rfl
+        · have hwd : wd = 32 ∨ wd = 64 := by dsimp [wd]; cases w <;> simp
+          exact ⟨hwd, by omega⟩
+      · rw [if_neg hm0] at hm
+        by_cases hm4 : (m / 8 % 8 == 4) = true
+        · -- ff /4: jmp r64
+          rw [if_pos hm4] at hm
+          simp only [pure, Option.some.injEq, Prod.mk.injEq] at hm
+          obtain ⟨rfl, rfl⟩ := hm
+          have hnar : decodeNarrow b = some (.ofInt (.jmpR (m % 8 + bb)), p + 2) := by
+            unfold decodeNarrow
+            rw [hb0]; simp only [Bind.bind, Option.bind]; rw [hbp]; dsimp only
+            repeat (first | rw [if_pos (by decide)] | rw [if_neg (by decide)])
+            rw [if_neg hrx, hm_b]; dsimp only
+            rw [if_neg hm64n, if_neg hm0, if_pos hm4]
+            rfl
+          refine ⟨?_, by omega, ?_⟩
+          · simp only [decode, hdec_none, hnar, toUniIns]; rfl
+          · show m % 8 + bb < 16
+            omega
+        · rw [if_neg hm4] at hm
+          cases hm
   rw [if_neg hoff] at hm
   cases hm
 
@@ -1837,6 +2130,9 @@ structure MinCompat (imMin : X86Min.Img) (imUni : Nat → Option (Ins × Nat)) :
   agree : ∀ a ins len, imMin.decodeAt a = some (ins, len) →
     InsWf ins ∧ (∀ w, ins ≠ .rr .xor w 11 11) ∧ a + len < W ∧
     imUni a = some (toUniIns a len ins, len)
+  /-- `jmp r64` jumps to a run-time register value, which need not keep `rip` canonical, so
+  the simulation covers images without it (neither seed uses it). -/
+  noJmpReg : ∀ a r len, imMin.decodeAt a = some (.jmpReg r, len) → False
 
 /-- Conditions on an ELF code buffer `code` loaded at `vbase` ensuring `MinCompat`. -/
 structure ImageOk (code : List Nat) (vbase : Nat) : Prop where
@@ -1846,6 +2142,8 @@ structure ImageOk (code : List Nat) (vbase : Nat) : Prop where
   noXor11 : ∀ a ins len,
     (X86Min.Img.mk' code vbase code.length).decodeAt a = some (ins, len) →
     ∀ w, ins ≠ .rr .xor w 11 11
+  noJmpReg : ∀ a r len,
+    (X86Min.Img.mk' code vbase code.length).decodeAt a = some (.jmpReg r, len) → False
 
 def checkImageOk (code : List Nat) (vbase : Nat) : Bool :=
   code.all (· < 256) &&
@@ -1854,30 +2152,47 @@ def checkImageOk (code : List Nat) (vbase : Nat) : Bool :=
   (List.range code.length).all fun off =>
     match (X86Min.Img.mk' code vbase code.length).decodeAt (vbase + off) with
     | some (.rr .xor _ 11 11, _) => false
+    | some (.jmpReg _, _) => false
     | _ => true
 
 theorem imageOk_of_check {code : List Nat} {vbase : Nat}
     (h : checkImageOk code vbase = true) : ImageOk code vbase := by
   simp only [checkImageOk, Bool.and_eq_true, decide_eq_true_eq] at h
   obtain ⟨⟨⟨hbytes, hlen⟩, hcanon⟩, hnox⟩ := h
-  refine ⟨fun b hb => of_decide_eq_true (List.all_eq_true.1 hbytes b hb), hlen, hcanon, ?_⟩
-  intro a ins len hd w heq
-  subst heq
-  unfold X86Min.Img.decodeAt at hd
-  dsimp only [X86Min.Img.mk'] at hd
-  split at hd
-  · rename_i hrange
-    simp only [Bool.and_eq_true, decide_eq_true_eq] at hrange
-    have hoff : a - vbase < code.length := by omega
-    have hchk := List.all_eq_true.1 hnox (a - vbase) (List.mem_range.2 hoff)
-    have ha_eq : vbase + (a - vbase) = a := by omega
-    rw [ha_eq] at hchk
-    unfold X86Min.Img.decodeAt at hchk
-    dsimp only [X86Min.Img.mk'] at hchk
-    rw [if_pos (by simp; omega)] at hchk
-    rw [hd] at hchk
-    cases hchk
-  · cases hd
+  refine ⟨fun b hb => of_decide_eq_true (List.all_eq_true.1 hbytes b hb), hlen, hcanon, ?_, ?_⟩
+  · intro a ins len hd w heq
+    subst heq
+    unfold X86Min.Img.decodeAt at hd
+    dsimp only [X86Min.Img.mk'] at hd
+    split at hd
+    · rename_i hrange
+      simp only [Bool.and_eq_true, decide_eq_true_eq] at hrange
+      have hoff : a - vbase < code.length := by omega
+      have hchk := List.all_eq_true.1 hnox (a - vbase) (List.mem_range.2 hoff)
+      have ha_eq : vbase + (a - vbase) = a := by omega
+      rw [ha_eq] at hchk
+      unfold X86Min.Img.decodeAt at hchk
+      dsimp only [X86Min.Img.mk'] at hchk
+      rw [if_pos (by simp; omega)] at hchk
+      rw [hd] at hchk
+      cases hchk
+    · cases hd
+  · intro a r len hd
+    unfold X86Min.Img.decodeAt at hd
+    dsimp only [X86Min.Img.mk'] at hd
+    split at hd
+    · rename_i hrange
+      simp only [Bool.and_eq_true, decide_eq_true_eq] at hrange
+      have hoff : a - vbase < code.length := by omega
+      have hchk := List.all_eq_true.1 hnox (a - vbase) (List.mem_range.2 hoff)
+      have ha_eq : vbase + (a - vbase) = a := by omega
+      rw [ha_eq] at hchk
+      unfold X86Min.Img.decodeAt at hchk
+      dsimp only [X86Min.Img.mk'] at hchk
+      rw [if_pos (by simp; omega)] at hchk
+      rw [hd] at hchk
+      cases hchk
+    · cases hd
 
 theorem fetchIn_eq_getElem? (code : List Nat) (i : Nat) :
     X86Min.fetchIn code code.length i = code[i]? := by
@@ -1888,7 +2203,7 @@ theorem fetchIn_eq_getElem? (code : List Nat) (i : Nat) :
 
 theorem minCompat_of_imageOk {code : List Nat} {vbase : Nat} (hok : ImageOk code vbase) :
     MinCompat (X86Min.Img.mk' code vbase code.length) (imageOf code vbase) := by
-  constructor
+  refine ⟨?_, fun a r len hd => hok.noJmpReg a r len hd⟩
   intro a ins len hd
   have hnox := hok.noXor11 a ins len hd
   unfold X86Min.Img.decodeAt at hd
@@ -1972,8 +2287,120 @@ theorem step_min_sim {imMin : X86Min.Img} {imUni : Nat → Option (Ins × Nat)}
     | rr op w d src =>
       obtain ⟨hd16, hs16, hw3264, hwf_op⟩ := hwf
       cases op with
-      | add | sub | cmp =>
-        rcases hwf_op with h | h | h | h <;> cases h
+      | cmp =>
+        rcases hwf_op with h | h | h | h | h | h <;> cases h
+      | add =>
+        have hzero_f : (X86Min.Op.add == .xor && d == src) = false := by simp
+        rcases hw3264 with rfl | rfl
+        · -- add32
+          simp only [toUniIns, exec, X86Int.lift, X86Min.okOf, hzero_f, Bool.false_eq_true, if_false]
+          cases hmd : m.reg d with
+          | none => simp [X86Min.St.rd, hmd]
+          | some va =>
+            cases hms : m.reg src with
+            | none => simp [X86Min.St.rd, hmd, hms]
+            | some vb =>
+              obtain ⟨hid, _⟩ := reg_lt16_bound hsim hd16 hmd
+              obtain ⟨his, _⟩ := reg_lt16_bound hsim hs16 hms
+              have hres_lt : (va % 2 ^ 32 + vb % 2 ^ 32) % 2 ^ 32 < W :=
+                Nat.lt_trans (Nat.mod_lt _ (by decide)) (by decide)
+              have hfl : FlRel (X86Min.alu .add 32 (va % 2 ^ 32) (vb % 2 ^ 32)).2
+                  (aluW .add 32 (va % 2 ^ 32) (vb % 2 ^ 32)).2 := by
+                simp only [X86Min.alu, aluW, msbW_eq]
+                exact ⟨X86Min.OLe.refl _, X86Min.OLe.refl _, X86Min.OLe.refl _, X86Min.OLe.refl _⟩
+              simp only [X86Min.St.rd, pow2_32_eq, hmd, hms, hid, his, Option.map_some,
+                bind, Option.bind, pure, X86Min.St.wr,
+                show (32 == 8) = false by decide, Bool.false_eq_true, if_false,
+                show (X86Min.Op.add == .test) = false by decide]
+              constructor
+              · intro m' hm'; cases hm'
+                refine ⟨_, rfl, ?_⟩
+                simpa [X86Min.St.setReg, X86Int.St.set, hnx_eq, hrip_int, X86Min.alu, aluW, pow2_32_eq] using
+                  sim_setReg hsim hd16 hres_lt (m.rip + len) hcanon hfl
+              · intro code out h; cases h
+        · -- add64
+          simp only [toUniIns, exec, X86Int.exec, X86Int.lift, X86Min.okOf, hzero_f,
+            Bool.false_eq_true, if_false]
+          cases hmd : m.reg d with
+          | none => simp [X86Min.St.rd, hmd]
+          | some va =>
+            cases hms : m.reg src with
+            | none => simp [X86Min.St.rd, hmd, hms]
+            | some vb =>
+              obtain ⟨hid, hvaW⟩ := reg_lt16_bound hsim hd16 hmd
+              obtain ⟨his, hvbW⟩ := reg_lt16_bound hsim hs16 hms
+              have hva_mod : va % X86Min.pow2 64 = va := by rw [pow2_64_eq_W]; exact Nat.mod_eq_of_lt hvaW
+              have hvb_mod : vb % X86Min.pow2 64 = vb := by rw [pow2_64_eq_W]; exact Nat.mod_eq_of_lt hvbW
+              have hres_lt : (va + vb) % W < W := Nat.mod_lt _ (by decide)
+              have hfl : FlRel (X86Min.alu .add 64 va vb).2 (X86Int.aluF .add va vb).2 := by
+                simp only [X86Min.alu, X86Int.aluF, msb_64_eq]
+                exact ⟨X86Min.OLe.refl _, X86Min.OLe.refl _, X86Min.OLe.refl _, X86Min.OLe.refl _⟩
+              simp only [X86Min.St.rd, hmd, hms, hid, his, Option.map_some, hva_mod, hvb_mod,
+                bind, Option.bind, pure, X86Min.St.wr,
+                show (64 == 8) = false by decide, Bool.false_eq_true, if_false,
+                show (X86Min.Op.add == .test) = false by decide]
+              constructor
+              · intro m' hm'; cases hm'
+                refine ⟨_, rfl, ?_⟩
+                simpa [X86Min.St.setReg, X86Int.St.set, hnx_eq, hrip_int, X86Min.alu, X86Int.aluF] using
+                  sim_setReg hsim hd16 hres_lt (m.rip + len) hcanon hfl
+              · intro code out h; cases h
+      | sub =>
+        have hzero_f : (X86Min.Op.sub == .xor && d == src) = false := by simp
+        rcases hw3264 with rfl | rfl
+        · -- sub32
+          simp only [toUniIns, exec, X86Int.lift, X86Min.okOf, hzero_f, Bool.false_eq_true, if_false]
+          cases hmd : m.reg d with
+          | none => simp [X86Min.St.rd, hmd]
+          | some va =>
+            cases hms : m.reg src with
+            | none => simp [X86Min.St.rd, hmd, hms]
+            | some vb =>
+              obtain ⟨hid, _⟩ := reg_lt16_bound hsim hd16 hmd
+              obtain ⟨his, _⟩ := reg_lt16_bound hsim hs16 hms
+              have hres_lt : (va % 2 ^ 32 + 2 ^ 32 - vb % 2 ^ 32) % 2 ^ 32 < W :=
+                Nat.lt_trans (Nat.mod_lt _ (by decide)) (by decide)
+              have hfl : FlRel (X86Min.alu .sub 32 (va % 2 ^ 32) (vb % 2 ^ 32)).2
+                  (aluW .sub 32 (va % 2 ^ 32) (vb % 2 ^ 32)).2 := by
+                simp only [X86Min.alu, aluW, msbW_eq]
+                exact ⟨X86Min.OLe.refl _, X86Min.OLe.refl _, X86Min.OLe.refl _, X86Min.OLe.refl _⟩
+              simp only [X86Min.St.rd, pow2_32_eq, hmd, hms, hid, his, Option.map_some,
+                bind, Option.bind, pure, X86Min.St.wr,
+                show (32 == 8) = false by decide, Bool.false_eq_true, if_false,
+                show (X86Min.Op.sub == .test) = false by decide]
+              constructor
+              · intro m' hm'; cases hm'
+                refine ⟨_, rfl, ?_⟩
+                simpa [X86Min.St.setReg, X86Int.St.set, hnx_eq, hrip_int, X86Min.alu, aluW] using
+                  sim_setReg hsim hd16 hres_lt (m.rip + len) hcanon hfl
+              · intro code out h; cases h
+        · -- sub64
+          simp only [toUniIns, exec, X86Int.exec, X86Int.lift, X86Min.okOf, hzero_f,
+            Bool.false_eq_true, if_false]
+          cases hmd : m.reg d with
+          | none => simp [X86Min.St.rd, hmd]
+          | some va =>
+            cases hms : m.reg src with
+            | none => simp [X86Min.St.rd, hmd, hms]
+            | some vb =>
+              obtain ⟨hid, hvaW⟩ := reg_lt16_bound hsim hd16 hmd
+              obtain ⟨his, hvbW⟩ := reg_lt16_bound hsim hs16 hms
+              have hva_mod : va % X86Min.pow2 64 = va := by rw [pow2_64_eq_W]; exact Nat.mod_eq_of_lt hvaW
+              have hvb_mod : vb % X86Min.pow2 64 = vb := by rw [pow2_64_eq_W]; exact Nat.mod_eq_of_lt hvbW
+              have hres_lt : (va + W - vb) % W < W := Nat.mod_lt _ (by decide)
+              have hfl : FlRel (X86Min.alu .sub 64 va vb).2 (X86Int.aluF .sub va vb).2 := by
+                simp only [X86Min.alu, X86Int.aluF, msb_64_eq]
+                exact ⟨X86Min.OLe.refl _, X86Min.OLe.refl _, X86Min.OLe.refl _, X86Min.OLe.refl _⟩
+              simp only [X86Min.St.rd, hmd, hms, hid, his, Option.map_some, hva_mod, hvb_mod,
+                bind, Option.bind, pure, X86Min.St.wr,
+                show (64 == 8) = false by decide, Bool.false_eq_true, if_false,
+                show (X86Min.Op.sub == .test) = false by decide]
+              constructor
+              · intro m' hm'; cases hm'
+                refine ⟨_, rfl, ?_⟩
+                simpa [X86Min.St.setReg, X86Int.St.set, hnx_eq, hrip_int, X86Min.alu, X86Int.aluF] using
+                  sim_setReg hsim hd16 hres_lt (m.rip + len) hcanon hfl
+              · intro code out h; cases h
       | mov =>
         rcases hw3264 with rfl | rfl
         · -- mov32
@@ -2205,7 +2632,7 @@ theorem step_min_sim {imMin : X86Min.Img} {imUni : Nat → Option (Ins × Nat)}
                 simpa [hnx_eq, hrip_int] using sim_with_rip_fl hsim (m.rip + len) hcanon hfl
               · intro code out h; cases h
     | ri op w d imm =>
-      rcases hwf with ⟨rfl, hw3264, hd16, himmW⟩ | ⟨hop8, rfl, rfl, himm8⟩
+      rcases hwf with ⟨rfl, hw3264, hd16, himmW⟩ | ⟨hop8, rfl, rfl, himm8⟩ | ⟨hopAS, hw3264, hd16, himmW⟩
       · -- cmp r32/r64, imm
         rcases hw3264 with rfl | rfl
         · -- cmpI32
@@ -2315,6 +2742,98 @@ theorem step_min_sim {imMin : X86Min.Img} {imUni : Nat → Option (Ins × Nat)}
             · intro m' hm'; cases hm'
               refine ⟨_, rfl, ?_⟩
               simpa [hnx_eq, hrip_int] using sim_with_rip_fl hsim (m.rip + len) hcanon hfl
+            · intro code out h; cases h
+      · -- add/sub r32/r64, imm
+        rcases hopAS with rfl | rfl <;> rcases hw3264 with rfl | rfl
+        · -- add r32, imm
+          have himm32 : imm < 2 ^ 32 := by simpa [pow2_32_eq] using himmW
+          have himm_mod : imm % 2 ^ 32 = imm := Nat.mod_eq_of_lt himm32
+          simp only [toUniIns, exec, X86Int.lift, X86Min.okOf, himm_mod, NarrowAlu8.toAluOp]
+          cases hmd : m.reg d with
+          | none => simp [X86Min.St.rd, hmd]
+          | some va =>
+            obtain ⟨hid, _⟩ := reg_lt16_bound hsim hd16 hmd
+            have hres_lt : (X86Min.alu .add 32 (va % 2 ^ 32) imm).1 < W := by
+              simp only [X86Min.alu, pow2_32_eq]; exact Nat.lt_trans (Nat.mod_lt _ (by decide)) (by decide)
+            have hfl : FlRel (X86Min.alu .add 32 (va % 2 ^ 32) imm).2 (aluW .add 32 (va % 2 ^ 32) imm).2 := by
+              simp only [X86Min.alu, aluW, msbW_eq, pow2_32_eq]
+              exact ⟨X86Min.OLe.refl _, X86Min.OLe.refl _, X86Min.OLe.refl _, X86Min.OLe.refl _⟩
+            simp only [X86Min.St.rd, pow2_32_eq, hmd, hid, Option.map_some, bind, Option.bind,
+              pure, show (X86Min.Op.add == .cmp) = false by decide, Bool.false_eq_true, if_false,
+              X86Min.St.wr, show (32 == 8) = false by decide]
+            constructor
+            · intro m' hm'; cases hm'
+              refine ⟨_, rfl, ?_⟩
+              simpa [X86Min.St.setReg, X86Int.St.set, hnx_eq, hrip_int, X86Min.alu, aluW, pow2_32_eq] using
+                sim_setReg hsim hd16 hres_lt (m.rip + len) hcanon hfl
+            · intro code out h; cases h
+        · -- add r64, imm
+          have himmW' : imm < W := by simpa [pow2_64_eq_W] using himmW
+          have himm_mod : imm % W = imm := Nat.mod_eq_of_lt himmW'
+          simp only [toUniIns, exec, X86Int.exec, X86Int.lift, X86Min.okOf, himm_mod]
+          cases hmd : m.reg d with
+          | none => simp [X86Min.St.rd, hmd]
+          | some va =>
+            obtain ⟨hid, hvaW⟩ := reg_lt16_bound hsim hd16 hmd
+            have hva_mod : va % X86Min.pow2 64 = va := by rw [pow2_64_eq_W]; exact Nat.mod_eq_of_lt hvaW
+            have hres_lt : (X86Int.aluF .add va imm).1 < W := by
+              simp only [X86Int.aluF]; exact Nat.mod_lt _ (by decide)
+            have hfl : FlRel (X86Min.alu .add 64 va imm).2 (X86Int.aluF .add va imm).2 := by
+              simp only [X86Min.alu, X86Int.aluF, msb_64_eq, pow2_64_eq_W]
+              exact ⟨X86Min.OLe.refl _, X86Min.OLe.refl _, X86Min.OLe.refl _, X86Min.OLe.refl _⟩
+            simp only [X86Min.St.rd, hmd, hid, Option.map_some, hva_mod, bind, Option.bind,
+              pure, show (X86Min.Op.add == .cmp) = false by decide, Bool.false_eq_true, if_false,
+              X86Min.St.wr, show (64 == 8) = false by decide]
+            constructor
+            · intro m' hm'; cases hm'
+              refine ⟨_, rfl, ?_⟩
+              simpa [X86Min.St.setReg, X86Int.St.set, hnx_eq, hnx_mod, hrip_int, X86Min.alu, X86Int.aluF, pow2_64_eq_W] using
+                sim_setReg hsim hd16 hres_lt (m.rip + len) hcanon hfl
+            · intro code out h; cases h
+        · -- sub r32, imm
+          have himm32 : imm < 2 ^ 32 := by simpa [pow2_32_eq] using himmW
+          have himm_mod : imm % 2 ^ 32 = imm := Nat.mod_eq_of_lt himm32
+          simp only [toUniIns, exec, X86Int.lift, X86Min.okOf, himm_mod, NarrowAlu8.toAluOp]
+          cases hmd : m.reg d with
+          | none => simp [X86Min.St.rd, hmd]
+          | some va =>
+            obtain ⟨hid, _⟩ := reg_lt16_bound hsim hd16 hmd
+            have hres_lt : (X86Min.alu .sub 32 (va % 2 ^ 32) imm).1 < W := by
+              simp only [X86Min.alu, pow2_32_eq]; exact Nat.lt_trans (Nat.mod_lt _ (by decide)) (by decide)
+            have hfl : FlRel (X86Min.alu .sub 32 (va % 2 ^ 32) imm).2 (aluW .sub 32 (va % 2 ^ 32) imm).2 := by
+              simp only [X86Min.alu, aluW, msbW_eq, pow2_32_eq]
+              exact ⟨X86Min.OLe.refl _, X86Min.OLe.refl _, X86Min.OLe.refl _, X86Min.OLe.refl _⟩
+            simp only [X86Min.St.rd, pow2_32_eq, hmd, hid, Option.map_some, bind, Option.bind,
+              pure, show (X86Min.Op.sub == .cmp) = false by decide, Bool.false_eq_true, if_false,
+              X86Min.St.wr, show (32 == 8) = false by decide]
+            constructor
+            · intro m' hm'; cases hm'
+              refine ⟨_, rfl, ?_⟩
+              simpa [X86Min.St.setReg, X86Int.St.set, hnx_eq, hrip_int, X86Min.alu, aluW, pow2_32_eq] using
+                sim_setReg hsim hd16 hres_lt (m.rip + len) hcanon hfl
+            · intro code out h; cases h
+        · -- sub r64, imm
+          have himmW' : imm < W := by simpa [pow2_64_eq_W] using himmW
+          have himm_mod : imm % W = imm := Nat.mod_eq_of_lt himmW'
+          simp only [toUniIns, exec, X86Int.exec, X86Int.lift, X86Min.okOf, himm_mod]
+          cases hmd : m.reg d with
+          | none => simp [X86Min.St.rd, hmd]
+          | some va =>
+            obtain ⟨hid, hvaW⟩ := reg_lt16_bound hsim hd16 hmd
+            have hva_mod : va % X86Min.pow2 64 = va := by rw [pow2_64_eq_W]; exact Nat.mod_eq_of_lt hvaW
+            have hres_lt : (X86Int.aluF .sub va imm).1 < W := by
+              simp only [X86Int.aluF]; exact Nat.mod_lt _ (by decide)
+            have hfl : FlRel (X86Min.alu .sub 64 va imm).2 (X86Int.aluF .sub va imm).2 := by
+              simp only [X86Min.alu, X86Int.aluF, msb_64_eq, pow2_64_eq_W]
+              exact ⟨X86Min.OLe.refl _, X86Min.OLe.refl _, X86Min.OLe.refl _, X86Min.OLe.refl _⟩
+            simp only [X86Min.St.rd, hmd, hid, Option.map_some, hva_mod, bind, Option.bind,
+              pure, show (X86Min.Op.sub == .cmp) = false by decide, Bool.false_eq_true, if_false,
+              X86Min.St.wr, show (64 == 8) = false by decide]
+            constructor
+            · intro m' hm'; cases hm'
+              refine ⟨_, rfl, ?_⟩
+              simpa [X86Min.St.setReg, X86Int.St.set, hnx_eq, hnx_mod, hrip_int, X86Min.alu, X86Int.aluF, pow2_64_eq_W] using
+                sim_setReg hsim hd16 hres_lt (m.rip + len) hcanon hfl
             · intro code out h; cases h
     | shlI w d c =>
       obtain ⟨rfl, hd16, _⟩ := hwf
@@ -2629,6 +3148,7 @@ theorem step_min_sim {imMin : X86Min.Img} {imUni : Nat → Option (Ins × Nat)}
           · have hwin' : ¬(m.lo ≤ sp ∧ sp < m.lo + X86Min.winSize) := by
               simpa [Bool.and_eq_true, decide_eq_true_eq] using hwin
             simp [X86Min.St.wrByte, hwin']
+    | jmpReg r => exact (hcompat.noJmpReg m.rip r len hdec).elim
     | jmp rel =>
       have hrelW : rel < W := hwf
       simp only [toUniIns, exec, X86Int.exec, mod_add_mod_W, pow2_64_eq_W]
@@ -3379,6 +3899,7 @@ theorem exec_min_sim {fuel : Nat} {f inp : List Nat} {imMin : X86Min.Img} {m0 : 
     (hload : X86Min.load f seedSp inp = some (imMin, m0))
     (hcanon : imMin.vbase + imMin.len + 16 < W)
     (hno11 : ∀ a ins len, imMin.decodeAt a = some (ins, len) → ∀ w, ins ≠ .rr .xor w 11 11)
+    (hnoJmp : ∀ a r len, imMin.decodeAt a = some (.jmpReg r, len) → False)
     {code : Nat} {out : List Nat}
     (hexec : X86Min.exec fuel f inp = .exit code out) :
     let imUni := imageOf f imMin.vbase
@@ -3396,7 +3917,8 @@ theorem exec_min_sim {fuel : Nat} {f inp : List Nat} {imMin : X86Min.Img} {m0 : 
     bytesLt256 := hf
     lenBound := hlen
     vbaseCanon := by rw [him] at hcanon; exact hcanon
-    noXor11 := by rw [← him]; exact hno11 }
+    noXor11 := by rw [← him]; exact hno11
+    noJmpReg := by rw [← him]; exact hnoJmp }
   have hcompat : MinCompat imMin (imageOf f imMin.vbase) := by
     rw [him]; exact minCompat_of_imageOk hok
   have hsim := sim_of_load hload hcanon hinp
@@ -3410,6 +3932,7 @@ theorem exec_prun_min_sim (alts : Alts) (r : Rates) (hr : r.ok)
     (hload : X86Min.load f seedSp inp = some (imMin, m0))
     (hcanon : imMin.vbase + imMin.len + 16 < W)
     (hno11 : ∀ a ins len, imMin.decodeAt a = some (ins, len) → ∀ w, ins ≠ .rr .xor w 11 11)
+    (hnoJmp : ∀ a r len, imMin.decodeAt a = some (.jmpReg r, len) → False)
     {code : Nat} {out : List Nat}
     (hexec : X86Min.exec fuel f inp = .exit code out) :
     let imUni := imageOf f imMin.vbase
@@ -3427,7 +3950,8 @@ theorem exec_prun_min_sim (alts : Alts) (r : Rates) (hr : r.ok)
     bytesLt256 := hf
     lenBound := hlen
     vbaseCanon := by rw [him] at hcanon; exact hcanon
-    noXor11 := by rw [← him]; exact hno11 }
+    noXor11 := by rw [← him]; exact hno11
+    noJmpReg := by rw [← him]; exact hnoJmp }
   have hcompat : MinCompat imMin (imageOf f imMin.vbase) := by
     rw [him]; exact minCompat_of_imageOk hok
   have hsim := sim_of_load hload hcanon hinp

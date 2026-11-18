@@ -342,6 +342,43 @@ static void gen_narrow(Rng &rng, int kind, TestCase &tc) {
     tc.ins.push_back(static_cast<uint8_t>(0xc0 | (d & 7)));
     break;
   }
+  case 13:   // rr32_add (01 /r)
+  case 14: { // rr32_sub (29 /r)
+    bool add = kind == 13;
+    tc.tag = add ? "narrow_rr32_add" : "narrow_rr32_sub";
+    int d = static_cast<int>(rng.range(0, 16));
+    int s = static_cast<int>(rng.range(0, 16));
+    tc.regs[d] |= 0x5a5a5a5a00000000ULL;
+    tc.regs[s] |= 0xa5a5a5a500000000ULL;
+    push_rex(tc.ins, false, s, d);
+    tc.ins.push_back(add ? 0x01 : 0x29);
+    tc.ins.push_back(static_cast<uint8_t>(0xc0 | ((s & 7) << 3) | (d & 7)));
+    break;
+  }
+  case 15: case 16: case 17: case 18: { // aluI32 add/sub: 81 /0, 83 /0, 81 /5, 83 /5
+    bool add = kind <= 16;
+    bool imm32 = kind == 15 || kind == 17;
+    tc.tag = add ? (imm32 ? "narrow_aluI32_add_81" : "narrow_aluI32_add_83")
+                 : (imm32 ? "narrow_aluI32_sub_81" : "narrow_aluI32_sub_83");
+    int d = static_cast<int>(rng.range(0, 16));
+    tc.regs[d] |= 0x0123456700000000ULL;
+    push_rex(tc.ins, false, add ? 0 : 5, d);
+    tc.ins.push_back(imm32 ? 0x81 : 0x83);
+    tc.ins.push_back(static_cast<uint8_t>(0xc0 | ((add ? 0 : 5) << 3) | (d & 7)));
+    if (imm32) push_le32(tc.ins, rng.u32()); else tc.ins.push_back(rng.u8());
+    break;
+  }
+  case 19: { // jmp r64 (ff /4, mod 11); REX.W is ignored by the CPU
+    tc.tag = "int_jmpR";
+    int r = static_cast<int>(rng.range(0, 16));
+    if (r == 4) r = 5; // the harness needs rsp
+    bool w = rng.next() % 2 == 0;
+    push_rex(tc.ins, w, 4, r, w);
+    tc.ins.push_back(0xff);
+    tc.ins.push_back(static_cast<uint8_t>(0xc0 | (4 << 3) | (r & 7)));
+    tc.regs[r] = pick_branch_target(rng, tc.ins.size(), false);
+    break;
+  }
   default: { // inc64
     tc.tag = "narrow_inc64";
     int d = static_cast<int>(rng.range(0, 16));
@@ -731,8 +768,8 @@ int main(int argc, char **argv) {
   }
 
   Rng rng(seed);
-  // Schedule: guarantee >= 1200 hits per narrow form (13 * 1200 = 15600) + uniform over 32 int forms.
-  constexpr int kNarrowKinds = 13;
+  // Schedule: guarantee >= 1200 hits per narrow form (20 * 1200 = 24000) + uniform over 32 int forms.
+  constexpr int kNarrowKinds = 20;
   constexpr int kIntKinds = 32;
   constexpr int kPerNarrow = 1200;
   int narrow_quota = kNarrowKinds * kPerNarrow;

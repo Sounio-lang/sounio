@@ -99,6 +99,13 @@ private def classifyForm (bytes : List Nat) (ins : Ins) : String :=
   | .rr32 .or _ _ => "narrow_rr32_or"
   | .rr32 .test _ _ => "narrow_rr32_test"
   | .rr32 .mov _ _ => "narrow_rr32_mov"
+  | .rr32 .add _ _ => "narrow_rr32_add"
+  | .rr32 .sub _ _ => "narrow_rr32_sub"
+  | .aluI32 op _ _ =>
+      let b0 := bytes.headD 0
+      let opc := if 0x40 ≤ b0 && b0 ≤ 0x4f then bytes[1]?.getD 0 else b0
+      let o := match op with | .add => "add" | .sub => "sub" | .cmp => "cmp"
+      if opc == 0x81 then s!"narrow_aluI32_{o}_81" else s!"narrow_aluI32_{o}_83"
   | .cmpI32 _ _ =>
       let b0 := bytes.headD 0
       let opc := if 0x40 ≤ b0 && b0 ≤ 0x4f then bytes[1]?.getD 0 else b0
@@ -140,6 +147,13 @@ private def requiredNarrowForms : List String :=
   , "narrow_shl32_cntgt1"
   , "narrow_inc32"
   , "narrow_inc64"
+  , "narrow_rr32_add"
+  , "narrow_rr32_sub"
+  , "narrow_aluI32_add_81"
+  , "narrow_aluI32_add_83"
+  , "narrow_aluI32_sub_81"
+  , "narrow_aluI32_sub_83"
+  , "int_jmpR"
   ]
 
 private def requiredIntForms : List String :=
