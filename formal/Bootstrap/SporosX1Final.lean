@@ -11137,6 +11137,122 @@ theorem parser_words_head_zero {s : X86Int.St}
     show ({ t1 with rip := t1.rip + 2 }).k = s.k
     rw [ht1]
 
+/-- One table-slot store `st [rdi+off], r` with full frame. -/
+theorem store_slot {site off slen p v r : Nat} {m : Mem} {s : X86Int.St}
+    (hst : stage1Im site = some (.st 7 off r, slen))
+    (hrip : s.rip = site) (hr7 : s.reg 7 = some p)
+    (hrv : s.reg r = some v) (hpW : p + off < W)
+    (hm : wr64 s.mem (p + off) v = some m) :
+    ∃ s' : X86Int.St,
+      run stage1Im 1 (Out.ok s) = Out.ok s' ∧
+      s'.rip = site + slen ∧ s'.mem = m ∧
+      rd64 s'.mem (p + off) = some (v % W) ∧
+      (∀ i, s'.reg i = s.reg i) ∧
+      s'.regs.length = s.regs.length ∧ s'.k = s.k ∧
+      wshape s'.mem = wshape s.mem ∧
+      (∀ x k, p + off + 8 ≤ x ∨ x + k ≤ p + off →
+        s'.mem.rdN x k = s.mem.rdN x k) := by
+  have hea : ea p off = p + off := by
+    unfold ea
+    rw [Nat.mod_eq_of_lt hpW]
+  have hm' : wr64 s.mem (ea p off) v = some m := by rwa [hea]
+  have e1 : X86Int.step stage1Im s =
+      .ok { s with mem := m, rip := s.rip + slen } :=
+    step_st (by rw [hrip]; exact hst) hr7 hrv hm'
+  obtain ⟨t1, ht1⟩ : ∃ t : X86Int.St, t =
+      { s with mem := m, rip := s.rip + slen } := ⟨_, rfl⟩
+  have r1 : run stage1Im 1 (Out.ok s) = Out.ok t1 := by
+    rw [run_succ_ok stage1Im 0 s, e1, ← ht1, run_zero]
+  have ht1mem : t1.mem = m := by rw [ht1]
+  refine ⟨t1, r1, ?_, ht1mem, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  · rw [ht1]; show s.rip + slen = site + slen; rw [hrip]
+  · rw [ht1mem]; exact rd64_wr64 hm
+  · intro i
+    rw [ht1]
+    show ({ s with mem := m, rip := s.rip + slen }).reg i = s.reg i
+    exact rfl
+  · rw [ht1]
+  · rw [ht1]
+  · rw [ht1mem]
+    exact wrN_wshape _ _ _ hm
+  · intro x k hd
+    rw [ht1mem]
+    exact rdN_wr64_other hm hd
+
+/-- One word field: `call RDC` then store `rax` at `[rdi+off]`. -/
+theorem field_store {site off slen c e sp p : Nat} {bs4 : List Nat}
+    {s : X86Int.St}
+    (hcall : stage1Im site = some (.call aRDC, 5))
+    (hst : stage1Im (site + 5) = some (.st 7 off 0, slen))
+    (hsiteW : site + 5 < W)
+    (hrip : s.rip = site) (hr6 : s.reg 6 = some c)
+    (hr15 : s.reg 15 = some e) (hce : c + 4 ≤ e)
+    (hcW : c < W) (heW : e < W)
+    (hrd : s.mem.rdN c 4 = some bs4) (hroom : StackRoom s 2)
+    (hr4 : s.reg 4 = some sp) (hsp16 : 16 ≤ sp) (hspW : sp < W)
+    (hlen16 : s.regs.length = 16)
+    (hdisj : c + 4 ≤ sp - 16 ∨ sp ≤ c)
+    (hr7 : s.reg 7 = some p) (hpW : p + off < W)
+    (hdisjp : p + off + 8 ≤ c ∨ c + 4 ≤ p + off)
+    (hwr : (wr64 s.mem (p + off) (leVal bs4)).isSome) :
+    ∃ n s', run stage1Im n (Out.ok s) = Out.ok s' ∧
+      s'.rip = site + 5 + slen ∧
+      s'.reg 6 = some (c + 4) ∧ s'.reg 4 = some sp ∧
+      rd64 s'.mem (p + off) = some (leVal bs4 % W) ∧
+      (∀ i, i ≠ 0 → i ≠ 2 → i ≠ 4 → i ≠ 6 → s'.reg i = s.reg i) ∧
+      s'.regs.length = 16 ∧ s'.k = s.k ∧
+      wshape s'.mem = wshape s.mem ∧ StackRoom s' 2 ∧
+      s'.mem.rdN c 4 = some bs4 ∧
+      (∀ x k, (x + k ≤ sp - 16 ∨ sp ≤ x) →
+        (p + off + 8 ≤ x ∨ x + k ≤ p + off) →
+        s'.mem.rdN x k = s.mem.rdN x k) := by
+  obtain ⟨n1, s1, hrun1, hs1rip, hs1r0, hs1r6, hs1r4, hs1fr, hs1len,
+      hs1memfr, hs1rd, hs1k, hs1memwr⟩ :=
+    call_rdc_ok hcall hsiteW hrip hr6 hr15 hce hcW heW
+      (by rw [hrd]; exact Option.isSome_some) hroom hr4 hsp16 hspW
+      hlen16 hdisj
+  obtain ⟨m1, m2, hm1, hm2, hs1mem⟩ := hs1memwr
+  have hs1r0v : s1.reg 0 = some (leVal bs4) := by
+    rw [hs1r0, hrd]; rfl
+  have hs1r7 : s1.reg 7 = some p := by
+    rw [hs1fr 7 (by decide) (by decide) (by decide) (by decide)]
+    exact hr7
+  have hwr1 : (wr64 m1 (p + off) (leVal bs4)).isSome :=
+    wr64_some_of_wr64 hm1 hwr
+  have hwr2 : (wr64 s1.mem (p + off) (leVal bs4)).isSome := by
+    rw [hs1mem]
+    exact wr64_some_of_wr64 hm2 hwr1
+  obtain ⟨m3, hm3⟩ : ∃ m, wr64 s1.mem (p + off) (leVal bs4) = some m :=
+    Option.isSome_iff_exists.mp hwr2
+  obtain ⟨s2, hrun2, hs2rip, hs2mem, hs2slot, hs2fr, hs2len, hs2k,
+      hs2sh, hs2memfr⟩ :=
+    store_slot hst hs1rip hs1r7 hs1r0v hpW hm3
+  have hsh : wshape s2.mem = wshape s.mem := by
+    rw [hs2sh, hs1mem]
+    have h2 : wshape m2 = wshape m1 := wrN_wshape _ _ _ hm2
+    have h1 : wshape m1 = wshape s.mem := wrN_wshape _ _ _ hm1
+    rw [h2, h1]
+  have hroom2 : StackRoom s2 2 := by
+    apply StackRoom_of_wshape hsh _ hroom
+    rw [hs2fr 4]
+    rw [hs1r4, hr4]
+  have hrun : run stage1Im (n1 + 1) (Out.ok s) = Out.ok s2 := by
+    rw [run_add stage1Im n1 1, hrun1, hrun2]
+  refine ⟨n1 + 1, s2, hrun, hs2rip, ?_, ?_, ?_, ?_, ?_, ?_, hsh, hroom2,
+    ?_, ?_⟩
+  · rw [hs2fr 6]; exact hs1r6
+  · rw [hs2fr 4]; exact hs1r4
+  · exact hs2slot
+  · intro i hi0 hi2 hi4 hi6
+    rw [hs2fr i]
+    exact hs1fr i hi0 hi2 hi4 hi6
+  · rw [hs2len]; exact hs1len
+  · rw [hs2k]; exact hs1k
+  · rw [hs2memfr c 4 hdisjp, hs1rd, hrd]
+  · intro x k hd1 hd2
+    rw [hs2memfr x k hd2]
+    exact hs1memfr x k hd1
+
 /-- EXISTENCE TARGET: with room, some oracle makes the final
 theorem non-vacuous.  The witness is `stage1Oracle f A` for the
 `A` given by `Room`.  What remains is the loader-prefix invariant:
