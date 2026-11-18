@@ -15551,6 +15551,7 @@ theorem decData_inv {bs rest d : List Nat}
 /-- The per-word byte bounds. -/
 def WordBound (w : Word) : Prop :=
   w.ins < 256 ^ 4 ∧ w.outs < 256 ^ 4 ∧ w.locals < 256 ^ 4 ∧
+    w.code.length < 256 ^ 4 ∧ w.ann.length < 256 ^ 4 ∧
     (∀ x ∈ w.code, InstrBound x) ∧ (∀ x ∈ w.ann, AnnBound x)
 
 /-- Inversion of `decWord`. -/
@@ -15600,10 +15601,10 @@ theorem decWord_inv {bs rest : List Nat} {w : Word}
   obtain ⟨he3, hbl, -⟩ := rdLE_inv h3' hb2
   have hb3 : ∀ b ∈ bs3, b < 256 := fun b hm =>
     hb2 b (he3.symm ▸ List.mem_append_right _ hm)
-  obtain ⟨he4, -, -⟩ := rdLE_inv h4' hb3
+  obtain ⟨he4, hbnc, -⟩ := rdLE_inv h4' hb3
   have hb4 : ∀ b ∈ bs4, b < 256 := fun b hm =>
     hb3 b (he4.symm ▸ List.mem_append_right _ hm)
-  obtain ⟨he5, -, -⟩ := rdLE_inv h5' hb4
+  obtain ⟨he5, hbna, -⟩ := rdLE_inv h5' hb4
   have hb5 : ∀ b ∈ bs5, b < 256 := fun b hm =>
     hb4 b (he5.symm ▸ List.mem_append_right _ hm)
   obtain ⟨he6, hclen, hcP⟩ :=
@@ -15622,7 +15623,9 @@ theorem decWord_inv {bs rest : List Nat} {w : Word}
         (code.flatMap Instr.enc) ++
         (ann.flatMap fun x => leBytes x.1 4 ++ leBytes x.2.d 4 ++
           leBytes x.2.a 4) := rfl
-  refine ⟨?_, hbi, hbo, hbl, hcP, haP⟩
+  refine ⟨?_, hbi, hbo, hbl,
+    by show code.length < 256 ^ 4; rw [hclen]; exact hbnc,
+    by show ann.length < 256 ^ 4; rw [halen]; exact hbna, hcP, haP⟩
   rw [hwenc, he1, he2, he3, he4, he5, he6, he7, hclen, halen]
   simp only [List.append_assoc]
 
@@ -15707,6 +15710,201 @@ theorem decode_inv {f : List Nat} {pr : Prog}
   rw [henc, he1, he2, he3, he4, he5, ht5, hwlen, hdlen]
   simp only [List.append_assoc, List.append_nil, List.cons_append,
     List.nil_append]
+
+/-- The value of a `u32` field below its bound, read at `W`. -/
+theorem leVal4_W {v : Nat} (h : v < 256 ^ 4) :
+    leVal (leBytes v 4) % W = v := by
+  rw [leVal_leBytes, Nat.mod_eq_of_lt h,
+    Nat.mod_eq_of_lt (Nat.lt_trans h (by unfold W; decide))]
+
+/-- The value of a `u32` field, read at `2^32`. -/
+theorem leVal4_32 (v : Nat) :
+    leVal (leBytes v 4) % 2 ^ 32 = v % 2 ^ 32 := by
+  rw [leVal_leBytes]
+  show v % 2 ^ 32 % 2 ^ 32 = v % 2 ^ 32
+  exact Nat.mod_mod v (2 ^ 32)
+
+/-- Head of a `leBytes` field. -/
+theorem take4_leBytes (v : Nat) (r : List Nat) :
+    (leBytes v 4 ++ r).take 4 = leBytes v 4 := by
+  rw [List.take_append_of_le_length (by simp [leBytes_length]),
+    List.take_of_length_le (by simp [leBytes_length])]
+
+/-- Tail after a `leBytes` field. -/
+theorem drop4_leBytes (v : Nat) (r : List Nat) :
+    (leBytes v 4 ++ r).drop 4 = r := by
+  rw [show (4 : Nat) = (leBytes v 4).length by simp [leBytes_length]]
+  exact List.drop_left
+
+/-- A slice inside the first of two appended lists. -/
+theorem seg_slice_append {l r : List Nat} {o k : Nat}
+    (h : o + k ≤ l.length) :
+    ((l ++ r).drop o).take k = (l.drop o).take k := by
+  rw [List.drop_append_of_le_length (by omega),
+    List.take_append_of_le_length]
+  rw [List.length_drop]
+  omega
+
+/-- The `i`-th segment of a flatMap with constant segment
+length. -/
+theorem flatSeg_take {α : Type} (f : α → List Nat) (k : Nat) :
+    ∀ (l : List α) (i : Nat) (hi : i < l.length),
+    (∀ x ∈ l, (f x).length = k) →
+    ((l.flatMap f).drop (k * i)).take k = f (l[i]'hi) := by
+  intro l
+  induction l with
+  | nil => intro i hi _; simp at hi
+  | cons a l ih =>
+    intro i hi hlen
+    cases i with
+    | zero =>
+      show (f a ++ l.flatMap f).take k = f a
+      rw [List.take_append_of_le_length (by
+          have hh := hlen a (.head _); omega),
+        List.take_of_length_le (by
+          have hh := hlen a (.head _); omega)]
+    | succ i =>
+      have hi' : i < l.length := by
+        have h := hi
+        simp only [List.length_cons] at h
+        omega
+      have step : k * (i + 1) = k + k * i := by
+        rw [Nat.left_distrib, Nat.mul_one, Nat.add_comm (k * i) k]
+      rw [step, ← List.drop_drop]
+      have hda : ((a :: l).flatMap f).drop k = l.flatMap f := by
+        show (f a ++ l.flatMap f).drop k = l.flatMap f
+        rw [← hlen a (.head _)]
+        exact List.drop_left
+      rw [hda, List.getElem_cons_succ]
+      exact ih i hi' (fun x hx => hlen x (.tail _ hx))
+
+/-- Encoded code length matches `codeBytes`. -/
+theorem codeBytes_flatMap : ∀ (code : List Instr),
+    (code.flatMap Instr.enc).length = codeBytes code
+  | [] => rfl
+  | x :: xs => by
+    calc ((x :: xs).flatMap Instr.enc).length
+        = (x.enc ++ xs.flatMap Instr.enc).length := by
+          rw [List.flatMap_cons]
+      _ = x.enc.length + codeBytes xs := by
+          rw [List.length_append, codeBytes_flatMap xs]
+      _ = codeBytes (x :: xs) := rfl
+
+/-- `CodeSeq` from one read of the whole encoding. -/
+theorem CodeSeq_of_rdN : ∀ (code : List Instr) {m : Mem} {c : Nat},
+    m.rdN c (codeBytes code) = some (code.flatMap Instr.enc) →
+    CodeSeq m c code := by
+  intro code
+  induction code with
+  | nil => intro m c _; trivial
+  | cons x xs ih =>
+    intro m c h
+    have hh : m.rdN c (x.enc.length + codeBytes xs) =
+        some ((x :: xs).flatMap Instr.enc) := h
+    have h1 : m.rdN c x.enc.length = some x.enc := by
+      have hok1 : 0 + x.enc.length ≤ x.enc.length + codeBytes xs := by
+        omega
+      have hs := rdN_slice hh hok1
+      simp only [Nat.add_zero, List.drop_zero] at hs
+      rw [hs, List.flatMap_cons, List.take_left]
+    have h2 : m.rdN (c + x.enc.length) (codeBytes xs) =
+        some (xs.flatMap Instr.enc) := by
+      have hok2 : x.enc.length + codeBytes xs ≤
+          x.enc.length + codeBytes xs := Nat.le_refl _
+      have hs := rdN_slice hh hok2
+      have e : (xs.flatMap Instr.enc).take (codeBytes xs) =
+          xs.flatMap Instr.enc := by
+        rw [← codeBytes_flatMap xs]
+        exact List.take_of_length_le (Nat.le_refl _)
+      rw [hs, List.flatMap_cons, List.drop_left, e]
+    exact ⟨h1, ih h2⟩
+
+/-- Encoded annotation length. -/
+theorem annflat_length : ∀ (ann : List (Nat × Height)),
+    (ann.flatMap (fun x => leBytes x.1 4 ++ leBytes x.2.d 4 ++
+      leBytes x.2.a 4)).length = 12 * ann.length
+  | [] => rfl
+  | a :: l => by
+    rw [List.flatMap_cons]
+    simp only [List.length_append, leBytes_length,
+      List.length_cons, annflat_length l]
+    omega
+
+/-- `AnnLayB` from one read of the whole annotation array. -/
+theorem AnnLayB_of_rdN {m : Mem} {p : Nat}
+    {ann : List (Nat × Height)}
+    (h : m.rdN p (12 * ann.length) =
+      some (ann.flatMap (fun x => leBytes x.1 4 ++ leBytes x.2.d 4 ++
+        leBytes x.2.a 4)))
+    (hb : ∀ x ∈ ann, AnnBound x) : AnnLayB m p ann := by
+  intro i hi
+  have hseglen : ∀ x ∈ ann,
+      ((fun x => leBytes x.1 4 ++ leBytes x.2.d 4 ++
+        leBytes x.2.a 4) x).length = 12 := fun x _ => by
+        simp only [List.length_append, leBytes_length]
+  have hseg : m.rdN (p + 12 * i) 12 =
+      some (leBytes ann[i].1 4 ++ leBytes ann[i].2.d 4 ++
+        leBytes ann[i].2.a 4) := by
+    have hs := rdN_slice h (o := 12 * i) (k := 12) (by
+      have : i + 1 ≤ ann.length := hi
+      have e : 12 * i + 12 = 12 * (i + 1) := by omega
+      omega)
+    rw [hs, flatSeg_take _ 12 ann i hi hseglen]
+  have hbnd := hb ann[i] (List.getElem_mem hi)
+  obtain ⟨hb1, hb2, hb3⟩ := hbnd
+  have hW : ann[i].1 < W :=
+    Nat.lt_trans hb1 (by unfold W; decide)
+  have f0 : m.rdN (p + 12 * i) 4 = some (leBytes ann[i].1 4) := by
+    have hs := rdN_slice hseg (o := 0) (k := 4) (by omega)
+    simp only [Nat.add_zero, List.drop_zero] at hs
+    rw [hs]
+    exact congrArg some (take4_leBytes _ _)
+  have e1 : (leBytes ann[i].1 4 ++ leBytes ann[i].2.d 4 ++
+        leBytes ann[i].2.a 4).drop 4 =
+      leBytes ann[i].2.d 4 ++ leBytes ann[i].2.a 4 := by
+    rw [List.append_assoc]
+    exact drop4_leBytes _ _
+  have f1 : m.rdN (p + 12 * i + 4) 4 = some (leBytes ann[i].2.d 4) := by
+    have hs := rdN_slice hseg (o := 4) (k := 4) (by omega)
+    rw [hs, e1]
+    exact congrArg some (take4_leBytes _ _)
+  have f2 : m.rdN (p + 12 * i + 8) 4 = some (leBytes ann[i].2.a 4) := by
+    have hs := rdN_slice hseg (o := 8) (k := 4) (by omega)
+    have e : (leBytes ann[i].1 4 ++ leBytes ann[i].2.d 4 ++
+        leBytes ann[i].2.a 4).drop 8 = leBytes ann[i].2.a 4 := by
+      show ((leBytes ann[i].1 4 ++ leBytes ann[i].2.d 4 ++
+        leBytes ann[i].2.a 4).drop 4).drop 4 = leBytes ann[i].2.a 4
+      rw [e1]
+      exact drop4_leBytes _ _
+    rw [hs, e]
+    exact congrArg some
+      (List.take_of_length_le (by simp [leBytes_length]))
+  refine ⟨?_, ?_, ?_, hW⟩
+  · rw [f0]; simp [leVal_leBytes, Nat.mod_eq_of_lt hb1]
+  · rw [f1]; simp [leVal_leBytes, Nat.mod_eq_of_lt hb2]
+  · rw [f2]; simp [leVal_leBytes, Nat.mod_eq_of_lt hb3]
+
+/-- Encoded word length. -/
+theorem wordEnc_length (wd : Word) :
+    wd.enc.length = 20 + codeBytes wd.code + 12 * wd.ann.length := by
+  show (leBytes wd.ins 4 ++ leBytes wd.outs 4 ++
+    leBytes wd.locals 4 ++ leBytes wd.code.length 4 ++
+    leBytes wd.ann.length 4 ++ (wd.code.flatMap Instr.enc) ++
+    (wd.ann.flatMap (fun x => leBytes x.1 4 ++ leBytes x.2.d 4 ++
+      leBytes x.2.a 4))).length =
+    20 + codeBytes wd.code + 12 * wd.ann.length
+  simp only [List.length_append, leBytes_length, codeBytes_flatMap,
+    annflat_length]
+
+/-- Encoded words length matches `wordsBytes`. -/
+theorem wordsBytes_flatMap : ∀ (wds : List Word),
+    (wds.flatMap Word.enc).length = wordsBytes wds
+  | [] => rfl
+  | wd :: wds => by
+    show ((wd :: wds).flatMap Word.enc).length =
+      (20 + codeBytes wd.code + 12 * wd.ann.length) + wordsBytes wds
+    rw [List.flatMap_cons, List.length_append, wordEnc_length,
+      wordsBytes_flatMap wds]
 
 /-- EXISTENCE TARGET: with room, some oracle makes the final
 theorem non-vacuous.  The witness is `stage1Oracle f A` for the
