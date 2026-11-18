@@ -234,7 +234,6 @@ class Keys(unittest.TestCase):
         def props(raw, text, major, minor, name):
             class Props:
                 uuid = CUuuid(raw, text)
-                pass
             Props.major = Integral(major)
             Props.minor = Integral(minor)
             Props.name = name
@@ -310,6 +309,10 @@ class Keys(unittest.TestCase):
                 self.assertEqual(marker_record["key_scope"], "per-gpu")
                 self.assertEqual(marker_record["phase"], "probe")
                 self.assertEqual(marker_record["sm"], identity["sm"])
+            not_json = dict(identities[0])
+            not_json["total_memory_bytes"] = float("nan")
+            with self.assertRaises(ValueError):
+                keys.observation_document(not_json)
             foreign = dict(identities[0])
             foreign["key_scope"] = "host"
             with self.assertRaises(RuntimeError) as caught:

@@ -1,5 +1,6 @@
 """Observation keys for one GPU. A hostname is not an identity when a node has two."""
 import json
+import math
 from pathlib import Path
 from paired_timing import VECTORS
 
@@ -197,7 +198,7 @@ def _json_ready(value):
     if isinstance(value, int):
         return value
     if isinstance(value, float):
-        if value != value or value in (float("inf"), float("-inf")):
+        if not math.isfinite(value):
             raise ValueError("observation field is not JSON")
         return value
     if isinstance(value, (bytes, bytearray)):
