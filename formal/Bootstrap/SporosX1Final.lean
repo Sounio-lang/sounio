@@ -15548,6 +15548,166 @@ theorem decData_inv {bs rest d : List Nat}
         rw [hdlen, ← hd, ← hr]
         simp only [List.append_assoc]
 
+/-- The per-word byte bounds. -/
+def WordBound (w : Word) : Prop :=
+  w.ins < 256 ^ 4 ∧ w.outs < 256 ^ 4 ∧ w.locals < 256 ^ 4 ∧
+    (∀ x ∈ w.code, InstrBound x) ∧ (∀ x ∈ w.ann, AnnBound x)
+
+/-- Inversion of `decWord`. -/
+theorem decWord_inv {bs rest : List Nat} {w : Word}
+    (h : decWord bs = some (w, rest)) (hb : ∀ b ∈ bs, b < 256) :
+    bs = w.enc ++ rest ∧ WordBound w := by
+  have hstep : decWord bs =
+      (rdLE bs 4).bind (fun p1 =>
+        (rdLE p1.2 4).bind (fun p2 =>
+          (rdLE p2.2 4).bind (fun p3 =>
+            (rdLE p3.2 4).bind (fun p4 =>
+              (rdLE p4.2 4).bind (fun p5 =>
+                (decMany decInstr p4.1 p5.2).bind (fun p6 =>
+                  (decMany decAnn p5.1 p6.2).bind (fun p7 =>
+                    some (⟨p1.1, p2.1, p3.1, p6.1, p7.1⟩,
+                      p7.2)))))))) := rfl
+  rw [hstep, Option.bind_eq_some_iff] at h
+  obtain ⟨⟨vi, bs1⟩, h1, h⟩ := h
+  rw [Option.bind_eq_some_iff] at h
+  obtain ⟨⟨vo, bs2⟩, h2, h⟩ := h
+  rw [Option.bind_eq_some_iff] at h
+  obtain ⟨⟨vl, bs3⟩, h3, h⟩ := h
+  rw [Option.bind_eq_some_iff] at h
+  obtain ⟨⟨nc, bs4⟩, h4, h⟩ := h
+  rw [Option.bind_eq_some_iff] at h
+  obtain ⟨⟨na, bs5⟩, h5, h⟩ := h
+  rw [Option.bind_eq_some_iff] at h
+  obtain ⟨⟨code, bs6⟩, h6, h⟩ := h
+  rw [Option.bind_eq_some_iff] at h
+  obtain ⟨⟨ann, bs7⟩, h7, h8⟩ := h
+  have h2' : rdLE bs1 4 = some (vo, bs2) := h2
+  have h3' : rdLE bs2 4 = some (vl, bs3) := h3
+  have h4' : rdLE bs3 4 = some (nc, bs4) := h4
+  have h5' : rdLE bs4 4 = some (na, bs5) := h5
+  have h6' : decMany decInstr nc bs5 = some (code, bs6) := h6
+  have h7' : decMany decAnn na bs6 = some (ann, bs7) := h7
+  have hw : (⟨vi, vo, vl, code, ann⟩ : Word) = w :=
+    congrArg Prod.fst (Option.some.inj h8)
+  have hr : bs7 = rest := congrArg Prod.snd (Option.some.inj h8)
+  subst hr; subst hw
+  obtain ⟨he1, hbi, -⟩ := rdLE_inv h1 hb
+  have hb1 : ∀ b ∈ bs1, b < 256 := fun b hm =>
+    hb b (he1.symm ▸ List.mem_append_right _ hm)
+  obtain ⟨he2, hbo, -⟩ := rdLE_inv h2' hb1
+  have hb2 : ∀ b ∈ bs2, b < 256 := fun b hm =>
+    hb1 b (he2.symm ▸ List.mem_append_right _ hm)
+  obtain ⟨he3, hbl, -⟩ := rdLE_inv h3' hb2
+  have hb3 : ∀ b ∈ bs3, b < 256 := fun b hm =>
+    hb2 b (he3.symm ▸ List.mem_append_right _ hm)
+  obtain ⟨he4, -, -⟩ := rdLE_inv h4' hb3
+  have hb4 : ∀ b ∈ bs4, b < 256 := fun b hm =>
+    hb3 b (he4.symm ▸ List.mem_append_right _ hm)
+  obtain ⟨he5, -, -⟩ := rdLE_inv h5' hb4
+  have hb5 : ∀ b ∈ bs5, b < 256 := fun b hm =>
+    hb4 b (he5.symm ▸ List.mem_append_right _ hm)
+  obtain ⟨he6, hclen, hcP⟩ :=
+    decMany_inv (f := decInstr) (e := Instr.enc) (P := InstrBound)
+      (fun hh hb' => decInstr_inv hh hb') h6' hb5
+  have hb6 : ∀ b ∈ bs6, b < 256 := fun b hm =>
+    hb5 b (he6.symm ▸ List.mem_append_right _ hm)
+  obtain ⟨he7, halen, haP⟩ :=
+    decMany_inv (f := decAnn)
+      (e := fun x => leBytes x.1 4 ++ leBytes x.2.d 4 ++
+        leBytes x.2.a 4) (P := AnnBound)
+      (fun hh hb' => decAnn_inv hh hb') h7' hb6
+  have hwenc : (⟨vi, vo, vl, code, ann⟩ : Word).enc =
+      leBytes vi 4 ++ leBytes vo 4 ++ leBytes vl 4 ++
+        leBytes code.length 4 ++ leBytes ann.length 4 ++
+        (code.flatMap Instr.enc) ++
+        (ann.flatMap fun x => leBytes x.1 4 ++ leBytes x.2.d 4 ++
+          leBytes x.2.a 4) := rfl
+  refine ⟨?_, hbi, hbo, hbl, hcP, haP⟩
+  rw [hwenc, he1, he2, he3, he4, he5, he6, he7, hclen, halen]
+  simp only [List.append_assoc]
+
+/-- Inversion of `decode`: a decoded file is exactly the encoding
+of its program, all header, word, code, annotation and data
+fields being byte-bounded as their widths force. -/
+theorem decode_inv {f : List Nat} {pr : Prog}
+    (h : decode f = some pr) (hb : ∀ b ∈ f, b < 256) :
+    f = pr.enc ∧ pr.main < 256 ^ 4 ∧ (∀ w ∈ pr.words, WordBound w) ∧
+      (∀ d ∈ pr.data, d.length < 256 ^ 4) := by
+  have hmagic : ∃ t, f = 0x53 :: 0x50 :: 0x52 :: 0x31 :: t := by
+    unfold Sporos.decode at h
+    split at h
+    · exact ⟨_, rfl⟩
+    · simp at h
+  obtain ⟨t, rfl⟩ := hmagic
+  have hbt : ∀ b ∈ t, b < 256 := fun b hm =>
+    hb b (by simp [hm])
+  have hstep : Sporos.decode (0x53 :: 0x50 :: 0x52 :: 0x31 :: t) =
+      (rdLE t 4).bind (fun p1 =>
+        (rdLE p1.2 4).bind (fun p2 =>
+          (rdLE p2.2 4).bind (fun p3 =>
+            (decMany decData p3.1 p3.2).bind (fun p4 =>
+              (decMany decWord p2.1 p4.2).bind (fun p5 =>
+                if p5.2.isEmpty = true then
+                  some (⟨p5.1, p4.1, p1.1⟩ : Prog)
+                else none))))) := rfl
+  rw [hstep, Option.bind_eq_some_iff] at h
+  obtain ⟨⟨mn, t1⟩, h1, h⟩ := h
+  rw [Option.bind_eq_some_iff] at h
+  obtain ⟨⟨nw, t2⟩, h2, h⟩ := h
+  rw [Option.bind_eq_some_iff] at h
+  obtain ⟨⟨nd, t3⟩, h3, h⟩ := h
+  rw [Option.bind_eq_some_iff] at h
+  obtain ⟨⟨data, t4⟩, h4, h⟩ := h
+  rw [Option.bind_eq_some_iff] at h
+  obtain ⟨⟨words, t5⟩, h5, h6⟩ := h
+  have h2' : rdLE t1 4 = some (nw, t2) := h2
+  have h3' : rdLE t2 4 = some (nd, t3) := h3
+  have h4' : decMany decData nd t3 = some (data, t4) := h4
+  have h5' : decMany decWord nw t4 = some (words, t5) := h5
+  have h6' : (if t5.isEmpty = true then
+      some (⟨words, data, mn⟩ : Prog) else none) = some pr := h6
+  have ht5e : t5.isEmpty = true := by
+    cases hbe : t5.isEmpty with
+    | true => rfl
+    | false =>
+      rw [if_neg (by simp [hbe])] at h6'
+      exact absurd h6' (by simp)
+  rw [if_pos ht5e] at h6'
+  have hpr : (⟨words, data, mn⟩ : Prog) = pr := Option.some.inj h6'
+  have ht5 : t5 = [] := by
+    cases t5 with
+    | nil => rfl
+    | cons a l => simp at ht5e
+  obtain ⟨he1, hbmn, -⟩ := rdLE_inv h1 hbt
+  have hb1 : ∀ b ∈ t1, b < 256 := fun b hm =>
+    hbt b (he1.symm ▸ List.mem_append_right _ hm)
+  obtain ⟨he2, -, -⟩ := rdLE_inv h2' hb1
+  have hb2 : ∀ b ∈ t2, b < 256 := fun b hm =>
+    hb1 b (he2.symm ▸ List.mem_append_right _ hm)
+  obtain ⟨he3, -, -⟩ := rdLE_inv h3' hb2
+  have hb3 : ∀ b ∈ t3, b < 256 := fun b hm =>
+    hb2 b (he3.symm ▸ List.mem_append_right _ hm)
+  obtain ⟨he4, hdlen, hdP⟩ :=
+    decMany_inv (f := decData)
+      (e := fun d => leBytes d.length 4 ++ d)
+      (P := fun d => d.length < 256 ^ 4)
+      (fun hh hb' => decData_inv hh hb') h4' hb3
+  have hb4 : ∀ b ∈ t4, b < 256 := fun b hm =>
+    hb3 b (he4.symm ▸ List.mem_append_right _ hm)
+  obtain ⟨he5, hwlen, hwP⟩ :=
+    decMany_inv (f := decWord) (e := Word.enc) (P := WordBound)
+      (fun hh hb' => decWord_inv hh hb') h5' hb4
+  have henc : (⟨words, data, mn⟩ : Prog).enc =
+      [0x53, 0x50, 0x52, 0x31] ++ leBytes mn 4 ++
+        leBytes words.length 4 ++ leBytes data.length 4 ++
+        (data.flatMap fun d => leBytes d.length 4 ++ d) ++
+        words.flatMap Word.enc := rfl
+  subst hpr
+  refine ⟨?_, hbmn, hwP, hdP⟩
+  rw [henc, he1, he2, he3, he4, he5, ht5, hwlen, hdlen]
+  simp only [List.append_assoc, List.append_nil, List.cons_append,
+    List.nil_append]
+
 /-- EXISTENCE TARGET: with room, some oracle makes the final
 theorem non-vacuous.  The witness is `stage1Oracle f A` for the
 `A` given by `Room`.  What remains is the loader-prefix invariant:
