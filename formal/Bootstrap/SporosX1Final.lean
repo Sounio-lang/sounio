@@ -1232,6 +1232,53 @@ theorem rd_some_region {m : Mem} {a v : Nat}
     obtain ⟨h1, h2, h3⟩ := find_some_mem hfind
     exact ⟨r, h1, h2, h3⟩
 
+/-- A read entirely inside the first region reads that region's
+data. -/
+theorem rdN_first_region : ∀ (n : Nat) {r : Region} {t : Mem}
+    {x : Nat}, r.base ≤ x → x + n ≤ r.hi →
+    Mem.rdN (r :: t) x n = some ((r.data.drop (x - r.base)).take n) := by
+  intro n
+  induction n with
+  | zero =>
+    intro r t x _ _
+    rfl
+  | succ n ih =>
+    intro r t x h1 h2
+    have hfind : Mem.find (r :: t) x 0 = some (0, r) := by
+      have hg : Mem.find (r :: t) x 0 =
+          (if r.base ≤ x ∧ x < r.hi then some (0, r)
+            else Mem.find t x 1) := rfl
+      rw [hg, if_pos ⟨h1, by omega⟩]
+    have hlen : x - r.base < r.data.length := by
+      have hh : r.hi = r.base + r.data.length := rfl
+      omega
+    have hrd : Mem.rd (r :: t) x = some (r.data[x - r.base]'hlen) := by
+      have he : Mem.rd (r :: t) x =
+          (do let y ← Mem.find (r :: t) x 0; y.2.data[x - y.2.base]?) :=
+        rfl
+      rw [he, hfind]
+      exact List.getElem?_eq_getElem hlen
+    have htail : Mem.rdN (r :: t) (x + 1) n =
+        some ((r.data.drop (x + 1 - r.base)).take n) :=
+      ih (by omega) (by omega)
+    have hj : x + 1 - r.base = (x - r.base) + 1 := by omega
+    rw [rdN_cons_some hrd htail, hj, List.drop_eq_getElem_cons hlen,
+      List.take_succ_cons]
+
+/-- Primitive codes are below 57. -/
+theorem prim_code_lt : ∀ p : Prim, p.code < 57 := by
+  intro p
+  cases p <;> decide
+
+set_option maxHeartbeats 0 in
+/-- The Eff table bytes in the image are `Prim.eff` in code order,
+checked by the kernel. -/
+theorem eff_bytes : ∀ p : Prim,
+    (stage1Code.drop (0x91d + 2 * p.code)).take 2 =
+      [p.eff.1, p.eff.2] := by
+  intro p
+  cases p <;> decide +kernel
+
 /-- Entry to the initial `mmap` site: 21 steps.  From a
 loader-shaped state the run reaches `base + 0xbf` with the exact
 `mmap` argument registers, fd 3 open on the file, the oracle
@@ -1257,7 +1304,8 @@ theorem loader_entry_to_mmap {f path argv0 : List Nat} {oracle : List Choice}
       s'.reg 8 = some (W - 1) ∧ s'.reg 9 = some 0 ∧
       s'.reg 14 = some 3 ∧ s'.reg 4 = some (sp0 + 24) ∧
       s'.k = ⟨[(path, f)], [some ⟨f, 0⟩], stdinL, [], oracle⟩ ∧
-      wshape s'.mem = wshape s.mem ∧ s'.regs.length = 16 := by
+      wshape s'.mem = wshape s.mem ∧ s'.regs.length = 16 ∧
+      (∃ stk', s'.mem = [⟨base, stage1Code, false⟩, stk']) := by
   have hc := stage1_loaderCode
   have hSR : X86Env.stackRoom = 4096 := rfl
   have hsp0eq : sp0 = stk.base + X86Env.stackRoom := by
@@ -2445,7 +2493,7 @@ theorem loader_entry_to_mmap {f path argv0 : List Nat} {oracle : List Choice}
       show (2 : Nat) = 1 + 1 from rfl, run_add stage1Im 1 1, r20, r21]
   exact ⟨a21, hrun, ha21rip, ha21r0, ha21r7, ha21r6, ha21r2, ha21r10,
     ha21r8, ha21r9, ha21r14, ha21r4, ha21k, by
-      rw [ha21mem, hwshape, ha18mem], hlen21⟩
+      rw [ha21mem, hwshape, ha18mem], hlen21, ⟨stk', ha21mem⟩⟩
 
 /-- The initial `mmap` is legal for a placement in the room
 interval, and six further steps reach the read loop head with the
@@ -5782,7 +5830,8 @@ theorem loader_init_to_loaded {f path argv0 stdin : List Nat}
       (∃ t, run stage1Im 21
         (Out.ok (stage1Init f path argv0 stdin (stage1Oracle f A)
           top)) = Out.ok t ∧ OracleLegalAt t) ∧
-      StackRoom s' 10 := by
+      StackRoom s' 10 ∧
+      s'.mem.rdN base stage1Code.length = some stage1Code := by
   obtain ⟨hfB, -, -, hpath0, -, hpathlen, -, htop47, hleInit,
     hstkhi⟩ := hinit
   obtain ⟨A, hAmod, hApos, hAbound, hfree⟩ := hroom
@@ -5796,7 +5845,7 @@ theorem loader_init_to_loaded {f path argv0 stdin : List Nat}
       ⟨[(path, f)], [], stdin, [], stage1Oracle f A⟩ := by
     simp [stage1Init]
   obtain ⟨s1, hrun1, hs1rip, hs1r0, hs1r7, hs1r6, hs1r2, hs1r10, hs1r8,
-    hs1r9, hs1r14, hs1r4, hs1k, hshape, hs1len⟩ :=
+    hs1r9, hs1r14, hs1r4, hs1k, hshape, hs1len, ⟨stk1, hs1memC⟩⟩ :=
     loader_entry_to_mmap
       (stk := (X86Env.initStack top [argv0, path]).1)
       (sp0 := (X86Env.initStack top [argv0, path]).2)
@@ -5887,6 +5936,10 @@ theorem loader_init_to_loaded {f path argv0 stdin : List Nat}
     have h := hshape3.2
     simp only [Prod.mk.injEq] at h
     exact h.2.1
+  have hc1eq : c1 = ⟨base, stage1Code, false⟩ := by
+    rw [hs1mem] at hs1memC
+    simp only [List.cons.injEq] at hs1memC
+    exact hs1memC.1
   have hs2mem' : s2.mem =
       [c1, c2, ⟨A, List.replicate 65536 0, true⟩] := by
     rw [hs2mem, hs1mem]
@@ -6025,7 +6078,22 @@ theorem loader_init_to_loaded {f path argv0 stdin : List Nat}
       · omega
       · have hW : W = 2 ^ 64 := rfl
         have ht : c2.hi = top := by rw [hc2hi]; exact hstkhi
-        omega⟩
+        omega, by
+      have h1 := rdN_first_region stage1Code.length
+        (r := c1) (t := [c2, buf3]) (x := base) (Nat.le_of_eq hc1b)
+        (Nat.le_of_eq hc1hi.symm)
+      rw [hs3mem, hc1eq]
+      rw [hc1eq] at h1
+      have h1' : Mem.rdN (⟨base, stage1Code, false⟩ :: [c2, buf3])
+            base stage1Code.length =
+          some ((stage1Code.drop (base - base)).take
+            stage1Code.length) := h1
+      have h2 : (stage1Code.drop (base - base)).take
+            stage1Code.length = stage1Code := by
+        rw [Nat.sub_self]
+        exact List.take_length
+      rw [h2] at h1'
+      exact h1'⟩
 
 /-- Layout of the parser region `base + 0x134` to `aCheckStart`
 (`base + 0x452`): every instruction of the header checks, the two
@@ -16819,7 +16887,9 @@ theorem parser_front_ok {f path argv0 : List Nat} {top A : Nat}
       StackRoom s' 1 ∧ s'.regs.length = 16 ∧
       (∀ x k, x + k ≤ (X86Env.initStack top [argv0, path]).2 + 24 - 16 ∨
         (X86Env.initStack top [argv0, path]).2 + 24 ≤ x →
-        m2.rdN x k = s0.mem.rdN x k) := by
+        m2.rdN x k = s0.mem.rdN x k) ∧
+      (s0.mem.rdN base stage1Code.length = some stage1Code →
+        s'.mem.rdN base stage1Code.length = some stage1Code) := by
   obtain ⟨hfenc, hbmn, hbnw, hbnd, hwB, hdB⟩ := decode_inv hdec hfB
   obtain ⟨hmn, -⟩ := checkProg_main hchk
   have hnw0 : pr.words.length ≠ 0 := by omega
@@ -17163,7 +17233,11 @@ theorem parser_front_ok {f path argv0 : List Nat} {top A : Nat}
       exact run_reg_some_ne11 _ (by decide) hv hrunTot, by
       obtain ⟨v, hv⟩ := hr9
       exact run_reg_some_ne11 _ (by decide) hv hrunTot, hroom5, hs5len,
-    (fun x k hk => by rw [hm2fr x k hk, hmem4])⟩
+    (fun x k hk => by rw [hm2fr x k hk, hmem4]), (fun h => by
+      rw [hs5mem]
+      apply rdN_append_left
+      rw [hm2fr base _ (Or.inl (by omega)), hmem4]
+      exact h)⟩
 
 /-- Transport a writable `find` hit across equal write shapes. -/
 theorem find_rw_of_wshape {m m' : Mem} {a : Nat}
@@ -17354,7 +17428,9 @@ theorem parser_back_ok {f path argv0 : List Nat} {top A : Nat}
           true⟩,
          ⟨A + (arenaFileBytes f + arenaTableBytes f),
           List.replicate (X86Env.pages f.length) 0, true⟩]) ∧
-      s'.k = (Kern.next s.k).2 := by
+      s'.k = (Kern.next s.k).2 ∧
+      (s.mem.rdN base stage1Code.length = some stage1Code →
+        s'.mem.rdN base stage1Code.length = some stage1Code) := by
   obtain ⟨hfenc, hbmn, hbnw, hbnd, hwB, hdB⟩ := decode_inv hdec hfB
   obtain ⟨hmn, hins0⟩ := checkProg_main hchk
   have hnw0 : pr.words.length ≠ 0 := by omega
@@ -17873,7 +17949,7 @@ theorem parser_back_ok {f path argv0 : List Nat} {top A : Nat}
     · exact Or.inr (by omega)
   -- the whole word loop
   obtain ⟨k9, s9, hrun9, hs9rip, hs9r1, hs9r6, hs9r7, hs9r4, hs9tab,
-    hs9fr, hs9len, hs9k, hs9sh, hs9room, -⟩ :=
+    hs9fr, hs9len, hs9k, hs9sh, hs9room, hs9memfr⟩ :=
     parser_words_loop pr.words hs8rip hs8r1
       (hs8r 6 _ (by decide) hs7r6) (hs8r 7 _ (by decide) hs7r7)
       (hs8r 15 _ (by decide) hs7r15) (hs8r 4 _ (by decide) hs7r4')
@@ -17964,12 +18040,34 @@ theorem parser_back_ok {f path argv0 : List Nat} {top A : Nat}
       (by omega) hspFhi hspFW
   have hk11 : s11.k = (Kern.next s.k).2 := by
     rw [hs11k, hs10k, hs9k, hs8k, hs7k]; exact hs6k
+  have hcode11 : s.mem.rdN base stage1Code.length =
+        some stage1Code →
+      s11.mem.rdN base stage1Code.length = some stage1Code := by
+    intro h
+    have hm1c : m1.rdN base stage1Code.length = some stage1Code := by
+      rw [hm1fr base _ (Or.inl (by omega))]; exact h
+    have hs6c : s6.mem.rdN base stage1Code.length =
+        some stage1Code := by
+      rw [hs6mem]; exact rdN_append_left hm1c
+    have hs8c : s8.mem.rdN base stage1Code.length =
+        some stage1Code := by
+      rw [hs8mem, hs7mem]; exact hs6c
+    have hs9c : s9.mem.rdN base stage1Code.length =
+        some stage1Code := by
+      rw [hs9memfr base _ (Or.inl (by omega)) ?_ ?_]; exact hs8c
+      · rcases hfreecode2 with hf | hf
+        · exact Or.inl (by omega)
+        · exact Or.inr (by omega)
+      · rcases hfreecode2 with hf | hf
+        · exact Or.inl (by omega)
+        · exact Or.inr (by omega)
+    rw [hs11mem, hs10mem]; exact hs9c
   exact ⟨12 + 11 + 1 + k9 + 3 + 15, s11, hrunTot, hs11rip,
     hs11r 14 _ (by decide) (by decide) hs10r14,
     hs11r 13 _ (by decide) (by decide) hs10r13,
     hs11r 4 _ (by decide) (by decide) hs10r4,
     by rw [hs11mem, hs10mem]; exact hs9tab,
-    hroom11, hs11len, hsh11, hk11⟩
+    hroom11, hs11len, hsh11, hk11, hcode11⟩
 
 set_option maxHeartbeats 0 in
 /-- The whole accept path from process entry to the checker
@@ -17995,6 +18093,7 @@ theorem parser_accept_ok {f path argv0 stdin : List Nat} {top : Nat}
         (A + arenaFileBytes f)
         (A + 16 + dataBytes pr.data) pr.words ∧
       StackRoom s' 6 ∧ s'.regs.length = 16 ∧
+      s'.mem.rdN base stage1Code.length = some stage1Code ∧
       s'.k.oracle = [] ∧
       (∃ c1 c2 buf', wshape s'.mem = wshape ([c1, c2, buf'] ++
         [⟨A + arenaFileBytes f,
@@ -18014,7 +18113,7 @@ theorem parser_accept_ok {f path argv0 stdin : List Nat} {top : Nat}
         true := by
   obtain ⟨A, k0, s0, hAmod, hApos, hAbound, hfreeA, hrun0, hs0rip,
     hs0r3, -, hs0r13, -, hs0r4, -, -, -, hs0r9, hs0oracle, -,
-    hmem0, hs0rdN, hs0len, hlegal, hs0room⟩ :=
+    hmem0, hs0rdN, hs0len, hlegal, hs0room, hs0code⟩ :=
     loader_init_to_loaded hinit hroom
   have hfB : ∀ b ∈ f, b < 256 := hinit.1
   have htop47 : top ≤ 2 ^ 47 := hinit.2.2.2.2.2.2.2.1
@@ -18036,7 +18135,7 @@ theorem parser_accept_ok {f path argv0 stdin : List Nat} {top : Nat}
         (stage1Oracle f A) top (by decide) (by decide)) hrun0
   obtain ⟨k1, s1, m2, hrun1, hs1rip, hs1r14, hs1r4, hs1r3, hs1r12,
     hs1r13, hs1r15, hs1mem, hm2sh, hs1rdN, hs1cur, hs1oracle,
-    -, -, -, -, hs1r7, hs1r9, hs1room, hs1len, -⟩ :=
+    -, -, -, -, hs1r7, hs1r9, hs1room, hs1len, -, hs1code⟩ :=
     parser_front_ok hdec hchk hfB hAmod hApos hAbound hfreeA
       hdisjInit hstkhi htop47 hs0rip hs0r3 hs0r13 hs0r4 hr7 hs0r9
       hs0oracle
@@ -18053,7 +18152,7 @@ theorem parser_accept_ok {f path argv0 stdin : List Nat} {top : Nat}
       simp [wshape]
     rw [hs1mem, happ, hm2sh, hmem0eq, happ]
   obtain ⟨k2, s2, hrun2, hs2rip, hs2r14, hs2r13, hs2r4, hs2tab,
-    hs2room, hs2len, hs2sh, hs2k⟩ :=
+    hs2room, hs2len, hs2sh, hs2k, hs2code⟩ :=
     parser_back_ok hdec hchk hfB hAmod hApos hAbound hfreeA
       hdisjInit hstkhi htop47 hs1rip hs1r14 hs1r4 hs1r3 hs1r12
       hs1r13 hs1r15 hwsh1 hc1b hc1hi hc2b hc2hi hbufb hbufhi
@@ -18072,7 +18171,7 @@ theorem parser_accept_ok {f path argv0 stdin : List Nat} {top : Nat}
     rw [hs2k]
     exact next_oracle_tail hs1oracle
   exact ⟨A, k0 + k1 + k2, s2, hrunTot, hs2rip, hs2r14, hs2r13, hs2r4,
-    hs2tab, hs2room, hs2len, hor2,
+    hs2tab, hs2room, hs2len, hs2code (hs1code hs0code), hor2,
     ⟨c1, c2, buf', hs2sh, hc1b, hc1hi, hc2b, hc2hi, hc2rw,
       by rw [hc1hi, hc2b]; exact hdisjInit⟩,
     hlegal, hAmod, hApos, hAbound, hfreeA⟩
@@ -18444,6 +18543,175 @@ theorem WordTab_of_TabLay {pr : Prog} {s : X86Int.St}
       · exact Or.inr (by omega)
   exact ⟨cj + 20, cj + 20 + codeBytes pr.words[j].code, t0, t8, t16,
     t24, t32, t40, t48, tseq, AnnLayout_of_AnnLayB tann, hok⟩
+
+/-- A state whose memory holds the whole code at `base` has the
+Eff table. -/
+theorem EffTable_of_code {s : X86Int.St}
+    (h : s.mem.rdN base stage1Code.length = some stage1Code) :
+    EffTable s := by
+  intro p
+  have hcode : p.code < 57 := prim_code_lt p
+  have hok : (0x91d + 2 * p.code) + 2 ≤ stage1Code.length := by
+    rw [stage1Code_length]; omega
+  have hs := rdN_slice h hok
+  have e : base + (0x91d + 2 * p.code) = aEff + 2 * p.code := by
+    unfold aEff; omega
+  rw [e] at hs
+  rw [hs, eff_bytes p]
+
+set_option maxHeartbeats 0 in
+/-- The witness run accepts: under the witness oracle, a file
+that decodes and checks runs from process entry to exit 0. -/
+theorem witness_exit0 {f path argv0 stdin : List Nat} {top : Nat}
+    {pr : Prog}
+    (hinit : Stage1InitOk f path argv0 top)
+    (hroom : Room f path argv0 top)
+    (hdec : Sporos.decode f = some pr)
+    (hchk : Sporos.checkProg pr = true) :
+    ∃ A k, run stage1Im k
+      (Out.ok (stage1Init f path argv0 stdin (stage1Oracle f A)
+        top)) = Out.exit 0 := by
+  have hfB : ∀ b ∈ f, b < 256 := hinit.1
+  have htop47 : top ≤ 2 ^ 47 := hinit.2.2.2.2.2.2.2.1
+  have hleInit : phVaddr + phMemsz ≤
+      (X86Env.initStack top [argv0, path]).1.base :=
+    hinit.2.2.2.2.2.2.2.2.1
+  have hstkhi : (X86Env.initStack top [argv0, path]).1.hi = top :=
+    hinit.2.2.2.2.2.2.2.2.2
+  have hdisjInit : base + stage1Code.length ≤
+      (X86Env.initStack top [argv0, path]).1.base := by
+    have h := hleInit
+    rw [phVaddr_eq, phMemsz_eq] at h
+    exact h
+  obtain ⟨hfenc, -, hbnw, -, hwB, -⟩ := decode_inv hdec hfB
+  have hLenc : f.length =
+      16 + dataBytes pr.data + wordsBytes pr.words := by
+    rw [hfenc]; exact enc_length pr
+  have h64nw : 64 * pr.words.length ≤ arenaTableBytes f := by
+    have h1 : X86Env.pages (64 * pr.words.length) ≤
+        arenaTableBytes f := by
+      unfold arenaTableBytes
+      apply pages_mono
+      have h2 := wordsBytes_ge pr.words
+      omega
+    exact Nat.le_trans (pages_ge _) h1
+  have hLfile : f.length ≤ arenaFileBytes f := by
+    unfold arenaFileBytes
+    have h2 := pages_ge (65536 + 2 * f.length)
+    omega
+  obtain ⟨A, k0, s2, hrun0, hs2rip, hs2r14, hs2r13, hs2r4, hs2tab,
+    hs2room, hs2len, hs2code, -,
+    ⟨c1, c2, buf', -, hc1b, hc1hi, hc2b, hc2hi, -, hdisj12⟩, -,
+    hAmod, hApos, hAbound, hfreeA⟩ :=
+    parser_accept_ok hinit hroom hdec hchk
+  -- the free interval against the initial stack region
+  have hfree0 := hfreeA
+  rw [stage1Init_mem] at hfree0
+  unfold X86Env.Mem.free at hfree0
+  rw [List.all_eq_true] at hfree0
+  have hfreestk := hfree0
+    (X86Env.initStack top [argv0, path]).1 (by simp)
+  rw [Bool.or_eq_true] at hfreestk
+  simp only [decide_eq_true_eq] at hfreestk
+  have hsp0 : (X86Env.initStack top [argv0, path]).2 + 24 + 48 =
+      c2.base + 4168 := by
+    have h1 := initStack_sp top argv0 path
+    rw [← hc2b] at h1
+    have hsr : X86Env.stackRoom = 4096 := rfl
+    omega
+  have hspHi : (X86Env.initStack top [argv0, path]).2 + 24 + 48 ≤
+      c2.hi := by
+    have hh : c2.hi = c2.base +
+        (X86Env.initStack top [argv0, path]).1.data.length := by
+      have e : (X86Env.initStack top [argv0, path]).1.hi =
+          (X86Env.initStack top [argv0, path]).1.base +
+            (X86Env.initStack top [argv0, path]).1.data.length := rfl
+      rw [hc2hi, e, ← hc2b]
+    have hlen : 8192 ≤
+        (X86Env.initStack top [argv0, path]).1.data.length := by
+      rw [initStack_data_length]
+      have hp : 4096 ≤ X86Env.pages
+          (56 + ((argv0.length + 1) + (path.length + 1)) + 1) := by
+        unfold X86Env.pages X86Env.page
+        have h1 : 1 ≤ (56 + ((argv0.length + 1) +
+            (path.length + 1)) + 1 + 4095) / 4096 :=
+          Nat.div_pos (by omega) (by decide)
+        omega
+      have hsr : X86Env.stackRoom = 4096 := rfl
+      omega
+    omega
+  have hspW : (X86Env.initStack top [argv0, path]).2 + 24 + 48 < W := by
+    have ht : c2.hi = top := by rw [hc2hi]; exact hstkhi
+    have hW : W = 2 ^ 64 := rfl
+    omega
+  have htblW : A + arenaFileBytes f + 64 * pr.words.length < W := by
+    have hW : W = 2 ^ 64 := rfl
+    unfold stage1Mf at hAbound
+    omega
+  have hMf : stage1Mf f =
+      arenaFileBytes f + arenaTableBytes f + arenaScratchBytes f :=
+    rfl
+  have htab : ∀ j : Nat, j < pr.words.length →
+      (X86Env.initStack top [argv0, path]).2 + 24 + 48 ≤
+          A + arenaFileBytes f + 64 * j ∨
+        A + arenaFileBytes f + 64 * j + 64 ≤
+          (X86Env.initStack top [argv0, path]).2 + 24 + 48 - 48 := by
+    intro j hj
+    rcases hfreestk with h | h
+    · exact Or.inr (by clear hs2tab hs2code; omega)
+    · exact Or.inl (by clear hs2tab hs2code; omega)
+  have hdisjT : (X86Env.initStack top [argv0, path]).2 + 24 + 48 ≤
+        A + arenaFileBytes f ∨
+      A + arenaFileBytes f + 64 * pr.words.length ≤
+        (X86Env.initStack top [argv0, path]).2 + 24 + 48 - 48 := by
+    rcases hfreestk with h | h
+    · exact Or.inr (by clear hs2tab hs2code htab; omega)
+    · exact Or.inl (by clear hs2tab hs2code htab; omega)
+  have hdisjB : (X86Env.initStack top [argv0, path]).2 + 24 + 48 ≤
+        A + 16 + dataBytes pr.data ∨
+      A + 16 + dataBytes pr.data + wordsBytes pr.words ≤
+        (X86Env.initStack top [argv0, path]).2 + 24 + 48 - 48 := by
+    rcases hfreestk with h | h
+    · exact Or.inr (by clear hs2tab hs2code htab; omega)
+    · exact Or.inl (by clear hs2tab hs2code htab; omega)
+  have hdisjEff : aEff + 114 ≤
+        (X86Env.initStack top [argv0, path]).2 + 24 + 48 - 48 ∨
+      (X86Env.initStack top [argv0, path]).2 + 24 + 48 ≤ aEff := by
+    have step1 : aEff + 114 ≤ base + stage1Code.length := by
+      show base + 0x91d + 114 ≤ base + stage1Code.length
+      rw [Nat.add_assoc]
+      exact Nat.add_le_add_left
+        (by rw [stage1Code_length]; decide) base
+    have step3 : (X86Env.initStack top [argv0, path]).1.base ≤
+        (X86Env.initStack top [argv0, path]).2 + 24 + 48 - 48 := by
+      have h1 := initStack_sp top argv0 path
+      have hsr : X86Env.stackRoom = 4096 := rfl
+      clear hs2tab hs2code htab hdisjT hdisjB
+      omega
+    exact Or.inl (Nat.le_trans step1 (Nat.le_trans hdisjInit step3))
+  have hregs : RegsOk s2 := by
+    apply run_regs_ok hrun0
+    intro i hi16 _
+    by_cases h4 : i = 4
+    · subst h4
+      exact ⟨_, stage1Init_reg4 f path argv0 stdin
+        (stage1Oracle f A) top⟩
+    · exact ⟨0, stage1Init_reg_ne4 f path argv0 stdin
+        (stage1Oracle f A) top hi16 h4⟩
+  have htab2 : WordTab pr (A + arenaFileBytes f)
+      ((X86Env.initStack top [argv0, path]).2 + 24 + 48) s2 :=
+    WordTab_of_TabLay hs2tab (by
+      have hW : W = 2 ^ 64 := rfl
+      unfold stage1Mf at hAbound
+      omega) (by omega) hwB (by omega) hspW htblW hdisjT hdisjB
+      hdisjEff
+  obtain ⟨k1, hrun1⟩ :=
+    checker_accepts_from_start stage1_allCode stage1_outerCode
+      (by omega) hspW htblW htab hdisjEff hchk
+      (s := s2)
+      (by unfold aCheckStart; exact hs2rip) hs2r14 hs2r13 hs2r4
+      (by omega) hregs hs2room (EffTable_of_code hs2code) htab2
+  exact ⟨A, k0 + k1, by rw [run_add, hrun0, hrun1]⟩
 
 /-- EXISTENCE TARGET: with room, some oracle makes the final
 theorem non-vacuous.  The witness is `stage1Oracle f A` for the
