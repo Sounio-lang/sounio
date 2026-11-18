@@ -15973,7 +15973,8 @@ of its program, all header, word, code, annotation and data
 fields being byte-bounded as their widths force. -/
 theorem decode_inv {f : List Nat} {pr : Prog}
     (h : decode f = some pr) (hb : ∀ b ∈ f, b < 256) :
-    f = pr.enc ∧ pr.main < 256 ^ 4 ∧ (∀ w ∈ pr.words, WordBound w) ∧
+    f = pr.enc ∧ pr.main < 256 ^ 4 ∧ pr.words.length < 256 ^ 4 ∧
+      pr.data.length < 256 ^ 4 ∧ (∀ w ∈ pr.words, WordBound w) ∧
       (∀ d ∈ pr.data, d.length < 256 ^ 4) := by
   have hmagic : ∃ t, f = 0x53 :: 0x50 :: 0x52 :: 0x31 :: t := by
     unfold Sporos.decode at h
@@ -16023,10 +16024,10 @@ theorem decode_inv {f : List Nat} {pr : Prog}
   obtain ⟨he1, hbmn, -⟩ := rdLE_inv h1 hbt
   have hb1 : ∀ b ∈ t1, b < 256 := fun b hm =>
     hbt b (he1.symm ▸ List.mem_append_right _ hm)
-  obtain ⟨he2, -, -⟩ := rdLE_inv h2' hb1
+  obtain ⟨he2, hbnw, -⟩ := rdLE_inv h2' hb1
   have hb2 : ∀ b ∈ t2, b < 256 := fun b hm =>
     hb1 b (he2.symm ▸ List.mem_append_right _ hm)
-  obtain ⟨he3, -, -⟩ := rdLE_inv h3' hb2
+  obtain ⟨he3, hbnd, -⟩ := rdLE_inv h3' hb2
   have hb3 : ∀ b ∈ t3, b < 256 := fun b hm =>
     hb2 b (he3.symm ▸ List.mem_append_right _ hm)
   obtain ⟨he4, hdlen, hdP⟩ :=
@@ -16045,7 +16046,8 @@ theorem decode_inv {f : List Nat} {pr : Prog}
         (data.flatMap fun d => leBytes d.length 4 ++ d) ++
         words.flatMap Word.enc := rfl
   subst hpr
-  refine ⟨?_, hbmn, hwP, hdP⟩
+  refine ⟨?_, hbmn, by rw [hwlen]; exact hbnw,
+    by rw [hdlen]; exact hbnd, hwP, hdP⟩
   rw [henc, he1, he2, he3, he4, he5, ht5, hwlen, hdlen]
   simp only [List.append_assoc, List.append_nil, List.cons_append,
     List.nil_append]
