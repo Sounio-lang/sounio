@@ -12856,6 +12856,186 @@ theorem parser_code_tail {c e B S l n : Nat} {s : X86Int.St}
     rw [ht11mem']
     exact rdN_wr_other hm8 hd
 
+/-- Every instruction encoding starts with an opcode byte whose
+dispatch length is the encoding length. -/
+theorem enc_head (x : Instr) :
+    ∃ op rest, x.enc = op :: rest ∧ OpLen op x.enc.length := by
+  cases x with
+  | prim p =>
+    exact ⟨p.code, [], rfl, Or.inl ⟨Prim_code_lt p, rfl⟩⟩
+  | lit n =>
+    exact ⟨0x80, leBytes n 8, rfl,
+      Or.inr (Or.inl ⟨rfl, by simp [Instr.enc, leBytes]⟩)⟩
+  | str i =>
+    exact ⟨0x81, leBytes i 4, rfl,
+      Or.inr (Or.inr (Or.inr
+        ⟨⟨by decide, by decide, by decide, by decide, by decide⟩,
+          by simp [Instr.enc, leBytes]⟩))⟩
+  | pick n =>
+    exact ⟨0x82, leBytes n 4, rfl,
+      Or.inr (Or.inr (Or.inr
+        ⟨⟨by decide, by decide, by decide, by decide, by decide⟩,
+          by simp [Instr.enc, leBytes]⟩))⟩
+  | tor =>
+    exact ⟨0x83, [], rfl,
+      Or.inr (Or.inr (Or.inl ⟨Or.inl rfl, rfl⟩))⟩
+  | fromr =>
+    exact ⟨0x84, [], rfl,
+      Or.inr (Or.inr (Or.inl ⟨Or.inr (Or.inl rfl), rfl⟩))⟩
+  | rfetch =>
+    exact ⟨0x85, [], rfl,
+      Or.inr (Or.inr (Or.inl ⟨Or.inr (Or.inr (Or.inl rfl)), rfl⟩))⟩
+  | locget i =>
+    exact ⟨0x86, leBytes i 4, rfl,
+      Or.inr (Or.inr (Or.inr
+        ⟨⟨by decide, by decide, by decide, by decide, by decide⟩,
+          by simp [Instr.enc, leBytes]⟩))⟩
+  | locset i =>
+    exact ⟨0x87, leBytes i 4, rfl,
+      Or.inr (Or.inr (Or.inr
+        ⟨⟨by decide, by decide, by decide, by decide, by decide⟩,
+          by simp [Instr.enc, leBytes]⟩))⟩
+  | jmp t =>
+    exact ⟨0x88, leBytes t 4, rfl,
+      Or.inr (Or.inr (Or.inr
+        ⟨⟨by decide, by decide, by decide, by decide, by decide⟩,
+          by simp [Instr.enc, leBytes]⟩))⟩
+  | jz t =>
+    exact ⟨0x89, leBytes t 4, rfl,
+      Or.inr (Or.inr (Or.inr
+        ⟨⟨by decide, by decide, by decide, by decide, by decide⟩,
+          by simp [Instr.enc, leBytes]⟩))⟩
+  | jnz t =>
+    exact ⟨0x8a, leBytes t 4, rfl,
+      Or.inr (Or.inr (Or.inr
+        ⟨⟨by decide, by decide, by decide, by decide, by decide⟩,
+          by simp [Instr.enc, leBytes]⟩))⟩
+  | call w =>
+    exact ⟨0x8b, leBytes w 4, rfl,
+      Or.inr (Or.inr (Or.inr
+        ⟨⟨by decide, by decide, by decide, by decide, by decide⟩,
+          by simp [Instr.enc, leBytes]⟩))⟩
+  | ret =>
+    exact ⟨0x8c, [], rfl,
+      Or.inr (Or.inr (Or.inl ⟨Or.inr (Or.inr (Or.inr rfl)), rfl⟩))⟩
+
+/-- Code-loop head with instructions remaining: enter the body. -/
+theorem parser_code_head_pos {n : Nat} {s : X86Int.St}
+    (hrip : s.rip = base + 0x30b) (hr1 : s.reg 1 = some (n + 1))
+    (hnW : n + 1 < W) :
+    ∃ s' : X86Int.St,
+      run stage1Im 2 (Out.ok s) = Out.ok s' ∧
+      s'.rip = base + 0x315 ∧
+      (∀ i, s'.reg i = s.reg i) ∧
+      s'.mem = s.mem ∧ s'.regs.length = s.regs.length ∧ s'.k = s.k := by
+  have hc := stage1_parserCode
+  have e1 : X86Int.step stage1Im s =
+      .ok { s with fl := (aluF .and (n + 1) (n + 1)).2, rip := s.rip + 3 } :=
+    step_test (by rw [hrip]; exact hc.p30b) hr1 hr1
+  obtain ⟨t1, ht1⟩ : ∃ t : X86Int.St, t =
+      { s with fl := (aluF .and (n + 1) (n + 1)).2, rip := s.rip + 3 } :=
+    ⟨_, rfl⟩
+  have ht1rip : t1.rip = base + 0x30e := by
+    rw [ht1]; show s.rip + 3 = base + 0x30e; rw [hrip]
+  have ht1fl : X86Int.cond t1.fl 5 = some true := by
+    have hzf : t1.fl.zf = some false := by
+      rw [ht1]
+      show (aluF .and (n + 1) (n + 1)).2.zf = some false
+      rw [aluF_zf, aluF_and_fst_self]
+      simp [Nat.mod_eq_of_lt hnW]
+    have hcc := cond_cc5 hzf
+    simpa using hcc
+  have e2 : X86Int.step stage1Im t1 =
+      .ok { t1 with rip := base + 0x315 } := by
+    have h := step_jcc (im := stage1Im) (s := t1)
+      (by rw [ht1rip]; exact hc.p30e) ht1fl
+    simpa using h
+  obtain ⟨t2, ht2⟩ : ∃ t : X86Int.St, t =
+      { t1 with rip := base + 0x315 } := ⟨_, rfl⟩
+  have r1 : run stage1Im 1 (Out.ok s) = Out.ok t1 := by
+    rw [run_succ_ok stage1Im 0 s, e1, ← ht1, run_zero]
+  have r2 : run stage1Im 1 (Out.ok t1) = Out.ok t2 := by
+    rw [run_succ_ok stage1Im 0 t1, e2, ← ht2, run_zero]
+  have hrun : run stage1Im 2 (Out.ok s) = Out.ok t2 := by
+    rw [show (2 : Nat) = 1 + 1 by omega, run_add stage1Im 1 1, r1, r2]
+  refine ⟨t2, hrun, ?_, ?_, ?_, ?_, ?_⟩
+  · rw [ht2]
+  · intro i
+    rw [ht2]
+    show ({ t1 with rip := base + 0x315 }).reg i = s.reg i
+    rw [reg_with_rip, ht1]
+    show s.reg i = s.reg i
+    exact rfl
+  · rw [ht2]
+    show ({ t1 with rip := base + 0x315 }).mem = s.mem
+    rw [mem_with_rip, ht1]
+  · rw [ht2]
+    show ({ t1 with rip := base + 0x315 }).regs.length = s.regs.length
+    rw [len_with_rip, ht1]
+  · rw [ht2]
+    show ({ t1 with rip := base + 0x315 }).k = s.k
+    rw [ht1]
+
+/-- Code-loop head with no instructions remaining: jump to the
+word tail. -/
+theorem parser_code_head_zero {s : X86Int.St}
+    (hrip : s.rip = base + 0x30b) (hr1 : s.reg 1 = some 0) :
+    ∃ s' : X86Int.St,
+      run stage1Im 3 (Out.ok s) = Out.ok s' ∧
+      s'.rip = base + 0x3db ∧
+      (∀ i, s'.reg i = s.reg i) ∧
+      s'.mem = s.mem ∧ s'.regs.length = s.regs.length ∧ s'.k = s.k := by
+  have hc := stage1_parserCode
+  have e1 : X86Int.step stage1Im s =
+      .ok { s with fl := (aluF .and 0 0).2, rip := s.rip + 3 } :=
+    step_test (by rw [hrip]; exact hc.p30b) hr1 hr1
+  obtain ⟨t1, ht1⟩ : ∃ t : X86Int.St, t =
+      { s with fl := (aluF .and 0 0).2, rip := s.rip + 3 } := ⟨_, rfl⟩
+  have ht1rip : t1.rip = base + 0x30e := by
+    rw [ht1]; show s.rip + 3 = base + 0x30e; rw [hrip]
+  have ht1fl : X86Int.cond t1.fl 5 = some false := by
+    have hzf : t1.fl.zf = some true := by
+      rw [ht1]
+      show (aluF .and 0 0).2.zf = some true
+      rw [aluF_zf, aluF_and_fst_self]
+      simp
+    have hcc := cond_cc5 hzf
+    simpa using hcc
+  have e2 : X86Int.step stage1Im t1 =
+      .ok { t1 with rip := t1.rip + 2 } := by
+    have h := step_jcc (im := stage1Im) (s := t1)
+      (by rw [ht1rip]; exact hc.p30e) ht1fl
+    simpa using h
+  obtain ⟨t2, ht2⟩ : ∃ t : X86Int.St, t =
+      { t1 with rip := t1.rip + 2 } := ⟨_, rfl⟩
+  have ht2rip : t2.rip = base + 0x310 := by
+    rw [ht2]; show t1.rip + 2 = base + 0x310; rw [ht1rip]
+  obtain ⟨t3, hrun3, ht3rip, ht3fr, ht3mem, ht3len, ht3k⟩ :=
+    jmp_step hc.p310 ht2rip
+  have r1 : run stage1Im 1 (Out.ok s) = Out.ok t1 := by
+    rw [run_succ_ok stage1Im 0 s, e1, ← ht1, run_zero]
+  have r2 : run stage1Im 1 (Out.ok t1) = Out.ok t2 := by
+    rw [run_succ_ok stage1Im 0 t1, e2, ← ht2, run_zero]
+  have hrun : run stage1Im 3 (Out.ok s) = Out.ok t3 := by
+    rw [show (3 : Nat) = 1 + 2 by omega, run_add stage1Im 1 2, r1,
+      show (2 : Nat) = 1 + 1 by omega, run_add stage1Im 1 1, r2, hrun3]
+  refine ⟨t3, hrun, ht3rip, ?_, ?_, ?_, ?_⟩
+  · intro i
+    rw [ht3fr i, ht2]
+    show ({ t1 with rip := t1.rip + 2 }).reg i = s.reg i
+    rw [reg_with_rip, ht1]
+    show s.reg i = s.reg i
+    exact rfl
+  · rw [ht3mem, ht2]
+    show ({ t1 with rip := t1.rip + 2 }).mem = s.mem
+    rw [mem_with_rip, ht1]
+  · rw [ht3len, ht2]
+    show ({ t1 with rip := t1.rip + 2 }).regs.length = s.regs.length
+    rw [len_with_rip, ht1]
+  · rw [ht3k, ht2]
+    show ({ t1 with rip := t1.rip + 2 }).k = s.k
+    rw [ht1]
+
 /-- EXISTENCE TARGET: with room, some oracle makes the final
 theorem non-vacuous.  The witness is `stage1Oracle f A` for the
 `A` given by `Room`.  What remains is the loader-prefix invariant:
