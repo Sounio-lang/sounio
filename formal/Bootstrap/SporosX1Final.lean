@@ -17254,6 +17254,39 @@ theorem leVal_first4_mod {bs : List Nat} (h : bs.length = 8) :
     leVal (bs.take 4) % 2 ^ 32
   exact Nat.add_mul_mod_self_left _ _ _
 
+/-- An address below a region is outside it. -/
+theorem not_mem_region_of_lt {r : Region} {a : Nat}
+    (h : a < r.base) : ¬ (r.base ≤ a ∧ a < r.hi) :=
+  fun hcon => absurd hcon.1 (Nat.not_le.mpr h)
+
+/-- An address at or past a region's end is outside it. -/
+theorem not_mem_region_of_le {r : Region} {a : Nat}
+    (h : r.hi ≤ a) : ¬ (r.base ≤ a ∧ a < r.hi) :=
+  fun hcon => absurd hcon.2 (Nat.not_lt.mpr h)
+
+/-- The word-count field bytes at offset eight of a program
+encoding. -/
+theorem enc_drop8_take4 (pr : Prog) :
+    (pr.enc.drop 8).take 4 = leBytes pr.words.length 4 := by
+  have hf := enc_form pr
+  have d4 : pr.enc.drop 4 =
+      leBytes pr.main 4 ++ (leBytes pr.words.length 4 ++
+        (leBytes pr.data.length 4 ++
+          ((pr.data.flatMap (fun d => leBytes d.length 4 ++ d)) ++
+            (pr.words.flatMap Word.enc)))) := by
+    rw [hf, show (4 : Nat) =
+      ([0x53, 0x50, 0x52, 0x31] : List Nat).length from rfl]
+    exact List.drop_left
+  have d8 : pr.enc.drop 8 =
+      leBytes pr.words.length 4 ++ (leBytes pr.data.length 4 ++
+        ((pr.data.flatMap (fun d => leBytes d.length 4 ++ d)) ++
+          (pr.words.flatMap Word.enc))) := by
+    have e : pr.enc.drop 8 = (pr.enc.drop 4).drop 4 :=
+      (List.drop_drop (i := 4) (j := 4)).symm
+    rw [e, d4]; exact drop4_leBytes _ _
+  rw [d8]
+  exact take4_leBytes _ _
+
 /-- EXISTENCE TARGET: with room, some oracle makes the final
 theorem non-vacuous.  The witness is `stage1Oracle f A` for the
 `A` given by `Room`.  What remains is the loader-prefix invariant:
