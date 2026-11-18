@@ -16114,6 +16114,234 @@ theorem WordsLay_of_rdN : ∀ (wds : List Word) {m : Mem} {c : Nat},
       AnnLayB_of_rdN hann (fun x hx => hbwd.2.2.2.2.2.2 x hx),
       ih hrest (fun w hw => hb w (.tail _ hw))⟩
 
+/-- Buffer bytes consumed by a data segment list. -/
+def dataBytes : List (List Nat) → Nat
+  | [] => 0
+  | d :: ds => (4 + d.length) + dataBytes ds
+
+/-- Encoded data length matches `dataBytes`. -/
+theorem dataBytes_flat : ∀ (ds : List (List Nat)),
+    (ds.flatMap (fun d => leBytes d.length 4 ++ d)).length =
+      dataBytes ds
+  | [] => rfl
+  | d :: ds => by
+    show ((d :: ds).flatMap (fun d => leBytes d.length 4 ++
+        d)).length = (4 + d.length) + dataBytes ds
+    rw [List.flatMap_cons, List.length_append, List.length_append,
+      leBytes_length, dataBytes_flat ds]
+
+/-- `DataSeq` from one read of the whole data encoding. -/
+theorem DataSeq_of_rdN : ∀ (ds : List (List Nat)) {m : Mem}
+    {c : Nat},
+    m.rdN c (dataBytes ds) =
+      some (ds.flatMap (fun d => leBytes d.length 4 ++ d)) →
+    (∀ d ∈ ds, d.length < 256 ^ 4) →
+    DataSeq m c (ds.map List.length) (c + dataBytes ds) := by
+  intro ds
+  induction ds with
+  | nil =>
+    intro m c _ _
+    show DataSeq m c [] (c + 0)
+    rw [Nat.add_zero]
+    exact DataSeq.nil c
+  | cons d ds ih =>
+    intro m c h hb
+    have hdlen := hb d (.head _)
+    have hh : m.rdN c ((4 + d.length) + dataBytes ds) =
+        some ((leBytes d.length 4 ++ d) ++
+          ds.flatMap (fun d => leBytes d.length 4 ++ d)) := by
+      rwa [List.flatMap_cons] at h
+    have hd : rd32 m c = some d.length := by
+      have hok : 0 + 4 ≤ (4 + d.length) + dataBytes ds := by omega
+      have hs := rdN_slice hh hok
+      simp only [Nat.add_zero, List.drop_zero] at hs
+      show (m.rdN c 4).map leVal = some d.length
+      rw [hs, List.take_append_of_le_length (by
+          simp only [List.length_append, leBytes_length]; omega),
+        take4_leBytes]
+      simp [leVal_leBytes, Nat.mod_eq_of_lt hdlen]
+    have hrest : m.rdN (c + 4 + d.length) (dataBytes ds) =
+        some (ds.flatMap (fun d => leBytes d.length 4 ++ d)) := by
+      have hok : (4 + d.length) + dataBytes ds ≤
+          (4 + d.length) + dataBytes ds := Nat.le_refl _
+      have hs := rdN_slice hh hok
+      have hdrop : ((leBytes d.length 4 ++ d) ++
+            ds.flatMap (fun d => leBytes d.length 4 ++ d)).drop
+          (4 + d.length) =
+          ds.flatMap (fun d => leBytes d.length 4 ++ d) := by
+        rw [show (4 + d.length) =
+          (leBytes d.length 4 ++ d).length by
+            simp only [List.length_append, leBytes_length]]
+        exact List.drop_left
+      have e : (ds.flatMap (fun d => leBytes d.length 4 ++
+            d)).take (dataBytes ds) =
+          ds.flatMap (fun d => leBytes d.length 4 ++ d) := by
+        rw [← dataBytes_flat]
+        exact List.take_of_length_le (Nat.le_refl _)
+      have ec : c + (4 + d.length) = c + 4 + d.length := by omega
+      rw [ec] at hs
+      rw [hs, hdrop, e]
+    show DataSeq m c (d.length :: ds.map List.length)
+      (c + ((4 + d.length) + dataBytes ds))
+    rw [show c + ((4 + d.length) + dataBytes ds) =
+      (c + 4 + d.length) + dataBytes ds by omega]
+    exact DataSeq.cons hd
+      (ih hrest (fun x hx => hb x (.tail _ hx)))
+
+/-- A program encoding, right-associated. -/
+theorem enc_form (pr : Prog) : pr.enc =
+    [0x53, 0x50, 0x52, 0x31] ++ (leBytes pr.main 4 ++
+      (leBytes pr.words.length 4 ++ (leBytes pr.data.length 4 ++
+        ((pr.data.flatMap (fun d => leBytes d.length 4 ++ d)) ++
+          (pr.words.flatMap Word.enc))))) := by
+  unfold Prog.enc
+  simp only [List.append_assoc]
+
+/-- Encoded program length. -/
+theorem enc_length (pr : Prog) :
+    pr.enc.length = 16 + dataBytes pr.data + wordsBytes pr.words := by
+  rw [enc_form]
+  have hmagiclen : ([0x53, 0x50, 0x52, 0x31] : List Nat).length = 4 :=
+    rfl
+  simp only [List.length_append, leBytes_length, hmagiclen,
+    dataBytes_flat, wordsBytes_flatMap]
+  omega
+
+/-- Past the sixteen header bytes of a program encoding sit the
+data and words encodings. -/
+theorem enc_drop16 (pr : Prog) :
+    pr.enc.drop 16 =
+      (pr.data.flatMap (fun d => leBytes d.length 4 ++ d)) ++
+        (pr.words.flatMap Word.enc) := by
+  have hf := enc_form pr
+  have d4 : pr.enc.drop 4 =
+      leBytes pr.main 4 ++ (leBytes pr.words.length 4 ++
+        (leBytes pr.data.length 4 ++
+          ((pr.data.flatMap (fun d => leBytes d.length 4 ++ d)) ++
+            (pr.words.flatMap Word.enc)))) := by
+    rw [hf, show (4 : Nat) =
+      ([0x53, 0x50, 0x52, 0x31] : List Nat).length from rfl]
+    exact List.drop_left
+  have d8 : pr.enc.drop 8 =
+      leBytes pr.words.length 4 ++ (leBytes pr.data.length 4 ++
+        ((pr.data.flatMap (fun d => leBytes d.length 4 ++ d)) ++
+          (pr.words.flatMap Word.enc))) := by
+    have e : pr.enc.drop 8 = (pr.enc.drop 4).drop 4 :=
+      (List.drop_drop (i := 4) (j := 4)).symm
+    rw [e, d4]; exact drop4_leBytes _ _
+  have d12 : pr.enc.drop 12 =
+      leBytes pr.data.length 4 ++
+        ((pr.data.flatMap (fun d => leBytes d.length 4 ++ d)) ++
+          (pr.words.flatMap Word.enc)) := by
+    have e : pr.enc.drop 12 = (pr.enc.drop 8).drop 4 :=
+      (List.drop_drop (i := 4) (j := 8)).symm
+    rw [e, d8]; exact drop4_leBytes _ _
+  have e : pr.enc.drop 16 = (pr.enc.drop 12).drop 4 :=
+    (List.drop_drop (i := 4) (j := 12)).symm
+  rw [e, d12]
+  exact drop4_leBytes _ _
+
+/-- The header values of a program encoding, as the parser reads
+them from its first 20 bytes, plus the drop-4/8/12 forms the
+composition needs for the field loads. -/
+theorem enc_header_vals (pr : Prog) :
+    leVal ((pr.enc.take 20).take 4) % 2 ^ 32 = 827478099 ∧
+    leVal (((pr.enc.take 20).drop 4).take 4) % 2 ^ 32 =
+      pr.main % 2 ^ 32 ∧
+    leVal (((pr.enc.take 20).drop 8).take 4) % 2 ^ 32 =
+      pr.words.length % 2 ^ 32 ∧
+    leVal (((pr.enc.take 20).drop 12).take 4) % 2 ^ 32 =
+      pr.data.length % 2 ^ 32 := by
+  have hf := enc_form pr
+  have d4 : pr.enc.drop 4 =
+      leBytes pr.main 4 ++ (leBytes pr.words.length 4 ++
+        (leBytes pr.data.length 4 ++
+          ((pr.data.flatMap (fun d => leBytes d.length 4 ++ d)) ++
+            (pr.words.flatMap Word.enc)))) := by
+    rw [hf, show (4 : Nat) =
+      ([0x53, 0x50, 0x52, 0x31] : List Nat).length from rfl]
+    exact List.drop_left
+  have d8 : pr.enc.drop 8 =
+      leBytes pr.words.length 4 ++ (leBytes pr.data.length 4 ++
+        ((pr.data.flatMap (fun d => leBytes d.length 4 ++ d)) ++
+          (pr.words.flatMap Word.enc))) := by
+    have e : pr.enc.drop 8 = (pr.enc.drop 4).drop 4 :=
+      (List.drop_drop (i := 4) (j := 4)).symm
+    rw [e, d4]; exact drop4_leBytes _ _
+  have d12 : pr.enc.drop 12 =
+      leBytes pr.data.length 4 ++
+        ((pr.data.flatMap (fun d => leBytes d.length 4 ++ d)) ++
+          (pr.words.flatMap Word.enc)) := by
+    have e : pr.enc.drop 12 = (pr.enc.drop 8).drop 4 :=
+      (List.drop_drop (i := 4) (j := 8)).symm
+    rw [e, d8]; exact drop4_leBytes _ _
+  have tk : ∀ (o : Nat), o ≤ 16 →
+      ((pr.enc.take 20).drop o).take 4 = (pr.enc.drop o).take 4 := by
+    intro o ho
+    rw [List.drop_take, List.take_take, Nat.min_eq_left (by omega)]
+  refine ⟨?_, ?_, ?_, ?_⟩
+  · rw [List.take_take, Nat.min_eq_left (by decide : 4 ≤ 20), hf,
+      show (4 : Nat) = ([0x53, 0x50, 0x52, 0x31] : List Nat).length
+        from rfl, List.take_left]
+    decide
+  · rw [tk 4 (by decide), d4, take4_leBytes]
+    exact leVal4_32 _
+  · rw [tk 8 (by decide), d8, take4_leBytes]
+    exact leVal4_32 _
+  · rw [tk 12 (by decide), d12, take4_leBytes]
+    exact leVal4_32 _
+
+/-- The first twenty bytes of a program in memory. -/
+theorem enc_head20 {m : Mem} {B : Nat} {pr : Prog}
+    (h : m.rdN B pr.enc.length = some pr.enc)
+    (h20 : 20 ≤ pr.enc.length) :
+    m.rdN B 20 = some (pr.enc.take 20) := by
+  have hok : 0 + 20 ≤ pr.enc.length := h20
+  have hs := rdN_slice h hok
+  simpa using hs
+
+/-- The data section of a program in memory. -/
+theorem enc_data_slice {m : Mem} {B : Nat} {pr : Prog}
+    (h : m.rdN B pr.enc.length = some pr.enc) :
+    m.rdN (B + 16) (dataBytes pr.data) =
+      some (pr.data.flatMap (fun d => leBytes d.length 4 ++ d)) := by
+  have hok : 16 + dataBytes pr.data ≤ pr.enc.length := by
+    rw [enc_length]; omega
+  have hs := rdN_slice h hok
+  have e : (pr.data.flatMap (fun d => leBytes d.length 4 ++
+        d)).take (dataBytes pr.data) =
+      pr.data.flatMap (fun d => leBytes d.length 4 ++ d) := by
+    rw [← dataBytes_flat]
+    exact List.take_of_length_le (Nat.le_refl _)
+  rw [hs, enc_drop16,
+    List.take_append_of_le_length (by
+      have hcc := dataBytes_flat pr.data; omega), e]
+
+/-- The words section of a program in memory. -/
+theorem enc_words_slice {m : Mem} {B : Nat} {pr : Prog}
+    (h : m.rdN B pr.enc.length = some pr.enc) :
+    m.rdN (B + 16 + dataBytes pr.data) (wordsBytes pr.words) =
+      some (pr.words.flatMap Word.enc) := by
+  have hok : (16 + dataBytes pr.data) + wordsBytes pr.words ≤
+      pr.enc.length := by
+    rw [enc_length]; omega
+  have hs := rdN_slice h hok
+  have ec : B + (16 + dataBytes pr.data) =
+      B + 16 + dataBytes pr.data := by omega
+  rw [ec] at hs
+  have edrop : pr.enc.drop (16 + dataBytes pr.data) =
+      pr.words.flatMap Word.enc := by
+    have e1 : pr.enc.drop (16 + dataBytes pr.data) =
+        (pr.enc.drop 16).drop (dataBytes pr.data) :=
+      (List.drop_drop (i := dataBytes pr.data) (j := 16)).symm
+    rw [e1, enc_drop16, ← dataBytes_flat]
+    exact List.drop_left
+  have e : (pr.words.flatMap Word.enc).take (wordsBytes pr.words) =
+      pr.words.flatMap Word.enc := by
+    rw [← wordsBytes_flatMap]
+    exact List.take_of_length_le (Nat.le_refl _)
+  rw [hs, edrop, e]
+
 /-- EXISTENCE TARGET: with room, some oracle makes the final
 theorem non-vacuous.  The witness is `stage1Oracle f A` for the
 `A` given by `Room`.  What remains is the loader-prefix invariant:
