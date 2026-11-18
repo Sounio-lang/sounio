@@ -5102,6 +5102,7 @@ theorem loader_read_loop : ∀ rem : Nat,
       A % page = 0 → 0 < A → A < 2 ^ 63 →
       cap % page = 0 → 0 < cap →
       A + cap * 2 ^ g ≤ 2 ^ 47 → f.length < cap * 2 ^ g →
+      (g = 0 ∨ cap * 2 ^ (g - 1) ≤ f.length) →
       ∃ k s', run stage1Im k (Out.ok s) = Out.ok s' ∧
         s'.rip = base + 0x134 ∧
         s'.reg 3 = some A ∧ (∃ cap', s'.reg 12 = some cap') ∧
@@ -5109,7 +5110,7 @@ theorem loader_read_loop : ∀ rem : Nat,
         s'.reg 4 = some (sp0 + 24) ∧
         (∃ v, s'.reg 0 = some v) ∧ (∃ v, s'.reg 10 = some v) ∧
         (∃ v, s'.reg 8 = some v) ∧ (∃ v, s'.reg 9 = some v) ∧
-        (∃ g', s'.k.oracle = List.replicate g' (.at A) ++ tail) ∧
+        s'.k.oracle = tail ∧
         s'.k.fds = [some ⟨f, f.length⟩] ∧
         (∃ buf', s'.mem = [c1, c2, buf'] ∧ buf'.base = A ∧
           (∃ cap', buf'.hi = A + cap') ∧ buf'.rw = true) ∧
@@ -5121,7 +5122,7 @@ theorem loader_read_loop : ∀ rem : Nat,
   intro f A sp0 cap count g capB c1 c2 buf s tail hrem hrip hlen16 hr3
     hr12 hr13 hr14 hr4 hr0 hr10 hr8 hr9 hmem hbufbase hbufrw hbufhi
     hdisj1 hdisj2 hcapB hcontent hfd horacle htail hfB hcount hcountcap
-    hAmod hApos hA63 hcapmod hcappos hbound hflen
+    hAmod hApos hA63 hcapmod hcappos hbound hflen hgmin
   have hc := stage1_loaderCode
   have hcaple : cap ≤ cap * 2 ^ g := by
     cases g with
@@ -5184,8 +5185,20 @@ theorem loader_read_loop : ∀ rem : Nat,
       have htf : f.take f.length = f := by simp
       rw [← hlen_eq, htf] at hs1content
       exact hs1content
+    have hg0 : g = 0 := by
+      by_cases hg0 : g = 0
+      · exact hg0
+      · have hge : cap * 2 ^ (g - 1) ≤ f.length := by
+          rcases hgmin with h | h
+          · omega
+          · exact h
+        have h1 : cap ≤ cap * 2 ^ (g - 1) := by
+          calc cap = cap * 1 := by rw [Nat.mul_one]
+            _ ≤ cap * 2 ^ (g - 1) :=
+              Nat.mul_le_mul_left cap Nat.one_le_two_pow
+        omega
     refine ⟨11, s2, hrun, by rw [hs2], ?_, ⟨cap, ?_⟩, ?_, ?_, ?_,
-      ⟨n, ?_⟩, ?_, ?_, ?_, ⟨g, ?_⟩, ?_,
+      ⟨n, ?_⟩, ?_, ?_, ?_, ?_, ?_,
       ⟨buf1, ?_, hbuf1base, ⟨cap, hbuf1hi⟩, hbuf1rw⟩, hcontent2, ?_⟩
     · rw [hs2]
       show ({ s1 with rip := base + 0x134 }).reg 3 = some A
@@ -5221,9 +5234,9 @@ theorem loader_read_loop : ∀ rem : Nat,
       show ({ s1 with rip := base + 0x134 }).reg 9 = some v
       rw [reg_with_rip]; exact hv
     · rw [hs2]
-      show ({ s1 with rip := base + 0x134 }).k.oracle =
-        List.replicate g (.at A) ++ tail
-      rw [hs1oracle, horacle]
+      show ({ s1 with rip := base + 0x134 }).k.oracle = tail
+      rw [hs1oracle, horacle, hg0]
+      simp
     · rw [hs2]
       show ({ s1 with rip := base + 0x134 }).k.fds = [some ⟨f, f.length⟩]
       rw [hs1fds, hn0, Nat.add_zero, ← hlen_eq]
@@ -5260,7 +5273,7 @@ theorem loader_read_loop : ∀ rem : Nat,
           hs2r12 hs2r13 hs2r14 hs2r4 hs2r0 hs2r10 hs2r8 hs2r9 hs2mem'
           hbuf1base hbuf1rw hbuf1hi hdisj1 hdisj2 hcapB hs2content hs2fds
           hs2oracle htail hfB hnlen hltcap hAmod hApos hA63 hcapmod
-          hcappos hbound hflen
+          hcappos hbound hflen hgmin
       have hrun : run stage1Im (14 + k) (Out.ok s) = Out.ok s3 := by
         rw [show 14 + k = 10 + (4 + k) by omega, run_add stage1Im 10 _,
           hrun1, show 4 + k = 4 + k from rfl, run_add stage1Im 4 k,
@@ -5323,7 +5336,26 @@ theorem loader_read_loop : ∀ rem : Nat,
           hbuf3base hbuf3rw hbuf3hi hdisj1 hdisj2
           (by rwa [hcapgrow]) hs3content hs3fds
           hs3oracle htail hfB hnlen (by omega) hAmod hApos hA63
-          hcapmod2 (by omega) hbound3 hflen3
+          hcapmod2 (by omega) hbound3 hflen3 (by
+            by_cases hg'0 : g' = 0
+            · exact Or.inl hg'0
+            · refine Or.inr ?_
+              have hge : cap * 2 ^ (g - 1) ≤ f.length := by
+                rcases hgmin with h | h
+                · omega
+                · exact h
+              have e1 : g - 1 = g' := by omega
+              have e2 : (cap + cap) * 2 ^ (g' - 1) = cap * 2 ^ g' := by
+                obtain ⟨g'', hg''⟩ : ∃ m, g' = m + 1 := ⟨g' - 1, by omega⟩
+                rw [hg'']
+                simp only [Nat.add_sub_cancel]
+                calc (cap + cap) * 2 ^ g'' = cap * (2 * 2 ^ g'') := by
+                      rw [show cap + cap = cap * 2 by omega,
+                        Nat.mul_assoc]
+                  _ = cap * 2 ^ (g'' + 1) := by
+                      rw [Nat.pow_succ, Nat.mul_comm (2 ^ g'') 2]
+              rw [e2, ← e1]
+              exact hge)
       have hrun : run stage1Im (26 + k) (Out.ok s) = Out.ok s4 := by
         rw [show 26 + k = 10 + (16 + k) by omega, run_add stage1Im 10 _,
           hrun1, show 16 + k = 4 + (12 + k) by omega,
@@ -5331,6 +5363,33 @@ theorem loader_read_loop : ∀ rem : Nat,
           run_add stage1Im 12 k, hrun3, hrun4]
       exact ⟨26 + k, s4, hrun, hrip4, hr34, hcap4, hr134, hr144, hr44,
         hr04, hr104, hr84, hr94, hor4, hfd4, hmem4, hcontent4, hlen4⟩
+
+/-- The growth budget is exact: one fewer growth would not
+hold the file. -/
+theorem growths_min (L : Nat) :
+    stage1Growths L = 0 ∨
+      65536 * 2 ^ (stage1Growths L - 1) ≤ L := by
+  unfold stage1Growths
+  by_cases hL : L < 65536
+  · rw [if_pos hL]
+    exact Or.inl rfl
+  · rw [if_neg hL]
+    refine Or.inr ?_
+    have hq : 0 < L / 65536 := by
+      rw [Nat.div_pos_iff]
+      omega
+    have hle : 2 ^ (Nat.log2 (L / 65536)) ≤ L / 65536 := by
+      by_cases h : L / 65536 < 2 ^ (Nat.log2 (L / 65536))
+      · have h2 := (Nat.log2_lt (show L / 65536 ≠ 0 by omega)).2 h
+        omega
+      · omega
+    have h1 : 65536 * 2 ^ (Nat.log2 (L / 65536)) ≤
+        65536 * (L / 65536) := Nat.mul_le_mul_left 65536 hle
+    have h2 : 65536 * (L / 65536) ≤ L := Nat.mul_div_le L 65536
+    have e : Nat.log2 (L / 65536) + 1 - 1 = Nat.log2 (L / 65536) := by
+      omega
+    rw [e]
+    omega
 
 theorem growths_cap_gt (L : Nat) :
     L < 65536 * 2 ^ (stage1Growths L) := by
@@ -5474,10 +5533,9 @@ theorem loader_init_to_loaded {f path argv0 stdin : List Nat}
         some ((X86Env.initStack top [argv0, path]).2 + 24) ∧
       (∃ v, s'.reg 0 = some v) ∧ (∃ v, s'.reg 10 = some v) ∧
       (∃ v, s'.reg 8 = some v) ∧ (∃ v, s'.reg 9 = some v) ∧
-      (∃ g', s'.k.oracle =
-        List.replicate g' (.at A) ++
-          [.at (A + arenaFileBytes f),
-           .at (A + (arenaFileBytes f + arenaTableBytes f))]) ∧
+      s'.k.oracle =
+        [.at (A + arenaFileBytes f),
+         .at (A + (arenaFileBytes f + arenaTableBytes f))] ∧
       s'.k.fds = [some ⟨f, f.length⟩] ∧
       (∃ c1 c2 buf', s'.mem = [c1, c2, buf'] ∧
         c1.base = base ∧ c1.hi = base + stage1Code.length ∧
@@ -5679,6 +5737,7 @@ theorem loader_init_to_loaded {f path argv0 stdin : List Nat}
       (by simp [Mem.rdN]) hs2fds hs2oracle ⟨A + arenaFileBytes f, rfl⟩
       hfB (Nat.zero_le _) (by decide) hAmod hApos hA63 (by decide)
       (by decide) hboundL (growths_cap_gt f.length)
+      (growths_min f.length)
   have hrun : run stage1Im (21 + 6 + k)
       (Out.ok (stage1Init f path argv0 stdin (stage1Oracle f A)
         top)) = Out.ok s3 := by
