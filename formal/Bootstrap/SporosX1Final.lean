@@ -17165,6 +17165,95 @@ theorem parser_front_ok {f path argv0 : List Nat} {top A : Nat}
       exact run_reg_some_ne11 _ (by decide) hv hrunTot, hroom5, hs5len,
     (fun x k hk => by rw [hm2fr x k hk, hmem4])⟩
 
+/-- Transport a writable `find` hit across equal write shapes. -/
+theorem find_rw_of_wshape {m m' : Mem} {a : Nat}
+    (hsh : wshape m' = wshape m)
+    (h : ∃ i r, Mem.find m a 0 = some (i, r) ∧ r.rw = true) :
+    ∃ i r, Mem.find m' a 0 = some (i, r) ∧ r.rw = true := by
+  obtain ⟨i, r, hf, hrw⟩ := h
+  have hw := find_wshape m m' hsh a 0
+  obtain ⟨i', r', hf', -, hrw'⟩ :=
+    (by simpa [hf] using hw : ∃ i' r',
+      Mem.find m' a 0 = some (i', r') ∧ i' = i ∧ r'.rw = r.rw)
+  exact ⟨i', r', hf', by rw [hrw']; exact hrw⟩
+
+/-- `find` hits the second of three regions. -/
+theorem find_c2_of_three {c1 c2 buf : Region} {a : Nat}
+    (hdisj : c1.hi ≤ c2.base) (h1 : c2.base ≤ a) (h2 : a < c2.hi) :
+    Mem.find [c1, c2, buf] a 0 = some (1, c2) := by
+  have hg : Mem.find [c1, c2, buf] a 0 =
+      (if c1.base ≤ a ∧ a < c1.hi then some (0, c1)
+        else if c2.base ≤ a ∧ a < c2.hi then some (1, c2)
+          else Mem.find [buf] a 2) := rfl
+  rw [hg, if_neg (by omega), if_pos ⟨h1, h2⟩]
+
+/-- `StackRoom` from a write shape whose second region is a
+writable stack disjoint from the first. -/
+theorem stackRoom_of_wshape_c2 {s : X86Int.St}
+    {c1 c2 buf : Region} {extra : Mem} {sp k : Nat}
+    (hsh : wshape s.mem = wshape ([c1, c2, buf] ++ extra))
+    (hr4 : s.reg 4 = some sp) (hrw : c2.rw = true)
+    (hdisj : c1.hi ≤ c2.base)
+    (hlo : c2.base + 8 * k ≤ sp) (hhi : sp ≤ c2.hi)
+    (hspW : sp < W) :
+    StackRoom s k := by
+  intro sp' h4' i hi v
+  have hsp' : sp' = sp := by
+    rw [hr4] at h4'
+    exact (Option.some.inj h4').symm
+  rw [hsp']
+  have hmod : (sp + W - 8 * (i + 1)) % W = sp - 8 * (i + 1) := by
+    have hh : sp + W - 8 * (i + 1) = (sp - 8 * (i + 1)) + W := by
+      omega
+    rw [hh, Nat.add_mod_right, Nat.mod_eq_of_lt (by omega)]
+  rw [hmod]
+  refine wr64_isSome_of_forall_wr (fun j hj u => ?_)
+  have href : ∃ ii r,
+      Mem.find ([c1, c2, buf] ++ extra) (sp - 8 * (i + 1) + j) 0 =
+        some (ii, r) ∧ r.rw = true :=
+    ⟨1, c2, find_append_left [c1, c2, buf] extra _ 0
+      (find_c2_of_three hdisj (by omega) (by omega)), hrw⟩
+  obtain ⟨ii, r, hf, hrw2⟩ := find_rw_of_wshape hsh href
+  exact wr_isSome_iff.mpr ⟨ii, r, hf, hrw2⟩
+
+/-- The `ins` slot of the `j`-th word in a laid-out table. -/
+theorem TabLay_ins_at : ∀ {m : Mem} {B S tbl c : Nat}
+    {wds : List Word}, TabLay m B S tbl c wds →
+    ∀ (j : Nat) (hj : j < wds.length),
+      rd64 m (tbl + 64 * j) = some wds[j].ins := by
+  intro m B S tbl c wds h
+  induction wds generalizing tbl c with
+  | nil => intro j hj; simp at hj
+  | cons wd wds ih =>
+    intro j hj
+    obtain ⟨h0, -, -, -, -, -, -, -, -, -, hrest⟩ := h
+    cases j with
+    | zero =>
+      simpa using h0
+    | succ j =>
+      have hj' : j < wds.length := by
+        simp only [List.length_cons] at hj; omega
+      have h1 := ih hrest j hj'
+      have e : tbl + 64 * (j + 1) = tbl + 64 + 64 * j := by omega
+      rw [e, List.getElem_cons_succ]
+      exact h1
+
+/-- Only the first four bytes of an eight-byte little-endian
+value matter modulo `2^32`. -/
+theorem leVal_first4_mod {bs : List Nat} (h : bs.length = 8) :
+    leVal bs % 2 ^ 32 = leVal (bs.take 4) % 2 ^ 32 := by
+  have hsplit : bs = bs.take 4 ++ bs.drop 4 :=
+    (List.take_append_drop 4 bs).symm
+  have htlen : (bs.take 4).length = 4 := by
+    rw [List.length_take, h]; omega
+  have hcong : leVal bs % 2 ^ 32 =
+      leVal (bs.take 4 ++ bs.drop 4) % 2 ^ 32 :=
+    congrArg (fun x => leVal x % 2 ^ 32) hsplit
+  rw [hcong, leVal_append, htlen]
+  show (leVal (bs.take 4) + 256 ^ 4 * leVal (bs.drop 4)) % 2 ^ 32 =
+    leVal (bs.take 4) % 2 ^ 32
+  exact Nat.add_mul_mod_self_left _ _ _
+
 /-- EXISTENCE TARGET: with room, some oracle makes the final
 theorem non-vacuous.  The witness is `stage1Oracle f A` for the
 `A` given by `Room`.  What remains is the loader-prefix invariant:
