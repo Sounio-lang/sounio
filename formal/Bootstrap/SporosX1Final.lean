@@ -6649,6 +6649,271 @@ theorem rdc_body_fail {c e : Nat} {s : X86Int.St}
       show t3.k = s.k
       exact ht3k
 
+/-- A parser `call RDC` site, success case: from the call
+instruction to the instruction after it, with `rax` the `u32` at
+the cursor, the cursor advanced by four, `rsp` restored, and
+memory changed only in the two stack slots `[sp-16, sp)`. -/
+theorem call_rdc_ok {site c e sp : Nat} {s : X86Int.St}
+    (hsite : stage1Im site = some (.call aRDC, 5)) (hsiteW : site + 5 < W)
+    (hrip : s.rip = site) (hr6 : s.reg 6 = some c)
+    (hr15 : s.reg 15 = some e) (hce : c + 4 ≤ e)
+    (hcW : c < W) (heW : e < W)
+    (hrd : (s.mem.rdN c 4).isSome) (hroom : StackRoom s 2)
+    (hr4 : s.reg 4 = some sp) (hsp16 : 16 ≤ sp) (hspW : sp < W)
+    (hlen16 : s.regs.length = 16)
+    (hdisj : c + 4 ≤ sp - 16 ∨ sp ≤ c) :
+    ∃ n s', run stage1Im n (Out.ok s) = Out.ok s' ∧
+      s'.rip = site + 5 ∧
+      s'.reg 0 = (s.mem.rdN c 4).map leVal ∧
+      s'.reg 6 = some (c + 4) ∧ s'.reg 4 = some sp ∧
+      (∀ i, i ≠ 0 → i ≠ 2 → i ≠ 4 → i ≠ 6 → s'.reg i = s.reg i) ∧
+      s'.regs.length = 16 ∧
+      (∀ x k, x + k ≤ sp - 16 ∨ sp ≤ x → s'.mem.rdN x k = s.mem.rdN x k) ∧
+      s'.mem.rdN c 4 = s.mem.rdN c 4 ∧ s'.k = s.k := by
+  have hc := stage1_parserCode
+  have hsp8mod : (sp + W - 8) % W = sp - 8 := by
+    have h : sp + W - 8 = (sp - 8) + W := by omega
+    rw [h, Nat.add_mod_right, Nat.mod_eq_of_lt (by omega)]
+  have hsp16mod : (sp + W - 16) % W = sp - 16 := by
+    have h : sp + W - 16 = (sp - 16) + W := by omega
+    rw [h, Nat.add_mod_right, Nat.mod_eq_of_lt (by omega)]
+  have haddr2 : (sp - 8 + W - 8) % W = sp - 16 := by
+    have h : sp - 8 + W - 8 = (sp - 16) + W := by omega
+    rw [h, Nat.add_mod_right, Nat.mod_eq_of_lt (by omega)]
+  -- the call step
+  obtain ⟨m1, hm1raw⟩ : ∃ m, wr64 s.mem ((sp + W - 8 * (0 + 1)) % W)
+      (site + 5) = some m :=
+    Option.isSome_iff_exists.mp (hroom sp hr4 0 (by decide) (site + 5))
+  have hm1 : wr64 s.mem ((sp + W - 8) % W) (site + 5) = some m1 := hm1raw
+  have hm1wr : wr64 s.mem (sp - 8) (site + 5) = some m1 := by
+    rwa [hsp8mod] at hm1
+  have e1 : X86Int.step stage1Im s =
+      .ok { s.set 4 (some ((sp + W - 8) % W)) with mem := m1, rip := aRDC } :=
+    step_call (im := stage1Im) (s := s) (m := m1)
+      (by rw [hrip]; exact hsite) hr4 (by rw [hrip]; exact hm1)
+  obtain ⟨s1, hs1⟩ : ∃ t : X86Int.St, t =
+      { s.set 4 (some ((sp + W - 8) % W)) with mem := m1, rip := aRDC } :=
+    ⟨_, rfl⟩
+  have hs1rip : s1.rip = aRDC := by rw [hs1]
+  have hs1r6 : s1.reg 6 = some c := by
+    rw [hs1]
+    show (s.set 4 (some ((sp + W - 8) % W))).reg 6 = some c
+    rw [reg_set_other (by decide)]; exact hr6
+  have hs1r15 : s1.reg 15 = some e := by
+    rw [hs1]
+    show (s.set 4 (some ((sp + W - 8) % W))).reg 15 = some e
+    rw [reg_set_other (by decide)]; exact hr15
+  have hs1r4 : s1.reg 4 = some (sp - 8) := by
+    rw [hs1]
+    show (s.set 4 (some ((sp + W - 8) % W))).reg 4 = some (sp - 8)
+    rw [reg_set_self (by rw [hlen16]; decide), hsp8mod]
+  have hs1fr : ∀ i, i ≠ 4 → s1.reg i = s.reg i := by
+    intro i hi
+    rw [hs1]
+    show (s.set 4 (some ((sp + W - 8) % W))).reg i = s.reg i
+    rw [reg_set_other hi]
+  have hs1mem : s1.mem = m1 := by rw [hs1]
+  have hs1len : s1.regs.length = 16 := by
+    rw [hs1]
+    show (s.set 4 (some ((sp + W - 8) % W))).regs.length = 16
+    rw [len_set]; exact hlen16
+  have hs1k : s1.k = s.k := by
+    rw [hs1]
+    show (s.set 4 (some ((sp + W - 8) % W))).k = s.k
+    rfl
+  have hm1rd : m1.rdN c 4 = s.mem.rdN c 4 := by
+    apply rdN_wr64_other hm1wr
+    rcases hdisj with h | h
+    · exact Or.inr (by omega)
+    · exact Or.inl (by omega)
+  have hs1rd : (s1.mem.rdN c 4).isSome := by
+    rw [hs1mem, hm1rd]; exact hrd
+  have hs1room : StackRoom s1 1 := by
+    intro sp1 hsp1 i hi v
+    have hsp1eq : sp1 = sp - 8 := by
+      rw [hs1r4] at hsp1
+      exact (Option.some.inj hsp1).symm
+    have hi0 : i = 0 := by omega
+    subst hsp1eq
+    subst hi0
+    have hh : (wr64 s.mem (sp - 16) v).isSome := by
+      have h2 : (wr64 s.mem ((sp + W - 16) % W) v).isSome :=
+        hroom sp hr4 1 (by decide) v
+      rwa [hsp16mod] at h2
+    have h3 : (wr64 m1 (sp - 16) v).isSome :=
+      wr64_some_of_wr64 hm1wr hh
+    have h4 : (sp - 8 + W - 8 * (0 + 1)) % W = sp - 16 := haddr2
+    rw [hs1mem, h4]
+    exact h3
+  have hs1frame : ∀ m, wr64 s1.mem ((sp - 8 + W - 8) % W) (aRDC + 32) =
+      some m → m.rdN c 4 = s1.mem.rdN c 4 := by
+    intro m hm
+    rw [haddr2] at hm
+    rw [hs1mem] at hm ⊢
+    apply rdN_wr64_other hm
+    rcases hdisj with h | h
+    · exact Or.inr (by omega)
+    · exact Or.inl (by omega)
+  -- the body
+  obtain ⟨nb, s2, hrunb, hs2rip, hs2r0, hs2r6, hs2r4, hs2fr, hs2len,
+      hs2memfr, hs2rd, hs2k⟩ :=
+    rdc_body_ok hs1rip hs1r6 hs1r15 hce hcW heW hs1rd hs1room hs1r4
+      (by omega) (by omega) hs1len hs1frame
+  -- the ret at aRDC + 0x24
+  have hrd64 : rd64 s2.mem (sp - 8) = some (site + 5) := by
+    have h1 : s2.mem.rdN (sp - 8) 8 = s1.mem.rdN (sp - 8) 8 :=
+      hs2memfr (sp - 8) 8 (Or.inr (by omega))
+    show (s2.mem.rdN (sp - 8) 8).map leVal = some (site + 5)
+    rw [h1, hs1mem]
+    have h := rd64_wr64 hm1wr
+    rw [Nat.mod_eq_of_lt hsiteW] at h
+    exact h
+  have e2 : X86Int.step stage1Im s2 =
+      .ok { s2.set 4 (some ((sp - 8 + 8) % W)) with rip := site + 5 } :=
+    step_ret (im := stage1Im) (by rw [hs2rip]; exact hc.p295) hs2r4 hrd64
+  obtain ⟨s3, hs3⟩ : ∃ t : X86Int.St, t =
+      { s2.set 4 (some ((sp - 8 + 8) % W)) with rip := site + 5 } :=
+    ⟨_, rfl⟩
+  have hspret : (sp - 8 + 8) % W = sp := by
+    rw [show sp - 8 + 8 = sp by omega, Nat.mod_eq_of_lt hspW]
+  have r1 : run stage1Im 1 (Out.ok s) = Out.ok s1 := by
+    rw [run_succ_ok stage1Im 0 s, e1, ← hs1, run_zero]
+  have r2 : run stage1Im 1 (Out.ok s2) = Out.ok s3 := by
+    rw [run_succ_ok stage1Im 0 s2, e2, ← hs3, run_zero]
+  have hrun : run stage1Im (1 + nb + 1) (Out.ok s) = Out.ok s3 := by
+    rw [show 1 + nb + 1 = 1 + (nb + 1) by omega, run_add stage1Im 1 _,
+      r1, run_add stage1Im nb 1, hrunb, r2]
+  have hm1fr : ∀ x k, x + k ≤ sp - 8 ∨ sp ≤ x →
+      m1.rdN x k = s.mem.rdN x k := by
+    intro x k hdis
+    apply rdN_wr64_other hm1wr
+    rcases hdis with h | h
+    · exact Or.inr h
+    · exact Or.inl (by omega)
+  refine ⟨1 + nb + 1, s3, hrun, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  · rw [hs3]
+  · rw [hs3]
+    show (s2.set 4 (some ((sp - 8 + 8) % W))).reg 0 =
+      (s.mem.rdN c 4).map leVal
+    rw [reg_set_other (by decide)]
+    rw [hs1mem, hm1rd] at hs2r0
+    exact hs2r0
+  · rw [hs3]
+    show (s2.set 4 (some ((sp - 8 + 8) % W))).reg 6 = some (c + 4)
+    rw [reg_set_other (by decide)]; exact hs2r6
+  · rw [hs3]
+    show (s2.set 4 (some ((sp - 8 + 8) % W))).reg 4 = some sp
+    rw [reg_set_self (by rw [hs2len]; decide), hspret]
+  · intro i hi0 hi2 hi4 hi6
+    rw [hs3]
+    show (s2.set 4 (some ((sp - 8 + 8) % W))).reg i = s.reg i
+    rw [reg_set_other hi4]
+    rw [hs2fr i hi0 hi2 hi4 hi6]
+    exact hs1fr i hi4
+  · rw [hs3]
+    show (s2.set 4 (some ((sp - 8 + 8) % W))).regs.length = 16
+    rw [len_set]; exact hs2len
+  · intro x k hdis
+    rw [hs3]
+    show (s2.set 4 (some ((sp - 8 + 8) % W))).mem.rdN x k = s.mem.rdN x k
+    rw [mem_set]
+    have h1 : s2.mem.rdN x k = s1.mem.rdN x k := by
+      apply hs2memfr
+      rcases hdis with h | h
+      · exact Or.inl (by omega)
+      · exact Or.inr (by omega)
+    rw [h1, hs1mem]
+    apply hm1fr
+    rcases hdis with h | h
+    · exact Or.inl (by omega)
+    · exact Or.inr h
+  · rw [hs3]
+    show (s2.set 4 (some ((sp - 8 + 8) % W))).mem.rdN c 4 = s.mem.rdN c 4
+    rw [mem_set]
+    rw [hs1mem, hm1rd] at hs2rd
+    exact hs2rd
+  · rw [hs3]
+    show (s2.set 4 (some ((sp - 8 + 8) % W))).k = s.k
+    rw [← hs1k]; exact hs2k
+
+/-- A parser `call RDC` site, refusal case: fewer than four
+bytes left sends the run to `aFail1` with `rsp` still decremented
+by the call, and memory changed only in the return slot. -/
+theorem call_rdc_fail {site c e sp : Nat} {s : X86Int.St}
+    (hsite : stage1Im site = some (.call aRDC, 5))
+    (hrip : s.rip = site) (hr6 : s.reg 6 = some c)
+    (hr15 : s.reg 15 = some e) (hce : ¬ c + 4 ≤ e)
+    (hcW : c < W) (heW : e < W)
+    (hroom : StackRoom s 1)
+    (hr4 : s.reg 4 = some sp) (hsp8 : 8 ≤ sp) (hspW : sp < W)
+    (hlen16 : s.regs.length = 16) :
+    ∃ n s', run stage1Im n (Out.ok s) = Out.ok s' ∧
+      s'.rip = aFail1 ∧ s'.reg 4 = some (sp - 8) ∧
+      (∀ i, i ≠ 2 → i ≠ 4 → s'.reg i = s.reg i) ∧
+      (∀ x k, x + k ≤ sp - 8 ∨ sp ≤ x → s'.mem.rdN x k = s.mem.rdN x k) ∧
+      s'.regs.length = 16 ∧ s'.k = s.k := by
+  have hsp8mod : (sp + W - 8) % W = sp - 8 := by
+    have h : sp + W - 8 = (sp - 8) + W := by omega
+    rw [h, Nat.add_mod_right, Nat.mod_eq_of_lt (by omega)]
+  obtain ⟨m1, hm1raw⟩ : ∃ m, wr64 s.mem ((sp + W - 8 * (0 + 1)) % W)
+      (site + 5) = some m :=
+    Option.isSome_iff_exists.mp (hroom sp hr4 0 (by decide) (site + 5))
+  have hm1 : wr64 s.mem ((sp + W - 8) % W) (site + 5) = some m1 := hm1raw
+  have hm1wr : wr64 s.mem (sp - 8) (site + 5) = some m1 := by
+    rwa [hsp8mod] at hm1
+  have e1 : X86Int.step stage1Im s =
+      .ok { s.set 4 (some ((sp + W - 8) % W)) with mem := m1, rip := aRDC } :=
+    step_call (im := stage1Im) (s := s) (m := m1)
+      (by rw [hrip]; exact hsite) hr4 (by rw [hrip]; exact hm1)
+  obtain ⟨s1, hs1⟩ : ∃ t : X86Int.St, t =
+      { s.set 4 (some ((sp + W - 8) % W)) with mem := m1, rip := aRDC } :=
+    ⟨_, rfl⟩
+  have hs1rip : s1.rip = aRDC := by rw [hs1]
+  have hs1r6 : s1.reg 6 = some c := by
+    rw [hs1]
+    show (s.set 4 (some ((sp + W - 8) % W))).reg 6 = some c
+    rw [reg_set_other (by decide)]; exact hr6
+  have hs1r15 : s1.reg 15 = some e := by
+    rw [hs1]
+    show (s.set 4 (some ((sp + W - 8) % W))).reg 15 = some e
+    rw [reg_set_other (by decide)]; exact hr15
+  have hs1r4 : s1.reg 4 = some (sp - 8) := by
+    rw [hs1]
+    show (s.set 4 (some ((sp + W - 8) % W))).reg 4 = some (sp - 8)
+    rw [reg_set_self (by rw [hlen16]; decide), hsp8mod]
+  have hs1fr : ∀ i, i ≠ 4 → s1.reg i = s.reg i := by
+    intro i hi
+    rw [hs1]
+    show (s.set 4 (some ((sp + W - 8) % W))).reg i = s.reg i
+    rw [reg_set_other hi]
+  have hs1mem : s1.mem = m1 := by rw [hs1]
+  have hs1len : s1.regs.length = 16 := by
+    rw [hs1]
+    show (s.set 4 (some ((sp + W - 8) % W))).regs.length = 16
+    rw [len_set]; exact hlen16
+  have hs1k : s1.k = s.k := by
+    rw [hs1]
+    show (s.set 4 (some ((sp + W - 8) % W))).k = s.k
+    rfl
+  obtain ⟨nb, s2, hrunb, hs2rip, hs2fr, hs2mem, hs2len, hs2k⟩ :=
+    rdc_body_fail hs1rip hs1r6 hs1r15 hce hcW heW hs1len
+  have r1 : run stage1Im 1 (Out.ok s) = Out.ok s1 := by
+    rw [run_succ_ok stage1Im 0 s, e1, ← hs1, run_zero]
+  have hrun : run stage1Im (1 + nb) (Out.ok s) = Out.ok s2 := by
+    rw [run_add stage1Im 1 nb, r1, hrunb]
+  refine ⟨1 + nb, s2, hrun, hs2rip, ?_, ?_, ?_, hs2len, ?_⟩
+  · have h := hs2fr 4 (by decide)
+    rw [h]; exact hs1r4
+  · intro i hi2 hi4
+    rw [hs2fr i hi2]; exact hs1fr i hi4
+  · intro x k hdis
+    rw [hs2mem, hs1mem]
+    apply rdN_wr64_other hm1wr
+    rcases hdis with h | h
+    · exact Or.inr h
+    · exact Or.inl (by omega)
+  · rw [← hs1k]; exact hs2k
+
 /-- EXISTENCE TARGET: with room, some oracle makes the final
 theorem non-vacuous.  The witness is `stage1Oracle f A` for the
 `A` given by `Room`.  What remains is the loader-prefix invariant:
