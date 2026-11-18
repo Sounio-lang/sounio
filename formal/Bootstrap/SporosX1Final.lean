@@ -11253,6 +11253,276 @@ theorem field_store {site off slen c e sp p : Nat} {bs4 : List Nat}
     rw [hs2memfr x k hd2]
     exact hs1memfr x k hd1
 
+/-- The five header fields of one word: five `RDC` reads stored
+at entry slots 0, 8, 16, 24, 32, then the cursor (code pointer)
+stored at slot 40.  Ends at the code-loop setup. -/
+theorem parser_word_fields {c e sp p : Nat} {bs : List Nat}
+    {s : X86Int.St}
+    (hrip : s.rip = base + 0x2d6) (hr6 : s.reg 6 = some c)
+    (hr15 : s.reg 15 = some e) (hr7 : s.reg 7 = some p)
+    (hr4 : s.reg 4 = some sp)
+    (h20 : s.mem.rdN c 20 = some bs) (hce : c + 20 ≤ e)
+    (hcW : c < W) (heW : e < W) (hpW : p + 64 < W)
+    (hroom : StackRoom s 2) (hsp16 : 16 ≤ sp) (hspW : sp < W)
+    (hlen16 : s.regs.length = 16)
+    (hEB : p + 64 ≤ c ∨ e ≤ p)
+    (hSB : e ≤ sp - 16 ∨ sp ≤ c)
+    (hES : p + 64 ≤ sp - 16 ∨ sp ≤ p)
+    (hwr : ∀ (off v : Nat), off < 64 →
+      (wr64 s.mem (p + off) v).isSome) :
+    ∃ n s', run stage1Im n (Out.ok s) = Out.ok s' ∧
+      s'.rip = base + 0x306 ∧ s'.reg 6 = some (c + 20) ∧
+      s'.reg 4 = some sp ∧ s'.reg 7 = some p ∧
+      rd64 s'.mem p = some (leVal (bs.take 4) % W) ∧
+      rd64 s'.mem (p + 8) = some (leVal ((bs.drop 4).take 4) % W) ∧
+      rd64 s'.mem (p + 16) = some (leVal ((bs.drop 8).take 4) % W) ∧
+      rd64 s'.mem (p + 24) = some (leVal ((bs.drop 12).take 4) % W) ∧
+      rd64 s'.mem (p + 32) = some (leVal ((bs.drop 16).take 4) % W) ∧
+      rd64 s'.mem (p + 40) = some ((c + 20) % W) ∧
+      (∀ i, i ≠ 0 → i ≠ 2 → i ≠ 4 → i ≠ 6 → s'.reg i = s.reg i) ∧
+      s'.regs.length = 16 ∧ s'.k = s.k ∧
+      wshape s'.mem = wshape s.mem ∧ StackRoom s' 2 ∧
+      s'.mem.rdN c 20 = some bs ∧
+      (∀ (off v : Nat), off < 64 →
+        (wr64 s'.mem (p + off) v).isSome) := by
+  have hc := stage1_parserCode
+  have hbW : base + 0x400 < W := by decide
+  -- field slices of the 20 header bytes
+  have hf0 : s.mem.rdN c 4 = some (bs.take 4) := by
+    have h := rdN_slice h20 (show 0 + 4 ≤ 20 by decide)
+    simpa using h
+  -- slot 0
+  obtain ⟨n1, s1, hrun1, hs1rip, hs1r6, hs1r4, hs1slot, hs1fr, hs1len,
+      hs1k, hs1sh, hs1room, hs1rd, hs1memfr⟩ :=
+    field_store (site := base + 0x2d6) (off := 0) (slen := 3)
+      hc.p2d6 hc.p2db (Nat.lt_of_le_of_lt (by omega) hbW) hrip hr6 hr15 (by omega) hcW heW
+      hf0 hroom hr4 hsp16 hspW hlen16 (by omega) hr7 (by omega)
+      (by omega) (by
+        have h := hwr 0 (leVal (bs.take 4)) (by decide)
+        simpa using h)
+  have hs1rip' : s1.rip = base + 0x2de := hs1rip
+  have hs1r15 : s1.reg 15 = some e := by
+    rw [hs1fr 15 (by decide) (by decide) (by decide) (by decide)]
+    exact hr15
+  have hs1r7 : s1.reg 7 = some p := by
+    rw [hs1fr 7 (by decide) (by decide) (by decide) (by decide)]
+    exact hr7
+  have hs1h20 : s1.mem.rdN c 20 = some bs := by
+    rw [hs1memfr c 20 (by omega) (by omega)]; exact h20
+  have hs1wr : ∀ (off v : Nat), off < 64 →
+      (wr64 s1.mem (p + off) v).isSome := by
+    intro off v hoff
+    exact wrN_some_of_wshape _ s.mem s1.mem hs1sh _
+      (hwr off v hoff)
+  have hf1 : s1.mem.rdN (c + 4) 4 = some ((bs.drop 4).take 4) :=
+    rdN_slice hs1h20 (show 4 + 4 ≤ 20 by decide)
+  -- slot 8
+  obtain ⟨n2, s2, hrun2, hs2rip, hs2r6, hs2r4, hs2slot, hs2fr, hs2len,
+      hs2k, hs2sh, hs2room, hs2rd, hs2memfr⟩ :=
+    field_store (site := base + 0x2de) (off := 8) (slen := 4)
+      hc.p2de hc.p2e3 (Nat.lt_of_le_of_lt (by omega) hbW) hs1rip' hs1r6 hs1r15 (by omega)
+      (by omega) heW hf1 hs1room hs1r4 hsp16 hspW hs1len (by omega)
+      hs1r7 (by omega) (by omega) (hs1wr 8 _ (by decide))
+  have hs2rip' : s2.rip = base + 0x2e7 := hs2rip
+  have hs2r15 : s2.reg 15 = some e := by
+    rw [hs2fr 15 (by decide) (by decide) (by decide) (by decide)]
+    exact hs1r15
+  have hs2r7 : s2.reg 7 = some p := by
+    rw [hs2fr 7 (by decide) (by decide) (by decide) (by decide)]
+    exact hs1r7
+  have hs2h20 : s2.mem.rdN c 20 = some bs := by
+    rw [hs2memfr c 20 (by omega) (by omega)]; exact hs1h20
+  have hs2wr : ∀ (off v : Nat), off < 64 →
+      (wr64 s2.mem (p + off) v).isSome := by
+    intro off v hoff
+    exact wrN_some_of_wshape _ s1.mem s2.mem hs2sh _
+      (hs1wr off v hoff)
+  have hs2slot0 : rd64 s2.mem p = some (leVal (bs.take 4) % W) := by
+    have h : s2.mem.rdN p 8 = s1.mem.rdN p 8 :=
+      hs2memfr p 8 (by omega) (by omega)
+    unfold rd64
+    rw [h]
+    have h1 : rd64 s1.mem (p + 0) = some (leVal (bs.take 4) % W) :=
+      hs1slot
+    unfold rd64 at h1
+    simpa using h1
+  have hf2 : s2.mem.rdN (c + 8) 4 = some ((bs.drop 8).take 4) :=
+    rdN_slice hs2h20 (show 8 + 4 ≤ 20 by decide)
+  have hs2r6' : s2.reg 6 = some (c + 8) := by
+    have e1 : c + 4 + 4 = c + 8 := by omega
+    rwa [e1] at hs2r6
+  -- slot 16
+  obtain ⟨n3, s3, hrun3, hs3rip, hs3r6, hs3r4, hs3slot, hs3fr, hs3len,
+      hs3k, hs3sh, hs3room, hs3rd, hs3memfr⟩ :=
+    field_store (site := base + 0x2e7) (off := 16) (slen := 4)
+      hc.p2e7 hc.p2ec (Nat.lt_of_le_of_lt (by omega) hbW) hs2rip' hs2r6' hs2r15 (by omega)
+      (by omega) heW hf2 hs2room hs2r4 hsp16 hspW hs2len (by omega)
+      hs2r7 (by omega) (by omega) (hs2wr 16 _ (by decide))
+  have hs3rip' : s3.rip = base + 0x2f0 := hs3rip
+  have hs3r15 : s3.reg 15 = some e := by
+    rw [hs3fr 15 (by decide) (by decide) (by decide) (by decide)]
+    exact hs2r15
+  have hs3r7 : s3.reg 7 = some p := by
+    rw [hs3fr 7 (by decide) (by decide) (by decide) (by decide)]
+    exact hs2r7
+  have hs3h20 : s3.mem.rdN c 20 = some bs := by
+    rw [hs3memfr c 20 (by omega) (by omega)]; exact hs2h20
+  have hs3wr : ∀ (off v : Nat), off < 64 →
+      (wr64 s3.mem (p + off) v).isSome := by
+    intro off v hoff
+    exact wrN_some_of_wshape _ s2.mem s3.mem hs3sh _
+      (hs2wr off v hoff)
+  have hs3slot0 : rd64 s3.mem p = some (leVal (bs.take 4) % W) := by
+    unfold rd64
+    rw [hs3memfr p 8 (by omega) (by omega)]
+    have h := hs2slot0
+    unfold rd64 at h
+    exact h
+  have hs3slot8 : rd64 s3.mem (p + 8) =
+      some (leVal ((bs.drop 4).take 4) % W) := by
+    unfold rd64
+    rw [hs3memfr (p + 8) 8 (by omega) (by omega)]
+    have h := hs2slot
+    unfold rd64 at h
+    exact h
+  have hf3 : s3.mem.rdN (c + 12) 4 = some ((bs.drop 12).take 4) :=
+    rdN_slice hs3h20 (show 12 + 4 ≤ 20 by decide)
+  have hs3r6' : s3.reg 6 = some (c + 12) := by
+    have e1 : c + 8 + 4 = c + 12 := by omega
+    rwa [e1] at hs3r6
+  -- slot 24
+  obtain ⟨n4, s4, hrun4, hs4rip, hs4r6, hs4r4, hs4slot, hs4fr, hs4len,
+      hs4k, hs4sh, hs4room, hs4rd, hs4memfr⟩ :=
+    field_store (site := base + 0x2f0) (off := 24) (slen := 4)
+      hc.p2f0 hc.p2f5 (Nat.lt_of_le_of_lt (by omega) hbW) hs3rip' hs3r6' hs3r15 (by omega)
+      (by omega) heW hf3 hs3room hs3r4 hsp16 hspW hs3len (by omega)
+      hs3r7 (by omega) (by omega) (hs3wr 24 _ (by decide))
+  have hs4rip' : s4.rip = base + 0x2f9 := hs4rip
+  have hs4r15 : s4.reg 15 = some e := by
+    rw [hs4fr 15 (by decide) (by decide) (by decide) (by decide)]
+    exact hs3r15
+  have hs4r7 : s4.reg 7 = some p := by
+    rw [hs4fr 7 (by decide) (by decide) (by decide) (by decide)]
+    exact hs3r7
+  have hs4h20 : s4.mem.rdN c 20 = some bs := by
+    rw [hs4memfr c 20 (by omega) (by omega)]; exact hs3h20
+  have hs4wr : ∀ (off v : Nat), off < 64 →
+      (wr64 s4.mem (p + off) v).isSome := by
+    intro off v hoff
+    exact wrN_some_of_wshape _ s3.mem s4.mem hs4sh _
+      (hs3wr off v hoff)
+  have hs4slot0 : rd64 s4.mem p = some (leVal (bs.take 4) % W) := by
+    unfold rd64
+    rw [hs4memfr p 8 (by omega) (by omega)]
+    have h := hs3slot0
+    unfold rd64 at h
+    exact h
+  have hs4slot8 : rd64 s4.mem (p + 8) =
+      some (leVal ((bs.drop 4).take 4) % W) := by
+    unfold rd64
+    rw [hs4memfr (p + 8) 8 (by omega) (by omega)]
+    have h := hs3slot8
+    unfold rd64 at h
+    exact h
+  have hs4slot16 : rd64 s4.mem (p + 16) =
+      some (leVal ((bs.drop 8).take 4) % W) := by
+    unfold rd64
+    rw [hs4memfr (p + 16) 8 (by omega) (by omega)]
+    have h := hs3slot
+    unfold rd64 at h
+    exact h
+  have hf4 : s4.mem.rdN (c + 16) 4 = some ((bs.drop 16).take 4) :=
+    rdN_slice hs4h20 (show 16 + 4 ≤ 20 by decide)
+  have hs4r6' : s4.reg 6 = some (c + 16) := by
+    have e1 : c + 12 + 4 = c + 16 := by omega
+    rwa [e1] at hs4r6
+  -- slot 32
+  obtain ⟨n5, s5, hrun5, hs5rip, hs5r6, hs5r4, hs5slot, hs5fr, hs5len,
+      hs5k, hs5sh, hs5room, hs5rd, hs5memfr⟩ :=
+    field_store (site := base + 0x2f9) (off := 32) (slen := 4)
+      hc.p2f9 hc.p2fe (Nat.lt_of_le_of_lt (by omega) hbW) hs4rip' hs4r6' hs4r15 (by omega)
+      (by omega) heW hf4 hs4room hs4r4 hsp16 hspW hs4len (by omega)
+      hs4r7 (by omega) (by omega) (hs4wr 32 _ (by decide))
+  have hs5rip' : s5.rip = base + 0x302 := hs5rip
+  have hs5r7 : s5.reg 7 = some p := by
+    rw [hs5fr 7 (by decide) (by decide) (by decide) (by decide)]
+    exact hs4r7
+  have hs5h20 : s5.mem.rdN c 20 = some bs := by
+    rw [hs5memfr c 20 (by omega) (by omega)]; exact hs4h20
+  have hs5wr : ∀ (off v : Nat), off < 64 →
+      (wr64 s5.mem (p + off) v).isSome := by
+    intro off v hoff
+    exact wrN_some_of_wshape _ s4.mem s5.mem hs5sh _
+      (hs4wr off v hoff)
+  have hs5r6' : s5.reg 6 = some (c + 20) := by
+    have e1 : c + 16 + 4 = c + 20 := by omega
+    rwa [e1] at hs5r6
+  have slot_at : ∀ {off : Nat} {w : Nat},
+      rd64 s4.mem (p + off) = some w → off + 8 ≤ 32 →
+      rd64 s5.mem (p + off) = some w := by
+    intro off w h hoff
+    unfold rd64
+    rw [hs5memfr (p + off) 8 (by omega) (by omega)]
+    have h' := h
+    unfold rd64 at h'
+    exact h'
+  -- slot 40: store the cursor (code pointer)
+  obtain ⟨m6, hm6⟩ : ∃ m, wr64 s5.mem (p + 40) (c + 20) = some m :=
+    Option.isSome_iff_exists.mp (hs5wr 40 _ (by decide))
+  obtain ⟨s6, hrun6, hs6rip, hs6mem, hs6slot, hs6fr, hs6len, hs6k,
+      hs6sh, hs6memfr⟩ :=
+    store_slot (site := base + 0x302) (off := 40) (slen := 4)
+      (r := 6) hc.p302 hs5rip' hs5r7 hs5r6' (by omega) hm6
+  have hs6sh' : wshape s6.mem = wshape s.mem := by
+    rw [hs6sh, hs5sh, hs4sh, hs3sh, hs2sh, hs1sh]
+  have hrun : run stage1Im (n1 + n2 + n3 + n4 + n5 + 1) (Out.ok s) =
+      Out.ok s6 := by
+    rw [show n1 + n2 + n3 + n4 + n5 + 1 =
+        n1 + (n2 + (n3 + (n4 + (n5 + 1)))) by omega,
+      run_add stage1Im n1 _, hrun1, run_add stage1Im n2 _, hrun2,
+      run_add stage1Im n3 _, hrun3, run_add stage1Im n4 _, hrun4,
+      run_add stage1Im n5 1, hrun5, hrun6]
+  have slot6 : ∀ {off : Nat} {w : Nat},
+      rd64 s5.mem (p + off) = some w → off + 8 ≤ 40 →
+      rd64 s6.mem (p + off) = some w := by
+    intro off w h hoff
+    unfold rd64
+    rw [hs6memfr (p + off) 8 (by omega)]
+    have h' := h
+    unfold rd64 at h'
+    exact h'
+  have hslot0 : rd64 s6.mem p = some (leVal (bs.take 4) % W) := by
+    have h5 : rd64 s5.mem (p + 0) = some (leVal (bs.take 4) % W) :=
+      slot_at (off := 0) (by simpa using hs4slot0) (by decide)
+    have h6 := slot6 (off := 0) h5 (by decide)
+    simpa using h6
+  have hroom6 : StackRoom s6 2 := by
+    apply StackRoom_of_wshape hs6sh' _ hroom
+    rw [hs6fr 4, hs5r4, hr4]
+  refine ⟨n1 + n2 + n3 + n4 + n5 + 1, s6, hrun, hs6rip, ?_, ?_, ?_,
+    hslot0, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, hs6sh', hroom6, ?_, ?_⟩
+  · rw [hs6fr 6]; exact hs5r6'
+  · rw [hs6fr 4]; exact hs5r4
+  · rw [hs6fr 7]; exact hs5r7
+  · exact slot6 (slot_at hs4slot8 (by decide)) (by decide)
+  · exact slot6 (slot_at hs4slot16 (by decide)) (by decide)
+  · have h5 : rd64 s5.mem (p + 24) =
+        some (leVal ((bs.drop 12).take 4) % W) :=
+      slot_at hs4slot (by decide)
+    exact slot6 h5 (by decide)
+  · exact slot6 hs5slot (by decide)
+  · exact hs6slot
+  · intro i hi0 hi2 hi4 hi6
+    rw [hs6fr i, hs5fr i hi0 hi2 hi4 hi6, hs4fr i hi0 hi2 hi4 hi6,
+      hs3fr i hi0 hi2 hi4 hi6, hs2fr i hi0 hi2 hi4 hi6,
+      hs1fr i hi0 hi2 hi4 hi6]
+  · rw [hs6len]; exact hs5len
+  · rw [hs6k, hs5k, hs4k, hs3k, hs2k, hs1k]
+  · rw [hs6memfr c 20 (by omega)]; exact hs5h20
+  · intro off v hoff
+    exact wrN_some_of_wshape _ s.mem s6.mem hs6sh' _
+      (hwr off v hoff)
+
 /-- EXISTENCE TARGET: with room, some oracle makes the final
 theorem non-vacuous.  The witness is `stage1Oracle f A` for the
 `A` given by `Room`.  What remains is the loader-prefix invariant:
