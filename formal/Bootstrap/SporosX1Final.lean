@@ -11735,6 +11735,141 @@ theorem parser_code_bounds {c e op : Nat} {s : X86Int.St}
     rw [len_with_rip, len_set]; exact ht5len
   · rw [ht6]; exact ht5k
 
+/-- The length dispatch of the code loop, as a relation between
+an opcode byte and its instruction length.  Mirrors the compare
+chain at `0x330` and `decInstr` in `Sporos.Bytecode`. -/
+def OpLen (op l : Nat) : Prop :=
+  (op < 57 ∧ l = 1) ∨ (op = 128 ∧ l = 9) ∨
+  ((op = 131 ∨ op = 132 ∨ op = 133 ∨ op = 140) ∧ l = 1) ∨
+  ((129 ≤ op ∧ op ≤ 139 ∧ op ≠ 131 ∧ op ≠ 132 ∧ op ≠ 133) ∧ l = 5)
+
+/-- Length dispatch, primitive opcodes: `cmp 57` not above-or-equal
+falls to the length-1 assignment. -/
+theorem parser_disp_lt57 {op : Nat} {s : X86Int.St}
+    (hrip : s.rip = base + 0x330) (hr0 : s.reg 0 = some op)
+    (hop : op < 57) (hlen16 : s.regs.length = 16) :
+    ∃ s' : X86Int.St,
+      run stage1Im 4 (Out.ok s) = Out.ok s' ∧
+      s'.rip = base + 0x3b3 ∧ s'.reg 10 = some 1 ∧
+      s'.reg 0 = some op ∧
+      (∀ i, i ≠ 10 → s'.reg i = s.reg i) ∧
+      s'.mem = s.mem ∧ s'.regs.length = 16 ∧ s'.k = s.k := by
+  have hc := stage1_parserCode
+  have h57W : 57 % W = 57 := Nat.mod_eq_of_lt (by unfold W; decide)
+  have h1W : 1 % W = 1 := Nat.mod_eq_of_lt (by unfold W; decide)
+  -- 0x330: cmp rax, 57
+  have e1 : X86Int.step stage1Im s =
+      .ok { s with fl := (aluF .sub op (57 % W)).2, rip := s.rip + 4 } :=
+    step_cmpI (by rw [hrip]; exact hc.p330) hr0
+  obtain ⟨t1, ht1⟩ : ∃ t : X86Int.St, t =
+      { s with fl := (aluF .sub op (57 % W)).2, rip := s.rip + 4 } :=
+    ⟨_, rfl⟩
+  have ht1rip : t1.rip = base + 0x334 := by
+    rw [ht1]; show s.rip + 4 = base + 0x334; rw [hrip]
+  have ht1fl : X86Int.cond t1.fl 3 = some false := by
+    have hcf : t1.fl.cf = some true := by
+      rw [ht1]
+      show (aluF .sub op (57 % W)).2.cf = some true
+      rw [h57W]; exact aluF_sub_cf_true hop
+    have hcc := cond_cc3 hcf
+    simpa using hcc
+  have ht1fr : ∀ i, t1.reg i = s.reg i := by
+    intro i
+    rw [ht1]
+    show s.reg i = s.reg i
+    exact rfl
+  have ht1mem : t1.mem = s.mem := by rw [ht1]
+  have ht1len : t1.regs.length = 16 := by rw [ht1]; exact hlen16
+  have ht1k : t1.k = s.k := by rw [ht1]
+  -- 0x334: jae not taken
+  have e2 : X86Int.step stage1Im t1 =
+      .ok { t1 with rip := t1.rip + 2 } := by
+    have h := step_jcc (im := stage1Im) (s := t1)
+      (by rw [ht1rip]; exact hc.p334) ht1fl
+    simpa using h
+  obtain ⟨t2, ht2⟩ : ∃ t : X86Int.St, t =
+      { t1 with rip := t1.rip + 2 } := ⟨_, rfl⟩
+  have ht2rip : t2.rip = base + 0x336 := by
+    rw [ht2]; show t1.rip + 2 = base + 0x336; rw [ht1rip]
+  have ht2fr : ∀ i, t2.reg i = s.reg i := by
+    intro i
+    rw [ht2]
+    show ({ t1 with rip := t1.rip + 2 }).reg i = s.reg i
+    rw [reg_with_rip]; exact ht1fr i
+  have ht2mem : t2.mem = s.mem := by
+    rw [ht2]
+    show ({ t1 with rip := t1.rip + 2 }).mem = s.mem
+    rw [mem_with_rip]; exact ht1mem
+  have ht2len : t2.regs.length = 16 := by
+    rw [ht2]
+    show ({ t1 with rip := t1.rip + 2 }).regs.length = 16
+    rw [len_with_rip]; exact ht1len
+  have ht2k : t2.k = s.k := by rw [ht2]; exact ht1k
+  -- 0x336: jmp 0x3ad
+  have e3 : X86Int.step stage1Im t2 =
+      .ok { t2 with rip := base + 0x3ad } :=
+    step_jmp (by rw [ht2rip]; exact hc.p336)
+  obtain ⟨t3, ht3⟩ : ∃ t : X86Int.St, t =
+      { t2 with rip := base + 0x3ad } := ⟨_, rfl⟩
+  have ht3rip : t3.rip = base + 0x3ad := by rw [ht3]
+  have ht3fr : ∀ i, t3.reg i = s.reg i := by
+    intro i
+    rw [ht3]
+    show ({ t2 with rip := base + 0x3ad }).reg i = s.reg i
+    rw [reg_with_rip]; exact ht2fr i
+  have ht3mem : t3.mem = s.mem := by
+    rw [ht3]
+    show ({ t2 with rip := base + 0x3ad }).mem = s.mem
+    rw [mem_with_rip]; exact ht2mem
+  have ht3len : t3.regs.length = 16 := by
+    rw [ht3]
+    show ({ t2 with rip := base + 0x3ad }).regs.length = 16
+    rw [len_with_rip]; exact ht2len
+  have ht3k : t3.k = s.k := by rw [ht3]; exact ht2k
+  -- 0x3ad: mov r10d, 1
+  have e4 : X86Int.step stage1Im t3 =
+      .ok { t3.set 10 (some (1 % W)) with rip := t3.rip + 6 } :=
+    step_movI (by rw [ht3rip]; exact hc.p3ad)
+  obtain ⟨t4, ht4⟩ : ∃ t : X86Int.St, t =
+      { t3.set 10 (some (1 % W)) with rip := t3.rip + 6 } := ⟨_, rfl⟩
+  have r1 : run stage1Im 1 (Out.ok s) = Out.ok t1 := by
+    rw [run_succ_ok stage1Im 0 s, e1, ← ht1, run_zero]
+  have r2 : run stage1Im 1 (Out.ok t1) = Out.ok t2 := by
+    rw [run_succ_ok stage1Im 0 t1, e2, ← ht2, run_zero]
+  have r3 : run stage1Im 1 (Out.ok t2) = Out.ok t3 := by
+    rw [run_succ_ok stage1Im 0 t2, e3, ← ht3, run_zero]
+  have r4 : run stage1Im 1 (Out.ok t3) = Out.ok t4 := by
+    rw [run_succ_ok stage1Im 0 t3, e4, ← ht4, run_zero]
+  have hrun : run stage1Im 4 (Out.ok s) = Out.ok t4 := by
+    rw [show (4 : Nat) = 1 + 3 by omega, run_add stage1Im 1 3, r1,
+      show (3 : Nat) = 1 + 2 by omega, run_add stage1Im 1 2, r2,
+      show (2 : Nat) = 1 + 1 by omega, run_add stage1Im 1 1, r3, r4]
+  refine ⟨t4, hrun, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  · rw [ht4]; show t3.rip + 6 = base + 0x3b3; rw [ht3rip]
+  · rw [ht4]
+    show ({ t3.set 10 (some (1 % W)) with rip := t3.rip + 6 }).reg 10 =
+      some 1
+    rw [reg_with_rip, reg_set_self (by rw [ht3len]; decide), h1W]
+  · rw [ht4]
+    show ({ t3.set 10 (some (1 % W)) with rip := t3.rip + 6 }).reg 0 =
+      some op
+    rw [reg_with_rip, reg_set_other (by decide : (0 : Nat) ≠ 10),
+      ht3fr 0]; exact hr0
+  · intro i hi
+    rw [ht4]
+    show ({ t3.set 10 (some (1 % W)) with rip := t3.rip + 6 }).reg i =
+      s.reg i
+    rw [reg_with_rip, reg_set_other hi]; exact ht3fr i
+  · rw [ht4]
+    show ({ t3.set 10 (some (1 % W)) with rip := t3.rip + 6 }).mem =
+      s.mem
+    rw [mem_with_rip, mem_set]; exact ht3mem
+  · rw [ht4]
+    show ({ t3.set 10 (some (1 % W)) with
+      rip := t3.rip + 6 }).regs.length = 16
+    rw [len_with_rip, len_set]; exact ht3len
+  · rw [ht4]; exact ht3k
+
 /-- EXISTENCE TARGET: with room, some oracle makes the final
 theorem non-vacuous.  The witness is `stage1Oracle f A` for the
 `A` given by `Room`.  What remains is the loader-prefix invariant:
