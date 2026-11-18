@@ -1,4 +1,7 @@
 """Observation keys for one GPU. A hostname is not an identity when a node has two."""
+import json
+from pathlib import Path
+from paired_timing import VECTORS
 
 ADMITTED_SM = (75, 86, 121)
 # cudaDeviceProp.uuid is a 16-byte CUuuid. PyTorch 2.15 binds it as _CUuuid:
@@ -165,3 +168,114 @@ def device_identity(props, name, expect_sm):
             raise ValueError("GPU total memory is malformed")
         identity["total_memory_bytes"] = memory
     return identity
+
+
+def version_text(value):
+    """A torch version field. Unknown objects become text instead of breaking JSON."""
+    if value is None or isinstance(value, str):
+        return value
+    if isinstance(value, bool):
+        raise ValueError("version is malformed")
+    if isinstance(value, (int, float)):
+        return value
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value).split(b"\0", 1)[0].decode("utf-8", "replace")
+    item = getattr(value, "item", None)
+    if callable(item):
+        try:
+            reduced = item()
+        except Exception:
+            reduced = value
+        if reduced is not value:
+            return version_text(reduced)
+    return str(value)
+
+
+def _json_ready(value):
+    if value is None or isinstance(value, (str, bool)):
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):
+            raise ValueError("observation field is not JSON")
+        return value
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value).split(b"\0", 1)[0].decode("utf-8", "replace")
+    if isinstance(value, dict):
+        if any(not isinstance(key, str) for key in value):
+            raise ValueError("observation field is not JSON")
+        return {key: _json_ready(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_ready(item) for item in value]
+    item = getattr(value, "item", None)
+    if callable(item):
+        try:
+            reduced = item()
+        except Exception as exc:
+            raise ValueError("observation field is not JSON") from exc
+        if reduced is value:
+            raise ValueError("observation field is not JSON")
+        return _json_ready(reduced)
+    raise ValueError("observation field is not JSON")
+
+
+def observation_document(identity, **fields):
+    """Merge an identity into a record. A foreign key_scope is an error, not an overwrite."""
+    if not isinstance(identity, dict):
+        raise RuntimeError("observation identity is missing")
+    scope = identity.get("key_scope")
+    if scope != "per-gpu":
+        raise RuntimeError("observation key_scope must be per-gpu, got " + repr(scope))
+    clashes = [key for key in fields if key in identity and identity[key] != fields[key]]
+    if clashes:
+        raise RuntimeError("observation field clashes with identity: " + ", ".join(sorted(clashes)))
+    merged = dict(identity)
+    merged.update(fields)
+    return _json_ready(merged)
+
+
+def document_text(identity, **fields):
+    return json.dumps(observation_document(identity, **fields), indent=2, allow_nan=False) + "\n"
+
+
+def log_line(**fields):
+    return json.dumps(_json_ready(fields), allow_nan=False, separators=(", ", ": "))
+
+
+def probe_record_fields(job, node, cuda):
+    return {"job": job, "node": node, "cuda": version_text(cuda), "observation_only": True}
+
+
+def timing_record_fields(job, node, cuda, torch_version):
+    return {
+        "job": job,
+        "node": node,
+        "cuda": version_text(cuda),
+        "torch": version_text(torch_version),
+        "timing": "CUDA events around 32 captured kernel launches",
+        "vectors": VECTORS,
+        "layout_conversion_included": False,
+        "observation_only": True,
+    }
+
+
+def _write_document(path, identity, **fields):
+    document = observation_document(identity, **fields)
+    text = json.dumps(document, indent=2, allow_nan=False) + "\n"
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    return path
+
+
+def write_inventory(directory, identity, **fields):
+    return _write_document(Path(directory) / "inventory.json", identity, **fields)
+
+
+def write_marker(root, phase, identity, job):
+    document = observation_document(identity, phase=phase, job=job)
+    path = Path(root) / marker_name(phase, document["sm"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(document, indent=2, allow_nan=False) + "\n")
+    return path

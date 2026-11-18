@@ -205,9 +205,121 @@ class Keys(unittest.TestCase):
         observe = (HERE / "r740_observe.py").read_text()
         self.assertIn("observation_dir(", observe)
         self.assertIn("device_count() != 1", observe)
-        self.assertIn("key_scope", observe)
+        self.assertIn("write_inventory(", observe)
+        self.assertIn("append_timing_block(", observe)
+        self.assertNotIn("**identity", observe)
         self.assertNotIn("check_pair", observe)
         self.assertNotIn("timings-\"+socket.gethostname()", observe)
+
+    def test_inventory_and_timing_records_accept_a_cuuuid(self):
+        class CUuuid:
+            def __init__(self, blob, text):
+                self.bytes = blob
+                self.text = text
+
+            def __str__(self):
+                return self.text
+
+        class Integral:
+            def __init__(self, value):
+                self.value = value
+
+            def item(self):
+                return self.value
+
+        class Version:
+            def __str__(self):
+                return "13.2"
+
+        def props(raw, text, major, minor, name):
+            class Props:
+                uuid = CUuuid(raw, text)
+                pass
+            Props.major = Integral(major)
+            Props.minor = Integral(minor)
+            Props.name = name
+            Props.total_memory = Integral(8 * 1024 * 1024)
+            return Props()
+
+        a5000 = props(
+            bytes.fromhex("00112233445566778899aabbccddeeff"),
+            "<_CUuuid object>", 8, 6, b"NVIDIA RTX A5000\x00pad",
+        )
+        rtx8000 = props(
+            list(bytes.fromhex("aabbccddeeff00112233445566778899")),
+            "aabbccdd-eeff-0011-2233-445566778899", 7, 5, b"Quadro RTX 8000\x00",
+        )
+        identities = (
+            keys.device_identity(a5000, None, 86),
+            keys.device_identity(rtx8000, None, 75),
+        )
+        self.assertEqual(identities[0]["gpu_uuid"], "GPU-00112233-4455-6677-8899-aabbccddeeff")
+        self.assertEqual(identities[1]["gpu_uuid"], "GPU-aabbccdd-eeff-0011-2233-445566778899")
+        self.assertEqual([item["sm"] for item in identities], [86, 75])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for identity, major, minor in (
+                (identities[0], 8, 6), (identities[1], 7, 5),
+            ):
+                probed = root / keys.observation_dir("probe", identity["gpu_uuid"], major, minor)
+                timed = root / keys.observation_dir("timing", identity["gpu_uuid"], major, minor)
+                probed.mkdir()
+                timed.mkdir()
+                messy = dict(identity)
+                messy["total_memory_bytes"] = Integral(identity["total_memory_bytes"])
+                inventory = keys.write_inventory(
+                    probed, messy, **keys.probe_record_fields("24827", "r740", Version()),
+                )
+                text = inventory.read_text()
+                record = json.loads(text)
+                self.assertEqual(text.count('"key_scope"'), 1)
+                self.assertEqual(record["key_scope"], "per-gpu")
+                self.assertEqual(record["cuda"], "13.2")
+                self.assertEqual(record["total_memory_bytes"], identity["total_memory_bytes"])
+                self.assertEqual(record["gpu_uuid"], identity["gpu_uuid"])
+                self.assertEqual(record["observation_only"], True)
+                timing_inventory = keys.write_inventory(
+                    timed, identity,
+                    **keys.timing_record_fields("24828", "r740", "13.2", "2.15.0"),
+                )
+                timing_record = json.loads(timing_inventory.read_text())
+                self.assertEqual(timing_record["key_scope"], "per-gpu")
+                self.assertEqual(timing_record["sm"], identity["sm"])
+                self.assertEqual(timing_record["vectors"], paired_timing.VECTORS)
+                self.assertEqual(timing_record["layout_conversion_included"], False)
+                self.assertEqual(timing_record["torch"], "2.15.0")
+                trial = timed / "000.direct.tsv"
+                with trial.open("w") as log:
+                    for block in range(paired_timing.BLOCKS):
+                        paired_timing.append_timing_block(
+                            log, block, paired_timing.duration_ns(Integral(0.5)),
+                            paired_timing.duration_ns(1.0),
+                        )
+                lines = trial.read_text().splitlines()
+                self.assertEqual(len(lines), paired_timing.BLOCKS)
+                self.assertEqual(lines[0], "0 0 500000 1000000")
+                self.assertEqual(lines[1], "1 1 500000 1000000")
+                parsed = json.loads(keys.log_line(
+                    stage="PAIRED_TIMING_OBSERVED", sm=Integral(identity["sm"]),
+                    key_scope=identity["key_scope"], blocks=paired_timing.BLOCKS,
+                ))
+                self.assertEqual(parsed["sm"], identity["sm"])
+                self.assertEqual(parsed["key_scope"], "per-gpu")
+                marker = keys.write_marker(root, "probe", identity, "24827")
+                marker_record = json.loads(marker.read_text())
+                self.assertEqual(marker_record["key_scope"], "per-gpu")
+                self.assertEqual(marker_record["phase"], "probe")
+                self.assertEqual(marker_record["sm"], identity["sm"])
+            foreign = dict(identities[0])
+            foreign["key_scope"] = "host"
+            with self.assertRaises(RuntimeError) as caught:
+                keys.write_inventory(root / "rejected", foreign, **keys.probe_record_fields("1", "n", "13.2"))
+            self.assertIn("per-gpu", str(caught.exception))
+            self.assertFalse((root / "rejected" / "inventory.json").exists())
+            clash = dict(identities[0])
+            clash["job"] = "other"
+            with self.assertRaises(RuntimeError):
+                keys.write_inventory(root / "clash", clash, **keys.probe_record_fields("24827", "r740", "13.2"))
 
 
 class Plans(unittest.TestCase):

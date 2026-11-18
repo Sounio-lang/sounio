@@ -8,18 +8,13 @@ import socket
 from pathlib import Path
 import numpy as np
 import torch
-from gpu_device_key import device_identity, marker_name, observation_dir
+from gpu_device_key import (
+    device_identity, log_line, observation_dir, observation_document,
+    probe_record_fields, timing_record_fields, write_inventory, write_marker,
+)
 from gpu_probe import Driver, hex_frame
-from paired_timing import BLOCKS, GRAPH_WARMUP, REPLAYS, VECTORS, row
+from paired_timing import BLOCKS, GRAPH_WARMUP, REPLAYS, VECTORS, append_timing_block, duration_ns
 from run_inputs import data_root, require_probe_inputs, require_timing_inputs
-
-
-def version_text(value):
-    if value is None or isinstance(value, (str, int)):
-        return value
-    if isinstance(value, (bytes, bytearray)):
-        return bytes(value).split(b"\0", 1)[0].decode("utf-8", "replace")
-    return str(value)
 
 
 def visible_identity(expect_sm):
@@ -36,15 +31,8 @@ def visible_identity(expect_sm):
         raise RuntimeError(str(exc)) from exc
 
 
-def write_marker(root, phase, identity, job):
-    path = root / marker_name(phase, identity["sm"])
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({
-        "phase": phase, "job": job, "key_scope": "per-gpu", **identity,
-    }, indent=2) + "\n")
-
-
 def probe(root, identity, job):
+    identity = observation_document(identity)
     manifest, fixtures, _digest, _ptx = require_probe_inputs(root)
     rows = [json.loads(line) for line in fixtures.splitlines()]
     arrays = {key: np.array([r[key] for r in rows], dtype=np.int64) for key in ("a_bits", "b_bits", "output_bits")}
@@ -72,19 +60,18 @@ def probe(root, identity, job):
         bits = np.ascontiguousarray(raw).view(np.int64)
         destination = output / (candidate["id"] + ".hex")
         destination.write_text(hex_frame(bits))
-        print(json.dumps(dict(
+        print(log_line(
             stage="MATERIAL_OBSERVATION", candidate=candidate["id"],
             sha256=hashlib.sha256(destination.read_bytes()).hexdigest(),
             components=int(bits.size), gpu_uuid=identity["gpu_uuid_hex"],
             compute_capability=identity["compute_capability"], sm=identity["sm"],
-            key_scope="per-gpu", job=job)), flush=True)
+            key_scope=identity["key_scope"], job=job), flush=True)
         driver.check(driver.lib.cuModuleUnload(module))
-    (output / "inventory.json").write_text(json.dumps(dict(
-        job=job, node=socket.gethostname(), cuda=version_text(torch.version.cuda),
-        observation_only=True, key_scope="per-gpu", **identity), indent=2) + "\n")
+    write_inventory(output, identity, **probe_record_fields(job, socket.gethostname(), torch.version.cuda))
 
 
 def timing(root, identity, job):
+    identity = observation_document(identity)
     manifest, fixtures, _digest, _ptx = require_timing_inputs(root)
     if manifest["blocks"] != BLOCKS or manifest["vectors"] != VECTORS or manifest["replays"] != REPLAYS:
         raise ValueError("protocol")
@@ -137,20 +124,17 @@ def timing(root, identity, job):
                         graph.replay()
                         end.record()
                         end.synchronize()
-                        durations[label] = round(start.elapsed_time(end) * 1000000)
-                    log.write(row(block, durations["candidate"], durations["control"]))
-                    log.flush()
-                    os.fsync(log.fileno())
-            print(json.dumps(dict(
+                        durations[label] = duration_ns(start.elapsed_time(end))
+                    append_timing_block(log, block, durations["candidate"], durations["control"])
+            print(log_line(
                 stage="PAIRED_TIMING_OBSERVED", candidate=candidate["id"], control=control["id"],
                 gpu_uuid=identity["gpu_uuid_hex"], compute_capability=identity["compute_capability"],
-                sm=identity["sm"], key_scope="per-gpu", job=job,
-                sha256=hashlib.sha256(target.read_bytes()).hexdigest(), blocks=BLOCKS)), flush=True)
-    (output / "inventory.json").write_text(json.dumps(dict(
-        job=job, node=socket.gethostname(), cuda=version_text(torch.version.cuda), torch=str(torch.__version__),
-        timing="CUDA events around 32 captured kernel launches", vectors=VECTORS,
-        layout_conversion_included=False, observation_only=True, key_scope="per-gpu",
-        **identity), indent=2) + "\n")
+                sm=identity["sm"], key_scope=identity["key_scope"], job=job,
+                sha256=hashlib.sha256(target.read_bytes()).hexdigest(), blocks=BLOCKS), flush=True)
+    write_inventory(
+        output, identity,
+        **timing_record_fields(job, socket.gethostname(), torch.version.cuda, torch.__version__),
+    )
 
 
 def main():
