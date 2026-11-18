@@ -593,6 +593,18 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
     (`stdlib/str/lib.sio`'s `pub fn str_eq(a: &Str, b: &Str)` received two
     string handles). Both names are on the shadow list now, so the user fn is
     `<name>__user` and the operator keeps the runtime.
+  - **Native float builtins (2026-11-16).** `sqrt`, `exp`, `log`, `sin`,
+    `cos` and `pow` are not intercepted by the checker or the lowerer; the
+    native backend binds a call to whichever IR function of that name has a
+    body, and the merged IR is keyed by bare name. So a `fn sqrt` anywhere in
+    the module closure (56 private and 2 pub ones exist in the tree) became
+    THE sqrt of the program: modules that never imported it, and the
+    lowerer's own GUM / meet arithmetic, ran its body; `use pb::m::{fb}`
+    printed `sqrt(4.0) = 104` for a `pb::m` with `pub fn sqrt(x) { x + 100 }`,
+    and `use math::pure::{exp}` alone made a bare `sqrt` require Panic (E035).
+    The six names are on the shadow list now. Pin:
+    `scripts/ci/madaros_builtin_math_shadow_gate.sh`
+    (`tests/multimodule/builtin_math_shadow/`).
 - Pins: `tests/run-pass/user_fn_shadows_builtin_measure.sio`,
   `tests/run-pass/user_print_f64_does_not_capture_println.sio`,
   `tests/run-pass/user_str_eq_does_not_capture_string_eq.sio`,
