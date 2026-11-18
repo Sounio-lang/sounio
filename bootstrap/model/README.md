@@ -21,6 +21,7 @@ no library beyond core, and the evidence that it says what the CPU does.
 | `formal/Bootstrap/X86DecFuzzModel.lean`, `x86dec_fuzz_cpu.cpp`, `x86dec_fuzz_gate.sh` | Hamming-1/2 (`X86Dec.altsAt`) and byte-boundary differential fuzzer of `X86Dec.decode` and `X86Int.step` against the CPU. |
 | `formal/Bootstrap/TMRBoundCheck.lean`, `tmr_fault_inject.cpp`, `tmr_fault_gate.sh` | Physical 4-site machine-code fault injection of the 38-byte TMR voter against kernel-checked `TMRVoter` and `TMRExposure` bounds. |
 | `formal/Bootstrap/TMRMemExposure.lean` | Decision 50 exposure kernel in machine code over three page-disjoint memory arenas: majority repair, refusal on a three-way split, single-arena-fault SDC certificate, and the physical bound `3·r.mem²·Σexposure + ops·fuel·r.total` under `X86Int` faults. |
+| `formal/Bootstrap/TMRBurst.lean`, `TMRBurstCheck.lean`, `tmr_burst_straddle_cpu.cpp`, `tmr_burst_straddle_gate.sh` | 64-byte cache-line burst fault model: a single burst touches at most one of three arenas separated by 64 bytes or more, so it never corrupts the vote; three bursts keep the `3·q_burst²` bound. The gate checks this and guard-page instruction straddles against the CPU, with packed-arena and straddle negative controls. |
 
 ## What the model says
 
