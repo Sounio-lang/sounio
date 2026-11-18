@@ -17,7 +17,7 @@
 # seedB_refuses), and that they rest on no axiom beyond propext,
 # Classical.choice and Quot.sound. All six checks run in parallel. Then it builds
 # Bootstrap/SeedUniBridge.lean (the same four theorems and the fault-free `prun` runs,
-# lifted to X86Uni) and audits those six theorems the same way.
+# lifted to X86Uni, accepting and refusing) and audits those eight theorems the same way.
 #
 #   bootstrap/model/seed_proofs.sh [outdir]
 set -euo pipefail
@@ -80,10 +80,11 @@ if [ "$fail" = 0 ]; then
     '#print axioms X86Min.SeedB.seedB_correct' '#print axioms X86Min.SeedB.seedB_refuses' \
     '#print axioms X86Uni.seedA_uni_correct' '#print axioms X86Uni.seedA_uni_refuses' \
     '#print axioms X86Uni.seedB_uni_correct' '#print axioms X86Uni.seedB_uni_refuses' \
-    '#print axioms X86Uni.seedA_uni_prun' '#print axioms X86Uni.seedB_uni_prun' > "$work/axioms.lean"
+    '#print axioms X86Uni.seedA_uni_prun' '#print axioms X86Uni.seedB_uni_prun' \
+    '#print axioms X86Uni.seedA_uni_refuses_prun' '#print axioms X86Uni.seedB_uni_refuses_prun' > "$work/axioms.lean"
   "$lean" "$work/axioms.lean" > "$work/axioms.log" 2>&1 || fail=1
   cat "$work/axioms.log"
-  [ "$(grep -c "depends on axioms: \[propext, Classical.choice, Quot.sound\]" "$work/axioms.log")" = 10 ] \
+  [ "$(grep -c "depends on axioms: \[propext, Classical.choice, Quot.sound\]" "$work/axioms.log")" = 12 ] \
     || { echo "a theorem about every listing rests on another axiom"; fail=1; }
 fi
 
