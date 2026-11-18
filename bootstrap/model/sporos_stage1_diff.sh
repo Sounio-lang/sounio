@@ -12,8 +12,7 @@
 # bootstrap/roots/sporos/vectors (each also truncated and byte-flipped
 # here), the example programs, N sporos_gen programs, and two
 # corruptions of each generated program.
-# The RunHex variant is generated from RunHex.lean in a scratch dir: the
-# committed x86run feeds only a patterned file of a given size.
+# The committed x86run feeds the image the file itself with `@FILE`.
 set -euo pipefail
 N="${1:-20}"
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -23,19 +22,13 @@ HEX="$ROOT/bootstrap/roots/sporos/sporos-stage1.hex"
 REF="$ROOT/formal/.lake/build/bin/sporos"
 g++ -std=c++23 -O2 -o "$W/gen" "$ROOT/bootstrap/model/sporos_gen.cpp"
 "$ROOT/formal/.lake/build/bin/sporos-examples" "$W/ex" >/dev/null
-awk '{ if ($0 ~ /path :: size :: rest/) sub(/size/, "fpath");
-       if ($0 ~ /file of \{size\}/) sub(/\{size\}/, "{fpath}");
-       if ($0 ~ /startState code \(pattern/) { print "      let fb ← IO.FS.readBinFile fpath"; sub(/\(pattern size.toNat!\)/, "(fb.toList.map UInt8.toNat)") }
-       print }' \
-    "$ROOT/formal/Bootstrap/RunHex.lean" > "$W/RunHexFile.lean"
-grep -q readBinFile "$W/RunHexFile.lean" || { echo "RunHex.lean changed shape; update the awk above"; exit 1; }
-cd "$ROOT/formal"; export LEAN_PATH="$PWD/.lake/build/lib/lean"
+RUN="$ROOT/formal/.lake/build/bin/x86run"
 pass=0; fail=0
 check() {
   local f="$1" err want got
   err=$("$REF" "$f" </dev/null 2>&1 >/dev/null || true)
   case "$err" in *refused*|*"not a Sporos"*) want=1;; *) want=0;; esac
-  got=$(lean --run "$W/RunHexFile.lean" "$HEX" "$f" 2>&1 | sed -n '2p' || true)
+  got=$("$RUN" "$HEX" "@$f" 2>&1 | sed -n '2p' || true)
   case "$got" in
     "exit $want,"*) pass=$((pass+1));;
     *) fail=$((fail+1)); echo "MISMATCH $f want=exit $want got=$got";;
