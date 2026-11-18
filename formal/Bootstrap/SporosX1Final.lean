@@ -6123,7 +6123,9 @@ theorem rdc_body_ok {c e sp : Nat} {s : X86Int.St}
       (∀ i, i ≠ 0 → i ≠ 2 → i ≠ 4 → i ≠ 6 → s'.reg i = s.reg i) ∧
       s'.regs.length = 16 ∧
       (∀ x k, x + k ≤ sp - 8 ∨ sp ≤ x → s'.mem.rdN x k = s.mem.rdN x k) ∧
-      s'.mem.rdN c 4 = s.mem.rdN c 4 ∧ s'.k = s.k := by
+      s'.mem.rdN c 4 = s.mem.rdN c 4 ∧ s'.k = s.k ∧
+      (∃ m1, wr64 s.mem (sp - 8) (aRDC + 32) = some m1 ∧
+        s'.mem = m1) := by
   have hc := stage1_parserCode
   have haRDC : aRDC = base + 0x271 := rfl
   have hlen : ∀ i : Nat, i < 16 → i < s.regs.length := by
@@ -6508,7 +6510,7 @@ theorem rdc_body_ok {c e sp : Nat} {s : X86Int.St}
   have hm1wr : wr64 s.mem (sp - 8) (aRDC + 32) = some m1 := by
     have h := hm1
     rwa [ht6mem, hsp8mod] at h
-  refine ⟨10, t10, hrun, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  refine ⟨10, t10, hrun, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
   · rw [ht10]
     show t9.rip + 4 = aRDC + 0x24
     rw [ht9rip, haRDC]
@@ -6550,6 +6552,10 @@ theorem rdc_body_ok {c e sp : Nat} {s : X86Int.St}
       show (t8.set 4 (some ((sp - 8 + 8) % W))).k = s.k
       exact ht8k
     exact h9k
+  · refine ⟨m1, hm1wr, ?_⟩
+    rw [ht10]
+    show (t9.set 6 (some (aluF .add c (4 % W)).1)).mem = m1
+    rw [mem_set]; exact ht9mem
 
 /-- The `RDC` body at `aRDC`, refusal case: fewer than four
 bytes between cursor and end sends the run to `aFail1`, touching
@@ -6827,7 +6833,9 @@ theorem call_rdc_ok {site c e sp : Nat} {s : X86Int.St}
       (∀ i, i ≠ 0 → i ≠ 2 → i ≠ 4 → i ≠ 6 → s'.reg i = s.reg i) ∧
       s'.regs.length = 16 ∧
       (∀ x k, x + k ≤ sp - 16 ∨ sp ≤ x → s'.mem.rdN x k = s.mem.rdN x k) ∧
-      s'.mem.rdN c 4 = s.mem.rdN c 4 ∧ s'.k = s.k := by
+      s'.mem.rdN c 4 = s.mem.rdN c 4 ∧ s'.k = s.k ∧
+      (∃ m1 m2, wr64 s.mem (sp - 8) (site + 5) = some m1 ∧
+        wr64 m1 (sp - 8 - 8) (aRDC + 32) = some m2 ∧ s'.mem = m2) := by
   have hc := stage1_parserCode
   have hsp8mod : (sp + W - 8) % W = sp - 8 := by
     have h : sp + W - 8 = (sp - 8) + W := by omega
@@ -6914,7 +6922,7 @@ theorem call_rdc_ok {site c e sp : Nat} {s : X86Int.St}
     · exact Or.inl (by omega)
   -- the body
   obtain ⟨nb, s2, hrunb, hs2rip, hs2r0, hs2r6, hs2r4, hs2fr, hs2len,
-      hs2memfr, hs2rd, hs2k⟩ :=
+      hs2memfr, hs2rd, hs2k, hs2memwr⟩ :=
     rdc_body_ok hs1rip hs1r6 hs1r15 hce hcW heW hs1rd hs1room hs1r4
       (by omega) (by omega) hs1len hs1frame
   -- the ret at aRDC + 0x24
@@ -6948,7 +6956,7 @@ theorem call_rdc_ok {site c e sp : Nat} {s : X86Int.St}
     rcases hdis with h | h
     · exact Or.inr h
     · exact Or.inl (by omega)
-  refine ⟨1 + nb + 1, s3, hrun, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  refine ⟨1 + nb + 1, s3, hrun, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
   · rw [hs3]
   · rw [hs3]
     show (s2.set 4 (some ((sp - 8 + 8) % W))).reg 0 =
@@ -6993,6 +7001,12 @@ theorem call_rdc_ok {site c e sp : Nat} {s : X86Int.St}
   · rw [hs3]
     show (s2.set 4 (some ((sp - 8 + 8) % W))).k = s.k
     rw [← hs1k]; exact hs2k
+  · obtain ⟨m2', hm2', hs2mem'⟩ := hs2memwr
+    refine ⟨m1, m2', hm1wr, ?_, ?_⟩
+    · rwa [hs1mem] at hm2'
+    · rw [hs3]
+      show (s2.set 4 (some ((sp - 8 + 8) % W))).mem = m2'
+      rw [mem_set]; exact hs2mem'
 
 /-- A parser `call RDC` site, refusal case: fewer than four
 bytes left sends the run to `aFail1` with `rsp` still decremented
