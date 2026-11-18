@@ -59,6 +59,9 @@ lean_lib Bootstrap where
     .one `Bootstrap.TMR,
     .one `Bootstrap.X86Dec,
     .one `Bootstrap.TMRExposure,
+    .one `Bootstrap.TMRVoter,
+    .one `Bootstrap.X86Bridge,
+    .one `Bootstrap.TMRX86,
     .one `Bootstrap.TMRWord,
     .one `Bootstrap.X86Env,
     .one `Bootstrap.X86Int,
@@ -80,3 +83,15 @@ lean_exe «sporos-examples» where
 
 lean_exe x86run where
   root := `Bootstrap.RunHex
+
+lean_exe «x86int-diff» where
+  root := `Bootstrap.X86IntDiffModel
+
+lean_exe «x86env-diff» where
+  root := `Bootstrap.X86EnvDiffModel
+
+lean_exe «x86dec-fuzz» where
+  root := `Bootstrap.X86DecFuzzModel
+
+lean_exe «tmr-bound-check» where
+  root := `Bootstrap.TMRBoundCheck
