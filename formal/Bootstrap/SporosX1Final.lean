@@ -13284,6 +13284,126 @@ theorem parser_code_loop : ∀ (code : List Instr) {c e B S : Nat}
         omega
       rw [h1, h2]
 
+/-- Code-loop entry: push the outer word counter and load this
+word's instruction count from slot 24. -/
+theorem parser_code_enter {sp p m nc : Nat} {s : X86Int.St}
+    (hrip : s.rip = base + 0x306) (hr1 : s.reg 1 = some m)
+    (hr7 : s.reg 7 = some p) (hr4 : s.reg 4 = some sp)
+    (hroom : StackRoom s 1) (hsp8 : 8 ≤ sp) (hspW : sp < W)
+    (hpW : p + 24 < W)
+    (hslot : rd64 s.mem (p + 24) = some nc)
+    (hdisj : p + 24 + 8 ≤ sp - 8 ∨ sp ≤ p + 24)
+    (hlen16 : s.regs.length = 16) :
+    ∃ s' : X86Int.St,
+      run stage1Im 2 (Out.ok s) = Out.ok s' ∧
+      s'.rip = base + 0x30b ∧ s'.reg 1 = some nc ∧
+      s'.reg 4 = some (sp - 8) ∧
+      rd64 s'.mem (sp - 8) = some (m % W) ∧
+      rd64 s'.mem (p + 24) = some nc ∧
+      (∀ i, i ≠ 1 → i ≠ 4 → s'.reg i = s.reg i) ∧
+      s'.regs.length = 16 ∧ s'.k = s.k ∧
+      wshape s'.mem = wshape s.mem ∧
+      (∀ x k, x + k ≤ sp - 8 ∨ sp ≤ x →
+        s'.mem.rdN x k = s.mem.rdN x k) := by
+  have hc := stage1_parserCode
+  have hlen : ∀ i : Nat, i < 16 → i < s.regs.length := by
+    intro i hi; omega
+  have hsp8mod : (sp + W - 8) % W = sp - 8 := by
+    have h : sp + W - 8 = (sp - 8) + W := by omega
+    rw [h, Nat.add_mod_right, Nat.mod_eq_of_lt (by omega)]
+  obtain ⟨m1, hm1raw⟩ : ∃ mm, wr64 s.mem ((sp + W - 8 * (0 + 1)) % W) m =
+      some mm :=
+    Option.isSome_iff_exists.mp (hroom sp hr4 0 (by decide) m)
+  have hm1 : wr64 s.mem ((sp + W - 8) % W) m = some m1 := hm1raw
+  have hm1wr : wr64 s.mem (sp - 8) m = some m1 := by
+    rwa [hsp8mod] at hm1
+  -- 0x306: push rcx
+  have e1 : X86Int.step stage1Im s =
+      .ok { s.set 4 (some ((sp + W - 8) % W)) with
+        mem := m1, rip := s.rip + 1 } :=
+    step_push (by rw [hrip]; exact hc.p306) hr1 hr4 hm1
+  obtain ⟨t1, ht1⟩ : ∃ t : X86Int.St, t =
+      { s.set 4 (some ((sp + W - 8) % W)) with
+        mem := m1, rip := s.rip + 1 } := ⟨_, rfl⟩
+  have ht1rip : t1.rip = base + 0x307 := by
+    rw [ht1]; show s.rip + 1 = base + 0x307; rw [hrip]
+  have ht1r4 : t1.reg 4 = some (sp - 8) := by
+    rw [ht1]
+    show (s.set 4 (some ((sp + W - 8) % W))).reg 4 = some (sp - 8)
+    rw [reg_set_self (hlen 4 (by decide)), hsp8mod]
+  have ht1r7 : t1.reg 7 = some p := by
+    rw [ht1]
+    show (s.set 4 (some ((sp + W - 8) % W))).reg 7 = some p
+    rw [reg_set_other (by decide)]; exact hr7
+  have ht1fr : ∀ i, i ≠ 4 → t1.reg i = s.reg i := by
+    intro i hi
+    rw [ht1]
+    show (s.set 4 (some ((sp + W - 8) % W))).reg i = s.reg i
+    rw [reg_set_other hi]
+  have ht1mem : t1.mem = m1 := by rw [ht1]
+  have ht1len : t1.regs.length = 16 := by
+    rw [ht1]
+    show (s.set 4 (some ((sp + W - 8) % W))).regs.length = 16
+    rw [len_set]; exact hlen16
+  have ht1k : t1.k = s.k := by rw [ht1]; rfl
+  have ht1slot : rd64 t1.mem (p + 24) = some nc := by
+    rw [ht1mem]
+    have h := rd64_wr64_other hm1wr (m := s.mem) (x := p + 24) (by
+      rcases hdisj with h | h
+      · exact Or.inr h
+      · exact Or.inl (by omega))
+    rw [h]; exact hslot
+  -- 0x307: ld rcx, [rdi+24]
+  have hld : rd64 t1.mem (ea p 24) = some nc := by
+    unfold ea
+    rwa [Nat.mod_eq_of_lt hpW]
+  have e2 : X86Int.step stage1Im t1 =
+      .ok { t1.set 1 (some nc) with rip := t1.rip + 4 } :=
+    step_ld (by rw [ht1rip]; exact hc.p307) ht1r7 hld
+  obtain ⟨t2, ht2⟩ : ∃ t : X86Int.St, t =
+      { t1.set 1 (some nc) with rip := t1.rip + 4 } := ⟨_, rfl⟩
+  have r1 : run stage1Im 1 (Out.ok s) = Out.ok t1 := by
+    rw [run_succ_ok stage1Im 0 s, e1, ← ht1, run_zero]
+  have r2 : run stage1Im 1 (Out.ok t1) = Out.ok t2 := by
+    rw [run_succ_ok stage1Im 0 t1, e2, ← ht2, run_zero]
+  have hrun : run stage1Im 2 (Out.ok s) = Out.ok t2 := by
+    rw [show (2 : Nat) = 1 + 1 by omega, run_add stage1Im 1 1, r1, r2]
+  have ht2mem : t2.mem = m1 := by
+    rw [ht2]
+    show ({ t1.set 1 (some nc) with rip := t1.rip + 4 }).mem = m1
+    rw [mem_with_rip, mem_set]; exact ht1mem
+  refine ⟨t2, hrun, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  · rw [ht2]; show t1.rip + 4 = base + 0x30b; rw [ht1rip]
+  · rw [ht2]
+    show ({ t1.set 1 (some nc) with rip := t1.rip + 4 }).reg 1 = some nc
+    rw [reg_with_rip, reg_set_self (by rw [ht1len]; decide)]
+  · rw [ht2]
+    show ({ t1.set 1 (some nc) with rip := t1.rip + 4 }).reg 4 =
+      some (sp - 8)
+    rw [reg_with_rip, reg_set_other (by decide)]; exact ht1r4
+  · rw [ht2mem]; exact rd64_wr64 hm1wr
+  · rw [ht2mem]
+    have h := rd64_wr64_other hm1wr (m := s.mem) (x := p + 24) (by
+      rcases hdisj with h | h
+      · exact Or.inr h
+      · exact Or.inl (by omega))
+    rw [h]; exact hslot
+  · intro i hi1 hi4
+    rw [ht2]
+    show ({ t1.set 1 (some nc) with rip := t1.rip + 4 }).reg i = s.reg i
+    rw [reg_with_rip, reg_set_other hi1]; exact ht1fr i hi4
+  · rw [ht2]
+    show ({ t1.set 1 (some nc) with rip := t1.rip + 4 }).regs.length = 16
+    rw [len_with_rip, len_set]; exact ht1len
+  · rw [ht2]; exact ht1k
+  · rw [ht2mem]; exact wrN_wshape _ _ _ hm1wr
+  · intro x k hd
+    rw [ht2mem]
+    apply rdN_wr64_other hm1wr
+    rcases hd with h | h
+    · exact Or.inr h
+    · exact Or.inl (by omega)
+
 /-- EXISTENCE TARGET: with room, some oracle makes the final
 theorem non-vacuous.  The witness is `stage1Oracle f A` for the
 `A` given by `Room`.  What remains is the loader-prefix invariant:
