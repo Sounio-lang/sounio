@@ -3017,6 +3017,98 @@ theorem parser_loaded_to_scratch_classify {f : List Nat}
       hs3r4, hs3rd64, hs3rd, hs3or, hwsh3, hs3room, hs3len⟩
 
 
+/-- Parser setup and word-loop entry for a nonzero word
+count: from `base + 0x258` to the first word body at
+`base + 0x2d6`, with the saved cursor restored and the loop
+counter loaded. -/
+theorem parser_setup_to_word_body {sp1 c T B S e mn v : Nat}
+    {w1 w2 w3 w4 w5 w6 : Nat} {s : X86Int.St}
+    (hrip : s.rip = base + 0x258) (hr4 : s.reg 4 = some sp1)
+    (hr14 : s.reg 14 = some T) (hr3 : s.reg 3 = some B)
+    (hr15 : s.reg 15 = some e) (hr11 : s.reg 11 = some S)
+    (hr12 : s.reg 12 = some mn)
+    (hspW : sp1 + 56 < W) (hBW : B + 8 < W)
+    (hcur : rd64 s.mem sp1 = some c)
+    (hnw : rd64 s.mem (B + 8) = some v)
+    (hp1 : rd64 s.mem (sp1 + 8) = some w1)
+    (hp2 : rd64 s.mem (sp1 + 16) = some w2)
+    (hp3 : rd64 s.mem (sp1 + 24) = some w3)
+    (hp4 : rd64 s.mem (sp1 + 32) = some w4)
+    (hp5 : rd64 s.mem (sp1 + 40) = some w5)
+    (hp6 : rd64 s.mem (sp1 + 48) = some w6)
+    (hnw0 : v % 2 ^ 32 ≠ 0)
+    (hlen16 : s.regs.length = 16) :
+    ∃ s', run stage1Im 14 (Out.ok s) = Out.ok s' ∧
+      s'.rip = base + 0x2d6 ∧
+      s'.reg 1 = some (v % 2 ^ 32) ∧
+      s'.reg 6 = some c ∧ s'.reg 7 = some T ∧
+      s'.reg 13 = some (v % 2 ^ 32) ∧
+      s'.reg 4 = some (sp1 + 56) ∧
+      s'.reg 15 = some e ∧ s'.reg 3 = some B ∧
+      s'.reg 11 = some S ∧ s'.reg 12 = some mn ∧
+      s'.reg 14 = some T ∧
+      s'.mem = s.mem ∧ s'.regs.length = 16 ∧ s'.k = s.k := by
+  obtain ⟨s1, hrun1, hs1rip, hs1r6, hs1r7, hs1r13, hs1r4, _hs1r0,
+      hs1mem, hs1fr, hs1len, hs1k⟩ :=
+    parser_setup_ok hrip hr4 hr14 hr3 hspW hBW hcur hnw hp1 hp2
+      hp3 hp4 hp5 hp6 hlen16
+  have hs1r15 : s1.reg 15 = some e := by
+    rw [hs1fr 15 (by decide) (by decide) (by decide) (by decide)
+      (by decide)]
+    exact hr15
+  have hs1r3 : s1.reg 3 = some B := by
+    rw [hs1fr 3 (by decide) (by decide) (by decide) (by decide)
+      (by decide)]
+    exact hr3
+  have hs1r11 : s1.reg 11 = some S := by
+    rw [hs1fr 11 (by decide) (by decide) (by decide) (by decide)
+      (by decide)]
+    exact hr11
+  have hs1r12 : s1.reg 12 = some mn := by
+    rw [hs1fr 12 (by decide) (by decide) (by decide) (by decide)
+      (by decide)]
+    exact hr12
+  have hs1r14 : s1.reg 14 = some T := by
+    rw [hs1fr 14 (by decide) (by decide) (by decide) (by decide)
+      (by decide)]
+    exact hr14
+  obtain ⟨s2, hrun2, hs2rip, hs2r1, hs2fr, hs2mem, hs2len, hs2k⟩ :=
+    parser_words_init hs1rip hs1r13 hs1len
+  have hreg2 : ∀ {i : Nat} {x : Nat}, i ≠ 1 →
+      s1.reg i = some x → s2.reg i = some x := by
+    intro i x hi hx
+    rw [hs2fr i hi]
+    exact hx
+  have hnwW : v % 2 ^ 32 < W := by
+    have h := Nat.mod_lt v (show 0 < 2 ^ 32 by decide)
+    unfold W
+    omega
+  obtain ⟨s3, hrun3, hs3rip, hs3fr, hs3mem, hs3len, hs3k⟩ :=
+    parser_words_head_pos hs2rip hs2r1 hnw0 hnwW
+  have hreg3 : ∀ {i : Nat} {x : Nat},
+      s2.reg i = some x → s3.reg i = some x := by
+    intro i x hx
+    rw [hs3fr i]
+    exact hx
+  have hlen3 : s3.regs.length = 16 := by rw [hs3len]; exact hs2len
+  refine ⟨s3, ?_, hs3rip,
+    hreg3 hs2r1,
+    hreg3 (hreg2 (by decide) hs1r6),
+    hreg3 (hreg2 (by decide) hs1r7),
+    hreg3 (hreg2 (by decide) hs1r13),
+    hreg3 (hreg2 (by decide) hs1r4),
+    hreg3 (hreg2 (by decide) hs1r15),
+    hreg3 (hreg2 (by decide) hs1r3),
+    hreg3 (hreg2 (by decide) hs1r11),
+    hreg3 (hreg2 (by decide) hs1r12),
+    hreg3 (hreg2 (by decide) hs1r14),
+    (hs3mem.trans hs2mem).trans hs1mem, hlen3,
+    (hs3k.trans hs2k).trans hs1k⟩
+  rw [show (14 : Nat) = (11 + 1) + 2 by omega,
+    run_add stage1Im (11 + 1) 2,
+    show run stage1Im (11 + 1) (Out.ok s) = Out.ok s2 from by
+      rw [run_add stage1Im 11 1, hrun1, hrun2], hrun3]
+
 set_option maxHeartbeats 0 in
 /-- `mmap` with a refusing oracle returns `-ENOMEM`, memory
 unchanged, and consumes the oracle entry. -/
