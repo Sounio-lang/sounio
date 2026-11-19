@@ -7591,7 +7591,7 @@ theorem parser_word_step_classify {B e S sp p c r : Nat}
       CodeSeq s'.mem (c + 20) wd.code ∧
       LenLay s'.mem B S (c + 20) wd.code ∧
       AnnLayB s'.mem (c + 20 + codeBytes wd.code) wd.ann ∧
-      (∀ x ∈ wd.ann, AnnBound x) ∧
+      WordBound wd ∧
       (∃ abs, s.mem.rdN (c + 20 + codeBytes wd.code)
           (12 * wd.ann.length) = some abs ∧
         decMany decAnn wd.ann.length abs = some (wd.ann, [])) ∧
@@ -7818,12 +7818,32 @@ theorem parser_word_step_classify {B e S sp p c r : Nat}
           ann :=
         AnnLayB_of_frame hannlay4 (fun x k _ _ =>
           hs5memfr x k (by omega))
+      have hfb : ∀ a : Nat, a ≤ 16 →
+          leVal ((bs.drop a).take 4) % W < 256 ^ 4 := by
+        intro a ha
+        have hl : ((bs.drop a).take 4).length = 4 := by
+          rw [List.length_take, List.length_drop, hbslen]
+          omega
+        have hb := leVal_bound (bs := (bs.drop a).take 4)
+          (fun b hb => hb20 b
+            (List.mem_of_mem_drop (List.mem_of_mem_take hb)))
+        rw [hl] at hb
+        have hm : leVal ((bs.drop a).take 4) % W =
+            leVal ((bs.drop a).take 4) :=
+          Nat.mod_eq_of_lt (by unfold W; omega)
+        rwa [hm]
+      have hwbound : WordBound (⟨leVal (bs.take 4) % W,
+          leVal ((bs.drop 4).take 4) % W,
+          leVal ((bs.drop 8).take 4) % W, code, ann⟩ : Word) :=
+        ⟨by simpa using hfb 0 (by decide), hfb 4 (by decide),
+          hfb 8 (by decide), by rw [hcodelen]; exact hfb 12 (by decide),
+          by rw [hannlen]; exact hfb 16 (by decide), hs3b, hannb⟩
       refine Or.inl ⟨⟨leVal (bs.take 4) % W,
           leVal ((bs.drop 4).take 4) % W,
           leVal ((bs.drop 8).take 4) % W, code, ann⟩,
         nf + 2 + k3 + 3 + 18, s5, hrun, hs5rip, hs5r1, ?_, hs5r7,
         ?_, ⟨bs, h20, rfl, rfl, rfl, hcodelen.symm, hannlen.symm⟩,
-        ?_, ?_, ?_, ?_, ?_, ?_, ?_, hs5s48, ?_, ?_, hannlay5, hannb,
+        ?_, ?_, ?_, ?_, ?_, ?_, ?_, hs5s48, ?_, ?_, hannlay5, hwbound,
         ⟨abs, by rwa [hannlen], by rwa [hannlen]⟩, ?_, hs5len, ?_,
         hs5sh', hroom5, ?_⟩
       · show s5.reg 6 = some (c + 20 + codeBytes code +
@@ -7949,7 +7969,7 @@ theorem parser_words_loop_classify : ∀ (n : Nat)
       s'.reg 4 = some sp ∧
       c + wordsBytes wds ≤ e ∧
       WordsLay s.mem c wds ∧ TabLay s'.mem B S p c wds ∧
-      (∀ wd ∈ wds, ∀ x ∈ wd.ann, AnnBound x) ∧
+      (∀ wd ∈ wds, WordBound wd) ∧
       (∀ i, i ≠ 0 → i ≠ 1 → i ≠ 2 → i ≠ 4 → i ≠ 6 → i ≠ 7 →
         i ≠ 10 → s'.reg i = s.reg i) ∧
       s'.regs.length = 16 ∧ s'.k = s.k ∧
@@ -8148,10 +8168,10 @@ theorem parser_words_loop_classify : ∀ (n : Nat)
           have h := hs3r7
           rwa [show p + 64 + 64 * r = p + 64 * (r + 1) by omega]
             at h
-        · intro wd' hwd x hx
+        · intro wd' hwd
           rcases List.mem_cons.mp hwd with rfl | hwd
-          · exact hs2annb x hx
-          · exact hs3annb wd' hwd x hx
+          · exact hs2annb
+          · exact hs3annb wd' hwd
         · intro i hi0 hi1 hi2 hi4 hi6 hi7 hi10
           rw [hs3fr i hi0 hi1 hi2 hi4 hi6 hi7 hi10,
             hs2fr i hi0 hi1 hi2 hi4 hi6 hi7 hi10, hs1fr i]
@@ -8349,7 +8369,7 @@ theorem parser_loaded_to_checker_classify {f : List Nat}
       TabLay s'.mem A
         (A + (arenaFileBytes f + arenaTableBytes f))
         (A + arenaFileBytes f) c wds ∧
-      (∀ wd ∈ wds, ∀ x ∈ wd.ann, AnnBound x) ∧
+      (∀ wd ∈ wds, WordBound wd) ∧
       s'.mem.rdN A f.length = some f ∧
       s'.k.oracle = [] ∧ RegsOk s' ∧ StackRoom s' 6 ∧
       wshape s'.mem = wshape ([c1, c2, buf] ++
