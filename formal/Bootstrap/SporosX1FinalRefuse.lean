@@ -7298,6 +7298,231 @@ theorem exists_ann_of_rdN : ∀ (na : Nat) {m : Mem} {p : Nat}
 
 
 set_option maxHeartbeats 0 in
+/-- The five word header fields, classified: either all twenty
+bytes fit and the fields are stored exactly as in
+`parser_word_fields`, or the first short field's `call RDC`
+reaches `aFail1` with `rsp` decremented by the call. -/
+theorem parser_word_fields_classify {c e sp p : Nat}
+    {s : X86Int.St}
+    (hrip : s.rip = base + 0x2d6) (hr6 : s.reg 6 = some c)
+    (hr15 : s.reg 15 = some e) (hr7 : s.reg 7 = some p)
+    (hr4 : s.reg 4 = some sp)
+    (hcW : c < W) (heW : e < W) (hpW : p + 64 < W)
+    (hroom : StackRoom s 2) (hsp16 : 16 ≤ sp) (hspW : sp < W)
+    (hlen16 : s.regs.length = 16)
+    (hEB : p + 64 ≤ c ∨ e ≤ p)
+    (hSB : e ≤ sp - 16 ∨ sp ≤ c)
+    (hES : p + 64 ≤ sp - 16 ∨ sp ≤ p)
+    (hwr : ∀ (off v : Nat), off + 8 ≤ 64 →
+      (wr64 s.mem (p + off) v).isSome)
+    (hrdN : ∀ a l, c ≤ a → l ≤ e - a →
+      ∃ bs, s.mem.rdN a l = some bs ∧ ∀ b ∈ bs, b < 256) :
+    (∃ bs, c + 20 ≤ e ∧ s.mem.rdN c 20 = some bs ∧
+      ∃ n s', run stage1Im n (Out.ok s) = Out.ok s' ∧
+      s'.rip = base + 0x306 ∧ s'.reg 6 = some (c + 20) ∧
+      s'.reg 4 = some sp ∧ s'.reg 7 = some p ∧
+      rd64 s'.mem p = some (leVal (bs.take 4) % W) ∧
+      rd64 s'.mem (p + 8) = some (leVal ((bs.drop 4).take 4) % W) ∧
+      rd64 s'.mem (p + 16) = some (leVal ((bs.drop 8).take 4) % W) ∧
+      rd64 s'.mem (p + 24) =
+        some (leVal ((bs.drop 12).take 4) % W) ∧
+      rd64 s'.mem (p + 32) =
+        some (leVal ((bs.drop 16).take 4) % W) ∧
+      rd64 s'.mem (p + 40) = some ((c + 20) % W) ∧
+      (∀ i, i ≠ 0 → i ≠ 2 → i ≠ 4 → i ≠ 6 → s'.reg i = s.reg i) ∧
+      s'.regs.length = 16 ∧ s'.k = s.k ∧
+      wshape s'.mem = wshape s.mem ∧ StackRoom s' 2 ∧
+      s'.mem.rdN c 20 = some bs ∧
+      (∀ (off v : Nat), off + 8 ≤ 64 →
+        (wr64 s'.mem (p + off) v).isSome) ∧
+      (∀ x k, (x + k ≤ sp - 16 ∨ sp ≤ x) →
+        (p + 64 ≤ x ∨ x + k ≤ p) →
+        s'.mem.rdN x k = s.mem.rdN x k)) ∨
+    (∃ n s', run stage1Im n (Out.ok s) = Out.ok s' ∧
+      s'.rip = aFail1 ∧ s'.reg 4 = some (sp - 8) ∧
+      (∀ i, i ≠ 0 → i ≠ 2 → i ≠ 4 → i ≠ 6 → s'.reg i = s.reg i) ∧
+      s'.regs.length = 16 ∧ s'.k = s.k ∧
+      wshape s'.mem = wshape s.mem) := by
+  have hc := stage1_parserCode
+  have hbW : base + 0x400 < W := by decide
+  by_cases hfit : c + 20 ≤ e
+  · obtain ⟨bs, h20, -⟩ := hrdN c 20 (Nat.le_refl c) (by omega)
+    exact Or.inl ⟨bs, hfit, h20,
+      parser_word_fields hrip hr6 hr15 hr7 hr4 h20 hfit hcW heW
+        hpW hroom hsp16 hspW hlen16 hEB hSB hES hwr⟩
+  by_cases h4 : ¬ c + 4 ≤ e
+  · -- field 0 is already short
+    obtain ⟨n, s', hrun, hrip', hr4', hfr, -, hlen, hk, hsh⟩ :=
+      call_rdc_fail hc.p2d6 hrip hr6 hr15 h4 hcW heW
+        (stackRoom_mono hroom (by decide)) hr4 (by omega) hspW
+        hlen16
+    exact Or.inr ⟨n, s', hrun, hrip', hr4',
+      fun i _ hi2 hi4 _ => hfr i hi2 hi4, hlen, hk, hsh⟩
+  -- field 0 fits, store it
+  obtain ⟨f0, hf0, -⟩ := hrdN c 4 (Nat.le_refl c) (by omega)
+  obtain ⟨n1, s1, hrun1, hs1rip, hs1r6, hs1r4, -, hs1fr, hs1len,
+      hs1k, hs1sh, hs1room, -, hs1memfr⟩ :=
+    field_store (site := base + 0x2d6) (off := 0) (slen := 3)
+      hc.p2d6 hc.p2db (Nat.lt_of_le_of_lt (by omega) hbW) hrip hr6
+      hr15 (by omega) hcW heW hf0 hroom hr4 hsp16 hspW hlen16 (by omega)
+      hr7 (by omega) (by omega) (by
+        have h := hwr 0 (leVal f0) (by decide)
+        simpa using h)
+  have hs1rip' : s1.rip = base + 0x2de := hs1rip
+  have hs1r15 : s1.reg 15 = some e := by
+    rw [hs1fr 15 (by decide) (by decide) (by decide) (by decide)]
+    exact hr15
+  have hs1r7 : s1.reg 7 = some p := by
+    rw [hs1fr 7 (by decide) (by decide) (by decide) (by decide)]
+    exact hr7
+  by_cases h8 : ¬ c + 8 ≤ e
+  · -- field 1 is short
+    obtain ⟨n, s', hrun, hrip', hr4', hfr, -, hlen, hk, hsh⟩ :=
+      call_rdc_fail hc.p2de hs1rip' hs1r6 hs1r15 (by omega)
+        (by omega) heW (stackRoom_mono hs1room (by decide)) hs1r4
+        (by omega) hspW hs1len
+    exact Or.inr ⟨n1 + n, s', by
+        rw [run_add stage1Im n1 n, hrun1, hrun], hrip', hr4',
+      fun i hi0 hi2 hi4 hi6 =>
+        (hfr i hi2 hi4).trans (hs1fr i hi0 hi2 hi4 hi6),
+      hlen, hk.trans hs1k, hsh.trans hs1sh⟩
+  -- field 1 fits, store it
+  obtain ⟨f1, hf1, -⟩ := hrdN (c + 4) 4 (by omega) (by omega)
+  have hf1' : s1.mem.rdN (c + 4) 4 = some f1 := by
+    rw [hs1memfr (c + 4) 4 (by omega) (by omega)]; exact hf1
+  have hw1 : ∀ v, (wr64 s1.mem (p + 8) v).isSome := by
+    intro v
+    exact wrN_some_of_wshape _ s.mem s1.mem hs1sh _
+      (hwr 8 v (by decide))
+  obtain ⟨n2, s2, hrun2, hs2rip, hs2r6, hs2r4, -, hs2fr, hs2len,
+      hs2k, hs2sh, hs2room, -, hs2memfr⟩ :=
+    field_store (site := base + 0x2de) (off := 8) (slen := 4)
+      hc.p2de hc.p2e3 (Nat.lt_of_le_of_lt (by omega) hbW) hs1rip'
+      hs1r6 hs1r15 (by omega) (by omega) heW hf1' hs1room hs1r4
+      hsp16 hspW hs1len (by omega) hs1r7 (by omega) (by omega)
+      (hw1 _)
+  have hs2rip' : s2.rip = base + 0x2e7 := hs2rip
+  have hs2r15 : s2.reg 15 = some e := by
+    rw [hs2fr 15 (by decide) (by decide) (by decide) (by decide)]
+    exact hs1r15
+  have hs2r7 : s2.reg 7 = some p := by
+    rw [hs2fr 7 (by decide) (by decide) (by decide) (by decide)]
+    exact hs1r7
+  have hs2r6' : s2.reg 6 = some (c + 8) := by
+    have e1 : c + 4 + 4 = c + 8 := by omega
+    rwa [e1] at hs2r6
+  by_cases h12 : ¬ c + 12 ≤ e
+  · -- field 2 is short
+    obtain ⟨n, s', hrun, hrip', hr4', hfr, -, hlen, hk, hsh⟩ :=
+      call_rdc_fail hc.p2e7 hs2rip' hs2r6' hs2r15 (by omega)
+        (by omega) heW (stackRoom_mono hs2room (by decide)) hs2r4
+        (by omega) hspW hs2len
+    exact Or.inr ⟨n1 + n2 + n, s', by
+        rw [show n1 + n2 + n = n1 + (n2 + n) by omega,
+          run_add stage1Im n1 _, hrun1, run_add stage1Im n2 n,
+          hrun2, hrun], hrip', hr4',
+      fun i hi0 hi2 hi4 hi6 =>
+        (hfr i hi2 hi4).trans
+          ((hs2fr i hi0 hi2 hi4 hi6).trans (hs1fr i hi0 hi2 hi4 hi6)),
+      hlen, (hk.trans hs2k).trans hs1k, (hsh.trans hs2sh).trans hs1sh⟩
+  -- field 2 fits, store it
+  obtain ⟨f2, hf2, -⟩ := hrdN (c + 8) 4 (by omega) (by omega)
+  have hf2' : s2.mem.rdN (c + 8) 4 = some f2 := by
+    rw [hs2memfr (c + 8) 4 (by omega) (by omega),
+      hs1memfr (c + 8) 4 (by omega) (by omega)]
+    exact hf2
+  have hw2 : ∀ v, (wr64 s2.mem (p + 16) v).isSome := by
+    intro v
+    have h1 : (wr64 s1.mem (p + 16) v).isSome :=
+      wrN_some_of_wshape _ s.mem s1.mem hs1sh _
+        (hwr 16 v (by decide))
+    exact wrN_some_of_wshape _ s1.mem s2.mem hs2sh _ h1
+  obtain ⟨n3, s3, hrun3, hs3rip, hs3r6, hs3r4, -, hs3fr, hs3len,
+      hs3k, hs3sh, hs3room, -, hs3memfr⟩ :=
+    field_store (site := base + 0x2e7) (off := 16) (slen := 4)
+      hc.p2e7 hc.p2ec (Nat.lt_of_le_of_lt (by omega) hbW) hs2rip'
+      hs2r6' hs2r15 (by omega) (by omega) heW hf2' hs2room hs2r4
+      hsp16 hspW hs2len (by omega) hs2r7 (by omega) (by omega)
+      (hw2 _)
+  have hs3rip' : s3.rip = base + 0x2f0 := hs3rip
+  have hs3r15 : s3.reg 15 = some e := by
+    rw [hs3fr 15 (by decide) (by decide) (by decide) (by decide)]
+    exact hs2r15
+  have hs3r7 : s3.reg 7 = some p := by
+    rw [hs3fr 7 (by decide) (by decide) (by decide) (by decide)]
+    exact hs2r7
+  have hs3r6' : s3.reg 6 = some (c + 12) := by
+    have e1 : c + 8 + 4 = c + 12 := by omega
+    rwa [e1] at hs3r6
+  by_cases h16 : ¬ c + 16 ≤ e
+  · -- field 3 is short
+    obtain ⟨n, s', hrun, hrip', hr4', hfr, -, hlen, hk, hsh⟩ :=
+      call_rdc_fail hc.p2f0 hs3rip' hs3r6' hs3r15 (by omega)
+        (by omega) heW (stackRoom_mono hs3room (by decide)) hs3r4
+        (by omega) hspW hs3len
+    exact Or.inr ⟨n1 + n2 + n3 + n, s', by
+        rw [show n1 + n2 + n3 + n = n1 + (n2 + (n3 + n)) by omega,
+          run_add stage1Im n1 _, hrun1, run_add stage1Im n2 _,
+          hrun2, run_add stage1Im n3 n, hrun3, hrun], hrip', hr4',
+      fun i hi0 hi2 hi4 hi6 =>
+        (hfr i hi2 hi4).trans
+          ((hs3fr i hi0 hi2 hi4 hi6).trans
+            ((hs2fr i hi0 hi2 hi4 hi6).trans
+              (hs1fr i hi0 hi2 hi4 hi6))),
+      hlen, ((hk.trans hs3k).trans hs2k).trans hs1k,
+      ((hsh.trans hs3sh).trans hs2sh).trans hs1sh⟩
+  -- field 3 fits, store it
+  obtain ⟨f3, hf3, -⟩ := hrdN (c + 12) 4 (by omega) (by omega)
+  have hf3' : s3.mem.rdN (c + 12) 4 = some f3 := by
+    rw [hs3memfr (c + 12) 4 (by omega) (by omega),
+      hs2memfr (c + 12) 4 (by omega) (by omega),
+      hs1memfr (c + 12) 4 (by omega) (by omega)]
+    exact hf3
+  have hw3 : ∀ v, (wr64 s3.mem (p + 24) v).isSome := by
+    intro v
+    have h1 : (wr64 s1.mem (p + 24) v).isSome :=
+      wrN_some_of_wshape _ s.mem s1.mem hs1sh _
+        (hwr 24 v (by decide))
+    have h2 : (wr64 s2.mem (p + 24) v).isSome :=
+      wrN_some_of_wshape _ s1.mem s2.mem hs2sh _ h1
+    exact wrN_some_of_wshape _ s2.mem s3.mem hs3sh _ h2
+  obtain ⟨n4, s4, hrun4, hs4rip, hs4r6, hs4r4, -, hs4fr, hs4len,
+      hs4k, hs4sh, hs4room, -, -⟩ :=
+    field_store (site := base + 0x2f0) (off := 24) (slen := 4)
+      hc.p2f0 hc.p2f5 (Nat.lt_of_le_of_lt (by omega) hbW) hs3rip'
+      hs3r6' hs3r15 (by omega) (by omega) heW hf3' hs3room hs3r4
+      hsp16 hspW hs3len (by omega) hs3r7 (by omega) (by omega)
+      (hw3 _)
+  have hs4rip' : s4.rip = base + 0x2f9 := hs4rip
+  have hs4r15 : s4.reg 15 = some e := by
+    rw [hs4fr 15 (by decide) (by decide) (by decide) (by decide)]
+    exact hs3r15
+  have hs4r6' : s4.reg 6 = some (c + 16) := by
+    have e1 : c + 12 + 4 = c + 16 := by omega
+    rwa [e1] at hs4r6
+  by_cases h20f : ¬ c + 20 ≤ e
+  · -- field 4 is short
+    obtain ⟨n, s', hrun, hrip', hr4', hfr, -, hlen, hk, hsh⟩ :=
+      call_rdc_fail hc.p2f9 hs4rip' hs4r6' hs4r15 (by omega)
+        (by omega) heW (stackRoom_mono hs4room (by decide)) hs4r4
+        (by omega) hspW hs4len
+    exact Or.inr ⟨n1 + n2 + n3 + n4 + n, s', by
+        rw [show n1 + n2 + n3 + n4 + n =
+            n1 + (n2 + (n3 + (n4 + n))) by omega,
+          run_add stage1Im n1 _, hrun1, run_add stage1Im n2 _,
+          hrun2, run_add stage1Im n3 _, hrun3,
+          run_add stage1Im n4 n, hrun4, hrun], hrip', hr4',
+      fun i hi0 hi2 hi4 hi6 =>
+        (hfr i hi2 hi4).trans
+          ((hs4fr i hi0 hi2 hi4 hi6).trans
+            ((hs3fr i hi0 hi2 hi4 hi6).trans
+              ((hs2fr i hi0 hi2 hi4 hi6).trans
+                (hs1fr i hi0 hi2 hi4 hi6)))),
+      hlen, (((hk.trans hs4k).trans hs3k).trans hs2k).trans hs1k,
+      (((hsh.trans hs4sh).trans hs3sh).trans hs2sh).trans hs1sh⟩
+  exact (hfit (by omega)).elim
+
+set_option maxHeartbeats 0 in
 /-- One full word of the parser loop, classified for arbitrary
 bytes: either a `Word` is built from the buffer (fields, code
 loop and annotation array all fit), with the table entry, code
@@ -7309,7 +7534,6 @@ theorem parser_word_step_classify {B e S sp p c r : Nat}
     (hr6 : s.reg 6 = some c) (hr15 : s.reg 15 = some e)
     (hr7 : s.reg 7 = some p) (hr4 : s.reg 4 = some sp)
     (hr3 : s.reg 3 = some B) (hr11 : s.reg 11 = some S)
-    (hc20 : c + 20 ≤ e)
     (hcW : c < W) (heW : e < W) (hpW : p + 64 < W)
     (hr1W : r + 1 < W) (hBc : B ≤ c)
     (hSW : S + (e - B) < W)
@@ -7371,6 +7595,16 @@ theorem parser_word_step_classify {B e S sp p c r : Nat}
         i ≠ 10 → s'.reg i = s.reg i) ∧
       s'.regs.length = 16 ∧ s'.k = s.k ∧
       wshape s'.mem = wshape s.mem) := by
+  by_cases hfit20 : ¬ c + 20 ≤ e
+  · rcases parser_word_fields_classify hrip hr6 hr15 hr7 hr4 hcW
+        heW hpW hroom hsp16 hspW hlen16 hEB hSB hES hwrE hrdN with
+      ⟨bs, hfit, -⟩ | hffail
+    · exact (hfit20 hfit).elim
+    · obtain ⟨n, s', hrun, hrip', hr4', hfr, hlen, hk, hsh⟩ := hffail
+      exact Or.inr ⟨n, s', hrun, hrip', Or.inr hr4',
+        fun i hi0 _ hi2 hi4 hi6 _ _ => hfr i hi0 hi2 hi4 hi6,
+        hlen, hk, hsh⟩
+  have hc20 : c + 20 ≤ e := by omega
   obtain ⟨bs, h20, hb20⟩ := hrdN c 20 (Nat.le_refl c) (by omega)
   have hbslen : bs.length = 20 := rdN_length h20
   -- fields
@@ -7661,231 +7895,6 @@ theorem parser_word_step_classify {B e S sp p c r : Nat}
     · rw [hs3k, hs2k, hs1k]
     · rw [hs3sh, hs2sh, hs1sh]
 
-
-set_option maxHeartbeats 0 in
-/-- The five word header fields, classified: either all twenty
-bytes fit and the fields are stored exactly as in
-`parser_word_fields`, or the first short field's `call RDC`
-reaches `aFail1` with `rsp` decremented by the call. -/
-theorem parser_word_fields_classify {c e sp p : Nat}
-    {s : X86Int.St}
-    (hrip : s.rip = base + 0x2d6) (hr6 : s.reg 6 = some c)
-    (hr15 : s.reg 15 = some e) (hr7 : s.reg 7 = some p)
-    (hr4 : s.reg 4 = some sp)
-    (hcW : c < W) (heW : e < W) (hpW : p + 64 < W)
-    (hroom : StackRoom s 2) (hsp16 : 16 ≤ sp) (hspW : sp < W)
-    (hlen16 : s.regs.length = 16)
-    (hEB : p + 64 ≤ c ∨ e ≤ p)
-    (hSB : e ≤ sp - 16 ∨ sp ≤ c)
-    (hES : p + 64 ≤ sp - 16 ∨ sp ≤ p)
-    (hwr : ∀ (off v : Nat), off + 8 ≤ 64 →
-      (wr64 s.mem (p + off) v).isSome)
-    (hrdN : ∀ a l, c ≤ a → l ≤ e - a →
-      ∃ bs, s.mem.rdN a l = some bs ∧ ∀ b ∈ bs, b < 256) :
-    (∃ bs, c + 20 ≤ e ∧ s.mem.rdN c 20 = some bs ∧
-      ∃ n s', run stage1Im n (Out.ok s) = Out.ok s' ∧
-      s'.rip = base + 0x306 ∧ s'.reg 6 = some (c + 20) ∧
-      s'.reg 4 = some sp ∧ s'.reg 7 = some p ∧
-      rd64 s'.mem p = some (leVal (bs.take 4) % W) ∧
-      rd64 s'.mem (p + 8) = some (leVal ((bs.drop 4).take 4) % W) ∧
-      rd64 s'.mem (p + 16) = some (leVal ((bs.drop 8).take 4) % W) ∧
-      rd64 s'.mem (p + 24) =
-        some (leVal ((bs.drop 12).take 4) % W) ∧
-      rd64 s'.mem (p + 32) =
-        some (leVal ((bs.drop 16).take 4) % W) ∧
-      rd64 s'.mem (p + 40) = some ((c + 20) % W) ∧
-      (∀ i, i ≠ 0 → i ≠ 2 → i ≠ 4 → i ≠ 6 → s'.reg i = s.reg i) ∧
-      s'.regs.length = 16 ∧ s'.k = s.k ∧
-      wshape s'.mem = wshape s.mem ∧ StackRoom s' 2 ∧
-      s'.mem.rdN c 20 = some bs ∧
-      (∀ (off v : Nat), off + 8 ≤ 64 →
-        (wr64 s'.mem (p + off) v).isSome) ∧
-      (∀ x k, (x + k ≤ sp - 16 ∨ sp ≤ x) →
-        (p + 64 ≤ x ∨ x + k ≤ p) →
-        s'.mem.rdN x k = s.mem.rdN x k)) ∨
-    (∃ n s', run stage1Im n (Out.ok s) = Out.ok s' ∧
-      s'.rip = aFail1 ∧ s'.reg 4 = some (sp - 8) ∧
-      (∀ i, i ≠ 0 → i ≠ 2 → i ≠ 4 → i ≠ 6 → s'.reg i = s.reg i) ∧
-      s'.regs.length = 16 ∧ s'.k = s.k ∧
-      wshape s'.mem = wshape s.mem) := by
-  have hc := stage1_parserCode
-  have hbW : base + 0x400 < W := by decide
-  by_cases hfit : c + 20 ≤ e
-  · obtain ⟨bs, h20, -⟩ := hrdN c 20 (Nat.le_refl c) (by omega)
-    exact Or.inl ⟨bs, hfit, h20,
-      parser_word_fields hrip hr6 hr15 hr7 hr4 h20 hfit hcW heW
-        hpW hroom hsp16 hspW hlen16 hEB hSB hES hwr⟩
-  by_cases h4 : ¬ c + 4 ≤ e
-  · -- field 0 is already short
-    obtain ⟨n, s', hrun, hrip', hr4', hfr, -, hlen, hk, hsh⟩ :=
-      call_rdc_fail hc.p2d6 hrip hr6 hr15 h4 hcW heW
-        (stackRoom_mono hroom (by decide)) hr4 (by omega) hspW
-        hlen16
-    exact Or.inr ⟨n, s', hrun, hrip', hr4',
-      fun i _ hi2 hi4 _ => hfr i hi2 hi4, hlen, hk, hsh⟩
-  -- field 0 fits, store it
-  obtain ⟨f0, hf0, -⟩ := hrdN c 4 (Nat.le_refl c) (by omega)
-  obtain ⟨n1, s1, hrun1, hs1rip, hs1r6, hs1r4, -, hs1fr, hs1len,
-      hs1k, hs1sh, hs1room, -, hs1memfr⟩ :=
-    field_store (site := base + 0x2d6) (off := 0) (slen := 3)
-      hc.p2d6 hc.p2db (Nat.lt_of_le_of_lt (by omega) hbW) hrip hr6
-      hr15 (by omega) hcW heW hf0 hroom hr4 hsp16 hspW hlen16 (by omega)
-      hr7 (by omega) (by omega) (by
-        have h := hwr 0 (leVal f0) (by decide)
-        simpa using h)
-  have hs1rip' : s1.rip = base + 0x2de := hs1rip
-  have hs1r15 : s1.reg 15 = some e := by
-    rw [hs1fr 15 (by decide) (by decide) (by decide) (by decide)]
-    exact hr15
-  have hs1r7 : s1.reg 7 = some p := by
-    rw [hs1fr 7 (by decide) (by decide) (by decide) (by decide)]
-    exact hr7
-  by_cases h8 : ¬ c + 8 ≤ e
-  · -- field 1 is short
-    obtain ⟨n, s', hrun, hrip', hr4', hfr, -, hlen, hk, hsh⟩ :=
-      call_rdc_fail hc.p2de hs1rip' hs1r6 hs1r15 (by omega)
-        (by omega) heW (stackRoom_mono hs1room (by decide)) hs1r4
-        (by omega) hspW hs1len
-    exact Or.inr ⟨n1 + n, s', by
-        rw [run_add stage1Im n1 n, hrun1, hrun], hrip', hr4',
-      fun i hi0 hi2 hi4 hi6 =>
-        (hfr i hi2 hi4).trans (hs1fr i hi0 hi2 hi4 hi6),
-      hlen, hk.trans hs1k, hsh.trans hs1sh⟩
-  -- field 1 fits, store it
-  obtain ⟨f1, hf1, -⟩ := hrdN (c + 4) 4 (by omega) (by omega)
-  have hf1' : s1.mem.rdN (c + 4) 4 = some f1 := by
-    rw [hs1memfr (c + 4) 4 (by omega) (by omega)]; exact hf1
-  have hw1 : ∀ v, (wr64 s1.mem (p + 8) v).isSome := by
-    intro v
-    exact wrN_some_of_wshape _ s.mem s1.mem hs1sh _
-      (hwr 8 v (by decide))
-  obtain ⟨n2, s2, hrun2, hs2rip, hs2r6, hs2r4, -, hs2fr, hs2len,
-      hs2k, hs2sh, hs2room, -, hs2memfr⟩ :=
-    field_store (site := base + 0x2de) (off := 8) (slen := 4)
-      hc.p2de hc.p2e3 (Nat.lt_of_le_of_lt (by omega) hbW) hs1rip'
-      hs1r6 hs1r15 (by omega) (by omega) heW hf1' hs1room hs1r4
-      hsp16 hspW hs1len (by omega) hs1r7 (by omega) (by omega)
-      (hw1 _)
-  have hs2rip' : s2.rip = base + 0x2e7 := hs2rip
-  have hs2r15 : s2.reg 15 = some e := by
-    rw [hs2fr 15 (by decide) (by decide) (by decide) (by decide)]
-    exact hs1r15
-  have hs2r7 : s2.reg 7 = some p := by
-    rw [hs2fr 7 (by decide) (by decide) (by decide) (by decide)]
-    exact hs1r7
-  have hs2r6' : s2.reg 6 = some (c + 8) := by
-    have e1 : c + 4 + 4 = c + 8 := by omega
-    rwa [e1] at hs2r6
-  by_cases h12 : ¬ c + 12 ≤ e
-  · -- field 2 is short
-    obtain ⟨n, s', hrun, hrip', hr4', hfr, -, hlen, hk, hsh⟩ :=
-      call_rdc_fail hc.p2e7 hs2rip' hs2r6' hs2r15 (by omega)
-        (by omega) heW (stackRoom_mono hs2room (by decide)) hs2r4
-        (by omega) hspW hs2len
-    exact Or.inr ⟨n1 + n2 + n, s', by
-        rw [show n1 + n2 + n = n1 + (n2 + n) by omega,
-          run_add stage1Im n1 _, hrun1, run_add stage1Im n2 n,
-          hrun2, hrun], hrip', hr4',
-      fun i hi0 hi2 hi4 hi6 =>
-        (hfr i hi2 hi4).trans
-          ((hs2fr i hi0 hi2 hi4 hi6).trans (hs1fr i hi0 hi2 hi4 hi6)),
-      hlen, (hk.trans hs2k).trans hs1k, (hsh.trans hs2sh).trans hs1sh⟩
-  -- field 2 fits, store it
-  obtain ⟨f2, hf2, -⟩ := hrdN (c + 8) 4 (by omega) (by omega)
-  have hf2' : s2.mem.rdN (c + 8) 4 = some f2 := by
-    rw [hs2memfr (c + 8) 4 (by omega) (by omega),
-      hs1memfr (c + 8) 4 (by omega) (by omega)]
-    exact hf2
-  have hw2 : ∀ v, (wr64 s2.mem (p + 16) v).isSome := by
-    intro v
-    have h1 : (wr64 s1.mem (p + 16) v).isSome :=
-      wrN_some_of_wshape _ s.mem s1.mem hs1sh _
-        (hwr 16 v (by decide))
-    exact wrN_some_of_wshape _ s1.mem s2.mem hs2sh _ h1
-  obtain ⟨n3, s3, hrun3, hs3rip, hs3r6, hs3r4, -, hs3fr, hs3len,
-      hs3k, hs3sh, hs3room, -, hs3memfr⟩ :=
-    field_store (site := base + 0x2e7) (off := 16) (slen := 4)
-      hc.p2e7 hc.p2ec (Nat.lt_of_le_of_lt (by omega) hbW) hs2rip'
-      hs2r6' hs2r15 (by omega) (by omega) heW hf2' hs2room hs2r4
-      hsp16 hspW hs2len (by omega) hs2r7 (by omega) (by omega)
-      (hw2 _)
-  have hs3rip' : s3.rip = base + 0x2f0 := hs3rip
-  have hs3r15 : s3.reg 15 = some e := by
-    rw [hs3fr 15 (by decide) (by decide) (by decide) (by decide)]
-    exact hs2r15
-  have hs3r7 : s3.reg 7 = some p := by
-    rw [hs3fr 7 (by decide) (by decide) (by decide) (by decide)]
-    exact hs2r7
-  have hs3r6' : s3.reg 6 = some (c + 12) := by
-    have e1 : c + 8 + 4 = c + 12 := by omega
-    rwa [e1] at hs3r6
-  by_cases h16 : ¬ c + 16 ≤ e
-  · -- field 3 is short
-    obtain ⟨n, s', hrun, hrip', hr4', hfr, -, hlen, hk, hsh⟩ :=
-      call_rdc_fail hc.p2f0 hs3rip' hs3r6' hs3r15 (by omega)
-        (by omega) heW (stackRoom_mono hs3room (by decide)) hs3r4
-        (by omega) hspW hs3len
-    exact Or.inr ⟨n1 + n2 + n3 + n, s', by
-        rw [show n1 + n2 + n3 + n = n1 + (n2 + (n3 + n)) by omega,
-          run_add stage1Im n1 _, hrun1, run_add stage1Im n2 _,
-          hrun2, run_add stage1Im n3 n, hrun3, hrun], hrip', hr4',
-      fun i hi0 hi2 hi4 hi6 =>
-        (hfr i hi2 hi4).trans
-          ((hs3fr i hi0 hi2 hi4 hi6).trans
-            ((hs2fr i hi0 hi2 hi4 hi6).trans
-              (hs1fr i hi0 hi2 hi4 hi6))),
-      hlen, ((hk.trans hs3k).trans hs2k).trans hs1k,
-      ((hsh.trans hs3sh).trans hs2sh).trans hs1sh⟩
-  -- field 3 fits, store it
-  obtain ⟨f3, hf3, -⟩ := hrdN (c + 12) 4 (by omega) (by omega)
-  have hf3' : s3.mem.rdN (c + 12) 4 = some f3 := by
-    rw [hs3memfr (c + 12) 4 (by omega) (by omega),
-      hs2memfr (c + 12) 4 (by omega) (by omega),
-      hs1memfr (c + 12) 4 (by omega) (by omega)]
-    exact hf3
-  have hw3 : ∀ v, (wr64 s3.mem (p + 24) v).isSome := by
-    intro v
-    have h1 : (wr64 s1.mem (p + 24) v).isSome :=
-      wrN_some_of_wshape _ s.mem s1.mem hs1sh _
-        (hwr 24 v (by decide))
-    have h2 : (wr64 s2.mem (p + 24) v).isSome :=
-      wrN_some_of_wshape _ s1.mem s2.mem hs2sh _ h1
-    exact wrN_some_of_wshape _ s2.mem s3.mem hs3sh _ h2
-  obtain ⟨n4, s4, hrun4, hs4rip, hs4r6, hs4r4, -, hs4fr, hs4len,
-      hs4k, hs4sh, hs4room, -, -⟩ :=
-    field_store (site := base + 0x2f0) (off := 24) (slen := 4)
-      hc.p2f0 hc.p2f5 (Nat.lt_of_le_of_lt (by omega) hbW) hs3rip'
-      hs3r6' hs3r15 (by omega) (by omega) heW hf3' hs3room hs3r4
-      hsp16 hspW hs3len (by omega) hs3r7 (by omega) (by omega)
-      (hw3 _)
-  have hs4rip' : s4.rip = base + 0x2f9 := hs4rip
-  have hs4r15 : s4.reg 15 = some e := by
-    rw [hs4fr 15 (by decide) (by decide) (by decide) (by decide)]
-    exact hs3r15
-  have hs4r6' : s4.reg 6 = some (c + 16) := by
-    have e1 : c + 12 + 4 = c + 16 := by omega
-    rwa [e1] at hs4r6
-  by_cases h20f : ¬ c + 20 ≤ e
-  · -- field 4 is short
-    obtain ⟨n, s', hrun, hrip', hr4', hfr, -, hlen, hk, hsh⟩ :=
-      call_rdc_fail hc.p2f9 hs4rip' hs4r6' hs4r15 (by omega)
-        (by omega) heW (stackRoom_mono hs4room (by decide)) hs4r4
-        (by omega) hspW hs4len
-    exact Or.inr ⟨n1 + n2 + n3 + n4 + n, s', by
-        rw [show n1 + n2 + n3 + n4 + n =
-            n1 + (n2 + (n3 + (n4 + n))) by omega,
-          run_add stage1Im n1 _, hrun1, run_add stage1Im n2 _,
-          hrun2, run_add stage1Im n3 _, hrun3,
-          run_add stage1Im n4 n, hrun4, hrun], hrip', hr4',
-      fun i hi0 hi2 hi4 hi6 =>
-        (hfr i hi2 hi4).trans
-          ((hs4fr i hi0 hi2 hi4 hi6).trans
-            ((hs3fr i hi0 hi2 hi4 hi6).trans
-              ((hs2fr i hi0 hi2 hi4 hi6).trans
-                (hs1fr i hi0 hi2 hi4 hi6)))),
-      hlen, (((hk.trans hs4k).trans hs3k).trans hs2k).trans hs1k,
-      (((hsh.trans hs4sh).trans hs3sh).trans hs2sh).trans hs1sh⟩
-  exact (hfit (by omega)).elim
 
 
 end SporosX1
