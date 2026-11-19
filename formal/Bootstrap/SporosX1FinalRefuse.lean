@@ -7897,4 +7897,272 @@ theorem parser_word_step_classify {B e S sp p c r : Nat}
 
 
 
+set_option maxHeartbeats 0 in
+/-- The whole parser word loop, classified for arbitrary bytes:
+either a word list of the given length is built from the buffer,
+laid out in the table with its code, length and annotation
+layouts, or the run reaches `aFail1` with the stack pointer at
+the entry value or one slot below. -/
+theorem parser_words_loop_classify : ∀ (n : Nat)
+    {B e S sp p c : Nat} {s : X86Int.St},
+    s.rip = base + 0x2cc → s.reg 1 = some n →
+    s.reg 6 = some c → s.reg 7 = some p →
+    s.reg 15 = some e → s.reg 4 = some sp →
+    s.reg 3 = some B → s.reg 11 = some S →
+    B ≤ c → c ≤ e → e < W →
+    p + 64 * n < W → S + (e - B) < W → n < W →
+    StackRoom s 2 → 16 ≤ sp → sp < W → s.regs.length = 16 →
+    (p + 64 * n ≤ c ∨ e ≤ p) →
+    (p + 64 * n ≤ sp - 16 ∨ sp ≤ p) →
+    (S + (e - B) ≤ p ∨ p + 64 * n ≤ S + (c - B)) →
+    (e ≤ sp - 16 ∨ sp ≤ c) →
+    (S + (e - B) ≤ c ∨ e ≤ S + (c - B)) →
+    (S + (e - B) ≤ sp - 16 ∨ sp ≤ S + (c - B)) →
+    (∀ (off v : Nat), off + 8 ≤ 64 * n →
+      (wr64 s.mem (p + off) v).isSome) →
+    (∀ a v, S + (c - B) ≤ a → a < S + (e - B) →
+      (s.mem.wr a v).isSome) →
+    (∀ a l, c ≤ a → l ≤ e - a →
+      ∃ bs, s.mem.rdN a l = some bs ∧ ∀ b ∈ bs, b < 256) →
+    (∃ (wds : List Word) (k : Nat) (s' : X86Int.St),
+      wds.length = n ∧
+      run stage1Im k (Out.ok s) = Out.ok s' ∧
+      s'.rip = base + 0x2cc ∧ s'.reg 1 = some 0 ∧
+      s'.reg 6 = some (c + wordsBytes wds) ∧
+      s'.reg 7 = some (p + 64 * n) ∧
+      s'.reg 4 = some sp ∧
+      c + wordsBytes wds ≤ e ∧
+      WordsLay s.mem c wds ∧ TabLay s'.mem B S p c wds ∧
+      (∀ wd ∈ wds, ∀ x ∈ wd.ann, AnnBound x) ∧
+      (∀ i, i ≠ 0 → i ≠ 1 → i ≠ 2 → i ≠ 4 → i ≠ 6 → i ≠ 7 →
+        i ≠ 10 → s'.reg i = s.reg i) ∧
+      s'.regs.length = 16 ∧ s'.k = s.k ∧
+      wshape s'.mem = wshape s.mem ∧ StackRoom s' 2 ∧
+      (∀ x k, (x + k ≤ sp - 16 ∨ sp ≤ x) →
+        (p + 64 * n ≤ x ∨ x + k ≤ p) →
+        (S + (c + wordsBytes wds - B) ≤ x ∨
+          x + k ≤ S + (c - B)) →
+        s'.mem.rdN x k = s.mem.rdN x k)) ∨
+    (∃ k s', run stage1Im k (Out.ok s) = Out.ok s' ∧
+      s'.rip = aFail1 ∧
+      (s'.reg 4 = some sp ∨ s'.reg 4 = some (sp - 8)) ∧
+      (∀ i, i ≠ 0 → i ≠ 1 → i ≠ 2 → i ≠ 4 → i ≠ 6 → i ≠ 7 →
+        i ≠ 10 → s'.reg i = s.reg i) ∧
+      s'.regs.length = 16 ∧ s'.k = s.k ∧
+      wshape s'.mem = wshape s.mem) := by
+  intro n
+  induction n with
+  | zero =>
+    intro B e S sp p c s hrip hr1 hr6 hr7 _ hr4 _ _ _ hce _ _ _ _
+      hroom _ _ hlen16 _ _ _ _ _ _ _ _ _
+    refine Or.inl ⟨[], 0, s, rfl, rfl, hrip, hr1, ?_, ?_, hr4, ?_,
+      trivial, trivial, fun wd hwd => (List.not_mem_nil hwd).elim,
+      ?_, hlen16, rfl, rfl, hroom, ?_⟩
+    · show s.reg 6 = some (c + wordsBytes [])
+      exact hr6
+    · show s.reg 7 = some (p + 64 * 0)
+      exact hr7
+    · have hz : wordsBytes [] = 0 := rfl
+      omega
+    · intro i _ _ _ _ _ _ _; exact rfl
+    · intro x k _ _ _; exact rfl
+  | succ r ih =>
+    intro B e S sp p c s hrip hr1 hr6 hr7 hr15 hr4 hr3 hr11 hBc hce
+      heW hpW hSW hnW hroom hsp16 hspW hlen16 hTB hTStk hTScr hSB
+      hScrB hScrStk hwrE hwrS hrdN
+    have hcW : c < W := by omega
+    -- head: enter the body
+    obtain ⟨s1, hrun1, hs1rip, hs1fr, hs1mem, hs1len, hs1k⟩ :=
+      parser_words_head_pos hrip hr1 (by omega) hnW
+    have hs1len16 : s1.regs.length = 16 := by rw [hs1len]; exact hlen16
+    have hs1r : ∀ i v, s.reg i = some v → s1.reg i = some v := by
+      intro i v h
+      rw [hs1fr i]; exact h
+    -- one word step, classified
+    rcases parser_word_step_classify hs1rip (hs1r 1 _ hr1)
+        (hs1r 6 _ hr6) (hs1r 15 _ hr15) (hs1r 7 _ hr7)
+        (hs1r 4 _ hr4) (hs1r 3 _ hr3) (hs1r 11 _ hr11) hcW heW
+        (by omega) hnW hBc hSW
+        (StackRoom_of_mem hs1mem (hs1fr 4) hroom)
+        hsp16 hspW hs1len16 (by omega) hSB (by omega) hScrB
+        (by omega) (by omega)
+        (by
+          intro off v hoff
+          rw [hs1mem]
+          exact hwrE off v (by omega))
+        (by
+          intro a v ha1 ha2
+          rw [hs1mem]
+          exact hwrS a v (by omega) ha2)
+        (by
+          intro a l ha hl
+          obtain ⟨bs, hbs, hb⟩ := hrdN a l ha hl
+          exact ⟨bs, by rwa [hs1mem], hb⟩) with hstep | hstepfail
+    · obtain ⟨wd, k1, s2, hrun2, hs2rip, hs2r1, hs2r6, hs2r7, hs2r4,
+          hs2head, hs2fit, hs2s0, hs2s8, hs2s16, hs2s24, hs2s32,
+          hs2s40, hs2s48, hs2seq, hs2lay, hs2annlay, hs2annb, -,
+          hs2fr, hs2len, hs2k, hs2sh, hs2room, hs2memfr⟩ := hstep
+      have hs2sh' : wshape s2.mem = wshape s.mem := by
+        rw [hs2sh, hs1mem]
+      have hs2r15 : s2.reg 15 = some e := by
+        rw [hs2fr 15 (by decide) (by decide) (by decide)
+          (by decide) (by decide) (by decide) (by decide), hs1fr 15]
+        exact hr15
+      have hs2r3 : s2.reg 3 = some B := by
+        rw [hs2fr 3 (by decide) (by decide) (by decide) (by decide)
+          (by decide) (by decide) (by decide), hs1fr 3]
+        exact hr3
+      have hs2r11 : s2.reg 11 = some S := by
+        rw [hs2fr 11 (by decide) (by decide) (by decide)
+          (by decide) (by decide) (by decide) (by decide), hs1fr 11]
+        exact hr11
+      have hs2wrE : ∀ (off v : Nat), off + 8 ≤ 64 * r →
+          (wr64 s2.mem (p + 64 + off) v).isSome := by
+        intro off v hoff
+        have h1 : (s.mem.wrN (p + 64 + off) (bytes8 v)).isSome := by
+          have h2 := hwrE (64 + off) v (by omega)
+          rwa [show p + (64 + off) = p + 64 + off by omega] at h2
+        exact wrN_some_of_wshape _ s.mem s2.mem hs2sh' _ h1
+      have hs2wrS : ∀ a v,
+          S + (c + 20 + codeBytes wd.code + 12 * wd.ann.length -
+            B) ≤ a → a < S + (e - B) → (s2.mem.wr a v).isSome := by
+        intro a v ha1 ha2
+        have h1 : (s.mem.wrN a [v]).isSome := by
+          rw [← wr_eq_wrN]
+          exact hwrS a v (by omega) ha2
+        have h2 := wrN_some_of_wshape _ s.mem s2.mem hs2sh' _ h1
+        rwa [← wr_eq_wrN] at h2
+      have hs2rdN : ∀ a l,
+          c + 20 + codeBytes wd.code + 12 * wd.ann.length ≤ a →
+          l ≤ e - a →
+          ∃ bs, s2.mem.rdN a l = some bs ∧
+            ∀ b ∈ bs, b < 256 := by
+        intro a l ha hl
+        by_cases hl0 : l = 0
+        · subst hl0
+          exact ⟨[], rfl, fun b hb => (List.not_mem_nil hb).elim⟩
+        obtain ⟨bs, hbs, hb⟩ := hrdN a l (by omega) hl
+        refine ⟨bs, ?_, hb⟩
+        rw [hs2memfr a l (by omega) (by omega) (by omega), hs1mem]
+        exact hbs
+      -- induction over the rest
+      rcases ih hs2rip hs2r1 hs2r6 hs2r7 hs2r15 hs2r4 hs2r3 hs2r11
+          (by omega) hs2fit heW (by omega) hSW (by omega) hs2room
+          hsp16 hspW hs2len (by omega) (by omega) (by omega)
+          (by omega) (by omega) (by omega) hs2wrE hs2wrS hs2rdN with
+        hrest | hrestfail
+      · obtain ⟨wds, k2, s3, hwdslen, hrun3, hs3rip, hs3r1, hs3r6,
+            hs3r7, hs3r4, hs3fit, hs3layW, hs3tab, hs3annb, hs3fr,
+            hs3len, hs3k, hs3sh, hs3room, hs3memfr⟩ := hrest
+        have hwb : wordsBytes (wd :: wds) =
+            (20 + codeBytes wd.code + 12 * wd.ann.length) +
+              wordsBytes wds := rfl
+        have hrun : run stage1Im (2 + k1 + k2) (Out.ok s) =
+            Out.ok s3 := by
+          rw [show 2 + k1 + k2 = 2 + (k1 + k2) by omega,
+            run_add stage1Im 2 _, hrun1, run_add stage1Im k1 k2,
+            hrun2, hrun3]
+        have slot3 : ∀ {off w : Nat}, off + 8 ≤ 56 →
+            rd64 s2.mem (p + off) = some w →
+            rd64 s3.mem (p + off) = some w := by
+          intro off w hoff h
+          unfold rd64
+          rw [hs3memfr (p + off) 8 (by omega) (by omega) (by omega)]
+          have h' := h
+          unfold rd64 at h'
+          exact h'
+        have hseq3 : CodeSeq s3.mem (c + 20) wd.code := by
+          apply CodeSeq_of_frame hs2seq
+          intro y k hy hk
+          apply hs3memfr <;> omega
+        have hlay3 : LenLay s3.mem B S (c + 20) wd.code := by
+          apply LenLay_of_frame wd.code (by omega) hs2lay
+          intro a ha1 ha2
+          apply rd_eq_of_rdN1
+          apply hs3memfr
+          · rcases hScrStk with h | h
+            · exact Or.inl (by omega)
+            · exact Or.inr (by omega)
+          · rcases hTScr with h | h
+            · exact Or.inr (by omega)
+            · exact Or.inl (by omega)
+          · exact Or.inr (by omega)
+        have hann3 : AnnLayB s3.mem (c + 20 + codeBytes wd.code)
+            wd.ann := by
+          apply AnnLayB_of_frame hs2annlay
+          intro y k hy hk
+          apply hs3memfr <;> omega
+        have htab : TabLay s3.mem B S p c (wd :: wds) :=
+          ⟨slot3 (off := 0) (by decide) (by simpa using hs2s0),
+            slot3 (by decide) hs2s8, slot3 (by decide) hs2s16,
+            slot3 (by decide) hs2s24, slot3 (by decide) hs2s32,
+            slot3 (by decide) hs2s40, slot3 (by decide) hs2s48,
+            hseq3, hlay3, hann3, hs3tab⟩
+        have hlayW : WordsLay s.mem c (wd :: wds) := by
+          obtain ⟨bs, h20, e0, e1, e2, e3, e4⟩ := hs2head
+          refine ⟨⟨bs, by rwa [hs1mem] at h20, e0, e1, e2, e3, e4⟩,
+            ?_, ?_, ?_⟩
+          · apply CodeSeq_of_frame hs2seq
+            intro y k hy hk
+            rw [← hs1mem]
+            exact (hs2memfr y k (by omega) (by omega)
+              (by omega)).symm
+          · apply AnnLayB_of_frame hs2annlay
+            intro y k hy hk
+            rw [← hs1mem]
+            exact (hs2memfr y k (by omega) (by omega)
+              (by omega)).symm
+          · apply WordsLay_of_frame wds hs3layW
+            intro y k hy hk
+            rw [← hs1mem]
+            exact (hs2memfr y k (by omega) (by omega)
+              (by omega)).symm
+        refine Or.inl ⟨wd :: wds, 2 + k1 + k2, s3, by
+            rw [List.length_cons, hwdslen], hrun, hs3rip, hs3r1,
+          ?_, ?_, hs3r4, by rw [hwb]; omega, hlayW, htab, ?_, ?_,
+          hs3len, ?_, ?_, hs3room, ?_⟩
+        · show s3.reg 6 = some (c + wordsBytes (wd :: wds))
+          rw [hwb]
+          have h := hs3r6
+          rwa [show c + 20 + codeBytes wd.code +
+              12 * wd.ann.length + wordsBytes wds =
+            c + (20 + codeBytes wd.code + 12 * wd.ann.length +
+              wordsBytes wds) by omega] at h
+        · show s3.reg 7 = some (p + 64 * (r + 1))
+          have h := hs3r7
+          rwa [show p + 64 + 64 * r = p + 64 * (r + 1) by omega]
+            at h
+        · intro wd' hwd x hx
+          rcases List.mem_cons.mp hwd with rfl | hwd
+          · exact hs2annb x hx
+          · exact hs3annb wd' hwd x hx
+        · intro i hi0 hi1 hi2 hi4 hi6 hi7 hi10
+          rw [hs3fr i hi0 hi1 hi2 hi4 hi6 hi7 hi10,
+            hs2fr i hi0 hi1 hi2 hi4 hi6 hi7 hi10, hs1fr i]
+        · rw [hs3k, hs2k, hs1k]
+        · rw [hs3sh, hs2sh, hs1mem]
+        · intro x k hd1 hd2 hd3
+          rw [hs3memfr x k hd1 (by omega) (by omega),
+            hs2memfr x k hd1 (by omega) (by omega), hs1mem]
+      · obtain ⟨k2, s3, hrun3, hs3rip, hs3r4, hs3fr, hs3len, hs3k,
+            hs3sh⟩ := hrestfail
+        exact Or.inr ⟨2 + k1 + k2, s3, by
+            rw [show 2 + k1 + k2 = 2 + (k1 + k2) by omega,
+              run_add stage1Im 2 _, hrun1, run_add stage1Im k1 k2,
+              hrun2, hrun3], hs3rip, hs3r4,
+          fun i hi0 hi1 hi2 hi4 hi6 hi7 hi10 =>
+            (hs3fr i hi0 hi1 hi2 hi4 hi6 hi7 hi10).trans
+              ((hs2fr i hi0 hi1 hi2 hi4 hi6 hi7 hi10).trans
+                (hs1fr i)),
+          hs3len, (hs3k.trans hs2k).trans hs1k,
+          by rw [hs3sh, hs2sh, hs1mem]⟩
+    · obtain ⟨k1, s2, hrun2, hs2rip, hs2r4, hs2fr, hs2len, hs2k,
+          hs2sh⟩ := hstepfail
+      exact Or.inr ⟨2 + k1, s2, by
+          rw [run_add stage1Im 2 k1, hrun1, hrun2], hs2rip, hs2r4,
+        fun i hi0 hi1 hi2 hi4 hi6 hi7 hi10 =>
+          (hs2fr i hi0 hi1 hi2 hi4 hi6 hi7 hi10).trans (hs1fr i),
+        hs2len, hs2k.trans hs1k, by rw [hs2sh, hs1mem]⟩
+
+
 end SporosX1
