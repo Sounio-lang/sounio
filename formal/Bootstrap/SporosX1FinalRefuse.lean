@@ -3486,7 +3486,7 @@ length for the head byte and the exact bytes, all below 256. -/
 theorem instr_of_opLen {op l : Nat} {bs : List Nat}
     (hOp : OpLen op l) (hbs : bs.length = l)
     (hb : ∀ b ∈ bs, b < 256) (hhead : bs.head? = some op) :
-    ∃ x : Instr, x.enc = bs := by
+    ∃ x : Instr, x.enc = bs ∧ InstrBound x := by
   cases bs with
   | nil => simp at hhead
   | cons b rest =>
@@ -3508,7 +3508,7 @@ theorem instr_of_opLen {op l : Nat} {bs : List Nat}
         rw [prim_all_length]; exact hop
       exact ⟨.prim (Prim.all[b]'hlt), by
         show [(Prim.all[b]'hlt).code] = [b]
-        rw [prim_code_get b hlt]⟩
+        rw [prim_code_get b hlt], trivial⟩
     · subst hop
       have hrlen : rest.length = 8 := by
         rw [hl] at hbs
@@ -3517,7 +3517,10 @@ theorem instr_of_opLen {op l : Nat} {bs : List Nat}
       exact ⟨.lit (leVal rest), by
         show 0x80 :: leBytes (leVal rest) 8 = 0x80 :: rest
         rw [← hrlen]
-        exact congrArg _ (leBytes_leVal hrestb)⟩
+        exact congrArg _ (leBytes_leVal hrestb), by
+        show leVal rest < 256 ^ 8
+        have h := leVal_bound hrestb
+        rwa [hrlen] at h⟩
     · have hrlen : rest.length = 0 := by
         rw [hl] at hbs
         simp only [List.length_cons] at hbs
@@ -3525,10 +3528,10 @@ theorem instr_of_opLen {op l : Nat} {bs : List Nat}
       have hrest : rest = [] := (by cases rest with | nil => rfl | cons x xs => simp at hrlen)
       subst hrest
       rcases hop with rfl | rfl | rfl | rfl
-      · exact ⟨.tor, rfl⟩
-      · exact ⟨.fromr, rfl⟩
-      · exact ⟨.rfetch, rfl⟩
-      · exact ⟨.ret, rfl⟩
+      · exact ⟨.tor, rfl, trivial⟩
+      · exact ⟨.fromr, rfl, trivial⟩
+      · exact ⟨.rfetch, rfl, trivial⟩
+      · exact ⟨.ret, rfl, trivial⟩
     · obtain ⟨hlo, hhi, h131, h132, h133⟩ := hop
       have hrlen : rest.length = 4 := by
         rw [hl] at hbs
@@ -3536,21 +3539,24 @@ theorem instr_of_opLen {op l : Nat} {bs : List Nat}
         omega
       have key : ∀ (f : Nat → Instr),
           (∀ v, (f v).enc = b :: leBytes v 4) →
-          ∃ x : Instr, x.enc = b :: rest := by
-        intro f hf
-        exact ⟨f (leVal rest), by
-          rw [hf, ← hrlen, leBytes_leVal hrestb]⟩
+          (∀ v, v < 256 ^ 4 → InstrBound (f v)) →
+          ∃ x : Instr, x.enc = b :: rest ∧ InstrBound x := by
+        intro f hf hbnd
+        refine ⟨f (leVal rest), by
+          rw [hf, ← hrlen, leBytes_leVal hrestb], hbnd _ ?_⟩
+        have h := leVal_bound hrestb
+        rwa [hrlen] at h
       have hcases : b = 129 ∨ b = 130 ∨ b = 134 ∨ b = 135 ∨
           b = 136 ∨ b = 137 ∨ b = 138 ∨ b = 139 := by omega
       rcases hcases with rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl
-      · exact key Instr.str (fun v => rfl)
-      · exact key Instr.pick (fun v => rfl)
-      · exact key Instr.locget (fun v => rfl)
-      · exact key Instr.locset (fun v => rfl)
-      · exact key Instr.jmp (fun v => rfl)
-      · exact key Instr.jz (fun v => rfl)
-      · exact key Instr.jnz (fun v => rfl)
-      · exact key Instr.call (fun v => rfl)
+      · exact key Instr.str (fun v => rfl) (fun v hv => hv)
+      · exact key Instr.pick (fun v => rfl) (fun v hv => hv)
+      · exact key Instr.locget (fun v => rfl) (fun v hv => hv)
+      · exact key Instr.locset (fun v => rfl) (fun v hv => hv)
+      · exact key Instr.jmp (fun v => rfl) (fun v hv => hv)
+      · exact key Instr.jz (fun v => rfl) (fun v hv => hv)
+      · exact key Instr.jnz (fun v => rfl) (fun v hv => hv)
+      · exact key Instr.call (fun v => rfl) (fun v hv => hv)
 
 set_option maxHeartbeats 0 in
 /-- `mmap` with a refusing oracle returns `-ENOMEM`, memory
@@ -6281,7 +6287,7 @@ theorem parser_code_step_classify {c e B S n : Nat}
       s'.reg 6 = some (c + x.enc.length) ∧ s'.reg 1 = some n ∧
       s'.mem.rd (S + (c - B)) = some x.enc.length ∧
       s.mem.rdN c x.enc.length = some x.enc ∧
-      c + x.enc.length ≤ e ∧
+      c + x.enc.length ≤ e ∧ InstrBound x ∧
       (∀ i, i ≠ 0 → i ≠ 1 → i ≠ 2 → i ≠ 6 → i ≠ 10 →
         s'.reg i = s.reg i) ∧
       s'.regs.length = 16 ∧ s'.k = s.k ∧
@@ -6356,7 +6362,7 @@ theorem parser_code_step_classify {c e B S n : Nat}
               exact (Option.some.inj hb1').symm
             subst hb_eq
             rfl
-        obtain ⟨x, hx⟩ := instr_of_opLen hOp hlenl hbl hhead
+        obtain ⟨x, hx, hxb⟩ := instr_of_opLen hOp hlenl hbl hhead
         have henc : s.mem.rdN c x.enc.length = some x.enc := by
           rw [hx, hlenl]
           exact hbsl
@@ -6371,7 +6377,7 @@ theorem parser_code_step_classify {c e B S n : Nat}
             (by omega) hcW heW hnW hBc hSW (hwr _ hxpos (by omega))
             hlen16
         exact Or.inl ⟨x, k, s', hrun, hsrip, hsr6, hsr1, hsrd,
-          henc, (by omega), hsfr, hslen, hsk, hssh, hsmemfr⟩
+          henc, (by omega), hxb, hsfr, hslen, hsk, hssh, hsmemfr⟩
       · obtain ⟨nd, s3, hrun3, hs3rip, hs3r10, _hs3r0, hs3fr,
             hs3mem, hs3len16, hs3k⟩ :=
           parser_dispatch hs2rip hs2r0 hOp hs2len16
@@ -6454,6 +6460,7 @@ theorem parser_code_loop_classify : ∀ (n : Nat) {c e B S : Nat}
       s'.rip = base + 0x30b ∧ s'.reg 1 = some 0 ∧
       s'.reg 6 = some (c + codeBytes code) ∧
       CodeSeq s'.mem c code ∧ LenLay s'.mem B S c code ∧
+      (∀ x ∈ code, InstrBound x) ∧
       (∀ i, i ≠ 0 → i ≠ 1 → i ≠ 2 → i ≠ 6 → i ≠ 10 →
         s'.reg i = s.reg i) ∧
       s'.regs.length = 16 ∧ s'.k = s.k ∧
@@ -6471,7 +6478,7 @@ theorem parser_code_loop_classify : ∀ (n : Nat) {c e B S : Nat}
   | zero =>
     intro c e B S s hrip hr1 hr6 _ _ _ hce hcW _ _ _ _ _ _ _ hlen16
     refine Or.inl ⟨[], 0, s, rfl, by simpa using hce, rfl, hrip, hr1, ?_, trivial,
-      trivial, ?_, hlen16, rfl, rfl, ?_⟩
+      trivial, fun x hx => (List.not_mem_nil hx).elim, ?_, hlen16, rfl, rfl, ?_⟩
     · show s.reg 6 = some (c + codeBytes [])
       rw [show codeBytes [] = 0 from rfl, Nat.add_zero]
       exact hr6
@@ -6488,7 +6495,7 @@ theorem parser_code_loop_classify : ∀ (n : Nat) {c e B S : Nat}
         (fun l _ _ => hwr _ _ (Nat.le_refl _) (by omega)) hrdNc hlen16 with
       hstep | hfail
     · obtain ⟨x, k1, s1, hrun1, hs1rip, hs1r6, hs1r1, hs1rd, henc,
-          hce1, hs1fr, hs1len, hs1k, hs1sh, hs1memfr⟩ := hstep
+          hce1, hs1b, hs1fr, hs1len, hs1k, hs1sh, hs1memfr⟩ := hstep
       have hpos : 0 < x.enc.length := by
         obtain ⟨op, rest, heq, _⟩ := enc_head x
         rw [heq]; exact Nat.zero_lt_succ _
@@ -6523,7 +6530,7 @@ theorem parser_code_loop_classify : ∀ (n : Nat) {c e B S : Nat}
           (by omega) heW (by omega) (by omega) (by omega)
           (by omega) hs1wr hs1rdN hs1len with hrest | hrestfail
       · obtain ⟨xs, k2, s2, hxslen, hs2fit, hrun2, hs2rip, hs2r1, hs2r6,
-            hs2seq, hs2lay, hs2fr, hs2len, hs2k, hs2sh, hs2memfr⟩ :=
+            hs2seq, hs2lay, hs2b, hs2fr, hs2len, hs2k, hs2sh, hs2memfr⟩ :=
           hrest
         have hrun : run stage1Im (k1 + k2) (Out.ok s) =
             Out.ok s2 := by
@@ -6550,8 +6557,13 @@ theorem parser_code_loop_classify : ∀ (n : Nat) {c e B S : Nat}
               omega
             exact rd_of_rdN1 h1 hs1rd
           · exact hs2lay
+        have hbcode : ∀ y ∈ x :: xs, InstrBound y := by
+          intro y hy
+          rcases List.mem_cons.mp hy with rfl | hy
+          · exact hs1b
+          · exact hs2b y hy
         refine Or.inl ⟨x :: xs, k1 + k2, s2, by simp [hxslen],
-          by rw [hcb]; omega, hrun, hs2rip, hs2r1, ?_, hseq', hlay', ?_, hs2len, ?_,
+          by rw [hcb]; omega, hrun, hs2rip, hs2r1, ?_, hseq', hlay', hbcode, ?_, hs2len, ?_,
           ?_, ?_⟩
         · show s2.reg 6 = some (c + codeBytes (x :: xs))
           rw [hcb]
@@ -7667,7 +7679,7 @@ theorem parser_word_step_classify {B e S sp p c r : Nat}
       (by rcases hScrB with h | h <;> omega) hs2wr hs2rdN hs2len with
     hcl | hclfail
   · obtain ⟨code, k3, s3, hcodelen, hfit3, hrun3, hs3rip, hs3r1,
-        hs3r6, hs3seq, hs3lay, hs3fr, hs3len, hs3k, hs3sh,
+        hs3r6, hs3seq, hs3lay, hs3b, hs3fr, hs3len, hs3k, hs3sh,
         hs3memfr⟩ := hcl
     have slot3 : ∀ {off w : Nat}, off + 8 ≤ 48 →
         rd64 s2.mem (p + off) = some w →
