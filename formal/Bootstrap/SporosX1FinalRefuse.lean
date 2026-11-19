@@ -8881,4 +8881,140 @@ theorem parser_loaded_to_checker_classify {f : List Nat}
     exact hqor
 
 
+set_option maxHeartbeats 0 in
+/-- The oracle-existence prefix: from process entry, under the
+witness oracle for the `Room` interval, the run either exits 1
+in the loader/parser, or reaches the checker entry with the
+oracle fully consumed.  Together with
+`oracleLegalAt_of_prefix`, every state before that milestone is
+oracle-legal; `stage1Oracle_not_hitsNomem` discharges the
+memory-refusal side for the whole run. -/
+theorem stage1_oracle_prefix {f path argv0 stdin : List Nat}
+    {top : Nat} (hinit : Stage1InitOk f path argv0 top)
+    (hroom : Room f path argv0 top) :
+    ∃ A, A % page = 0 ∧ 0 < A ∧ A + stage1Mf f ≤ 2 ^ 47 ∧
+      (stage1Init f path argv0 [] [] top).mem.free A
+          (stage1Mf f) = true ∧
+      ((∃ k, run stage1Im k
+          (Out.ok (stage1Init f path argv0 stdin
+            (stage1Oracle f A) top)) = Out.exit 1) ∨
+       (∃ k s', run stage1Im k
+          (Out.ok (stage1Init f path argv0 stdin
+            (stage1Oracle f A) top)) = Out.ok s' ∧
+        s'.rip = base + 0x452 ∧ s'.k.oracle = [] ∧
+        RegsOk s' ∧ StackRoom s' 6)) := by
+  have hinit0 := hinit
+  obtain ⟨hfB, -, -, -, -, -, -, htop47, hleInit, hstkhi⟩ := hinit0
+  obtain ⟨A, k0, sL, hAmod, hApos, hAbound, hfree, hrun0, hLrip,
+      hLr3, -, hLr13, -, hLr4, -, -, -, hLr9, hLoracle, -,
+      hLmem, hLfile, hLwin, hLlen, -, hLroom, -⟩ :=
+    loader_init_to_loaded hinit hroom
+  obtain ⟨c1, c2, buf, hmL, hc1b, hc1hi, hc2b, hc2hi, hbufb,
+      hbufhi, hbufrw, hc2rw⟩ := hLmem
+  have hregsI : RegsOk
+      (stage1Init f path argv0 stdin (stage1Oracle f A) top) := by
+    intro i hi16 _
+    by_cases h4 : i = 4
+    · subst h4
+      exact ⟨_, stage1Init_reg4 f path argv0 stdin
+        (stage1Oracle f A) top⟩
+    · exact ⟨0, stage1Init_reg_ne4 f path argv0 stdin
+        (stage1Oracle f A) top hi16 h4⟩
+  have hregsL : RegsOk sL := run_regs_ok hrun0 hregsI
+  -- stack geometry of the initial frame
+  have hspEq : (X86Env.initStack top [argv0, path]).2 + 24 =
+      c2.base + 4120 := by
+    have h1 := initStack_sp top argv0 path
+    rw [← hc2b] at h1
+    have hsr : X86Env.stackRoom = 4096 := rfl
+    omega
+  have hstklen : 8192 ≤
+      (X86Env.initStack top [argv0, path]).1.data.length := by
+    rw [initStack_data_length]
+    have hp : 4096 ≤ X86Env.pages
+        (56 + ((argv0.length + 1) + (path.length + 1)) + 1) := by
+      unfold X86Env.pages X86Env.page
+      have h1 : 1 ≤ (56 + ((argv0.length + 1) +
+          (path.length + 1)) + 1 + 4095) / 4096 :=
+        Nat.div_pos (by omega) (by decide)
+      omega
+    have hsr : X86Env.stackRoom = 4096 := rfl
+    omega
+  have hc2hi' : c2.hi = top := by rw [hc2hi]; exact hstkhi
+  have hspHi : (X86Env.initStack top [argv0, path]).2 + 24 + 48 ≤
+      c2.hi := by
+    have hh : c2.hi = c2.base +
+        (X86Env.initStack top [argv0, path]).1.data.length := by
+      have e : (X86Env.initStack top [argv0, path]).1.hi =
+          (X86Env.initStack top [argv0, path]).1.base +
+            (X86Env.initStack top [argv0, path]).1.data.length :=
+        rfl
+      rw [hc2hi, e, ← hc2b]
+    omega
+  -- the free interval against the two initial regions
+  have hfree0 := hfree
+  rw [stage1Init_mem] at hfree0
+  unfold X86Env.Mem.free at hfree0
+  rw [List.all_eq_true] at hfree0
+  have hfreecode := hfree0 ⟨base, stage1Code, false⟩ (by simp)
+  have hfreestk := hfree0
+    (X86Env.initStack top [argv0, path]).1 (by simp)
+  rw [Bool.or_eq_true] at hfreecode hfreestk
+  simp only [decide_eq_true_eq] at hfreecode hfreestk
+  have hfreecode2 : A + stage1Mf f ≤ base ∨
+      base + stage1Code.length ≤ A := by
+    have hcodehi : (⟨base, stage1Code, false⟩ : Region).hi =
+        base + stage1Code.length := by simp only [X86Env.Region.hi]
+    rwa [hcodehi] at hfreecode
+  have hfreeInit : ∀ r ∈ ([c1, c2] : Mem),
+      A + stage1Mf f ≤ r.base ∨ r.hi ≤ A := by
+    intro r hr
+    have hr2 : r = c1 ∨ r = c2 := by simpa using hr
+    rcases hr2 with rfl | rfl
+    · rcases hfreecode2 with h | h
+      · exact Or.inl (by rw [hc1b]; exact h)
+      · exact Or.inr (by rw [hc1hi]; exact h)
+    · rcases hfreestk with h | h
+      · exact Or.inl (by rw [hc2b]; exact h)
+      · exact Or.inr (by rw [hc2hi]; exact h)
+  have hAframe : ∀ x k, A ≤ x → x + k ≤ A + f.length →
+      x + k ≤ (X86Env.initStack top [argv0, path]).2 + 24 - 16 ∨
+        (X86Env.initStack top [argv0, path]).2 + 24 ≤ x := by
+    intro x k hx hxk
+    have hLe : f.length ≤ stage1Mf f := by
+      have h1 : f.length ≤ arenaFileBytes f := by
+        unfold arenaFileBytes
+        have h2 := pages_ge (65536 + 2 * f.length)
+        omega
+      unfold stage1Mf
+      omega
+    rcases hfreestk with h | h
+    · exact Or.inl (by omega)
+    · exact Or.inr (by omega)
+  have hdisjc : c1.hi ≤ c2.base := by
+    have h := hleInit
+    rw [phVaddr_eq, phMemsz_eq] at h
+    rw [hc1hi, hc2b]
+    exact h
+  have hspW' : (X86Env.initStack top [argv0, path]).2 + 24 < W := by
+    have hW : W = 2 ^ 64 := rfl
+    omega
+  have hsp48W : (X86Env.initStack top [argv0, path]).2 + 24 + 48 <
+      W := by
+    have hW : W = 2 ^ 64 := rfl
+    omega
+  -- the classified parser from the loaded state
+  rcases parser_loaded_to_checker_classify hLrip hLr3 hLr13 hLr4
+      (hregsL 7 (by decide) (by decide)) hLr9 hLoracle hmL hbufb
+      hbufhi hLfile hLwin hfB hfreeInit hAmod hApos hAbound
+      hAframe hdisjc hc2rw (by omega) (by omega) (by omega) hLlen
+      (by omega) hspW' hsp48W hregsL hLroom with hexit | hchk
+  · exact ⟨A, hAmod, hApos, hAbound, hfree, Or.inl (by
+      obtain ⟨k, hk⟩ := hexit
+      exact ⟨k0 + k, by rw [run_add, hrun0, hk]⟩)⟩
+  · obtain ⟨bs, ds, wds, c, k, s', -, -, -, -, -, -, -, -, -, -, -, -, hrun, hrip', -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, hor, hregs', hroom', -, -⟩ := hchk
+    exact ⟨A, hAmod, hApos, hAbound, hfree, Or.inr ⟨k0 + k, s', by
+      rw [run_add, hrun0, hrun], hrip', hor, hregs', hroom'⟩⟩
+
+
 end SporosX1
