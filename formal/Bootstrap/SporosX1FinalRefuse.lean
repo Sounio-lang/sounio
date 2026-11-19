@@ -27588,5 +27588,150 @@ theorem parser_code_step_nh {c e B S n : Nat} {x : Instr} {s : X86Int.St}
   · intro y k hd
     rw [hs4memfr y k hd, hs3mem']
 
+theorem parser_code_loop_nh : ∀ (code : List Instr) {c e B S : Nat}
+    {s : X86Int.St},
+    s.rip = base + 0x30b → s.reg 1 = some code.length →
+    s.reg 6 = some c → s.reg 15 = some e →
+    s.reg 3 = some B → s.reg 11 = some S →
+    CodeSeq s.mem c code →
+    c + codeBytes code ≤ e → c < W → e < W →
+    B ≤ c → S + (c + codeBytes code - B) < W →
+    (S + (c + codeBytes code - B) ≤ c ∨ c + codeBytes code ≤ S + (c - B)) →
+    (∀ a v, S + (c - B) ≤ a → a < S + (c + codeBytes code - B) →
+      (s.mem.wr a v).isSome) →
+    s.regs.length = 16 →
+    ∃ k, k ≤ 37 * code.length ∧ ∃ s',
+      run stage1Im k (Out.ok s) = Out.ok s' ∧
+      s'.rip = base + 0x30b ∧ s'.reg 1 = some 0 ∧
+      s'.reg 6 = some (c + codeBytes code) ∧
+      CodeSeq s'.mem c code ∧ LenLay s'.mem B S c code ∧
+      (∀ i, i ≠ 0 → i ≠ 1 → i ≠ 2 → i ≠ 6 → i ≠ 10 →
+        s'.reg i = s.reg i) ∧
+      s'.regs.length = 16 ∧ s'.k = s.k ∧
+      wshape s'.mem = wshape s.mem ∧
+      (∀ y k, S + (c + codeBytes code - B) ≤ y ∨
+        y + k ≤ S + (c - B) → s'.mem.rdN y k = s.mem.rdN y k) ∧
+      NoHitUpTo s k := by
+  intro code
+  induction code with
+  | nil =>
+    intro c e B S s hrip hr1 hr6 _ _ _ _ _ hcW _ _ _ _ _ hlen16
+    refine ⟨0, by omega, s, rfl, hrip, hr1, ?_, trivial, trivial, ?_,
+      hlen16, rfl, rfl, ?_, ?_⟩
+    · show s.reg 6 = some (c + codeBytes [])
+      rw [show codeBytes [] = 0 from rfl]
+      exact hr6
+    · intro i _ _ _ _ _; exact rfl
+    · intro y k _; exact rfl
+    · intro j t hj hr hmem
+      have hj0 : j = 0 := by omega
+      subst hj0
+      rw [run_zero] at hr
+      simp only [Out.ok.injEq] at hr
+      subst hr
+      have h1 := hmem.1
+      rw [hrip, (stage1_parserCode).p30b] at h1
+      simp at h1
+  | cons x xs ih =>
+    intro c e B S s hrip hr1 hr6 hr15 hr3 hr11 hseq hce hcW heW hBc
+      hSW hdisj hwr hlen16
+    obtain ⟨henc, hseqx⟩ := hseq
+    have hcb : codeBytes (x :: xs) = x.enc.length + codeBytes xs := rfl
+    have hpos : 0 < x.enc.length := by
+      obtain ⟨op, rest, heq, _⟩ := enc_head x
+      rw [heq]; exact Nat.zero_lt_succ _
+    have hlenW : (x :: xs).length < W := by
+      have h1 := code_length_le_bytes (x :: xs)
+      omega
+    have hr1' : s.reg 1 = some (xs.length + 1) := hr1
+    have hwr0 : (s.mem.wr (S + (c - B)) x.enc.length).isSome := by
+      apply hwr
+      · omega
+      · have hpos : 0 < x.enc.length := by
+          obtain ⟨op, rest, heq, _⟩ := enc_head x
+          rw [heq]; exact Nat.zero_lt_succ _
+        omega
+    have hSW0 : S + (c - B) < W := by omega
+    obtain ⟨k1, hk1b, s1, hrun1, hs1rip, hs1r6, hs1r1, hs1rd, hs1fr,
+        hs1len, hs1k, hs1sh, hs1memfr, hnh1⟩ :=
+      parser_code_step_nh hrip hr1' hr6 hr15 hr3 hr11 henc (by omega)
+        hcW heW hlenW hBc hSW0 hwr0 hlen16
+    have hs1r15 : s1.reg 15 = some e := by
+      rw [hs1fr 15 (by decide) (by decide) (by decide) (by decide)
+        (by decide)]
+      exact hr15
+    have hs1r3 : s1.reg 3 = some B := by
+      rw [hs1fr 3 (by decide) (by decide) (by decide) (by decide)
+        (by decide)]
+      exact hr3
+    have hs1r11 : s1.reg 11 = some S := by
+      rw [hs1fr 11 (by decide) (by decide) (by decide) (by decide)
+        (by decide)]
+      exact hr11
+    have hs1seq : CodeSeq s1.mem (c + x.enc.length) xs := by
+      apply CodeSeq_of_frame hseqx
+      intro y k hy hk
+      apply hs1memfr
+      omega
+    have hs1wr : ∀ a v, S + (c + x.enc.length - B) ≤ a →
+        a < S + (c + x.enc.length + codeBytes xs - B) →
+        (s1.mem.wr a v).isSome := by
+      intro a v ha1 ha2
+      have h1 : (s.mem.wrN a [v]).isSome := by
+        rw [← wr_eq_wrN]
+        apply hwr <;> omega
+      have h2 := wrN_some_of_wshape _ s.mem s1.mem hs1sh _ h1
+      rwa [← wr_eq_wrN] at h2
+    obtain ⟨k2, hk2b, s2, hrun2, hs2rip, hs2r1, hs2r6, hs2seq, hs2lay,
+        hs2fr, hs2len, hs2k, hs2sh, hs2memfr, hnh2⟩ :=
+      ih hs1rip hs1r1 hs1r6 hs1r15 hs1r3 hs1r11 hs1seq (by omega)
+        (by omega) heW (by omega) (by omega) (by omega) hs1wr hs1len
+    have hrun : run stage1Im (k1 + k2) (Out.ok s) = Out.ok s2 := by
+      rw [run_add stage1Im k1 k2, hrun1, hrun2]
+    have hseq' : CodeSeq s2.mem c (x :: xs) := by
+      constructor
+      · have h1 : s2.mem.rdN c x.enc.length =
+            s1.mem.rdN c x.enc.length := by
+          apply hs2memfr
+          omega
+        have h2 : s1.mem.rdN c x.enc.length =
+            s.mem.rdN c x.enc.length := by
+          apply hs1memfr
+          omega
+        rw [h1, h2]; exact henc
+      · exact hs2seq
+    have hlay' : LenLay s2.mem B S c (x :: xs) := by
+      constructor
+      · have h1 : s2.mem.rdN (S + (c - B)) 1 =
+            s1.mem.rdN (S + (c - B)) 1 := by
+          apply hs2memfr
+          omega
+        exact rd_of_rdN1 h1 hs1rd
+      · exact hs2lay
+    refine ⟨k1 + k2, by
+      have hlen : (x :: xs).length = xs.length + 1 :=
+        List.length_cons
+      omega, s2, hrun, hs2rip, hs2r1, ?_, hseq',
+      hlay', ?_, hs2len, ?_, ?_, ?_,
+      noHitUpTo_add hnh1 hrun1 hnh2⟩
+    · show s2.reg 6 = some (c + codeBytes (x :: xs))
+      rw [hcb]
+      have h := hs2r6
+      rwa [show c + x.enc.length + codeBytes xs =
+        c + (x.enc.length + codeBytes xs) by omega] at h
+    · intro i hi0 hi1 hi2 hi6 hi10
+      rw [hs2fr i hi0 hi1 hi2 hi6 hi10]
+      exact hs1fr i hi0 hi1 hi2 hi6 hi10
+    · rw [hs2k, hs1k]
+    · rw [hs2sh, hs1sh]
+    · intro y k hd
+      have h1 : s2.mem.rdN y k = s1.mem.rdN y k := by
+        apply hs2memfr
+        omega
+      have h2 : s1.mem.rdN y k = s.mem.rdN y k := by
+        apply hs1memfr
+        omega
+      rw [h1, h2]
+
 
 end SporosX1
