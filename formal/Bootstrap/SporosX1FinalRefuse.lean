@@ -8214,4 +8214,61 @@ theorem parser_trailing_classify {c e mn nw T : Nat}
     exact Or.inr ⟨16, s', hrun, hrip', hfr, hmem, hlen, hk⟩
 
 
+/-- A writable `find` hit in a prefix of a reference memory,
+transported across an append and then across equal write shapes. -/
+theorem find_rw_of_wshape_append_left {m pre extra : Mem} {a : Nat}
+    (hsh : wshape m = wshape (pre ++ extra))
+    (h : ∃ i r, Mem.find pre a 0 = some (i, r) ∧ r.rw = true) :
+    ∃ i r, Mem.find m a 0 = some (i, r) ∧ r.rw = true := by
+  apply find_rw_of_wshape hsh
+  obtain ⟨i, r, hf, hrw⟩ := h
+  exact ⟨i, r, find_append_left pre extra a 0 hf, hrw⟩
+
+/-- A writable `find` hit in the last region of a reference
+memory, transported across equal write shapes. -/
+theorem find_rw_of_wshape_append_last {m pre : Mem} {r : Region}
+    {a : Nat}
+    (hsh : wshape m = wshape (pre ++ [r]))
+    (hnon : ∀ r' ∈ pre, ¬ (r'.base ≤ a ∧ a < r'.hi))
+    (hmem : r.base ≤ a ∧ a < r.hi) (hrw : r.rw = true) :
+    ∃ i r', Mem.find m a 0 = some (i, r') ∧ r'.rw = true := by
+  apply find_rw_of_wshape hsh
+  exact ⟨0 + pre.length, r, find_append_last pre 0 hnon hmem, hrw⟩
+
+/-- Readability from a writable `find` hit in a prefix of a
+reference memory of the same write shape. -/
+theorem rd_isSome_of_wshape_append_left {m pre extra : Mem}
+    {a : Nat}
+    (hsh : wshape m = wshape (pre ++ extra))
+    (h : ∃ i r, Mem.find pre a 0 = some (i, r) ∧ r.rw = true) :
+    (m.rd a).isSome := by
+  apply rd_isSome_of_find
+  obtain ⟨i, r, hf, -⟩ :=
+    find_rw_of_wshape_append_left hsh h
+  exact ⟨i, r, hf⟩
+
+/-- Writability from a writable `find` hit in a prefix of a
+reference memory of the same write shape. -/
+theorem wr_isSome_of_wshape_append_left {m pre extra : Mem}
+    {a u : Nat}
+    (hsh : wshape m = wshape (pre ++ extra))
+    (h : ∃ i r, Mem.find pre a 0 = some (i, r) ∧ r.rw = true) :
+    (m.wr a u).isSome := by
+  obtain ⟨i, r, hf, hrw⟩ :=
+    find_rw_of_wshape_append_left hsh h
+  exact wr_isSome_iff.mpr ⟨i, r, hf, hrw⟩
+
+/-- Writability from a writable `find` hit in the last region of
+a reference memory of the same write shape. -/
+theorem wr_isSome_of_wshape_append_last {m pre : Mem}
+    {r : Region} {a u : Nat}
+    (hsh : wshape m = wshape (pre ++ [r]))
+    (hnon : ∀ r' ∈ pre, ¬ (r'.base ≤ a ∧ a < r'.hi))
+    (hmem : r.base ≤ a ∧ a < r.hi) (hrw : r.rw = true) :
+    (m.wr a u).isSome := by
+  obtain ⟨i, r', hf, hrw'⟩ :=
+    find_rw_of_wshape_append_last hsh hnon hmem hrw
+  exact wr_isSome_iff.mpr ⟨i, r', hf, hrw'⟩
+
+
 end SporosX1
