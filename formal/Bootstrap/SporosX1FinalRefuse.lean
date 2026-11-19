@@ -4416,4 +4416,185 @@ theorem call_rdc_fail_exit1 {site c e sp : Nat} {s : X86Int.St}
     hroom'
   exact ⟨n + k, by rw [run_add stage1Im n k, hrun, hk]⟩
 
+/-- Condition outcome for `cmp op, k` with `k < op` under cc6. -/
+theorem fl_ja {op k : Nat} (hop : op < W) (hk : k < W)
+    (h : k < op) :
+    X86Int.cond (aluF .sub op (k % W)).2 6 = some false := by
+  have hkmod : k % W = k := Nat.mod_eq_of_lt hk
+  have hcf : (aluF .sub op (k % W)).2.cf = some false := by
+    rw [hkmod]; exact aluF_sub_cf (by omega)
+  have hzf : (aluF .sub op (k % W)).2.zf = some false := by
+    rw [aluF_zf, hkmod]
+    have hbeq : ((aluF .sub op k).1 == 0) = false := by
+      cases h2 : ((aluF .sub op k).1 == 0) with
+      | false => rfl
+      | true =>
+        rw [beq_iff_eq] at h2
+        exact absurd h2 (sub_fst_ne_zero hop hk (by omega))
+    rw [hbeq]
+  simp [X86Int.cond, hcf, hzf]
+
+/-- Length dispatch, invalid opcodes `57 ≤ op < 129`, `op ≠ 128`:
+the chain reaches the `129` lower-bound test and falls to
+`aFail1` in fifteen steps. -/
+theorem parser_disp_invalid_lo {op : Nat} {s : X86Int.St}
+    (hrip : s.rip = base + 0x330) (hr0 : s.reg 0 = some op)
+    (hlo : 57 ≤ op) (hhi : op < 129) (h128 : op ≠ 128)
+    (hlen16 : s.regs.length = 16) :
+    ∃ s', run stage1Im 15 (Out.ok s) = Out.ok s' ∧
+      s'.rip = aFail1 ∧ (∀ i, s'.reg i = s.reg i) ∧
+      s'.mem = s.mem ∧ s'.regs.length = 16 ∧ s'.k = s.k := by
+  have hc := stage1_parserCode
+  have hopW : op < W :=
+    Nat.lt_of_le_of_lt (show op ≤ 128 by omega) (by decide)
+  obtain ⟨s1, hrun1, hs1rip, hs1fr, hs1mem, hs1len, hs1k⟩ :=
+    cmpI_jcc_pair hc.p330 hc.p334 hrip hr0
+      (fl_jae (by decide) (by omega))
+  have hs1r0 : s1.reg 0 = some op := by rw [hs1fr 0]; exact hr0
+  obtain ⟨s2, hrun2, hs2rip, hs2fr, hs2mem, hs2len, hs2k⟩ :=
+    cmpI_jcc_pair hc.p33b hc.p342 hs1rip hs1r0
+      (fl_jne hopW (by decide) h128)
+  have hs2r0 : s2.reg 0 = some op := by rw [hs2fr 0]; exact hs1r0
+  obtain ⟨s3, hrun3, hs3rip, hs3fr, hs3mem, hs3len, hs3k⟩ :=
+    cmpI_jcc_pair hc.p349 hc.p350 hs2rip hs2r0
+      (fl_jne (k := 131) hopW (by decide) (by omega))
+  have hs3r0 : s3.reg 0 = some op := by rw [hs3fr 0]; exact hs2r0
+  obtain ⟨s4, hrun4, hs4rip, hs4fr, hs4mem, hs4len, hs4k⟩ :=
+    cmpI_jcc_pair hc.p357 hc.p35e hs3rip hs3r0
+      (fl_jne (k := 132) hopW (by decide) (by omega))
+  have hs4r0 : s4.reg 0 = some op := by rw [hs4fr 0]; exact hs3r0
+  obtain ⟨s5, hrun5, hs5rip, hs5fr, hs5mem, hs5len, hs5k⟩ :=
+    cmpI_jcc_pair hc.p365 hc.p36c hs4rip hs4r0
+      (fl_jne (k := 133) hopW (by decide) (by omega))
+  have hs5r0 : s5.reg 0 = some op := by rw [hs5fr 0]; exact hs4r0
+  obtain ⟨s6, hrun6, hs6rip, hs6fr, hs6mem, hs6len, hs6k⟩ :=
+    cmpI_jcc_pair hc.p373 hc.p37a hs5rip hs5r0
+      (fl_jne (k := 140) hopW (by decide) (by omega))
+  have hs6r0 : s6.reg 0 = some op := by rw [hs6fr 0]; exact hs5r0
+  obtain ⟨s7, hrun7, hs7rip, hs7fr, hs7mem, hs7len, hs7k⟩ :=
+    cmpI_jcc_pair hc.p381 hc.p388 hs6rip hs6r0
+      (fl_jb (by decide) hhi)
+  have hs7rip' : s7.rip = base + 0x38a := hs7rip
+  obtain ⟨s8, hrun8, hs8rip, hs8fr, hs8mem, hs8len, hs8k⟩ :=
+    jmp_step hc.p38a hs7rip'
+  have hrun : run stage1Im 15 (Out.ok s) = Out.ok s8 := by
+    rw [show (15 : Nat) = 2 + 13 by omega, run_add stage1Im 2 13, hrun1,
+      show (13 : Nat) = 2 + 11 by omega, run_add stage1Im 2 11, hrun2,
+      show (11 : Nat) = 2 + 9 by omega, run_add stage1Im 2 9, hrun3,
+      show (9 : Nat) = 2 + 7 by omega, run_add stage1Im 2 7, hrun4,
+      show (7 : Nat) = 2 + 5 by omega, run_add stage1Im 2 5, hrun5,
+      show (5 : Nat) = 2 + 3 by omega, run_add stage1Im 2 3, hrun6,
+      show (3 : Nat) = 2 + 1 by omega, run_add stage1Im 2 1, hrun7,
+      hrun8]
+  refine ⟨s8, hrun, ?_, ?_, ?_, ?_, ?_⟩
+  · rw [hs8rip]; rfl
+  · intro i
+    rw [hs8fr i, hs7fr i, hs6fr i, hs5fr i, hs4fr i, hs3fr i, hs2fr i,
+      hs1fr i]
+  · rw [hs8mem, hs7mem, hs6mem, hs5mem, hs4mem, hs3mem, hs2mem, hs1mem]
+  · rw [hs8len, hs7len, hs6len, hs5len, hs4len, hs3len, hs2len, hs1len]
+    exact hlen16
+  · rw [hs8k, hs7k, hs6k, hs5k, hs4k, hs3k, hs2k, hs1k]
+
+/-- Length dispatch, invalid opcodes `141 ≤ op`: the chain
+reaches the `139` upper-bound test and falls to `aFail1` in
+seventeen steps. -/
+theorem parser_disp_invalid_hi {op : Nat} {s : X86Int.St}
+    (hrip : s.rip = base + 0x330) (hr0 : s.reg 0 = some op)
+    (hlo : 141 ≤ op) (hopW : op < W)
+    (hlen16 : s.regs.length = 16) :
+    ∃ s', run stage1Im 17 (Out.ok s) = Out.ok s' ∧
+      s'.rip = aFail1 ∧ (∀ i, s'.reg i = s.reg i) ∧
+      s'.mem = s.mem ∧ s'.regs.length = 16 ∧ s'.k = s.k := by
+  have hc := stage1_parserCode
+  obtain ⟨s1, hrun1, hs1rip, hs1fr, hs1mem, hs1len, hs1k⟩ :=
+    cmpI_jcc_pair hc.p330 hc.p334 hrip hr0
+      (fl_jae (by decide) (by omega))
+  have hs1r0 : s1.reg 0 = some op := by rw [hs1fr 0]; exact hr0
+  obtain ⟨s2, hrun2, hs2rip, hs2fr, hs2mem, hs2len, hs2k⟩ :=
+    cmpI_jcc_pair hc.p33b hc.p342 hs1rip hs1r0
+      (fl_jne (k := 128) hopW (by decide) (by omega))
+  have hs2r0 : s2.reg 0 = some op := by rw [hs2fr 0]; exact hs1r0
+  obtain ⟨s3, hrun3, hs3rip, hs3fr, hs3mem, hs3len, hs3k⟩ :=
+    cmpI_jcc_pair hc.p349 hc.p350 hs2rip hs2r0
+      (fl_jne (k := 131) hopW (by decide) (by omega))
+  have hs3r0 : s3.reg 0 = some op := by rw [hs3fr 0]; exact hs2r0
+  obtain ⟨s4, hrun4, hs4rip, hs4fr, hs4mem, hs4len, hs4k⟩ :=
+    cmpI_jcc_pair hc.p357 hc.p35e hs3rip hs3r0
+      (fl_jne (k := 132) hopW (by decide) (by omega))
+  have hs4r0 : s4.reg 0 = some op := by rw [hs4fr 0]; exact hs3r0
+  obtain ⟨s5, hrun5, hs5rip, hs5fr, hs5mem, hs5len, hs5k⟩ :=
+    cmpI_jcc_pair hc.p365 hc.p36c hs4rip hs4r0
+      (fl_jne (k := 133) hopW (by decide) (by omega))
+  have hs5r0 : s5.reg 0 = some op := by rw [hs5fr 0]; exact hs4r0
+  obtain ⟨s6, hrun6, hs6rip, hs6fr, hs6mem, hs6len, hs6k⟩ :=
+    cmpI_jcc_pair hc.p373 hc.p37a hs5rip hs5r0
+      (fl_jne (k := 140) hopW (by decide) (by omega))
+  have hs6r0 : s6.reg 0 = some op := by rw [hs6fr 0]; exact hs5r0
+  obtain ⟨s7, hrun7, hs7rip, hs7fr, hs7mem, hs7len, hs7k⟩ :=
+    cmpI_jcc_pair hc.p381 hc.p388 hs6rip hs6r0
+      (fl_jae (by decide) (by omega))
+  have hs7r0 : s7.reg 0 = some op := by rw [hs7fr 0]; exact hs6r0
+  obtain ⟨s8, hrun8, hs8rip, hs8fr, hs8mem, hs8len, hs8k⟩ :=
+    cmpI_jcc_pair hc.p38f hc.p396 hs7rip hs7r0
+      (fl_ja hopW (by decide) (by omega))
+  have hs8rip' : s8.rip = base + 0x398 := hs8rip
+  obtain ⟨s9, hrun9, hs9rip, hs9fr, hs9mem, hs9len, hs9k⟩ :=
+    jmp_step hc.p398 hs8rip'
+  have hrun : run stage1Im 17 (Out.ok s) = Out.ok s9 := by
+    rw [show (17 : Nat) = 2 + 15 by omega, run_add stage1Im 2 15, hrun1,
+      show (15 : Nat) = 2 + 13 by omega, run_add stage1Im 2 13, hrun2,
+      show (13 : Nat) = 2 + 11 by omega, run_add stage1Im 2 11, hrun3,
+      show (11 : Nat) = 2 + 9 by omega, run_add stage1Im 2 9, hrun4,
+      show (9 : Nat) = 2 + 7 by omega, run_add stage1Im 2 7, hrun5,
+      show (7 : Nat) = 2 + 5 by omega, run_add stage1Im 2 5, hrun6,
+      show (5 : Nat) = 2 + 3 by omega, run_add stage1Im 2 3, hrun7,
+      show (3 : Nat) = 2 + 1 by omega, run_add stage1Im 2 1, hrun8,
+      hrun9]
+  refine ⟨s9, hrun, ?_, ?_, ?_, ?_, ?_⟩
+  · rw [hs9rip]; rfl
+  · intro i
+    rw [hs9fr i, hs8fr i, hs7fr i, hs6fr i, hs5fr i, hs4fr i, hs3fr i,
+      hs2fr i, hs1fr i]
+  · rw [hs9mem, hs8mem, hs7mem, hs6mem, hs5mem, hs4mem, hs3mem, hs2mem,
+      hs1mem]
+  · rw [hs9len, hs8len, hs7len, hs6len, hs5len, hs4len, hs3len, hs2len,
+      hs1len]
+    exact hlen16
+  · rw [hs9k, hs8k, hs7k, hs6k, hs5k, hs4k, hs3k, hs2k, hs1k]
+
+/-- Invalid low opcode exits 1 at the dispatch. -/
+theorem parser_disp_invalid_lo_exit1 {op sp : Nat} {s : X86Int.St}
+    (hrip : s.rip = base + 0x330) (hr0 : s.reg 0 = some op)
+    (hlo : 57 ≤ op) (hhi : op < 129) (h128 : op ≠ 128)
+    (hlen16 : s.regs.length = 16)
+    (hr4 : s.reg 4 = some sp) (hsp32 : 32 ≤ sp) (hspW : sp < W)
+    (hregs : RegsOk s) (hroom : StackRoom s 1) :
+    ∃ k, run stage1Im k (Out.ok s) = Out.exit 1 := by
+  obtain ⟨s', hrun, hrip', hfr, hmem, -, -⟩ :=
+    parser_disp_invalid_lo hrip hr0 hlo hhi h128 hlen16
+  have hr4' : s'.reg 4 = some sp := by rw [hfr 4]; exact hr4
+  have h4eq : s'.reg 4 = s.reg 4 := by rw [hr4', hr4]
+  obtain ⟨k, hk⟩ := exit1_of_fail1 stage1_refuseCode hsp32 hspW s'
+    hrip' hr4' (run_regs_ok hrun hregs)
+    (StackRoom_of_mem hmem h4eq hroom)
+  exact ⟨15 + k, by rw [run_add stage1Im 15 k, hrun, hk]⟩
+
+/-- Invalid high opcode exits 1 at the dispatch. -/
+theorem parser_disp_invalid_hi_exit1 {op sp : Nat} {s : X86Int.St}
+    (hrip : s.rip = base + 0x330) (hr0 : s.reg 0 = some op)
+    (hlo : 141 ≤ op) (hopW : op < W)
+    (hlen16 : s.regs.length = 16)
+    (hr4 : s.reg 4 = some sp) (hsp32 : 32 ≤ sp) (hspW : sp < W)
+    (hregs : RegsOk s) (hroom : StackRoom s 1) :
+    ∃ k, run stage1Im k (Out.ok s) = Out.exit 1 := by
+  obtain ⟨s', hrun, hrip', hfr, hmem, -, -⟩ :=
+    parser_disp_invalid_hi hrip hr0 hlo hopW hlen16
+  have hr4' : s'.reg 4 = some sp := by rw [hfr 4]; exact hr4
+  have h4eq : s'.reg 4 = s.reg 4 := by rw [hr4', hr4]
+  obtain ⟨k, hk⟩ := exit1_of_fail1 stage1_refuseCode hsp32 hspW s'
+    hrip' hr4' (run_regs_ok hrun hregs)
+    (StackRoom_of_mem hmem h4eq hroom)
+  exact ⟨17 + k, by rw [run_add stage1Im 17 k, hrun, hk]⟩
+
 end SporosX1
