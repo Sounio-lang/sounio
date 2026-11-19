@@ -22379,5 +22379,247 @@ theorem parser_data_loop_ok_nh {e : Nat} :
         noHitUpTo_add hnh1 hrun1 hnh2⟩
       rw [hlencons]; omega
 
+/-- Parser front (header, data loop, guard) with step bound and
+`NoHitUpTo` companion, from the loaded state at `0x134` to the
+words-table syscall site state at `0x1ec`. -/
+theorem parser_front_to_mmap1_nh {f path argv0 : List Nat}
+    {top A : Nat} {pr : Prog} {s0 : X86Int.St}
+    (hdec : Sporos.decode f = some pr)
+    (hchk : Sporos.checkProg pr = true)
+    (hfB : ∀ b ∈ f, b < 256)
+    (htop47 : top ≤ 2 ^ 47)
+    (hstkhi : (X86Env.initStack top [argv0, path]).1.hi = top)
+    (hrip0 : s0.rip = base + 0x134)
+    (hr3 : s0.reg 3 = some A) (hr13 : s0.reg 13 = some f.length)
+    (hr4 : s0.reg 4 =
+      some ((X86Env.initStack top [argv0, path]).2 + 24))
+    (hregs0 : RegsOk s0)
+    (hmem0 : ∃ c1 c2 buf', s0.mem = [c1, c2, buf'] ∧
+      c1.base = base ∧ c1.hi = base + stage1Code.length ∧
+      c2.base = (X86Env.initStack top [argv0, path]).1.base ∧
+      c2.hi = (X86Env.initStack top [argv0, path]).1.hi ∧
+      buf'.base = A ∧ (∃ cap', buf'.hi = A + cap' ∧
+        A + cap' ≤ 2 ^ 47) ∧ buf'.rw = true ∧ c2.rw = true ∧
+      buf'.data.take f.length = f)
+    (hrdN : s0.mem.rdN A f.length = some f)
+    (hlen16 : s0.regs.length = 16)
+    (hroom10 : StackRoom s0 10) :
+    ∃ N, N ≤ 35 + 16 * (pr.data.length + 1) ∧ ∃ s4,
+      run stage1Im N (Out.ok s0) = Out.ok s4 ∧
+      s4.rip = base + 0x1ec ∧
+      s4.reg 6 = some (A + 16 + dataBytes pr.data) ∧
+      s4.reg 10 = some pr.words.length ∧
+      s4.reg 4 =
+        some ((X86Env.initStack top [argv0, path]).2 + 24) ∧
+      s4.reg 3 = some A ∧ s4.reg 12 = some pr.main ∧
+      s4.reg 13 = some f.length ∧
+      s4.reg 15 = some (A + f.length) ∧
+      s4.mem = s0.mem ∧ s4.k = s0.k ∧ s4.regs.length = 16 ∧
+      RegsOk s4 ∧ StackRoom s4 2 ∧
+      (∃ v, s4.reg 7 = some v) ∧ (∃ v, s4.reg 9 = some v) ∧
+      NoHitUpTo s0 N := by
+  obtain ⟨hfenc, hbmn, hbnw, hbnd, hwB, hdB⟩ := decode_inv hdec hfB
+  obtain ⟨hmn, -⟩ := checkProg_main hchk
+  have hnw0 : pr.words.length ≠ 0 := by omega
+  have hLenc : f.length =
+      16 + dataBytes pr.data + wordsBytes pr.words := by
+    rw [hfenc]; exact enc_length pr
+  have hwb20 : 20 ≤ wordsBytes pr.words := by
+    have h := wordsBytes_ge pr.words
+    omega
+  have hL20 : 20 ≤ f.length := by omega
+  have hL16 : 16 ≤ f.length := by omega
+  have hrdNenc : s0.mem.rdN A pr.enc.length = some pr.enc := by
+    rwa [← hfenc]
+  have h20 : s0.mem.rdN A 20 = some (pr.enc.take 20) :=
+    enc_head20 hrdNenc (by rw [← hfenc]; omega)
+  obtain ⟨hmagic, hvmain, hvnw, hvnd⟩ := enc_header_vals pr
+  have hmainv : leVal (((pr.enc.take 20).drop 4).take 4) % 2 ^ 32 =
+      pr.main := by
+    rw [hvmain]
+    exact Nat.mod_eq_of_lt hbmn
+  have hnwv : leVal (((pr.enc.take 20).drop 8).take 4) % 2 ^ 32 =
+      pr.words.length := by
+    rw [hvnw]
+    exact Nat.mod_eq_of_lt hbnw
+  have hndv : leVal (((pr.enc.take 20).drop 12).take 4) % 2 ^ 32 =
+      pr.data.length := by
+    rw [hvnd]
+    exact Nat.mod_eq_of_lt hbnd
+  obtain ⟨c1, c2, buf', hmem0eq, hc1b, hc1hi, hc2b, hc2hi, hbufb,
+    ⟨cap', hbufhi, hbufcap⟩, hbufrw, hc2rw, htake⟩ := hmem0
+  have hAe : A + f.length < W := by
+    have hW : W = 2 ^ 64 := rfl
+    have hcapE : cap' = buf'.data.length := by
+      have e : buf'.hi = buf'.base + buf'.data.length := rfl
+      rw [hbufb, hbufhi] at e
+      omega
+    have hflen : f.length ≤ cap' := by
+      have h1 : (buf'.data.take f.length).length = f.length := by
+        rw [htake]
+      rw [List.length_take] at h1
+      omega
+    omega
+  -- SP0 arithmetic
+  have hsp0eq : (X86Env.initStack top [argv0, path]).2 =
+      c2.base + 4096 := by
+    have h1 := initStack_sp top argv0 path
+    rw [← hc2b] at h1
+    have hsr : X86Env.stackRoom = 4096 := rfl
+    rw [hsr] at h1
+    exact h1
+  have hSP0ge : c2.base + 4096 ≤
+      (X86Env.initStack top [argv0, path]).2 + 24 := by omega
+  have hSPv : (X86Env.initStack top [argv0, path]).2 + 24 =
+      c2.base + 4120 := by omega
+  have hSPle : (X86Env.initStack top [argv0, path]).2 + 24 ≤
+      c2.hi := by
+    have hlen := initStack_data_length top argv0 path
+    have hh : c2.hi = c2.base +
+        (X86Env.initStack top [argv0, path]).1.data.length := by
+      have e : (X86Env.initStack top [argv0, path]).1.hi =
+          (X86Env.initStack top [argv0, path]).1.base +
+            (X86Env.initStack top [argv0, path]).1.data.length :=
+        rfl
+      rw [hc2hi, e, ← hc2b]
+    have hsr : X86Env.stackRoom = 4096 := rfl
+    have hpg := pages_ge
+      (56 + ((argv0.length + 1) + (path.length + 1)) + 1)
+    omega
+  have hSP0W : (X86Env.initStack top [argv0, path]).2 + 24 < W := by
+    have hW : W = 2 ^ 64 := rfl
+    have ht : c2.hi = top := by rw [hc2hi]; exact hstkhi
+    omega
+  -- header_a
+  obtain ⟨s1, hrun1, hs1rip, hs1r15, hs1r6, hs1fr, hs1mem,
+    hs1len, hs1k, hnh1⟩ :=
+    parser_header_a_nh hrip0 hr3 hr13 hAe hL16 h20 hmagic hlen16
+  have hs1r4 : s1.reg 4 = s0.reg 4 :=
+    hs1fr 4 (by decide) (by decide) (by decide)
+  have h20_1 : s1.mem.rdN A 20 = some (pr.enc.take 20) := by
+    rw [hs1mem]; exact h20
+  -- header_b
+  obtain ⟨s2, hrun2, hs2rip, hs2r12, hs2r10, hs2r1, hs2r6, hs2fr,
+    hs2mem, hs2len, hs2k, hnh2⟩ :=
+    parser_header_b_nh hs1rip hs1r6 hAe hL16 h20_1
+      (by rw [hnwv]; exact hnw0) hs1len
+  rw [hmainv] at hs2r12
+  rw [hnwv] at hs2r10
+  rw [hndv] at hs2r1
+  have hs2r15 : s2.reg 15 = some (A + f.length) := by
+    rw [hs2fr 15 (by decide) (by decide) (by decide) (by decide)
+      (by decide) (by decide)]
+    exact hs1r15
+  have hs2r4 : s2.reg 4 = s0.reg 4 := by
+    rw [hs2fr 4 (by decide) (by decide) (by decide) (by decide)
+      (by decide) (by decide)]
+    exact hs1r4
+  have hs2r3 : s2.reg 3 = some A := by
+    rw [hs2fr 3 (by decide) (by decide) (by decide) (by decide)
+      (by decide) (by decide),
+      hs1fr 3 (by decide) (by decide) (by decide)]
+    exact hr3
+  have hs2r13 : s2.reg 13 = some f.length := by
+    rw [hs2fr 13 (by decide) (by decide) (by decide) (by decide)
+      (by decide) (by decide),
+      hs1fr 13 (by decide) (by decide) (by decide)]
+    exact hr13
+  -- data loop
+  have hrdN2 : s2.mem.rdN A pr.enc.length = some pr.enc := by
+    rw [hs2mem, hs1mem]; exact hrdNenc
+  have hdataseq : DataSeq s2.mem (A + 16) (pr.data.map List.length)
+      (A + 16 + dataBytes pr.data) :=
+    DataSeq_of_rdN _ (enc_data_slice hrdN2) hdB
+  obtain ⟨n3, hn3bnd, s3, hrun3, hs3rip, hs3r1, hs3r6, hs3r15, hs3fr,
+    hs3mem, hs3len, hs3k, hnh3⟩ :=
+    parser_data_loop_ok_nh hdataseq hs2rip
+      (by rw [hs2r1, List.length_map]) hs2r6 hs2r15 (by omega) hAe
+      (by
+        have hW : W = 2 ^ 64 := rfl
+        rw [List.length_map]
+        omega) hs2len
+  have hs3r10 : s3.reg 10 = some pr.words.length := by
+    rw [hs3fr 10 (by decide) (by decide) (by decide) (by decide)]
+    exact hs2r10
+  have hs3r4 : s3.reg 4 = s0.reg 4 := by
+    rw [hs3fr 4 (by decide) (by decide) (by decide) (by decide)]
+    exact hs2r4
+  -- guard
+  have hguard : 20 * pr.words.length ≤
+      (A + f.length) - (A + 16 + dataBytes pr.data) := by
+    have h1 := wordsBytes_ge pr.words
+    omega
+  obtain ⟨s4, hrun4, hs4rip, hs4fr, hs4mem, hs4len, hs4k, hnh4⟩ :=
+    parser_guard_ok_nh hs3rip hs3r10 hs3r6 hs3r15 hbnw (by omega) hAe
+      hguard hs3len
+  have hmem4 : s4.mem = s0.mem := by
+    rw [hs4mem, hs3mem, hs2mem, hs1mem]
+  have hs4r4 : s4.reg 4 = s0.reg 4 := by
+    rw [hs4fr 4 (by decide) (by decide)]
+    exact hs3r4
+  have hs4r6 : s4.reg 6 = some (A + 16 + dataBytes pr.data) := by
+    rw [hs4fr 6 (by decide) (by decide)]
+    exact hs3r6
+  have hs4r10 : s4.reg 10 = some pr.words.length := by
+    rw [hs4fr 10 (by decide) (by decide)]
+    exact hs3r10
+  have hs4r3 : s4.reg 3 = some A := by
+    rw [hs4fr 3 (by decide) (by decide),
+      hs3fr 3 (by decide) (by decide) (by decide) (by decide)]
+    exact hs2r3
+  have hs4r12 : s4.reg 12 = some pr.main := by
+    rw [hs4fr 12 (by decide) (by decide),
+      hs3fr 12 (by decide) (by decide) (by decide) (by decide)]
+    exact hs2r12
+  have hs4r13 : s4.reg 13 = some f.length := by
+    rw [hs4fr 13 (by decide) (by decide),
+      hs3fr 13 (by decide) (by decide) (by decide) (by decide)]
+    exact hs2r13
+  have hs4r15 : s4.reg 15 = some (A + f.length) := by
+    rw [hs4fr 15 (by decide) (by decide)]
+    exact hs3r15
+  have hk4 : s4.k = s0.k := by rw [hs4k, hs3k, hs2k, hs1k]
+  have hroom4 : StackRoom s4 2 :=
+    stackRoom_mono
+      (StackRoom_of_mem hmem4 (by rw [hs4r4]) hroom10) (by decide)
+  have hs4r7 : ∃ v, s4.reg 7 = some v := by
+    obtain ⟨v, hv⟩ := hregs0 7 (by decide) (by decide)
+    exact ⟨v, by
+      rw [hs4fr 7 (by decide) (by decide),
+        hs3fr 7 (by decide) (by decide) (by decide) (by decide),
+        hs2fr 7 (by decide) (by decide) (by decide) (by decide)
+          (by decide) (by decide),
+        hs1fr 7 (by decide) (by decide) (by decide)]
+      exact hv⟩
+  have hs4r9 : ∃ v, s4.reg 9 = some v := by
+    obtain ⟨v, hv⟩ := hregs0 9 (by decide) (by decide)
+    exact ⟨v, by
+      rw [hs4fr 9 (by decide) (by decide),
+        hs3fr 9 (by decide) (by decide) (by decide) (by decide),
+        hs2fr 9 (by decide) (by decide) (by decide) (by decide)
+          (by decide) (by decide),
+        hs1fr 9 (by decide) (by decide) (by decide)]
+      exact hv⟩
+  have hNH : NoHitUpTo s0 (9 + (15 + (n3 + 11))) :=
+    noHitUpTo_add hnh1 hrun1
+      (noHitUpTo_add hnh2 hrun2
+        (noHitUpTo_add hnh3 hrun3 hnh4))
+  have hrunT : run stage1Im (9 + (15 + (n3 + 11))) (Out.ok s0) =
+      Out.ok s4 := by
+    rw [run_add stage1Im 9 (15 + (n3 + 11)), hrun1,
+      show (15 + (n3 + 11) : Nat) = 15 + (n3 + 11) from rfl,
+      run_add stage1Im 15 (n3 + 11), hrun2,
+      run_add stage1Im n3 11, hrun3, hrun4]
+  have hregs4 : RegsOk s4 :=
+    run_regs_ok hrun4 (run_regs_ok hrun3 (run_regs_ok hrun2
+      (run_regs_ok hrun1 hregs0)))
+  have hs4r4' : s4.reg 4 =
+      some ((X86Env.initStack top [argv0, path]).2 + 24) := by
+    rw [hs4r4]; exact hr4
+  have hn3' : n3 ≤ 16 * (pr.data.length + 1) := by
+    simpa [List.length_map] using hn3bnd
+  refine ⟨9 + (15 + (n3 + 11)), by omega, s4, hrunT, hs4rip, hs4r6,
+    hs4r10, hs4r4', hs4r3, hs4r12, hs4r13, hs4r15, hmem4, hk4,
+    hs4len, hregs4, hroom4, hs4r7, hs4r9, hNH⟩
 
 end SporosX1
