@@ -3453,6 +3453,101 @@ theorem parser_code_tail_overrun {c e l : Nat} {s : X86Int.St}
   · rw [ht5len]; exact ht4len
   · rw [ht5k]; exact ht4k
 
+/-- Every opcode byte either has a dispatch length or lies
+in one of the two invalid ranges the dispatch refusals cover. -/
+theorem opLen_or_invalid (op : Nat) :
+    (∃ l, OpLen op l) ∨ (57 ≤ op ∧ op < 129 ∧ op ≠ 128) ∨
+      141 ≤ op := by
+  by_cases h1 : op < 57
+  · exact Or.inl ⟨1, Or.inl ⟨h1, rfl⟩⟩
+  by_cases h2 : op = 128
+  · exact Or.inl ⟨9, Or.inr (Or.inl ⟨h2, rfl⟩)⟩
+  by_cases h3 : op = 131 ∨ op = 132 ∨ op = 133 ∨ op = 140
+  · exact Or.inl ⟨1, Or.inr (Or.inr (Or.inl ⟨h3, rfl⟩))⟩
+  by_cases h4 : 129 ≤ op ∧ op ≤ 139
+  · have hne : op ≠ 131 ∧ op ≠ 132 ∧ op ≠ 133 := by
+      refine ⟨fun h => h3 (Or.inl h), fun h => h3 (Or.inr (Or.inl h)),
+        fun h => h3 (Or.inr (Or.inr (Or.inl h)))⟩
+    exact Or.inl ⟨5, Or.inr (Or.inr (Or.inr
+      ⟨⟨h4.1, h4.2, hne.1, hne.2.1, hne.2.2⟩, rfl⟩))⟩
+  by_cases h5 : op < 129
+  · exact Or.inr (Or.inl ⟨by omega, h5, h2⟩)
+  · exact Or.inr (Or.inr (by
+      have h140 : op ≠ 140 := fun h =>
+        h3 (Or.inr (Or.inr (Or.inr h)))
+      omega))
+
+/-- An instruction with a prescribed encoding: from a dispatch
+length for the head byte and the exact bytes, all below 256. -/
+theorem instr_of_opLen {op l : Nat} {bs : List Nat}
+    (hOp : OpLen op l) (hbs : bs.length = l)
+    (hb : ∀ b ∈ bs, b < 256) (hhead : bs.head? = some op) :
+    ∃ x : Instr, x.enc = bs := by
+  cases bs with
+  | nil => simp at hhead
+  | cons b rest =>
+    have hbop : b = op := by
+      have h : (b :: rest).head? = some b := rfl
+      rw [h] at hhead
+      exact Option.some.inj hhead
+    subst hbop
+    have hrestb : ∀ x ∈ rest, x < 256 := fun x hx =>
+      hb x (List.mem_cons_of_mem _ hx)
+    rcases hOp with ⟨hop, hl⟩ | ⟨hop, hl⟩ | ⟨hop, hl⟩ | ⟨hop, hl⟩
+    · have hrlen : rest.length = 0 := by
+        rw [hl] at hbs
+        simp only [List.length_cons] at hbs
+        omega
+      have hrest : rest = [] := (by cases rest with | nil => rfl | cons x xs => simp at hrlen)
+      subst hrest
+      have hlt : b < Prim.all.length := by
+        rw [prim_all_length]; exact hop
+      exact ⟨.prim (Prim.all[b]'hlt), by
+        show [(Prim.all[b]'hlt).code] = [b]
+        rw [prim_code_get b hlt]⟩
+    · subst hop
+      have hrlen : rest.length = 8 := by
+        rw [hl] at hbs
+        simp only [List.length_cons] at hbs
+        omega
+      exact ⟨.lit (leVal rest), by
+        show 0x80 :: leBytes (leVal rest) 8 = 0x80 :: rest
+        rw [← hrlen]
+        exact congrArg _ (leBytes_leVal hrestb)⟩
+    · have hrlen : rest.length = 0 := by
+        rw [hl] at hbs
+        simp only [List.length_cons] at hbs
+        omega
+      have hrest : rest = [] := (by cases rest with | nil => rfl | cons x xs => simp at hrlen)
+      subst hrest
+      rcases hop with rfl | rfl | rfl | rfl
+      · exact ⟨.tor, rfl⟩
+      · exact ⟨.fromr, rfl⟩
+      · exact ⟨.rfetch, rfl⟩
+      · exact ⟨.ret, rfl⟩
+    · obtain ⟨hlo, hhi, h131, h132, h133⟩ := hop
+      have hrlen : rest.length = 4 := by
+        rw [hl] at hbs
+        simp only [List.length_cons] at hbs
+        omega
+      have key : ∀ (f : Nat → Instr),
+          (∀ v, (f v).enc = b :: leBytes v 4) →
+          ∃ x : Instr, x.enc = b :: rest := by
+        intro f hf
+        exact ⟨f (leVal rest), by
+          rw [hf, ← hrlen, leBytes_leVal hrestb]⟩
+      have hcases : b = 129 ∨ b = 130 ∨ b = 134 ∨ b = 135 ∨
+          b = 136 ∨ b = 137 ∨ b = 138 ∨ b = 139 := by omega
+      rcases hcases with rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl
+      · exact key Instr.str (fun v => rfl)
+      · exact key Instr.pick (fun v => rfl)
+      · exact key Instr.locget (fun v => rfl)
+      · exact key Instr.locset (fun v => rfl)
+      · exact key Instr.jmp (fun v => rfl)
+      · exact key Instr.jz (fun v => rfl)
+      · exact key Instr.jnz (fun v => rfl)
+      · exact key Instr.call (fun v => rfl)
+
 set_option maxHeartbeats 0 in
 /-- `mmap` with a refusing oracle returns `-ENOMEM`, memory
 unchanged, and consumes the oracle entry. -/
