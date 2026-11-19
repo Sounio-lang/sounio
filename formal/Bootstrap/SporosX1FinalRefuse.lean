@@ -9016,5 +9016,499 @@ theorem stage1_oracle_prefix {f path argv0 stdin : List Nat}
     exact ⟨A, hAmod, hApos, hAbound, hfree, Or.inr ⟨k0 + k, s', by
       rw [run_add, hrun0, hrun], hrip', hor, hregs', hroom'⟩⟩
 
+/-! ### Checker reachability: decode tables and abstract closure
+
+Ported from spr1 (`SporosCheckBinCore`, commit `b887f1b51e`): the
+checker region `base + 0x452 ... base + 2333` and the `ANNL`
+subroutine are linear decode walks, kernel-checked (`walkOK`), and
+carry an abstract state (stack slots above the frame, `reg 0` value)
+whose successor closure is also kernel-checked (`annOK`).  Calls to
+`L32` (`base + 622`) and `ANNL` (`base + 662`) are summarised in the
+closure; jumps to `aFail1` leave the table.  The step lemmas below
+turn this into: no state reachable from the checker entry is at a
+memory syscall. -/
+
+
+/-- Walk the code once: each entry decodes at its address from the
+bytes that remain there (ported from spr1 `SporosCheckBinCore`). -/
+def walkOK : List Nat → Nat → List (Nat × Ins × Nat) → Bool
+  | _, _, [] => true
+  | rest, a, (a', i, l) :: t =>
+    a == a' && X86Dec.decode (fun j => rest[j]?) a == some (i, l) &&
+      walkOK (rest.drop l) (a + l) t
+
+theorem walkOK_sound (code : List Nat) :
+    ∀ (tbl : List (Nat × Ins × Nat)) (rest : List Nat) (a : Nat),
+    walkOK rest a tbl = true → base ≤ a → rest = code.drop (a - base) →
+    ∀ e ∈ tbl, X86Dec.imageOf code base e.1 = some e.2
+  | [], _, _, _, _, _, e, he => by simp at he
+  | (a', i, l) :: t, rest, a, h, ha, hr, e, he => by
+    simp only [walkOK, Bool.and_eq_true, beq_iff_eq] at h
+    obtain ⟨⟨rfl, hd⟩, ht⟩ := h
+    rcases List.mem_cons.1 he with rfl | he
+    · show X86Dec.imageOf code base _ = some (i, l)
+      unfold X86Dec.imageOf
+      rw [if_neg (by omega), ← hd, hr]
+      simp only [List.getElem?_drop]
+    · refine walkOK_sound code t _ _ ht (by omega) ?_ e he
+      rw [hr, List.drop_drop]
+      exact congrArg (fun k => code.drop k) (by omega)
+
+def projT (t : List (Nat × Ins × Nat × List (Option Nat) × Option Nat)) :
+    List (Nat × Ins × Nat) :=
+  t.map fun e => (e.1, e.2.1, e.2.2.1)
+
+def chkAnn : List (Nat × Ins × Nat × List (Option Nat) × Option Nat) :=
+[  (4195410, .mov 7 14, 3, [], none),
+  (4195413, .mov 5 13, 3, [], none),
+  (4195416, .test 5 5, 3, [], none),
+  (4195419, .jcc 5 4195426, 2, [], none),
+  (4195421, .jmp 4196629, 5, [], none),
+  (4195426, .ld 0 7 24, 4, [], none),
+  (4195430, .test 0 0, 3, [], none),
+  (4195433, .jcc 5 4195440, 2, [], none),
+  (4195435, .jmp 4194596, 5, [], none),
+  (4195440, .ld 6 7 48, 4, [], none),
+  (4195444, .ld 1 7 32, 4, [], none),
+  (4195448, .test 1 1, 3, [], none),
+  (4195451, .jcc 5 4195458, 2, [], none),
+  (4195453, .jmp 4195578, 5, [], none),
+  (4195458, .push 1, 1, [], none),
+  (4195459, .push 6, 1, [none], none),
+  (4195460, .mov 2 6, 3, [none, none], none),
+  (4195463, .call 4194926, 5, [none, none], none),
+  (4195468, .mov 12 0, 3, [none, none], none),
+  (4195471, .ld 2 7 24, 4, [none, none], none),
+  (4195475, .cmp 0 2, 3, [none, none], none),
+  (4195478, .jcc 2 4195485, 2, [none, none], none),
+  (4195480, .jmp 4194596, 5, [none, none], none),
+  (4195485, .call 4194966, 5, [none, none], none),
+  (4195490, .push 0, 1, [none, none], none),
+  (4195491, .mov 2 0, 3, [none, none, none], none),
+  (4195494, .aluI .add 2 4, 4, [none, none, none], none),
+  (4195498, .call 4194926, 5, [none, none, none], none),
+  (4195503, .mov 8 0, 3, [none, none, none], none),
+  (4195506, .pop 2, 1, [none, none, none], none),
+  (4195507, .aluI .add 2 8, 4, [none, none], none),
+  (4195511, .call 4194926, 5, [none, none], none),
+  (4195516, .mov 9 0, 3, [none, none], none),
+  (4195519, .pop 6, 1, [none, none], none),
+  (4195520, .mov 2 6, 3, [none], none),
+  (4195523, .aluI .add 2 4, 4, [none], none),
+  (4195527, .call 4194926, 5, [none], none),
+  (4195532, .cmp 0 8, 3, [none], none),
+  (4195535, .jcc 4 4195542, 2, [none], none),
+  (4195537, .jmp 4194596, 5, [none], none),
+  (4195542, .mov 2 6, 3, [none], none),
+  (4195545, .aluI .add 2 8, 4, [none], none),
+  (4195549, .call 4194926, 5, [none], none),
+  (4195554, .cmp 0 9, 3, [none], none),
+  (4195557, .jcc 4 4195564, 2, [none], none),
+  (4195559, .jmp 4194596, 5, [none], none),
+  (4195564, .aluI .add 6 12, 4, [none], none),
+  (4195568, .pop 1, 1, [none], none),
+  (4195569, .aluI .sub 1 1, 4, [], none),
+  (4195573, .jmp 4195448, 5, [], none),
+  (4195578, .ld 6 7 40, 4, [], none),
+  (4195582, .alu .xor 1 1, 2, [], none),
+  (4195584, .ld 8 7 0, 3, [], none),
+  (4195587, .alu .xor 9 9, 3, [], none),
+  (4195590, .alu .xor 12 12, 3, [], none),
+  (4195593, .call 4194966, 5, [], none),
+  (4195598, .test 0 0, 3, [], none),
+  (4195601, .jcc 4 4195646, 2, [], none),
+  (4195603, .push 0, 1, [], none),
+  (4195604, .mov 2 0, 3, [none], none),
+  (4195607, .aluI .add 2 4, 4, [none], none),
+  (4195611, .call 4194926, 5, [none], none),
+  (4195616, .cmp 0 8, 3, [none], none),
+  (4195619, .jcc 4 4195626, 2, [none], none),
+  (4195621, .jmp 4194596, 5, [none], none),
+  (4195626, .pop 2, 1, [none], none),
+  (4195627, .aluI .add 2 8, 4, [], none),
+  (4195631, .call 4194926, 5, [], none),
+  (4195636, .cmp 0 9, 3, [], none),
+  (4195639, .jcc 4 4195646, 2, [], none),
+  (4195641, .jmp 4194596, 5, [], none),
+  (4195646, .ld 0 7 24, 4, [], none),
+  (4195650, .cmp 1 0, 3, [], none),
+  (4195653, .jcc 2 4195660, 2, [], none),
+  (4195655, .jmp 4196616, 5, [], none),
+  (4195660, .ld8 0 6 0, 3, [], none),
+  (4195663, .cmpI 0 57, 4, [], none),
+  (4195667, .jcc 3 4195674, 2, [], none),
+  (4195669, .jmp 4196021, 5, [], none),
+  (4195674, .cmpI 0 128, 7, [], none),
+  (4195681, .jcc 5 4195688, 2, [], none),
+  (4195683, .jmp 4196089, 5, [], none),
+  (4195688, .cmpI 0 129, 7, [], none),
+  (4195695, .jcc 5 4195702, 2, [], none),
+  (4195697, .jmp 4196102, 5, [], none),
+  (4195702, .cmpI 0 130, 7, [], none),
+  (4195709, .jcc 5 4195716, 2, [], none),
+  (4195711, .jmp 4196115, 5, [], none),
+  (4195716, .cmpI 0 131, 7, [], none),
+  (4195723, .jcc 5 4195730, 2, [], none),
+  (4195725, .jmp 4196150, 5, [], none),
+  (4195730, .cmpI 0 132, 7, [], none),
+  (4195737, .jcc 5 4195744, 2, [], none),
+  (4195739, .jmp 4196178, 5, [], none),
+  (4195744, .cmpI 0 133, 7, [], none),
+  (4195751, .jcc 5 4195758, 2, [], none),
+  (4195753, .jmp 4196206, 5, [], none),
+  (4195758, .cmpI 0 134, 7, [], none),
+  (4195765, .jcc 5 4195772, 2, [], none),
+  (4195767, .jmp 4196230, 5, [], none),
+  (4195772, .cmpI 0 135, 7, [], none),
+  (4195779, .jcc 5 4195786, 2, [], none),
+  (4195781, .jmp 4196269, 5, [], none),
+  (4195786, .cmpI 0 136, 7, [], none),
+  (4195793, .jcc 5 4195800, 2, [], none),
+  (4195795, .jmp 4196319, 5, [], none),
+  (4195800, .cmpI 0 137, 7, [], none),
+  (4195807, .jcc 5 4195814, 2, [], none),
+  (4195809, .jmp 4196401, 5, [], none),
+  (4195814, .cmpI 0 138, 7, [], none),
+  (4195821, .jcc 5 4195828, 2, [], none),
+  (4195823, .jmp 4196401, 5, [], none),
+  (4195828, .cmpI 0 139, 7, [], none),
+  (4195835, .jcc 5 4195842, 2, [], none),
+  (4195837, .jmp 4196505, 5, [], none),
+  (4195842, .cmpI 0 140, 7, [], none),
+  (4195849, .jcc 5 4195856, 2, [], none),
+  (4195851, .jmp 4196583, 5, [], none),
+  (4195856, .jmp 4194596, 5, [], none),
+  (4195861, .aluI .add 1 1, 4, [], none),
+  (4195865, .ld 0 7 24, 4, [], none),
+  (4195869, .cmp 1 0, 3, [], none),
+  (4195872, .jcc 2 4195879, 2, [], none),
+  (4195874, .jmp 4194596, 5, [], none),
+  (4195879, .mov 12 1, 3, [], none),
+  (4195882, .call 4194966, 5, [], none),
+  (4195887, .test 0 0, 3, [], none),
+  (4195890, .jcc 5 4195897, 2, [], none),
+  (4195892, .jmp 4195646, 5, [], none),
+  (4195897, .push 0, 1, [], none),
+  (4195898, .mov 2 0, 3, [none], none),
+  (4195901, .aluI .add 2 4, 4, [none], none),
+  (4195905, .call 4194926, 5, [none], none),
+  (4195910, .cmp 0 8, 3, [none], none),
+  (4195913, .jcc 4 4195920, 2, [none], none),
+  (4195915, .jmp 4194596, 5, [none], none),
+  (4195920, .pop 2, 1, [none], none),
+  (4195921, .aluI .add 2 8, 4, [], none),
+  (4195925, .call 4194926, 5, [], none),
+  (4195930, .cmp 0 9, 3, [], none),
+  (4195933, .jcc 4 4195940, 2, [], none),
+  (4195935, .jmp 4194596, 5, [], none),
+  (4195940, .jmp 4195646, 5, [], none),
+  (4195945, .aluI .add 1 1, 4, [], none),
+  (4195949, .ld 0 7 24, 4, [], none),
+  (4195953, .cmp 1 0, 3, [], none),
+  (4195956, .jcc 2 4195963, 2, [], none),
+  (4195958, .jmp 4195646, 5, [], none),
+  (4195963, .mov 12 1, 3, [], none),
+  (4195966, .call 4194966, 5, [], none),
+  (4195971, .test 0 0, 3, [], none),
+  (4195974, .jcc 5 4195987, 2, [], none),
+  (4195976, .alu .xor 8 8, 3, [], none),
+  (4195979, .alu .xor 9 9, 3, [], none),
+  (4195982, .jmp 4195646, 5, [], none),
+  (4195987, .push 0, 1, [], none),
+  (4195988, .mov 2 0, 3, [none], none),
+  (4195991, .aluI .add 2 4, 4, [none], none),
+  (4195995, .call 4194926, 5, [none], none),
+  (4196000, .mov 8 0, 3, [none], none),
+  (4196003, .pop 2, 1, [none], none),
+  (4196004, .aluI .add 2 8, 4, [], none),
+  (4196008, .call 4194926, 5, [], none),
+  (4196013, .mov 9 0, 3, [], none),
+  (4196016, .jmp 4195646, 5, [], none),
+  (4196021, .movI 2 4196637, 10, [], none),
+  (4196031, .alu .add 2 0, 3, [], none),
+  (4196034, .alu .add 2 0, 3, [], none),
+  (4196037, .ld8 10 2 0, 4, [], none),
+  (4196041, .cmp 8 10, 3, [], none),
+  (4196044, .jcc 3 4196051, 2, [], none),
+  (4196046, .jmp 4194596, 5, [], none),
+  (4196051, .cmpI 0 50, 4, [], none),
+  (4196055, .jcc 5 4196066, 2, [], none),
+  (4196057, .aluI .add 6 1, 4, [], none),
+  (4196061, .jmp 4195945, 5, [], none),
+  (4196066, .aluI .add 2 1, 4, [], none),
+  (4196070, .ld8 11 2 0, 4, [], none),
+  (4196074, .alu .sub 8 10, 3, [], none),
+  (4196077, .alu .add 8 11, 3, [], none),
+  (4196080, .aluI .add 6 1, 4, [], none),
+  (4196084, .jmp 4195861, 5, [], none),
+  (4196089, .aluI .add 8 1, 4, [], none),
+  (4196093, .aluI .add 6 9, 4, [], none),
+  (4196097, .jmp 4195861, 5, [], none),
+  (4196102, .aluI .add 8 2, 4, [], none),
+  (4196106, .aluI .add 6 5, 4, [], none),
+  (4196110, .jmp 4195861, 5, [], none),
+  (4196115, .mov 2 6, 3, [], none),
+  (4196118, .aluI .add 2 1, 4, [], none),
+  (4196122, .call 4194926, 5, [], none),
+  (4196127, .cmp 0 8, 3, [], none),
+  (4196130, .jcc 2 4196137, 2, [], none),
+  (4196132, .jmp 4194596, 5, [], none),
+  (4196137, .aluI .add 8 1, 4, [], none),
+  (4196141, .aluI .add 6 5, 4, [], none),
+  (4196145, .jmp 4195861, 5, [], none),
+  (4196150, .cmpI 8 1, 4, [], none),
+  (4196154, .jcc 3 4196161, 2, [], none),
+  (4196156, .jmp 4194596, 5, [], none),
+  (4196161, .aluI .sub 8 1, 4, [], none),
+  (4196165, .aluI .add 9 1, 4, [], none),
+  (4196169, .aluI .add 6 1, 4, [], none),
+  (4196173, .jmp 4195861, 5, [], none),
+  (4196178, .cmpI 9 1, 4, [], none),
+  (4196182, .jcc 3 4196189, 2, [], none),
+  (4196184, .jmp 4194596, 5, [], none),
+  (4196189, .aluI .add 8 1, 4, [], none),
+  (4196193, .aluI .sub 9 1, 4, [], none),
+  (4196197, .aluI .add 6 1, 4, [], none),
+  (4196201, .jmp 4195861, 5, [], none),
+  (4196206, .cmpI 9 1, 4, [], none),
+  (4196210, .jcc 3 4196217, 2, [], none),
+  (4196212, .jmp 4194596, 5, [], none),
+  (4196217, .aluI .add 8 1, 4, [], none),
+  (4196221, .aluI .add 6 1, 4, [], none),
+  (4196225, .jmp 4195861, 5, [], none),
+  (4196230, .mov 2 6, 3, [], none),
+  (4196233, .aluI .add 2 1, 4, [], none),
+  (4196237, .call 4194926, 5, [], none),
+  (4196242, .ld 10 7 16, 4, [], none),
+  (4196246, .cmp 0 10, 3, [], none),
+  (4196249, .jcc 2 4196256, 2, [], none),
+  (4196251, .jmp 4194596, 5, [], none),
+  (4196256, .aluI .add 8 1, 4, [], none),
+  (4196260, .aluI .add 6 5, 4, [], none),
+  (4196264, .jmp 4195861, 5, [], none),
+  (4196269, .mov 2 6, 3, [], none),
+  (4196272, .aluI .add 2 1, 4, [], none),
+  (4196276, .call 4194926, 5, [], none),
+  (4196281, .cmpI 8 1, 4, [], none),
+  (4196285, .jcc 3 4196292, 2, [], none),
+  (4196287, .jmp 4194596, 5, [], none),
+  (4196292, .ld 10 7 16, 4, [], none),
+  (4196296, .cmp 0 10, 3, [], none),
+  (4196299, .jcc 2 4196306, 2, [], none),
+  (4196301, .jmp 4194596, 5, [], none),
+  (4196306, .aluI .sub 8 1, 4, [], none),
+  (4196310, .aluI .add 6 5, 4, [], none),
+  (4196314, .jmp 4195861, 5, [], none),
+  (4196319, .mov 2 6, 3, [], none),
+  (4196322, .aluI .add 2 1, 4, [], none),
+  (4196326, .call 4194926, 5, [], none),
+  (4196331, .mov 12 0, 3, [], none),
+  (4196334, .call 4194966, 5, [], none),
+  (4196339, .test 0 0, 3, [], none),
+  (4196342, .jcc 5 4196349, 2, [], none),
+  (4196344, .jmp 4194596, 5, [], none),
+  (4196349, .push 0, 1, [], none),
+  (4196350, .mov 2 0, 3, [none], none),
+  (4196353, .aluI .add 2 4, 4, [none], none),
+  (4196357, .call 4194926, 5, [none], none),
+  (4196362, .cmp 0 8, 3, [none], none),
+  (4196365, .jcc 4 4196372, 2, [none], none),
+  (4196367, .jmp 4194596, 5, [none], none),
+  (4196372, .pop 2, 1, [none], none),
+  (4196373, .aluI .add 2 8, 4, [], none),
+  (4196377, .call 4194926, 5, [], none),
+  (4196382, .cmp 0 9, 3, [], none),
+  (4196385, .jcc 4 4196392, 2, [], none),
+  (4196387, .jmp 4194596, 5, [], none),
+  (4196392, .aluI .add 6 5, 4, [], none),
+  (4196396, .jmp 4195945, 5, [], none),
+  (4196401, .mov 2 6, 3, [], none),
+  (4196404, .aluI .add 2 1, 4, [], none),
+  (4196408, .call 4194926, 5, [], none),
+  (4196413, .cmpI 8 1, 4, [], none),
+  (4196417, .jcc 3 4196424, 2, [], none),
+  (4196419, .jmp 4194596, 5, [], none),
+  (4196424, .mov 12 0, 3, [], none),
+  (4196427, .call 4194966, 5, [], none),
+  (4196432, .test 0 0, 3, [], none),
+  (4196435, .jcc 5 4196442, 2, [], none),
+  (4196437, .jmp 4194596, 5, [], none),
+  (4196442, .push 0, 1, [], none),
+  (4196443, .mov 2 0, 3, [none], none),
+  (4196446, .aluI .add 2 4, 4, [none], none),
+  (4196450, .call 4194926, 5, [none], none),
+  (4196455, .mov 10 8, 3, [none], none),
+  (4196458, .aluI .sub 10 1, 4, [none], none),
+  (4196462, .cmp 0 10, 3, [none], none),
+  (4196465, .jcc 4 4196472, 2, [none], none),
+  (4196467, .jmp 4194596, 5, [none], none),
+  (4196472, .pop 2, 1, [none], none),
+  (4196473, .aluI .add 2 8, 4, [], none),
+  (4196477, .call 4194926, 5, [], none),
+  (4196482, .cmp 0 9, 3, [], none),
+  (4196485, .jcc 4 4196492, 2, [], none),
+  (4196487, .jmp 4194596, 5, [], none),
+  (4196492, .aluI .sub 8 1, 4, [], none),
+  (4196496, .aluI .add 6 5, 4, [], none),
+  (4196500, .jmp 4195861, 5, [], none),
+  (4196505, .mov 2 6, 3, [], none),
+  (4196508, .aluI .add 2 1, 4, [], none),
+  (4196512, .call 4194926, 5, [], none),
+  (4196517, .cmp 0 13, 3, [], none),
+  (4196520, .jcc 2 4196527, 2, [], none),
+  (4196522, .jmp 4194596, 5, [], none),
+  (4196527, .mov 2 0, 3, [], none),
+  (4196530, .alu .add 2 2, 3, [], none),
+  (4196533, .alu .add 2 2, 3, [], none),
+  (4196536, .alu .add 2 2, 3, [], none),
+  (4196539, .alu .add 2 2, 3, [], none),
+  (4196542, .alu .add 2 2, 3, [], none),
+  (4196545, .alu .add 2 2, 3, [], none),
+  (4196548, .alu .add 2 14, 3, [], none),
+  (4196551, .ld 10 2 0, 3, [], none),
+  (4196554, .cmp 8 10, 3, [], none),
+  (4196557, .jcc 3 4196564, 2, [], none),
+  (4196559, .jmp 4194596, 5, [], none),
+  (4196564, .ld 11 2 8, 4, [], none),
+  (4196568, .alu .sub 8 10, 3, [], none),
+  (4196571, .alu .add 8 11, 3, [], none),
+  (4196574, .aluI .add 6 5, 4, [], none),
+  (4196578, .jmp 4195861, 5, [], none),
+  (4196583, .ld 0 7 8, 4, [], none),
+  (4196587, .cmp 8 0, 3, [], none),
+  (4196590, .jcc 4 4196597, 2, [], none),
+  (4196592, .jmp 4194596, 5, [], none),
+  (4196597, .test 9 9, 3, [], none),
+  (4196600, .jcc 4 4196607, 2, [], none),
+  (4196602, .jmp 4194596, 5, [], none),
+  (4196607, .aluI .add 6 1, 4, [], none),
+  (4196611, .jmp 4195945, 5, [], none),
+  (4196616, .aluI .add 7 64, 4, [], none),
+  (4196620, .aluI .sub 5 1, 4, [], none),
+  (4196624, .jmp 4195416, 5, [], none),
+  (4196629, .pushI 60, 2, [], none),
+  (4196631, .pop 0, 1, [some 60], none),
+  (4196632, .pushI 0, 2, [], some 60),
+  (4196634, .pop 7, 1, [some 0], some 60),
+  (4196635, .syscall, 2, [], some 60)]
+
+def annlAnn : List (Nat × Ins × Nat × List (Option Nat) × Option Nat) :=
+[  (4194966, .push 1, 1, [], none),
+  (4194967, .ld 0 7 48, 4, [none], none),
+  (4194971, .ld 1 7 32, 4, [none], none),
+  (4194975, .test 1 1, 3, [none], none),
+  (4194978, .jcc 4 4195008, 2, [none], none),
+  (4194980, .mov 2 0, 3, [none], none),
+  (4194983, .push 0, 1, [none], none),
+  (4194984, .call 4194926, 5, [none, none], none),
+  (4194989, .pop 2, 1, [none, none], none),
+  (4194990, .cmp 0 12, 3, [none], none),
+  (4194993, .jcc 4 4195012, 2, [none], none),
+  (4194995, .mov 0 2, 3, [none], none),
+  (4194998, .aluI .add 0 12, 4, [none], none),
+  (4195002, .aluI .sub 1 1, 4, [none], none),
+  (4195006, .jmp 4194975, 2, [none], none),
+  (4195008, .alu .xor 0 0, 2, [none], none),
+  (4195010, .pop 1, 1, [none], some 0),
+  (4195011, .ret, 1, [], some 0),
+  (4195012, .mov 0 2, 3, [none], none),
+  (4195015, .pop 1, 1, [none], none),
+  (4195016, .ret, 1, [], none)]
+
+set_option maxRecDepth 100000 in
+theorem walk_chk_ok : walkOK (stage1Code.drop 0x452) (base + 0x452)
+    (projT chkAnn) = true := by decide +kernel
+
+set_option maxRecDepth 100000 in
+theorem walk_annl_ok : walkOK (stage1Code.drop 662) (base + 662)
+    (projT annlAnn) = true := by decide +kernel
+
+theorem chk_codeAt : ∀ e ∈ projT chkAnn, stage1Im e.1 = some e.2 :=
+  walkOK_sound stage1Code _ _ _ walk_chk_ok (by decide)
+    (by rw [show base + 0x452 - base = 0x452 by unfold base; omega])
+
+theorem annl_codeAt : ∀ e ∈ projT annlAnn, stage1Im e.1 = some e.2 :=
+  walkOK_sound stage1Code _ _ _ walk_annl_ok (by decide)
+    (by rw [show base + 662 - base = 662 by unfold base; omega])
+
+
+/-- The register an instruction writes, if any (fall-through cases). -/
+def destReg : Ins → Option Nat
+  | .movI d _ | .mov d _ | .mov32 d _ | .alu _ d _ | .aluI _ d _
+  | .shlI d _ | .shrI d _ | .ld d _ _ | .ld32 d _ _ | .ld8 d _ _
+  | .lea d _ _ => some d
+  | _ => none
+
+/-- The abstract value of `reg 0` after a fall-through instruction. -/
+def r0After : Ins → Option Nat → Option Nat
+  | .movI d imm, r0 => if d == 0 then some (imm % W) else r0
+  | .mov d r, r0 => if d == 0 then (if r == 0 then r0 else none) else r0
+  | .mov32 d r, r0 =>
+    if d == 0 then (if r == 0 then r0.map (· % 2 ^ 32) else none) else r0
+  | .alu op d r, r0 =>
+    if d == 0 then
+      if r == 0 then
+        match r0 with
+        | some v => some (aluF op v v).1
+        | none => if op = .xor then some 0 else none
+      else none
+    else r0
+  | .aluI op d imm, r0 =>
+    if d == 0 then r0.map (fun v => (aluF op v (imm % W)).1) else r0
+  | .shlI d c, r0 => if d == 0 then r0.map (fun v => v * 2 ^ (c % 64) % W) else r0
+  | .shrI d c, r0 => if d == 0 then r0.map (fun v => v / 2 ^ (c % 64)) else r0
+  | .ld d _ _, r0 => if d == 0 then none else r0
+  | .ld32 d _ _, r0 => if d == 0 then none else r0
+  | .ld8 d _ _, r0 => if d == 0 then none else r0
+  | .lea d _ _, r0 => if d == 0 then none else r0
+  | _, r0 => r0
+
+/-- Abstract successors of one entry. `mode = true` is the `ANNL`
+subroutine (a `ret` on the empty abstract stack leaves the table;
+calls go only to `L32`). Calls to the two subroutines are summarised:
+control returns to the fall-through with the same abstract stack and
+unknown `reg 0`. A jump to `aFail1` leaves the table. -/
+def succs (mode : Bool) (a : Nat) (ins : Ins) (l : Nat)
+    (σ : List (Option Nat)) (r0 : Option Nat) :
+    Option (List (Nat × List (Option Nat) × Option Nat)) :=
+  match ins with
+  | .syscall => if r0 == some 60 then some [] else none
+  | .jmp t => some [(t, σ, r0)]
+  | .jcc _ t => some [(t, σ, r0), (a + l, σ, r0)]
+  | .call t =>
+    if (mode && t == base + 622) ||
+        (!mode && (t == base + 622 || t == base + 662)) then
+      some [(a + l, σ, none)]
+    else none
+  | .ret => if mode && σ.isEmpty then some [] else none
+  | .pushI imm => some [(a + l, some (imm % W) :: σ, r0)]
+  | .push r => some [(a + l, (if r == 0 then r0 else none) :: σ, r0)]
+  | .pop d =>
+    if d == 4 then none
+    else match σ with
+      | v :: σ' => some [(a + l, σ', if d == 0 then v else r0)]
+      | [] => none
+  | .st _ _ _ | .st8 _ _ _ | .jtab _ _ _ | .jmpR _ => none
+  | i =>
+    match destReg i with
+    | some 4 => none
+    | _ => some [(a + l, σ, r0After i r0)]
+
+/-- Every abstract successor is an entry of the table with exactly
+that abstract state, or the exit-1 block. -/
+def annOK (mode : Bool)
+    (t : List (Nat × Ins × Nat × List (Option Nat) × Option Nat)) : Bool :=
+  t.all fun e =>
+    match succs mode e.1 e.2.1 e.2.2.1 e.2.2.2.1 e.2.2.2.2 with
+    | none => false
+    | some ss => ss.all fun s => s.1 == aFail1 ||
+        t.any fun e' => e'.1 == s.1 && e'.2.2.2.1 == s.2.1 &&
+          e'.2.2.2.2 == s.2.2
+
+set_option maxRecDepth 100000 in
+theorem chk_ann_ok : annOK false chkAnn = true := by decide +kernel
+
+theorem annl_ann_ok : annOK true annlAnn = true := by decide +kernel
+
 
 end SporosX1
