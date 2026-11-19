@@ -2185,14 +2185,13 @@ constexpr const char* kLeanHead =
     "namespace SporosCheckBin\n\n"
     "open X86Int\n\n";
 
-// Verbatim frozen header of the committed b887f1b51e listing
-// (bootstrap/model/spr1_check.hex) required for byte-for-byte cmp -s parity;
-// spr1_check itself is an independent second check, not Root A or Root A's
-// trust base.
+// Header of the spr1_check.hex listing: spr1_check is an independent second
+// check of stage 1, not Root A or Root A's trust base (Root A is
+// bootstrap/roots/sporos/sporos-stage1.hex).
 std::string format_listing_head(u64 size, u64 entry, u64 tripled, u64 vote, u64 guard,
                                 u64 overflow) {
   std::string s;
-  s += "# spr1_check: the checker of Sporos bytecode, stage 1 of bootstrap root A.\n";
+  s += "# spr1_check: checker of Sporos bytecode — independent second check of stage 1 (Root A is bootstrap/roots/sporos/sporos-stage1.hex).\n";
   s += "#\n";
   s += "# What it does: reads a Sporos bytecode file (formal/Sporos/Bytecode.lean) from\n";
   s += "# standard input and checks it as Sporos.decode and Sporos.checkProg\n";
