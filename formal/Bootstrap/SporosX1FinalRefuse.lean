@@ -422,6 +422,25 @@ theorem parser_header_a_short {B L : Nat} {s : X86Int.St}
       show (2 : Nat) = 1 + 1 by omega, run_add stage1Im 1 1, r5, r6]
   exact ⟨t6, hrun, ht6rip, ht6fr, ht6mem, ht6len, ht6k⟩
 
+/-- Short header exits 1: the header refusal composed with the
+`fail1` exit block. -/
+theorem parser_header_a_short_exit1 {B L sp : Nat} {s : X86Int.St}
+    (hrip : s.rip = base + 0x134) (hr3 : s.reg 3 = some B)
+    (hr13 : s.reg 13 = some L) (hBL : B + L < W) (hL : L < 16)
+    (hlen16 : s.regs.length = 16)
+    (hr4 : s.reg 4 = some sp) (hsp32 : 32 ≤ sp) (hspW : sp < W)
+    (hregs : RegsOk s) (hroom : StackRoom s 1) :
+    ∃ k, run stage1Im k (Out.ok s) = Out.exit 1 := by
+  obtain ⟨s', hrun, hrip', hfr, hmem, -, -⟩ :=
+    parser_header_a_short hrip hr3 hr13 hBL hL hlen16
+  have hr4' : s'.reg 4 = some sp := by
+    rw [hfr 4 (by decide) (by decide)]; exact hr4
+  have h4eq : s'.reg 4 = s.reg 4 := by rw [hr4', hr4]
+  obtain ⟨k, hk⟩ := exit1_of_fail1 stage1_refuseCode hsp32 hspW s'
+    hrip' hr4' (run_regs_ok hrun hregs)
+    (StackRoom_of_mem hmem h4eq hroom)
+  exact ⟨6 + k, by rw [run_add stage1Im 6 k, hrun, hk]⟩
+
 set_option maxHeartbeats 0 in
 /-- Parser header refusal, bad magic: from `loaded` to `aFail1`
 in ten steps when the first four bytes are not `SPR1`. -/
@@ -791,6 +810,28 @@ theorem parser_header_a_magic {B L : Nat} {bs : List Nat}
       show (3 : Nat) = 1 + 2 by omega, run_add stage1Im 1 2, r8,
       show (2 : Nat) = 1 + 1 by omega, run_add stage1Im 1 1, r9, r10]
   exact ⟨t10, hrun, ht10rip, ht10fr, ht10mem, ht10len, ht10k⟩
+
+/-- Bad magic exits 1: the header refusal composed with the
+`fail1` exit block. -/
+theorem parser_header_a_magic_exit1 {B L sp : Nat} {bs : List Nat}
+    {s : X86Int.St}
+    (hrip : s.rip = base + 0x134) (hr3 : s.reg 3 = some B)
+    (hr13 : s.reg 13 = some L) (hBL : B + L < W) (hL16 : 16 ≤ L)
+    (h20 : s.mem.rdN B 20 = some bs)
+    (hmagic : leVal (bs.take 4) % 2 ^ 32 ≠ 827478099)
+    (hlen16 : s.regs.length = 16)
+    (hr4 : s.reg 4 = some sp) (hsp32 : 32 ≤ sp) (hspW : sp < W)
+    (hregs : RegsOk s) (hroom : StackRoom s 1) :
+    ∃ k, run stage1Im k (Out.ok s) = Out.exit 1 := by
+  obtain ⟨s', hrun, hrip', hfr, hmem, -, -⟩ :=
+    parser_header_a_magic hrip hr3 hr13 hBL hL16 h20 hmagic hlen16
+  have hr4' : s'.reg 4 = some sp := by
+    rw [hfr 4 (by decide) (by decide) (by decide)]; exact hr4
+  have h4eq : s'.reg 4 = s.reg 4 := by rw [hr4', hr4]
+  obtain ⟨k, hk⟩ := exit1_of_fail1 stage1_refuseCode hsp32 hspW s'
+    hrip' hr4' (run_regs_ok hrun hregs)
+    (StackRoom_of_mem hmem h4eq hroom)
+  exact ⟨10 + k, by rw [run_add stage1Im 10 k, hrun, hk]⟩
 
 set_option maxHeartbeats 0 in
 /-- Parser header refusal, `nwords = 0`: from `base + 0x15b` to
