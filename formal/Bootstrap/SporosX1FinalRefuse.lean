@@ -27162,5 +27162,139 @@ theorem cmpI_jcc_pair_nh {a t k op clen cc : Nat} {b : Bool}
     show ({ t1 with rip := if b then t else t1.rip + 2 }).k = s.k
     rw [ht1]
 
+theorem parser_disp_128_nh {op : Nat} {s : X86Int.St}
+    (hrip : s.rip = base + 0x330) (hr0 : s.reg 0 = some op)
+    (heq : op = 128) (hlen16 : s.regs.length = 16) :
+    ∃ s' : X86Int.St,
+      run stage1Im 7 (Out.ok s) = Out.ok s' ∧
+      s'.rip = base + 0x3b3 ∧ s'.reg 10 = some 9 ∧
+      s'.reg 0 = some op ∧
+      (∀ i, i ≠ 10 → s'.reg i = s.reg i) ∧
+      s'.mem = s.mem ∧ s'.regs.length = 16 ∧ s'.k = s.k ∧
+      NoHitUpTo s 7 := by
+  have hc := stage1_parserCode
+  obtain ⟨s1, hrun1, hs1rip, hs1fr, hs1mem, hs1len, hs1k, hnh1⟩ :=
+    cmpI_jcc_pair_nh hc.p330 hc.p334 hrip hr0
+      (fl_jae (by decide) (by omega)) (by decide +kernel) (by decide +kernel)
+  have hs1rip' : s1.rip = base + 0x33b := hs1rip
+  have hs1r0 : s1.reg 0 = some op := by rw [hs1fr 0]; exact hr0
+  obtain ⟨s2, hrun2, hs2rip, hs2fr, hs2mem, hs2len, hs2k, hnh2⟩ :=
+    cmpI_jcc_pair_nh hc.p33b hc.p342 hs1rip' hs1r0
+      (fl_je (by decide) heq) (by decide +kernel) (by decide +kernel)
+  have hs2rip' : s2.rip = base + 0x344 := hs2rip
+  obtain ⟨s3, hrun3, hs3rip, hs3fr, hs3mem, hs3len, hs3k, hnh3⟩ :=
+    jmp_step_nh hc.p344 hs2rip' (by decide +kernel)
+  have hs3len16 : s3.regs.length = 16 := by
+    rw [hs3len, hs2len, hs1len]; exact hlen16
+  obtain ⟨s4, hrun4, hs4rip, hs4r10, hs4fr, hs4mem, hs4len, hs4k, hnh4⟩ :=
+    movI_step_nh hc.p3a5 hs3rip (by rw [hs3len16]; decide) (by decide +kernel)
+  have hs4rip' : s4.rip = base + 0x3ab := hs4rip
+  obtain ⟨s5, hrun5, hs5rip, hs5fr, hs5mem, hs5len, hs5k, hnh5⟩ :=
+    jmp_step_nh hc.p3ab hs4rip' (by decide +kernel)
+  have hrun : run stage1Im 7 (Out.ok s) = Out.ok s5 := by
+    rw [show (7 : Nat) = 2 + 5 by omega, run_add stage1Im 2 5, hrun1,
+      show (5 : Nat) = 2 + 3 by omega, run_add stage1Im 2 3, hrun2,
+      show (3 : Nat) = 1 + 2 by omega, run_add stage1Im 1 2, hrun3,
+      show (2 : Nat) = 1 + 1 by omega, run_add stage1Im 1 1, hrun4,
+      hrun5]
+  have h9W : 9 % W = 9 := Nat.mod_eq_of_lt (by unfold W; decide)
+  have hNH : NoHitUpTo s 7 := noHitUpTo_add hnh1 hrun1 (noHitUpTo_add hnh2 hrun2 (noHitUpTo_add hnh3 hrun3 (noHitUpTo_add hnh4 hrun4 (hnh5))))
+  refine ⟨s5, hrun, hs5rip, ?_, ?_, ?_, ?_, ?_, ?_, hNH⟩
+  · rw [hs5fr 10, hs4r10, h9W]
+  · rw [hs5fr 0, hs4fr 0 (by decide), hs3fr 0, hs2fr 0, hs1fr 0]
+    exact hr0
+  · intro i hi
+    rw [hs5fr i, hs4fr i hi, hs3fr i, hs2fr i, hs1fr i]
+  · rw [hs5mem, hs4mem, hs3mem, hs2mem, hs1mem]
+  · rw [hs5len, hs4len]; exact hs3len16
+  · rw [hs5k, hs4k, hs3k, hs2k, hs1k]
+
+theorem parser_disp_5_nh {op : Nat} {s : X86Int.St}
+    (hrip : s.rip = base + 0x330) (hr0 : s.reg 0 = some op)
+    (hlo : 129 ≤ op) (hhi : op ≤ 139)
+    (h131 : op ≠ 131) (h132 : op ≠ 132) (h133 : op ≠ 133)
+    (hlen16 : s.regs.length = 16) :
+    ∃ s' : X86Int.St,
+      run stage1Im 18 (Out.ok s) = Out.ok s' ∧
+      s'.rip = base + 0x3b3 ∧ s'.reg 10 = some 5 ∧
+      s'.reg 0 = some op ∧
+      (∀ i, i ≠ 10 → s'.reg i = s.reg i) ∧
+      s'.mem = s.mem ∧ s'.regs.length = 16 ∧ s'.k = s.k ∧
+      NoHitUpTo s 18 := by
+  have hc := stage1_parserCode
+  have hopW : op < W := Nat.lt_of_le_of_lt hhi (by decide)
+  obtain ⟨s1, hrun1, hs1rip, hs1fr, hs1mem, hs1len, hs1k, hnh1⟩ :=
+    cmpI_jcc_pair_nh hc.p330 hc.p334 hrip hr0
+      (fl_jae (by decide) (by omega)) (by decide +kernel) (by decide +kernel)
+  have hs1rip' : s1.rip = base + 0x33b := hs1rip
+  have hs1r0 : s1.reg 0 = some op := by rw [hs1fr 0]; exact hr0
+  obtain ⟨s2, hrun2, hs2rip, hs2fr, hs2mem, hs2len, hs2k, hnh2⟩ :=
+    cmpI_jcc_pair_nh hc.p33b hc.p342 hs1rip' hs1r0
+      (fl_jne hopW (by decide) (by omega)) (by decide +kernel) (by decide +kernel)
+  have hs2rip' : s2.rip = base + 0x349 := hs2rip
+  have hs2r0 : s2.reg 0 = some op := by rw [hs2fr 0]; exact hs1r0
+  obtain ⟨s3, hrun3, hs3rip, hs3fr, hs3mem, hs3len, hs3k, hnh3⟩ :=
+    cmpI_jcc_pair_nh hc.p349 hc.p350 hs2rip' hs2r0
+      (fl_jne hopW (by decide) h131) (by decide +kernel) (by decide +kernel)
+  have hs3rip' : s3.rip = base + 0x357 := hs3rip
+  have hs3r0 : s3.reg 0 = some op := by rw [hs3fr 0]; exact hs2r0
+  obtain ⟨s4, hrun4, hs4rip, hs4fr, hs4mem, hs4len, hs4k, hnh4⟩ :=
+    cmpI_jcc_pair_nh hc.p357 hc.p35e hs3rip' hs3r0
+      (fl_jne hopW (by decide) h132) (by decide +kernel) (by decide +kernel)
+  have hs4rip' : s4.rip = base + 0x365 := hs4rip
+  have hs4r0 : s4.reg 0 = some op := by rw [hs4fr 0]; exact hs3r0
+  obtain ⟨s5, hrun5, hs5rip, hs5fr, hs5mem, hs5len, hs5k, hnh5⟩ :=
+    cmpI_jcc_pair_nh hc.p365 hc.p36c hs4rip' hs4r0
+      (fl_jne hopW (by decide) h133) (by decide +kernel) (by decide +kernel)
+  have hs5rip' : s5.rip = base + 0x373 := hs5rip
+  have hs5r0 : s5.reg 0 = some op := by rw [hs5fr 0]; exact hs4r0
+  obtain ⟨s6, hrun6, hs6rip, hs6fr, hs6mem, hs6len, hs6k, hnh6⟩ :=
+    cmpI_jcc_pair_nh hc.p373 hc.p37a hs5rip' hs5r0
+      (fl_jne hopW (by decide) (by omega)) (by decide +kernel) (by decide +kernel)
+  have hs6rip' : s6.rip = base + 0x381 := hs6rip
+  have hs6r0 : s6.reg 0 = some op := by rw [hs6fr 0]; exact hs5r0
+  obtain ⟨s7, hrun7, hs7rip, hs7fr, hs7mem, hs7len, hs7k, hnh7⟩ :=
+    cmpI_jcc_pair_nh hc.p381 hc.p388 hs6rip' hs6r0
+      (fl_jae (by decide) (by omega)) (by decide +kernel) (by decide +kernel)
+  have hs7rip' : s7.rip = base + 0x38f := hs7rip
+  have hs7r0 : s7.reg 0 = some op := by rw [hs7fr 0]; exact hs6r0
+  obtain ⟨s8, hrun8, hs8rip, hs8fr, hs8mem, hs8len, hs8k, hnh8⟩ :=
+    cmpI_jcc_pair_nh hc.p38f hc.p396 hs7rip' hs7r0
+      (fl_jbe hopW (by decide) hhi) (by decide +kernel) (by decide +kernel)
+  have hs8rip' : s8.rip = base + 0x39d := hs8rip
+  have hs8len16 : s8.regs.length = 16 := by
+    rw [hs8len, hs7len, hs6len, hs5len, hs4len, hs3len, hs2len,
+      hs1len]; exact hlen16
+  obtain ⟨s9, hrun9, hs9rip, hs9r10, hs9fr, hs9mem, hs9len, hs9k, hnh9⟩ :=
+    movI_step_nh hc.p39d hs8rip' (by rw [hs8len16]; decide) (by decide +kernel)
+  have hs9rip' : s9.rip = base + 0x3a3 := hs9rip
+  obtain ⟨s10, hrun10, hs10rip, hs10fr, hs10mem, hs10len, hs10k, hnh10⟩ :=
+    jmp_step_nh hc.p3a3 hs9rip' (by decide +kernel)
+  have hrun : run stage1Im 18 (Out.ok s) = Out.ok s10 := by
+    rw [show (18 : Nat) = 2 + 16 by omega, run_add stage1Im 2 16, hrun1,
+      show (16 : Nat) = 2 + 14 by omega, run_add stage1Im 2 14, hrun2,
+      show (14 : Nat) = 2 + 12 by omega, run_add stage1Im 2 12, hrun3,
+      show (12 : Nat) = 2 + 10 by omega, run_add stage1Im 2 10, hrun4,
+      show (10 : Nat) = 2 + 8 by omega, run_add stage1Im 2 8, hrun5,
+      show (8 : Nat) = 2 + 6 by omega, run_add stage1Im 2 6, hrun6,
+      show (6 : Nat) = 2 + 4 by omega, run_add stage1Im 2 4, hrun7,
+      show (4 : Nat) = 2 + 2 by omega, run_add stage1Im 2 2, hrun8,
+      show (2 : Nat) = 1 + 1 by omega, run_add stage1Im 1 1, hrun9,
+      hrun10]
+  have h5W : 5 % W = 5 := Nat.mod_eq_of_lt (by unfold W; decide)
+  have hNH : NoHitUpTo s 18 := noHitUpTo_add hnh1 hrun1 (noHitUpTo_add hnh2 hrun2 (noHitUpTo_add hnh3 hrun3 (noHitUpTo_add hnh4 hrun4 (noHitUpTo_add hnh5 hrun5 (noHitUpTo_add hnh6 hrun6 (noHitUpTo_add hnh7 hrun7 (noHitUpTo_add hnh8 hrun8 (noHitUpTo_add hnh9 hrun9 (hnh10)))))))))
+  refine ⟨s10, hrun, hs10rip, ?_, ?_, ?_, ?_, ?_, ?_, hNH⟩
+  · rw [hs10fr 10, hs9r10, h5W]
+  · rw [hs10fr 0, hs9fr 0 (by decide), hs8fr 0, hs7fr 0, hs6fr 0,
+      hs5fr 0, hs4fr 0, hs3fr 0, hs2fr 0, hs1fr 0]
+    exact hr0
+  · intro i hi
+    rw [hs10fr i, hs9fr i hi, hs8fr i, hs7fr i, hs6fr i, hs5fr i,
+      hs4fr i, hs3fr i, hs2fr i, hs1fr i]
+  · rw [hs10mem, hs9mem, hs8mem, hs7mem, hs6mem, hs5mem, hs4mem,
+      hs3mem, hs2mem, hs1mem]
+  · rw [hs10len, hs9len]; exact hs8len16
+  · rw [hs10k, hs9k, hs8k, hs7k, hs6k, hs5k, hs4k, hs3k, hs2k, hs1k]
+
 
 end SporosX1
