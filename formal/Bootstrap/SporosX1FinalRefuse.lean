@@ -1057,6 +1057,7 @@ theorem parser_header_classify {B L sp : Nat} {s : X86Int.St}
     (hregs : RegsOk s) (hroom : StackRoom s 1) :
     (∃ k, run stage1Im k (Out.ok s) = Out.exit 1) ∨
     (∃ bs k s', s.mem.rdN B 20 = some bs ∧ 16 ≤ L ∧
+      leVal (bs.take 4) % 2 ^ 32 = 827478099 ∧
       run stage1Im k (Out.ok s) = Out.ok s' ∧
       s'.rip = base + 0x18f ∧
       s'.reg 12 = some (leVal ((bs.drop 4).take 4) % 2 ^ 32) ∧
@@ -1113,7 +1114,7 @@ theorem parser_header_classify {B L sp : Nat} {s : X86Int.St}
           rw [hs2fr 4 (by decide) (by decide) (by decide)
             (by decide) (by decide) (by decide)]
           exact hs1r4
-        exact Or.inr ⟨bs, n1 + n2, s2, h20, hL16,
+        exact Or.inr ⟨bs, n1 + n2, s2, h20, hL16, hmagic,
           by rw [run_add stage1Im n1 n2, hrun1, hrun2],
           hs2rip, hs2r12, hs2r10, hnw0, hs2r1, hs2r6, hs2r15,
           hs2r3, hs2r13, hs2r4,
@@ -2551,6 +2552,7 @@ theorem parser_front_to_guard_classify {B L sp : Nat}
     (hregs : RegsOk s) (hroom : StackRoom s 1) :
     (∃ k, run stage1Im k (Out.ok s) = Out.exit 1) ∨
     (∃ bs ds c k s', s.mem.rdN B 20 = some bs ∧ 16 ≤ L ∧
+      leVal (bs.take 4) % 2 ^ 32 = 827478099 ∧
       ds.length = leVal ((bs.drop 12).take 4) % 2 ^ 32 ∧
       DataSeq s.mem (B + 16) ds c ∧ c ≤ B + L ∧
       20 * (leVal ((bs.drop 8).take 4) % 2 ^ 32) ≤ B + L - c ∧
@@ -2568,7 +2570,7 @@ theorem parser_front_to_guard_classify {B L sp : Nat}
   rcases parser_header_classify hrip hr3 hr13 hBL hwin hlen16 hr4
       hsp32 hspW hregs hroom with hexit | hhead
   · exact Or.inl hexit
-  · obtain ⟨bs, k1, s1, h20, hL16, hrun1, hs1rip, hs1r12, hs1r10,
+  · obtain ⟨bs, k1, s1, h20, hL16, hmagic, hrun1, hs1rip, hs1r12, hs1r10,
         hnw0, hs1r1, hs1r6, hs1r15, hs1r3, hs1r13, hs1r4, hs1fr,
         hs1mem, hs1len, hs1k⟩ := hhead
     have hs1regs : RegsOk s1 := run_regs_ok hrun1 hregs
@@ -2630,7 +2632,7 @@ theorem parser_front_to_guard_classify {B L sp : Nat}
           rw [hs3fr i hi0 hi2]
           exact hv
         exact Or.inr ⟨bs, ds, c, k1 + k2 + 11, s3, h20, hL16,
-          hdslen, hseq0, hcL, hguard,
+          hmagic, hdslen, hseq0, hcL, hguard,
           by rw [show k1 + k2 + 11 = (k1 + k2) + 11 by omega,
             run_add stage1Im (k1 + k2) 11,
             show run stage1Im (k1 + k2) (Out.ok s) = Out.ok s2 from by
@@ -2712,6 +2714,7 @@ theorem parser_loaded_to_scratch_classify {f : List Nat}
     (hregs : RegsOk s) (hroom10 : StackRoom s 10) :
     (∃ k, run stage1Im k (Out.ok s) = Out.exit 1) ∨
     (∃ bs ds c k s', s.mem.rdN A 20 = some bs ∧ 16 ≤ f.length ∧
+      leVal (bs.take 4) % 2 ^ 32 = 827478099 ∧
       ds.length = leVal ((bs.drop 12).take 4) % 2 ^ 32 ∧
       DataSeq s.mem (A + 16) ds c ∧ c ≤ A + f.length ∧
       20 * (leVal ((bs.drop 8).take 4) % 2 ^ 32) ≤
@@ -2762,7 +2765,7 @@ theorem parser_loaded_to_scratch_classify {f : List Nat}
       hrd hlen16 hr4 (by omega) hspW hregs
       (stackRoom_mono hroom10 (by decide)) with hexit | hfront
   · exact Or.inl hexit
-  · obtain ⟨bs, ds, c, k1, sg, h20, hL16, hdslen, hseq, hcL,
+  · obtain ⟨bs, ds, c, k1, sg, h20, hL16, hmagic, hdslen, hseq, hcL,
         hguard, hrun1, hsgrip, hsg12, hsg10, hnw0, _hsg1, hsg6,
         hsg15, hsg3, hsg13, hsg4, hsgfr, hsgmem, hsglen, hsgk⟩ :=
       hfront
@@ -2981,7 +2984,8 @@ theorem parser_loaded_to_scratch_classify {f : List Nat}
       stackRoom_of_wshape_c2 hwsh3 hs3r4 hc2rw hdisjc hc2lo hc2hi2
         (by omega)
     rw [← hnwdef] at hguard hnw0 hwsh3
-    exact Or.inr ⟨bs, ds, c, k1 + 20 + 12, s3, h20, hL16, hdslen,
+    exact Or.inr ⟨bs, ds, c, k1 + 20 + 12, s3, h20, hL16, hmagic,
+      hdslen,
       hseq, hcL, hguard, hrunTot, hs3rip,
       by
         rw [hs3fr 14 (by decide) (by decide) (by decide)
@@ -8305,7 +8309,7 @@ theorem parser_loaded_to_checker_classify {f : List Nat}
     (hregs : RegsOk s) (hroom10 : StackRoom s 10) :
     (∃ k, run stage1Im k (Out.ok s) = Out.exit 1) ∨
     (∃ bs ds wds c k s', s.mem.rdN A 20 = some bs ∧
-      bs = f.take 20 ∧ 16 ≤ f.length ∧
+      bs = f.take 20 ∧ 16 ≤ f.length ∧ leVal (bs.take 4) % 2 ^ 32 = 827478099 ∧
       ds.length = leVal ((bs.drop 12).take 4) % 2 ^ 32 ∧
       DataSeq s.mem (A + 16) ds c ∧ c ≤ A + f.length ∧
       20 * (leVal ((bs.drop 8).take 4) % 2 ^ 32) ≤
@@ -8360,7 +8364,7 @@ theorem parser_loaded_to_checker_classify {f : List Nat}
       hApos hAbound hAframe hdisjc hc2rw hc2lo hc2hi2 hlen16
       hsp80 hspW hregs hroom10 with hexit | hscr
   · exact Or.inl hexit
-  obtain ⟨bs, ds, c, k0, q, h20, hL16, hdslen, hseq, hcL, hguard,
+  obtain ⟨bs, ds, c, k0, q, h20, hL16, hmagic, hdslen, hseq, hcL, hguard,
       hrun0, hqrip, hq14, hq11, hq12, hnw0, hq3, hq13, hq15, hq4,
       hqcur, hqfile, hqor, hwshq, hqroom6, hqlen⟩ := hscr
   obtain ⟨capB, hbufhi0, hbufcap⟩ := hbufhi
@@ -8820,7 +8824,7 @@ theorem parser_loaded_to_checker_classify {f : List Nat}
     rw [ha11mem, ha10mem]
     exact ha9tab
   refine Or.inr ⟨bs, ds, wds, c, k0 + 11 + 1 + k9 + 3 + 15, a11,
-    h20, hbs, hL16, hdslen, hseq, hcL, by
+    h20, hbs, hL16, hmagic, hdslen, hseq, hcL, by
       rw [hnwdef]; exact hguard, by
       rw [hnwdef]; exact hwdslen, hcurE, by
       rw [hmn, hnwdef]; exact hmnlt, by
