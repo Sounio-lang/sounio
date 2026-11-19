@@ -142,6 +142,101 @@ theorem oracleLegalAt_of_prefix {s0 s sT : X86Int.St} {k K : Nat}
   rw [h2]
   simp
 
+/-- A state that is not at a memory syscall is oracle-legal
+vacuously (`OracleLegalAt` is an implication, Defs:66). -/
+theorem oracleLegalAt_of_not_atMemSyscall {s : X86Int.St}
+    (h : ¬ AtMemSyscall s) : OracleLegalAt s :=
+  fun hmem => absurd hmem h
+
+/-- If the instruction at `rip` is not the syscall
+instruction, the state is not at a memory syscall. -/
+theorem not_atMemSyscall_of_stage1Im_ne_syscall {s : X86Int.St}
+    (h : stage1Im s.rip ≠ some (.syscall, 2)) :
+    ¬ AtMemSyscall s :=
+  fun hmem => h hmem.1
+
+theorem oracleLegalAt_of_stage1Im_ne_syscall {s : X86Int.St}
+    (h : stage1Im s.rip ≠ some (.syscall, 2)) :
+    OracleLegalAt s :=
+  oracleLegalAt_of_not_atMemSyscall
+    (not_atMemSyscall_of_stage1Im_ne_syscall h)
+
+/-- The `loaded` milestone (`base + 0x134`, a `mov`) is
+oracle-legal: it is not a syscall address
+(`ParserCode.p134`). -/
+theorem oracleLegalAt_of_rip_loaded {s : X86Int.St}
+    (hrip : s.rip = base + 0x134) : OracleLegalAt s := by
+  apply oracleLegalAt_of_not_atMemSyscall
+  intro hmem
+  have h1 : stage1Im (base + 0x134) = some (.syscall, 2) := by
+    rw [← hrip]; exact hmem.1
+  have h2 : stage1Im (base + 0x134) = some (.mov 15 3, 3) :=
+    stage1_parserCode.p134
+  rw [h2] at h1
+  simp at h1
+
+/-- `OracleAdmits` reduces to the stuck states: every
+reachable state whose step is not stuck is already legal
+(`oracleLegalAt_of_step_ne_stuck`, Refuse:64). -/
+theorem oracleAdmits_of_stuck_cases {s0 : X86Int.St}
+    (h : ∀ k s, run stage1Im k (Out.ok s0) = Out.ok s →
+      X86Int.step stage1Im s = .stuck → OracleLegalAt s) :
+    OracleAdmits s0 := by
+  intro k s hr
+  by_cases hs : X86Int.step stage1Im s = .stuck
+  · exact h k s hr hs
+  · exact oracleLegalAt_of_step_ne_stuck hs
+
+/-- `OracleAdmits` from one ok milestone plus legality at
+and after it: earlier states are prefixes of the milestone
+(`oracleLegalAt_of_prefix`, Refuse:133). -/
+theorem oracleAdmits_of_milestone {s0 sT : X86Int.St} {K : Nat}
+    (hT : run stage1Im K (Out.ok s0) = Out.ok sT)
+    (hpost : ∀ k s, K ≤ k →
+      run stage1Im k (Out.ok s0) = Out.ok s → OracleLegalAt s) :
+    OracleAdmits s0 := by
+  intro k s hr
+  rcases Nat.lt_or_ge k K with hk | hk
+  · exact oracleLegalAt_of_prefix hk hr hT
+  · exact hpost k s hk hr
+
+/-- A run from `exit` stays at `exit` (cf. `run_stuck`,
+Refuse:114). -/
+theorem run_exit (n c : Nat) :
+    run stage1Im n (.exit c) = .exit c := by
+  cases n <;> rfl
+
+/-- Termination implies admission: if the run from `s0`
+reaches any exit, every reachable state is oracle-legal.
+Strictly earlier states continue to a non-stuck outcome
+(`oracleLegalAt_of_continues`, Refuse:120); at or after the
+exit step the run is never `ok` again. -/
+theorem oracleAdmits_of_exit {s0 : X86Int.St} {K c : Nat}
+    (hK : run stage1Im K (Out.ok s0) = .exit c) :
+    OracleAdmits s0 := by
+  intro k s hr
+  rcases Nat.lt_trichotomy k K with hk | hk | hk
+  · have h2 : run stage1Im (K - k) (Out.ok s) = .exit c := by
+      have h := hK
+      rw [show K = k + (K - k) by omega, run_add, hr] at h
+      exact h
+    refine oracleLegalAt_of_continues (m := K - k) (by omega) ?_
+    rw [h2]
+    simp
+  · subst hk
+    rw [hr] at hK
+    simp at hK
+  · have h2 : run stage1Im k (Out.ok s0) = .exit c := by
+      rw [show k = K + (k - K) by omega, run_add, hK, run_exit]
+    rw [hr] at h2
+    simp at h2
+
+/-- The witness oracle starts with the file-buffer placement
+(same proof as in `loader_init_to_loaded`, Loader:5268). -/
+theorem stage1Oracle_head? (f : List Nat) (A : Nat) :
+    (stage1Oracle f A).head? = some (.at A) := by
+  simp [stage1Oracle, List.replicate_succ]
+
 set_option maxHeartbeats 0 in
 /-- Parser header refusal, short file: fewer than 16 bytes sends
 the run from `loaded` to `aFail1` in six steps. -/
