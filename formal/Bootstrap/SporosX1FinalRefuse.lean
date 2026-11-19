@@ -3782,4 +3782,177 @@ theorem parser_trailing_cursor_fail_exit1 {c e sp : Nat}
     (StackRoom_of_mem hmem h4eq hroom)
   exact ⟨3 + k, by rw [run_add stage1Im 3 k, hrun, hk]⟩
 
+/-- Trailing refusal: `main` not below the word count
+reaches `aFail1` in five steps. -/
+theorem parser_trailing_main_ge {c e mn nw : Nat} {s : X86Int.St}
+    (hrip : s.rip = base + 0x419) (hr6 : s.reg 6 = some c)
+    (hr15 : s.reg 15 = some e) (hr12 : s.reg 12 = some mn)
+    (hr13 : s.reg 13 = some nw)
+    (hceq : c = e) (hcW : c < W) (heW : e < W)
+    (hmn : nw ≤ mn) (hlen16 : s.regs.length = 16) :
+    ∃ s', run stage1Im 5 (Out.ok s) = Out.ok s' ∧
+      s'.rip = aFail1 ∧ (∀ i, s'.reg i = s.reg i) ∧
+      s'.mem = s.mem ∧ s'.regs.length = 16 ∧ s'.k = s.k := by
+  have hc := stage1_parserCode
+  have hlen : ∀ i : Nat, i < 16 → i < s.regs.length := by
+    intro i hi; omega
+  have hdbl : ∀ v : Nat, 2 * v < W → (aluF .add v v).1 = 2 * v := by
+    intro v hv
+    rw [aluF_add_fst, show v + v = 2 * v by omega,
+      Nat.mod_eq_of_lt hv]
+  -- 0x419: cmp rsi, r15
+  have e1 : X86Int.step stage1Im s =
+      .ok { s with fl := (aluF .sub c e).2, rip := s.rip + 3 } :=
+    step_cmp (by rw [hrip]; exact hc.p419) hr6 hr15
+  obtain ⟨t1, ht1⟩ : ∃ t : X86Int.St, t =
+      { s with fl := (aluF .sub c e).2, rip := s.rip + 3 } := ⟨_, rfl⟩
+  have ht1rip : t1.rip = base + 0x41c := by
+    rw [ht1]; show s.rip + 3 = base + 0x41c; rw [hrip]
+  have ht1fl : X86Int.cond t1.fl 4 = some true := by
+    have hzf : t1.fl.zf = some true := by
+      rw [ht1]
+      show (aluF .sub c e).2.zf = some true
+      rw [aluF_zf, hceq]
+      have hbeq : ((aluF .sub e e).1 == 0) = true := by
+        rw [beq_iff_eq]; exact sub_fst_self e
+      rw [hbeq]
+    have hcc := cond_cc4 hzf
+    simpa using hcc
+  have ht1fr : ∀ i, t1.reg i = s.reg i := by
+    intro i
+    rw [ht1]
+    show s.reg i = s.reg i
+    exact rfl
+  have ht1mem : t1.mem = s.mem := by rw [ht1]
+  have ht1len : t1.regs.length = 16 := by rw [ht1]; exact hlen16
+  have ht1k : t1.k = s.k := by rw [ht1]
+  have r1 : run stage1Im 1 (Out.ok s) = Out.ok t1 := by
+    rw [run_succ_ok stage1Im 0 s, e1, ← ht1, run_zero]
+  -- 0x41c: je 0x423
+  have e2 : X86Int.step stage1Im t1 =
+      .ok { t1 with rip := base + 0x423 } := by
+    have h := step_jcc (im := stage1Im) (s := t1)
+      (by rw [ht1rip]; exact hc.p41c) ht1fl
+    simpa using h
+  obtain ⟨t2, ht2⟩ : ∃ t : X86Int.St, t =
+      { t1 with rip := base + 0x423 } := ⟨_, rfl⟩
+  have ht2rip : t2.rip = base + 0x423 := by rw [ht2]
+  have ht2fr : ∀ i, t2.reg i = s.reg i := by
+    intro i
+    rw [ht2]
+    show ({ t1 with rip := base + 0x423 }).reg i = s.reg i
+    rw [reg_with_rip]; exact ht1fr i
+  have ht2mem : t2.mem = s.mem := by
+    rw [ht2]
+    show ({ t1 with rip := base + 0x423 }).mem = s.mem
+    rw [mem_with_rip]; exact ht1mem
+  have ht2len : t2.regs.length = 16 := by
+    rw [ht2]
+    show ({ t1 with rip := base + 0x423 }).regs.length = 16
+    rw [len_with_rip]; exact ht1len
+  have ht2k : t2.k = s.k := by rw [ht2]; exact ht1k
+  have r2 : run stage1Im 1 (Out.ok t1) = Out.ok t2 := by
+    rw [run_succ_ok stage1Im 0 t1, e2, ← ht2, run_zero]
+  -- 0x423: cmp r12, r13
+  have ht2r12 : t2.reg 12 = some mn := by rw [ht2fr 12]; exact hr12
+  have ht2r13 : t2.reg 13 = some nw := by rw [ht2fr 13]; exact hr13
+  have e3 : X86Int.step stage1Im t2 =
+      .ok { t2 with fl := (aluF .sub mn nw).2, rip := t2.rip + 3 } :=
+    step_cmp (by rw [ht2rip]; exact hc.p423) ht2r12 ht2r13
+  obtain ⟨t3, ht3⟩ : ∃ t : X86Int.St, t =
+      { t2 with fl := (aluF .sub mn nw).2, rip := t2.rip + 3 } :=
+    ⟨_, rfl⟩
+  have ht3rip : t3.rip = base + 0x426 := by
+    rw [ht3]; show t2.rip + 3 = base + 0x426; rw [ht2rip]
+  have ht3fl : X86Int.cond t3.fl 2 = some false := by
+    have hcf : t3.fl.cf = some false := by
+      rw [ht3]
+      show (aluF .sub mn nw).2.cf = some false
+      exact aluF_sub_cf (by omega)
+    have hcc := cond_cc2 hcf
+    simpa using hcc
+  have ht3fr : ∀ i, t3.reg i = s.reg i := by
+    intro i
+    rw [ht3]
+    show t2.reg i = s.reg i
+    exact ht2fr i
+  have ht3mem : t3.mem = s.mem := by rw [ht3]; exact ht2mem
+  have ht3len : t3.regs.length = 16 := by rw [ht3]; exact ht2len
+  have ht3k : t3.k = s.k := by rw [ht3]; exact ht2k
+  have r3 : run stage1Im 1 (Out.ok t2) = Out.ok t3 := by
+    rw [run_succ_ok stage1Im 0 t2, e3, ← ht3, run_zero]
+  have e4 : X86Int.step stage1Im t3 =
+      .ok { t3 with rip := base + 0x428 } := by
+    have h := step_jcc (im := stage1Im) (s := t3)
+      (by rw [ht3rip]; exact hc.p426) ht3fl
+    rw [ht3rip] at h
+    simpa using h
+  obtain ⟨t4, ht4⟩ : ∃ t : X86Int.St, t =
+      { t3 with rip := base + 0x428 } := ⟨_, rfl⟩
+  have ht4rip : t4.rip = base + 0x428 := by rw [ht4]
+  have e5 : X86Int.step stage1Im t4 =
+      .ok { t4 with rip := (base + 0x124) } := by
+    have h := step_jmp (im := stage1Im) (s := t4)
+      (by rw [ht4rip]; exact hc.p428)
+    simpa using h
+  obtain ⟨t5, ht5⟩ : ∃ t : X86Int.St, t =
+      { t4 with rip := (base + 0x124) } := ⟨_, rfl⟩
+  have r4 : run stage1Im 1 (Out.ok t3) = Out.ok t4 := by
+    rw [run_succ_ok stage1Im 0 t3, e4, ← ht4, run_zero]
+  have r5 : run stage1Im 1 (Out.ok t4) = Out.ok t5 := by
+    rw [run_succ_ok stage1Im 0 t4, e5, ← ht5, run_zero]
+  refine ⟨t5, by rw [show (5 : Nat) = 1 + 4 by omega,
+    run_add stage1Im 1 4, r1, show (4 : Nat) = 1 + 3 by omega,
+    run_add stage1Im 1 3, r2, show (3 : Nat) = 1 + 2 by omega,
+    run_add stage1Im 1 2, r3, show (2 : Nat) = 1 + 1 by omega,
+    run_add stage1Im 1 1, r4, r5], ?_, ?_, ?_, ?_, ?_⟩
+  · rw [ht5]; show base + 0x124 = aFail1; rfl
+  · intro i
+    have h4i : t4.reg i = s.reg i := by
+      rw [ht4]
+      show ({ t3 with rip := base + 0x428 }).reg i = s.reg i
+      rw [reg_with_rip]; exact ht3fr i
+    rw [ht5]
+    show ({ t4 with rip := (base + 0x124) }).reg i = s.reg i
+    rw [reg_with_rip]; exact h4i
+  · have h4m : t4.mem = s.mem := by
+      rw [ht4]
+      show ({ t3 with rip := base + 0x428 }).mem = s.mem
+      rw [mem_with_rip]; exact ht3mem
+    rw [ht5]
+    show ({ t4 with rip := (base + 0x124) }).mem = s.mem
+    rw [mem_with_rip]; exact h4m
+  · have h4l : t4.regs.length = 16 := by
+      rw [ht4]
+      show ({ t3 with rip := base + 0x428 }).regs.length = 16
+      rw [len_with_rip]; exact ht3len
+    rw [ht5]
+    show ({ t4 with rip := (base + 0x124) }).regs.length = 16
+    rw [len_with_rip]; exact h4l
+  · have h4k : t4.k = s.k := by rw [ht4]; exact ht3k
+    rw [ht5]
+    show ({ t4 with rip := (base + 0x124) }).k = s.k
+    exact h4k
+
+/-- `main` out of range exits 1. -/
+theorem parser_trailing_main_ge_exit1 {c e mn nw sp : Nat}
+    {s : X86Int.St}
+    (hrip : s.rip = base + 0x419) (hr6 : s.reg 6 = some c)
+    (hr15 : s.reg 15 = some e) (hr12 : s.reg 12 = some mn)
+    (hr13 : s.reg 13 = some nw)
+    (hceq : c = e) (hcW : c < W) (heW : e < W)
+    (hmn : nw ≤ mn) (hlen16 : s.regs.length = 16)
+    (hr4 : s.reg 4 = some sp) (hsp32 : 32 ≤ sp) (hspW : sp < W)
+    (hregs : RegsOk s) (hroom : StackRoom s 1) :
+    ∃ k, run stage1Im k (Out.ok s) = Out.exit 1 := by
+  obtain ⟨s', hrun, hrip', hfr, hmem, -, -⟩ :=
+    parser_trailing_main_ge hrip hr6 hr15 hr12 hr13 hceq hcW heW hmn
+      hlen16
+  have hr4' : s'.reg 4 = some sp := by rw [hfr 4]; exact hr4
+  have h4eq : s'.reg 4 = s.reg 4 := by rw [hr4', hr4]
+  obtain ⟨k, hk⟩ := exit1_of_fail1 stage1_refuseCode hsp32 hspW s'
+    hrip' hr4' (run_regs_ok hrun hregs)
+    (StackRoom_of_mem hmem h4eq hroom)
+  exact ⟨5 + k, by rw [run_add stage1Im 5 k, hrun, hk]⟩
+
 end SporosX1
