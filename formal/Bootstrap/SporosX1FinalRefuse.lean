@@ -22236,5 +22236,148 @@ theorem parser_guard_ok_nh {c e nw : Nat} {s : X86Int.St}
     rw [len_with_rip, ht10]
     show t9.regs.length = 16
     exact ht9len
+theorem parser_data_loop_ok_nh {e : Nat} :
+    ∀ {c : Nat} {ds : List Nat} {c' : Nat} {s : X86Int.St},
+      DataSeq s.mem c ds c' → s.rip = base + 0x18f →
+      s.reg 1 = some ds.length → s.reg 6 = some c →
+      s.reg 15 = some e → c' ≤ e → e < W → ds.length < W →
+      s.regs.length = 16 →
+      ∃ n, n ≤ 16 * (ds.length + 1) ∧ ∃ s',
+        run stage1Im n (Out.ok s) = Out.ok s' ∧
+        s'.rip = base + 0x1c7 ∧ s'.reg 1 = some 0 ∧
+        s'.reg 6 = some c' ∧ s'.reg 15 = some e ∧
+        (∀ i, i ≠ 0 → i ≠ 1 → i ≠ 2 → i ≠ 6 → s'.reg i = s.reg i) ∧
+        s'.mem = s.mem ∧ s'.regs.length = 16 ∧ s'.k = s.k ∧
+        NoHitUpTo s n := by
+  intro c ds
+  induction ds generalizing c with
+  | nil =>
+    intro c' s hseq hrip hr1 hr6 hr15 hc'e heW hlenW hlen16
+    cases hseq
+    have hc := stage1_parserCode
+    have hr1' : s.reg 1 = some 0 := hr1
+    -- test rcx, rcx (zero)
+    have e1 : X86Int.step stage1Im s =
+        .ok { s with fl := (aluF .and 0 0).2, rip := s.rip + 3 } :=
+      step_test (by rw [hrip]; exact hc.p18f) hr1' hr1'
+    obtain ⟨t1, ht1⟩ : ∃ t : X86Int.St, t =
+        { s with fl := (aluF .and 0 0).2, rip := s.rip + 3 } := ⟨_, rfl⟩
+    have ht1rip : t1.rip = base + 0x192 := by
+      rw [ht1]; show s.rip + 3 = base + 0x192; rw [hrip]
+    have ht1fl : X86Int.cond t1.fl 4 = some true := by
+      have hzf : t1.fl.zf = some true := by
+        rw [ht1]
+        show (aluF .and 0 0).2.zf = some true
+        simp [aluF_zf, aluF_and_fst_self]
+      have hcc := cond_cc4 hzf
+      simpa using hcc
+    have e2 : X86Int.step stage1Im t1 =
+        .ok { t1 with rip := base + 0x1c7 } := by
+      have h := step_jcc (im := stage1Im) (s := t1)
+        (by rw [ht1rip]; exact hc.p192) ht1fl
+      simpa using h
+    obtain ⟨t2, ht2⟩ : ∃ t : X86Int.St, t =
+        { t1 with rip := base + 0x1c7 } := ⟨_, rfl⟩
+    have r1 : run stage1Im 1 (Out.ok s) = Out.ok t1 := by
+      rw [run_succ_ok stage1Im 0 s, e1, ← ht1, run_zero]
+    have r2 : run stage1Im 1 (Out.ok t1) = Out.ok t2 := by
+      rw [run_succ_ok stage1Im 0 t1, e2, ← ht2, run_zero]
+    have hrun : run stage1Im 2 (Out.ok s) = Out.ok t2 := by
+      rw [show (2 : Nat) = 1 + 1 by omega, run_add stage1Im 1 1, r1, r2]
+    have ht2k : t2.k = s.k := by
+      rw [ht2]
+      show ({ t1 with rip := base + 0x1c7 }).k = s.k
+      rw [ht1]
+    have hnohit : NoHitUpTo s 2 := by
+      intro j t hj hr hmem
+      rcases (by omega : j = 0 ∨ j = 1 ∨ j = 2) with rfl | rfl | rfl
+      · rw [run_zero] at hr
+        simp only [Out.ok.injEq] at hr
+        subst hr
+        have h1 := hmem.1
+        rw [hrip, hc.p18f] at h1
+        simp at h1
+      · have hrj : run stage1Im 1 (Out.ok s) = Out.ok t1 := by
+          rw [r1]
+        have ht : t = t1 := by
+          have h := hrj.symm.trans hr
+          simp only [Out.ok.injEq] at h
+          exact h.symm
+        rw [ht] at hmem
+        have h1 := hmem.1
+        rw [ht1rip, hc.p192] at h1
+        simp at h1
+      · have hrj : run stage1Im 2 (Out.ok s) = Out.ok t2 := by
+          rw [hrun]
+        have ht : t = t2 := by
+          have h := hrj.symm.trans hr
+          simp only [Out.ok.injEq] at h
+          exact h.symm
+        rw [ht] at hmem
+        have h1 := hmem.1
+        have ht2rip : t2.rip = base + 0x1c7 := by rw [ht2]
+        rw [ht2rip, hc.p1c7] at h1
+        simp at h1
+    refine ⟨2, by omega, t2, hrun, ?_, ?_, ?_, ?_, ?_, ?_, ?_,
+      ht2k, hnohit⟩
+    · rw [ht2]
+    · rw [ht2]
+      show ({ t1 with rip := base + 0x1c7 }).reg 1 = some 0
+      rw [reg_with_rip, ht1]
+      show s.reg 1 = some 0
+      exact hr1'
+    · rw [ht2]
+      show ({ t1 with rip := base + 0x1c7 }).reg 6 = some c
+      rw [reg_with_rip, ht1]
+      show s.reg 6 = some c
+      exact hr6
+    · rw [ht2]
+      show ({ t1 with rip := base + 0x1c7 }).reg 15 = some e
+      rw [reg_with_rip, ht1]
+      show s.reg 15 = some e
+      exact hr15
+    · intro i _ _ _ _
+      rw [ht2]
+      show ({ t1 with rip := base + 0x1c7 }).reg i = s.reg i
+      rw [reg_with_rip, ht1]
+      rfl
+    · rw [ht2]
+      show ({ t1 with rip := base + 0x1c7 }).mem = s.mem
+      rw [mem_with_rip, ht1]
+    · rw [ht2]
+      show ({ t1 with rip := base + 0x1c7 }).regs.length = 16
+      rw [len_with_rip, ht1]
+      show s.regs.length = 16
+      exact hlen16
+  | cons d ds ih =>
+    intro c' s hseq hrip hr1 hr6 hr15 hc'e heW hlenW hlen16
+    cases hseq with
+    | cons hd hrest =>
+      have hle : c + 4 + d ≤ e := Nat.le_trans (DataSeq.le hrest) hc'e
+      have hlencons : (d :: ds).length = ds.length + 1 :=
+        List.length_cons
+      obtain ⟨s1, hrun1, hs1rip, hs1r1, hs1r6, hs1r15, hs1fr, hs1mem,
+          hs1len, hs1k, hnh1⟩ :=
+        parser_data_step_ok_nh hrip hr1 hr6 hr15
+          (by rw [hlencons]; omega) hlenW
+          (by omega) hd hle heW hlen16
+      have hs1r1' : s1.reg 1 = some ds.length := by
+        rw [hlencons] at hs1r1
+        simpa using hs1r1
+      have hseq1 : DataSeq s1.mem (c + 4 + d) ds c' := by
+        rw [hs1mem]; exact hrest
+      obtain ⟨n2, hn2bnd, s2, hrun2, hs2rip, hs2r1, hs2r6, hs2r15,
+          hs2fr, hs2mem, hs2len, hs2k, hnh2⟩ :=
+        ih hseq1 hs1rip hs1r1' hs1r6 hs1r15 hc'e heW
+          (by rw [hlencons] at hlenW; omega) hs1len
+      have hrun : run stage1Im (16 + n2) (Out.ok s) = Out.ok s2 := by
+        rw [run_add stage1Im 16 n2, hrun1, hrun2]
+      refine ⟨16 + n2, ?_, s2, hrun, hs2rip, hs2r1, hs2r6, hs2r15,
+        fun i hi0 hi1 hi2 hi6 =>
+          (hs2fr i hi0 hi1 hi2 hi6).trans (hs1fr i hi0 hi1 hi2 hi6),
+        hs2mem.trans hs1mem, hs2len, hs2k.trans hs1k,
+        noHitUpTo_add hnh1 hrun1 hnh2⟩
+      rw [hlencons]; omega
+
 
 end SporosX1
