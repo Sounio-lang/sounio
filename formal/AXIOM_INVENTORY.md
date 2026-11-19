@@ -10,7 +10,7 @@ files say in comments that they use no `sorry` or no axioms).
 
 | Count | Value |
 |---|---:|
-| `sorry` in code | 3 |
+| `sorry` in code | 2 |
 | `axiom` declarations | 59, in 10 files |
 | `native_decide` uses | 741, in 110 files |
 
@@ -133,7 +133,7 @@ compiled evaluator, not the kernel alone.
 
 | File | Count |
 |---|---:|
-| `formal/Bootstrap/SporosX1Final.lean` | 3 |
+| `formal/Bootstrap/SporosX1Final.lean` | 2 |
 
 ## `native_decide` uses, by file
 
