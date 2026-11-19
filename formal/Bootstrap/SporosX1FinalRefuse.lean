@@ -3676,4 +3676,110 @@ theorem parser_mmap2_nomem_exit2 {L sp1 : Nat} {s : X86Int.St}
     (run_regs_ok hrun hregs) hroom'
   exact ⟨12 + k, by rw [run_add stage1Im 12 k, hrun, hk]⟩
 
+/-- Trailing refusal: cursor not at buffer end reaches
+`aFail1` in three steps. -/
+theorem parser_trailing_cursor_fail {c e : Nat} {s : X86Int.St}
+    (hrip : s.rip = base + 0x419) (hr6 : s.reg 6 = some c)
+    (hr15 : s.reg 15 = some e) (hne : c ≠ e)
+    (hcW : c < W) (heW : e < W) :
+    ∃ s', run stage1Im 3 (Out.ok s) = Out.ok s' ∧
+      s'.rip = aFail1 ∧ (∀ i, s'.reg i = s.reg i) ∧
+      s'.mem = s.mem ∧ s'.regs.length = s.regs.length ∧ s'.k = s.k := by
+  have hc := stage1_parserCode
+  have e1 : X86Int.step stage1Im s =
+      .ok { s with fl := (aluF .sub c e).2, rip := s.rip + 3 } :=
+    step_cmp (by rw [hrip]; exact hc.p419) hr6 hr15
+  obtain ⟨t1, ht1⟩ : ∃ t : X86Int.St, t =
+      { s with fl := (aluF .sub c e).2, rip := s.rip + 3 } := ⟨_, rfl⟩
+  have ht1rip : t1.rip = base + 0x41c := by
+    rw [ht1]; show s.rip + 3 = base + 0x41c; rw [hrip]
+  have ht1fl : X86Int.cond t1.fl 4 = some false := by
+    have hzf : t1.fl.zf = some false := by
+      rw [ht1]
+      show (aluF .sub c e).2.zf = some false
+      rw [aluF_zf]
+      simp [sub_fst_ne_zero hcW heW hne]
+    have hcc := cond_cc4 hzf
+    simpa using hcc
+  have e2 : X86Int.step stage1Im t1 =
+      .ok { t1 with rip := base + 0x41e } := by
+    have h := step_jcc (im := stage1Im) (s := t1)
+      (by rw [ht1rip]; exact hc.p41c) ht1fl
+    rw [ht1rip] at h
+    simpa using h
+  obtain ⟨t2, ht2⟩ : ∃ t : X86Int.St, t =
+      { t1 with rip := base + 0x41e } := ⟨_, rfl⟩
+  have ht2rip : t2.rip = base + 0x41e := by rw [ht2]
+  have e3 : X86Int.step stage1Im t2 =
+      .ok { t2 with rip := (base + 0x124) } := by
+    have h := step_jmp (im := stage1Im) (s := t2)
+      (by rw [ht2rip]; exact hc.p41e)
+    simpa using h
+  obtain ⟨t3, ht3⟩ : ∃ t : X86Int.St, t =
+      { t2 with rip := (base + 0x124) } := ⟨_, rfl⟩
+  have r1 : run stage1Im 1 (Out.ok s) = Out.ok t1 := by
+    rw [run_succ_ok stage1Im 0 s, e1, ← ht1, run_zero]
+  have r2 : run stage1Im 1 (Out.ok t1) = Out.ok t2 := by
+    rw [run_succ_ok stage1Im 0 t1, e2, ← ht2, run_zero]
+  have r3 : run stage1Im 1 (Out.ok t2) = Out.ok t3 := by
+    rw [run_succ_ok stage1Im 0 t2, e3, ← ht3, run_zero]
+  refine ⟨t3, by rw [show (3 : Nat) = 1 + 2 by omega,
+    run_add stage1Im 1 2, r1, show (2 : Nat) = 1 + 1 by omega,
+    run_add stage1Im 1 1, r2, r3], ?_, ?_, ?_, ?_, ?_⟩
+  · rw [ht3]; show base + 0x124 = aFail1; rfl
+  · intro i
+    have h1i : t1.reg i = s.reg i := by
+      rw [ht1]
+      show s.reg i = s.reg i
+      rfl
+    have h2i : t2.reg i = s.reg i := by
+      rw [ht2]
+      show ({ t1 with rip := base + 0x41e }).reg i = s.reg i
+      rw [reg_with_rip]; exact h1i
+    rw [ht3]
+    show ({ t2 with rip := (base + 0x124) }).reg i = s.reg i
+    rw [reg_with_rip]; exact h2i
+  · have h1m : t1.mem = s.mem := by rw [ht1]
+    have h2m : t2.mem = s.mem := by
+      rw [ht2]
+      show ({ t1 with rip := base + 0x41e }).mem = s.mem
+      rw [mem_with_rip]; exact h1m
+    rw [ht3]
+    show ({ t2 with rip := (base + 0x124) }).mem = s.mem
+    rw [mem_with_rip]; exact h2m
+  · have h1l : t1.regs.length = s.regs.length := by rw [ht1]
+    have h2l : t2.regs.length = s.regs.length := by
+      rw [ht2]
+      show ({ t1 with rip := base + 0x41e }).regs.length = s.regs.length
+      rw [len_with_rip]; exact h1l
+    rw [ht3]
+    show ({ t2 with rip := (base + 0x124) }).regs.length = s.regs.length
+    rw [len_with_rip]; exact h2l
+  · have h1k : t1.k = s.k := by rw [ht1]
+    have h2k : t2.k = s.k := by
+      rw [ht2]
+      show ({ t1 with rip := base + 0x41e }).k = s.k
+      exact h1k
+    rw [ht3]
+    show ({ t2 with rip := (base + 0x124) }).k = s.k
+    exact h2k
+
+/-- Trailing-cursor refusal exits 1. -/
+theorem parser_trailing_cursor_fail_exit1 {c e sp : Nat}
+    {s : X86Int.St}
+    (hrip : s.rip = base + 0x419) (hr6 : s.reg 6 = some c)
+    (hr15 : s.reg 15 = some e) (hne : c ≠ e)
+    (hcW : c < W) (heW : e < W)
+    (hr4 : s.reg 4 = some sp) (hsp32 : 32 ≤ sp) (hspW : sp < W)
+    (hregs : RegsOk s) (hroom : StackRoom s 1) :
+    ∃ k, run stage1Im k (Out.ok s) = Out.exit 1 := by
+  obtain ⟨s', hrun, hrip', hfr, hmem, -, -⟩ :=
+    parser_trailing_cursor_fail hrip hr6 hr15 hne hcW heW
+  have hr4' : s'.reg 4 = some sp := by rw [hfr 4]; exact hr4
+  have h4eq : s'.reg 4 = s.reg 4 := by rw [hr4', hr4]
+  obtain ⟨k, hk⟩ := exit1_of_fail1 stage1_refuseCode hsp32 hspW s'
+    hrip' hr4' (run_regs_ok hrun hregs)
+    (StackRoom_of_mem hmem h4eq hroom)
+  exact ⟨3 + k, by rw [run_add stage1Im 3 k, hrun, hk]⟩
+
 end SporosX1
