@@ -4416,6 +4416,23 @@ theorem call_rdc_fail_exit1 {site c e sp : Nat} {s : X86Int.St}
     hroom'
   exact ⟨n + k, by rw [run_add stage1Im n k, hrun, hk]⟩
 
+/-- Word-header `RDC` refusal, first `u32` field (`ins`): a word
+body entered with fewer than four bytes left exits 1 at the very
+first `call RDC` (`base + 0x2d6`).  Refusal mirror of
+`parser_word_step`/`parser_word_fields` with only the branch
+condition inverted. -/
+theorem parser_word_step_field0_short_exit1 {c e sp : Nat}
+    {s : X86Int.St}
+    (hrip : s.rip = base + 0x2d6) (hr6 : s.reg 6 = some c)
+    (hr15 : s.reg 15 = some e) (hshort : ¬ c + 4 ≤ e)
+    (hcW : c < W) (heW : e < W)
+    (hroom : StackRoom s 2)
+    (hr4 : s.reg 4 = some sp) (hsp40 : 40 ≤ sp) (hspW : sp < W)
+    (hlen16 : s.regs.length = 16) (hregs : RegsOk s) :
+    ∃ k, run stage1Im k (Out.ok s) = Out.exit 1 :=
+  call_rdc_fail_exit1 stage1_parserCode.p2d6 hrip hr6 hr15 hshort
+    hcW heW hroom hr4 hsp40 hspW hlen16 hregs
+
 /-- Condition outcome for `cmp op, k` with `k < op` under cc6. -/
 theorem fl_ja {op k : Nat} (hop : op < W) (hk : k < W)
     (h : k < op) :
