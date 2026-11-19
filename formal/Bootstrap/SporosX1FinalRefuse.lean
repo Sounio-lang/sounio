@@ -2334,6 +2334,71 @@ theorem syscall_mmap_nomem {k : Kern} {m : Mem} {a2 : Nat}
     subst hnext1
     rfl
 
+theorem cond_cc8_of_sf_true {f : Flags} (hsf : f.sf = some true) :
+    X86Int.cond f 8 = some true := by
+  simp [X86Int.cond, hsf]
+
+theorem cond_cc9_of_sf_true {f : Flags} (hsf : f.sf = some true) :
+    X86Int.cond f 9 = some false := by
+  simp [X86Int.cond, hsf]
+
+/-- sf after `test (neg ENOMEM) (neg ENOMEM)`.  Verbatim copy of the
+`hmsb`/`hsf` block in parser_mmap1_nomem (Refuse:2919-2927), factored
+out so both loader sites share it. -/
+theorem sf_test_neg_enomem :
+    (aluF .and (X86Env.neg ENOMEM) (X86Env.neg ENOMEM)).2.sf =
+      some true := by
+  have hmsb : msb (X86Env.neg ENOMEM) = true := by
+    unfold msb X86Env.neg ENOMEM W
+    decide
+  have h1 : (aluF .and (X86Env.neg ENOMEM) (X86Env.neg ENOMEM)).2.sf =
+      some (msb (aluF .and (X86Env.neg ENOMEM)
+        (X86Env.neg ENOMEM)).1) := rfl
+  rw [h1, aluF_and_fst_self, hmsb]
+
+/-! ### §1. The missing primitive: `mremap` with a refusing oracle
+
+Mirror of syscall_mremap_ret_of_place (Defs:563-589) with the
+existential resolved to the explicit refusal return, exactly as
+syscall_mmap_nomem (Refuse:2228-2240) mirrors
+syscall_mmap_ret_of_place (Defs:546-561).  All guards of the accept
+version are retained — they are evaluated BEFORE the oracle is
+consulted (X86Env:229-236), so they are genuine preconditions of
+the refusal too, not artifacts: without hfind/hbase/hlen/hrw/hgrow
+the model syscall is `none` (stuck), never `-ENOMEM`.
+NOT needed (contrast accept): any `place`/free/aligned/bound fact —
+the `.nomem` branch of `place` ignores mem and size (X86Env:173).
+a5/a6 are universally quantified and unused: at the growth site they
+are the preserved-but-arbitrary v8/v9 (hg6r8/hg6r9, Loader:4003-4047;
+the block never zeroes r8/r9, cf. loader_grow hr8/hr9 as bare
+existentials, Loader:3724). -/
+
+theorem syscall_mremap_nomem {k : Kern} {m : Mem}
+    {a1 a2 a3 a5 a6 : Nat} {i : Nat} {r : Region}
+    (hfind : m.find a1 0 = some (i, r))
+    (hbase : r.base = a1) (hlen : r.data.length = X86Env.pages a2)
+    (hrw : r.rw = true) (hgrow : ¬ X86Env.pages a3 < r.data.length)
+    (hhead : k.oracle.head? = some .nomem) :
+    X86Env.syscall k m 25 a1 a2 a3 MREMAP_MAYMOVE a5 a6 =
+      some (.ret (X86Env.neg ENOMEM) (Kern.next k).2 m) := by
+  have hnext1 : (Kern.next k).1 = some .nomem :=
+    kern_next_of_head hhead
+  have hval : ¬ (r.base ≠ a1 ∨ r.data.length ≠ X86Env.pages a2 ∨
+      ¬ r.rw) := by simp [hbase, hlen, hrw]
+  -- Lines above: kern_next_of_head (Defs:538) and the `hval` shape of
+  -- Defs:577-578 verbatim.  The simp invocation below is Defs:580-581
+  -- verbatim; it discharges a4 (MREMAP_MAYMOVE), the find, hval
+  -- (via hbase/hlen/hrw) and the not-shrink guard (hgrow).
+  simp only [X86Env.syscall, hfind, hbase, hlen, hrw, hgrow,
+    if_false]
+  cases hnext : Kern.next k with
+  | mk c k1 =>
+    rw [hnext] at hnext1
+    simp only [] at hnext1
+    subst hnext1
+    simp [X86Env.place, hgrow, hlen]
+    omega
+
 set_option maxHeartbeats 0 in
 /-- The words-table `mmap`, oracle-refusal case: from
 `base + 0x1ec` to `aFail2` in twenty steps when the oracle
