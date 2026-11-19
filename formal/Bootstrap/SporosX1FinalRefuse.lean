@@ -6253,4 +6253,169 @@ theorem parser_disp_invalid_hi_exit1 {op sp : Nat} {s : X86Int.St}
     (StackRoom_of_mem hmem h4eq hroom)
   exact ⟨17 + k, by rw [run_add stage1Im 17 k, hrun, hk]⟩
 
+set_option maxHeartbeats 0 in
+/-- One code-loop iteration, classified for arbitrary bytes:
+either the byte at the cursor starts a valid instruction that
+fits before `e`, and the iteration is `parser_code_step` over
+the constructed instruction, or the run reaches `aFail1`
+(no byte left, invalid opcode, or instruction overrun). -/
+theorem parser_code_step_classify {c e B S n : Nat}
+    {s : X86Int.St}
+    (hrip : s.rip = base + 0x30b) (hr1 : s.reg 1 = some (n + 1))
+    (hr6 : s.reg 6 = some c) (hr15 : s.reg 15 = some e)
+    (hr3 : s.reg 3 = some B) (hr11 : s.reg 11 = some S)
+    (hce : c ≤ e) (hcW : c < W) (heW : e < W)
+    (hnW : n + 1 < W) (hBc : B ≤ c) (hSW : S + (c - B) < W)
+    (hwr : ∀ l, (s.mem.wr (S + (c - B)) l).isSome)
+    (hrdN : ∀ l, l ≤ e - c →
+      ∃ bs, s.mem.rdN c l = some bs ∧ ∀ b ∈ bs, b < 256)
+    (hlen16 : s.regs.length = 16) :
+    (∃ (x : Instr) (k : Nat) (s' : X86Int.St),
+      run stage1Im k (Out.ok s) = Out.ok s' ∧
+      s'.rip = base + 0x30b ∧
+      s'.reg 6 = some (c + x.enc.length) ∧ s'.reg 1 = some n ∧
+      s'.mem.rd (S + (c - B)) = some x.enc.length ∧
+      (∀ i, i ≠ 0 → i ≠ 1 → i ≠ 2 → i ≠ 6 → i ≠ 10 →
+        s'.reg i = s.reg i) ∧
+      s'.regs.length = 16 ∧ s'.k = s.k ∧
+      wshape s'.mem = wshape s.mem ∧
+      (∀ y k, S + (c - B) + 1 ≤ y ∨ y + k ≤ S + (c - B) →
+        s'.mem.rdN y k = s.mem.rdN y k)) ∨
+    (∃ k s', run stage1Im k (Out.ok s) = Out.ok s' ∧
+      s'.rip = aFail1 ∧
+      (∀ i, i ≠ 0 → i ≠ 1 → i ≠ 2 → i ≠ 6 → i ≠ 10 →
+        s'.reg i = s.reg i) ∧
+      s'.mem = s.mem ∧ s'.regs.length = 16 ∧ s'.k = s.k) := by
+  obtain ⟨s1, hrun1, hs1rip, hs1fr, hs1mem, hs1len, hs1k⟩ :=
+    parser_code_head_pos hrip hr1 hnW
+  have hs1len16 : s1.regs.length = 16 := by
+    rw [hs1len]; exact hlen16
+  have hs1r6 : s1.reg 6 = some c := by rw [hs1fr 6]; exact hr6
+  have hs1r15 : s1.reg 15 = some e := by
+    rw [hs1fr 15]; exact hr15
+  by_cases h1 : c + 1 ≤ e
+  · obtain ⟨bs1, hbs1, hb1⟩ := hrdN 1 (by omega)
+    have hbs1len : bs1.length = 1 := rdN_length hbs1
+    obtain ⟨op, hopbs⟩ : ∃ op, bs1 = [op] := by
+      cases bs1 with
+      | nil => simp at hbs1len
+      | cons b rest =>
+        cases rest with
+        | nil => exact ⟨b, rfl⟩
+        | cons b2 rest2 => simp at hbs1len
+    subst hopbs
+    have hop256 : op < 256 := hb1 op (by simp)
+    have hrd : s.mem.rd c = some op := by
+      have h : s.mem.rdN c (0 + 1) = some (op :: []) := by
+        simpa using hbs1
+      exact (rdN_cons h).1
+    have hs1rd : s1.mem.rd c = some op := by
+      rw [hs1mem]; exact hrd
+    obtain ⟨s2, hrun2, hs2rip, hs2r0, hs2r6, hs2fr, hs2mem,
+        hs2len16, hs2k⟩ :=
+      parser_code_bounds hs1rip hs1r6 hs1r15 h1 hcW heW hs1rd
+        hs1len16
+    have hrun12 : run stage1Im (2 + 6) (Out.ok s) = Out.ok s2 := by
+      rw [run_add stage1Im 2 6, hrun1, hrun2]
+    have hfr2 : ∀ i, i ≠ 0 → i ≠ 1 → i ≠ 2 → i ≠ 6 → i ≠ 10 →
+        s2.reg i = s.reg i := by
+      intro i hi0 _ hi2 _ _
+      rw [hs2fr i hi0 hi2, hs1fr i]
+    have hmem2 : s2.mem = s.mem := hs2mem.trans hs1mem
+    have hk2 : s2.k = s.k := hs2k.trans hs1k
+    rcases opLen_or_invalid op with ⟨l, hOp⟩ | hlo | hhi
+    · by_cases hfit : c + l ≤ e
+      · obtain ⟨bsl, hbsl, hbl⟩ := hrdN l (by omega)
+        have hlenl : bsl.length = l := rdN_length hbsl
+        have hlpos : 0 < l := by
+          rcases hOp with ⟨-, hl⟩ | ⟨-, hl⟩ | ⟨-, hl⟩ | ⟨-, hl⟩ <;>
+            omega
+        have hhead : bsl.head? = some op := by
+          cases hbseq : bsl with
+          | nil =>
+            rw [hbseq] at hlenl
+            simp at hlenl
+            omega
+          | cons b rest =>
+            have hleq : l = rest.length + 1 := by
+              rw [hbseq] at hlenl
+              simp only [List.length_cons] at hlenl
+              omega
+            have hb1' : s.mem.rd c = some b := by
+              rw [hbseq, hleq] at hbsl
+              exact (rdN_cons hbsl).1
+            have hb_eq : b = op := by
+              rw [hrd] at hb1'
+              exact (Option.some.inj hb1').symm
+            subst hb_eq
+            rfl
+        obtain ⟨x, hx⟩ := instr_of_opLen hOp hlenl hbl hhead
+        have henc : s.mem.rdN c x.enc.length = some x.enc := by
+          rw [hx, hlenl]
+          exact hbsl
+        have hxlen : x.enc.length = l := by
+          rw [hx]; exact hlenl
+        obtain ⟨k, s', hrun, hsrip, hsr6, hsr1, hsrd, hsfr,
+            hslen, hsk, hssh, hsmemfr⟩ :=
+          parser_code_step hrip hr1 hr6 hr15 hr3 hr11 henc
+            (by omega) hcW heW hnW hBc hSW (hwr _) hlen16
+        exact Or.inl ⟨x, k, s', hrun, hsrip, hsr6, hsr1, hsrd,
+          hsfr, hslen, hsk, hssh, hsmemfr⟩
+      · obtain ⟨nd, s3, hrun3, hs3rip, hs3r10, _hs3r0, hs3fr,
+            hs3mem, hs3len16, hs3k⟩ :=
+          parser_dispatch hs2rip hs2r0 hOp hs2len16
+        have hs3r6 : s3.reg 6 = some c := by
+          rw [hs3fr 6 (by decide)]; exact hs2r6
+        have hs3r15 : s3.reg 15 = some e := by
+          rw [hs3fr 15 (by decide), hs2fr 15 (by decide)
+            (by decide), hs1fr 15]
+          exact hr15
+        obtain ⟨s4, hrun4, hs4rip, hs4fr, hs4mem, hs4len16,
+            hs4k⟩ :=
+          parser_code_tail_overrun hs3rip hs3r6 hs3r15 hs3r10 hce
+            (by omega) hcW heW hs3len16
+        exact Or.inr ⟨2 + 6 + nd + 5, s4, by
+          rw [show 2 + 6 + nd + 5 = (2 + 6 + nd) + 5 by omega,
+            run_add stage1Im (2 + 6 + nd) 5,
+            show run stage1Im (2 + 6 + nd) (Out.ok s) =
+              Out.ok s3 from by
+              rw [show 2 + 6 + nd = (2 + 6) + nd by omega,
+                run_add stage1Im (2 + 6) nd, hrun12, hrun3],
+            hrun4],
+          hs4rip,
+          fun i hi0 hi1 hi2 hi6 hi10 =>
+            (hs4fr i hi1 hi2 hi6).trans
+              ((hs3fr i hi10).trans (hfr2 i hi0 hi1 hi2 hi6 hi10)),
+          (hs4mem.trans hs3mem).trans hmem2, hs4len16,
+          (hs4k.trans hs3k).trans hk2⟩
+    · obtain ⟨s3, hrun3, hs3rip, hs3fr, hs3mem, hs3len16, hs3k⟩ :=
+        parser_disp_invalid_lo hs2rip hs2r0 hlo.1 hlo.2.1 hlo.2.2
+          hs2len16
+      exact Or.inr ⟨2 + 6 + 15, s3, by
+        rw [show 2 + 6 + 15 = (2 + 6) + 15 by omega,
+          run_add stage1Im (2 + 6) 15, hrun12, hrun3],
+        hs3rip,
+        fun i hi0 hi1 hi2 hi6 hi10 =>
+          (hs3fr i).trans (hfr2 i hi0 hi1 hi2 hi6 hi10),
+        hs3mem.trans hmem2, hs3len16, hs3k.trans hk2⟩
+    · obtain ⟨s3, hrun3, hs3rip, hs3fr, hs3mem, hs3len16, hs3k⟩ :=
+        parser_disp_invalid_hi hs2rip hs2r0 hhi
+          (by unfold W; omega) hs2len16
+      exact Or.inr ⟨2 + 6 + 17, s3, by
+        rw [show 2 + 6 + 17 = (2 + 6) + 17 by omega,
+          run_add stage1Im (2 + 6) 17, hrun12, hrun3],
+        hs3rip,
+        fun i hi0 hi1 hi2 hi6 hi10 =>
+          (hs3fr i).trans (hfr2 i hi0 hi1 hi2 hi6 hi10),
+        hs3mem.trans hmem2, hs3len16, hs3k.trans hk2⟩
+  · obtain ⟨s2, hrun2, hs2rip, hs2fr, hs2mem, hs2len16, hs2k⟩ :=
+      parser_code_bounds_short hs1rip hs1r6 hs1r15 hce
+        (by omega) hcW heW hs1len16
+    exact Or.inr ⟨2 + 6, s2, by
+      rw [run_add stage1Im 2 6, hrun1, hrun2],
+      hs2rip,
+      fun i _ _ hi2 _ _ => (hs2fr i hi2).trans (hs1fr i),
+      hs2mem.trans hs1mem, hs2len16, hs2k.trans hs1k⟩
+
+
 end SporosX1
