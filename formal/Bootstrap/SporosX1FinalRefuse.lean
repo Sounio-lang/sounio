@@ -1851,6 +1851,102 @@ theorem parser_data_step_overrun_exit1 {c e d n sp : Nat}
     (StackRoom_of_mem hmem h4eq hroom)
   exact ⟨14 + k, by rw [run_add stage1Im 14 k, hrun, hk]⟩
 
+/-- Data-loop classification for arbitrary bytes: from the loop
+head, either all `n` length-prefixed segments fit and the loop
+reaches `base + 0x1c7` describing them by a `DataSeq`, or a
+short length field or a payload overrun reaches `aFail1`.
+The only memory hypothesis is that a u32 is readable wherever
+four bytes remain before `e`. -/
+theorem parser_data_loop_classify :
+    ∀ (n : Nat) {c e : Nat} {s : X86Int.St},
+      s.rip = base + 0x18f → s.reg 1 = some n →
+      s.reg 6 = some c → s.reg 15 = some e → c ≤ e → e < W →
+      n < W →
+      (∀ a, c ≤ a → a + 4 ≤ e → ∃ d, rd32 s.mem a = some d) →
+      s.regs.length = 16 →
+      (∃ ds c' k s', ds.length = n ∧ DataSeq s.mem c ds c' ∧
+          c' ≤ e ∧ run stage1Im k (Out.ok s) = Out.ok s' ∧
+          s'.rip = base + 0x1c7 ∧ s'.reg 1 = some 0 ∧
+          s'.reg 6 = some c' ∧ s'.reg 15 = some e ∧
+          (∀ i, i ≠ 0 → i ≠ 1 → i ≠ 2 → i ≠ 6 →
+            s'.reg i = s.reg i) ∧
+          s'.mem = s.mem ∧ s'.regs.length = 16 ∧ s'.k = s.k) ∨
+      (∃ k s', run stage1Im k (Out.ok s) = Out.ok s' ∧
+          s'.rip = aFail1 ∧ s'.reg 15 = some e ∧
+          (∀ i, i ≠ 0 → i ≠ 1 → i ≠ 2 → i ≠ 6 →
+            s'.reg i = s.reg i) ∧
+          s'.mem = s.mem ∧ s'.regs.length = 16 ∧ s'.k = s.k) := by
+  intro n
+  induction n with
+  | zero =>
+    intro c e s hrip hr1 hr6 hr15 hce heW _hnW _hrd hlen16
+    obtain ⟨k, s', hrun, hsrip, hsr1, hsr6, hsr15, hsfr, hsmem,
+        hslen, hsk⟩ :=
+      parser_data_loop_ok (DataSeq.nil c) hrip hr1 hr6 hr15 hce heW
+        (by simp [W]) hlen16
+    exact Or.inl ⟨[], c, k, s', rfl, DataSeq.nil c, hce, hrun,
+      hsrip, hsr1, hsr6, hsr15, hsfr, hsmem, hslen, hsk⟩
+  | succ n ih =>
+    intro c e s hrip hr1 hr6 hr15 hce heW hnW hrd hlen16
+    by_cases hshort : e < c + 4
+    · obtain ⟨s', hrun, hsrip, hsfr, hsmem, hslen, hsk⟩ :=
+        parser_data_step_short hrip hr1 hr6 hr15 (by omega) hce
+          hshort heW hlen16
+      have hs15 : s'.reg 15 = some e := by
+        rw [hsfr 15 (by decide)]; exact hr15
+      exact Or.inr ⟨7, s', hrun, hsrip, hs15,
+        fun i _ _ hi2 _ => hsfr i hi2, hsmem, hslen, hsk⟩
+    · have hc4 : c + 4 ≤ e := by omega
+      obtain ⟨d, hd⟩ := hrd c (Nat.le_refl c) hc4
+      by_cases hover : e < c + 4 + d
+      · obtain ⟨s', hrun, hsrip, hsfr, hsmem, hslen, hsk⟩ :=
+          parser_data_step_overrun hrip hr1 hr6 hr15 (by omega) hc4
+            hd hover heW hlen16
+        have hs15 : s'.reg 15 = some e := by
+          rw [hsfr 15 (by decide) (by decide) (by decide)]
+          exact hr15
+        exact Or.inr ⟨14, s', hrun, hsrip, hs15,
+          fun i hi0 _ hi2 hi6 => hsfr i hi0 hi2 hi6,
+          hsmem, hslen, hsk⟩
+      · have hcd : c + 4 + d ≤ e := by omega
+        obtain ⟨s1, hrun1, hs1rip, hs1r1, hs1r6, hs1r15, hs1fr,
+            hs1mem, hs1len, hs1k⟩ :=
+          parser_data_step_ok hrip hr1 hr6 hr15 (by omega) hnW hc4
+            hd hcd heW hlen16
+        have hs1r1' : s1.reg 1 = some n := by
+          have h : n + 1 - 1 = n := by omega
+          rw [h] at hs1r1
+          exact hs1r1
+        have hrd1 : ∀ a, c + 4 + d ≤ a → a + 4 ≤ e →
+            ∃ d', rd32 s1.mem a = some d' := by
+          intro a ha hb
+          obtain ⟨d', hd'⟩ := hrd a (by omega) hb
+          exact ⟨d', by rw [hs1mem]; exact hd'⟩
+        rcases ih hs1rip hs1r1' hs1r6 hs1r15 hcd heW (by omega) hrd1
+            hs1len with hleft | hright
+        · obtain ⟨ds, c', k, s2, hdslen, hseq, hc'e, hrun2, hs2rip,
+              hs2r1, hs2r6, hs2r15, hs2fr, hs2mem, hs2len, hs2k⟩ :=
+            hleft
+          have hrest : DataSeq s.mem (c + 4 + d) ds c' := by
+            rw [hs1mem] at hseq
+            exact hseq
+          exact Or.inl ⟨d :: ds, c', 16 + k, s2,
+            by simp [hdslen], DataSeq.cons hd hrest, hc'e,
+            by rw [run_add stage1Im 16 k, hrun1, hrun2],
+            hs2rip, hs2r1, hs2r6, hs2r15,
+            fun i hi0 hi1 hi2 hi6 =>
+              (hs2fr i hi0 hi1 hi2 hi6).trans
+                (hs1fr i hi0 hi1 hi2 hi6),
+            hs2mem.trans hs1mem, hs2len, hs2k.trans hs1k⟩
+        · obtain ⟨k, s2, hrun2, hs2rip, hs2r15, hs2fr, hs2mem,
+              hs2len, hs2k⟩ := hright
+          exact Or.inr ⟨16 + k, s2,
+            by rw [run_add stage1Im 16 k, hrun1, hrun2],
+            hs2rip, hs2r15,
+            fun i hi0 hi1 hi2 hi6 =>
+              (hs2fr i hi0 hi1 hi2 hi6).trans
+                (hs1fr i hi0 hi1 hi2 hi6),
+            hs2mem.trans hs1mem, hs2len, hs2k.trans hs1k⟩
 
 set_option maxHeartbeats 0 in
 /-- Guard refusal: `20 * nwords` exceeds the bytes remaining,
