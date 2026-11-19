@@ -1,0 +1,3577 @@
+# spr1_check: the checker of Sporos bytecode, stage 1 of bootstrap root A.
+#
+# What it does: reads a Sporos bytecode file (formal/Sporos/Bytecode.lean) from
+# standard input and checks it as Sporos.decode and Sporos.checkProg
+# (formal/Sporos/Check.lean) do, three times, on three copies of the input.
+#
+# Exit status: 0 when the file decodes and passes the checker; 5 when it is
+# malformed or ill-typed; 6 when memory is refused or a stack height reaches
+# 2^64; 3 when the three passes all disagree. Every non-zero status is at
+# Hamming distance 2 or more from 0.
+#
+# Structure (addresses are 0x400000 + file offset):
+#   start   (0x403eaf)  mmap a 64 KiB buffer, read all of stdin, doubling it
+#                        with mremap; triplicate the input into two more
+#                        mappings; descriptors (base, N) at 0x600000,
+#                        0x601000, 0x602000; rax = rbx = rcx = REJECT.
+#   tripled (0x400290)  pass 1 (result in rax), pass 2 (rbx), pass 3 (rcx).
+#                        Each pass reads only its own copy and descriptor, makes
+#                        no store, call, push or syscall, and writes only its
+#                        result register: ACCEPT 0x5acce970a55a3c96, REJECT
+#                        0xdeadbeef11110001 or OVERFLOW 0xbad0f1e33c3c3a5.
+#   vote    (0x40296c)  the 38-byte voter of Bootstrap/TMRVoter.lean, with its
+#                        park (eb fe) replaced by eb 0c, a jump to the guard.
+#   guard   (0x402992)  exit(0) only when rax - ACCEPT and rbx - ACCEPT are both
+#                        zero, tested by two conditional branches; the exit
+#                        status is computed from the two differences.
+#
+# The bytes 0f 85 (jne rel32, one bit from syscall 0f 05) never occur, and
+# 0f 05 occurs only at the syscalls.
+#
+# Total 16402 bytes.
+
+# ---------------------------------------------------------------- ELF header
+7f 45 4c 46                     # 000  e_ident: magic 0x7f E L F
+02                              # 004  ELFCLASS64
+01                              # 005  little endian
+01                              # 006  EI_VERSION = 1
+00                              # 007  System V
+00 00 00 00 00 00 00 00         # 008  padding
+02 00                           # 010  e_type = ET_EXEC
+3e 00                           # 012  e_machine = EM_X86_64
+01 00 00 00                     # 014  e_version = 1
+af 3e 40 00 00 00 00 00         # 018  e_entry
+40 00 00 00 00 00 00 00         # 020  e_phoff = 0x40
+00 00 00 00 00 00 00 00         # 028  e_shoff = 0
+00 00 00 00                     # 030  e_flags = 0
+40 00                           # 034  e_ehsize = 64
+38 00                           # 036  e_phentsize = 56
+02 00                           # 038  e_phnum = 2
+00 00                           # 03a  e_shentsize = 0
+00 00                           # 03c  e_shnum = 0
+00 00                           # 03e  e_shstrndx = 0
+
+# ----------------------------------------------------------- program headers
+01 00 00 00                     # 040  PT_LOAD (code)
+05 00 00 00                     # 044  PF_R | PF_X
+00 00 00 00 00 00 00 00         # 048  p_offset = 0
+00 00 40 00 00 00 00 00         # 050  p_vaddr = 0x400000
+00 00 40 00 00 00 00 00         # 058  p_paddr
+12 40 00 00 00 00 00 00         # 060  p_filesz = whole file
+12 40 00 00 00 00 00 00         # 068  p_memsz
+00 10 00 00 00 00 00 00         # 070  p_align = 0x1000
+01 00 00 00                     # 078  PT_LOAD (descriptors)
+06 00 00 00                     # 07c  PF_R | PF_W
+00 00 00 00 00 00 00 00         # 080  p_offset = 0
+00 00 60 00 00 00 00 00         # 088  p_vaddr = 0x600000
+00 00 60 00 00 00 00 00         # 090  p_paddr
+00 00 00 00 00 00 00 00         # 098  p_filesz = 0
+00 30 00 00 00 00 00 00         # 0a0  p_memsz = 0x3000 (three pages)
+00 10 00 00 00 00 00 00         # 0a8  p_align = 0x1000
+
+# --------------------------------------------------------------------- code
+# Offsets on the left are file offsets; address = 0x400000 + offset.
+# pad0 (480 bytes of 0xf4)
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+
+# tripled:
+
+# p1:
+41 bf 00 00 60 00               # 290  mov r15, 0x600000   pass 1: descriptor 1
+49 8b 3f                        # 296  ld rdi, [r15+0x0]   base of input copy
+49 8b 57 08                     # 299  ld rdx, [r15+0x8]   N
+48 8b ef                        # 29d  mov rbp, rdi
+48 01 d5                        # 2a0  add rbp, rdx   rbp = end of input
+48 83 fa 10                     # 2a3  cmp rdx, 0x10
+0f 82 c8 0c 00 00               # 2a7  jb 0x400f75   shorter than the file header -> p1_rej
+8b 17                           # 2ad  ld32 rdx, [rdi+0x0]
+48 81 fa 53 50 52 31            # 2af  cmp rdx, 0x31525053
+74 05                           # 2b6  je 0x4002bd   not "SPR1" (jne: je over the jmp)
+e9 b8 0c 00 00                  # 2b8  jmp 0x400f75   -> p1_rej
+44 8b 67 04                     # 2bd  ld32 r12, [rdi+0x4]   main
+8b 77 08                        # 2c1  ld32 rsi, [rdi+0x8]   nw
+44 8b 7f 0c                     # 2c4  ld32 r15, [rdi+0xc]   nd
+4c 8d 57 10                     # 2c8  lea r10, [rdi+0x10]   first data item
+
+# sd_top_1:
+4d 85 ff                        # 2cc  test r15, r15   skipData: items left?
+74 2e                           # 2cf  je 0x4002ff    -> sd_done_2
+4d 8b da                        # 2d1  mov r11, r10
+49 83 c3 04                     # 2d4  add r11, 0x4
+49 39 eb                        # 2d8  cmp r11, rbp
+0f 87 94 0c 00 00               # 2db  ja 0x400f75   truncated length -> p1_rej
+45 8b 32                        # 2e1  ld32 r14, [r10+0x0]   len
+4d 8b d3                        # 2e4  mov r10, r11
+4c 8b dd                        # 2e7  mov r11, rbp
+4d 29 d3                        # 2ea  sub r11, r10   bytes left
+4d 39 f3                        # 2ed  cmp r11, r14
+0f 82 7f 0c 00 00               # 2f0  jb 0x400f75   truncated data -> p1_rej
+4d 01 f2                        # 2f6  add r10, r14
+49 83 ef 01                     # 2f9  sub r15, 0x1
+eb cd                           # 2fd  jmp 0x4002cc    -> sd_top_1
+
+# sd_done_2:
+4d 8b ea                        # 2ff  mov r13, r10   ws = first word
+4c 8b fe                        # 302  mov r15, rsi   nw words
+
+# sw_top_3:
+4d 85 ff                        # 305  test r15, r15   skipWords (parse): words left?
+0f 84 c0 00 00 00               # 308  je 0x4003ce    -> sw_done_4
+4d 8b f2                        # 30e  mov r14, r10
+49 83 c6 14                     # 311  add r14, 0x14
+49 39 ee                        # 315  cmp r14, rbp
+0f 87 57 0c 00 00               # 318  ja 0x400f75   truncated word header -> p1_rej
+45 8b 72 10                     # 31e  ld32 r14, [r10+0x10]   na
+49 c1 e6 20                     # 322  shl r14, 32
+4d 01 f7                        # 326  add r15, r14   park na in the high half
+45 8b 5a 0c                     # 329  ld32 r11, [r10+0xc]   nc
+49 83 c2 14                     # 32d  add r10, 0x14   first instruction
+
+# sc_top_5:
+4d 85 db                        # 331  test r11, r11   skipCode (parse): instructions left?
+74 6b                           # 334  je 0x4003a1    -> sc_done_6
+49 39 ea                        # 336  cmp r10, rbp   opcode byte inside the input?
+0f 83 36 0c 00 00               # 339  jae 0x400f75    -> p1_rej
+45 0f b6 32                     # 33f  ld8 r14, [r10+0x0]   opcode
+49 83 fe 39                     # 343  cmp r14, 0x39   prim 0x00..0x38
+72 40                           # 347  jb 0x400389    -> sc_l1_7
+49 81 fe 80 00 00 00            # 349  cmp r14, 0x80
+0f 82 1f 0c 00 00               # 350  jb 0x400f75   0x39..0x7f: no such opcode -> p1_rej
+74 29                           # 356  je 0x400381   0x80 lit u64 -> sc_l9_9
+49 81 fe 8c 00 00 00            # 358  cmp r14, 0x8c
+0f 87 10 0c 00 00               # 35f  ja 0x400f75   0x8d..0xff: no such opcode -> p1_rej
+74 22                           # 365  je 0x400389   0x8c ret -> sc_l1_7
+49 81 fe 83 00 00 00            # 367  cmp r14, 0x83
+72 09                           # 36e  jb 0x400379   0x81 str, 0x82 pick -> sc_l5_8
+49 81 fe 86 00 00 00            # 370  cmp r14, 0x86
+72 10                           # 377  jb 0x400389   0x83 tor, 0x84 fromr, 0x85 rfetch -> sc_l1_7
+
+# sc_l5_8:
+41 be 05 00 00 00               # 379  mov r14, 0x5   opcode + u32
+eb 0e                           # 37f  jmp 0x40038f    -> sc_len_10
+
+# sc_l9_9:
+41 be 09 00 00 00               # 381  mov r14, 0x9   opcode + u64
+eb 06                           # 387  jmp 0x40038f    -> sc_len_10
+
+# sc_l1_7:
+41 be 01 00 00 00               # 389  mov r14, 0x1   opcode alone
+
+# sc_len_10:
+4d 01 f2                        # 38f  add r10, r14   past the instruction
+49 39 ea                        # 392  cmp r10, rbp
+0f 87 da 0b 00 00               # 395  ja 0x400f75   truncated instruction -> p1_rej
+49 83 eb 01                     # 39b  sub r11, 0x1
+eb 90                           # 39f  jmp 0x400331    -> sc_top_5
+
+# sc_done_6:
+4d 8b f7                        # 3a1  mov r14, r15
+49 c1 ee 20                     # 3a4  shr r14, 32   na
+45 8b ff                        # 3a8  mov32 r15, r15   words left, high half cleared
+4d 8b de                        # 3ab  mov r11, r14
+49 c1 e3 03                     # 3ae  shl r11, 3
+49 c1 e6 02                     # 3b2  shl r14, 2
+4d 01 f3                        # 3b6  add r11, r14   12 * na
+4d 01 da                        # 3b9  add r10, r11   past the annotations
+49 39 ea                        # 3bc  cmp r10, rbp
+0f 87 b0 0b 00 00               # 3bf  ja 0x400f75   truncated annotations -> p1_rej
+49 83 ef 01                     # 3c5  sub r15, 0x1
+e9 37 ff ff ff                  # 3c9  jmp 0x400305    -> sw_top_3
+
+# sw_done_4:
+49 39 ea                        # 3ce  cmp r10, rbp
+74 05                           # 3d1  je 0x4003d8   trailing bytes (jne: je over the jmp)
+e9 9d 0b 00 00                  # 3d3  jmp 0x400f75   -> p1_rej
+49 39 f4                        # 3d8  cmp r12, rsi
+0f 83 94 0b 00 00               # 3db  jae 0x400f75   main >= nw -> p1_rej
+4d 8b d5                        # 3e1  mov r10, r13
+4d 8b fc                        # 3e4  mov r15, r12
+
+# sw_top_11:
+4d 85 ff                        # 3e7  test r15, r15   skipWords (main): words left?
+0f 84 c0 00 00 00               # 3ea  je 0x4004b0    -> sw_done_12
+4d 8b f2                        # 3f0  mov r14, r10
+49 83 c6 14                     # 3f3  add r14, 0x14
+49 39 ee                        # 3f7  cmp r14, rbp
+0f 87 75 0b 00 00               # 3fa  ja 0x400f75   truncated word header -> p1_rej
+45 8b 72 10                     # 400  ld32 r14, [r10+0x10]   na
+49 c1 e6 20                     # 404  shl r14, 32
+4d 01 f7                        # 408  add r15, r14   park na in the high half
+45 8b 5a 0c                     # 40b  ld32 r11, [r10+0xc]   nc
+49 83 c2 14                     # 40f  add r10, 0x14   first instruction
+
+# sc_top_13:
+4d 85 db                        # 413  test r11, r11   skipCode (main): instructions left?
+74 6b                           # 416  je 0x400483    -> sc_done_14
+49 39 ea                        # 418  cmp r10, rbp   opcode byte inside the input?
+0f 83 54 0b 00 00               # 41b  jae 0x400f75    -> p1_rej
+45 0f b6 32                     # 421  ld8 r14, [r10+0x0]   opcode
+49 83 fe 39                     # 425  cmp r14, 0x39   prim 0x00..0x38
+72 40                           # 429  jb 0x40046b    -> sc_l1_15
+49 81 fe 80 00 00 00            # 42b  cmp r14, 0x80
+0f 82 3d 0b 00 00               # 432  jb 0x400f75   0x39..0x7f: no such opcode -> p1_rej
+74 29                           # 438  je 0x400463   0x80 lit u64 -> sc_l9_17
+49 81 fe 8c 00 00 00            # 43a  cmp r14, 0x8c
+0f 87 2e 0b 00 00               # 441  ja 0x400f75   0x8d..0xff: no such opcode -> p1_rej
+74 22                           # 447  je 0x40046b   0x8c ret -> sc_l1_15
+49 81 fe 83 00 00 00            # 449  cmp r14, 0x83
+72 09                           # 450  jb 0x40045b   0x81 str, 0x82 pick -> sc_l5_16
+49 81 fe 86 00 00 00            # 452  cmp r14, 0x86
+72 10                           # 459  jb 0x40046b   0x83 tor, 0x84 fromr, 0x85 rfetch -> sc_l1_15
+
+# sc_l5_16:
+41 be 05 00 00 00               # 45b  mov r14, 0x5   opcode + u32
+eb 0e                           # 461  jmp 0x400471    -> sc_len_18
+
+# sc_l9_17:
+41 be 09 00 00 00               # 463  mov r14, 0x9   opcode + u64
+eb 06                           # 469  jmp 0x400471    -> sc_len_18
+
+# sc_l1_15:
+41 be 01 00 00 00               # 46b  mov r14, 0x1   opcode alone
+
+# sc_len_18:
+4d 01 f2                        # 471  add r10, r14   past the instruction
+49 39 ea                        # 474  cmp r10, rbp
+0f 87 f8 0a 00 00               # 477  ja 0x400f75   truncated instruction -> p1_rej
+49 83 eb 01                     # 47d  sub r11, 0x1
+eb 90                           # 481  jmp 0x400413    -> sc_top_13
+
+# sc_done_14:
+4d 8b f7                        # 483  mov r14, r15
+49 c1 ee 20                     # 486  shr r14, 32   na
+45 8b ff                        # 48a  mov32 r15, r15   words left, high half cleared
+4d 8b de                        # 48d  mov r11, r14
+49 c1 e3 03                     # 490  shl r11, 3
+49 c1 e6 02                     # 494  shl r14, 2
+4d 01 f3                        # 498  add r11, r14   12 * na
+4d 01 da                        # 49b  add r10, r11   past the annotations
+49 39 ea                        # 49e  cmp r10, rbp
+0f 87 ce 0a 00 00               # 4a1  ja 0x400f75   truncated annotations -> p1_rej
+49 83 ef 01                     # 4a7  sub r15, 0x1
+e9 37 ff ff ff                  # 4ab  jmp 0x4003e7    -> sw_top_11
+
+# sw_done_12:
+41 8b 12                        # 4b0  ld32 rdx, [r10+0x0]   ins of main
+48 85 d2                        # 4b3  test rdx, rdx
+74 05                           # 4b6  je 0x4004bd   main takes arguments (jne: je over the jmp)
+e9 b8 0a 00 00                  # 4b8  jmp 0x400f75   -> p1_rej
+4d 8b e5                        # 4bd  mov r12, r13   r12 = word header
+
+# p1_word:
+49 39 ec                        # 4c0  cmp r12, rbp
+0f 84 8e 0a 00 00               # 4c3  je 0x400f57   all words checked -> p1_acc
+45 8b 5c 24 0c                  # 4c9  ld32 r11, [r12+0xc]   nc
+4d 85 db                        # 4ce  test r11, r11
+0f 84 9e 0a 00 00               # 4d1  je 0x400f75   empty code -> p1_rej
+4d 8d 4c 24 14                  # 4d7  lea r9, [r12+0x14]
+
+# sc_top_19:
+4d 85 db                        # 4dc  test r11, r11   skipCode (annotations): instructions left?
+74 6b                           # 4df  je 0x40054c    -> sc_done_20
+49 39 e9                        # 4e1  cmp r9, rbp   opcode byte inside the input?
+0f 83 8b 0a 00 00               # 4e4  jae 0x400f75    -> p1_rej
+45 0f b6 31                     # 4ea  ld8 r14, [r9+0x0]   opcode
+49 83 fe 39                     # 4ee  cmp r14, 0x39   prim 0x00..0x38
+72 40                           # 4f2  jb 0x400534    -> sc_l1_21
+49 81 fe 80 00 00 00            # 4f4  cmp r14, 0x80
+0f 82 74 0a 00 00               # 4fb  jb 0x400f75   0x39..0x7f: no such opcode -> p1_rej
+74 29                           # 501  je 0x40052c   0x80 lit u64 -> sc_l9_23
+49 81 fe 8c 00 00 00            # 503  cmp r14, 0x8c
+0f 87 65 0a 00 00               # 50a  ja 0x400f75   0x8d..0xff: no such opcode -> p1_rej
+74 22                           # 510  je 0x400534   0x8c ret -> sc_l1_21
+49 81 fe 83 00 00 00            # 512  cmp r14, 0x83
+72 09                           # 519  jb 0x400524   0x81 str, 0x82 pick -> sc_l5_22
+49 81 fe 86 00 00 00            # 51b  cmp r14, 0x86
+72 10                           # 522  jb 0x400534   0x83 tor, 0x84 fromr, 0x85 rfetch -> sc_l1_21
+
+# sc_l5_22:
+41 be 05 00 00 00               # 524  mov r14, 0x5   opcode + u32
+eb 0e                           # 52a  jmp 0x40053a    -> sc_len_24
+
+# sc_l9_23:
+41 be 09 00 00 00               # 52c  mov r14, 0x9   opcode + u64
+eb 06                           # 532  jmp 0x40053a    -> sc_len_24
+
+# sc_l1_21:
+41 be 01 00 00 00               # 534  mov r14, 0x1   opcode alone
+
+# sc_len_24:
+4d 01 f1                        # 53a  add r9, r14   past the instruction
+49 39 e9                        # 53d  cmp r9, rbp
+0f 87 2f 0a 00 00               # 540  ja 0x400f75   truncated instruction -> p1_rej
+49 83 eb 01                     # 546  sub r11, 0x1
+eb 90                           # 54a  jmp 0x4004dc    -> sc_top_19
+
+# sc_done_20:
+45 31 c0                        # 54c  xor r8, r8   i = 0
+45 8b 74 24 10                  # 54f  ld32 r14, [r12+0x10]   lookup (0): na
+4d 8b de                        # 554  mov r11, r14
+49 c1 e3 03                     # 557  shl r11, 3
+49 c1 e6 02                     # 55b  shl r14, 2
+4d 01 f3                        # 55f  add r11, r14
+4d 01 cb                        # 562  add r11, r9   r11 = end of the annotations
+4d 8b d1                        # 565  mov r10, r9
+
+# lk_top_25:
+4d 39 da                        # 568  cmp r10, r11
+74 0e                           # 56b  je 0x40057b   none -> lk_done_26
+45 8b 32                        # 56d  ld32 r14, [r10+0x0]
+4d 39 c6                        # 570  cmp r14, r8
+74 06                           # 573  je 0x40057b   found -> lk_done_26
+49 83 c2 0c                     # 575  add r10, 0xc
+eb ed                           # 579  jmp 0x400568    -> lk_top_25
+
+# lk_done_26:
+4d 39 da                        # 57b  cmp r10, r11
+74 20                           # 57e  je 0x4005a0    -> init_27
+45 8b 72 04                     # 580  ld32 r14, [r10+0x4]
+45 8b 3c 24                     # 584  ld32 r15, [r12+0x0]
+4d 39 fe                        # 588  cmp r14, r15
+74 05                           # 58b  je 0x400592   H[0].d != ins (jne: je over the jmp)
+e9 e3 09 00 00                  # 58d  jmp 0x400f75   -> p1_rej
+45 8b 72 08                     # 592  ld32 r14, [r10+0x8]
+4d 85 f6                        # 596  test r14, r14
+74 05                           # 599  je 0x4005a0   H[0].a != 0 (jne: je over the jmp)
+e9 d5 09 00 00                  # 59b  jmp 0x400f75   -> p1_rej
+
+# init_27:
+41 8b 14 24                     # 5a0  ld32 rdx, [r12+0x0]   curD = ins
+31 ff                           # 5a4  xor rdi, rdi   curA = 0
+49 8d 74 24 14                  # 5a6  lea rsi, [r12+0x14]   p = first instruction
+
+# p1_walk:
+45 8b 7c 24 0c                  # 5ab  ld32 r15, [r12+0xc]
+4d 39 f8                        # 5b0  cmp r8, r15
+0f 84 07 09 00 00               # 5b3  je 0x400ec0   i == nc -> p1_wdone
+45 8b 74 24 10                  # 5b9  ld32 r14, [r12+0x10]   lookup (i): na
+4d 8b de                        # 5be  mov r11, r14
+49 c1 e3 03                     # 5c1  shl r11, 3
+49 c1 e6 02                     # 5c5  shl r14, 2
+4d 01 f3                        # 5c9  add r11, r14
+4d 01 cb                        # 5cc  add r11, r9   r11 = end of the annotations
+4d 8b d1                        # 5cf  mov r10, r9
+
+# lk_top_28:
+4d 39 da                        # 5d2  cmp r10, r11
+74 0e                           # 5d5  je 0x4005e5   none -> lk_done_29
+45 8b 32                        # 5d7  ld32 r14, [r10+0x0]
+4d 39 c6                        # 5da  cmp r14, r8
+74 06                           # 5dd  je 0x4005e5   found -> lk_done_29
+49 83 c2 0c                     # 5df  add r10, 0xc
+eb ed                           # 5e3  jmp 0x4005d2    -> lk_top_28
+
+# lk_done_29:
+4d 39 da                        # 5e5  cmp r10, r11
+74 08                           # 5e8  je 0x4005f2    -> hready_30
+41 8b 52 04                     # 5ea  ld32 rdx, [r10+0x4]   h = annotation at i
+41 8b 7a 08                     # 5ee  ld32 rdi, [r10+0x8]
+
+# hready_30:
+44 0f b6 3e                     # 5f2  ld8 r15, [rsi+0x0]   opcode
+49 83 ff 39                     # 5f6  cmp r15, 0x39
+0f 82 ae 00 00 00               # 5fa  jb 0x4006ae    -> p1_prim
+49 81 ff 80 00 00 00            # 600  cmp r15, 0x80
+0f 84 ac 04 00 00               # 607  je 0x400ab9    -> p1_lit
+49 81 ff 81 00 00 00            # 60d  cmp r15, 0x81
+0f 84 bf 04 00 00               # 614  je 0x400ad9    -> p1_str
+49 81 ff 82 00 00 00            # 61a  cmp r15, 0x82
+0f 84 d2 04 00 00               # 621  je 0x400af9    -> p1_pick
+49 81 ff 83 00 00 00            # 627  cmp r15, 0x83
+0f 84 f2 04 00 00               # 62e  je 0x400b26    -> p1_tor
+49 81 ff 84 00 00 00            # 634  cmp r15, 0x84
+0f 84 12 05 00 00               # 63b  je 0x400b53    -> p1_fromr
+49 81 ff 85 00 00 00            # 641  cmp r15, 0x85
+0f 84 32 05 00 00               # 648  je 0x400b80    -> p1_rfetch
+49 81 ff 86 00 00 00            # 64e  cmp r15, 0x86
+0f 84 4e 05 00 00               # 655  je 0x400ba9    -> p1_locget
+49 81 ff 87 00 00 00            # 65b  cmp r15, 0x87
+0f 84 73 05 00 00               # 662  je 0x400bdb    -> p1_locset
+49 81 ff 88 00 00 00            # 668  cmp r15, 0x88
+0f 84 90 05 00 00               # 66f  je 0x400c05    -> p1_jmp
+49 81 ff 89 00 00 00            # 675  cmp r15, 0x89
+0f 84 e3 05 00 00               # 67c  je 0x400c65    -> p1_jz
+49 81 ff 8a 00 00 00            # 682  cmp r15, 0x8a
+0f 84 d6 05 00 00               # 689  je 0x400c65    -> p1_jz
+49 81 ff 8b 00 00 00            # 68f  cmp r15, 0x8b
+0f 84 36 06 00 00               # 696  je 0x400cd2    -> p1_call
+49 81 ff 8c 00 00 00            # 69c  cmp r15, 0x8c
+0f 84 41 07 00 00               # 6a3  je 0x400dea    -> p1_ret
+e9 c7 08 00 00                  # 6a9  jmp 0x400f75   unreachable after parse -> p1_rej
+
+# p1_prim:
+49 83 ff 32                     # 6ae  cmp r15, 0x32
+0f 84 ed 03 00 00               # 6b2  je 0x400aa5    -> p1_exit
+49 83 ff 22                     # 6b8  cmp r15, 0x22
+0f 83 dc 01 00 00               # 6bc  jae 0x40089e    -> eff_31
+49 83 ff 0f                     # 6c2  cmp r15, 0xf
+0f 83 e9 00 00 00               # 6c6  jae 0x4007b5    -> eff_32
+49 83 ff 04                     # 6cc  cmp r15, 0x4
+0f 83 62 00 00 00               # 6d0  jae 0x400738    -> eff_33
+49 83 ff 02                     # 6d6  cmp r15, 0x2
+0f 83 2c 00 00 00               # 6da  jae 0x40070c    -> eff_34
+49 83 ff 01                     # 6e0  cmp r15, 0x1
+0f 83 11 00 00 00               # 6e4  jae 0x4006fb    -> eff_35
+41 ba 01 00 00 00               # 6ea  mov r10, 0x1   ops 0..0: takes 1
+41 bb 02 00 00 00               # 6f0  mov r11, 0x2   pushes 2
+e9 7f 03 00 00                  # 6f6  jmp 0x400a7a    -> p1_have
+
+# eff_35:
+41 ba 01 00 00 00               # 6fb  mov r10, 0x1   ops 1..1: takes 1
+41 bb 00 00 00 00               # 701  mov r11, 0x0   pushes 0
+e9 6e 03 00 00                  # 707  jmp 0x400a7a    -> p1_have
+
+# eff_34:
+49 83 ff 03                     # 70c  cmp r15, 0x3
+0f 83 11 00 00 00               # 710  jae 0x400727    -> eff_36
+41 ba 02 00 00 00               # 716  mov r10, 0x2   ops 2..2: takes 2
+41 bb 02 00 00 00               # 71c  mov r11, 0x2   pushes 2
+e9 53 03 00 00                  # 722  jmp 0x400a7a    -> p1_have
+
+# eff_36:
+41 ba 02 00 00 00               # 727  mov r10, 0x2   ops 3..3: takes 2
+41 bb 03 00 00 00               # 72d  mov r11, 0x3   pushes 3
+e9 42 03 00 00                  # 733  jmp 0x400a7a    -> p1_have
+
+# eff_33:
+49 83 ff 06                     # 738  cmp r15, 0x6
+0f 83 2c 00 00 00               # 73c  jae 0x40076e    -> eff_37
+49 83 ff 05                     # 742  cmp r15, 0x5
+0f 83 11 00 00 00               # 746  jae 0x40075d    -> eff_38
+41 ba 03 00 00 00               # 74c  mov r10, 0x3   ops 4..4: takes 3
+41 bb 03 00 00 00               # 752  mov r11, 0x3   pushes 3
+e9 1d 03 00 00                  # 758  jmp 0x400a7a    -> p1_have
+
+# eff_38:
+41 ba 02 00 00 00               # 75d  mov r10, 0x2   ops 5..5: takes 2
+41 bb 01 00 00 00               # 763  mov r11, 0x1   pushes 1
+e9 0c 03 00 00                  # 769  jmp 0x400a7a    -> p1_have
+
+# eff_37:
+49 83 ff 07                     # 76e  cmp r15, 0x7
+0f 83 11 00 00 00               # 772  jae 0x400789    -> eff_39
+41 ba 02 00 00 00               # 778  mov r10, 0x2   ops 6..6: takes 2
+41 bb 03 00 00 00               # 77e  mov r11, 0x3   pushes 3
+e9 f1 02 00 00                  # 784  jmp 0x400a7a    -> p1_have
+
+# eff_39:
+49 83 ff 0e                     # 789  cmp r15, 0xe
+0f 83 11 00 00 00               # 78d  jae 0x4007a4    -> eff_40
+41 ba 02 00 00 00               # 793  mov r10, 0x2   ops 7..13: takes 2
+41 bb 01 00 00 00               # 799  mov r11, 0x1   pushes 1
+e9 d6 02 00 00                  # 79f  jmp 0x400a7a    -> p1_have
+
+# eff_40:
+41 ba 01 00 00 00               # 7a4  mov r10, 0x1   ops 14..14: takes 1
+41 bb 01 00 00 00               # 7aa  mov r11, 0x1   pushes 1
+e9 c5 02 00 00                  # 7b0  jmp 0x400a7a    -> p1_have
+
+# eff_32:
+49 83 ff 1d                     # 7b5  cmp r15, 0x1d
+0f 83 62 00 00 00               # 7b9  jae 0x400821    -> eff_41
+49 83 ff 13                     # 7bf  cmp r15, 0x13
+0f 83 2c 00 00 00               # 7c3  jae 0x4007f5    -> eff_42
+49 83 ff 12                     # 7c9  cmp r15, 0x12
+0f 83 11 00 00 00               # 7cd  jae 0x4007e4    -> eff_43
+41 ba 02 00 00 00               # 7d3  mov r10, 0x2   ops 15..17: takes 2
+41 bb 01 00 00 00               # 7d9  mov r11, 0x1   pushes 1
+e9 96 02 00 00                  # 7df  jmp 0x400a7a    -> p1_have
+
+# eff_43:
+41 ba 01 00 00 00               # 7e4  mov r10, 0x1   ops 18..18: takes 1
+41 bb 01 00 00 00               # 7ea  mov r11, 0x1   pushes 1
+e9 85 02 00 00                  # 7f0  jmp 0x400a7a    -> p1_have
+
+# eff_42:
+49 83 ff 1c                     # 7f5  cmp r15, 0x1c
+0f 83 11 00 00 00               # 7f9  jae 0x400810    -> eff_44
+41 ba 02 00 00 00               # 7ff  mov r10, 0x2   ops 19..27: takes 2
+41 bb 01 00 00 00               # 805  mov r11, 0x1   pushes 1
+e9 6a 02 00 00                  # 80b  jmp 0x400a7a    -> p1_have
+
+# eff_44:
+41 ba 01 00 00 00               # 810  mov r10, 0x1   ops 28..28: takes 1
+41 bb 01 00 00 00               # 816  mov r11, 0x1   pushes 1
+e9 59 02 00 00                  # 81c  jmp 0x400a7a    -> p1_have
+
+# eff_41:
+49 83 ff 1f                     # 821  cmp r15, 0x1f
+0f 83 2c 00 00 00               # 825  jae 0x400857    -> eff_45
+49 83 ff 1e                     # 82b  cmp r15, 0x1e
+0f 83 11 00 00 00               # 82f  jae 0x400846    -> eff_46
+41 ba 02 00 00 00               # 835  mov r10, 0x2   ops 29..29: takes 2
+41 bb 00 00 00 00               # 83b  mov r11, 0x0   pushes 0
+e9 34 02 00 00                  # 841  jmp 0x400a7a    -> p1_have
+
+# eff_46:
+41 ba 01 00 00 00               # 846  mov r10, 0x1   ops 30..30: takes 1
+41 bb 01 00 00 00               # 84c  mov r11, 0x1   pushes 1
+e9 23 02 00 00                  # 852  jmp 0x400a7a    -> p1_have
+
+# eff_45:
+49 83 ff 20                     # 857  cmp r15, 0x20
+0f 83 11 00 00 00               # 85b  jae 0x400872    -> eff_47
+41 ba 02 00 00 00               # 861  mov r10, 0x2   ops 31..31: takes 2
+41 bb 00 00 00 00               # 867  mov r11, 0x0   pushes 0
+e9 08 02 00 00                  # 86d  jmp 0x400a7a    -> p1_have
+
+# eff_47:
+49 83 ff 21                     # 872  cmp r15, 0x21
+0f 83 11 00 00 00               # 876  jae 0x40088d    -> eff_48
+41 ba 01 00 00 00               # 87c  mov r10, 0x1   ops 32..32: takes 1
+41 bb 01 00 00 00               # 882  mov r11, 0x1   pushes 1
+e9 ed 01 00 00                  # 888  jmp 0x400a7a    -> p1_have
+
+# eff_48:
+41 ba 02 00 00 00               # 88d  mov r10, 0x2   ops 33..33: takes 2
+41 bb 00 00 00 00               # 893  mov r11, 0x0   pushes 0
+e9 dc 01 00 00                  # 899  jmp 0x400a7a    -> p1_have
+
+# eff_31:
+49 83 ff 2c                     # 89e  cmp r15, 0x2c
+0f 83 e9 00 00 00               # 8a2  jae 0x400991    -> eff_49
+49 83 ff 27                     # 8a8  cmp r15, 0x27
+0f 83 62 00 00 00               # 8ac  jae 0x400914    -> eff_50
+49 83 ff 24                     # 8b2  cmp r15, 0x24
+0f 83 2c 00 00 00               # 8b6  jae 0x4008e8    -> eff_51
+49 83 ff 23                     # 8bc  cmp r15, 0x23
+0f 83 11 00 00 00               # 8c0  jae 0x4008d7    -> eff_52
+41 ba 01 00 00 00               # 8c6  mov r10, 0x1   ops 34..34: takes 1
+41 bb 01 00 00 00               # 8cc  mov r11, 0x1   pushes 1
+e9 a3 01 00 00                  # 8d2  jmp 0x400a7a    -> p1_have
+
+# eff_52:
+41 ba 02 00 00 00               # 8d7  mov r10, 0x2   ops 35..35: takes 2
+41 bb 00 00 00 00               # 8dd  mov r11, 0x0   pushes 0
+e9 92 01 00 00                  # 8e3  jmp 0x400a7a    -> p1_have
+
+# eff_51:
+49 83 ff 26                     # 8e8  cmp r15, 0x26
+0f 83 11 00 00 00               # 8ec  jae 0x400903    -> eff_53
+41 ba 03 00 00 00               # 8f2  mov r10, 0x3   ops 36..37: takes 3
+41 bb 00 00 00 00               # 8f8  mov r11, 0x0   pushes 0
+e9 77 01 00 00                  # 8fe  jmp 0x400a7a    -> p1_have
+
+# eff_53:
+41 ba 03 00 00 00               # 903  mov r10, 0x3   ops 38..38: takes 3
+41 bb 01 00 00 00               # 909  mov r11, 0x1   pushes 1
+e9 66 01 00 00                  # 90f  jmp 0x400a7a    -> p1_have
+
+# eff_50:
+49 83 ff 29                     # 914  cmp r15, 0x29
+0f 83 2c 00 00 00               # 918  jae 0x40094a    -> eff_54
+49 83 ff 28                     # 91e  cmp r15, 0x28
+0f 83 11 00 00 00               # 922  jae 0x400939    -> eff_55
+41 ba 01 00 00 00               # 928  mov r10, 0x1   ops 39..39: takes 1
+41 bb 01 00 00 00               # 92e  mov r11, 0x1   pushes 1
+e9 41 01 00 00                  # 934  jmp 0x400a7a    -> p1_have
+
+# eff_55:
+41 ba 00 00 00 00               # 939  mov r10, 0x0   ops 40..40: takes 0
+41 bb 01 00 00 00               # 93f  mov r11, 0x1   pushes 1
+e9 30 01 00 00                  # 945  jmp 0x400a7a    -> p1_have
+
+# eff_54:
+49 83 ff 2a                     # 94a  cmp r15, 0x2a
+0f 83 11 00 00 00               # 94e  jae 0x400965    -> eff_56
+41 ba 01 00 00 00               # 954  mov r10, 0x1   ops 41..41: takes 1
+41 bb 00 00 00 00               # 95a  mov r11, 0x0   pushes 0
+e9 15 01 00 00                  # 960  jmp 0x400a7a    -> p1_have
+
+# eff_56:
+49 83 ff 2b                     # 965  cmp r15, 0x2b
+0f 83 11 00 00 00               # 969  jae 0x400980    -> eff_57
+41 ba 04 00 00 00               # 96f  mov r10, 0x4   ops 42..42: takes 4
+41 bb 01 00 00 00               # 975  mov r11, 0x1   pushes 1
+e9 fa 00 00 00                  # 97b  jmp 0x400a7a    -> p1_have
+
+# eff_57:
+41 ba 02 00 00 00               # 980  mov r10, 0x2   ops 43..43: takes 2
+41 bb 01 00 00 00               # 986  mov r11, 0x1   pushes 1
+e9 e9 00 00 00                  # 98c  jmp 0x400a7a    -> p1_have
+
+# eff_49:
+49 83 ff 30                     # 991  cmp r15, 0x30
+0f 83 62 00 00 00               # 995  jae 0x4009fd    -> eff_58
+49 83 ff 2e                     # 99b  cmp r15, 0x2e
+0f 83 2c 00 00 00               # 99f  jae 0x4009d1    -> eff_59
+49 83 ff 2d                     # 9a5  cmp r15, 0x2d
+0f 83 11 00 00 00               # 9a9  jae 0x4009c0    -> eff_60
+41 ba 00 00 00 00               # 9af  mov r10, 0x0   ops 44..44: takes 0
+41 bb 01 00 00 00               # 9b5  mov r11, 0x1   pushes 1
+e9 ba 00 00 00                  # 9bb  jmp 0x400a7a    -> p1_have
+
+# eff_60:
+41 ba 03 00 00 00               # 9c0  mov r10, 0x3   ops 45..45: takes 3
+41 bb 00 00 00 00               # 9c6  mov r11, 0x0   pushes 0
+e9 a9 00 00 00                  # 9cc  jmp 0x400a7a    -> p1_have
+
+# eff_59:
+49 83 ff 2f                     # 9d1  cmp r15, 0x2f
+0f 83 11 00 00 00               # 9d5  jae 0x4009ec    -> eff_61
+41 ba 02 00 00 00               # 9db  mov r10, 0x2   ops 46..46: takes 2
+41 bb 02 00 00 00               # 9e1  mov r11, 0x2   pushes 2
+e9 8e 00 00 00                  # 9e7  jmp 0x400a7a    -> p1_have
+
+# eff_61:
+41 ba 00 00 00 00               # 9ec  mov r10, 0x0   ops 47..47: takes 0
+41 bb 01 00 00 00               # 9f2  mov r11, 0x1   pushes 1
+e9 7d 00 00 00                  # 9f8  jmp 0x400a7a    -> p1_have
+
+# eff_58:
+49 83 ff 35                     # 9fd  cmp r15, 0x35
+0f 83 2c 00 00 00               # a01  jae 0x400a33    -> eff_62
+49 83 ff 33                     # a07  cmp r15, 0x33
+0f 83 11 00 00 00               # a0b  jae 0x400a22    -> eff_63
+41 ba 01 00 00 00               # a11  mov r10, 0x1   ops 48..50: takes 1
+41 bb 00 00 00 00               # a17  mov r11, 0x0   pushes 0
+e9 58 00 00 00                  # a1d  jmp 0x400a7a    -> p1_have
+
+# eff_63:
+41 ba 00 00 00 00               # a22  mov r10, 0x0   ops 51..52: takes 0
+41 bb 01 00 00 00               # a28  mov r11, 0x1   pushes 1
+e9 47 00 00 00                  # a2e  jmp 0x400a7a    -> p1_have
+
+# eff_62:
+49 83 ff 36                     # a33  cmp r15, 0x36
+0f 83 11 00 00 00               # a37  jae 0x400a4e    -> eff_64
+41 ba 01 00 00 00               # a3d  mov r10, 0x1   ops 53..53: takes 1
+41 bb 01 00 00 00               # a43  mov r11, 0x1   pushes 1
+e9 2c 00 00 00                  # a49  jmp 0x400a7a    -> p1_have
+
+# eff_64:
+49 83 ff 38                     # a4e  cmp r15, 0x38
+0f 83 11 00 00 00               # a52  jae 0x400a69    -> eff_65
+41 ba 01 00 00 00               # a58  mov r10, 0x1   ops 54..55: takes 1
+41 bb 02 00 00 00               # a5e  mov r11, 0x2   pushes 2
+e9 11 00 00 00                  # a64  jmp 0x400a7a    -> p1_have
+
+# eff_65:
+41 ba 02 00 00 00               # a69  mov r10, 0x2   ops 56..56: takes 2
+41 bb 01 00 00 00               # a6f  mov r11, 0x1   pushes 1
+e9 00 00 00 00                  # a75  jmp 0x400a7a    -> p1_have
+
+# p1_have:
+4c 39 d2                        # a7a  cmp rdx, r10
+0f 82 f2 04 00 00               # a7d  jb 0x400f75   too few operands -> p1_rej
+4c 29 d2                        # a83  sub rdx, r10
+4c 01 da                        # a86  add rdx, r11
+4c 8b d2                        # a89  mov r10, rdx
+49 c1 ea 30                     # a8c  shr r10, 48
+4d 85 d2                        # a90  test r10, r10
+74 05                           # a93  je 0x400a9a   height >= 2^48 (jne: je over the jmp)
+e9 cc 04 00 00                  # a95  jmp 0x400f66   -> p1_ovf
+41 bf 01 00 00 00               # a9a  mov r15, 0x1
+e9 69 03 00 00                  # aa0  jmp 0x400e0e    -> p1_fall
+
+# p1_exit:
+48 85 d2                        # aa5  test rdx, rdx
+0f 84 c7 04 00 00               # aa8  je 0x400f75   exit needs one operand -> p1_rej
+41 bf 01 00 00 00               # aae  mov r15, 0x1
+e9 bc 03 00 00                  # ab4  jmp 0x400e75    -> p1_nofall
+
+# p1_lit:
+48 83 c2 01                     # ab9  add rdx, 0x1
+4c 8b d2                        # abd  mov r10, rdx
+49 c1 ea 30                     # ac0  shr r10, 48
+4d 85 d2                        # ac4  test r10, r10
+74 05                           # ac7  je 0x400ace   height >= 2^48 (jne: je over the jmp)
+e9 98 04 00 00                  # ac9  jmp 0x400f66   -> p1_ovf
+41 bf 09 00 00 00               # ace  mov r15, 0x9
+e9 35 03 00 00                  # ad4  jmp 0x400e0e    -> p1_fall
+
+# p1_str:
+48 83 c2 02                     # ad9  add rdx, 0x2
+4c 8b d2                        # add  mov r10, rdx
+49 c1 ea 30                     # ae0  shr r10, 48
+4d 85 d2                        # ae4  test r10, r10
+74 05                           # ae7  je 0x400aee   height >= 2^48 (jne: je over the jmp)
+e9 78 04 00 00                  # ae9  jmp 0x400f66   -> p1_ovf
+41 bf 05 00 00 00               # aee  mov r15, 0x5
+e9 15 03 00 00                  # af4  jmp 0x400e0e    -> p1_fall
+
+# p1_pick:
+44 8b 56 01                     # af9  ld32 r10, [rsi+0x1]
+49 39 d2                        # afd  cmp r10, rdx
+0f 83 6f 04 00 00               # b00  jae 0x400f75   pick beyond the stack -> p1_rej
+48 83 c2 01                     # b06  add rdx, 0x1
+4c 8b d2                        # b0a  mov r10, rdx
+49 c1 ea 30                     # b0d  shr r10, 48
+4d 85 d2                        # b11  test r10, r10
+74 05                           # b14  je 0x400b1b   height >= 2^48 (jne: je over the jmp)
+e9 4b 04 00 00                  # b16  jmp 0x400f66   -> p1_ovf
+41 bf 05 00 00 00               # b1b  mov r15, 0x5
+e9 e8 02 00 00                  # b21  jmp 0x400e0e    -> p1_fall
+
+# p1_tor:
+48 85 d2                        # b26  test rdx, rdx
+0f 84 46 04 00 00               # b29  je 0x400f75    -> p1_rej
+48 83 ea 01                     # b2f  sub rdx, 0x1
+48 83 c7 01                     # b33  add rdi, 0x1
+4c 8b d7                        # b37  mov r10, rdi
+49 c1 ea 30                     # b3a  shr r10, 48
+4d 85 d2                        # b3e  test r10, r10
+74 05                           # b41  je 0x400b48   height >= 2^48 (jne: je over the jmp)
+e9 1e 04 00 00                  # b43  jmp 0x400f66   -> p1_ovf
+41 bf 01 00 00 00               # b48  mov r15, 0x1
+e9 bb 02 00 00                  # b4e  jmp 0x400e0e    -> p1_fall
+
+# p1_fromr:
+48 85 ff                        # b53  test rdi, rdi
+0f 84 19 04 00 00               # b56  je 0x400f75    -> p1_rej
+48 83 ef 01                     # b5c  sub rdi, 0x1
+48 83 c2 01                     # b60  add rdx, 0x1
+4c 8b d2                        # b64  mov r10, rdx
+49 c1 ea 30                     # b67  shr r10, 48
+4d 85 d2                        # b6b  test r10, r10
+74 05                           # b6e  je 0x400b75   height >= 2^48 (jne: je over the jmp)
+e9 f1 03 00 00                  # b70  jmp 0x400f66   -> p1_ovf
+41 bf 01 00 00 00               # b75  mov r15, 0x1
+e9 8e 02 00 00                  # b7b  jmp 0x400e0e    -> p1_fall
+
+# p1_rfetch:
+48 85 ff                        # b80  test rdi, rdi
+0f 84 ec 03 00 00               # b83  je 0x400f75    -> p1_rej
+48 83 c2 01                     # b89  add rdx, 0x1
+4c 8b d2                        # b8d  mov r10, rdx
+49 c1 ea 30                     # b90  shr r10, 48
+4d 85 d2                        # b94  test r10, r10
+74 05                           # b97  je 0x400b9e   height >= 2^48 (jne: je over the jmp)
+e9 c8 03 00 00                  # b99  jmp 0x400f66   -> p1_ovf
+41 bf 01 00 00 00               # b9e  mov r15, 0x1
+e9 65 02 00 00                  # ba4  jmp 0x400e0e    -> p1_fall
+
+# p1_locget:
+44 8b 56 01                     # ba9  ld32 r10, [rsi+0x1]
+45 8b 5c 24 08                  # bad  ld32 r11, [r12+0x8]   locals
+4d 39 da                        # bb2  cmp r10, r11
+0f 83 ba 03 00 00               # bb5  jae 0x400f75    -> p1_rej
+48 83 c2 01                     # bbb  add rdx, 0x1
+4c 8b d2                        # bbf  mov r10, rdx
+49 c1 ea 30                     # bc2  shr r10, 48
+4d 85 d2                        # bc6  test r10, r10
+74 05                           # bc9  je 0x400bd0   height >= 2^48 (jne: je over the jmp)
+e9 96 03 00 00                  # bcb  jmp 0x400f66   -> p1_ovf
+41 bf 05 00 00 00               # bd0  mov r15, 0x5
+e9 33 02 00 00                  # bd6  jmp 0x400e0e    -> p1_fall
+
+# p1_locset:
+48 85 d2                        # bdb  test rdx, rdx
+0f 84 91 03 00 00               # bde  je 0x400f75    -> p1_rej
+44 8b 56 01                     # be4  ld32 r10, [rsi+0x1]
+45 8b 5c 24 08                  # be8  ld32 r11, [r12+0x8]   locals
+4d 39 da                        # bed  cmp r10, r11
+0f 83 7f 03 00 00               # bf0  jae 0x400f75    -> p1_rej
+48 83 ea 01                     # bf6  sub rdx, 0x1
+41 bf 05 00 00 00               # bfa  mov r15, 0x5
+e9 09 02 00 00                  # c00  jmp 0x400e0e    -> p1_fall
+
+# p1_jmp:
+44 8b 7e 01                     # c05  ld32 r15, [rsi+0x1]   t
+45 8b 74 24 10                  # c09  ld32 r14, [r12+0x10]   lookup (jmp t): na
+4d 8b de                        # c0e  mov r11, r14
+49 c1 e3 03                     # c11  shl r11, 3
+49 c1 e6 02                     # c15  shl r14, 2
+4d 01 f3                        # c19  add r11, r14
+4d 01 cb                        # c1c  add r11, r9   r11 = end of the annotations
+4d 8b d1                        # c1f  mov r10, r9
+
+# lk_top_66:
+4d 39 da                        # c22  cmp r10, r11
+74 0e                           # c25  je 0x400c35   none -> lk_done_67
+45 8b 32                        # c27  ld32 r14, [r10+0x0]
+4d 39 fe                        # c2a  cmp r14, r15
+74 06                           # c2d  je 0x400c35   found -> lk_done_67
+49 83 c2 0c                     # c2f  add r10, 0xc
+eb ed                           # c33  jmp 0x400c22    -> lk_top_66
+
+# lk_done_67:
+4d 39 da                        # c35  cmp r10, r11
+0f 84 37 03 00 00               # c38  je 0x400f75   no annotation at t -> p1_rej
+45 8b 72 04                     # c3e  ld32 r14, [r10+0x4]
+49 39 d6                        # c42  cmp r14, rdx
+74 05                           # c45  je 0x400c4c    (jne: je over the jmp)
+e9 29 03 00 00                  # c47  jmp 0x400f75   -> p1_rej
+45 8b 72 08                     # c4c  ld32 r14, [r10+0x8]
+49 39 fe                        # c50  cmp r14, rdi
+74 05                           # c53  je 0x400c5a    (jne: je over the jmp)
+e9 1b 03 00 00                  # c55  jmp 0x400f75   -> p1_rej
+41 bf 05 00 00 00               # c5a  mov r15, 0x5
+e9 10 02 00 00                  # c60  jmp 0x400e75    -> p1_nofall
+
+# p1_jz:
+48 85 d2                        # c65  test rdx, rdx
+0f 84 07 03 00 00               # c68  je 0x400f75    -> p1_rej
+48 83 ea 01                     # c6e  sub rdx, 0x1
+44 8b 7e 01                     # c72  ld32 r15, [rsi+0x1]   t
+45 8b 74 24 10                  # c76  ld32 r14, [r12+0x10]   lookup (jz t): na
+4d 8b de                        # c7b  mov r11, r14
+49 c1 e3 03                     # c7e  shl r11, 3
+49 c1 e6 02                     # c82  shl r14, 2
+4d 01 f3                        # c86  add r11, r14
+4d 01 cb                        # c89  add r11, r9   r11 = end of the annotations
+4d 8b d1                        # c8c  mov r10, r9
+
+# lk_top_68:
+4d 39 da                        # c8f  cmp r10, r11
+74 0e                           # c92  je 0x400ca2   none -> lk_done_69
+45 8b 32                        # c94  ld32 r14, [r10+0x0]
+4d 39 fe                        # c97  cmp r14, r15
+74 06                           # c9a  je 0x400ca2   found -> lk_done_69
+49 83 c2 0c                     # c9c  add r10, 0xc
+eb ed                           # ca0  jmp 0x400c8f    -> lk_top_68
+
+# lk_done_69:
+4d 39 da                        # ca2  cmp r10, r11
+0f 84 ca 02 00 00               # ca5  je 0x400f75   no annotation at t -> p1_rej
+45 8b 72 04                     # cab  ld32 r14, [r10+0x4]
+49 39 d6                        # caf  cmp r14, rdx
+74 05                           # cb2  je 0x400cb9    (jne: je over the jmp)
+e9 bc 02 00 00                  # cb4  jmp 0x400f75   -> p1_rej
+45 8b 72 08                     # cb9  ld32 r14, [r10+0x8]
+49 39 fe                        # cbd  cmp r14, rdi
+74 05                           # cc0  je 0x400cc7    (jne: je over the jmp)
+e9 ae 02 00 00                  # cc2  jmp 0x400f75   -> p1_rej
+41 bf 05 00 00 00               # cc7  mov r15, 0x5
+e9 3c 01 00 00                  # ccd  jmp 0x400e0e    -> p1_fall
+
+# p1_call:
+44 8b 7e 01                     # cd2  ld32 r15, [rsi+0x1]   w
+41 be 00 00 60 00               # cd6  mov r14, 0x600000
+4d 8b 36                        # cdc  ld r14, [r14+0x0]   base
+45 8b 76 08                     # cdf  ld32 r14, [r14+0x8]   nw
+4d 39 f7                        # ce3  cmp r15, r14
+0f 83 89 02 00 00               # ce6  jae 0x400f75   no such word -> p1_rej
+4d 8b d5                        # cec  mov r10, r13   rescan from ws
+
+# sw_top_70:
+4d 85 ff                        # cef  test r15, r15   skipWords (call): words left?
+0f 84 c0 00 00 00               # cf2  je 0x400db8    -> sw_done_71
+4d 8b f2                        # cf8  mov r14, r10
+49 83 c6 14                     # cfb  add r14, 0x14
+49 39 ee                        # cff  cmp r14, rbp
+0f 87 6d 02 00 00               # d02  ja 0x400f75   truncated word header -> p1_rej
+45 8b 72 10                     # d08  ld32 r14, [r10+0x10]   na
+49 c1 e6 20                     # d0c  shl r14, 32
+4d 01 f7                        # d10  add r15, r14   park na in the high half
+45 8b 5a 0c                     # d13  ld32 r11, [r10+0xc]   nc
+49 83 c2 14                     # d17  add r10, 0x14   first instruction
+
+# sc_top_72:
+4d 85 db                        # d1b  test r11, r11   skipCode (call): instructions left?
+74 6b                           # d1e  je 0x400d8b    -> sc_done_73
+49 39 ea                        # d20  cmp r10, rbp   opcode byte inside the input?
+0f 83 4c 02 00 00               # d23  jae 0x400f75    -> p1_rej
+45 0f b6 32                     # d29  ld8 r14, [r10+0x0]   opcode
+49 83 fe 39                     # d2d  cmp r14, 0x39   prim 0x00..0x38
+72 40                           # d31  jb 0x400d73    -> sc_l1_74
+49 81 fe 80 00 00 00            # d33  cmp r14, 0x80
+0f 82 35 02 00 00               # d3a  jb 0x400f75   0x39..0x7f: no such opcode -> p1_rej
+74 29                           # d40  je 0x400d6b   0x80 lit u64 -> sc_l9_76
+49 81 fe 8c 00 00 00            # d42  cmp r14, 0x8c
+0f 87 26 02 00 00               # d49  ja 0x400f75   0x8d..0xff: no such opcode -> p1_rej
+74 22                           # d4f  je 0x400d73   0x8c ret -> sc_l1_74
+49 81 fe 83 00 00 00            # d51  cmp r14, 0x83
+72 09                           # d58  jb 0x400d63   0x81 str, 0x82 pick -> sc_l5_75
+49 81 fe 86 00 00 00            # d5a  cmp r14, 0x86
+72 10                           # d61  jb 0x400d73   0x83 tor, 0x84 fromr, 0x85 rfetch -> sc_l1_74
+
+# sc_l5_75:
+41 be 05 00 00 00               # d63  mov r14, 0x5   opcode + u32
+eb 0e                           # d69  jmp 0x400d79    -> sc_len_77
+
+# sc_l9_76:
+41 be 09 00 00 00               # d6b  mov r14, 0x9   opcode + u64
+eb 06                           # d71  jmp 0x400d79    -> sc_len_77
+
+# sc_l1_74:
+41 be 01 00 00 00               # d73  mov r14, 0x1   opcode alone
+
+# sc_len_77:
+4d 01 f2                        # d79  add r10, r14   past the instruction
+49 39 ea                        # d7c  cmp r10, rbp
+0f 87 f0 01 00 00               # d7f  ja 0x400f75   truncated instruction -> p1_rej
+49 83 eb 01                     # d85  sub r11, 0x1
+eb 90                           # d89  jmp 0x400d1b    -> sc_top_72
+
+# sc_done_73:
+4d 8b f7                        # d8b  mov r14, r15
+49 c1 ee 20                     # d8e  shr r14, 32   na
+45 8b ff                        # d92  mov32 r15, r15   words left, high half cleared
+4d 8b de                        # d95  mov r11, r14
+49 c1 e3 03                     # d98  shl r11, 3
+49 c1 e6 02                     # d9c  shl r14, 2
+4d 01 f3                        # da0  add r11, r14   12 * na
+4d 01 da                        # da3  add r10, r11   past the annotations
+49 39 ea                        # da6  cmp r10, rbp
+0f 87 c6 01 00 00               # da9  ja 0x400f75   truncated annotations -> p1_rej
+49 83 ef 01                     # daf  sub r15, 0x1
+e9 37 ff ff ff                  # db3  jmp 0x400cef    -> sw_top_70
+
+# sw_done_71:
+45 8b 32                        # db8  ld32 r14, [r10+0x0]   c.ins
+4c 39 f2                        # dbb  cmp rdx, r14
+0f 82 b1 01 00 00               # dbe  jb 0x400f75   too few arguments -> p1_rej
+4c 29 f2                        # dc4  sub rdx, r14
+45 8b 72 04                     # dc7  ld32 r14, [r10+0x4]   c.outs
+4c 01 f2                        # dcb  add rdx, r14
+4c 8b d2                        # dce  mov r10, rdx
+49 c1 ea 30                     # dd1  shr r10, 48
+4d 85 d2                        # dd5  test r10, r10
+74 05                           # dd8  je 0x400ddf   height >= 2^48 (jne: je over the jmp)
+e9 87 01 00 00                  # dda  jmp 0x400f66   -> p1_ovf
+41 bf 05 00 00 00               # ddf  mov r15, 0x5
+e9 24 00 00 00                  # de5  jmp 0x400e0e    -> p1_fall
+
+# p1_ret:
+45 8b 74 24 04                  # dea  ld32 r14, [r12+0x4]   outs
+4c 39 f2                        # def  cmp rdx, r14
+74 05                           # df2  je 0x400df9    (jne: je over the jmp)
+e9 7c 01 00 00                  # df4  jmp 0x400f75   -> p1_rej
+48 85 ff                        # df9  test rdi, rdi
+74 05                           # dfc  je 0x400e03    (jne: je over the jmp)
+e9 72 01 00 00                  # dfe  jmp 0x400f75   -> p1_rej
+41 bf 01 00 00 00               # e03  mov r15, 0x1
+e9 67 00 00 00                  # e09  jmp 0x400e75    -> p1_nofall
+
+# p1_fall:
+49 83 c0 01                     # e0e  add r8, 0x1
+45 8b 74 24 0c                  # e12  ld32 r14, [r12+0xc]
+4d 39 f0                        # e17  cmp r8, r14
+0f 83 55 01 00 00               # e1a  jae 0x400f75   falls off the end -> p1_rej
+45 8b 74 24 10                  # e20  ld32 r14, [r12+0x10]   lookup (i + 1): na
+4d 8b de                        # e25  mov r11, r14
+49 c1 e3 03                     # e28  shl r11, 3
+49 c1 e6 02                     # e2c  shl r14, 2
+4d 01 f3                        # e30  add r11, r14
+4d 01 cb                        # e33  add r11, r9   r11 = end of the annotations
+4d 8b d1                        # e36  mov r10, r9
+
+# lk_top_78:
+4d 39 da                        # e39  cmp r10, r11
+74 0e                           # e3c  je 0x400e4c   none -> lk_done_79
+45 8b 32                        # e3e  ld32 r14, [r10+0x0]
+4d 39 c6                        # e41  cmp r14, r8
+74 06                           # e44  je 0x400e4c   found -> lk_done_79
+49 83 c2 0c                     # e46  add r10, 0xc
+eb ed                           # e4a  jmp 0x400e39    -> lk_top_78
+
+# lk_done_79:
+4d 39 da                        # e4c  cmp r10, r11
+74 1c                           # e4f  je 0x400e6d    -> p1_adv
+45 8b 72 04                     # e51  ld32 r14, [r10+0x4]
+49 39 d6                        # e55  cmp r14, rdx
+74 05                           # e58  je 0x400e5f    (jne: je over the jmp)
+e9 16 01 00 00                  # e5a  jmp 0x400f75   -> p1_rej
+45 8b 72 08                     # e5f  ld32 r14, [r10+0x8]
+49 39 fe                        # e63  cmp r14, rdi
+74 05                           # e66  je 0x400e6d    (jne: je over the jmp)
+e9 08 01 00 00                  # e68  jmp 0x400f75   -> p1_rej
+
+# p1_adv:
+4c 01 fe                        # e6d  add rsi, r15   next instruction
+e9 36 f7 ff ff                  # e70  jmp 0x4005ab    -> p1_walk
+
+# p1_nofall:
+49 83 c0 01                     # e75  add r8, 0x1
+45 8b 74 24 10                  # e79  ld32 r14, [r12+0x10]   lookup (i + 1): na
+4d 8b de                        # e7e  mov r11, r14
+49 c1 e3 03                     # e81  shl r11, 3
+49 c1 e6 02                     # e85  shl r14, 2
+4d 01 f3                        # e89  add r11, r14
+4d 01 cb                        # e8c  add r11, r9   r11 = end of the annotations
+4d 8b d1                        # e8f  mov r10, r9
+
+# lk_top_80:
+4d 39 da                        # e92  cmp r10, r11
+74 0e                           # e95  je 0x400ea5   none -> lk_done_81
+45 8b 32                        # e97  ld32 r14, [r10+0x0]
+4d 39 c6                        # e9a  cmp r14, r8
+74 06                           # e9d  je 0x400ea5   found -> lk_done_81
+49 83 c2 0c                     # e9f  add r10, 0xc
+eb ed                           # ea3  jmp 0x400e92    -> lk_top_80
+
+# lk_done_81:
+4d 39 da                        # ea5  cmp r10, r11
+74 0d                           # ea8  je 0x400eb7    -> nfzero_82
+41 8b 52 04                     # eaa  ld32 rdx, [r10+0x4]
+41 8b 7a 08                     # eae  ld32 rdi, [r10+0x8]
+e9 b6 ff ff ff                  # eb2  jmp 0x400e6d    -> p1_adv
+
+# nfzero_82:
+31 d2                           # eb7  xor rdx, rdx
+31 ff                           # eb9  xor rdi, rdi
+e9 ad ff ff ff                  # ebb  jmp 0x400e6d    -> p1_adv
+
+# p1_wdone:
+45 8b 74 24 10                  # ec0  ld32 r14, [r12+0x10]   na
+49 8b fe                        # ec5  mov rdi, r14
+48 c1 e7 03                     # ec8  shl rdi, 3
+49 c1 e6 02                     # ecc  shl r14, 2
+4c 01 f7                        # ed0  add rdi, r14
+4c 01 cf                        # ed3  add rdi, r9   rdi = end of the annotations = next word
+49 8b f1                        # ed6  mov rsi, r9
+
+# p1_anns:
+48 39 fe                        # ed9  cmp rsi, rdi
+74 71                           # edc  je 0x400f4f    -> p1_annsok
+44 8b 3e                        # ede  ld32 r15, [rsi+0x0]   t
+45 8b 74 24 0c                  # ee1  ld32 r14, [r12+0xc]
+4d 39 f7                        # ee6  cmp r15, r14
+0f 83 86 00 00 00               # ee9  jae 0x400f75   annotation past the code -> p1_rej
+45 8b 74 24 10                  # eef  ld32 r14, [r12+0x10]   lookup (ann t): na
+4d 8b de                        # ef4  mov r11, r14
+49 c1 e3 03                     # ef7  shl r11, 3
+49 c1 e6 02                     # efb  shl r14, 2
+4d 01 f3                        # eff  add r11, r14
+4d 01 cb                        # f02  add r11, r9   r11 = end of the annotations
+4d 8b d1                        # f05  mov r10, r9
+
+# lk_top_83:
+4d 39 da                        # f08  cmp r10, r11
+74 0e                           # f0b  je 0x400f1b   none -> lk_done_84
+45 8b 32                        # f0d  ld32 r14, [r10+0x0]
+4d 39 fe                        # f10  cmp r14, r15
+74 06                           # f13  je 0x400f1b   found -> lk_done_84
+49 83 c2 0c                     # f15  add r10, 0xc
+eb ed                           # f19  jmp 0x400f08    -> lk_top_83
+
+# lk_done_84:
+4d 39 da                        # f1b  cmp r10, r11
+0f 84 51 00 00 00               # f1e  je 0x400f75    -> p1_rej
+45 8b 72 04                     # f24  ld32 r14, [r10+0x4]
+8b 56 04                        # f28  ld32 rdx, [rsi+0x4]
+49 39 d6                        # f2b  cmp r14, rdx
+74 05                           # f2e  je 0x400f35   conflicting annotations (jne: je over the jmp)
+e9 40 00 00 00                  # f30  jmp 0x400f75   -> p1_rej
+45 8b 72 08                     # f35  ld32 r14, [r10+0x8]
+8b 56 08                        # f39  ld32 rdx, [rsi+0x8]
+49 39 d6                        # f3c  cmp r14, rdx
+74 05                           # f3f  je 0x400f46   conflicting annotations (jne: je over the jmp)
+e9 2f 00 00 00                  # f41  jmp 0x400f75   -> p1_rej
+48 83 c6 0c                     # f46  add rsi, 0xc
+e9 8a ff ff ff                  # f4a  jmp 0x400ed9    -> p1_anns
+
+# p1_annsok:
+4c 8b e7                        # f4f  mov r12, rdi   next word
+e9 69 f5 ff ff                  # f52  jmp 0x4004c0    -> p1_word
+
+# p1_acc:
+48 b8 96 3c 5a a5 70 e9 cc 5a   # f57  mov rax, 0x5acce970a55a3c96   pass 1: ACCEPT
+e9 1e 00 00 00                  # f61  jmp 0x400f84    -> p2
+
+# p1_ovf:
+48 b8 a5 c3 c3 33 1e 0f ad 0b   # f66  mov rax, 0xbad0f1e33c3c3a5   pass 1: OVERFLOW
+e9 0f 00 00 00                  # f70  jmp 0x400f84    -> p2
+
+# p1_rej:
+48 b8 01 00 11 11 ef be ad de   # f75  mov rax, 0xdeadbeef11110001   pass 1: REJECT
+e9 00 00 00 00                  # f7f  jmp 0x400f84    -> p2
+
+# p1_end:
+
+# p2:
+41 bf 00 10 60 00               # f84  mov r15, 0x601000   pass 2: descriptor 2
+49 8b 3f                        # f8a  ld rdi, [r15+0x0]   base of input copy
+49 8b 57 08                     # f8d  ld rdx, [r15+0x8]   N
+48 8b ef                        # f91  mov rbp, rdi
+48 01 d5                        # f94  add rbp, rdx   rbp = end of input
+48 83 fa 10                     # f97  cmp rdx, 0x10
+0f 82 c8 0c 00 00               # f9b  jb 0x401c69   shorter than the file header -> p2_rej
+8b 17                           # fa1  ld32 rdx, [rdi+0x0]
+48 81 fa 53 50 52 31            # fa3  cmp rdx, 0x31525053
+74 05                           # faa  je 0x400fb1   not "SPR1" (jne: je over the jmp)
+e9 b8 0c 00 00                  # fac  jmp 0x401c69   -> p2_rej
+44 8b 67 04                     # fb1  ld32 r12, [rdi+0x4]   main
+8b 77 08                        # fb5  ld32 rsi, [rdi+0x8]   nw
+44 8b 7f 0c                     # fb8  ld32 r15, [rdi+0xc]   nd
+4c 8d 57 10                     # fbc  lea r10, [rdi+0x10]   first data item
+
+# sd_top_85:
+4d 85 ff                        # fc0  test r15, r15   skipData: items left?
+74 2e                           # fc3  je 0x400ff3    -> sd_done_86
+4d 8b da                        # fc5  mov r11, r10
+49 83 c3 04                     # fc8  add r11, 0x4
+49 39 eb                        # fcc  cmp r11, rbp
+0f 87 94 0c 00 00               # fcf  ja 0x401c69   truncated length -> p2_rej
+45 8b 32                        # fd5  ld32 r14, [r10+0x0]   len
+4d 8b d3                        # fd8  mov r10, r11
+4c 8b dd                        # fdb  mov r11, rbp
+4d 29 d3                        # fde  sub r11, r10   bytes left
+4d 39 f3                        # fe1  cmp r11, r14
+0f 82 7f 0c 00 00               # fe4  jb 0x401c69   truncated data -> p2_rej
+4d 01 f2                        # fea  add r10, r14
+49 83 ef 01                     # fed  sub r15, 0x1
+eb cd                           # ff1  jmp 0x400fc0    -> sd_top_85
+
+# sd_done_86:
+4d 8b ea                        # ff3  mov r13, r10   ws = first word
+4c 8b fe                        # ff6  mov r15, rsi   nw words
+
+# sw_top_87:
+4d 85 ff                        # ff9  test r15, r15   skipWords (parse): words left?
+0f 84 c0 00 00 00               # ffc  je 0x4010c2    -> sw_done_88
+4d 8b f2                        # 1002  mov r14, r10
+49 83 c6 14                     # 1005  add r14, 0x14
+49 39 ee                        # 1009  cmp r14, rbp
+0f 87 57 0c 00 00               # 100c  ja 0x401c69   truncated word header -> p2_rej
+45 8b 72 10                     # 1012  ld32 r14, [r10+0x10]   na
+49 c1 e6 20                     # 1016  shl r14, 32
+4d 01 f7                        # 101a  add r15, r14   park na in the high half
+45 8b 5a 0c                     # 101d  ld32 r11, [r10+0xc]   nc
+49 83 c2 14                     # 1021  add r10, 0x14   first instruction
+
+# sc_top_89:
+4d 85 db                        # 1025  test r11, r11   skipCode (parse): instructions left?
+74 6b                           # 1028  je 0x401095    -> sc_done_90
+49 39 ea                        # 102a  cmp r10, rbp   opcode byte inside the input?
+0f 83 36 0c 00 00               # 102d  jae 0x401c69    -> p2_rej
+45 0f b6 32                     # 1033  ld8 r14, [r10+0x0]   opcode
+49 83 fe 39                     # 1037  cmp r14, 0x39   prim 0x00..0x38
+72 40                           # 103b  jb 0x40107d    -> sc_l1_91
+49 81 fe 80 00 00 00            # 103d  cmp r14, 0x80
+0f 82 1f 0c 00 00               # 1044  jb 0x401c69   0x39..0x7f: no such opcode -> p2_rej
+74 29                           # 104a  je 0x401075   0x80 lit u64 -> sc_l9_93
+49 81 fe 8c 00 00 00            # 104c  cmp r14, 0x8c
+0f 87 10 0c 00 00               # 1053  ja 0x401c69   0x8d..0xff: no such opcode -> p2_rej
+74 22                           # 1059  je 0x40107d   0x8c ret -> sc_l1_91
+49 81 fe 83 00 00 00            # 105b  cmp r14, 0x83
+72 09                           # 1062  jb 0x40106d   0x81 str, 0x82 pick -> sc_l5_92
+49 81 fe 86 00 00 00            # 1064  cmp r14, 0x86
+72 10                           # 106b  jb 0x40107d   0x83 tor, 0x84 fromr, 0x85 rfetch -> sc_l1_91
+
+# sc_l5_92:
+41 be 05 00 00 00               # 106d  mov r14, 0x5   opcode + u32
+eb 0e                           # 1073  jmp 0x401083    -> sc_len_94
+
+# sc_l9_93:
+41 be 09 00 00 00               # 1075  mov r14, 0x9   opcode + u64
+eb 06                           # 107b  jmp 0x401083    -> sc_len_94
+
+# sc_l1_91:
+41 be 01 00 00 00               # 107d  mov r14, 0x1   opcode alone
+
+# sc_len_94:
+4d 01 f2                        # 1083  add r10, r14   past the instruction
+49 39 ea                        # 1086  cmp r10, rbp
+0f 87 da 0b 00 00               # 1089  ja 0x401c69   truncated instruction -> p2_rej
+49 83 eb 01                     # 108f  sub r11, 0x1
+eb 90                           # 1093  jmp 0x401025    -> sc_top_89
+
+# sc_done_90:
+4d 8b f7                        # 1095  mov r14, r15
+49 c1 ee 20                     # 1098  shr r14, 32   na
+45 8b ff                        # 109c  mov32 r15, r15   words left, high half cleared
+4d 8b de                        # 109f  mov r11, r14
+49 c1 e3 03                     # 10a2  shl r11, 3
+49 c1 e6 02                     # 10a6  shl r14, 2
+4d 01 f3                        # 10aa  add r11, r14   12 * na
+4d 01 da                        # 10ad  add r10, r11   past the annotations
+49 39 ea                        # 10b0  cmp r10, rbp
+0f 87 b0 0b 00 00               # 10b3  ja 0x401c69   truncated annotations -> p2_rej
+49 83 ef 01                     # 10b9  sub r15, 0x1
+e9 37 ff ff ff                  # 10bd  jmp 0x400ff9    -> sw_top_87
+
+# sw_done_88:
+49 39 ea                        # 10c2  cmp r10, rbp
+74 05                           # 10c5  je 0x4010cc   trailing bytes (jne: je over the jmp)
+e9 9d 0b 00 00                  # 10c7  jmp 0x401c69   -> p2_rej
+49 39 f4                        # 10cc  cmp r12, rsi
+0f 83 94 0b 00 00               # 10cf  jae 0x401c69   main >= nw -> p2_rej
+4d 8b d5                        # 10d5  mov r10, r13
+4d 8b fc                        # 10d8  mov r15, r12
+
+# sw_top_95:
+4d 85 ff                        # 10db  test r15, r15   skipWords (main): words left?
+0f 84 c0 00 00 00               # 10de  je 0x4011a4    -> sw_done_96
+4d 8b f2                        # 10e4  mov r14, r10
+49 83 c6 14                     # 10e7  add r14, 0x14
+49 39 ee                        # 10eb  cmp r14, rbp
+0f 87 75 0b 00 00               # 10ee  ja 0x401c69   truncated word header -> p2_rej
+45 8b 72 10                     # 10f4  ld32 r14, [r10+0x10]   na
+49 c1 e6 20                     # 10f8  shl r14, 32
+4d 01 f7                        # 10fc  add r15, r14   park na in the high half
+45 8b 5a 0c                     # 10ff  ld32 r11, [r10+0xc]   nc
+49 83 c2 14                     # 1103  add r10, 0x14   first instruction
+
+# sc_top_97:
+4d 85 db                        # 1107  test r11, r11   skipCode (main): instructions left?
+74 6b                           # 110a  je 0x401177    -> sc_done_98
+49 39 ea                        # 110c  cmp r10, rbp   opcode byte inside the input?
+0f 83 54 0b 00 00               # 110f  jae 0x401c69    -> p2_rej
+45 0f b6 32                     # 1115  ld8 r14, [r10+0x0]   opcode
+49 83 fe 39                     # 1119  cmp r14, 0x39   prim 0x00..0x38
+72 40                           # 111d  jb 0x40115f    -> sc_l1_99
+49 81 fe 80 00 00 00            # 111f  cmp r14, 0x80
+0f 82 3d 0b 00 00               # 1126  jb 0x401c69   0x39..0x7f: no such opcode -> p2_rej
+74 29                           # 112c  je 0x401157   0x80 lit u64 -> sc_l9_101
+49 81 fe 8c 00 00 00            # 112e  cmp r14, 0x8c
+0f 87 2e 0b 00 00               # 1135  ja 0x401c69   0x8d..0xff: no such opcode -> p2_rej
+74 22                           # 113b  je 0x40115f   0x8c ret -> sc_l1_99
+49 81 fe 83 00 00 00            # 113d  cmp r14, 0x83
+72 09                           # 1144  jb 0x40114f   0x81 str, 0x82 pick -> sc_l5_100
+49 81 fe 86 00 00 00            # 1146  cmp r14, 0x86
+72 10                           # 114d  jb 0x40115f   0x83 tor, 0x84 fromr, 0x85 rfetch -> sc_l1_99
+
+# sc_l5_100:
+41 be 05 00 00 00               # 114f  mov r14, 0x5   opcode + u32
+eb 0e                           # 1155  jmp 0x401165    -> sc_len_102
+
+# sc_l9_101:
+41 be 09 00 00 00               # 1157  mov r14, 0x9   opcode + u64
+eb 06                           # 115d  jmp 0x401165    -> sc_len_102
+
+# sc_l1_99:
+41 be 01 00 00 00               # 115f  mov r14, 0x1   opcode alone
+
+# sc_len_102:
+4d 01 f2                        # 1165  add r10, r14   past the instruction
+49 39 ea                        # 1168  cmp r10, rbp
+0f 87 f8 0a 00 00               # 116b  ja 0x401c69   truncated instruction -> p2_rej
+49 83 eb 01                     # 1171  sub r11, 0x1
+eb 90                           # 1175  jmp 0x401107    -> sc_top_97
+
+# sc_done_98:
+4d 8b f7                        # 1177  mov r14, r15
+49 c1 ee 20                     # 117a  shr r14, 32   na
+45 8b ff                        # 117e  mov32 r15, r15   words left, high half cleared
+4d 8b de                        # 1181  mov r11, r14
+49 c1 e3 03                     # 1184  shl r11, 3
+49 c1 e6 02                     # 1188  shl r14, 2
+4d 01 f3                        # 118c  add r11, r14   12 * na
+4d 01 da                        # 118f  add r10, r11   past the annotations
+49 39 ea                        # 1192  cmp r10, rbp
+0f 87 ce 0a 00 00               # 1195  ja 0x401c69   truncated annotations -> p2_rej
+49 83 ef 01                     # 119b  sub r15, 0x1
+e9 37 ff ff ff                  # 119f  jmp 0x4010db    -> sw_top_95
+
+# sw_done_96:
+41 8b 12                        # 11a4  ld32 rdx, [r10+0x0]   ins of main
+48 85 d2                        # 11a7  test rdx, rdx
+74 05                           # 11aa  je 0x4011b1   main takes arguments (jne: je over the jmp)
+e9 b8 0a 00 00                  # 11ac  jmp 0x401c69   -> p2_rej
+4d 8b e5                        # 11b1  mov r12, r13   r12 = word header
+
+# p2_word:
+49 39 ec                        # 11b4  cmp r12, rbp
+0f 84 8e 0a 00 00               # 11b7  je 0x401c4b   all words checked -> p2_acc
+45 8b 5c 24 0c                  # 11bd  ld32 r11, [r12+0xc]   nc
+4d 85 db                        # 11c2  test r11, r11
+0f 84 9e 0a 00 00               # 11c5  je 0x401c69   empty code -> p2_rej
+4d 8d 4c 24 14                  # 11cb  lea r9, [r12+0x14]
+
+# sc_top_103:
+4d 85 db                        # 11d0  test r11, r11   skipCode (annotations): instructions left?
+74 6b                           # 11d3  je 0x401240    -> sc_done_104
+49 39 e9                        # 11d5  cmp r9, rbp   opcode byte inside the input?
+0f 83 8b 0a 00 00               # 11d8  jae 0x401c69    -> p2_rej
+45 0f b6 31                     # 11de  ld8 r14, [r9+0x0]   opcode
+49 83 fe 39                     # 11e2  cmp r14, 0x39   prim 0x00..0x38
+72 40                           # 11e6  jb 0x401228    -> sc_l1_105
+49 81 fe 80 00 00 00            # 11e8  cmp r14, 0x80
+0f 82 74 0a 00 00               # 11ef  jb 0x401c69   0x39..0x7f: no such opcode -> p2_rej
+74 29                           # 11f5  je 0x401220   0x80 lit u64 -> sc_l9_107
+49 81 fe 8c 00 00 00            # 11f7  cmp r14, 0x8c
+0f 87 65 0a 00 00               # 11fe  ja 0x401c69   0x8d..0xff: no such opcode -> p2_rej
+74 22                           # 1204  je 0x401228   0x8c ret -> sc_l1_105
+49 81 fe 83 00 00 00            # 1206  cmp r14, 0x83
+72 09                           # 120d  jb 0x401218   0x81 str, 0x82 pick -> sc_l5_106
+49 81 fe 86 00 00 00            # 120f  cmp r14, 0x86
+72 10                           # 1216  jb 0x401228   0x83 tor, 0x84 fromr, 0x85 rfetch -> sc_l1_105
+
+# sc_l5_106:
+41 be 05 00 00 00               # 1218  mov r14, 0x5   opcode + u32
+eb 0e                           # 121e  jmp 0x40122e    -> sc_len_108
+
+# sc_l9_107:
+41 be 09 00 00 00               # 1220  mov r14, 0x9   opcode + u64
+eb 06                           # 1226  jmp 0x40122e    -> sc_len_108
+
+# sc_l1_105:
+41 be 01 00 00 00               # 1228  mov r14, 0x1   opcode alone
+
+# sc_len_108:
+4d 01 f1                        # 122e  add r9, r14   past the instruction
+49 39 e9                        # 1231  cmp r9, rbp
+0f 87 2f 0a 00 00               # 1234  ja 0x401c69   truncated instruction -> p2_rej
+49 83 eb 01                     # 123a  sub r11, 0x1
+eb 90                           # 123e  jmp 0x4011d0    -> sc_top_103
+
+# sc_done_104:
+45 31 c0                        # 1240  xor r8, r8   i = 0
+45 8b 74 24 10                  # 1243  ld32 r14, [r12+0x10]   lookup (0): na
+4d 8b de                        # 1248  mov r11, r14
+49 c1 e3 03                     # 124b  shl r11, 3
+49 c1 e6 02                     # 124f  shl r14, 2
+4d 01 f3                        # 1253  add r11, r14
+4d 01 cb                        # 1256  add r11, r9   r11 = end of the annotations
+4d 8b d1                        # 1259  mov r10, r9
+
+# lk_top_109:
+4d 39 da                        # 125c  cmp r10, r11
+74 0e                           # 125f  je 0x40126f   none -> lk_done_110
+45 8b 32                        # 1261  ld32 r14, [r10+0x0]
+4d 39 c6                        # 1264  cmp r14, r8
+74 06                           # 1267  je 0x40126f   found -> lk_done_110
+49 83 c2 0c                     # 1269  add r10, 0xc
+eb ed                           # 126d  jmp 0x40125c    -> lk_top_109
+
+# lk_done_110:
+4d 39 da                        # 126f  cmp r10, r11
+74 20                           # 1272  je 0x401294    -> init_111
+45 8b 72 04                     # 1274  ld32 r14, [r10+0x4]
+45 8b 3c 24                     # 1278  ld32 r15, [r12+0x0]
+4d 39 fe                        # 127c  cmp r14, r15
+74 05                           # 127f  je 0x401286   H[0].d != ins (jne: je over the jmp)
+e9 e3 09 00 00                  # 1281  jmp 0x401c69   -> p2_rej
+45 8b 72 08                     # 1286  ld32 r14, [r10+0x8]
+4d 85 f6                        # 128a  test r14, r14
+74 05                           # 128d  je 0x401294   H[0].a != 0 (jne: je over the jmp)
+e9 d5 09 00 00                  # 128f  jmp 0x401c69   -> p2_rej
+
+# init_111:
+41 8b 14 24                     # 1294  ld32 rdx, [r12+0x0]   curD = ins
+31 ff                           # 1298  xor rdi, rdi   curA = 0
+49 8d 74 24 14                  # 129a  lea rsi, [r12+0x14]   p = first instruction
+
+# p2_walk:
+45 8b 7c 24 0c                  # 129f  ld32 r15, [r12+0xc]
+4d 39 f8                        # 12a4  cmp r8, r15
+0f 84 07 09 00 00               # 12a7  je 0x401bb4   i == nc -> p2_wdone
+45 8b 74 24 10                  # 12ad  ld32 r14, [r12+0x10]   lookup (i): na
+4d 8b de                        # 12b2  mov r11, r14
+49 c1 e3 03                     # 12b5  shl r11, 3
+49 c1 e6 02                     # 12b9  shl r14, 2
+4d 01 f3                        # 12bd  add r11, r14
+4d 01 cb                        # 12c0  add r11, r9   r11 = end of the annotations
+4d 8b d1                        # 12c3  mov r10, r9
+
+# lk_top_112:
+4d 39 da                        # 12c6  cmp r10, r11
+74 0e                           # 12c9  je 0x4012d9   none -> lk_done_113
+45 8b 32                        # 12cb  ld32 r14, [r10+0x0]
+4d 39 c6                        # 12ce  cmp r14, r8
+74 06                           # 12d1  je 0x4012d9   found -> lk_done_113
+49 83 c2 0c                     # 12d3  add r10, 0xc
+eb ed                           # 12d7  jmp 0x4012c6    -> lk_top_112
+
+# lk_done_113:
+4d 39 da                        # 12d9  cmp r10, r11
+74 08                           # 12dc  je 0x4012e6    -> hready_114
+41 8b 52 04                     # 12de  ld32 rdx, [r10+0x4]   h = annotation at i
+41 8b 7a 08                     # 12e2  ld32 rdi, [r10+0x8]
+
+# hready_114:
+44 0f b6 3e                     # 12e6  ld8 r15, [rsi+0x0]   opcode
+49 83 ff 39                     # 12ea  cmp r15, 0x39
+0f 82 ae 00 00 00               # 12ee  jb 0x4013a2    -> p2_prim
+49 81 ff 80 00 00 00            # 12f4  cmp r15, 0x80
+0f 84 ac 04 00 00               # 12fb  je 0x4017ad    -> p2_lit
+49 81 ff 81 00 00 00            # 1301  cmp r15, 0x81
+0f 84 bf 04 00 00               # 1308  je 0x4017cd    -> p2_str
+49 81 ff 82 00 00 00            # 130e  cmp r15, 0x82
+0f 84 d2 04 00 00               # 1315  je 0x4017ed    -> p2_pick
+49 81 ff 83 00 00 00            # 131b  cmp r15, 0x83
+0f 84 f2 04 00 00               # 1322  je 0x40181a    -> p2_tor
+49 81 ff 84 00 00 00            # 1328  cmp r15, 0x84
+0f 84 12 05 00 00               # 132f  je 0x401847    -> p2_fromr
+49 81 ff 85 00 00 00            # 1335  cmp r15, 0x85
+0f 84 32 05 00 00               # 133c  je 0x401874    -> p2_rfetch
+49 81 ff 86 00 00 00            # 1342  cmp r15, 0x86
+0f 84 4e 05 00 00               # 1349  je 0x40189d    -> p2_locget
+49 81 ff 87 00 00 00            # 134f  cmp r15, 0x87
+0f 84 73 05 00 00               # 1356  je 0x4018cf    -> p2_locset
+49 81 ff 88 00 00 00            # 135c  cmp r15, 0x88
+0f 84 90 05 00 00               # 1363  je 0x4018f9    -> p2_jmp
+49 81 ff 89 00 00 00            # 1369  cmp r15, 0x89
+0f 84 e3 05 00 00               # 1370  je 0x401959    -> p2_jz
+49 81 ff 8a 00 00 00            # 1376  cmp r15, 0x8a
+0f 84 d6 05 00 00               # 137d  je 0x401959    -> p2_jz
+49 81 ff 8b 00 00 00            # 1383  cmp r15, 0x8b
+0f 84 36 06 00 00               # 138a  je 0x4019c6    -> p2_call
+49 81 ff 8c 00 00 00            # 1390  cmp r15, 0x8c
+0f 84 41 07 00 00               # 1397  je 0x401ade    -> p2_ret
+e9 c7 08 00 00                  # 139d  jmp 0x401c69   unreachable after parse -> p2_rej
+
+# p2_prim:
+49 83 ff 32                     # 13a2  cmp r15, 0x32
+0f 84 ed 03 00 00               # 13a6  je 0x401799    -> p2_exit
+49 83 ff 22                     # 13ac  cmp r15, 0x22
+0f 83 dc 01 00 00               # 13b0  jae 0x401592    -> eff_115
+49 83 ff 0f                     # 13b6  cmp r15, 0xf
+0f 83 e9 00 00 00               # 13ba  jae 0x4014a9    -> eff_116
+49 83 ff 04                     # 13c0  cmp r15, 0x4
+0f 83 62 00 00 00               # 13c4  jae 0x40142c    -> eff_117
+49 83 ff 02                     # 13ca  cmp r15, 0x2
+0f 83 2c 00 00 00               # 13ce  jae 0x401400    -> eff_118
+49 83 ff 01                     # 13d4  cmp r15, 0x1
+0f 83 11 00 00 00               # 13d8  jae 0x4013ef    -> eff_119
+41 ba 01 00 00 00               # 13de  mov r10, 0x1   ops 0..0: takes 1
+41 bb 02 00 00 00               # 13e4  mov r11, 0x2   pushes 2
+e9 7f 03 00 00                  # 13ea  jmp 0x40176e    -> p2_have
+
+# eff_119:
+41 ba 01 00 00 00               # 13ef  mov r10, 0x1   ops 1..1: takes 1
+41 bb 00 00 00 00               # 13f5  mov r11, 0x0   pushes 0
+e9 6e 03 00 00                  # 13fb  jmp 0x40176e    -> p2_have
+
+# eff_118:
+49 83 ff 03                     # 1400  cmp r15, 0x3
+0f 83 11 00 00 00               # 1404  jae 0x40141b    -> eff_120
+41 ba 02 00 00 00               # 140a  mov r10, 0x2   ops 2..2: takes 2
+41 bb 02 00 00 00               # 1410  mov r11, 0x2   pushes 2
+e9 53 03 00 00                  # 1416  jmp 0x40176e    -> p2_have
+
+# eff_120:
+41 ba 02 00 00 00               # 141b  mov r10, 0x2   ops 3..3: takes 2
+41 bb 03 00 00 00               # 1421  mov r11, 0x3   pushes 3
+e9 42 03 00 00                  # 1427  jmp 0x40176e    -> p2_have
+
+# eff_117:
+49 83 ff 06                     # 142c  cmp r15, 0x6
+0f 83 2c 00 00 00               # 1430  jae 0x401462    -> eff_121
+49 83 ff 05                     # 1436  cmp r15, 0x5
+0f 83 11 00 00 00               # 143a  jae 0x401451    -> eff_122
+41 ba 03 00 00 00               # 1440  mov r10, 0x3   ops 4..4: takes 3
+41 bb 03 00 00 00               # 1446  mov r11, 0x3   pushes 3
+e9 1d 03 00 00                  # 144c  jmp 0x40176e    -> p2_have
+
+# eff_122:
+41 ba 02 00 00 00               # 1451  mov r10, 0x2   ops 5..5: takes 2
+41 bb 01 00 00 00               # 1457  mov r11, 0x1   pushes 1
+e9 0c 03 00 00                  # 145d  jmp 0x40176e    -> p2_have
+
+# eff_121:
+49 83 ff 07                     # 1462  cmp r15, 0x7
+0f 83 11 00 00 00               # 1466  jae 0x40147d    -> eff_123
+41 ba 02 00 00 00               # 146c  mov r10, 0x2   ops 6..6: takes 2
+41 bb 03 00 00 00               # 1472  mov r11, 0x3   pushes 3
+e9 f1 02 00 00                  # 1478  jmp 0x40176e    -> p2_have
+
+# eff_123:
+49 83 ff 0e                     # 147d  cmp r15, 0xe
+0f 83 11 00 00 00               # 1481  jae 0x401498    -> eff_124
+41 ba 02 00 00 00               # 1487  mov r10, 0x2   ops 7..13: takes 2
+41 bb 01 00 00 00               # 148d  mov r11, 0x1   pushes 1
+e9 d6 02 00 00                  # 1493  jmp 0x40176e    -> p2_have
+
+# eff_124:
+41 ba 01 00 00 00               # 1498  mov r10, 0x1   ops 14..14: takes 1
+41 bb 01 00 00 00               # 149e  mov r11, 0x1   pushes 1
+e9 c5 02 00 00                  # 14a4  jmp 0x40176e    -> p2_have
+
+# eff_116:
+49 83 ff 1d                     # 14a9  cmp r15, 0x1d
+0f 83 62 00 00 00               # 14ad  jae 0x401515    -> eff_125
+49 83 ff 13                     # 14b3  cmp r15, 0x13
+0f 83 2c 00 00 00               # 14b7  jae 0x4014e9    -> eff_126
+49 83 ff 12                     # 14bd  cmp r15, 0x12
+0f 83 11 00 00 00               # 14c1  jae 0x4014d8    -> eff_127
+41 ba 02 00 00 00               # 14c7  mov r10, 0x2   ops 15..17: takes 2
+41 bb 01 00 00 00               # 14cd  mov r11, 0x1   pushes 1
+e9 96 02 00 00                  # 14d3  jmp 0x40176e    -> p2_have
+
+# eff_127:
+41 ba 01 00 00 00               # 14d8  mov r10, 0x1   ops 18..18: takes 1
+41 bb 01 00 00 00               # 14de  mov r11, 0x1   pushes 1
+e9 85 02 00 00                  # 14e4  jmp 0x40176e    -> p2_have
+
+# eff_126:
+49 83 ff 1c                     # 14e9  cmp r15, 0x1c
+0f 83 11 00 00 00               # 14ed  jae 0x401504    -> eff_128
+41 ba 02 00 00 00               # 14f3  mov r10, 0x2   ops 19..27: takes 2
+41 bb 01 00 00 00               # 14f9  mov r11, 0x1   pushes 1
+e9 6a 02 00 00                  # 14ff  jmp 0x40176e    -> p2_have
+
+# eff_128:
+41 ba 01 00 00 00               # 1504  mov r10, 0x1   ops 28..28: takes 1
+41 bb 01 00 00 00               # 150a  mov r11, 0x1   pushes 1
+e9 59 02 00 00                  # 1510  jmp 0x40176e    -> p2_have
+
+# eff_125:
+49 83 ff 1f                     # 1515  cmp r15, 0x1f
+0f 83 2c 00 00 00               # 1519  jae 0x40154b    -> eff_129
+49 83 ff 1e                     # 151f  cmp r15, 0x1e
+0f 83 11 00 00 00               # 1523  jae 0x40153a    -> eff_130
+41 ba 02 00 00 00               # 1529  mov r10, 0x2   ops 29..29: takes 2
+41 bb 00 00 00 00               # 152f  mov r11, 0x0   pushes 0
+e9 34 02 00 00                  # 1535  jmp 0x40176e    -> p2_have
+
+# eff_130:
+41 ba 01 00 00 00               # 153a  mov r10, 0x1   ops 30..30: takes 1
+41 bb 01 00 00 00               # 1540  mov r11, 0x1   pushes 1
+e9 23 02 00 00                  # 1546  jmp 0x40176e    -> p2_have
+
+# eff_129:
+49 83 ff 20                     # 154b  cmp r15, 0x20
+0f 83 11 00 00 00               # 154f  jae 0x401566    -> eff_131
+41 ba 02 00 00 00               # 1555  mov r10, 0x2   ops 31..31: takes 2
+41 bb 00 00 00 00               # 155b  mov r11, 0x0   pushes 0
+e9 08 02 00 00                  # 1561  jmp 0x40176e    -> p2_have
+
+# eff_131:
+49 83 ff 21                     # 1566  cmp r15, 0x21
+0f 83 11 00 00 00               # 156a  jae 0x401581    -> eff_132
+41 ba 01 00 00 00               # 1570  mov r10, 0x1   ops 32..32: takes 1
+41 bb 01 00 00 00               # 1576  mov r11, 0x1   pushes 1
+e9 ed 01 00 00                  # 157c  jmp 0x40176e    -> p2_have
+
+# eff_132:
+41 ba 02 00 00 00               # 1581  mov r10, 0x2   ops 33..33: takes 2
+41 bb 00 00 00 00               # 1587  mov r11, 0x0   pushes 0
+e9 dc 01 00 00                  # 158d  jmp 0x40176e    -> p2_have
+
+# eff_115:
+49 83 ff 2c                     # 1592  cmp r15, 0x2c
+0f 83 e9 00 00 00               # 1596  jae 0x401685    -> eff_133
+49 83 ff 27                     # 159c  cmp r15, 0x27
+0f 83 62 00 00 00               # 15a0  jae 0x401608    -> eff_134
+49 83 ff 24                     # 15a6  cmp r15, 0x24
+0f 83 2c 00 00 00               # 15aa  jae 0x4015dc    -> eff_135
+49 83 ff 23                     # 15b0  cmp r15, 0x23
+0f 83 11 00 00 00               # 15b4  jae 0x4015cb    -> eff_136
+41 ba 01 00 00 00               # 15ba  mov r10, 0x1   ops 34..34: takes 1
+41 bb 01 00 00 00               # 15c0  mov r11, 0x1   pushes 1
+e9 a3 01 00 00                  # 15c6  jmp 0x40176e    -> p2_have
+
+# eff_136:
+41 ba 02 00 00 00               # 15cb  mov r10, 0x2   ops 35..35: takes 2
+41 bb 00 00 00 00               # 15d1  mov r11, 0x0   pushes 0
+e9 92 01 00 00                  # 15d7  jmp 0x40176e    -> p2_have
+
+# eff_135:
+49 83 ff 26                     # 15dc  cmp r15, 0x26
+0f 83 11 00 00 00               # 15e0  jae 0x4015f7    -> eff_137
+41 ba 03 00 00 00               # 15e6  mov r10, 0x3   ops 36..37: takes 3
+41 bb 00 00 00 00               # 15ec  mov r11, 0x0   pushes 0
+e9 77 01 00 00                  # 15f2  jmp 0x40176e    -> p2_have
+
+# eff_137:
+41 ba 03 00 00 00               # 15f7  mov r10, 0x3   ops 38..38: takes 3
+41 bb 01 00 00 00               # 15fd  mov r11, 0x1   pushes 1
+e9 66 01 00 00                  # 1603  jmp 0x40176e    -> p2_have
+
+# eff_134:
+49 83 ff 29                     # 1608  cmp r15, 0x29
+0f 83 2c 00 00 00               # 160c  jae 0x40163e    -> eff_138
+49 83 ff 28                     # 1612  cmp r15, 0x28
+0f 83 11 00 00 00               # 1616  jae 0x40162d    -> eff_139
+41 ba 01 00 00 00               # 161c  mov r10, 0x1   ops 39..39: takes 1
+41 bb 01 00 00 00               # 1622  mov r11, 0x1   pushes 1
+e9 41 01 00 00                  # 1628  jmp 0x40176e    -> p2_have
+
+# eff_139:
+41 ba 00 00 00 00               # 162d  mov r10, 0x0   ops 40..40: takes 0
+41 bb 01 00 00 00               # 1633  mov r11, 0x1   pushes 1
+e9 30 01 00 00                  # 1639  jmp 0x40176e    -> p2_have
+
+# eff_138:
+49 83 ff 2a                     # 163e  cmp r15, 0x2a
+0f 83 11 00 00 00               # 1642  jae 0x401659    -> eff_140
+41 ba 01 00 00 00               # 1648  mov r10, 0x1   ops 41..41: takes 1
+41 bb 00 00 00 00               # 164e  mov r11, 0x0   pushes 0
+e9 15 01 00 00                  # 1654  jmp 0x40176e    -> p2_have
+
+# eff_140:
+49 83 ff 2b                     # 1659  cmp r15, 0x2b
+0f 83 11 00 00 00               # 165d  jae 0x401674    -> eff_141
+41 ba 04 00 00 00               # 1663  mov r10, 0x4   ops 42..42: takes 4
+41 bb 01 00 00 00               # 1669  mov r11, 0x1   pushes 1
+e9 fa 00 00 00                  # 166f  jmp 0x40176e    -> p2_have
+
+# eff_141:
+41 ba 02 00 00 00               # 1674  mov r10, 0x2   ops 43..43: takes 2
+41 bb 01 00 00 00               # 167a  mov r11, 0x1   pushes 1
+e9 e9 00 00 00                  # 1680  jmp 0x40176e    -> p2_have
+
+# eff_133:
+49 83 ff 30                     # 1685  cmp r15, 0x30
+0f 83 62 00 00 00               # 1689  jae 0x4016f1    -> eff_142
+49 83 ff 2e                     # 168f  cmp r15, 0x2e
+0f 83 2c 00 00 00               # 1693  jae 0x4016c5    -> eff_143
+49 83 ff 2d                     # 1699  cmp r15, 0x2d
+0f 83 11 00 00 00               # 169d  jae 0x4016b4    -> eff_144
+41 ba 00 00 00 00               # 16a3  mov r10, 0x0   ops 44..44: takes 0
+41 bb 01 00 00 00               # 16a9  mov r11, 0x1   pushes 1
+e9 ba 00 00 00                  # 16af  jmp 0x40176e    -> p2_have
+
+# eff_144:
+41 ba 03 00 00 00               # 16b4  mov r10, 0x3   ops 45..45: takes 3
+41 bb 00 00 00 00               # 16ba  mov r11, 0x0   pushes 0
+e9 a9 00 00 00                  # 16c0  jmp 0x40176e    -> p2_have
+
+# eff_143:
+49 83 ff 2f                     # 16c5  cmp r15, 0x2f
+0f 83 11 00 00 00               # 16c9  jae 0x4016e0    -> eff_145
+41 ba 02 00 00 00               # 16cf  mov r10, 0x2   ops 46..46: takes 2
+41 bb 02 00 00 00               # 16d5  mov r11, 0x2   pushes 2
+e9 8e 00 00 00                  # 16db  jmp 0x40176e    -> p2_have
+
+# eff_145:
+41 ba 00 00 00 00               # 16e0  mov r10, 0x0   ops 47..47: takes 0
+41 bb 01 00 00 00               # 16e6  mov r11, 0x1   pushes 1
+e9 7d 00 00 00                  # 16ec  jmp 0x40176e    -> p2_have
+
+# eff_142:
+49 83 ff 35                     # 16f1  cmp r15, 0x35
+0f 83 2c 00 00 00               # 16f5  jae 0x401727    -> eff_146
+49 83 ff 33                     # 16fb  cmp r15, 0x33
+0f 83 11 00 00 00               # 16ff  jae 0x401716    -> eff_147
+41 ba 01 00 00 00               # 1705  mov r10, 0x1   ops 48..50: takes 1
+41 bb 00 00 00 00               # 170b  mov r11, 0x0   pushes 0
+e9 58 00 00 00                  # 1711  jmp 0x40176e    -> p2_have
+
+# eff_147:
+41 ba 00 00 00 00               # 1716  mov r10, 0x0   ops 51..52: takes 0
+41 bb 01 00 00 00               # 171c  mov r11, 0x1   pushes 1
+e9 47 00 00 00                  # 1722  jmp 0x40176e    -> p2_have
+
+# eff_146:
+49 83 ff 36                     # 1727  cmp r15, 0x36
+0f 83 11 00 00 00               # 172b  jae 0x401742    -> eff_148
+41 ba 01 00 00 00               # 1731  mov r10, 0x1   ops 53..53: takes 1
+41 bb 01 00 00 00               # 1737  mov r11, 0x1   pushes 1
+e9 2c 00 00 00                  # 173d  jmp 0x40176e    -> p2_have
+
+# eff_148:
+49 83 ff 38                     # 1742  cmp r15, 0x38
+0f 83 11 00 00 00               # 1746  jae 0x40175d    -> eff_149
+41 ba 01 00 00 00               # 174c  mov r10, 0x1   ops 54..55: takes 1
+41 bb 02 00 00 00               # 1752  mov r11, 0x2   pushes 2
+e9 11 00 00 00                  # 1758  jmp 0x40176e    -> p2_have
+
+# eff_149:
+41 ba 02 00 00 00               # 175d  mov r10, 0x2   ops 56..56: takes 2
+41 bb 01 00 00 00               # 1763  mov r11, 0x1   pushes 1
+e9 00 00 00 00                  # 1769  jmp 0x40176e    -> p2_have
+
+# p2_have:
+4c 39 d2                        # 176e  cmp rdx, r10
+0f 82 f2 04 00 00               # 1771  jb 0x401c69   too few operands -> p2_rej
+4c 29 d2                        # 1777  sub rdx, r10
+4c 01 da                        # 177a  add rdx, r11
+4c 8b d2                        # 177d  mov r10, rdx
+49 c1 ea 30                     # 1780  shr r10, 48
+4d 85 d2                        # 1784  test r10, r10
+74 05                           # 1787  je 0x40178e   height >= 2^48 (jne: je over the jmp)
+e9 cc 04 00 00                  # 1789  jmp 0x401c5a   -> p2_ovf
+41 bf 01 00 00 00               # 178e  mov r15, 0x1
+e9 69 03 00 00                  # 1794  jmp 0x401b02    -> p2_fall
+
+# p2_exit:
+48 85 d2                        # 1799  test rdx, rdx
+0f 84 c7 04 00 00               # 179c  je 0x401c69   exit needs one operand -> p2_rej
+41 bf 01 00 00 00               # 17a2  mov r15, 0x1
+e9 bc 03 00 00                  # 17a8  jmp 0x401b69    -> p2_nofall
+
+# p2_lit:
+48 83 c2 01                     # 17ad  add rdx, 0x1
+4c 8b d2                        # 17b1  mov r10, rdx
+49 c1 ea 30                     # 17b4  shr r10, 48
+4d 85 d2                        # 17b8  test r10, r10
+74 05                           # 17bb  je 0x4017c2   height >= 2^48 (jne: je over the jmp)
+e9 98 04 00 00                  # 17bd  jmp 0x401c5a   -> p2_ovf
+41 bf 09 00 00 00               # 17c2  mov r15, 0x9
+e9 35 03 00 00                  # 17c8  jmp 0x401b02    -> p2_fall
+
+# p2_str:
+48 83 c2 02                     # 17cd  add rdx, 0x2
+4c 8b d2                        # 17d1  mov r10, rdx
+49 c1 ea 30                     # 17d4  shr r10, 48
+4d 85 d2                        # 17d8  test r10, r10
+74 05                           # 17db  je 0x4017e2   height >= 2^48 (jne: je over the jmp)
+e9 78 04 00 00                  # 17dd  jmp 0x401c5a   -> p2_ovf
+41 bf 05 00 00 00               # 17e2  mov r15, 0x5
+e9 15 03 00 00                  # 17e8  jmp 0x401b02    -> p2_fall
+
+# p2_pick:
+44 8b 56 01                     # 17ed  ld32 r10, [rsi+0x1]
+49 39 d2                        # 17f1  cmp r10, rdx
+0f 83 6f 04 00 00               # 17f4  jae 0x401c69   pick beyond the stack -> p2_rej
+48 83 c2 01                     # 17fa  add rdx, 0x1
+4c 8b d2                        # 17fe  mov r10, rdx
+49 c1 ea 30                     # 1801  shr r10, 48
+4d 85 d2                        # 1805  test r10, r10
+74 05                           # 1808  je 0x40180f   height >= 2^48 (jne: je over the jmp)
+e9 4b 04 00 00                  # 180a  jmp 0x401c5a   -> p2_ovf
+41 bf 05 00 00 00               # 180f  mov r15, 0x5
+e9 e8 02 00 00                  # 1815  jmp 0x401b02    -> p2_fall
+
+# p2_tor:
+48 85 d2                        # 181a  test rdx, rdx
+0f 84 46 04 00 00               # 181d  je 0x401c69    -> p2_rej
+48 83 ea 01                     # 1823  sub rdx, 0x1
+48 83 c7 01                     # 1827  add rdi, 0x1
+4c 8b d7                        # 182b  mov r10, rdi
+49 c1 ea 30                     # 182e  shr r10, 48
+4d 85 d2                        # 1832  test r10, r10
+74 05                           # 1835  je 0x40183c   height >= 2^48 (jne: je over the jmp)
+e9 1e 04 00 00                  # 1837  jmp 0x401c5a   -> p2_ovf
+41 bf 01 00 00 00               # 183c  mov r15, 0x1
+e9 bb 02 00 00                  # 1842  jmp 0x401b02    -> p2_fall
+
+# p2_fromr:
+48 85 ff                        # 1847  test rdi, rdi
+0f 84 19 04 00 00               # 184a  je 0x401c69    -> p2_rej
+48 83 ef 01                     # 1850  sub rdi, 0x1
+48 83 c2 01                     # 1854  add rdx, 0x1
+4c 8b d2                        # 1858  mov r10, rdx
+49 c1 ea 30                     # 185b  shr r10, 48
+4d 85 d2                        # 185f  test r10, r10
+74 05                           # 1862  je 0x401869   height >= 2^48 (jne: je over the jmp)
+e9 f1 03 00 00                  # 1864  jmp 0x401c5a   -> p2_ovf
+41 bf 01 00 00 00               # 1869  mov r15, 0x1
+e9 8e 02 00 00                  # 186f  jmp 0x401b02    -> p2_fall
+
+# p2_rfetch:
+48 85 ff                        # 1874  test rdi, rdi
+0f 84 ec 03 00 00               # 1877  je 0x401c69    -> p2_rej
+48 83 c2 01                     # 187d  add rdx, 0x1
+4c 8b d2                        # 1881  mov r10, rdx
+49 c1 ea 30                     # 1884  shr r10, 48
+4d 85 d2                        # 1888  test r10, r10
+74 05                           # 188b  je 0x401892   height >= 2^48 (jne: je over the jmp)
+e9 c8 03 00 00                  # 188d  jmp 0x401c5a   -> p2_ovf
+41 bf 01 00 00 00               # 1892  mov r15, 0x1
+e9 65 02 00 00                  # 1898  jmp 0x401b02    -> p2_fall
+
+# p2_locget:
+44 8b 56 01                     # 189d  ld32 r10, [rsi+0x1]
+45 8b 5c 24 08                  # 18a1  ld32 r11, [r12+0x8]   locals
+4d 39 da                        # 18a6  cmp r10, r11
+0f 83 ba 03 00 00               # 18a9  jae 0x401c69    -> p2_rej
+48 83 c2 01                     # 18af  add rdx, 0x1
+4c 8b d2                        # 18b3  mov r10, rdx
+49 c1 ea 30                     # 18b6  shr r10, 48
+4d 85 d2                        # 18ba  test r10, r10
+74 05                           # 18bd  je 0x4018c4   height >= 2^48 (jne: je over the jmp)
+e9 96 03 00 00                  # 18bf  jmp 0x401c5a   -> p2_ovf
+41 bf 05 00 00 00               # 18c4  mov r15, 0x5
+e9 33 02 00 00                  # 18ca  jmp 0x401b02    -> p2_fall
+
+# p2_locset:
+48 85 d2                        # 18cf  test rdx, rdx
+0f 84 91 03 00 00               # 18d2  je 0x401c69    -> p2_rej
+44 8b 56 01                     # 18d8  ld32 r10, [rsi+0x1]
+45 8b 5c 24 08                  # 18dc  ld32 r11, [r12+0x8]   locals
+4d 39 da                        # 18e1  cmp r10, r11
+0f 83 7f 03 00 00               # 18e4  jae 0x401c69    -> p2_rej
+48 83 ea 01                     # 18ea  sub rdx, 0x1
+41 bf 05 00 00 00               # 18ee  mov r15, 0x5
+e9 09 02 00 00                  # 18f4  jmp 0x401b02    -> p2_fall
+
+# p2_jmp:
+44 8b 7e 01                     # 18f9  ld32 r15, [rsi+0x1]   t
+45 8b 74 24 10                  # 18fd  ld32 r14, [r12+0x10]   lookup (jmp t): na
+4d 8b de                        # 1902  mov r11, r14
+49 c1 e3 03                     # 1905  shl r11, 3
+49 c1 e6 02                     # 1909  shl r14, 2
+4d 01 f3                        # 190d  add r11, r14
+4d 01 cb                        # 1910  add r11, r9   r11 = end of the annotations
+4d 8b d1                        # 1913  mov r10, r9
+
+# lk_top_150:
+4d 39 da                        # 1916  cmp r10, r11
+74 0e                           # 1919  je 0x401929   none -> lk_done_151
+45 8b 32                        # 191b  ld32 r14, [r10+0x0]
+4d 39 fe                        # 191e  cmp r14, r15
+74 06                           # 1921  je 0x401929   found -> lk_done_151
+49 83 c2 0c                     # 1923  add r10, 0xc
+eb ed                           # 1927  jmp 0x401916    -> lk_top_150
+
+# lk_done_151:
+4d 39 da                        # 1929  cmp r10, r11
+0f 84 37 03 00 00               # 192c  je 0x401c69   no annotation at t -> p2_rej
+45 8b 72 04                     # 1932  ld32 r14, [r10+0x4]
+49 39 d6                        # 1936  cmp r14, rdx
+74 05                           # 1939  je 0x401940    (jne: je over the jmp)
+e9 29 03 00 00                  # 193b  jmp 0x401c69   -> p2_rej
+45 8b 72 08                     # 1940  ld32 r14, [r10+0x8]
+49 39 fe                        # 1944  cmp r14, rdi
+74 05                           # 1947  je 0x40194e    (jne: je over the jmp)
+e9 1b 03 00 00                  # 1949  jmp 0x401c69   -> p2_rej
+41 bf 05 00 00 00               # 194e  mov r15, 0x5
+e9 10 02 00 00                  # 1954  jmp 0x401b69    -> p2_nofall
+
+# p2_jz:
+48 85 d2                        # 1959  test rdx, rdx
+0f 84 07 03 00 00               # 195c  je 0x401c69    -> p2_rej
+48 83 ea 01                     # 1962  sub rdx, 0x1
+44 8b 7e 01                     # 1966  ld32 r15, [rsi+0x1]   t
+45 8b 74 24 10                  # 196a  ld32 r14, [r12+0x10]   lookup (jz t): na
+4d 8b de                        # 196f  mov r11, r14
+49 c1 e3 03                     # 1972  shl r11, 3
+49 c1 e6 02                     # 1976  shl r14, 2
+4d 01 f3                        # 197a  add r11, r14
+4d 01 cb                        # 197d  add r11, r9   r11 = end of the annotations
+4d 8b d1                        # 1980  mov r10, r9
+
+# lk_top_152:
+4d 39 da                        # 1983  cmp r10, r11
+74 0e                           # 1986  je 0x401996   none -> lk_done_153
+45 8b 32                        # 1988  ld32 r14, [r10+0x0]
+4d 39 fe                        # 198b  cmp r14, r15
+74 06                           # 198e  je 0x401996   found -> lk_done_153
+49 83 c2 0c                     # 1990  add r10, 0xc
+eb ed                           # 1994  jmp 0x401983    -> lk_top_152
+
+# lk_done_153:
+4d 39 da                        # 1996  cmp r10, r11
+0f 84 ca 02 00 00               # 1999  je 0x401c69   no annotation at t -> p2_rej
+45 8b 72 04                     # 199f  ld32 r14, [r10+0x4]
+49 39 d6                        # 19a3  cmp r14, rdx
+74 05                           # 19a6  je 0x4019ad    (jne: je over the jmp)
+e9 bc 02 00 00                  # 19a8  jmp 0x401c69   -> p2_rej
+45 8b 72 08                     # 19ad  ld32 r14, [r10+0x8]
+49 39 fe                        # 19b1  cmp r14, rdi
+74 05                           # 19b4  je 0x4019bb    (jne: je over the jmp)
+e9 ae 02 00 00                  # 19b6  jmp 0x401c69   -> p2_rej
+41 bf 05 00 00 00               # 19bb  mov r15, 0x5
+e9 3c 01 00 00                  # 19c1  jmp 0x401b02    -> p2_fall
+
+# p2_call:
+44 8b 7e 01                     # 19c6  ld32 r15, [rsi+0x1]   w
+41 be 00 10 60 00               # 19ca  mov r14, 0x601000
+4d 8b 36                        # 19d0  ld r14, [r14+0x0]   base
+45 8b 76 08                     # 19d3  ld32 r14, [r14+0x8]   nw
+4d 39 f7                        # 19d7  cmp r15, r14
+0f 83 89 02 00 00               # 19da  jae 0x401c69   no such word -> p2_rej
+4d 8b d5                        # 19e0  mov r10, r13   rescan from ws
+
+# sw_top_154:
+4d 85 ff                        # 19e3  test r15, r15   skipWords (call): words left?
+0f 84 c0 00 00 00               # 19e6  je 0x401aac    -> sw_done_155
+4d 8b f2                        # 19ec  mov r14, r10
+49 83 c6 14                     # 19ef  add r14, 0x14
+49 39 ee                        # 19f3  cmp r14, rbp
+0f 87 6d 02 00 00               # 19f6  ja 0x401c69   truncated word header -> p2_rej
+45 8b 72 10                     # 19fc  ld32 r14, [r10+0x10]   na
+49 c1 e6 20                     # 1a00  shl r14, 32
+4d 01 f7                        # 1a04  add r15, r14   park na in the high half
+45 8b 5a 0c                     # 1a07  ld32 r11, [r10+0xc]   nc
+49 83 c2 14                     # 1a0b  add r10, 0x14   first instruction
+
+# sc_top_156:
+4d 85 db                        # 1a0f  test r11, r11   skipCode (call): instructions left?
+74 6b                           # 1a12  je 0x401a7f    -> sc_done_157
+49 39 ea                        # 1a14  cmp r10, rbp   opcode byte inside the input?
+0f 83 4c 02 00 00               # 1a17  jae 0x401c69    -> p2_rej
+45 0f b6 32                     # 1a1d  ld8 r14, [r10+0x0]   opcode
+49 83 fe 39                     # 1a21  cmp r14, 0x39   prim 0x00..0x38
+72 40                           # 1a25  jb 0x401a67    -> sc_l1_158
+49 81 fe 80 00 00 00            # 1a27  cmp r14, 0x80
+0f 82 35 02 00 00               # 1a2e  jb 0x401c69   0x39..0x7f: no such opcode -> p2_rej
+74 29                           # 1a34  je 0x401a5f   0x80 lit u64 -> sc_l9_160
+49 81 fe 8c 00 00 00            # 1a36  cmp r14, 0x8c
+0f 87 26 02 00 00               # 1a3d  ja 0x401c69   0x8d..0xff: no such opcode -> p2_rej
+74 22                           # 1a43  je 0x401a67   0x8c ret -> sc_l1_158
+49 81 fe 83 00 00 00            # 1a45  cmp r14, 0x83
+72 09                           # 1a4c  jb 0x401a57   0x81 str, 0x82 pick -> sc_l5_159
+49 81 fe 86 00 00 00            # 1a4e  cmp r14, 0x86
+72 10                           # 1a55  jb 0x401a67   0x83 tor, 0x84 fromr, 0x85 rfetch -> sc_l1_158
+
+# sc_l5_159:
+41 be 05 00 00 00               # 1a57  mov r14, 0x5   opcode + u32
+eb 0e                           # 1a5d  jmp 0x401a6d    -> sc_len_161
+
+# sc_l9_160:
+41 be 09 00 00 00               # 1a5f  mov r14, 0x9   opcode + u64
+eb 06                           # 1a65  jmp 0x401a6d    -> sc_len_161
+
+# sc_l1_158:
+41 be 01 00 00 00               # 1a67  mov r14, 0x1   opcode alone
+
+# sc_len_161:
+4d 01 f2                        # 1a6d  add r10, r14   past the instruction
+49 39 ea                        # 1a70  cmp r10, rbp
+0f 87 f0 01 00 00               # 1a73  ja 0x401c69   truncated instruction -> p2_rej
+49 83 eb 01                     # 1a79  sub r11, 0x1
+eb 90                           # 1a7d  jmp 0x401a0f    -> sc_top_156
+
+# sc_done_157:
+4d 8b f7                        # 1a7f  mov r14, r15
+49 c1 ee 20                     # 1a82  shr r14, 32   na
+45 8b ff                        # 1a86  mov32 r15, r15   words left, high half cleared
+4d 8b de                        # 1a89  mov r11, r14
+49 c1 e3 03                     # 1a8c  shl r11, 3
+49 c1 e6 02                     # 1a90  shl r14, 2
+4d 01 f3                        # 1a94  add r11, r14   12 * na
+4d 01 da                        # 1a97  add r10, r11   past the annotations
+49 39 ea                        # 1a9a  cmp r10, rbp
+0f 87 c6 01 00 00               # 1a9d  ja 0x401c69   truncated annotations -> p2_rej
+49 83 ef 01                     # 1aa3  sub r15, 0x1
+e9 37 ff ff ff                  # 1aa7  jmp 0x4019e3    -> sw_top_154
+
+# sw_done_155:
+45 8b 32                        # 1aac  ld32 r14, [r10+0x0]   c.ins
+4c 39 f2                        # 1aaf  cmp rdx, r14
+0f 82 b1 01 00 00               # 1ab2  jb 0x401c69   too few arguments -> p2_rej
+4c 29 f2                        # 1ab8  sub rdx, r14
+45 8b 72 04                     # 1abb  ld32 r14, [r10+0x4]   c.outs
+4c 01 f2                        # 1abf  add rdx, r14
+4c 8b d2                        # 1ac2  mov r10, rdx
+49 c1 ea 30                     # 1ac5  shr r10, 48
+4d 85 d2                        # 1ac9  test r10, r10
+74 05                           # 1acc  je 0x401ad3   height >= 2^48 (jne: je over the jmp)
+e9 87 01 00 00                  # 1ace  jmp 0x401c5a   -> p2_ovf
+41 bf 05 00 00 00               # 1ad3  mov r15, 0x5
+e9 24 00 00 00                  # 1ad9  jmp 0x401b02    -> p2_fall
+
+# p2_ret:
+45 8b 74 24 04                  # 1ade  ld32 r14, [r12+0x4]   outs
+4c 39 f2                        # 1ae3  cmp rdx, r14
+74 05                           # 1ae6  je 0x401aed    (jne: je over the jmp)
+e9 7c 01 00 00                  # 1ae8  jmp 0x401c69   -> p2_rej
+48 85 ff                        # 1aed  test rdi, rdi
+74 05                           # 1af0  je 0x401af7    (jne: je over the jmp)
+e9 72 01 00 00                  # 1af2  jmp 0x401c69   -> p2_rej
+41 bf 01 00 00 00               # 1af7  mov r15, 0x1
+e9 67 00 00 00                  # 1afd  jmp 0x401b69    -> p2_nofall
+
+# p2_fall:
+49 83 c0 01                     # 1b02  add r8, 0x1
+45 8b 74 24 0c                  # 1b06  ld32 r14, [r12+0xc]
+4d 39 f0                        # 1b0b  cmp r8, r14
+0f 83 55 01 00 00               # 1b0e  jae 0x401c69   falls off the end -> p2_rej
+45 8b 74 24 10                  # 1b14  ld32 r14, [r12+0x10]   lookup (i + 1): na
+4d 8b de                        # 1b19  mov r11, r14
+49 c1 e3 03                     # 1b1c  shl r11, 3
+49 c1 e6 02                     # 1b20  shl r14, 2
+4d 01 f3                        # 1b24  add r11, r14
+4d 01 cb                        # 1b27  add r11, r9   r11 = end of the annotations
+4d 8b d1                        # 1b2a  mov r10, r9
+
+# lk_top_162:
+4d 39 da                        # 1b2d  cmp r10, r11
+74 0e                           # 1b30  je 0x401b40   none -> lk_done_163
+45 8b 32                        # 1b32  ld32 r14, [r10+0x0]
+4d 39 c6                        # 1b35  cmp r14, r8
+74 06                           # 1b38  je 0x401b40   found -> lk_done_163
+49 83 c2 0c                     # 1b3a  add r10, 0xc
+eb ed                           # 1b3e  jmp 0x401b2d    -> lk_top_162
+
+# lk_done_163:
+4d 39 da                        # 1b40  cmp r10, r11
+74 1c                           # 1b43  je 0x401b61    -> p2_adv
+45 8b 72 04                     # 1b45  ld32 r14, [r10+0x4]
+49 39 d6                        # 1b49  cmp r14, rdx
+74 05                           # 1b4c  je 0x401b53    (jne: je over the jmp)
+e9 16 01 00 00                  # 1b4e  jmp 0x401c69   -> p2_rej
+45 8b 72 08                     # 1b53  ld32 r14, [r10+0x8]
+49 39 fe                        # 1b57  cmp r14, rdi
+74 05                           # 1b5a  je 0x401b61    (jne: je over the jmp)
+e9 08 01 00 00                  # 1b5c  jmp 0x401c69   -> p2_rej
+
+# p2_adv:
+4c 01 fe                        # 1b61  add rsi, r15   next instruction
+e9 36 f7 ff ff                  # 1b64  jmp 0x40129f    -> p2_walk
+
+# p2_nofall:
+49 83 c0 01                     # 1b69  add r8, 0x1
+45 8b 74 24 10                  # 1b6d  ld32 r14, [r12+0x10]   lookup (i + 1): na
+4d 8b de                        # 1b72  mov r11, r14
+49 c1 e3 03                     # 1b75  shl r11, 3
+49 c1 e6 02                     # 1b79  shl r14, 2
+4d 01 f3                        # 1b7d  add r11, r14
+4d 01 cb                        # 1b80  add r11, r9   r11 = end of the annotations
+4d 8b d1                        # 1b83  mov r10, r9
+
+# lk_top_164:
+4d 39 da                        # 1b86  cmp r10, r11
+74 0e                           # 1b89  je 0x401b99   none -> lk_done_165
+45 8b 32                        # 1b8b  ld32 r14, [r10+0x0]
+4d 39 c6                        # 1b8e  cmp r14, r8
+74 06                           # 1b91  je 0x401b99   found -> lk_done_165
+49 83 c2 0c                     # 1b93  add r10, 0xc
+eb ed                           # 1b97  jmp 0x401b86    -> lk_top_164
+
+# lk_done_165:
+4d 39 da                        # 1b99  cmp r10, r11
+74 0d                           # 1b9c  je 0x401bab    -> nfzero_166
+41 8b 52 04                     # 1b9e  ld32 rdx, [r10+0x4]
+41 8b 7a 08                     # 1ba2  ld32 rdi, [r10+0x8]
+e9 b6 ff ff ff                  # 1ba6  jmp 0x401b61    -> p2_adv
+
+# nfzero_166:
+31 d2                           # 1bab  xor rdx, rdx
+31 ff                           # 1bad  xor rdi, rdi
+e9 ad ff ff ff                  # 1baf  jmp 0x401b61    -> p2_adv
+
+# p2_wdone:
+45 8b 74 24 10                  # 1bb4  ld32 r14, [r12+0x10]   na
+49 8b fe                        # 1bb9  mov rdi, r14
+48 c1 e7 03                     # 1bbc  shl rdi, 3
+49 c1 e6 02                     # 1bc0  shl r14, 2
+4c 01 f7                        # 1bc4  add rdi, r14
+4c 01 cf                        # 1bc7  add rdi, r9   rdi = end of the annotations = next word
+49 8b f1                        # 1bca  mov rsi, r9
+
+# p2_anns:
+48 39 fe                        # 1bcd  cmp rsi, rdi
+74 71                           # 1bd0  je 0x401c43    -> p2_annsok
+44 8b 3e                        # 1bd2  ld32 r15, [rsi+0x0]   t
+45 8b 74 24 0c                  # 1bd5  ld32 r14, [r12+0xc]
+4d 39 f7                        # 1bda  cmp r15, r14
+0f 83 86 00 00 00               # 1bdd  jae 0x401c69   annotation past the code -> p2_rej
+45 8b 74 24 10                  # 1be3  ld32 r14, [r12+0x10]   lookup (ann t): na
+4d 8b de                        # 1be8  mov r11, r14
+49 c1 e3 03                     # 1beb  shl r11, 3
+49 c1 e6 02                     # 1bef  shl r14, 2
+4d 01 f3                        # 1bf3  add r11, r14
+4d 01 cb                        # 1bf6  add r11, r9   r11 = end of the annotations
+4d 8b d1                        # 1bf9  mov r10, r9
+
+# lk_top_167:
+4d 39 da                        # 1bfc  cmp r10, r11
+74 0e                           # 1bff  je 0x401c0f   none -> lk_done_168
+45 8b 32                        # 1c01  ld32 r14, [r10+0x0]
+4d 39 fe                        # 1c04  cmp r14, r15
+74 06                           # 1c07  je 0x401c0f   found -> lk_done_168
+49 83 c2 0c                     # 1c09  add r10, 0xc
+eb ed                           # 1c0d  jmp 0x401bfc    -> lk_top_167
+
+# lk_done_168:
+4d 39 da                        # 1c0f  cmp r10, r11
+0f 84 51 00 00 00               # 1c12  je 0x401c69    -> p2_rej
+45 8b 72 04                     # 1c18  ld32 r14, [r10+0x4]
+8b 56 04                        # 1c1c  ld32 rdx, [rsi+0x4]
+49 39 d6                        # 1c1f  cmp r14, rdx
+74 05                           # 1c22  je 0x401c29   conflicting annotations (jne: je over the jmp)
+e9 40 00 00 00                  # 1c24  jmp 0x401c69   -> p2_rej
+45 8b 72 08                     # 1c29  ld32 r14, [r10+0x8]
+8b 56 08                        # 1c2d  ld32 rdx, [rsi+0x8]
+49 39 d6                        # 1c30  cmp r14, rdx
+74 05                           # 1c33  je 0x401c3a   conflicting annotations (jne: je over the jmp)
+e9 2f 00 00 00                  # 1c35  jmp 0x401c69   -> p2_rej
+48 83 c6 0c                     # 1c3a  add rsi, 0xc
+e9 8a ff ff ff                  # 1c3e  jmp 0x401bcd    -> p2_anns
+
+# p2_annsok:
+4c 8b e7                        # 1c43  mov r12, rdi   next word
+e9 69 f5 ff ff                  # 1c46  jmp 0x4011b4    -> p2_word
+
+# p2_acc:
+48 bb 96 3c 5a a5 70 e9 cc 5a   # 1c4b  mov rbx, 0x5acce970a55a3c96   pass 2: ACCEPT
+e9 1e 00 00 00                  # 1c55  jmp 0x401c78    -> p3
+
+# p2_ovf:
+48 bb a5 c3 c3 33 1e 0f ad 0b   # 1c5a  mov rbx, 0xbad0f1e33c3c3a5   pass 2: OVERFLOW
+e9 0f 00 00 00                  # 1c64  jmp 0x401c78    -> p3
+
+# p2_rej:
+48 bb 01 00 11 11 ef be ad de   # 1c69  mov rbx, 0xdeadbeef11110001   pass 2: REJECT
+e9 00 00 00 00                  # 1c73  jmp 0x401c78    -> p3
+
+# p2_end:
+
+# p3:
+41 bf 00 20 60 00               # 1c78  mov r15, 0x602000   pass 3: descriptor 3
+49 8b 3f                        # 1c7e  ld rdi, [r15+0x0]   base of input copy
+49 8b 57 08                     # 1c81  ld rdx, [r15+0x8]   N
+48 8b ef                        # 1c85  mov rbp, rdi
+48 01 d5                        # 1c88  add rbp, rdx   rbp = end of input
+48 83 fa 10                     # 1c8b  cmp rdx, 0x10
+0f 82 c8 0c 00 00               # 1c8f  jb 0x40295d   shorter than the file header -> p3_rej
+8b 17                           # 1c95  ld32 rdx, [rdi+0x0]
+48 81 fa 53 50 52 31            # 1c97  cmp rdx, 0x31525053
+74 05                           # 1c9e  je 0x401ca5   not "SPR1" (jne: je over the jmp)
+e9 b8 0c 00 00                  # 1ca0  jmp 0x40295d   -> p3_rej
+44 8b 67 04                     # 1ca5  ld32 r12, [rdi+0x4]   main
+8b 77 08                        # 1ca9  ld32 rsi, [rdi+0x8]   nw
+44 8b 7f 0c                     # 1cac  ld32 r15, [rdi+0xc]   nd
+4c 8d 57 10                     # 1cb0  lea r10, [rdi+0x10]   first data item
+
+# sd_top_169:
+4d 85 ff                        # 1cb4  test r15, r15   skipData: items left?
+74 2e                           # 1cb7  je 0x401ce7    -> sd_done_170
+4d 8b da                        # 1cb9  mov r11, r10
+49 83 c3 04                     # 1cbc  add r11, 0x4
+49 39 eb                        # 1cc0  cmp r11, rbp
+0f 87 94 0c 00 00               # 1cc3  ja 0x40295d   truncated length -> p3_rej
+45 8b 32                        # 1cc9  ld32 r14, [r10+0x0]   len
+4d 8b d3                        # 1ccc  mov r10, r11
+4c 8b dd                        # 1ccf  mov r11, rbp
+4d 29 d3                        # 1cd2  sub r11, r10   bytes left
+4d 39 f3                        # 1cd5  cmp r11, r14
+0f 82 7f 0c 00 00               # 1cd8  jb 0x40295d   truncated data -> p3_rej
+4d 01 f2                        # 1cde  add r10, r14
+49 83 ef 01                     # 1ce1  sub r15, 0x1
+eb cd                           # 1ce5  jmp 0x401cb4    -> sd_top_169
+
+# sd_done_170:
+4d 8b ea                        # 1ce7  mov r13, r10   ws = first word
+4c 8b fe                        # 1cea  mov r15, rsi   nw words
+
+# sw_top_171:
+4d 85 ff                        # 1ced  test r15, r15   skipWords (parse): words left?
+0f 84 c0 00 00 00               # 1cf0  je 0x401db6    -> sw_done_172
+4d 8b f2                        # 1cf6  mov r14, r10
+49 83 c6 14                     # 1cf9  add r14, 0x14
+49 39 ee                        # 1cfd  cmp r14, rbp
+0f 87 57 0c 00 00               # 1d00  ja 0x40295d   truncated word header -> p3_rej
+45 8b 72 10                     # 1d06  ld32 r14, [r10+0x10]   na
+49 c1 e6 20                     # 1d0a  shl r14, 32
+4d 01 f7                        # 1d0e  add r15, r14   park na in the high half
+45 8b 5a 0c                     # 1d11  ld32 r11, [r10+0xc]   nc
+49 83 c2 14                     # 1d15  add r10, 0x14   first instruction
+
+# sc_top_173:
+4d 85 db                        # 1d19  test r11, r11   skipCode (parse): instructions left?
+74 6b                           # 1d1c  je 0x401d89    -> sc_done_174
+49 39 ea                        # 1d1e  cmp r10, rbp   opcode byte inside the input?
+0f 83 36 0c 00 00               # 1d21  jae 0x40295d    -> p3_rej
+45 0f b6 32                     # 1d27  ld8 r14, [r10+0x0]   opcode
+49 83 fe 39                     # 1d2b  cmp r14, 0x39   prim 0x00..0x38
+72 40                           # 1d2f  jb 0x401d71    -> sc_l1_175
+49 81 fe 80 00 00 00            # 1d31  cmp r14, 0x80
+0f 82 1f 0c 00 00               # 1d38  jb 0x40295d   0x39..0x7f: no such opcode -> p3_rej
+74 29                           # 1d3e  je 0x401d69   0x80 lit u64 -> sc_l9_177
+49 81 fe 8c 00 00 00            # 1d40  cmp r14, 0x8c
+0f 87 10 0c 00 00               # 1d47  ja 0x40295d   0x8d..0xff: no such opcode -> p3_rej
+74 22                           # 1d4d  je 0x401d71   0x8c ret -> sc_l1_175
+49 81 fe 83 00 00 00            # 1d4f  cmp r14, 0x83
+72 09                           # 1d56  jb 0x401d61   0x81 str, 0x82 pick -> sc_l5_176
+49 81 fe 86 00 00 00            # 1d58  cmp r14, 0x86
+72 10                           # 1d5f  jb 0x401d71   0x83 tor, 0x84 fromr, 0x85 rfetch -> sc_l1_175
+
+# sc_l5_176:
+41 be 05 00 00 00               # 1d61  mov r14, 0x5   opcode + u32
+eb 0e                           # 1d67  jmp 0x401d77    -> sc_len_178
+
+# sc_l9_177:
+41 be 09 00 00 00               # 1d69  mov r14, 0x9   opcode + u64
+eb 06                           # 1d6f  jmp 0x401d77    -> sc_len_178
+
+# sc_l1_175:
+41 be 01 00 00 00               # 1d71  mov r14, 0x1   opcode alone
+
+# sc_len_178:
+4d 01 f2                        # 1d77  add r10, r14   past the instruction
+49 39 ea                        # 1d7a  cmp r10, rbp
+0f 87 da 0b 00 00               # 1d7d  ja 0x40295d   truncated instruction -> p3_rej
+49 83 eb 01                     # 1d83  sub r11, 0x1
+eb 90                           # 1d87  jmp 0x401d19    -> sc_top_173
+
+# sc_done_174:
+4d 8b f7                        # 1d89  mov r14, r15
+49 c1 ee 20                     # 1d8c  shr r14, 32   na
+45 8b ff                        # 1d90  mov32 r15, r15   words left, high half cleared
+4d 8b de                        # 1d93  mov r11, r14
+49 c1 e3 03                     # 1d96  shl r11, 3
+49 c1 e6 02                     # 1d9a  shl r14, 2
+4d 01 f3                        # 1d9e  add r11, r14   12 * na
+4d 01 da                        # 1da1  add r10, r11   past the annotations
+49 39 ea                        # 1da4  cmp r10, rbp
+0f 87 b0 0b 00 00               # 1da7  ja 0x40295d   truncated annotations -> p3_rej
+49 83 ef 01                     # 1dad  sub r15, 0x1
+e9 37 ff ff ff                  # 1db1  jmp 0x401ced    -> sw_top_171
+
+# sw_done_172:
+49 39 ea                        # 1db6  cmp r10, rbp
+74 05                           # 1db9  je 0x401dc0   trailing bytes (jne: je over the jmp)
+e9 9d 0b 00 00                  # 1dbb  jmp 0x40295d   -> p3_rej
+49 39 f4                        # 1dc0  cmp r12, rsi
+0f 83 94 0b 00 00               # 1dc3  jae 0x40295d   main >= nw -> p3_rej
+4d 8b d5                        # 1dc9  mov r10, r13
+4d 8b fc                        # 1dcc  mov r15, r12
+
+# sw_top_179:
+4d 85 ff                        # 1dcf  test r15, r15   skipWords (main): words left?
+0f 84 c0 00 00 00               # 1dd2  je 0x401e98    -> sw_done_180
+4d 8b f2                        # 1dd8  mov r14, r10
+49 83 c6 14                     # 1ddb  add r14, 0x14
+49 39 ee                        # 1ddf  cmp r14, rbp
+0f 87 75 0b 00 00               # 1de2  ja 0x40295d   truncated word header -> p3_rej
+45 8b 72 10                     # 1de8  ld32 r14, [r10+0x10]   na
+49 c1 e6 20                     # 1dec  shl r14, 32
+4d 01 f7                        # 1df0  add r15, r14   park na in the high half
+45 8b 5a 0c                     # 1df3  ld32 r11, [r10+0xc]   nc
+49 83 c2 14                     # 1df7  add r10, 0x14   first instruction
+
+# sc_top_181:
+4d 85 db                        # 1dfb  test r11, r11   skipCode (main): instructions left?
+74 6b                           # 1dfe  je 0x401e6b    -> sc_done_182
+49 39 ea                        # 1e00  cmp r10, rbp   opcode byte inside the input?
+0f 83 54 0b 00 00               # 1e03  jae 0x40295d    -> p3_rej
+45 0f b6 32                     # 1e09  ld8 r14, [r10+0x0]   opcode
+49 83 fe 39                     # 1e0d  cmp r14, 0x39   prim 0x00..0x38
+72 40                           # 1e11  jb 0x401e53    -> sc_l1_183
+49 81 fe 80 00 00 00            # 1e13  cmp r14, 0x80
+0f 82 3d 0b 00 00               # 1e1a  jb 0x40295d   0x39..0x7f: no such opcode -> p3_rej
+74 29                           # 1e20  je 0x401e4b   0x80 lit u64 -> sc_l9_185
+49 81 fe 8c 00 00 00            # 1e22  cmp r14, 0x8c
+0f 87 2e 0b 00 00               # 1e29  ja 0x40295d   0x8d..0xff: no such opcode -> p3_rej
+74 22                           # 1e2f  je 0x401e53   0x8c ret -> sc_l1_183
+49 81 fe 83 00 00 00            # 1e31  cmp r14, 0x83
+72 09                           # 1e38  jb 0x401e43   0x81 str, 0x82 pick -> sc_l5_184
+49 81 fe 86 00 00 00            # 1e3a  cmp r14, 0x86
+72 10                           # 1e41  jb 0x401e53   0x83 tor, 0x84 fromr, 0x85 rfetch -> sc_l1_183
+
+# sc_l5_184:
+41 be 05 00 00 00               # 1e43  mov r14, 0x5   opcode + u32
+eb 0e                           # 1e49  jmp 0x401e59    -> sc_len_186
+
+# sc_l9_185:
+41 be 09 00 00 00               # 1e4b  mov r14, 0x9   opcode + u64
+eb 06                           # 1e51  jmp 0x401e59    -> sc_len_186
+
+# sc_l1_183:
+41 be 01 00 00 00               # 1e53  mov r14, 0x1   opcode alone
+
+# sc_len_186:
+4d 01 f2                        # 1e59  add r10, r14   past the instruction
+49 39 ea                        # 1e5c  cmp r10, rbp
+0f 87 f8 0a 00 00               # 1e5f  ja 0x40295d   truncated instruction -> p3_rej
+49 83 eb 01                     # 1e65  sub r11, 0x1
+eb 90                           # 1e69  jmp 0x401dfb    -> sc_top_181
+
+# sc_done_182:
+4d 8b f7                        # 1e6b  mov r14, r15
+49 c1 ee 20                     # 1e6e  shr r14, 32   na
+45 8b ff                        # 1e72  mov32 r15, r15   words left, high half cleared
+4d 8b de                        # 1e75  mov r11, r14
+49 c1 e3 03                     # 1e78  shl r11, 3
+49 c1 e6 02                     # 1e7c  shl r14, 2
+4d 01 f3                        # 1e80  add r11, r14   12 * na
+4d 01 da                        # 1e83  add r10, r11   past the annotations
+49 39 ea                        # 1e86  cmp r10, rbp
+0f 87 ce 0a 00 00               # 1e89  ja 0x40295d   truncated annotations -> p3_rej
+49 83 ef 01                     # 1e8f  sub r15, 0x1
+e9 37 ff ff ff                  # 1e93  jmp 0x401dcf    -> sw_top_179
+
+# sw_done_180:
+41 8b 12                        # 1e98  ld32 rdx, [r10+0x0]   ins of main
+48 85 d2                        # 1e9b  test rdx, rdx
+74 05                           # 1e9e  je 0x401ea5   main takes arguments (jne: je over the jmp)
+e9 b8 0a 00 00                  # 1ea0  jmp 0x40295d   -> p3_rej
+4d 8b e5                        # 1ea5  mov r12, r13   r12 = word header
+
+# p3_word:
+49 39 ec                        # 1ea8  cmp r12, rbp
+0f 84 8e 0a 00 00               # 1eab  je 0x40293f   all words checked -> p3_acc
+45 8b 5c 24 0c                  # 1eb1  ld32 r11, [r12+0xc]   nc
+4d 85 db                        # 1eb6  test r11, r11
+0f 84 9e 0a 00 00               # 1eb9  je 0x40295d   empty code -> p3_rej
+4d 8d 4c 24 14                  # 1ebf  lea r9, [r12+0x14]
+
+# sc_top_187:
+4d 85 db                        # 1ec4  test r11, r11   skipCode (annotations): instructions left?
+74 6b                           # 1ec7  je 0x401f34    -> sc_done_188
+49 39 e9                        # 1ec9  cmp r9, rbp   opcode byte inside the input?
+0f 83 8b 0a 00 00               # 1ecc  jae 0x40295d    -> p3_rej
+45 0f b6 31                     # 1ed2  ld8 r14, [r9+0x0]   opcode
+49 83 fe 39                     # 1ed6  cmp r14, 0x39   prim 0x00..0x38
+72 40                           # 1eda  jb 0x401f1c    -> sc_l1_189
+49 81 fe 80 00 00 00            # 1edc  cmp r14, 0x80
+0f 82 74 0a 00 00               # 1ee3  jb 0x40295d   0x39..0x7f: no such opcode -> p3_rej
+74 29                           # 1ee9  je 0x401f14   0x80 lit u64 -> sc_l9_191
+49 81 fe 8c 00 00 00            # 1eeb  cmp r14, 0x8c
+0f 87 65 0a 00 00               # 1ef2  ja 0x40295d   0x8d..0xff: no such opcode -> p3_rej
+74 22                           # 1ef8  je 0x401f1c   0x8c ret -> sc_l1_189
+49 81 fe 83 00 00 00            # 1efa  cmp r14, 0x83
+72 09                           # 1f01  jb 0x401f0c   0x81 str, 0x82 pick -> sc_l5_190
+49 81 fe 86 00 00 00            # 1f03  cmp r14, 0x86
+72 10                           # 1f0a  jb 0x401f1c   0x83 tor, 0x84 fromr, 0x85 rfetch -> sc_l1_189
+
+# sc_l5_190:
+41 be 05 00 00 00               # 1f0c  mov r14, 0x5   opcode + u32
+eb 0e                           # 1f12  jmp 0x401f22    -> sc_len_192
+
+# sc_l9_191:
+41 be 09 00 00 00               # 1f14  mov r14, 0x9   opcode + u64
+eb 06                           # 1f1a  jmp 0x401f22    -> sc_len_192
+
+# sc_l1_189:
+41 be 01 00 00 00               # 1f1c  mov r14, 0x1   opcode alone
+
+# sc_len_192:
+4d 01 f1                        # 1f22  add r9, r14   past the instruction
+49 39 e9                        # 1f25  cmp r9, rbp
+0f 87 2f 0a 00 00               # 1f28  ja 0x40295d   truncated instruction -> p3_rej
+49 83 eb 01                     # 1f2e  sub r11, 0x1
+eb 90                           # 1f32  jmp 0x401ec4    -> sc_top_187
+
+# sc_done_188:
+45 31 c0                        # 1f34  xor r8, r8   i = 0
+45 8b 74 24 10                  # 1f37  ld32 r14, [r12+0x10]   lookup (0): na
+4d 8b de                        # 1f3c  mov r11, r14
+49 c1 e3 03                     # 1f3f  shl r11, 3
+49 c1 e6 02                     # 1f43  shl r14, 2
+4d 01 f3                        # 1f47  add r11, r14
+4d 01 cb                        # 1f4a  add r11, r9   r11 = end of the annotations
+4d 8b d1                        # 1f4d  mov r10, r9
+
+# lk_top_193:
+4d 39 da                        # 1f50  cmp r10, r11
+74 0e                           # 1f53  je 0x401f63   none -> lk_done_194
+45 8b 32                        # 1f55  ld32 r14, [r10+0x0]
+4d 39 c6                        # 1f58  cmp r14, r8
+74 06                           # 1f5b  je 0x401f63   found -> lk_done_194
+49 83 c2 0c                     # 1f5d  add r10, 0xc
+eb ed                           # 1f61  jmp 0x401f50    -> lk_top_193
+
+# lk_done_194:
+4d 39 da                        # 1f63  cmp r10, r11
+74 20                           # 1f66  je 0x401f88    -> init_195
+45 8b 72 04                     # 1f68  ld32 r14, [r10+0x4]
+45 8b 3c 24                     # 1f6c  ld32 r15, [r12+0x0]
+4d 39 fe                        # 1f70  cmp r14, r15
+74 05                           # 1f73  je 0x401f7a   H[0].d != ins (jne: je over the jmp)
+e9 e3 09 00 00                  # 1f75  jmp 0x40295d   -> p3_rej
+45 8b 72 08                     # 1f7a  ld32 r14, [r10+0x8]
+4d 85 f6                        # 1f7e  test r14, r14
+74 05                           # 1f81  je 0x401f88   H[0].a != 0 (jne: je over the jmp)
+e9 d5 09 00 00                  # 1f83  jmp 0x40295d   -> p3_rej
+
+# init_195:
+41 8b 14 24                     # 1f88  ld32 rdx, [r12+0x0]   curD = ins
+31 ff                           # 1f8c  xor rdi, rdi   curA = 0
+49 8d 74 24 14                  # 1f8e  lea rsi, [r12+0x14]   p = first instruction
+
+# p3_walk:
+45 8b 7c 24 0c                  # 1f93  ld32 r15, [r12+0xc]
+4d 39 f8                        # 1f98  cmp r8, r15
+0f 84 07 09 00 00               # 1f9b  je 0x4028a8   i == nc -> p3_wdone
+45 8b 74 24 10                  # 1fa1  ld32 r14, [r12+0x10]   lookup (i): na
+4d 8b de                        # 1fa6  mov r11, r14
+49 c1 e3 03                     # 1fa9  shl r11, 3
+49 c1 e6 02                     # 1fad  shl r14, 2
+4d 01 f3                        # 1fb1  add r11, r14
+4d 01 cb                        # 1fb4  add r11, r9   r11 = end of the annotations
+4d 8b d1                        # 1fb7  mov r10, r9
+
+# lk_top_196:
+4d 39 da                        # 1fba  cmp r10, r11
+74 0e                           # 1fbd  je 0x401fcd   none -> lk_done_197
+45 8b 32                        # 1fbf  ld32 r14, [r10+0x0]
+4d 39 c6                        # 1fc2  cmp r14, r8
+74 06                           # 1fc5  je 0x401fcd   found -> lk_done_197
+49 83 c2 0c                     # 1fc7  add r10, 0xc
+eb ed                           # 1fcb  jmp 0x401fba    -> lk_top_196
+
+# lk_done_197:
+4d 39 da                        # 1fcd  cmp r10, r11
+74 08                           # 1fd0  je 0x401fda    -> hready_198
+41 8b 52 04                     # 1fd2  ld32 rdx, [r10+0x4]   h = annotation at i
+41 8b 7a 08                     # 1fd6  ld32 rdi, [r10+0x8]
+
+# hready_198:
+44 0f b6 3e                     # 1fda  ld8 r15, [rsi+0x0]   opcode
+49 83 ff 39                     # 1fde  cmp r15, 0x39
+0f 82 ae 00 00 00               # 1fe2  jb 0x402096    -> p3_prim
+49 81 ff 80 00 00 00            # 1fe8  cmp r15, 0x80
+0f 84 ac 04 00 00               # 1fef  je 0x4024a1    -> p3_lit
+49 81 ff 81 00 00 00            # 1ff5  cmp r15, 0x81
+0f 84 bf 04 00 00               # 1ffc  je 0x4024c1    -> p3_str
+49 81 ff 82 00 00 00            # 2002  cmp r15, 0x82
+0f 84 d2 04 00 00               # 2009  je 0x4024e1    -> p3_pick
+49 81 ff 83 00 00 00            # 200f  cmp r15, 0x83
+0f 84 f2 04 00 00               # 2016  je 0x40250e    -> p3_tor
+49 81 ff 84 00 00 00            # 201c  cmp r15, 0x84
+0f 84 12 05 00 00               # 2023  je 0x40253b    -> p3_fromr
+49 81 ff 85 00 00 00            # 2029  cmp r15, 0x85
+0f 84 32 05 00 00               # 2030  je 0x402568    -> p3_rfetch
+49 81 ff 86 00 00 00            # 2036  cmp r15, 0x86
+0f 84 4e 05 00 00               # 203d  je 0x402591    -> p3_locget
+49 81 ff 87 00 00 00            # 2043  cmp r15, 0x87
+0f 84 73 05 00 00               # 204a  je 0x4025c3    -> p3_locset
+49 81 ff 88 00 00 00            # 2050  cmp r15, 0x88
+0f 84 90 05 00 00               # 2057  je 0x4025ed    -> p3_jmp
+49 81 ff 89 00 00 00            # 205d  cmp r15, 0x89
+0f 84 e3 05 00 00               # 2064  je 0x40264d    -> p3_jz
+49 81 ff 8a 00 00 00            # 206a  cmp r15, 0x8a
+0f 84 d6 05 00 00               # 2071  je 0x40264d    -> p3_jz
+49 81 ff 8b 00 00 00            # 2077  cmp r15, 0x8b
+0f 84 36 06 00 00               # 207e  je 0x4026ba    -> p3_call
+49 81 ff 8c 00 00 00            # 2084  cmp r15, 0x8c
+0f 84 41 07 00 00               # 208b  je 0x4027d2    -> p3_ret
+e9 c7 08 00 00                  # 2091  jmp 0x40295d   unreachable after parse -> p3_rej
+
+# p3_prim:
+49 83 ff 32                     # 2096  cmp r15, 0x32
+0f 84 ed 03 00 00               # 209a  je 0x40248d    -> p3_exit
+49 83 ff 22                     # 20a0  cmp r15, 0x22
+0f 83 dc 01 00 00               # 20a4  jae 0x402286    -> eff_199
+49 83 ff 0f                     # 20aa  cmp r15, 0xf
+0f 83 e9 00 00 00               # 20ae  jae 0x40219d    -> eff_200
+49 83 ff 04                     # 20b4  cmp r15, 0x4
+0f 83 62 00 00 00               # 20b8  jae 0x402120    -> eff_201
+49 83 ff 02                     # 20be  cmp r15, 0x2
+0f 83 2c 00 00 00               # 20c2  jae 0x4020f4    -> eff_202
+49 83 ff 01                     # 20c8  cmp r15, 0x1
+0f 83 11 00 00 00               # 20cc  jae 0x4020e3    -> eff_203
+41 ba 01 00 00 00               # 20d2  mov r10, 0x1   ops 0..0: takes 1
+41 bb 02 00 00 00               # 20d8  mov r11, 0x2   pushes 2
+e9 7f 03 00 00                  # 20de  jmp 0x402462    -> p3_have
+
+# eff_203:
+41 ba 01 00 00 00               # 20e3  mov r10, 0x1   ops 1..1: takes 1
+41 bb 00 00 00 00               # 20e9  mov r11, 0x0   pushes 0
+e9 6e 03 00 00                  # 20ef  jmp 0x402462    -> p3_have
+
+# eff_202:
+49 83 ff 03                     # 20f4  cmp r15, 0x3
+0f 83 11 00 00 00               # 20f8  jae 0x40210f    -> eff_204
+41 ba 02 00 00 00               # 20fe  mov r10, 0x2   ops 2..2: takes 2
+41 bb 02 00 00 00               # 2104  mov r11, 0x2   pushes 2
+e9 53 03 00 00                  # 210a  jmp 0x402462    -> p3_have
+
+# eff_204:
+41 ba 02 00 00 00               # 210f  mov r10, 0x2   ops 3..3: takes 2
+41 bb 03 00 00 00               # 2115  mov r11, 0x3   pushes 3
+e9 42 03 00 00                  # 211b  jmp 0x402462    -> p3_have
+
+# eff_201:
+49 83 ff 06                     # 2120  cmp r15, 0x6
+0f 83 2c 00 00 00               # 2124  jae 0x402156    -> eff_205
+49 83 ff 05                     # 212a  cmp r15, 0x5
+0f 83 11 00 00 00               # 212e  jae 0x402145    -> eff_206
+41 ba 03 00 00 00               # 2134  mov r10, 0x3   ops 4..4: takes 3
+41 bb 03 00 00 00               # 213a  mov r11, 0x3   pushes 3
+e9 1d 03 00 00                  # 2140  jmp 0x402462    -> p3_have
+
+# eff_206:
+41 ba 02 00 00 00               # 2145  mov r10, 0x2   ops 5..5: takes 2
+41 bb 01 00 00 00               # 214b  mov r11, 0x1   pushes 1
+e9 0c 03 00 00                  # 2151  jmp 0x402462    -> p3_have
+
+# eff_205:
+49 83 ff 07                     # 2156  cmp r15, 0x7
+0f 83 11 00 00 00               # 215a  jae 0x402171    -> eff_207
+41 ba 02 00 00 00               # 2160  mov r10, 0x2   ops 6..6: takes 2
+41 bb 03 00 00 00               # 2166  mov r11, 0x3   pushes 3
+e9 f1 02 00 00                  # 216c  jmp 0x402462    -> p3_have
+
+# eff_207:
+49 83 ff 0e                     # 2171  cmp r15, 0xe
+0f 83 11 00 00 00               # 2175  jae 0x40218c    -> eff_208
+41 ba 02 00 00 00               # 217b  mov r10, 0x2   ops 7..13: takes 2
+41 bb 01 00 00 00               # 2181  mov r11, 0x1   pushes 1
+e9 d6 02 00 00                  # 2187  jmp 0x402462    -> p3_have
+
+# eff_208:
+41 ba 01 00 00 00               # 218c  mov r10, 0x1   ops 14..14: takes 1
+41 bb 01 00 00 00               # 2192  mov r11, 0x1   pushes 1
+e9 c5 02 00 00                  # 2198  jmp 0x402462    -> p3_have
+
+# eff_200:
+49 83 ff 1d                     # 219d  cmp r15, 0x1d
+0f 83 62 00 00 00               # 21a1  jae 0x402209    -> eff_209
+49 83 ff 13                     # 21a7  cmp r15, 0x13
+0f 83 2c 00 00 00               # 21ab  jae 0x4021dd    -> eff_210
+49 83 ff 12                     # 21b1  cmp r15, 0x12
+0f 83 11 00 00 00               # 21b5  jae 0x4021cc    -> eff_211
+41 ba 02 00 00 00               # 21bb  mov r10, 0x2   ops 15..17: takes 2
+41 bb 01 00 00 00               # 21c1  mov r11, 0x1   pushes 1
+e9 96 02 00 00                  # 21c7  jmp 0x402462    -> p3_have
+
+# eff_211:
+41 ba 01 00 00 00               # 21cc  mov r10, 0x1   ops 18..18: takes 1
+41 bb 01 00 00 00               # 21d2  mov r11, 0x1   pushes 1
+e9 85 02 00 00                  # 21d8  jmp 0x402462    -> p3_have
+
+# eff_210:
+49 83 ff 1c                     # 21dd  cmp r15, 0x1c
+0f 83 11 00 00 00               # 21e1  jae 0x4021f8    -> eff_212
+41 ba 02 00 00 00               # 21e7  mov r10, 0x2   ops 19..27: takes 2
+41 bb 01 00 00 00               # 21ed  mov r11, 0x1   pushes 1
+e9 6a 02 00 00                  # 21f3  jmp 0x402462    -> p3_have
+
+# eff_212:
+41 ba 01 00 00 00               # 21f8  mov r10, 0x1   ops 28..28: takes 1
+41 bb 01 00 00 00               # 21fe  mov r11, 0x1   pushes 1
+e9 59 02 00 00                  # 2204  jmp 0x402462    -> p3_have
+
+# eff_209:
+49 83 ff 1f                     # 2209  cmp r15, 0x1f
+0f 83 2c 00 00 00               # 220d  jae 0x40223f    -> eff_213
+49 83 ff 1e                     # 2213  cmp r15, 0x1e
+0f 83 11 00 00 00               # 2217  jae 0x40222e    -> eff_214
+41 ba 02 00 00 00               # 221d  mov r10, 0x2   ops 29..29: takes 2
+41 bb 00 00 00 00               # 2223  mov r11, 0x0   pushes 0
+e9 34 02 00 00                  # 2229  jmp 0x402462    -> p3_have
+
+# eff_214:
+41 ba 01 00 00 00               # 222e  mov r10, 0x1   ops 30..30: takes 1
+41 bb 01 00 00 00               # 2234  mov r11, 0x1   pushes 1
+e9 23 02 00 00                  # 223a  jmp 0x402462    -> p3_have
+
+# eff_213:
+49 83 ff 20                     # 223f  cmp r15, 0x20
+0f 83 11 00 00 00               # 2243  jae 0x40225a    -> eff_215
+41 ba 02 00 00 00               # 2249  mov r10, 0x2   ops 31..31: takes 2
+41 bb 00 00 00 00               # 224f  mov r11, 0x0   pushes 0
+e9 08 02 00 00                  # 2255  jmp 0x402462    -> p3_have
+
+# eff_215:
+49 83 ff 21                     # 225a  cmp r15, 0x21
+0f 83 11 00 00 00               # 225e  jae 0x402275    -> eff_216
+41 ba 01 00 00 00               # 2264  mov r10, 0x1   ops 32..32: takes 1
+41 bb 01 00 00 00               # 226a  mov r11, 0x1   pushes 1
+e9 ed 01 00 00                  # 2270  jmp 0x402462    -> p3_have
+
+# eff_216:
+41 ba 02 00 00 00               # 2275  mov r10, 0x2   ops 33..33: takes 2
+41 bb 00 00 00 00               # 227b  mov r11, 0x0   pushes 0
+e9 dc 01 00 00                  # 2281  jmp 0x402462    -> p3_have
+
+# eff_199:
+49 83 ff 2c                     # 2286  cmp r15, 0x2c
+0f 83 e9 00 00 00               # 228a  jae 0x402379    -> eff_217
+49 83 ff 27                     # 2290  cmp r15, 0x27
+0f 83 62 00 00 00               # 2294  jae 0x4022fc    -> eff_218
+49 83 ff 24                     # 229a  cmp r15, 0x24
+0f 83 2c 00 00 00               # 229e  jae 0x4022d0    -> eff_219
+49 83 ff 23                     # 22a4  cmp r15, 0x23
+0f 83 11 00 00 00               # 22a8  jae 0x4022bf    -> eff_220
+41 ba 01 00 00 00               # 22ae  mov r10, 0x1   ops 34..34: takes 1
+41 bb 01 00 00 00               # 22b4  mov r11, 0x1   pushes 1
+e9 a3 01 00 00                  # 22ba  jmp 0x402462    -> p3_have
+
+# eff_220:
+41 ba 02 00 00 00               # 22bf  mov r10, 0x2   ops 35..35: takes 2
+41 bb 00 00 00 00               # 22c5  mov r11, 0x0   pushes 0
+e9 92 01 00 00                  # 22cb  jmp 0x402462    -> p3_have
+
+# eff_219:
+49 83 ff 26                     # 22d0  cmp r15, 0x26
+0f 83 11 00 00 00               # 22d4  jae 0x4022eb    -> eff_221
+41 ba 03 00 00 00               # 22da  mov r10, 0x3   ops 36..37: takes 3
+41 bb 00 00 00 00               # 22e0  mov r11, 0x0   pushes 0
+e9 77 01 00 00                  # 22e6  jmp 0x402462    -> p3_have
+
+# eff_221:
+41 ba 03 00 00 00               # 22eb  mov r10, 0x3   ops 38..38: takes 3
+41 bb 01 00 00 00               # 22f1  mov r11, 0x1   pushes 1
+e9 66 01 00 00                  # 22f7  jmp 0x402462    -> p3_have
+
+# eff_218:
+49 83 ff 29                     # 22fc  cmp r15, 0x29
+0f 83 2c 00 00 00               # 2300  jae 0x402332    -> eff_222
+49 83 ff 28                     # 2306  cmp r15, 0x28
+0f 83 11 00 00 00               # 230a  jae 0x402321    -> eff_223
+41 ba 01 00 00 00               # 2310  mov r10, 0x1   ops 39..39: takes 1
+41 bb 01 00 00 00               # 2316  mov r11, 0x1   pushes 1
+e9 41 01 00 00                  # 231c  jmp 0x402462    -> p3_have
+
+# eff_223:
+41 ba 00 00 00 00               # 2321  mov r10, 0x0   ops 40..40: takes 0
+41 bb 01 00 00 00               # 2327  mov r11, 0x1   pushes 1
+e9 30 01 00 00                  # 232d  jmp 0x402462    -> p3_have
+
+# eff_222:
+49 83 ff 2a                     # 2332  cmp r15, 0x2a
+0f 83 11 00 00 00               # 2336  jae 0x40234d    -> eff_224
+41 ba 01 00 00 00               # 233c  mov r10, 0x1   ops 41..41: takes 1
+41 bb 00 00 00 00               # 2342  mov r11, 0x0   pushes 0
+e9 15 01 00 00                  # 2348  jmp 0x402462    -> p3_have
+
+# eff_224:
+49 83 ff 2b                     # 234d  cmp r15, 0x2b
+0f 83 11 00 00 00               # 2351  jae 0x402368    -> eff_225
+41 ba 04 00 00 00               # 2357  mov r10, 0x4   ops 42..42: takes 4
+41 bb 01 00 00 00               # 235d  mov r11, 0x1   pushes 1
+e9 fa 00 00 00                  # 2363  jmp 0x402462    -> p3_have
+
+# eff_225:
+41 ba 02 00 00 00               # 2368  mov r10, 0x2   ops 43..43: takes 2
+41 bb 01 00 00 00               # 236e  mov r11, 0x1   pushes 1
+e9 e9 00 00 00                  # 2374  jmp 0x402462    -> p3_have
+
+# eff_217:
+49 83 ff 30                     # 2379  cmp r15, 0x30
+0f 83 62 00 00 00               # 237d  jae 0x4023e5    -> eff_226
+49 83 ff 2e                     # 2383  cmp r15, 0x2e
+0f 83 2c 00 00 00               # 2387  jae 0x4023b9    -> eff_227
+49 83 ff 2d                     # 238d  cmp r15, 0x2d
+0f 83 11 00 00 00               # 2391  jae 0x4023a8    -> eff_228
+41 ba 00 00 00 00               # 2397  mov r10, 0x0   ops 44..44: takes 0
+41 bb 01 00 00 00               # 239d  mov r11, 0x1   pushes 1
+e9 ba 00 00 00                  # 23a3  jmp 0x402462    -> p3_have
+
+# eff_228:
+41 ba 03 00 00 00               # 23a8  mov r10, 0x3   ops 45..45: takes 3
+41 bb 00 00 00 00               # 23ae  mov r11, 0x0   pushes 0
+e9 a9 00 00 00                  # 23b4  jmp 0x402462    -> p3_have
+
+# eff_227:
+49 83 ff 2f                     # 23b9  cmp r15, 0x2f
+0f 83 11 00 00 00               # 23bd  jae 0x4023d4    -> eff_229
+41 ba 02 00 00 00               # 23c3  mov r10, 0x2   ops 46..46: takes 2
+41 bb 02 00 00 00               # 23c9  mov r11, 0x2   pushes 2
+e9 8e 00 00 00                  # 23cf  jmp 0x402462    -> p3_have
+
+# eff_229:
+41 ba 00 00 00 00               # 23d4  mov r10, 0x0   ops 47..47: takes 0
+41 bb 01 00 00 00               # 23da  mov r11, 0x1   pushes 1
+e9 7d 00 00 00                  # 23e0  jmp 0x402462    -> p3_have
+
+# eff_226:
+49 83 ff 35                     # 23e5  cmp r15, 0x35
+0f 83 2c 00 00 00               # 23e9  jae 0x40241b    -> eff_230
+49 83 ff 33                     # 23ef  cmp r15, 0x33
+0f 83 11 00 00 00               # 23f3  jae 0x40240a    -> eff_231
+41 ba 01 00 00 00               # 23f9  mov r10, 0x1   ops 48..50: takes 1
+41 bb 00 00 00 00               # 23ff  mov r11, 0x0   pushes 0
+e9 58 00 00 00                  # 2405  jmp 0x402462    -> p3_have
+
+# eff_231:
+41 ba 00 00 00 00               # 240a  mov r10, 0x0   ops 51..52: takes 0
+41 bb 01 00 00 00               # 2410  mov r11, 0x1   pushes 1
+e9 47 00 00 00                  # 2416  jmp 0x402462    -> p3_have
+
+# eff_230:
+49 83 ff 36                     # 241b  cmp r15, 0x36
+0f 83 11 00 00 00               # 241f  jae 0x402436    -> eff_232
+41 ba 01 00 00 00               # 2425  mov r10, 0x1   ops 53..53: takes 1
+41 bb 01 00 00 00               # 242b  mov r11, 0x1   pushes 1
+e9 2c 00 00 00                  # 2431  jmp 0x402462    -> p3_have
+
+# eff_232:
+49 83 ff 38                     # 2436  cmp r15, 0x38
+0f 83 11 00 00 00               # 243a  jae 0x402451    -> eff_233
+41 ba 01 00 00 00               # 2440  mov r10, 0x1   ops 54..55: takes 1
+41 bb 02 00 00 00               # 2446  mov r11, 0x2   pushes 2
+e9 11 00 00 00                  # 244c  jmp 0x402462    -> p3_have
+
+# eff_233:
+41 ba 02 00 00 00               # 2451  mov r10, 0x2   ops 56..56: takes 2
+41 bb 01 00 00 00               # 2457  mov r11, 0x1   pushes 1
+e9 00 00 00 00                  # 245d  jmp 0x402462    -> p3_have
+
+# p3_have:
+4c 39 d2                        # 2462  cmp rdx, r10
+0f 82 f2 04 00 00               # 2465  jb 0x40295d   too few operands -> p3_rej
+4c 29 d2                        # 246b  sub rdx, r10
+4c 01 da                        # 246e  add rdx, r11
+4c 8b d2                        # 2471  mov r10, rdx
+49 c1 ea 30                     # 2474  shr r10, 48
+4d 85 d2                        # 2478  test r10, r10
+74 05                           # 247b  je 0x402482   height >= 2^48 (jne: je over the jmp)
+e9 cc 04 00 00                  # 247d  jmp 0x40294e   -> p3_ovf
+41 bf 01 00 00 00               # 2482  mov r15, 0x1
+e9 69 03 00 00                  # 2488  jmp 0x4027f6    -> p3_fall
+
+# p3_exit:
+48 85 d2                        # 248d  test rdx, rdx
+0f 84 c7 04 00 00               # 2490  je 0x40295d   exit needs one operand -> p3_rej
+41 bf 01 00 00 00               # 2496  mov r15, 0x1
+e9 bc 03 00 00                  # 249c  jmp 0x40285d    -> p3_nofall
+
+# p3_lit:
+48 83 c2 01                     # 24a1  add rdx, 0x1
+4c 8b d2                        # 24a5  mov r10, rdx
+49 c1 ea 30                     # 24a8  shr r10, 48
+4d 85 d2                        # 24ac  test r10, r10
+74 05                           # 24af  je 0x4024b6   height >= 2^48 (jne: je over the jmp)
+e9 98 04 00 00                  # 24b1  jmp 0x40294e   -> p3_ovf
+41 bf 09 00 00 00               # 24b6  mov r15, 0x9
+e9 35 03 00 00                  # 24bc  jmp 0x4027f6    -> p3_fall
+
+# p3_str:
+48 83 c2 02                     # 24c1  add rdx, 0x2
+4c 8b d2                        # 24c5  mov r10, rdx
+49 c1 ea 30                     # 24c8  shr r10, 48
+4d 85 d2                        # 24cc  test r10, r10
+74 05                           # 24cf  je 0x4024d6   height >= 2^48 (jne: je over the jmp)
+e9 78 04 00 00                  # 24d1  jmp 0x40294e   -> p3_ovf
+41 bf 05 00 00 00               # 24d6  mov r15, 0x5
+e9 15 03 00 00                  # 24dc  jmp 0x4027f6    -> p3_fall
+
+# p3_pick:
+44 8b 56 01                     # 24e1  ld32 r10, [rsi+0x1]
+49 39 d2                        # 24e5  cmp r10, rdx
+0f 83 6f 04 00 00               # 24e8  jae 0x40295d   pick beyond the stack -> p3_rej
+48 83 c2 01                     # 24ee  add rdx, 0x1
+4c 8b d2                        # 24f2  mov r10, rdx
+49 c1 ea 30                     # 24f5  shr r10, 48
+4d 85 d2                        # 24f9  test r10, r10
+74 05                           # 24fc  je 0x402503   height >= 2^48 (jne: je over the jmp)
+e9 4b 04 00 00                  # 24fe  jmp 0x40294e   -> p3_ovf
+41 bf 05 00 00 00               # 2503  mov r15, 0x5
+e9 e8 02 00 00                  # 2509  jmp 0x4027f6    -> p3_fall
+
+# p3_tor:
+48 85 d2                        # 250e  test rdx, rdx
+0f 84 46 04 00 00               # 2511  je 0x40295d    -> p3_rej
+48 83 ea 01                     # 2517  sub rdx, 0x1
+48 83 c7 01                     # 251b  add rdi, 0x1
+4c 8b d7                        # 251f  mov r10, rdi
+49 c1 ea 30                     # 2522  shr r10, 48
+4d 85 d2                        # 2526  test r10, r10
+74 05                           # 2529  je 0x402530   height >= 2^48 (jne: je over the jmp)
+e9 1e 04 00 00                  # 252b  jmp 0x40294e   -> p3_ovf
+41 bf 01 00 00 00               # 2530  mov r15, 0x1
+e9 bb 02 00 00                  # 2536  jmp 0x4027f6    -> p3_fall
+
+# p3_fromr:
+48 85 ff                        # 253b  test rdi, rdi
+0f 84 19 04 00 00               # 253e  je 0x40295d    -> p3_rej
+48 83 ef 01                     # 2544  sub rdi, 0x1
+48 83 c2 01                     # 2548  add rdx, 0x1
+4c 8b d2                        # 254c  mov r10, rdx
+49 c1 ea 30                     # 254f  shr r10, 48
+4d 85 d2                        # 2553  test r10, r10
+74 05                           # 2556  je 0x40255d   height >= 2^48 (jne: je over the jmp)
+e9 f1 03 00 00                  # 2558  jmp 0x40294e   -> p3_ovf
+41 bf 01 00 00 00               # 255d  mov r15, 0x1
+e9 8e 02 00 00                  # 2563  jmp 0x4027f6    -> p3_fall
+
+# p3_rfetch:
+48 85 ff                        # 2568  test rdi, rdi
+0f 84 ec 03 00 00               # 256b  je 0x40295d    -> p3_rej
+48 83 c2 01                     # 2571  add rdx, 0x1
+4c 8b d2                        # 2575  mov r10, rdx
+49 c1 ea 30                     # 2578  shr r10, 48
+4d 85 d2                        # 257c  test r10, r10
+74 05                           # 257f  je 0x402586   height >= 2^48 (jne: je over the jmp)
+e9 c8 03 00 00                  # 2581  jmp 0x40294e   -> p3_ovf
+41 bf 01 00 00 00               # 2586  mov r15, 0x1
+e9 65 02 00 00                  # 258c  jmp 0x4027f6    -> p3_fall
+
+# p3_locget:
+44 8b 56 01                     # 2591  ld32 r10, [rsi+0x1]
+45 8b 5c 24 08                  # 2595  ld32 r11, [r12+0x8]   locals
+4d 39 da                        # 259a  cmp r10, r11
+0f 83 ba 03 00 00               # 259d  jae 0x40295d    -> p3_rej
+48 83 c2 01                     # 25a3  add rdx, 0x1
+4c 8b d2                        # 25a7  mov r10, rdx
+49 c1 ea 30                     # 25aa  shr r10, 48
+4d 85 d2                        # 25ae  test r10, r10
+74 05                           # 25b1  je 0x4025b8   height >= 2^48 (jne: je over the jmp)
+e9 96 03 00 00                  # 25b3  jmp 0x40294e   -> p3_ovf
+41 bf 05 00 00 00               # 25b8  mov r15, 0x5
+e9 33 02 00 00                  # 25be  jmp 0x4027f6    -> p3_fall
+
+# p3_locset:
+48 85 d2                        # 25c3  test rdx, rdx
+0f 84 91 03 00 00               # 25c6  je 0x40295d    -> p3_rej
+44 8b 56 01                     # 25cc  ld32 r10, [rsi+0x1]
+45 8b 5c 24 08                  # 25d0  ld32 r11, [r12+0x8]   locals
+4d 39 da                        # 25d5  cmp r10, r11
+0f 83 7f 03 00 00               # 25d8  jae 0x40295d    -> p3_rej
+48 83 ea 01                     # 25de  sub rdx, 0x1
+41 bf 05 00 00 00               # 25e2  mov r15, 0x5
+e9 09 02 00 00                  # 25e8  jmp 0x4027f6    -> p3_fall
+
+# p3_jmp:
+44 8b 7e 01                     # 25ed  ld32 r15, [rsi+0x1]   t
+45 8b 74 24 10                  # 25f1  ld32 r14, [r12+0x10]   lookup (jmp t): na
+4d 8b de                        # 25f6  mov r11, r14
+49 c1 e3 03                     # 25f9  shl r11, 3
+49 c1 e6 02                     # 25fd  shl r14, 2
+4d 01 f3                        # 2601  add r11, r14
+4d 01 cb                        # 2604  add r11, r9   r11 = end of the annotations
+4d 8b d1                        # 2607  mov r10, r9
+
+# lk_top_234:
+4d 39 da                        # 260a  cmp r10, r11
+74 0e                           # 260d  je 0x40261d   none -> lk_done_235
+45 8b 32                        # 260f  ld32 r14, [r10+0x0]
+4d 39 fe                        # 2612  cmp r14, r15
+74 06                           # 2615  je 0x40261d   found -> lk_done_235
+49 83 c2 0c                     # 2617  add r10, 0xc
+eb ed                           # 261b  jmp 0x40260a    -> lk_top_234
+
+# lk_done_235:
+4d 39 da                        # 261d  cmp r10, r11
+0f 84 37 03 00 00               # 2620  je 0x40295d   no annotation at t -> p3_rej
+45 8b 72 04                     # 2626  ld32 r14, [r10+0x4]
+49 39 d6                        # 262a  cmp r14, rdx
+74 05                           # 262d  je 0x402634    (jne: je over the jmp)
+e9 29 03 00 00                  # 262f  jmp 0x40295d   -> p3_rej
+45 8b 72 08                     # 2634  ld32 r14, [r10+0x8]
+49 39 fe                        # 2638  cmp r14, rdi
+74 05                           # 263b  je 0x402642    (jne: je over the jmp)
+e9 1b 03 00 00                  # 263d  jmp 0x40295d   -> p3_rej
+41 bf 05 00 00 00               # 2642  mov r15, 0x5
+e9 10 02 00 00                  # 2648  jmp 0x40285d    -> p3_nofall
+
+# p3_jz:
+48 85 d2                        # 264d  test rdx, rdx
+0f 84 07 03 00 00               # 2650  je 0x40295d    -> p3_rej
+48 83 ea 01                     # 2656  sub rdx, 0x1
+44 8b 7e 01                     # 265a  ld32 r15, [rsi+0x1]   t
+45 8b 74 24 10                  # 265e  ld32 r14, [r12+0x10]   lookup (jz t): na
+4d 8b de                        # 2663  mov r11, r14
+49 c1 e3 03                     # 2666  shl r11, 3
+49 c1 e6 02                     # 266a  shl r14, 2
+4d 01 f3                        # 266e  add r11, r14
+4d 01 cb                        # 2671  add r11, r9   r11 = end of the annotations
+4d 8b d1                        # 2674  mov r10, r9
+
+# lk_top_236:
+4d 39 da                        # 2677  cmp r10, r11
+74 0e                           # 267a  je 0x40268a   none -> lk_done_237
+45 8b 32                        # 267c  ld32 r14, [r10+0x0]
+4d 39 fe                        # 267f  cmp r14, r15
+74 06                           # 2682  je 0x40268a   found -> lk_done_237
+49 83 c2 0c                     # 2684  add r10, 0xc
+eb ed                           # 2688  jmp 0x402677    -> lk_top_236
+
+# lk_done_237:
+4d 39 da                        # 268a  cmp r10, r11
+0f 84 ca 02 00 00               # 268d  je 0x40295d   no annotation at t -> p3_rej
+45 8b 72 04                     # 2693  ld32 r14, [r10+0x4]
+49 39 d6                        # 2697  cmp r14, rdx
+74 05                           # 269a  je 0x4026a1    (jne: je over the jmp)
+e9 bc 02 00 00                  # 269c  jmp 0x40295d   -> p3_rej
+45 8b 72 08                     # 26a1  ld32 r14, [r10+0x8]
+49 39 fe                        # 26a5  cmp r14, rdi
+74 05                           # 26a8  je 0x4026af    (jne: je over the jmp)
+e9 ae 02 00 00                  # 26aa  jmp 0x40295d   -> p3_rej
+41 bf 05 00 00 00               # 26af  mov r15, 0x5
+e9 3c 01 00 00                  # 26b5  jmp 0x4027f6    -> p3_fall
+
+# p3_call:
+44 8b 7e 01                     # 26ba  ld32 r15, [rsi+0x1]   w
+41 be 00 20 60 00               # 26be  mov r14, 0x602000
+4d 8b 36                        # 26c4  ld r14, [r14+0x0]   base
+45 8b 76 08                     # 26c7  ld32 r14, [r14+0x8]   nw
+4d 39 f7                        # 26cb  cmp r15, r14
+0f 83 89 02 00 00               # 26ce  jae 0x40295d   no such word -> p3_rej
+4d 8b d5                        # 26d4  mov r10, r13   rescan from ws
+
+# sw_top_238:
+4d 85 ff                        # 26d7  test r15, r15   skipWords (call): words left?
+0f 84 c0 00 00 00               # 26da  je 0x4027a0    -> sw_done_239
+4d 8b f2                        # 26e0  mov r14, r10
+49 83 c6 14                     # 26e3  add r14, 0x14
+49 39 ee                        # 26e7  cmp r14, rbp
+0f 87 6d 02 00 00               # 26ea  ja 0x40295d   truncated word header -> p3_rej
+45 8b 72 10                     # 26f0  ld32 r14, [r10+0x10]   na
+49 c1 e6 20                     # 26f4  shl r14, 32
+4d 01 f7                        # 26f8  add r15, r14   park na in the high half
+45 8b 5a 0c                     # 26fb  ld32 r11, [r10+0xc]   nc
+49 83 c2 14                     # 26ff  add r10, 0x14   first instruction
+
+# sc_top_240:
+4d 85 db                        # 2703  test r11, r11   skipCode (call): instructions left?
+74 6b                           # 2706  je 0x402773    -> sc_done_241
+49 39 ea                        # 2708  cmp r10, rbp   opcode byte inside the input?
+0f 83 4c 02 00 00               # 270b  jae 0x40295d    -> p3_rej
+45 0f b6 32                     # 2711  ld8 r14, [r10+0x0]   opcode
+49 83 fe 39                     # 2715  cmp r14, 0x39   prim 0x00..0x38
+72 40                           # 2719  jb 0x40275b    -> sc_l1_242
+49 81 fe 80 00 00 00            # 271b  cmp r14, 0x80
+0f 82 35 02 00 00               # 2722  jb 0x40295d   0x39..0x7f: no such opcode -> p3_rej
+74 29                           # 2728  je 0x402753   0x80 lit u64 -> sc_l9_244
+49 81 fe 8c 00 00 00            # 272a  cmp r14, 0x8c
+0f 87 26 02 00 00               # 2731  ja 0x40295d   0x8d..0xff: no such opcode -> p3_rej
+74 22                           # 2737  je 0x40275b   0x8c ret -> sc_l1_242
+49 81 fe 83 00 00 00            # 2739  cmp r14, 0x83
+72 09                           # 2740  jb 0x40274b   0x81 str, 0x82 pick -> sc_l5_243
+49 81 fe 86 00 00 00            # 2742  cmp r14, 0x86
+72 10                           # 2749  jb 0x40275b   0x83 tor, 0x84 fromr, 0x85 rfetch -> sc_l1_242
+
+# sc_l5_243:
+41 be 05 00 00 00               # 274b  mov r14, 0x5   opcode + u32
+eb 0e                           # 2751  jmp 0x402761    -> sc_len_245
+
+# sc_l9_244:
+41 be 09 00 00 00               # 2753  mov r14, 0x9   opcode + u64
+eb 06                           # 2759  jmp 0x402761    -> sc_len_245
+
+# sc_l1_242:
+41 be 01 00 00 00               # 275b  mov r14, 0x1   opcode alone
+
+# sc_len_245:
+4d 01 f2                        # 2761  add r10, r14   past the instruction
+49 39 ea                        # 2764  cmp r10, rbp
+0f 87 f0 01 00 00               # 2767  ja 0x40295d   truncated instruction -> p3_rej
+49 83 eb 01                     # 276d  sub r11, 0x1
+eb 90                           # 2771  jmp 0x402703    -> sc_top_240
+
+# sc_done_241:
+4d 8b f7                        # 2773  mov r14, r15
+49 c1 ee 20                     # 2776  shr r14, 32   na
+45 8b ff                        # 277a  mov32 r15, r15   words left, high half cleared
+4d 8b de                        # 277d  mov r11, r14
+49 c1 e3 03                     # 2780  shl r11, 3
+49 c1 e6 02                     # 2784  shl r14, 2
+4d 01 f3                        # 2788  add r11, r14   12 * na
+4d 01 da                        # 278b  add r10, r11   past the annotations
+49 39 ea                        # 278e  cmp r10, rbp
+0f 87 c6 01 00 00               # 2791  ja 0x40295d   truncated annotations -> p3_rej
+49 83 ef 01                     # 2797  sub r15, 0x1
+e9 37 ff ff ff                  # 279b  jmp 0x4026d7    -> sw_top_238
+
+# sw_done_239:
+45 8b 32                        # 27a0  ld32 r14, [r10+0x0]   c.ins
+4c 39 f2                        # 27a3  cmp rdx, r14
+0f 82 b1 01 00 00               # 27a6  jb 0x40295d   too few arguments -> p3_rej
+4c 29 f2                        # 27ac  sub rdx, r14
+45 8b 72 04                     # 27af  ld32 r14, [r10+0x4]   c.outs
+4c 01 f2                        # 27b3  add rdx, r14
+4c 8b d2                        # 27b6  mov r10, rdx
+49 c1 ea 30                     # 27b9  shr r10, 48
+4d 85 d2                        # 27bd  test r10, r10
+74 05                           # 27c0  je 0x4027c7   height >= 2^48 (jne: je over the jmp)
+e9 87 01 00 00                  # 27c2  jmp 0x40294e   -> p3_ovf
+41 bf 05 00 00 00               # 27c7  mov r15, 0x5
+e9 24 00 00 00                  # 27cd  jmp 0x4027f6    -> p3_fall
+
+# p3_ret:
+45 8b 74 24 04                  # 27d2  ld32 r14, [r12+0x4]   outs
+4c 39 f2                        # 27d7  cmp rdx, r14
+74 05                           # 27da  je 0x4027e1    (jne: je over the jmp)
+e9 7c 01 00 00                  # 27dc  jmp 0x40295d   -> p3_rej
+48 85 ff                        # 27e1  test rdi, rdi
+74 05                           # 27e4  je 0x4027eb    (jne: je over the jmp)
+e9 72 01 00 00                  # 27e6  jmp 0x40295d   -> p3_rej
+41 bf 01 00 00 00               # 27eb  mov r15, 0x1
+e9 67 00 00 00                  # 27f1  jmp 0x40285d    -> p3_nofall
+
+# p3_fall:
+49 83 c0 01                     # 27f6  add r8, 0x1
+45 8b 74 24 0c                  # 27fa  ld32 r14, [r12+0xc]
+4d 39 f0                        # 27ff  cmp r8, r14
+0f 83 55 01 00 00               # 2802  jae 0x40295d   falls off the end -> p3_rej
+45 8b 74 24 10                  # 2808  ld32 r14, [r12+0x10]   lookup (i + 1): na
+4d 8b de                        # 280d  mov r11, r14
+49 c1 e3 03                     # 2810  shl r11, 3
+49 c1 e6 02                     # 2814  shl r14, 2
+4d 01 f3                        # 2818  add r11, r14
+4d 01 cb                        # 281b  add r11, r9   r11 = end of the annotations
+4d 8b d1                        # 281e  mov r10, r9
+
+# lk_top_246:
+4d 39 da                        # 2821  cmp r10, r11
+74 0e                           # 2824  je 0x402834   none -> lk_done_247
+45 8b 32                        # 2826  ld32 r14, [r10+0x0]
+4d 39 c6                        # 2829  cmp r14, r8
+74 06                           # 282c  je 0x402834   found -> lk_done_247
+49 83 c2 0c                     # 282e  add r10, 0xc
+eb ed                           # 2832  jmp 0x402821    -> lk_top_246
+
+# lk_done_247:
+4d 39 da                        # 2834  cmp r10, r11
+74 1c                           # 2837  je 0x402855    -> p3_adv
+45 8b 72 04                     # 2839  ld32 r14, [r10+0x4]
+49 39 d6                        # 283d  cmp r14, rdx
+74 05                           # 2840  je 0x402847    (jne: je over the jmp)
+e9 16 01 00 00                  # 2842  jmp 0x40295d   -> p3_rej
+45 8b 72 08                     # 2847  ld32 r14, [r10+0x8]
+49 39 fe                        # 284b  cmp r14, rdi
+74 05                           # 284e  je 0x402855    (jne: je over the jmp)
+e9 08 01 00 00                  # 2850  jmp 0x40295d   -> p3_rej
+
+# p3_adv:
+4c 01 fe                        # 2855  add rsi, r15   next instruction
+e9 36 f7 ff ff                  # 2858  jmp 0x401f93    -> p3_walk
+
+# p3_nofall:
+49 83 c0 01                     # 285d  add r8, 0x1
+45 8b 74 24 10                  # 2861  ld32 r14, [r12+0x10]   lookup (i + 1): na
+4d 8b de                        # 2866  mov r11, r14
+49 c1 e3 03                     # 2869  shl r11, 3
+49 c1 e6 02                     # 286d  shl r14, 2
+4d 01 f3                        # 2871  add r11, r14
+4d 01 cb                        # 2874  add r11, r9   r11 = end of the annotations
+4d 8b d1                        # 2877  mov r10, r9
+
+# lk_top_248:
+4d 39 da                        # 287a  cmp r10, r11
+74 0e                           # 287d  je 0x40288d   none -> lk_done_249
+45 8b 32                        # 287f  ld32 r14, [r10+0x0]
+4d 39 c6                        # 2882  cmp r14, r8
+74 06                           # 2885  je 0x40288d   found -> lk_done_249
+49 83 c2 0c                     # 2887  add r10, 0xc
+eb ed                           # 288b  jmp 0x40287a    -> lk_top_248
+
+# lk_done_249:
+4d 39 da                        # 288d  cmp r10, r11
+74 0d                           # 2890  je 0x40289f    -> nfzero_250
+41 8b 52 04                     # 2892  ld32 rdx, [r10+0x4]
+41 8b 7a 08                     # 2896  ld32 rdi, [r10+0x8]
+e9 b6 ff ff ff                  # 289a  jmp 0x402855    -> p3_adv
+
+# nfzero_250:
+31 d2                           # 289f  xor rdx, rdx
+31 ff                           # 28a1  xor rdi, rdi
+e9 ad ff ff ff                  # 28a3  jmp 0x402855    -> p3_adv
+
+# p3_wdone:
+45 8b 74 24 10                  # 28a8  ld32 r14, [r12+0x10]   na
+49 8b fe                        # 28ad  mov rdi, r14
+48 c1 e7 03                     # 28b0  shl rdi, 3
+49 c1 e6 02                     # 28b4  shl r14, 2
+4c 01 f7                        # 28b8  add rdi, r14
+4c 01 cf                        # 28bb  add rdi, r9   rdi = end of the annotations = next word
+49 8b f1                        # 28be  mov rsi, r9
+
+# p3_anns:
+48 39 fe                        # 28c1  cmp rsi, rdi
+74 71                           # 28c4  je 0x402937    -> p3_annsok
+44 8b 3e                        # 28c6  ld32 r15, [rsi+0x0]   t
+45 8b 74 24 0c                  # 28c9  ld32 r14, [r12+0xc]
+4d 39 f7                        # 28ce  cmp r15, r14
+0f 83 86 00 00 00               # 28d1  jae 0x40295d   annotation past the code -> p3_rej
+45 8b 74 24 10                  # 28d7  ld32 r14, [r12+0x10]   lookup (ann t): na
+4d 8b de                        # 28dc  mov r11, r14
+49 c1 e3 03                     # 28df  shl r11, 3
+49 c1 e6 02                     # 28e3  shl r14, 2
+4d 01 f3                        # 28e7  add r11, r14
+4d 01 cb                        # 28ea  add r11, r9   r11 = end of the annotations
+4d 8b d1                        # 28ed  mov r10, r9
+
+# lk_top_251:
+4d 39 da                        # 28f0  cmp r10, r11
+74 0e                           # 28f3  je 0x402903   none -> lk_done_252
+45 8b 32                        # 28f5  ld32 r14, [r10+0x0]
+4d 39 fe                        # 28f8  cmp r14, r15
+74 06                           # 28fb  je 0x402903   found -> lk_done_252
+49 83 c2 0c                     # 28fd  add r10, 0xc
+eb ed                           # 2901  jmp 0x4028f0    -> lk_top_251
+
+# lk_done_252:
+4d 39 da                        # 2903  cmp r10, r11
+0f 84 51 00 00 00               # 2906  je 0x40295d    -> p3_rej
+45 8b 72 04                     # 290c  ld32 r14, [r10+0x4]
+8b 56 04                        # 2910  ld32 rdx, [rsi+0x4]
+49 39 d6                        # 2913  cmp r14, rdx
+74 05                           # 2916  je 0x40291d   conflicting annotations (jne: je over the jmp)
+e9 40 00 00 00                  # 2918  jmp 0x40295d   -> p3_rej
+45 8b 72 08                     # 291d  ld32 r14, [r10+0x8]
+8b 56 08                        # 2921  ld32 rdx, [rsi+0x8]
+49 39 d6                        # 2924  cmp r14, rdx
+74 05                           # 2927  je 0x40292e   conflicting annotations (jne: je over the jmp)
+e9 2f 00 00 00                  # 2929  jmp 0x40295d   -> p3_rej
+48 83 c6 0c                     # 292e  add rsi, 0xc
+e9 8a ff ff ff                  # 2932  jmp 0x4028c1    -> p3_anns
+
+# p3_annsok:
+4c 8b e7                        # 2937  mov r12, rdi   next word
+e9 69 f5 ff ff                  # 293a  jmp 0x401ea8    -> p3_word
+
+# p3_acc:
+48 b9 96 3c 5a a5 70 e9 cc 5a   # 293f  mov rcx, 0x5acce970a55a3c96   pass 3: ACCEPT
+e9 1e 00 00 00                  # 2949  jmp 0x40296c    -> vote
+
+# p3_ovf:
+48 b9 a5 c3 c3 33 1e 0f ad 0b   # 294e  mov rcx, 0xbad0f1e33c3c3a5   pass 3: OVERFLOW
+e9 0f 00 00 00                  # 2958  jmp 0x40296c    -> vote
+
+# p3_rej:
+48 b9 01 00 11 11 ef be ad de   # 295d  mov rcx, 0xdeadbeef11110001   pass 3: REJECT
+e9 00 00 00 00                  # 2967  jmp 0x40296c    -> vote
+
+# p3_end:
+
+# vote:
+# TMRVoter.voterCode, park eb fe -> eb 0c (to guard)
+48 39 d8                        # 296c  cmp rax, rbx
+74 0d                           # 296f  je 0x40297e
+48 39 c8                        # 2971  cmp rax, rcx
+74 08                           # 2974  je 0x40297e
+48 39 cb                        # 2976  cmp rbx, rcx
+75 0b                           # 2979  jne 0x402986
+48 89 d8                        # 297b  mov rax, rbx
+48 89 c3                        # 297e  mov rbx, rax
+48 89 c1                        # 2981  mov rcx, rax
+eb 0c                           # 2984  jmp 0x402992
+bf 03 00 00 00                  # 2986  mov rdi, 0x3
+b8 3c 00 00 00                  # 298b  mov rax, 0x3c
+0f 05                           # 2990  syscall
+
+# guard:
+bf 05 00 00 00                  # 2992  mov rdi, 0x5   status 5 unless both guards pass
+48 ba 6a c3 a5 5a 8f 16 33 a5   # 2997  mov rdx, 0xa533168f5aa5c36a   -ACCEPT
+48 01 c2                        # 29a1  add rdx, rax   rdx = rax - ACCEPT
+75 1f                           # 29a4  jne 0x4029c5   guard 1 -> not_acc
+48 be 6a c3 a5 5a 8f 16 33 a5   # 29a6  mov rsi, 0xa533168f5aa5c36a   -ACCEPT
+48 01 de                        # 29b0  add rsi, rbx   rsi = rbx - ACCEPT
+75 10                           # 29b3  jne 0x4029c5   guard 2 -> not_acc
+b8 3c 00 00 00                  # 29b5  mov rax, 0x3c   exit(0): rax first,
+48 8d bb 6a ff ff ff            # 29ba  lea rdi, [rbx-0x96]   then status = (rbx - 0x96) mod 256, zero only for ACCEPT
+0f 05                           # 29c1  syscall
+eb 25                           # 29c3  jmp 0x4029ea    -> rej_exit
+
+# not_acc:
+bf 05 00 00 00                  # 29c5  mov rdi, 0x5
+48 ba 5b 3c 3c cc e1 f0 52 f4   # 29ca  mov rdx, 0xf452f0e1cc3c3c5b   -OVERFLOW
+48 01 c2                        # 29d4  add rdx, rax
+75 11                           # 29d7  jne 0x4029ea   not OVERFLOW -> rej_exit
+
+# nomem:
+bf 06 00 00 00                  # 29d9  mov rdi, 0x6   exit(6)
+b8 3c 00 00 00                  # 29de  mov rax, 0x3c
+bf 06 00 00 00                  # 29e3  mov rdi, 0x6
+0f 05                           # 29e8  syscall
+
+# rej_exit:
+bf 05 00 00 00                  # 29ea  mov rdi, 0x5   exit(5)
+b8 3c 00 00 00                  # 29ef  mov rax, 0x3c
+bf 05 00 00 00                  # 29f4  mov rdi, 0x5
+0f 05                           # 29f9  syscall
+# pad1 (5300 bytes of 0xf4)
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4 f4
+f4 f4 f4 f4
+
+# start:
+31 ff                           # 3eaf  xor rdi, rdi   mmap(0, 64 KiB, RW, PRIVATE|ANON, -1, 0)
+be 00 00 01 00                  # 3eb1  mov rsi, 0x10000
+ba 03 00 00 00                  # 3eb6  mov rdx, 0x3
+41 ba 22 00 00 00               # 3ebb  mov r10, 0x22
+49 b8 ff ff ff ff ff ff ff ff   # 3ec1  mov r8, 0xffffffffffffffff
+45 31 c9                        # 3ecb  xor r9, r9
+b8 09 00 00 00                  # 3ece  mov rax, 0x9
+0f 05                           # 3ed3  syscall
+48 85 c0                        # 3ed5  test rax, rax
+0f 88 fb ea ff ff               # 3ed8  js 0x4029d9   refused -> nomem
+4c 8b f0                        # 3ede  mov r14, rax   r14 = buffer
+41 bc 00 00 01 00               # 3ee1  mov r12, 0x10000   r12 = capacity
+45 31 ed                        # 3ee7  xor r13, r13   r13 = length
+
+# rd:
+4d 39 e5                        # 3eea  cmp r13, r12
+75 2a                           # 3eed  jne 0x403f19   room left -> rd_go
+49 8b fe                        # 3eef  mov rdi, r14   mremap(buf, cap, 2 cap, MAYMOVE)
+49 8b f4                        # 3ef2  mov rsi, r12
+49 8b d4                        # 3ef5  mov rdx, r12
+48 c1 e2 01                     # 3ef8  shl rdx, 1
+41 ba 01 00 00 00               # 3efc  mov r10, 0x1
+b8 19 00 00 00                  # 3f02  mov rax, 0x19
+0f 05                           # 3f07  syscall
+48 85 c0                        # 3f09  test rax, rax
+0f 88 c7 ea ff ff               # 3f0c  js 0x4029d9   refused -> nomem
+4c 8b f0                        # 3f12  mov r14, rax
+49 c1 e4 01                     # 3f15  shl r12, 1
+
+# rd_go:
+31 ff                           # 3f19  xor rdi, rdi   read(0, buf + len, cap - len)
+49 8b f6                        # 3f1b  mov rsi, r14
+4c 01 ee                        # 3f1e  add rsi, r13
+49 8b d4                        # 3f21  mov rdx, r12
+4c 29 ea                        # 3f24  sub rdx, r13
+31 c0                           # 3f27  xor rax, rax
+0f 05                           # 3f29  syscall
+48 85 c0                        # 3f2b  test rax, rax
+0f 88 a5 ea ff ff               # 3f2e  js 0x4029d9   read failed -> nomem
+74 05                           # 3f34  je 0x403f3b    -> eof
+49 01 c5                        # 3f36  add r13, rax
+eb af                           # 3f39  jmp 0x403eea    -> rd
+
+# eof:
+31 ff                           # 3f3b  xor rdi, rdi   mmap copy 2: len + 1 bytes
+49 8d 75 01                     # 3f3d  lea rsi, [r13+0x1]
+ba 03 00 00 00                  # 3f41  mov rdx, 0x3
+41 ba 22 00 00 00               # 3f46  mov r10, 0x22
+45 31 c9                        # 3f4c  xor r9, r9
+b8 09 00 00 00                  # 3f4f  mov rax, 0x9
+0f 05                           # 3f54  syscall
+48 85 c0                        # 3f56  test rax, rax
+0f 88 7a ea ff ff               # 3f59  js 0x4029d9    -> nomem
+4c 8b f8                        # 3f5f  mov r15, rax
+49 8b f6                        # 3f62  mov rsi, r14   copy len bytes
+49 8b ff                        # 3f65  mov rdi, r15
+4d 8b dd                        # 3f68  mov r11, r13
+
+# cp_top_253:
+4d 85 db                        # 3f6b  test r11, r11
+74 13                           # 3f6e  je 0x403f83    -> cp_done_254
+0f b6 16                        # 3f70  ld8 rdx, [rsi+0x0]
+88 17                           # 3f73  st8 [rdi+0x0], rdx
+48 83 c6 01                     # 3f75  add rsi, 0x1
+48 83 c7 01                     # 3f79  add rdi, 0x1
+49 83 eb 01                     # 3f7d  sub r11, 0x1
+eb e8                           # 3f81  jmp 0x403f6b    -> cp_top_253
+
+# cp_done_254:
+31 ff                           # 3f83  xor rdi, rdi   mmap copy 3: len + 1 bytes
+49 8d 75 01                     # 3f85  lea rsi, [r13+0x1]
+ba 03 00 00 00                  # 3f89  mov rdx, 0x3
+41 ba 22 00 00 00               # 3f8e  mov r10, 0x22
+45 31 c9                        # 3f94  xor r9, r9
+b8 09 00 00 00                  # 3f97  mov rax, 0x9
+0f 05                           # 3f9c  syscall
+48 85 c0                        # 3f9e  test rax, rax
+0f 88 32 ea ff ff               # 3fa1  js 0x4029d9    -> nomem
+48 8b e8                        # 3fa7  mov rbp, rax
+49 8b f6                        # 3faa  mov rsi, r14   copy len bytes
+48 8b fd                        # 3fad  mov rdi, rbp
+4d 8b dd                        # 3fb0  mov r11, r13
+
+# cp_top_255:
+4d 85 db                        # 3fb3  test r11, r11
+74 13                           # 3fb6  je 0x403fcb    -> cp_done_256
+0f b6 16                        # 3fb8  ld8 rdx, [rsi+0x0]
+88 17                           # 3fbb  st8 [rdi+0x0], rdx
+48 83 c6 01                     # 3fbd  add rsi, 0x1
+48 83 c7 01                     # 3fc1  add rdi, 0x1
+49 83 eb 01                     # 3fc5  sub r11, 0x1
+eb e8                           # 3fc9  jmp 0x403fb3    -> cp_top_255
+
+# cp_done_256:
+bf 00 00 60 00                  # 3fcb  mov rdi, 0x600000   descriptor 1
+4c 89 37                        # 3fd0  st [rdi+0x0], r14
+4c 89 6f 08                     # 3fd3  st [rdi+0x8], r13
+bf 00 10 60 00                  # 3fd7  mov rdi, 0x601000   descriptor 2
+4c 89 3f                        # 3fdc  st [rdi+0x0], r15
+4c 89 6f 08                     # 3fdf  st [rdi+0x8], r13
+bf 00 20 60 00                  # 3fe3  mov rdi, 0x602000   descriptor 3
+48 89 2f                        # 3fe8  st [rdi+0x0], rbp
+4c 89 6f 08                     # 3feb  st [rdi+0x8], r13
+48 b8 01 00 11 11 ef be ad de   # 3fef  mov rax, 0xdeadbeef11110001   results start at REJECT
+48 bb 01 00 11 11 ef be ad de   # 3ff9  mov rbx, 0xdeadbeef11110001
+48 b9 01 00 11 11 ef be ad de   # 4003  mov rcx, 0xdeadbeef11110001
+e9 7e c2 ff ff                  # 400d  jmp 0x400290    -> tripled
