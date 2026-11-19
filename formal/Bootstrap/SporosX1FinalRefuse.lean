@@ -7175,4 +7175,120 @@ theorem parser_word_tail_short {sp1 p c e r na : Nat} {m48 : Mem}
   · rw [ht15mem, ht14mem]; exact wrN_wshape _ _ _ hm48
 
 
+/-- Forward direction of `rdLE`: enough bytes decode to their
+`leVal` and the remaining suffix. -/
+theorem rdLE_forward {bs : List Nat} {k : Nat}
+    (h : k ≤ bs.length) :
+    rdLE bs k = some (leVal (bs.take k), bs.drop k) := by
+  unfold rdLE
+  rw [if_neg (by omega)]
+  have hlen : (bs.take k).length = k := by
+    rw [List.length_take, Nat.min_eq_left h]
+  have h2 := fold_zip_range (bs.take k)
+  rw [hlen] at h2
+  rw [h2]
+
+/-- Forward direction of `decAnn`: twelve bytes decode to the
+entry read from their three `u32` slices. -/
+theorem decAnn_forward {bs : List Nat} (h : 12 ≤ bs.length) :
+    decAnn bs = some ((leVal (bs.take 4),
+      ⟨leVal ((bs.drop 4).take 4), leVal ((bs.drop 8).take 4)⟩),
+      bs.drop 12) := by
+  have hstep : decAnn bs =
+      (rdLE bs 4).bind (fun p =>
+        (rdLE p.2 4).bind (fun q =>
+          (rdLE q.2 4).bind
+            (fun r => some ((p.1, ⟨q.1, r.1⟩), r.2)))) := rfl
+  rw [hstep, Option.bind_eq_some_iff]
+  refine ⟨(leVal (bs.take 4), bs.drop 4),
+    rdLE_forward (by omega), ?_⟩
+  rw [Option.bind_eq_some_iff]
+  refine ⟨(leVal ((bs.drop 4).take 4), (bs.drop 4).drop 4),
+    rdLE_forward (by rw [List.length_drop]; omega), ?_⟩
+  rw [Option.bind_eq_some_iff]
+  refine ⟨(leVal (((bs.drop 4).drop 4).take 4),
+      ((bs.drop 4).drop 4).drop 4),
+    rdLE_forward (by
+      rw [List.length_drop, List.length_drop]; omega), ?_⟩
+  simp only [List.drop_drop]
+
+/-- Build the annotation list laid out at `p` from a whole-array
+read: the list re-encodes to exactly the bytes read, every entry
+is byte-bounded, the memory layout holds, and the semantic
+decoder reads the same list. -/
+theorem exists_ann_of_rdN : ∀ (na : Nat) {m : Mem} {p : Nat}
+    {bs : List Nat},
+    m.rdN p (12 * na) = some bs → (∀ b ∈ bs, b < 256) →
+    ∃ ann : List (Nat × Height), ann.length = na ∧
+      bs = ann.flatMap (fun x => leBytes x.1 4 ++
+        leBytes x.2.d 4 ++ leBytes x.2.a 4) ∧
+      (∀ x ∈ ann, AnnBound x) ∧ AnnLayB m p ann ∧
+      decMany decAnn na bs = some (ann, []) := by
+  intro na
+  induction na with
+  | zero =>
+    intro m p bs h _
+    have hlen : bs.length = 0 := rdN_length h
+    have hbs : bs = [] := by
+      cases bs with
+      | nil => rfl
+      | cons b t => simp at hlen
+    subst hbs
+    refine ⟨[], rfl, rfl, fun x hx => (List.not_mem_nil hx).elim,
+      ?_, rfl⟩
+    intro i hi
+    exact (Nat.not_lt_zero i hi).elim
+  | succ na ih =>
+    intro m p bs h hb
+    have hlen : bs.length = 12 * (na + 1) := rdN_length h
+    have h12 : 12 ≤ bs.length := by omega
+    have hdec : decAnn bs = some ((leVal (bs.take 4),
+        ⟨leVal ((bs.drop 4).take 4), leVal ((bs.drop 8).take 4)⟩),
+        bs.drop 12) := decAnn_forward h12
+    obtain ⟨hhead, hbx⟩ := decAnn_inv hdec hb
+    have htail : m.rdN (p + 12) (12 * na) = some (bs.drop 12) := by
+      have hs := rdN_slice h (o := 12) (k := 12 * na) (by omega)
+      rwa [List.take_of_length_le (by
+        rw [List.length_drop, hlen]; omega)] at hs
+    have hbt : ∀ b ∈ bs.drop 12, b < 256 := fun b hbm =>
+      hb b (List.mem_of_mem_drop hbm)
+    obtain ⟨ann, hannlen, hannflat, hannb, -, hanndec⟩ :=
+      ih htail hbt
+    have hflat : bs = ((leVal (bs.take 4),
+        ⟨leVal ((bs.drop 4).take 4), leVal ((bs.drop 8).take 4)⟩) ::
+        ann).flatMap (fun x => leBytes x.1 4 ++ leBytes x.2.d 4 ++
+        leBytes x.2.a 4) := by
+      rw [List.flatMap_cons, ← hannflat]
+      exact hhead
+    have hdecM : decMany decAnn (na + 1) bs =
+        some ((leVal (bs.take 4),
+          ⟨leVal ((bs.drop 4).take 4),
+            leVal ((bs.drop 8).take 4)⟩) :: ann, []) := by
+      have hstep : decMany decAnn (na + 1) bs =
+          (decAnn bs).bind (fun q =>
+            (decMany decAnn na q.2).bind
+              (fun r => some (q.1 :: r.1, r.2))) := rfl
+      rw [hstep, Option.bind_eq_some_iff]
+      exact ⟨((leVal (bs.take 4),
+          ⟨leVal ((bs.drop 4).take 4),
+            leVal ((bs.drop 8).take 4)⟩), bs.drop 12), hdec, by
+        rw [Option.bind_eq_some_iff]
+        exact ⟨(ann, []), hanndec, rfl⟩⟩
+    refine ⟨(leVal (bs.take 4),
+        ⟨leVal ((bs.drop 4).take 4), leVal ((bs.drop 8).take 4)⟩) ::
+        ann, by rw [List.length_cons, hannlen], hflat, ?_, ?_,
+        hdecM⟩
+    · intro y hy
+      rcases List.mem_cons.mp hy with rfl | hy
+      · exact hbx
+      · exact hannb y hy
+    · apply AnnLayB_of_rdN (m := m) (p := p)
+      · rw [List.length_cons, hannlen, ← hflat]
+        exact h
+      · intro y hy
+        rcases List.mem_cons.mp hy with rfl | hy
+        · exact hbx
+        · exact hannb y hy
+
+
 end SporosX1
