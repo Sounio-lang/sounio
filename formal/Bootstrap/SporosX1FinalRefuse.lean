@@ -17670,4 +17670,270 @@ theorem loader_entry_nh {f path argv0 : List Nat} {oracle : List Choice}
     hchar⟩
 
 
+/-! ### §3e. Entry + initial `mmap` + read loop for an
+arbitrary admitted oracle: exit 2 at the first refused
+memory syscall, or loaded at `0x134`, with step bound and
+`NoHitUpTo` over the whole run. -/
+theorem loader_init_any {f path argv0 stdin : List Nat}
+    {oracle : List Choice} {top : Nat}
+    (hinit : Stage1InitOk f path argv0 top)
+    (hadm : OracleAdmits
+      (stage1Init f path argv0 stdin oracle top)) :
+    (∃ k, k ≤ 100 + 1000 * (f.length + 1) ∧
+      run stage1Im k
+        (Out.ok (stage1Init f path argv0 stdin oracle top)) =
+        Out.exit 2) ∨
+    (∃ k A' cap' c2 buf' s',
+      k ≤ 100 + 1000 * (f.length + 1) ∧
+      run stage1Im k
+        (Out.ok (stage1Init f path argv0 stdin oracle top)) =
+        Out.ok s' ∧
+      s'.rip = base + 0x134 ∧
+      s'.reg 3 = some A' ∧ s'.reg 12 = some cap' ∧
+      s'.reg 13 = some f.length ∧ s'.reg 14 = some 3 ∧
+      s'.reg 4 =
+        some ((X86Env.initStack top [argv0, path]).2 + 24) ∧
+      (∃ v, s'.reg 0 = some v) ∧ (∃ v, s'.reg 10 = some v) ∧
+      (∃ v, s'.reg 8 = some v) ∧ (∃ v, s'.reg 9 = some v) ∧
+      s'.mem = [⟨base, stage1Code, false⟩, c2, buf'] ∧
+      c2.base = (X86Env.initStack top [argv0, path]).1.base ∧
+      c2.hi = (X86Env.initStack top [argv0, path]).1.hi ∧
+      c2.rw = true ∧
+      buf'.base = A' ∧ buf'.hi = A' + cap' ∧ buf'.rw = true ∧
+      buf'.data.take f.length = f ∧
+      ((⟨base, stage1Code, false⟩ : Region).hi ≤ A' ∨
+        A' + cap' ≤ base) ∧
+      (c2.hi ≤ A' ∨ A' + cap' ≤ c2.base) ∧
+      A' % page = 0 ∧ 0 < A' ∧ A' + cap' ≤ 2 ^ 47 ∧
+      cap' % page = 0 ∧ 65536 ≤ cap' ∧
+      s'.k.fds = [some ⟨f, f.length⟩] ∧
+      s'.regs.length = 16 ∧ RegsOk s' ∧
+      NoHitUpTo (stage1Init f path argv0 stdin oracle top) k) := by
+  obtain ⟨hfB, -, -, hpath0, -, hpathlen, -, htop47, hleInit,
+    hstkhi⟩ := hinit
+  have hc := stage1_loaderCode
+  have hW : W = 2 ^ 64 := rfl
+  have hdisjInit : base + stage1Code.length ≤
+      (X86Env.initStack top [argv0, path]).1.base := by
+    have h := hleInit
+    rw [phVaddr_eq, phMemsz_eq] at h
+    exact h
+  have hk0 : (stage1Init f path argv0 stdin oracle top).k =
+      ⟨[(path, f)], [], stdin, [], oracle⟩ := by
+    simp [stage1Init]
+  have hregs0 : RegsOk (stage1Init f path argv0 stdin oracle
+      top) := by
+    intro i hi _
+    by_cases hi4 : i = 4
+    · subst hi4
+      exact ⟨_, stage1Init_reg4 _ _ _ _ _ _⟩
+    · exact ⟨0, stage1Init_reg_ne4 _ _ _ _ _ _ hi hi4⟩
+  obtain ⟨s1, hrun1, hs1rip, hs1r0, hs1r7, hs1r6, hs1r2, hs1r10,
+    hs1r8, hs1r9, hs1r14, hs1r4, hs1k, hshape, hs1len,
+    ⟨stk1, hs1memC⟩, hchar⟩ :=
+    loader_entry_nh
+      (stk := (X86Env.initStack top [argv0, path]).1)
+      (sp0 := (X86Env.initStack top [argv0, path]).2)
+      (stdinL := stdin) (oracle := oracle)
+      rfl rfl (stage1Init_rip _ _ _ _ _ _)
+      (stage1Init_regs_length _ _ _ _ _ _)
+      (stage1Init_reg4 _ _ _ _ _ _)
+      (fun i hi4 hi16 => stage1Init_reg_ne4 _ _ _ _ _ _ hi16 hi4)
+      (stage1Init_mem _ _ _ _ _ _) hk0 hdisjInit hstkhi htop47
+      hpath0 hpathlen
+  have hsp0eq : (X86Env.initStack top [argv0, path]).2 = (X86Env.initStack top [argv0, path]).1.base + 4096 := by
+    have h1 := initStack_sp top argv0 path
+    have hsr : X86Env.stackRoom = 4096 := rfl
+    rw [hsr] at h1
+    exact h1
+  have hdatalen : (X86Env.initStack top [argv0, path]).1.data.length =
+      X86Env.stackRoom +
+        X86Env.pages
+          (56 + ((argv0.length + 1) + (path.length + 1)) + 1) :=
+    initStack_data_length top argv0 path
+  have hple : (X86Env.initStack top [argv0, path]).2 + 24 ≤ (X86Env.initStack top [argv0, path]).1.hi := by
+    have hp : 4096 ≤ X86Env.pages
+        (56 + ((argv0.length + 1) + (path.length + 1)) + 1) := by
+      unfold X86Env.pages X86Env.page
+      have h1 : 1 ≤ (56 + ((argv0.length + 1) +
+          (path.length + 1)) + 1 + 4095) / 4096 :=
+        Nat.div_pos (by omega) (by decide)
+      omega
+    have hsr : X86Env.stackRoom = 4096 := rfl
+    have hh : (X86Env.initStack top [argv0, path]).1.hi = (X86Env.initStack top [argv0, path]).1.base + (X86Env.initStack top [argv0, path]).1.data.length := rfl
+    omega
+  have hsp0W : (X86Env.initStack top [argv0, path]).2 + 24 < W := by
+    rw [hstkhi] at hple
+    omega
+  have hshape2 : wshape s1.mem =
+      [(base, base + stage1Code.length, false),
+        ((X86Env.initStack top [argv0, path]).1.base, (X86Env.initStack top [argv0, path]).1.hi, (X86Env.initStack top [argv0, path]).1.rw)] := by
+    rw [hshape]
+    simp [stage1Init_mem, wshape, Region.hi]
+  have hstk1 : stk1.base = (X86Env.initStack top [argv0, path]).1.base ∧ stk1.hi = (X86Env.initStack top [argv0, path]).1.hi ∧
+      stk1.rw = (X86Env.initStack top [argv0, path]).1.rw := by
+    rw [hs1memC] at hshape2
+    simp only [wshape, List.map_cons, List.map_nil,
+      List.cons.injEq] at hshape2
+    obtain ⟨h1, h2, -⟩ := hshape2
+    simp only [Prod.mk.injEq] at h2
+    exact ⟨h2.1, h2.2.1, h2.2.2⟩
+  have hstkrw : (X86Env.initStack top [argv0, path]).1.rw = true := rfl
+  have hroom1 : StackRoom s1 1 := by
+    intro sp hsp i hi v
+    have hsp_eq : sp = (X86Env.initStack top [argv0, path]).2 + 24 :=
+      Option.some.inj (hsp.symm.trans hs1r4)
+    have hi0 : i = 0 := by omega
+    subst hi0
+    rw [hsp_eq]
+    have hmod : ((X86Env.initStack top [argv0, path]).2 + 24 + W - 8 * (0 + 1)) % W = (X86Env.initStack top [argv0, path]).2 + 16 := by
+      have hh : (X86Env.initStack top [argv0, path]).2 + 24 + W - 8 * (0 + 1) = ((X86Env.initStack top [argv0, path]).2 + 16) + W := by
+        omega
+      rw [hh, Nat.add_mod_right, Nat.mod_eq_of_lt (by omega)]
+    rw [hmod, hs1memC]
+    have hfind : ∀ a : Nat, stk1.base ≤ a → a < stk1.hi →
+        Mem.find [⟨base, stage1Code, false⟩, stk1] a 0 =
+          some (1, stk1) := by
+      intro a h1 h2
+      have hg : Mem.find [⟨base, stage1Code, false⟩, stk1] a 0 =
+          (if (⟨base, stage1Code, false⟩ : Region).base ≤ a ∧
+              a < (⟨base, stage1Code, false⟩ : Region).hi then
+              some (0, ⟨base, stage1Code, false⟩)
+            else if stk1.base ≤ a ∧ a < stk1.hi then
+              some (1, stk1)
+            else Mem.find [] a 2) := rfl
+      have hc1b : (⟨base, stage1Code, false⟩ : Region).base =
+          base := rfl
+      have hc1hi : (⟨base, stage1Code, false⟩ : Region).hi =
+          base + stage1Code.length := by simp only [Region.hi]
+      rw [hg]
+      rw [if_neg, if_pos ⟨h1, h2⟩]
+      rw [hc1b, hc1hi]
+      rw [hstk1.1] at h1
+      omega
+    refine wr64_isSome_of_forall_wr (fun j hj u => ?_)
+    refine wr_isSome_iff.mpr ⟨1, stk1, ?_, ?_⟩
+    · exact hfind _ (by rw [hstk1.1]; omega)
+        (by rw [hstk1.2.1]; omega)
+    · rw [hstk1.2.2]
+      exact hstkrw
+  have hregs1 : RegsOk s1 := run_regs_ok hrun1 hregs0
+  have hadm1 : OracleAdmits s1 :=
+    oracleAdmits_of_run hadm hrun1
+  have hleg1 : OracleLegalAt s1 := hadm1 0 s1 rfl
+  have hmem1 : AtMemSyscall s1 :=
+    ⟨by rw [hs1rip]; exact hc.dbf, Or.inl hs1r0⟩
+  rcases head_cases_of_legal_mmap hleg1 hmem1 hs1r0 hs1r7 hs1r6
+      hs1r2 hs1r10 hs1r8 hs1r9 (by decide) with
+    ⟨A, rest, horA⟩ | hhead
+  · -- placement at A, then the generalized read loop
+    have hplace : X86Env.place s1.mem (some (.at A))
+        (X86Env.pages 65536) = some (some A) :=
+      place_of_legal_mmap hleg1 hmem1 hs1r0 hs1r7 hs1r6 hs1r2
+        hs1r10 hs1r8 hs1r9 (by decide) horA
+    have hpf := place_at_facts hplace
+    have hpg : X86Env.pages 65536 = 65536 :=
+      pages_eq_of_mod_zero (by decide)
+    obtain ⟨s2, hrun2, hs2rip, hs2r3, hs2r12, hs2r13, hs2r14,
+      hs2r4, hs2r0, hs2r10, hs2r8, hs2r9, hs2mem, hs2k, hs2len,
+      hs2nh⟩ :=
+      loader_mmap1_any hs1rip hs1len hs1r0 hs1r7 hs1r6 hs1r2
+        hs1r10 hs1r8 hs1r9 hs1r14 hs1r4
+        (run_reg_some_ne11 21 (by decide)
+          (stage1Init_reg_ne4 _ _ _ _ _ _ (by decide) (by decide))
+          hrun1)
+        (by rw [horA]; rfl) hplace (by rw [hpg] at hpf; omega)
+    rw [hpg] at hpf
+    have hs2mem3 : s2.mem =
+        [⟨base, stage1Code, false⟩, stk1,
+          ⟨A, List.replicate 65536 0, true⟩] := by
+      rw [hs2mem, hs1memC]
+      rfl
+    have hs2fds : s2.k.fds = [some ⟨f, 0⟩] := by
+      have hnx : (Kern.next s1.k).2.fds = s1.k.fds := by
+        cases ho2 : s1.k.oracle with
+        | nil => simp [Kern.next, ho2]
+        | cons c rest => simp [Kern.next, ho2]
+      rw [hs2k, hnx, hs1k]
+    have hmemc1 : (⟨base, stage1Code, false⟩ : Region) ∈
+        s1.mem := by
+      rw [hs1memC]
+      exact List.mem_cons_self
+    have hdisjA1 : (⟨base, stage1Code, false⟩ : Region).hi ≤ A ∨
+        A + 65536 ≤ base := by
+      rcases free_spec hpf.2.2.2 ⟨base, stage1Code, false⟩
+          hmemc1 with
+        h | h
+      · exact Or.inr h
+      · exact Or.inl h
+    have hmemstk1 : stk1 ∈ s1.mem := by
+      rw [hs1memC]
+      exact List.mem_cons_of_mem _ List.mem_cons_self
+    have hdisjA2 : stk1.hi ≤ A ∨ A + 65536 ≤ stk1.base := by
+      rcases free_spec hpf.2.2.2 stk1 hmemstk1 with
+        h | h
+      · exact Or.inr h
+      · exact Or.inl h
+    have hrun27 : run stage1Im 27
+        (Out.ok (stage1Init f path argv0 stdin oracle top)) =
+        Out.ok s2 := by
+      rw [show (27 : Nat) = 21 + 6 by omega, run_add stage1Im 21 6,
+        hrun1, hrun2]
+    have hnh27 : NoHitUpTo
+        (stage1Init f path argv0 stdin oracle top) 27 :=
+      noHitUpTo_add (show NoHitUpTo
+          (stage1Init f path argv0 stdin oracle top) 21 from by
+        intro j t hj hr hmem
+        obtain ⟨-, ht⟩ := hchar j t hj hr hmem
+        exact hs2nh 0 t (Nat.zero_le _)
+          (by rw [run_zero, ht]) hmem) hrun1 hs2nh
+    have hadm2 : OracleAdmits s2 :=
+      oracleAdmits_of_run hadm hrun27
+    have hregs2 : RegsOk s2 := run_regs_ok hrun27 hregs0
+    rcases loader_read_loop_any f.length rfl hs2rip hs2len hs2r3
+        hs2r12 hs2r13 hs2r14 hs2r4 hs2r0 hs2r10 hs2r8 hs2r9
+        hs2mem3 rfl rfl (by
+          show A + (List.replicate 65536 0).length = A + 65536
+          rw [List.length_replicate])
+        hdisjA1 hdisjA2 (by simp) hs2fds hfB (Nat.zero_le _)
+        (by decide) hpf.1 hpf.2.1 hpf.2.2.1 (by decide)
+        (by decide) hadm2 hregs2
+        (by
+          have hc1hi : (⟨base, stage1Code, false⟩ : Region).hi =
+              base + stage1Code.length := by
+            simp only [Region.hi]
+          rw [hc1hi, hstk1.1]; exact hdisjInit)
+        (by rw [hstk1.2.2]; exact hstkrw)
+        (by rw [hstk1.1]; omega)
+        (by rw [hstk1.2.1]; exact hple) (by omega : 32 ≤ (X86Env.initStack top [argv0, path]).2 + 24) hsp0W with
+      hex | hload
+    · obtain ⟨k', hk'b, hrk'⟩ := hex
+      exact Or.inl ⟨27 + k', by omega, by
+        rw [run_add stage1Im 27 k', hrun27, hrk']⟩
+    · obtain ⟨k', A', cap', buf', s', hk'b, hrk', hs'rip, hs'r3,
+        hs'r12, hs'r13, hs'r14, hs'r4, hs'r0, hs'r10, hs'r8,
+        hs'r9, hs'mem, hbuf'b, hbuf'hi, hbuf'rw, hbuf'data,
+        hdisj1', hdisj2', hA'mod, hA'pos, hA'bound, hcap'mod,
+        hcap'ge, hs'fds, hs'len, hs'nh⟩ := hload
+      have hruntot : run stage1Im (27 + k')
+          (Out.ok (stage1Init f path argv0 stdin oracle top)) =
+          Out.ok s' := by
+        rw [run_add stage1Im 27 k', hrun27, hrk']
+      exact Or.inr ⟨27 + k', A', cap', stk1, buf', s', by omega,
+        hruntot, hs'rip, hs'r3, hs'r12, hs'r13, hs'r14, hs'r4,
+        hs'r0, hs'r10, hs'r8, hs'r9, hs'mem, hstk1.1, hstk1.2.1,
+        (by rw [hstk1.2.2]; exact hstkrw), hbuf'b, hbuf'hi,
+        hbuf'rw, hbuf'data, hdisj1', hdisj2', hA'mod, hA'pos,
+        hA'bound, hcap'mod, hcap'ge, hs'fds, hs'len,
+        run_regs_ok hruntot hregs0,
+        noHitUpTo_add hnh27 hrun27 hs'nh⟩
+  · -- nomem at the initial mmap: exit 2 in 9 more steps
+    have hsp32 : 32 ≤ (X86Env.initStack top [argv0, path]).2 + 24 := by omega
+    have hex := loader_mmap1_nomem_exit2_bnd hs1rip hs1len hs1r0
+      hs1r7 hs1r6 hs1r2 hs1r10 hs1r8 hs1r9 hs1r4 hhead hregs1
+      hroom1 hsp32 hsp0W
+    exact Or.inl ⟨30, by omega, by
+      rw [show (30 : Nat) = 21 + 9 by omega, run_add stage1Im 21 9,
+        hrun1, hex]⟩
+
 end SporosX1
