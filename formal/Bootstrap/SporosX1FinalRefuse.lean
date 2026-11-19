@@ -8902,7 +8902,9 @@ theorem stage1_oracle_prefix {f path argv0 stdin : List Nat}
           (Out.ok (stage1Init f path argv0 stdin
             (stage1Oracle f A) top)) = Out.ok s' ∧
         s'.rip = base + 0x452 ∧ s'.k.oracle = [] ∧
-        RegsOk s' ∧ StackRoom s' 6)) := by
+        RegsOk s' ∧ StackRoom s' 6 ∧
+        (∃ sp0, s'.reg 4 = some sp0 ∧ sp0 ≤ 2 ^ 48 ∧
+          ∀ q ∈ X86Env.shape s'.mem, q.2 ≤ 2 ^ 48))) := by
   have hinit0 := hinit
   obtain ⟨hfB, -, -, -, -, -, -, htop47, hleInit, hstkhi⟩ := hinit0
   obtain ⟨A, k0, sL, hAmod, hApos, hAbound, hfree, hrun0, hLrip,
@@ -9012,9 +9014,62 @@ theorem stage1_oracle_prefix {f path argv0 stdin : List Nat}
   · exact ⟨A, hAmod, hApos, hAbound, hfree, Or.inl (by
       obtain ⟨k, hk⟩ := hexit
       exact ⟨k0 + k, by rw [run_add, hrun0, hk]⟩)⟩
-  · obtain ⟨bs, ds, wds, c, k, s', -, -, -, -, -, -, -, -, -, -, -, -, hrun, hrip', -, -, -, -, -, -, -, -, -, -, -, -, -, -, -, hor, hregs', hroom', -, -⟩ := hchk
+  · obtain ⟨bs, ds, wds, c, k, s', -, -, -, -, -, hseq, -, -, hwdslen, hfit, -, -, hrun, hrip', -, -, -, hr4', -, -, -, -, -, -, -, -, -, -, -, hor, hregs', hroom', hwsh, -⟩ := hchk
+    have hpgnw : X86Env.pages
+        (64 * (leVal ((bs.drop 8).take 4) % 2 ^ 32)) ≤
+        arenaTableBytes f := by
+      rw [← hwdslen]
+      unfold arenaTableBytes
+      apply pages_mono
+      have h1 := wordsBytes_ge wds
+      have h2 : A + 16 ≤ c := DataSeq.le hseq
+      omega
+    have hshp : ∀ q ∈ X86Env.shape s'.mem, q.2 ≤ 2 ^ 48 := by
+      have hwb : ∀ q ∈ wshape s'.mem, q.2.1 ≤ 2 ^ 48 := by
+        rw [hwsh]
+        intro q hq
+        simp only [wshape, List.map_append, List.map_cons, List.map_nil,
+          List.mem_append, List.mem_cons, List.not_mem_nil, or_false] at hq
+        obtain ⟨cap, hcap, hcaple⟩ := hbufhi
+        rcases hq with (h | h | h) | h | h
+        · rw [h]
+          show c1.hi ≤ 2 ^ 48
+          rw [hc1hi, stage1Code_length]
+          have hb : base = 4194304 := rfl
+          rw [hb]
+          decide
+        · rw [h]
+          show c2.hi ≤ 2 ^ 48
+          rw [hc2hi']
+          omega
+        · rw [h]
+          show buf.hi ≤ 2 ^ 48
+          rw [hcap]
+          have hM : arenaFileBytes f ≤ stage1Mf f := by
+            unfold stage1Mf; omega
+          omega
+        · rw [h]
+          simp only [X86Env.Region.hi, List.length_replicate]
+          have hM : arenaFileBytes f + arenaTableBytes f ≤
+              stage1Mf f := by
+            unfold stage1Mf; omega
+          omega
+        · rw [h]
+          simp only [X86Env.Region.hi, List.length_replicate]
+          have hM : A + (arenaFileBytes f + arenaTableBytes f) +
+              X86Env.pages f.length = A + stage1Mf f := by
+            unfold stage1Mf arenaScratchBytes; omega
+          omega
+      intro q hq
+      have hbridge : X86Env.shape s'.mem =
+          (wshape s'.mem).map (fun q => (q.1, q.2.1)) := by
+        simp [X86Env.shape, wshape, List.map_map]
+      rw [hbridge] at hq
+      obtain ⟨q', hq', rfl⟩ := List.mem_map.1 hq
+      exact hwb q' hq'
     exact ⟨A, hAmod, hApos, hAbound, hfree, Or.inr ⟨k0 + k, s', by
-      rw [run_add, hrun0, hrun], hrip', hor, hregs', hroom'⟩⟩
+      rw [run_add, hrun0, hrun], hrip', hor, hregs', hroom',
+      _, hr4', by omega, hshp⟩⟩
 
 /-! ### Checker reachability: decode tables and abstract closure
 
@@ -9510,5 +9565,1873 @@ theorem chk_ann_ok : annOK false chkAnn = true := by decide +kernel
 
 theorem annl_ann_ok : annOK true annlAnn = true := by decide +kernel
 
+/-! ### Invariants over the abstract tables -/
+
+/-- The known stack slots at `sp`: slot `i` (at `sp + 8 * i`) holds
+`v` whenever the abstract stack says `some v` there. -/
+def stackAt (s : X86Int.St) (sp : Nat) (σ : List (Option Nat)) : Prop :=
+  ∀ i v, σ[i]? = some (some v) → rd64 s.mem (sp + 8 * i) = some v
+
+/-- Every region ends at or below `2 ^ 48`; this keeps the
+`(sp + W - 8) % W` arithmetic of pushes and calls honest. -/
+def shapeBnd (m : Mem) : Prop := ∀ p ∈ shape m, p.2 ≤ 2 ^ 48
+
+theorem find_cond : ∀ (m : Mem) (a i j : Nat) (r : Region),
+    Mem.find m a i = some (j, r) → r.base ≤ a ∧ a < r.hi ∧ r ∈ m
+  | [], _, _, _, _, h => by simp [Mem.find] at h
+  | r :: rest, a, i, j, r', h => by
+    simp only [Mem.find] at h
+    split at h
+    · obtain ⟨h1, h2⟩ := ‹r.base ≤ a ∧ a < r.hi›
+      simp only [Option.some.injEq, Prod.mk.injEq] at h
+      obtain ⟨-, rfl⟩ := h
+      exact ⟨h1, h2, List.mem_cons_self⟩
+    · obtain ⟨h1, h2, h3⟩ := find_cond rest a (i + 1) j r' h
+      exact ⟨h1, h2, List.mem_cons_of_mem _ h3⟩
+
+theorem rd_lt_of_shapeBnd {m : Mem} {a b : Nat}
+    (h : m.rd a = some b) (hb : shapeBnd m) : a < 2 ^ 48 := by
+  simp only [Mem.rd, bind, Option.bind] at h
+  split at h
+  · contradiction
+  · rename_i p hp
+    obtain ⟨j, r⟩ := p
+    obtain ⟨-, hlt, hmem⟩ := find_cond m a 0 j r hp
+    have hsh : (r.base, r.hi) ∈ shape m :=
+      List.mem_map.2 ⟨r, hmem, rfl⟩
+    have := hb _ hsh
+    omega
+
+theorem wr_lt_of_shapeBnd {m m' : Mem} {a v : Nat}
+    (h : m.wr a v = some m') (hb : shapeBnd m) : a < 2 ^ 48 := by
+  simp only [Mem.wr, bind, Option.bind] at h
+  split at h
+  · contradiction
+  · rename_i p hp
+    obtain ⟨j, r⟩ := p
+    obtain ⟨-, hlt, hmem⟩ := find_cond m a 0 j r hp
+    have hsh : (r.base, r.hi) ∈ shape m :=
+      List.mem_map.2 ⟨r, hmem, rfl⟩
+    have := hb _ hsh
+    omega
+
+theorem wr64_lt_of_shapeBnd {m m' : Mem} {a v : Nat}
+    (h : wr64 m a v = some m') (hb : shapeBnd m) : a < 2 ^ 48 := by
+  unfold wr64 at h
+  obtain ⟨b, bs, hbs⟩ : ∃ b bs, bytes8 v = b :: bs := by
+    have hlen : (bytes8 v).length = 8 := by simp [bytes8]
+    cases h : bytes8 v with
+    | nil => rw [h] at hlen; simp at hlen
+    | cons b bs => exact ⟨b, bs, rfl⟩
+  rw [hbs] at h
+  simp only [Mem.wrN, bind, Option.bind] at h
+  split at h
+  · contradiction
+  · rename_i m1 hm1
+    exact wr_lt_of_shapeBnd hm1 hb
+
+theorem shapeBnd_wr64 {m m' : Mem} {a v : Nat}
+    (h : wr64 m a v = some m') (hb : shapeBnd m) : shapeBnd m' := by
+  have hs : shape m' = shape m := wrN_shape m a (bytes8 v) h
+  intro p hp
+  rw [hs] at hp
+  exact hb p hp
+
+theorem stackAt_wr64_below {s : X86Int.St} {m' : Mem} {a v sp : Nat}
+    {σ : List (Option Nat)} (hm : wr64 s.mem a v = some m')
+    (hstk : stackAt s sp σ) (hd : a + 8 ≤ sp) :
+    stackAt { s with mem := m' } sp σ := by
+  intro i w hi
+  have h1 : rd64 s.mem (sp + 8 * i) = some w := hstk i w hi
+  have h2 : rd64 m' (sp + 8 * i) = rd64 s.mem (sp + 8 * i) :=
+    rd64_wr64_other hm (Or.inl (by omega))
+  show rd64 m' (sp + 8 * i) = some w
+  rw [h2, h1]
+
+theorem stackAt_tail {s : X86Int.St} {sp : Nat} {v : Option Nat}
+    {σ : List (Option Nat)} (h : stackAt s sp (v :: σ)) :
+    stackAt s (sp + 8) σ := by
+  intro i w hi
+  have h1 : rd64 s.mem (sp + 8 * (i + 1)) = some w := by
+    apply h
+    rw [List.getElem?_cons_succ]
+    exact hi
+  have : sp + 8 + 8 * i = sp + 8 * (i + 1) := by omega
+  rw [this]
+  exact h1
+
+theorem stackAt_head {s : X86Int.St} {sp v : Nat}
+    {σ : List (Option Nat)} (h : stackAt s sp (some v :: σ)) :
+    rd64 s.mem sp = some v := by
+  have h1 := h 0 v rfl
+  simpa using h1
+
+/-- Successor information from the kernel-checked closure. -/
+theorem annOK_succs {mode : Bool}
+    {t : List (Nat × Ins × Nat × List (Option Nat) × Option Nat)}
+    {e : Nat × Ins × Nat × List (Option Nat) × Option Nat}
+    (hok : annOK mode t = true) (he : e ∈ t) :
+    ∃ ss, succs mode e.1 e.2.1 e.2.2.1 e.2.2.2.1 e.2.2.2.2 = some ss ∧
+      ∀ s ∈ ss, s.1 = aFail1 ∨
+        ∃ e' ∈ t, e'.1 = s.1 ∧ e'.2.2.2.1 = s.2.1 ∧
+          e'.2.2.2.2 = s.2.2 := by
+  have h1 : (match succs mode e.1 e.2.1 e.2.2.1 e.2.2.2.1 e.2.2.2.2 with
+      | none => false
+      | some ss => ss.all fun s => s.1 == aFail1 ||
+          t.any fun e' => e'.1 == s.1 && e'.2.2.2.1 == s.2.1 &&
+            e'.2.2.2.2 == s.2.2) = true := by
+    have := List.all_eq_true.1 hok e he
+    exact this
+  cases hs : succs mode e.1 e.2.1 e.2.2.1 e.2.2.2.1 e.2.2.2.2 with
+  | none => rw [hs] at h1; simp at h1
+  | some ss =>
+    rw [hs] at h1
+    refine ⟨ss, rfl, ?_⟩
+    intro s hs_mem
+    have h2 := List.all_eq_true.1 h1 s hs_mem
+    rw [Bool.or_eq_true] at h2
+    rcases h2 with h2 | h2
+    · exact Or.inl (by simpa using h2)
+    · rw [List.any_eq_true] at h2
+      obtain ⟨e', he', h3⟩ := h2
+      simp only [Bool.and_eq_true, beq_iff_eq] at h3
+      exact Or.inr ⟨e', he', h3.1.1, h3.1.2, h3.2⟩
+
+/-- The concrete decode of an annotated entry. -/
+theorem chk_entry_decode {e : Nat × Ins × Nat × List (Option Nat) ×
+    Option Nat} (he : e ∈ chkAnn) :
+    stage1Im e.1 = some (e.2.1, e.2.2.1) := by
+  have hmem : (e.1, e.2.1, e.2.2.1) ∈ projT chkAnn :=
+    List.mem_map.2 ⟨e, he, rfl⟩
+  exact chk_codeAt _ hmem
+
+theorem annl_entry_decode {e : Nat × Ins × Nat × List (Option Nat) ×
+    Option Nat} (he : e ∈ annlAnn) :
+    stage1Im e.1 = some (e.2.1, e.2.2.1) := by
+  have hmem : (e.1, e.2.1, e.2.2.1) ∈ projT annlAnn :=
+    List.mem_map.2 ⟨e, he, rfl⟩
+  exact annl_codeAt _ hmem
+
+set_option maxRecDepth 100000 in
+theorem chkAnn_addr_bnd : ∀ e ∈ chkAnn, e.1 + e.2.2.1 ≤ base + 2447 := by
+  decide +kernel
+
+set_option maxRecDepth 100000 in
+theorem annlAnn_addr_bnd : ∀ e ∈ annlAnn, e.1 + e.2.2.1 ≤ base + 2447 := by
+  decide +kernel
+/-- The fall-through instructions: `exec` goes to `rip + len`,
+writes at most one register, and never touches memory. -/
+def isFall : Ins → Bool
+  | .movI _ _ | .mov _ _ | .mov32 _ _ | .alu _ _ _ | .aluI _ _ _
+  | .cmp _ _ | .cmpI _ _ | .test _ _ | .shlI _ _ | .shrI _ _
+  | .ld _ _ _ | .ld32 _ _ _ | .ld8 _ _ _ | .lea _ _ _ => true
+  | _ => false
+
+theorem aluF_fst_lt {op : Alu} {a b : Nat} (ha : a < W) (hb : b < W) :
+    (aluF op a b).1 < W := by
+  have hW : W = 2 ^ 64 := rfl
+  have hWpos : 0 < W := by omega
+  cases op <;> simp only [aluF]
+  · exact Nat.mod_lt _ hWpos
+  · exact Nat.mod_lt _ hWpos
+  · have h : Nat.land a b ≤ a := Nat.and_le_left; omega
+  · rw [hW] at ha hb ⊢; exact Nat.or_lt_two_pow ha hb
+  · rw [hW] at ha hb ⊢; exact Nat.xor_lt_two_pow ha hb
+
+set_option maxHeartbeats 0 in
+/-- Soundness of `r0After` for the fall-through instructions, with
+the frame facts the abstract step needs. -/
+theorem fall_sound {s s' : X86Int.St} {ins : Ins} {l : Nat}
+    {r0 : Option Nat}
+    (hfall : isFall ins = true) (hd4 : destReg ins ≠ some 4)
+    (h0 : ∀ v, r0 = some v → s.reg 0 = some v)
+    (h0W : ∀ v, r0 = some v → v < W)
+    (hlen : 16 ≤ s.regs.length)
+    (hexec : exec ins l s = .ok s') :
+    s'.rip = s.rip + l ∧ s'.mem = s.mem ∧ s'.reg 4 = s.reg 4 ∧
+    (∀ v, r0After ins r0 = some v → s'.reg 0 = some v) ∧
+    (∀ v, r0After ins r0 = some v → v < W) ∧
+    s'.regs.length = s.regs.length := by
+  have hWpos : 0 < W := by have hW : W = 2 ^ 64 := rfl; omega
+  have h00 : (0 : Nat) < s.regs.length := by omega
+  have key : ∀ (d : Nat) (w : Nat) (t : X86Int.St),
+      t = s.set d (some w) → d ≠ 4 →
+      ({ t with rip := s.rip + l }).reg 4 = s.reg 4 := by
+    intro d w t ht hd
+    rw [reg_with_rip, ht, reg_set_other (show (4:Nat) ≠ d from fun h => hd h.symm)]
+  cases ins with
+  | movI d imm =>
+    have hd : d ≠ 4 := by
+      intro h; apply hd4; rw [h]; rfl
+    simp only [exec] at hexec
+    cases hexec
+    refine ⟨rfl, rfl, key d (imm % W) _ rfl hd, ?_, ?_, ?_⟩
+    · intro v hv
+      simp only [r0After] at hv
+      rw [reg_with_rip]
+      by_cases hd0 : d = 0
+      · subst hd0
+        simp only [beq_self_eq_true, if_true] at hv
+        rw [reg_set_self h00]; exact hv
+      · simp only [beq_iff_eq, hd0, if_false] at hv
+        rw [reg_set_other (show (0:Nat) ≠ d from fun h => hd0 h.symm)]; exact h0 v hv
+    · intro v hv
+      simp only [r0After] at hv
+      by_cases hd0 : d = 0
+      · subst hd0
+        simp only [beq_self_eq_true, if_true] at hv
+        rw [Option.some.injEq] at hv
+        rw [← hv]; exact Nat.mod_lt _ hWpos
+      · simp only [beq_iff_eq, hd0, if_false] at hv
+        exact h0W v hv
+    · show (s.set d _).regs.length = s.regs.length
+      simp [St.set]
+  | mov d r =>
+    have hd : d ≠ 4 := by
+      intro h; apply hd4; rw [h]; rfl
+    cases hr : s.reg r with
+    | none => simp [exec, hr, lift] at hexec
+    | some w =>
+      simp only [exec, hr, lift, bind, Option.bind, pure] at hexec
+      cases hexec
+      refine ⟨rfl, rfl, key d w _ rfl hd, ?_, ?_, ?_⟩
+      · intro v hv
+        simp only [r0After] at hv
+        rw [reg_with_rip]
+        by_cases hd0 : d = 0
+        · subst hd0
+          simp only [beq_self_eq_true, if_true] at hv
+          rw [reg_set_self h00]
+          by_cases hr0 : r = 0
+          · subst hr0
+            simp only [beq_self_eq_true, if_true] at hv
+            have := h0 v hv
+            rw [hr] at this; exact this
+          · simp only [beq_iff_eq, hr0, if_false] at hv
+            simp at hv
+        · simp only [beq_iff_eq, hd0, if_false] at hv
+          rw [reg_set_other (show (0:Nat) ≠ d from fun h => hd0 h.symm)]; exact h0 v hv
+      · intro v hv
+        simp only [r0After] at hv
+        by_cases hd0 : d = 0
+        · subst hd0
+          simp only [beq_self_eq_true, if_true] at hv
+          by_cases hr0 : r = 0
+          · subst hr0
+            simp only [beq_self_eq_true, if_true] at hv
+            exact h0W v hv
+          · simp only [beq_iff_eq, hr0, if_false] at hv
+            simp at hv
+        · simp only [beq_iff_eq, hd0, if_false] at hv
+          exact h0W v hv
+      · show (s.set d _).regs.length = s.regs.length
+        simp [St.set]
+  | mov32 d r =>
+    have hd : d ≠ 4 := by
+      intro h; apply hd4; rw [h]; rfl
+    cases hr : s.reg r with
+    | none => simp [exec, hr, lift] at hexec
+    | some w =>
+      simp only [exec, hr, lift, bind, Option.bind, pure] at hexec
+      cases hexec
+      refine ⟨rfl, rfl, key d (w % 2^32) _ rfl hd, ?_, ?_, ?_⟩
+      · intro v hv
+        simp only [r0After] at hv
+        rw [reg_with_rip]
+        by_cases hd0 : d = 0
+        · subst hd0
+          simp only [beq_self_eq_true, if_true] at hv
+          rw [reg_set_self h00]
+          by_cases hr0 : r = 0
+          · subst hr0
+            simp only [beq_self_eq_true, if_true] at hv
+            cases hr0v : r0 with
+            | none => rw [hr0v] at hv; simp at hv
+            | some u =>
+              rw [hr0v] at hv
+              simp only [Option.map_some, Option.some.injEq] at hv
+              have hu := h0 u hr0v
+              rw [hr] at hu
+              rw [Option.some.injEq] at hu
+              rw [hu, Option.some.injEq]; exact hv
+          · simp only [beq_iff_eq, hr0, if_false] at hv
+            simp at hv
+        · simp only [beq_iff_eq, hd0, if_false] at hv
+          rw [reg_set_other (show (0:Nat) ≠ d from fun h => hd0 h.symm)]; exact h0 v hv
+      · intro v hv
+        simp only [r0After] at hv
+        by_cases hd0 : d = 0
+        · subst hd0
+          simp only [beq_self_eq_true, if_true] at hv
+          by_cases hr0 : r = 0
+          · subst hr0
+            simp only [beq_self_eq_true, if_true] at hv
+            cases hr0v : r0 with
+            | none => rw [hr0v] at hv; simp at hv
+            | some u =>
+              rw [hr0v] at hv
+              simp only [Option.map_some, Option.some.injEq] at hv
+              rw [← hv]
+              have := h0W u hr0v
+              have h1 : u % 2 ^ 32 < 2 ^ 32 := Nat.mod_lt _ (by decide)
+              have hW32 : 2 ^ 32 ≤ W := by
+                have hW : W = 2 ^ 64 := rfl; omega
+              omega
+          · simp only [beq_iff_eq, hr0, if_false] at hv
+            simp at hv
+        · simp only [beq_iff_eq, hd0, if_false] at hv
+          exact h0W v hv
+      · show (s.set d _).regs.length = s.regs.length
+        simp [St.set]
+  | alu op d r =>
+    have hd : d ≠ 4 := by
+      intro h; apply hd4; rw [h]; rfl
+    cases ha : s.reg d with
+    | none => simp [exec, ha, lift] at hexec
+    | some x =>
+      cases hb : s.reg r with
+      | none => simp [exec, ha, hb, lift] at hexec
+      | some y =>
+        simp only [exec, ha, hb, lift, bind, Option.bind, pure] at hexec
+        cases hexec
+        refine ⟨rfl, rfl, ?_, ?_, ?_, ?_⟩
+        · show (s.set d _).reg 4 = s.reg 4
+          rw [reg_set_other (show (4:Nat) ≠ d from fun h => hd h.symm)]
+        · intro v hv
+          simp only [r0After] at hv
+          by_cases hd0 : d = 0
+          · subst hd0
+            simp only [beq_self_eq_true, if_true] at hv
+            show (s.set 0 _).reg 0 = some v
+            rw [reg_set_self h00]
+            by_cases hr0 : r = 0
+            · subst hr0
+              simp only [beq_self_eq_true, if_true] at hv
+              have hxy : x = y := Option.some.inj (ha.symm.trans hb)
+              subst hxy
+              cases hr0v : r0 with
+              | none =>
+                rw [hr0v] at hv
+                dsimp only at hv
+                by_cases hop : op = .xor
+                · subst hop
+                  rw [if_pos rfl] at hv
+                  rw [← hv]
+                  simp [aluF]
+                · rw [if_neg hop] at hv
+                  simp at hv
+              | some u =>
+                rw [hr0v] at hv
+                dsimp only at hv
+                have hu := h0 u hr0v
+                rw [ha] at hu
+                rw [Option.some.injEq] at hu
+                subst hu
+                rw [Option.some.injEq] at hv
+                rw [Option.some.injEq]; exact hv
+            · simp only [beq_iff_eq, hr0, if_false] at hv
+              simp at hv
+          · simp only [beq_iff_eq, hd0, if_false] at hv
+            show (s.set d _).reg 0 = some v
+            rw [reg_set_other (show (0:Nat) ≠ d from fun h => hd0 h.symm)]; exact h0 v hv
+        · intro v hv
+          simp only [r0After] at hv
+          by_cases hd0 : d = 0
+          · subst hd0
+            simp only [beq_self_eq_true, if_true] at hv
+            by_cases hr0 : r = 0
+            · subst hr0
+              simp only [beq_self_eq_true, if_true] at hv
+              cases hr0v : r0 with
+              | none =>
+                rw [hr0v] at hv
+                dsimp only at hv
+                by_cases hop : op = .xor
+                · subst hop
+                  rw [if_pos rfl, Option.some.injEq] at hv; omega
+                · rw [if_neg hop] at hv
+                  simp at hv
+              | some u =>
+                rw [hr0v] at hv
+                dsimp only at hv
+                rw [Option.some.injEq] at hv
+                rw [← hv]
+                exact aluF_fst_lt (h0W u hr0v) (h0W u hr0v)
+            · simp only [beq_iff_eq, hr0, if_false] at hv
+              simp at hv
+          · simp only [beq_iff_eq, hd0, if_false] at hv
+            exact h0W v hv
+        · show (s.set d _).regs.length = s.regs.length
+          simp [St.set]
+  | aluI op d imm =>
+    have hd : d ≠ 4 := by
+      intro h; apply hd4; rw [h]; rfl
+    cases ha : s.reg d with
+    | none => simp [exec, ha, lift] at hexec
+    | some x =>
+      simp only [exec, ha, lift, bind, Option.bind, pure] at hexec
+      cases hexec
+      refine ⟨rfl, rfl, ?_, ?_, ?_, ?_⟩
+      · rw [reg_with_rip]
+        show (s.set d _).reg 4 = s.reg 4
+        rw [reg_set_other (show (4:Nat) ≠ d from fun h => hd h.symm)]
+      · intro v hv
+        simp only [r0After] at hv
+        by_cases hd0 : d = 0
+        · subst hd0
+          simp only [beq_self_eq_true, if_true] at hv
+          show (s.set 0 _).reg 0 = some v
+          rw [reg_set_self h00]
+          cases hr0v : r0 with
+          | none => rw [hr0v] at hv; simp at hv
+          | some u =>
+            rw [hr0v] at hv
+            simp only [Option.map_some, Option.some.injEq] at hv
+            have hu := h0 u hr0v
+            have e1 : s.reg 0 = some x := ha
+            rw [e1] at hu
+            rw [Option.some.injEq] at hu
+            subst hu
+            rw [Option.some.injEq]; exact hv
+        · simp only [beq_iff_eq, hd0, if_false] at hv
+          show (s.set d _).reg 0 = some v
+          rw [reg_set_other (show (0:Nat) ≠ d from fun h => hd0 h.symm)]; exact h0 v hv
+      · intro v hv
+        simp only [r0After] at hv
+        by_cases hd0 : d = 0
+        · subst hd0
+          simp only [beq_self_eq_true, if_true] at hv
+          cases hr0v : r0 with
+          | none => rw [hr0v] at hv; simp at hv
+          | some u =>
+            rw [hr0v] at hv
+            simp only [Option.map_some, Option.some.injEq] at hv
+            rw [← hv]
+            exact aluF_fst_lt (h0W u hr0v) (Nat.mod_lt _ hWpos)
+        · simp only [beq_iff_eq, hd0, if_false] at hv
+          exact h0W v hv
+      · show (s.set d _).regs.length = s.regs.length
+        simp [St.set]
+  | shlI d c =>
+    have hd : d ≠ 4 := by
+      intro h; apply hd4; rw [h]; rfl
+    cases ha : s.reg d with
+    | none => simp [exec, ha, lift] at hexec
+    | some x =>
+      simp only [exec, ha, lift, bind, Option.bind, pure] at hexec
+      cases hexec
+      refine ⟨rfl, rfl, ?_, ?_, ?_, ?_⟩
+      · rw [reg_with_rip]
+        show (s.set d _).reg 4 = s.reg 4
+        rw [reg_set_other (show (4:Nat) ≠ d from fun h => hd h.symm)]
+      · intro v hv
+        simp only [r0After] at hv
+        by_cases hd0 : d = 0
+        · subst hd0
+          simp only [beq_self_eq_true, if_true] at hv
+          show (s.set 0 _).reg 0 = some v
+          rw [reg_set_self h00]
+          cases hr0v : r0 with
+          | none => rw [hr0v] at hv; simp at hv
+          | some u =>
+            rw [hr0v] at hv
+            simp only [Option.map_some, Option.some.injEq] at hv
+            have hu := h0 u hr0v
+            have e1 : s.reg 0 = some x := ha
+            rw [e1] at hu
+            rw [Option.some.injEq] at hu
+            subst hu
+            rw [Option.some.injEq]; exact hv
+        · simp only [beq_iff_eq, hd0, if_false] at hv
+          show (s.set d _).reg 0 = some v
+          rw [reg_set_other (show (0:Nat) ≠ d from fun h => hd0 h.symm)]; exact h0 v hv
+      · intro v hv
+        simp only [r0After] at hv
+        by_cases hd0 : d = 0
+        · subst hd0
+          simp only [beq_self_eq_true, if_true] at hv
+          cases hr0v : r0 with
+          | none => rw [hr0v] at hv; simp at hv
+          | some u =>
+            rw [hr0v] at hv
+            simp only [Option.map_some, Option.some.injEq] at hv
+            rw [← hv]
+            exact Nat.mod_lt _ hWpos
+        · simp only [beq_iff_eq, hd0, if_false] at hv
+          exact h0W v hv
+      · show (s.set d _).regs.length = s.regs.length
+        simp [St.set]
+  | shrI d c =>
+    have hd : d ≠ 4 := by
+      intro h; apply hd4; rw [h]; rfl
+    cases ha : s.reg d with
+    | none => simp [exec, ha, lift] at hexec
+    | some x =>
+      simp only [exec, ha, lift, bind, Option.bind, pure] at hexec
+      cases hexec
+      refine ⟨rfl, rfl, ?_, ?_, ?_, ?_⟩
+      · rw [reg_with_rip]
+        show (s.set d _).reg 4 = s.reg 4
+        rw [reg_set_other (show (4:Nat) ≠ d from fun h => hd h.symm)]
+      · intro v hv
+        simp only [r0After] at hv
+        by_cases hd0 : d = 0
+        · subst hd0
+          simp only [beq_self_eq_true, if_true] at hv
+          show (s.set 0 _).reg 0 = some v
+          rw [reg_set_self h00]
+          cases hr0v : r0 with
+          | none => rw [hr0v] at hv; simp at hv
+          | some u =>
+            rw [hr0v] at hv
+            simp only [Option.map_some, Option.some.injEq] at hv
+            have hu := h0 u hr0v
+            have e1 : s.reg 0 = some x := ha
+            rw [e1] at hu
+            rw [Option.some.injEq] at hu
+            subst hu
+            rw [Option.some.injEq]; exact hv
+        · simp only [beq_iff_eq, hd0, if_false] at hv
+          show (s.set d _).reg 0 = some v
+          rw [reg_set_other (show (0:Nat) ≠ d from fun h => hd0 h.symm)]; exact h0 v hv
+      · intro v hv
+        simp only [r0After] at hv
+        by_cases hd0 : d = 0
+        · subst hd0
+          simp only [beq_self_eq_true, if_true] at hv
+          cases hr0v : r0 with
+          | none => rw [hr0v] at hv; simp at hv
+          | some u =>
+            rw [hr0v] at hv
+            simp only [Option.map_some, Option.some.injEq] at hv
+            rw [← hv]
+            have hu := h0W u hr0v
+            have h := Nat.div_le_self u (2 ^ (c % 64)); omega
+        · simp only [beq_iff_eq, hd0, if_false] at hv
+          exact h0W v hv
+      · show (s.set d _).regs.length = s.regs.length
+        simp [St.set]
+  | cmp a b =>
+    cases ha : s.reg a with
+    | none => simp [exec, ha, lift] at hexec
+    | some x =>
+      cases hb : s.reg b with
+      | none => simp [exec, ha, hb, lift] at hexec
+      | some y =>
+        simp only [exec, ha, hb, lift, bind, Option.bind, pure] at hexec
+        cases hexec
+        refine ⟨rfl, rfl, rfl, ?_, ?_, ?_⟩
+        · intro v hv
+          simp only [r0After] at hv
+          show s.reg 0 = some v
+          exact h0 v hv
+        · intro v hv
+          simp only [r0After] at hv
+          exact h0W v hv
+        · rfl
+  | cmpI a imm =>
+    cases ha : s.reg a with
+    | none => simp [exec, ha, lift] at hexec
+    | some x =>
+      simp only [exec, ha, lift, bind, Option.bind, pure] at hexec
+      cases hexec
+      refine ⟨rfl, rfl, rfl, ?_, ?_, ?_⟩
+      · intro v hv
+        simp only [r0After] at hv
+        show s.reg 0 = some v
+        exact h0 v hv
+      · intro v hv
+        simp only [r0After] at hv
+        exact h0W v hv
+      · rfl
+  | test a b =>
+    cases ha : s.reg a with
+    | none => simp [exec, ha, lift] at hexec
+    | some x =>
+      cases hb : s.reg b with
+      | none => simp [exec, ha, hb, lift] at hexec
+      | some y =>
+        simp only [exec, ha, hb, lift, bind, Option.bind, pure] at hexec
+        cases hexec
+        refine ⟨rfl, rfl, rfl, ?_, ?_, ?_⟩
+        · intro v hv
+          simp only [r0After] at hv
+          show s.reg 0 = some v
+          exact h0 v hv
+        · intro v hv
+          simp only [r0After] at hv
+          exact h0W v hv
+        · rfl
+  | ld d b disp =>
+    have hd : d ≠ 4 := by
+      intro h; apply hd4; rw [h]; rfl
+    cases hb : s.reg b with
+    | none => simp [exec, hb, lift] at hexec
+    | some x =>
+      cases hv : rd64 s.mem (ea x disp) with
+      | none => simp [exec, hb, hv, lift] at hexec
+      | some w =>
+        simp only [exec, hb, hv, lift, bind, Option.bind, pure] at hexec
+        cases hexec
+        refine ⟨rfl, rfl, key d w _ rfl hd, ?_, ?_, ?_⟩
+        · intro v hv
+          simp only [r0After] at hv
+          by_cases hd0 : d = 0
+          · simp only [beq_iff_eq, hd0, if_true] at hv
+            simp at hv
+          · simp only [beq_iff_eq, hd0, if_false] at hv
+            rw [reg_with_rip, reg_set_other (show (0:Nat) ≠ d from fun h => hd0 h.symm)]
+            exact h0 v hv
+        · intro v hv
+          simp only [r0After] at hv
+          by_cases hd0 : d = 0
+          · simp only [beq_iff_eq, hd0, if_true] at hv
+            simp at hv
+          · simp only [beq_iff_eq, hd0, if_false] at hv
+            exact h0W v hv
+        · show (s.set d _).regs.length = s.regs.length
+          simp [St.set]
+  | ld32 d b disp =>
+    have hd : d ≠ 4 := by
+      intro h; apply hd4; rw [h]; rfl
+    cases hb : s.reg b with
+    | none => simp [exec, hb, lift] at hexec
+    | some x =>
+      cases hv : rd32 s.mem (ea x disp) with
+      | none => simp [exec, hb, hv, lift] at hexec
+      | some w =>
+        simp only [exec, hb, hv, lift, bind, Option.bind, pure] at hexec
+        cases hexec
+        refine ⟨rfl, rfl, key d w _ rfl hd, ?_, ?_, ?_⟩
+        · intro v hv
+          simp only [r0After] at hv
+          by_cases hd0 : d = 0
+          · simp only [beq_iff_eq, hd0, if_true] at hv
+            simp at hv
+          · simp only [beq_iff_eq, hd0, if_false] at hv
+            rw [reg_with_rip, reg_set_other (show (0:Nat) ≠ d from fun h => hd0 h.symm)]
+            exact h0 v hv
+        · intro v hv
+          simp only [r0After] at hv
+          by_cases hd0 : d = 0
+          · simp only [beq_iff_eq, hd0, if_true] at hv
+            simp at hv
+          · simp only [beq_iff_eq, hd0, if_false] at hv
+            exact h0W v hv
+        · show (s.set d _).regs.length = s.regs.length
+          simp [St.set]
+  | ld8 d b disp =>
+    have hd : d ≠ 4 := by
+      intro h; apply hd4; rw [h]; rfl
+    cases hb : s.reg b with
+    | none => simp [exec, hb, lift] at hexec
+    | some x =>
+      cases hv : s.mem.rd (ea x disp) with
+      | none => simp [exec, hb, hv, lift] at hexec
+      | some w =>
+        simp only [exec, hb, hv, lift, bind, Option.bind, pure] at hexec
+        cases hexec
+        refine ⟨rfl, rfl, key d w _ rfl hd, ?_, ?_, ?_⟩
+        · intro v hv
+          simp only [r0After] at hv
+          by_cases hd0 : d = 0
+          · simp only [beq_iff_eq, hd0, if_true] at hv
+            simp at hv
+          · simp only [beq_iff_eq, hd0, if_false] at hv
+            rw [reg_with_rip, reg_set_other (show (0:Nat) ≠ d from fun h => hd0 h.symm)]
+            exact h0 v hv
+        · intro v hv
+          simp only [r0After] at hv
+          by_cases hd0 : d = 0
+          · simp only [beq_iff_eq, hd0, if_true] at hv
+            simp at hv
+          · simp only [beq_iff_eq, hd0, if_false] at hv
+            exact h0W v hv
+        · show (s.set d _).regs.length = s.regs.length
+          simp [St.set]
+  | lea d b disp =>
+    have hd : d ≠ 4 := by
+      intro h; apply hd4; rw [h]; rfl
+    cases hb : s.reg b with
+    | none => simp [exec, hb, lift] at hexec
+    | some x =>
+      simp only [exec, hb, lift, bind, Option.bind, pure] at hexec
+      cases hexec
+      refine ⟨rfl, rfl, key d (ea x disp) _ rfl hd, ?_, ?_, ?_⟩
+      · intro v hv
+        simp only [r0After] at hv
+        by_cases hd0 : d = 0
+        · simp only [beq_iff_eq, hd0, if_true] at hv
+          simp at hv
+        · simp only [beq_iff_eq, hd0, if_false] at hv
+          rw [reg_with_rip, reg_set_other (show (0:Nat) ≠ d from fun h => hd0 h.symm)]
+          exact h0 v hv
+      · intro v hv
+        simp only [r0After] at hv
+        by_cases hd0 : d = 0
+        · simp only [beq_iff_eq, hd0, if_true] at hv
+          simp at hv
+        · simp only [beq_iff_eq, hd0, if_false] at hv
+          exact h0W v hv
+      · show (s.set d _).regs.length = s.regs.length
+        simp [St.set]
+  | st _ _ _ => simp [isFall] at hfall
+  | st8 _ _ _ => simp [isFall] at hfall
+  | jmp _ => simp [isFall] at hfall
+  | jcc _ _ => simp [isFall] at hfall
+  | jtab _ _ _ => simp [isFall] at hfall
+  | call _ => simp [isFall] at hfall
+  | ret => simp [isFall] at hfall
+  | jmpR _ => simp [isFall] at hfall
+  | pushI _ => simp [isFall] at hfall
+  | push _ => simp [isFall] at hfall
+  | pop _ => simp [isFall] at hfall
+  | syscall => simp [isFall] at hfall
+/-- Every known abstract stack slot holds a 64-bit value. -/
+def σBnd (σ : List (Option Nat)) : Prop :=
+  ∀ (i v : Nat), σ[i]? = some (some v) → v < W
+
+/-- The local content of an abstract state at one entry, relative
+to the frame top `spT`: `sp + 8 * (abstract depth) = spT`. -/
+def RipStack (s : X86Int.St) (a : Nat) (σ : List (Option Nat))
+    (r0 : Option Nat) (spT : Nat) : Prop :=
+  ∃ sp, s.rip = a ∧ s.reg 4 = some sp ∧ sp + 8 * σ.length = spT ∧
+    stackAt s sp σ ∧ σBnd σ ∧ (∀ v, r0 = some v → s.reg 0 = some v) ∧
+    (∀ v, r0 = some v → v < W) ∧ shapeBnd s.mem ∧
+    16 ≤ s.regs.length
+
+/-- A state of the checker proper, at a `chkAnn` entry, with frame
+top `sp0` (the stack pointer at checker entry). -/
+def ChkMain (sp0 : Nat) (s : X86Int.St) : Prop :=
+  ∃ e ∈ chkAnn, RipStack s e.1 e.2.2.2.1 e.2.2.2.2 sp0
+
+/-- Inside `L32`, called from the checker: the return slot holds
+the address of a `chkAnn` entry `e` (with unknown `reg 0` on
+return), and `e`'s abstract stack sits above it. -/
+def ChkL32m (sp0 : Nat) (s : X86Int.St) : Prop :=
+  (s.rip = aL32 ∨ s.rip = aL32 + 2) ∧
+  ∃ sp e, e ∈ chkAnn ∧ s.reg 4 = some sp ∧
+    rd64 s.mem sp = some e.1 ∧ stackAt s (sp + 8) e.2.2.2.1 ∧
+    σBnd e.2.2.2.1 ∧
+    sp + 8 + 8 * e.2.2.2.1.length = sp0 ∧ e.2.2.2.2 = none ∧
+    shapeBnd s.mem ∧ 16 ≤ s.regs.length
+
+/-- Inside `ANNL`, called from the checker: at an `annlAnn` entry,
+with the `ANNL` return slot at `spA` holding a `chkAnn` entry
+address, whose abstract stack sits above it. -/
+def ChkAnnl (sp0 : Nat) (s : X86Int.St) : Prop :=
+  ∃ e ∈ annlAnn, ∃ spA e0, e0 ∈ chkAnn ∧
+    RipStack s e.1 e.2.2.2.1 e.2.2.2.2 spA ∧
+    rd64 s.mem spA = some e0.1 ∧ stackAt s (spA + 8) e0.2.2.2.1 ∧
+    σBnd e0.2.2.2.1 ∧
+    spA + 8 + 8 * e0.2.2.2.1.length = sp0 ∧ e0.2.2.2.2 = none
+
+/-- Inside `L32`, called from `ANNL`: like `ChkL32m`, but the
+return goes to an `annlAnn` entry, with the `ANNL` frame (return
+slot at `spA`, checker stack above) preserved below. -/
+def ChkL32a (sp0 : Nat) (s : X86Int.St) : Prop :=
+  (s.rip = aL32 ∨ s.rip = aL32 + 2) ∧
+  ∃ sp spA e e0, e ∈ annlAnn ∧ e0 ∈ chkAnn ∧
+    s.reg 4 = some sp ∧ rd64 s.mem sp = some e.1 ∧
+    stackAt s (sp + 8) e.2.2.2.1 ∧ σBnd e.2.2.2.1 ∧
+    sp + 8 + 8 * e.2.2.2.1.length = spA ∧
+    rd64 s.mem spA = some e0.1 ∧ stackAt s (spA + 8) e0.2.2.2.1 ∧
+    σBnd e0.2.2.2.1 ∧
+    spA + 8 + 8 * e0.2.2.2.1.length = sp0 ∧ e0.2.2.2.2 = none ∧
+    e.2.2.2.2 = none ∧ shapeBnd s.mem ∧ 16 ≤ s.regs.length
+
+/-- Inside the `fail1` status-exit block, which is stack-polymorphic:
+only the values the block itself pushes matter. -/
+def ChkExit1 (s : X86Int.St) : Prop :=
+  ((s.rip = aFail1 ∧ ∃ sp, s.reg 4 = some sp) ∨
+   (s.rip = aFail1 + 2 ∧ ∃ sp, s.reg 4 = some sp ∧
+      rd64 s.mem sp = some 60) ∨
+   (s.rip = aFail1 + 3 ∧ s.reg 0 = some 60 ∧ ∃ sp, s.reg 4 = some sp) ∨
+   (s.rip = aFail1 + 5 ∧ s.reg 0 = some 60 ∧ ∃ sp, s.reg 4 = some sp ∧
+      rd64 s.mem sp = some 1) ∨
+   (s.rip = aFail1 + 6 ∧ s.reg 0 = some 60)) ∧
+  shapeBnd s.mem ∧ 16 ≤ s.regs.length
+
+/-- Any state the checker can reach from its entry. -/
+def ChkP (sp0 : Nat) (s : X86Int.St) : Prop :=
+  ChkMain sp0 s ∨ ChkL32m sp0 s ∨ ChkAnnl sp0 s ∨ ChkL32a sp0 s ∨
+    ChkExit1 s
+
+theorem stackAt_cons {s : X86Int.St} {sp : Nat} {v : Option Nat}
+    {σ : List (Option Nat)} :
+    stackAt s sp (v :: σ) ↔
+      (∀ w, v = some w → rd64 s.mem sp = some w) ∧
+        stackAt s (sp + 8) σ := by
+  constructor
+  · intro h
+    refine ⟨?_, stackAt_tail h⟩
+    intro w hw
+    have h1 := h 0 w (by simp [hw])
+    simpa using h1
+  · rintro ⟨h0, h1⟩ i w hi
+    cases i with
+    | zero =>
+      simp only [List.getElem?_cons_zero] at hi
+      obtain rfl : v = some w := Option.some.inj hi
+      have := h0 w rfl
+      simpa using this
+    | succ i =>
+      rw [List.getElem?_cons_succ] at hi
+      have h2 := h1 i w hi
+      have e : sp + 8 * (i + 1) = sp + 8 + 8 * i := by omega
+      rw [e]
+      exact h2
+
+/-- The closure at a fall-through entry: no `rsp` write, and the
+unique abstract successor. -/
+theorem succs_fall {mode : Bool} {a l : Nat} {ins : Ins}
+    {σ : List (Option Nat)} {r0 : Option Nat}
+    {ss : List (Nat × List (Option Nat) × Option Nat)}
+    (hfall : isFall ins = true)
+    (hsuccs : succs mode a ins l σ r0 = some ss) :
+    destReg ins ≠ some 4 ∧ ss = [(a + l, σ, r0After ins r0)] := by
+  have hd4 : destReg ins ≠ some 4 := by
+    intro h
+    cases ins <;> simp [isFall] at hfall ⊢
+    all_goals simp [succs, h] at hsuccs
+  refine ⟨hd4, ?_⟩
+  cases ins <;> simp only [succs, destReg] at hsuccs
+  all_goals
+    first
+      | exact (Option.some.inj hsuccs).symm
+      | (split at hsuccs
+         · rename_i h
+           exact absurd h hd4
+         · exact (Option.some.inj hsuccs).symm)
+      | simp [isFall] at hfall
+
+/-- An `exec` of `syscall` with `reg 0 = 60` never continues: it
+exits, or sticks on a missing argument register. -/
+theorem syscall60_not_ok {s s' : X86Int.St} {l : Nat}
+    (h0 : s.reg 0 = some 60) (h : exec .syscall l s = .ok s') :
+    False := by
+  cases h7 : s.reg 7 <;> cases h6 : s.reg 6 <;> cases h2 : s.reg 2 <;>
+    cases h10 : s.reg 10 <;> cases h8 : s.reg 8 <;> cases h9 : s.reg 9 <;>
+    simp [exec, h0, h7, h6, h2, h10, h8, h9, X86Env.syscall] at h
+set_option maxHeartbeats 0 in
+/-- One abstract step at one table entry.  Falls, jumps and stack
+operations stay in the `RipStack` family at an abstract successor; a
+call to `L32`/`ANNL` produces the subroutine frame; a `ret` (only
+in `ANNL`) pops the return address the caller invariant carries. -/
+theorem local_step {mode : Bool} {s s' : X86Int.St} {a l spT : Nat}
+    {ins : Ins} {σ : List (Option Nat)} {r0 : Option Nat}
+    {ss : List (Nat × List (Option Nat) × Option Nat)}
+    (hdec : stage1Im a = some (ins, l)) (ha : a + l < W)
+    (hspT : spT ≤ 2 ^ 48)
+    (hin : RipStack s a σ r0 spT)
+    (hsuccs : succs mode a ins l σ r0 = some ss)
+    (hstep : step stage1Im s = .ok s') :
+    (∃ t ∈ ss, RipStack s' t.1 t.2.1 t.2.2 spT ∧
+      (∀ x, spT ≤ x → rd64 s'.mem x = rd64 s.mem x)) ∨
+    (∃ t, ins = .call t ∧ (t = aL32 ∨ (mode = false ∧ t = aANNL)) ∧
+      s'.rip = t ∧
+      ∃ sp, s'.reg 4 = some sp ∧ rd64 s'.mem sp = some (a + l) ∧
+        stackAt s' (sp + 8) σ ∧ σBnd σ ∧ sp + 8 + 8 * σ.length = spT ∧
+        shapeBnd s'.mem ∧ 16 ≤ s'.regs.length ∧
+        (a + l, σ, none) ∈ ss ∧
+        (∀ x, spT ≤ x → rd64 s'.mem x = rd64 s.mem x)) ∨
+    (ins = .ret ∧ σ = [] ∧
+      ∃ sp t, s.reg 4 = some sp ∧ rd64 s.mem sp = some t ∧
+        s'.rip = t ∧ s'.reg 4 = some (sp + 8) ∧ s'.mem = s.mem ∧
+        shapeBnd s'.mem ∧ 16 ≤ s'.regs.length) := by
+  obtain ⟨sp, hrip, h4, hsp, hstk, hσW, h0, h0W, hb, hlen⟩ := hin
+  have hW : W = 2 ^ 64 := rfl
+  have h04 : (4 : Nat) < s.regs.length := by omega
+  have hexec : exec ins l s = .ok s' := by
+    have h := hstep
+    simp only [X86Int.step, hrip, hdec] at h
+    exact h
+  have hsp48 : sp ≤ 2 ^ 48 := by omega
+  -- push arithmetic, where needed below
+  have push_sp : ∀ {val : Nat} {m' : Mem},
+      wr64 s.mem ((sp + W - 8) % W) val = some m' → 8 ≤ sp ∧
+        (sp + W - 8) % W = sp - 8 := by
+    intro val m' hm
+    have hlt : (sp + W - 8) % W < 2 ^ 48 := wr64_lt_of_shapeBnd hm hb
+    have h8 : 8 ≤ sp := by
+      by_cases h8 : 8 ≤ sp
+      · exact h8
+      · have e : (sp + W - 8) % W = sp + W - 8 :=
+          Nat.mod_eq_of_lt (by omega)
+        omega
+    refine ⟨h8, ?_⟩
+    rw [show sp + W - 8 = (sp - 8) + W by omega, Nat.add_mod_right,
+      Nat.mod_eq_of_lt (by omega)]
+  cases ins with
+  | movI d imm =>
+    obtain ⟨hd4, hss⟩ := succs_fall (ins := .movI d imm) rfl hsuccs
+    obtain ⟨hrip', hmem, h4', hr0', hr0W', hlen'⟩ :=
+      fall_sound rfl hd4 h0 h0W hlen hexec
+    refine Or.inl ⟨(a + l, σ, r0After (.movI d imm) r0), by rw [hss]; exact List.mem_singleton_self _, ⟨sp, ?_, ?_, hsp, ?_, hσW, hr0', hr0W', ?_, ?_⟩, fun x _ => by rw [hmem]⟩
+    · rw [hrip', hrip]
+    · rw [h4']; exact h4
+    · intro i v hi
+      rw [hmem]
+      exact hstk i v hi
+    · rw [hmem]; exact hb
+    · omega
+  | mov d r =>
+    obtain ⟨hd4, hss⟩ := succs_fall (ins := .mov d r) rfl hsuccs
+    obtain ⟨hrip', hmem, h4', hr0', hr0W', hlen'⟩ :=
+      fall_sound rfl hd4 h0 h0W hlen hexec
+    refine Or.inl ⟨(a + l, σ, r0After (.mov d r) r0), by rw [hss]; exact List.mem_singleton_self _, ⟨sp, ?_, ?_, hsp, ?_, hσW, hr0', hr0W', ?_, ?_⟩, fun x _ => by rw [hmem]⟩
+    · rw [hrip', hrip]
+    · rw [h4']; exact h4
+    · intro i v hi
+      rw [hmem]
+      exact hstk i v hi
+    · rw [hmem]; exact hb
+    · omega
+  | mov32 d r =>
+    obtain ⟨hd4, hss⟩ := succs_fall (ins := .mov32 d r) rfl hsuccs
+    obtain ⟨hrip', hmem, h4', hr0', hr0W', hlen'⟩ :=
+      fall_sound rfl hd4 h0 h0W hlen hexec
+    refine Or.inl ⟨(a + l, σ, r0After (.mov32 d r) r0), by rw [hss]; exact List.mem_singleton_self _, ⟨sp, ?_, ?_, hsp, ?_, hσW, hr0', hr0W', ?_, ?_⟩, fun x _ => by rw [hmem]⟩
+    · rw [hrip', hrip]
+    · rw [h4']; exact h4
+    · intro i v hi
+      rw [hmem]
+      exact hstk i v hi
+    · rw [hmem]; exact hb
+    · omega
+  | alu op d r =>
+    obtain ⟨hd4, hss⟩ := succs_fall (ins := .alu op d r) rfl hsuccs
+    obtain ⟨hrip', hmem, h4', hr0', hr0W', hlen'⟩ :=
+      fall_sound rfl hd4 h0 h0W hlen hexec
+    refine Or.inl ⟨(a + l, σ, r0After (.alu op d r) r0), by rw [hss]; exact List.mem_singleton_self _, ⟨sp, ?_, ?_, hsp, ?_, hσW, hr0', hr0W', ?_, ?_⟩, fun x _ => by rw [hmem]⟩
+    · rw [hrip', hrip]
+    · rw [h4']; exact h4
+    · intro i v hi
+      rw [hmem]
+      exact hstk i v hi
+    · rw [hmem]; exact hb
+    · omega
+  | aluI op d imm =>
+    obtain ⟨hd4, hss⟩ := succs_fall (ins := .aluI op d imm) rfl hsuccs
+    obtain ⟨hrip', hmem, h4', hr0', hr0W', hlen'⟩ :=
+      fall_sound rfl hd4 h0 h0W hlen hexec
+    refine Or.inl ⟨(a + l, σ, r0After (.aluI op d imm) r0), by rw [hss]; exact List.mem_singleton_self _, ⟨sp, ?_, ?_, hsp, ?_, hσW, hr0', hr0W', ?_, ?_⟩, fun x _ => by rw [hmem]⟩
+    · rw [hrip', hrip]
+    · rw [h4']; exact h4
+    · intro i v hi
+      rw [hmem]
+      exact hstk i v hi
+    · rw [hmem]; exact hb
+    · omega
+  | cmp x y =>
+    obtain ⟨hd4, hss⟩ := succs_fall (ins := .cmp x y) rfl hsuccs
+    obtain ⟨hrip', hmem, h4', hr0', hr0W', hlen'⟩ :=
+      fall_sound rfl hd4 h0 h0W hlen hexec
+    refine Or.inl ⟨(a + l, σ, r0After (.cmp x y) r0), by rw [hss]; exact List.mem_singleton_self _, ⟨sp, ?_, ?_, hsp, ?_, hσW, hr0', hr0W', ?_, ?_⟩, fun x _ => by rw [hmem]⟩
+    · rw [hrip', hrip]
+    · rw [h4']; exact h4
+    · intro i v hi
+      rw [hmem]
+      exact hstk i v hi
+    · rw [hmem]; exact hb
+    · omega
+  | cmpI x imm =>
+    obtain ⟨hd4, hss⟩ := succs_fall (ins := .cmpI x imm) rfl hsuccs
+    obtain ⟨hrip', hmem, h4', hr0', hr0W', hlen'⟩ :=
+      fall_sound rfl hd4 h0 h0W hlen hexec
+    refine Or.inl ⟨(a + l, σ, r0After (.cmpI x imm) r0), by rw [hss]; exact List.mem_singleton_self _, ⟨sp, ?_, ?_, hsp, ?_, hσW, hr0', hr0W', ?_, ?_⟩, fun x _ => by rw [hmem]⟩
+    · rw [hrip', hrip]
+    · rw [h4']; exact h4
+    · intro i v hi
+      rw [hmem]
+      exact hstk i v hi
+    · rw [hmem]; exact hb
+    · omega
+  | test x y =>
+    obtain ⟨hd4, hss⟩ := succs_fall (ins := .test x y) rfl hsuccs
+    obtain ⟨hrip', hmem, h4', hr0', hr0W', hlen'⟩ :=
+      fall_sound rfl hd4 h0 h0W hlen hexec
+    refine Or.inl ⟨(a + l, σ, r0After (.test x y) r0), by rw [hss]; exact List.mem_singleton_self _, ⟨sp, ?_, ?_, hsp, ?_, hσW, hr0', hr0W', ?_, ?_⟩, fun x _ => by rw [hmem]⟩
+    · rw [hrip', hrip]
+    · rw [h4']; exact h4
+    · intro i v hi
+      rw [hmem]
+      exact hstk i v hi
+    · rw [hmem]; exact hb
+    · omega
+  | shlI d c =>
+    obtain ⟨hd4, hss⟩ := succs_fall (ins := .shlI d c) rfl hsuccs
+    obtain ⟨hrip', hmem, h4', hr0', hr0W', hlen'⟩ :=
+      fall_sound rfl hd4 h0 h0W hlen hexec
+    refine Or.inl ⟨(a + l, σ, r0After (.shlI d c) r0), by rw [hss]; exact List.mem_singleton_self _, ⟨sp, ?_, ?_, hsp, ?_, hσW, hr0', hr0W', ?_, ?_⟩, fun x _ => by rw [hmem]⟩
+    · rw [hrip', hrip]
+    · rw [h4']; exact h4
+    · intro i v hi
+      rw [hmem]
+      exact hstk i v hi
+    · rw [hmem]; exact hb
+    · omega
+  | shrI d c =>
+    obtain ⟨hd4, hss⟩ := succs_fall (ins := .shrI d c) rfl hsuccs
+    obtain ⟨hrip', hmem, h4', hr0', hr0W', hlen'⟩ :=
+      fall_sound rfl hd4 h0 h0W hlen hexec
+    refine Or.inl ⟨(a + l, σ, r0After (.shrI d c) r0), by rw [hss]; exact List.mem_singleton_self _, ⟨sp, ?_, ?_, hsp, ?_, hσW, hr0', hr0W', ?_, ?_⟩, fun x _ => by rw [hmem]⟩
+    · rw [hrip', hrip]
+    · rw [h4']; exact h4
+    · intro i v hi
+      rw [hmem]
+      exact hstk i v hi
+    · rw [hmem]; exact hb
+    · omega
+  | ld d b disp =>
+    obtain ⟨hd4, hss⟩ := succs_fall (ins := .ld d b disp) rfl hsuccs
+    obtain ⟨hrip', hmem, h4', hr0', hr0W', hlen'⟩ :=
+      fall_sound rfl hd4 h0 h0W hlen hexec
+    refine Or.inl ⟨(a + l, σ, r0After (.ld d b disp) r0), by rw [hss]; exact List.mem_singleton_self _, ⟨sp, ?_, ?_, hsp, ?_, hσW, hr0', hr0W', ?_, ?_⟩, fun x _ => by rw [hmem]⟩
+    · rw [hrip', hrip]
+    · rw [h4']; exact h4
+    · intro i v hi
+      rw [hmem]
+      exact hstk i v hi
+    · rw [hmem]; exact hb
+    · omega
+  | ld32 d b disp =>
+    obtain ⟨hd4, hss⟩ := succs_fall (ins := .ld32 d b disp) rfl hsuccs
+    obtain ⟨hrip', hmem, h4', hr0', hr0W', hlen'⟩ :=
+      fall_sound rfl hd4 h0 h0W hlen hexec
+    refine Or.inl ⟨(a + l, σ, r0After (.ld32 d b disp) r0), by rw [hss]; exact List.mem_singleton_self _, ⟨sp, ?_, ?_, hsp, ?_, hσW, hr0', hr0W', ?_, ?_⟩, fun x _ => by rw [hmem]⟩
+    · rw [hrip', hrip]
+    · rw [h4']; exact h4
+    · intro i v hi
+      rw [hmem]
+      exact hstk i v hi
+    · rw [hmem]; exact hb
+    · omega
+  | ld8 d b disp =>
+    obtain ⟨hd4, hss⟩ := succs_fall (ins := .ld8 d b disp) rfl hsuccs
+    obtain ⟨hrip', hmem, h4', hr0', hr0W', hlen'⟩ :=
+      fall_sound rfl hd4 h0 h0W hlen hexec
+    refine Or.inl ⟨(a + l, σ, r0After (.ld8 d b disp) r0), by rw [hss]; exact List.mem_singleton_self _, ⟨sp, ?_, ?_, hsp, ?_, hσW, hr0', hr0W', ?_, ?_⟩, fun x _ => by rw [hmem]⟩
+    · rw [hrip', hrip]
+    · rw [h4']; exact h4
+    · intro i v hi
+      rw [hmem]
+      exact hstk i v hi
+    · rw [hmem]; exact hb
+    · omega
+  | lea d b disp =>
+    obtain ⟨hd4, hss⟩ := succs_fall (ins := .lea d b disp) rfl hsuccs
+    obtain ⟨hrip', hmem, h4', hr0', hr0W', hlen'⟩ :=
+      fall_sound rfl hd4 h0 h0W hlen hexec
+    refine Or.inl ⟨(a + l, σ, r0After (.lea d b disp) r0), by rw [hss]; exact List.mem_singleton_self _, ⟨sp, ?_, ?_, hsp, ?_, hσW, hr0', hr0W', ?_, ?_⟩, fun x _ => by rw [hmem]⟩
+    · rw [hrip', hrip]
+    · rw [h4']; exact h4
+    · intro i v hi
+      rw [hmem]
+      exact hstk i v hi
+    · rw [hmem]; exact hb
+    · omega
+  | jmp t =>
+    have hss : ss = [(t, σ, r0)] := by
+      simp only [succs] at hsuccs
+      exact (Option.some.inj hsuccs).symm
+    simp only [exec] at hexec
+    cases hexec
+    refine Or.inl ⟨(t, σ, r0), by rw [hss]; exact List.mem_singleton_self _, ⟨sp, rfl, ?_, hsp, hstk, hσW, h0, h0W, hb, hlen⟩, fun x _ => rfl⟩
+    rw [reg_with_rip]; exact h4
+  | jcc cc t =>
+    have hss : ss = [(t, σ, r0), (a + l, σ, r0)] := by
+      simp only [succs] at hsuccs
+      exact (Option.some.inj hsuccs).symm
+    cases hc : cond s.fl cc with
+    | none => simp [exec, hc, lift] at hexec
+    | some c =>
+      simp only [exec, hc, lift, bind, Option.bind, pure] at hexec
+      cases hexec
+      by_cases hc2 : c = true
+      · subst hc2
+        simp only [if_true]
+        refine Or.inl ⟨(t, σ, r0), by rw [hss]; simp, ⟨sp, by trivial, ?_, hsp, hstk, hσW, h0, h0W, hb, hlen⟩, by intro x _; trivial⟩
+        rw [reg_with_rip]; exact h4
+      · have : c = false := by cases c <;> simp_all
+        subst this
+        simp only [if_false]
+        refine Or.inl ⟨(a + l, σ, r0), by rw [hss]; simp, ⟨sp, ?_, ?_, hsp, hstk, hσW, h0, h0W, hb, hlen⟩, by intro x _; trivial⟩
+        · show s.rip + l = a + l
+          rw [hrip]
+        · rw [reg_with_rip]; exact h4
+  | pushI imm =>
+    have hss : ss = [(a + l, some (imm % W) :: σ, r0)] := by
+      simp only [succs] at hsuccs
+      exact (Option.some.inj hsuccs).symm
+    cases hm' : wr64 s.mem ((sp + W - 8) % W) (imm % W) with
+    | none => simp [exec, h4, hm', lift] at hexec
+    | some m' =>
+      obtain ⟨h8, hsp'⟩ := push_sp hm'
+      simp only [exec, h4, hm', lift, bind, Option.bind, pure] at hexec
+      cases hexec
+      rw [hsp'] at hm'
+      refine Or.inl ⟨(a + l, some (imm % W) :: σ, r0), by rw [hss]; exact List.mem_singleton_self _, ⟨sp - 8, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩, ?_⟩
+      · show s.rip + l = a + l
+        rw [hrip]
+      · show (s.set 4 (some ((sp + W - 8) % W))).reg 4 = some (sp - 8)
+        rw [reg_set_self h04, hsp']
+      · show sp - 8 + 8 * (some (imm % W) :: σ).length = spT
+        simp only [List.length_cons]
+        omega
+      · rw [stackAt_cons]
+        refine ⟨?_, ?_⟩
+        · intro w hw
+          obtain rfl : w = imm % W := by
+            have := hw; simp at this; exact this.symm
+          show rd64 m' (sp - 8) = some (imm % W)
+          have h1 := rd64_wr64 hm'
+          rwa [Nat.mod_mod] at h1
+        · have e : sp - 8 + 8 = sp := by omega
+          rw [e]
+          exact stackAt_wr64_below (s := s) hm' hstk (by omega)
+      · intro i v hi
+        cases i with
+        | zero =>
+          have h1 : imm % W = v := by simpa using hi
+          rw [← h1]; exact Nat.mod_lt _ (by omega)
+        | succ i =>
+          rw [List.getElem?_cons_succ] at hi
+          exact hσW i v hi
+      · intro v hv
+        have := h0 v hv
+        show (s.set 4 (some ((sp + W - 8) % W))).reg 0 = some v
+        rw [reg_set_other (show (0:Nat) ≠ 4 by decide)]
+        exact this
+      · intro v hv
+        exact h0W v hv
+      · exact shapeBnd_wr64 hm' hb
+      · show (s.set 4 _).regs.length ≥ 16
+        simp only [St.set, List.length_set]
+        exact hlen
+      · intro x hx
+        show rd64 m' x = rd64 s.mem x
+        exact rd64_wr64_other hm' (Or.inl (by omega))
+  | push r =>
+    have hss : ss = [(a + l, (if r == 0 then r0 else none) :: σ, r0)] := by
+      simp only [succs] at hsuccs
+      exact (Option.some.inj hsuccs).symm
+    cases hr : s.reg r with
+    | none => simp [exec, hr, lift] at hexec
+    | some w =>
+      cases hm' : wr64 s.mem ((sp + W - 8) % W) w with
+      | none => simp [exec, hr, h4, hm', lift] at hexec
+      | some m' =>
+        obtain ⟨h8, hsp'⟩ := push_sp hm'
+        simp only [exec, hr, h4, hm', lift, bind, Option.bind, pure] at hexec
+        cases hexec
+        rw [hsp'] at hm'
+        refine Or.inl ⟨(a + l, (if r == 0 then r0 else none) :: σ, r0), by rw [hss]; exact List.mem_singleton_self _, ⟨sp - 8, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩, ?_⟩
+        · show s.rip + l = a + l
+          rw [hrip]
+        · show (s.set 4 (some ((sp + W - 8) % W))).reg 4 = some (sp - 8)
+          rw [reg_set_self h04, hsp']
+        · show sp - 8 + 8 * ((if r == 0 then r0 else none) :: σ).length = spT
+          simp only [List.length_cons]
+          omega
+        · rw [stackAt_cons]
+          refine ⟨?_, ?_⟩
+          · intro u hu
+            have h1 := rd64_wr64 hm'
+            by_cases hr0 : r = 0
+            · subst hr0
+              simp only [beq_self_eq_true, if_true] at hu
+              have hu2 : s.reg 0 = some u := h0 u hu
+              rw [hu2] at hr
+              rw [Option.some.injEq] at hr
+              have huW : u < W := h0W u hu
+              rw [← hr] at h1
+              rwa [Nat.mod_eq_of_lt huW] at h1
+            · simp only [beq_iff_eq, hr0, if_false] at hu
+              simp at hu
+          · have e : sp - 8 + 8 = sp := by omega
+            rw [e]
+            exact stackAt_wr64_below (s := s) hm' hstk (by omega)
+        · intro i v hi
+          cases i with
+          | zero =>
+            by_cases hr0 : r = 0
+            · subst hr0
+              simp only [beq_self_eq_true, if_true] at hi
+              have h1 : r0 = some v := by simpa using hi
+              exact h0W v h1
+            · simp only [beq_iff_eq, hr0, if_false] at hi
+              simp at hi
+          | succ i =>
+            rw [List.getElem?_cons_succ] at hi
+            exact hσW i v hi
+        · intro v hv
+          have := h0 v hv
+          show (s.set 4 (some ((sp + W - 8) % W))).reg 0 = some v
+          rw [reg_set_other (show (0:Nat) ≠ 4 by decide)]
+          exact this
+        · intro v hv
+          exact h0W v hv
+        · exact shapeBnd_wr64 hm' hb
+        · show (s.set 4 _).regs.length ≥ 16
+          simp only [St.set, List.length_set]
+          exact hlen
+        · intro x hx
+          show rd64 m' x = rd64 s.mem x
+          exact rd64_wr64_other hm' (Or.inl (by omega))
+  | pop d =>
+    cases hσ : σ with
+    | nil =>
+      simp [succs, hσ] at hsuccs
+    | cons v0 σ' =>
+      have hd4' : d ≠ 4 := by
+        intro h
+        subst h
+        simp [succs, hσ] at hsuccs
+      have hss : ss = [(a + l, σ', if d == 0 then v0 else r0)] := by
+        simp only [succs, hσ] at hsuccs
+        split at hsuccs
+        · rename_i h
+          simp at h
+          exact absurd h hd4'
+        · exact (Option.some.inj hsuccs).symm
+      cases hv : rd64 s.mem sp with
+      | none => simp [exec, h4, hv, lift] at hexec
+      | some w =>
+        have hlenσ : (v0 :: σ').length = σ'.length + 1 := rfl
+        have hsp8 : (sp + 8) % W = sp + 8 := by
+          apply Nat.mod_eq_of_lt
+          have h1 : sp + 8 * (σ'.length + 1) = spT := by
+            rw [hσ] at hsp; exact hsp
+          omega
+        simp only [exec, h4, hv, lift, bind, Option.bind, pure] at hexec
+        cases hexec
+        refine Or.inl ⟨(a + l, σ', if d == 0 then v0 else r0), by rw [hss]; exact List.mem_singleton_self _, ⟨sp + 8, ?_, ?_, ?_, ?_, ?_, ?_, ?_, hb, ?_⟩, fun x _ => rfl⟩
+        · show s.rip + l = a + l
+          rw [hrip]
+        · show ((s.set 4 (some ((sp + 8) % W))).set d (some w)).reg 4 = some (sp + 8)
+          rw [reg_set_other (show (4:Nat) ≠ d from fun h => hd4' h.symm),
+            reg_set_self h04, hsp8]
+        · show sp + 8 + 8 * σ'.length = spT
+          have h1 : sp + 8 * (σ'.length + 1) = spT := by
+            rw [hσ] at hsp; exact hsp
+          omega
+        · refine stackAt_tail (s := s) (sp := sp) (v := v0) (σ := σ') ?_
+          rw [← hσ]; exact hstk
+        · intro i v hi
+          have h2 : σ[i + 1]? = some (some v) := by
+            rw [hσ, List.getElem?_cons_succ]; exact hi
+          exact hσW (i + 1) v h2
+        · intro u hu
+          by_cases hd0 : d = 0
+          · subst hd0
+            simp only [beq_self_eq_true, if_true] at hu
+            show ((s.set 4 (some ((sp + 8) % W))).set 0 (some w)).reg 0 = some u
+            rw [reg_set_self (by simp [St.set]; omega)]
+            cases hv0 : v0 with
+            | none => rw [hv0] at hu; simp at hu
+            | some x =>
+              have hx : rd64 s.mem sp = some x := by
+                refine stackAt_head (s := s) (sp := sp) (v := x) (σ := σ') ?_
+                rw [← hv0, ← hσ]; exact hstk
+              have e1 : w = x := Option.some.inj (hv.symm.trans hx)
+              have e2 : u = x := Option.some.inj (hu.symm.trans hv0)
+              rw [e1, e2]
+          · simp only [beq_iff_eq, hd0, if_false] at hu
+            have := h0 u hu
+            show ((s.set 4 (some ((sp + 8) % W))).set d (some w)).reg 0 = some u
+            rw [reg_set_other (show (0:Nat) ≠ d from fun h => hd0 h.symm),
+              reg_set_other (show (0:Nat) ≠ 4 by decide)]
+            exact this
+        · intro u hu
+          by_cases hd0 : d = 0
+          · subst hd0
+            simp only [beq_self_eq_true, if_true] at hu
+            cases hv0 : v0 with
+            | none => rw [hv0] at hu; simp at hu
+            | some x =>
+              have hux : u = x := Option.some.inj (hu.symm.trans hv0)
+              have hxW : x < W := hσW 0 x (by simp [hσ, hv0])
+              omega
+          · simp only [beq_iff_eq, hd0, if_false] at hu
+            exact h0W u hu
+        · show ((s.set 4 (some ((sp + 8) % W))).set d (some w)).regs.length ≥ 16
+          simp only [St.set, List.length_set]
+          exact hlen
+  | call t =>
+    simp only [succs] at hsuccs
+    split at hsuccs
+    · rename_i hcond
+      have hss : ss = [(a + l, σ, none)] := (Option.some.inj hsuccs).symm
+      have ht : t = aL32 ∨ (mode = false ∧ t = aANNL) := by
+        rw [Bool.or_eq_true] at hcond
+        rcases hcond with h | h
+        · rw [Bool.and_eq_true] at h
+          left
+          have e : t = base + 622 := by simpa using h.2
+          rw [e]
+          rfl
+        · rw [Bool.and_eq_true] at h
+          have hm : mode = false := by
+            have h1 := h.1
+            cases mode with
+            | false => rfl
+            | true => simp at h1
+          rw [Bool.or_eq_true] at h
+          rcases h.2 with h2 | h2
+          · left
+            have e : t = base + 622 := by simpa using h2
+            rw [e]; rfl
+          · right
+            refine ⟨hm, ?_⟩
+            have e : t = base + 662 := by simpa using h2
+            rw [e]; rfl
+      cases hm' : wr64 s.mem ((sp + W - 8) % W) (s.rip + l) with
+      | none => simp [exec, h4, hm', lift] at hexec
+      | some m' =>
+        obtain ⟨h8, hsp'⟩ := push_sp hm'
+        simp only [exec, h4, hm', lift, bind, Option.bind, pure] at hexec
+        cases hexec
+        rw [hsp'] at hm'
+        refine Or.inr (Or.inl ⟨t, rfl, ht, rfl, sp - 8, ?_, ?_, ?_, hσW, ?_, ?_, ?_, ?_, ?_⟩)
+        · show (s.set 4 (some ((sp + W - 8) % W))).reg 4 = some (sp - 8)
+          rw [reg_set_self h04, hsp']
+        · show rd64 m' (sp - 8) = some (a + l)
+          have h1 := rd64_wr64 hm'
+          have hnx : s.rip + l = a + l := by rw [hrip]
+          rw [hnx, Nat.mod_eq_of_lt ha] at h1
+          exact h1
+        · have e : sp - 8 + 8 = sp := by omega
+          rw [e]
+          exact stackAt_wr64_below (s := s) hm' hstk (by omega)
+        · omega
+        · exact shapeBnd_wr64 hm' hb
+        · show (s.set 4 _).regs.length ≥ 16
+          simp only [St.set, List.length_set]
+          exact hlen
+        · rw [hss]; exact List.mem_singleton_self _
+        · intro x hx
+          show rd64 m' x = rd64 s.mem x
+          exact rd64_wr64_other hm' (Or.inl (by omega))
+    · simp at hsuccs
+  | ret =>
+    cases hσ : σ with
+    | cons v0 σ' =>
+      simp [succs, hσ] at hsuccs
+    | nil =>
+      cases hv : rd64 s.mem sp with
+      | none => simp [exec, h4, hv, lift] at hexec
+      | some t =>
+        have hsp8 : (sp + 8) % W = sp + 8 := by
+          apply Nat.mod_eq_of_lt
+          have h1 : sp + 8 * ([] : List (Option Nat)).length = spT := by
+            rw [← hσ]; exact hsp
+          simp only [List.length_nil] at h1
+          omega
+        simp only [exec, h4, hv, lift, bind, Option.bind, pure] at hexec
+        cases hexec
+        refine Or.inr (Or.inr ⟨rfl, rfl, sp, t, h4, hv, rfl, ?_, rfl, hb, ?_⟩)
+        · show (s.set 4 (some ((sp + 8) % W))).reg 4 = some (sp + 8)
+          rw [reg_set_self h04, hsp8]
+        · show (s.set 4 _).regs.length ≥ 16
+          simp only [St.set, List.length_set]
+          exact hlen
+  | syscall =>
+    simp only [succs] at hsuccs
+    split at hsuccs
+    · rename_i h60
+      have hr0 : r0 = some 60 := by simpa using h60
+      exact (syscall60_not_ok (h0 60 hr0) hexec).elim
+    · simp at hsuccs
+  | st _ _ _ => simp [succs] at hsuccs
+  | st8 _ _ _ => simp [succs] at hsuccs
+  | jtab _ _ _ => simp [succs] at hsuccs
+  | jmpR _ => simp [succs] at hsuccs
+set_option maxRecDepth 100000 in
+theorem chkAnn_addr_ge : ∀ e ∈ chkAnn, base + 0x452 ≤ e.1 := by
+  decide +kernel
+
+set_option maxRecDepth 100000 in
+theorem annlAnn_addr_ge : ∀ e ∈ annlAnn, base + 662 ≤ e.1 := by
+  decide +kernel
+
+set_option maxRecDepth 100000 in
+theorem chkAnn_entry0 :
+    (base + 0x452, .mov 7 14, 3, [], none) ∈ chkAnn := by
+  decide +kernel
+
+set_option maxRecDepth 100000 in
+theorem annlAnn_entry0 :
+    (aANNL, .push 1, 1, [], none) ∈ annlAnn := by
+  decide +kernel
+
+theorem stage1Im_l32_ret : stage1Im (aL32 + 2) = some (.ret, 1) := by
+  decide +kernel
+
+/-- The checker-entry state is a `ChkMain` at the first entry. -/
+theorem chkMain_entry {s : X86Int.St} {sp0 : Nat}
+    (hrip : s.rip = base + 0x452) (h4 : s.reg 4 = some sp0)
+    (hb : shapeBnd s.mem) (hlen : 16 ≤ s.regs.length) :
+    ChkMain sp0 s :=
+  ⟨(base + 0x452, .mov 7 14, 3, [], none), chkAnn_entry0, sp0, hrip,
+    h4, by simp, by intro i v hi; simp at hi,
+    by intro i v hi; simp at hi, by intro v hv; simp at hv,
+    by intro v hv; simp at hv, hb, hlen⟩
+
+/-- Exit-1 from an abstract successor at `aFail1`. -/
+theorem chkExit1_of_ripStack {s : X86Int.St} {σ : List (Option Nat)}
+    {r0 : Option Nat} {spT : Nat}
+    (h : RipStack s aFail1 σ r0 spT) : ChkExit1 s := by
+  obtain ⟨sp, hrip, h4, -, -, -, -, -, hb, hlen⟩ := h
+  exact ⟨Or.inl ⟨hrip, sp, h4⟩, hb, hlen⟩
+
+set_option maxHeartbeats 0 in
+theorem step_main {sp0 : Nat} (hsp0 : sp0 ≤ 2 ^ 48)
+    {s s' : X86Int.St} (hs : ChkMain sp0 s)
+    (hstep : step stage1Im s = .ok s') : ChkP sp0 s' := by
+  obtain ⟨e, he, hin⟩ := hs
+  obtain ⟨ss, hssuccs, hsucc⟩ := annOK_succs (mode := false) chk_ann_ok he
+  have ha : e.1 + e.2.2.1 < W := by
+    have h1 := chkAnn_addr_bnd e he
+    have hb : base = 0x400000 := rfl
+    have hW : W = 2 ^ 64 := rfl
+    omega
+  rcases local_step (chk_entry_decode he) ha hsp0 hin hssuccs hstep with
+    (⟨t, ht, hRip, -⟩ |
+     ⟨t, -, ht2, hrip', sp', h4', hrd, hstk', hσW', hspEq, hb', hlen',
+       hmem, -⟩ | ⟨hins, -, -⟩)
+  · rcases hsucc t ht with hfail | ⟨e', he', ha', hσ', hr0'⟩
+    · rw [hfail] at hRip
+      exact Or.inr (Or.inr (Or.inr (Or.inr (chkExit1_of_ripStack hRip))))
+    · exact Or.inl ⟨e', he', by rw [ha', hσ', hr0']; exact hRip⟩
+  · rcases hsucc _ hmem with hfail | ⟨e', he', ha', hσ', hr0'⟩
+    · have hge := chkAnn_addr_ge e he
+      have hb : base = 0x400000 := rfl
+      have hf : aFail1 = base + 0x124 := rfl
+      omega
+    · rcases ht2 with ht | ⟨-, ht⟩
+      · refine Or.inr (Or.inl ⟨Or.inl ?_, sp', e', he', h4', ?_, ?_,
+          ?_, ?_, hr0', hb', hlen'⟩)
+        · rw [hrip', ht]
+        · rw [ha']; exact hrd
+        · rw [hσ']; exact hstk'
+        · rw [hσ']; exact hσW'
+        · rw [hσ']; exact hspEq
+      · refine Or.inr (Or.inr (Or.inl ⟨(aANNL, .push 1, 1, [], none),
+          annlAnn_entry0, sp', e', he', ⟨sp', ?_, h4', by simp, ?_, ?_,
+          ?_, ?_, hb', hlen'⟩, ?_, ?_, ?_, ?_, hr0'⟩))
+        · rw [hrip', ht]
+        · intro i v hi; simp at hi
+        · intro i v hi; simp at hi
+        · intro v hv; simp at hv
+        · intro v hv; simp at hv
+        · rw [ha']; exact hrd
+        · rw [hσ']; exact hstk'
+        · rw [hσ']; exact hσW'
+        · rw [hσ']; exact hspEq
+  · rw [hins] at hssuccs
+    simp [succs] at hssuccs
+
+set_option maxHeartbeats 0 in
+theorem step_annl {sp0 : Nat} (hsp0 : sp0 ≤ 2 ^ 48)
+    {s s' : X86Int.St} (hs : ChkAnnl sp0 s)
+    (hstep : step stage1Im s = .ok s') : ChkP sp0 s' := by
+  obtain ⟨e, he, spA, e0, he0, hin, hrdA, hstkA, hσWA, hspAeq, hr0A⟩ := hs
+  obtain ⟨ss, hssuccs, hsucc⟩ := annOK_succs (mode := true) annl_ann_ok he
+  have ha : e.1 + e.2.2.1 < W := by
+    have h1 := annlAnn_addr_bnd e he
+    have hb : base = 0x400000 := rfl
+    have hW : W = 2 ^ 64 := rfl
+    omega
+  have hspA : spA ≤ 2 ^ 48 := by omega
+  rcases local_step (annl_entry_decode he) ha hspA hin hssuccs hstep with
+    (⟨t, ht, hRip, hframe⟩ |
+     ⟨t, -, ht2, hrip', sp', h4', hrd, hstk', hσW', hspEq, hb', hlen',
+       hmem, hframe⟩ |
+     ⟨-, hσnil, sp1, t, h4s, hrds, hrip', h4'', hmem', hb', hlen'⟩)
+  · rcases hsucc t ht with hfail | ⟨e', he', ha', hσ', hr0'⟩
+    · rw [hfail] at hRip
+      exact Or.inr (Or.inr (Or.inr (Or.inr (chkExit1_of_ripStack hRip))))
+    · refine Or.inr (Or.inr (Or.inl ⟨e', he', spA, e0, he0, ?_, ?_, ?_,
+        hσWA, hspAeq, hr0A⟩))
+      · rw [ha', hσ', hr0']; exact hRip
+      · rw [hframe spA (Nat.le_refl _)]; exact hrdA
+      · intro i v hi
+        rw [hframe _ (by omega)]
+        exact hstkA i v hi
+  · rcases hsucc _ hmem with hfail | ⟨e', he', ha', hσ', hr0'⟩
+    · have hge := annlAnn_addr_ge e he
+      have hb : base = 0x400000 := rfl
+      have hf : aFail1 = base + 0x124 := rfl
+      omega
+    · have ht : t = aL32 := by
+        rcases ht2 with h | ⟨h, -⟩
+        · exact h
+        · simp at h
+      refine Or.inr (Or.inr (Or.inr (Or.inl ⟨Or.inl ?_, sp', spA, e', e0,
+        he', he0, h4', ?_, ?_, ?_, ?_, ?_, ?_, hσWA, hspAeq, hr0A,
+        hr0', hb', hlen'⟩)))
+      · rw [hrip', ht]
+      · rw [ha']; exact hrd
+      · rw [hσ']; exact hstk'
+      · rw [hσ']; exact hσW'
+      · rw [hσ']; exact hspEq
+      · rw [hframe spA (Nat.le_refl _)]; exact hrdA
+      · intro i v hi
+        rw [hframe _ (by omega)]
+        exact hstkA i v hi
+  · obtain ⟨sp, hrip, h4, hsp, -, -, -, -, -, -⟩ := hin
+    have hsp1 : sp1 = sp := by
+      rw [h4] at h4s
+      exact (Option.some.inj h4s).symm
+    have hspA2 : sp = spA := by
+      rw [hσnil] at hsp
+      simp at hsp
+      omega
+    have ht2 : t = e0.1 := by
+      rw [hsp1, hspA2] at hrds
+      rw [hrdA] at hrds
+      exact (Option.some.inj hrds).symm
+    refine Or.inl ⟨e0, he0, spA + 8, ?_, ?_, ?_, ?_, hσWA, ?_, ?_, hb',
+      hlen'⟩
+    · rw [hrip', ht2]
+    · rw [hsp1, hspA2] at h4''
+      exact h4''
+    · omega
+    · intro i v hi
+      rw [hmem']
+      exact hstkA i v hi
+    · intro v hv
+      rw [hr0A] at hv
+      simp at hv
+    · intro v hv
+      rw [hr0A] at hv
+      simp at hv
+
+theorem step_l32m {sp0 : Nat} (hsp0 : sp0 ≤ 2 ^ 48)
+    {s s' : X86Int.St} (hs : ChkL32m sp0 s)
+    (hstep : step stage1Im s = .ok s') : ChkP sp0 s' := by
+  have hW : W = 2 ^ 64 := rfl
+  obtain ⟨hrip, sp, e, he, h4, hrd, hstk, hσW, hspEq, hr0, hb, hlen⟩ := hs
+  rcases hrip with hrip | hrip
+  · have hexec : exec (.ld32 0 2 0) 2 s = .ok s' := by
+      have h := hstep
+      simp only [X86Int.step, hrip, stage1_l32.d0] at h
+      exact h
+    cases h2 : s.reg 2 with
+    | none => simp [exec, h2, lift] at hexec
+    | some x =>
+      cases hv : rd32 s.mem (ea x 0) with
+      | none => simp [exec, h2, hv, lift] at hexec
+      | some w =>
+        simp only [exec, h2, hv, lift, bind, Option.bind, pure] at hexec
+        cases hexec
+        refine Or.inr (Or.inl ⟨Or.inr ?_, sp, e, he, ?_, hrd, hstk, hσW,
+          hspEq, hr0, hb, ?_⟩)
+        · show s.rip + 2 = aL32 + 2
+          rw [hrip]
+        · show (s.set 0 _).reg 4 = some sp
+          rw [reg_set_other (show (4:Nat) ≠ 0 by decide)]
+          exact h4
+        · show (s.set 0 _).regs.length ≥ 16
+          simp only [St.set, List.length_set]
+          exact hlen
+  · have hexec : exec .ret 1 s = .ok s' := by
+      have h := hstep
+      simp only [X86Int.step, hrip, stage1Im_l32_ret] at h
+      exact h
+    simp only [exec, h4, hrd, lift, bind, Option.bind, pure] at hexec
+    cases hexec
+    refine Or.inl ⟨e, he, sp + 8, rfl, ?_, ?_, hstk, hσW, ?_, ?_, hb, ?_⟩
+    · show (s.set 4 (some ((sp + 8) % W))).reg 4 = some (sp + 8)
+      rw [reg_set_self (by omega), Nat.mod_eq_of_lt (by omega)]
+    · omega
+    · intro v hv
+      rw [hr0] at hv
+      simp at hv
+    · intro v hv
+      rw [hr0] at hv
+      simp at hv
+    · show (s.set 4 _).regs.length ≥ 16
+      simp only [St.set, List.length_set]
+      exact hlen
+
+theorem step_l32a {sp0 : Nat} (hsp0 : sp0 ≤ 2 ^ 48)
+    {s s' : X86Int.St} (hs : ChkL32a sp0 s)
+    (hstep : step stage1Im s = .ok s') : ChkP sp0 s' := by
+  have hW : W = 2 ^ 64 := rfl
+  obtain ⟨hrip, sp, spA, e, e0, he, he0, h4, hrd, hstk, hσW, hspEq,
+    hrdA, hstkA, hσWA, hspAeq, hr0A, hr0, hb, hlen⟩ := hs
+  rcases hrip with hrip | hrip
+  · have hexec : exec (.ld32 0 2 0) 2 s = .ok s' := by
+      have h := hstep
+      simp only [X86Int.step, hrip, stage1_l32.d0] at h
+      exact h
+    cases h2 : s.reg 2 with
+    | none => simp [exec, h2, lift] at hexec
+    | some x =>
+      cases hv : rd32 s.mem (ea x 0) with
+      | none => simp [exec, h2, hv, lift] at hexec
+      | some w =>
+        simp only [exec, h2, hv, lift, bind, Option.bind, pure] at hexec
+        cases hexec
+        refine Or.inr (Or.inr (Or.inr (Or.inl ⟨Or.inr ?_, sp, spA, e, e0,
+          he, he0, ?_, hrd, hstk, hσW, hspEq, hrdA, hstkA, hσWA, hspAeq,
+          hr0A, hr0, hb, ?_⟩)))
+        · show s.rip + 2 = aL32 + 2
+          rw [hrip]
+        · show (s.set 0 _).reg 4 = some sp
+          rw [reg_set_other (show (4:Nat) ≠ 0 by decide)]
+          exact h4
+        · show (s.set 0 _).regs.length ≥ 16
+          simp only [St.set, List.length_set]
+          exact hlen
+  · have hexec : exec .ret 1 s = .ok s' := by
+      have h := hstep
+      simp only [X86Int.step, hrip, stage1Im_l32_ret] at h
+      exact h
+    simp only [exec, h4, hrd, lift, bind, Option.bind, pure] at hexec
+    cases hexec
+    refine Or.inr (Or.inr (Or.inl ⟨e, he, spA, e0, he0,
+      ⟨sp + 8, rfl, ?_, ?_, hstk, hσW, ?_, ?_, hb, ?_⟩,
+      hrdA, hstkA, hσWA, hspAeq, hr0A⟩))
+    · show (s.set 4 (some ((sp + 8) % W))).reg 4 = some (sp + 8)
+      rw [reg_set_self (by omega), Nat.mod_eq_of_lt (by omega)]
+    · omega
+    · intro v hv
+      rw [hr0] at hv
+      simp at hv
+    · intro v hv
+      rw [hr0] at hv
+      simp at hv
+    · show (s.set 4 _).regs.length ≥ 16
+      simp only [St.set, List.length_set]
+      exact hlen
+
+/-- A readable 64-bit slot lies below `2 ^ 48` in a bounded memory. -/
+theorem rd64_lt_of_shapeBnd {m : Mem} {a v : Nat}
+    (h : rd64 m a = some v) (hb : shapeBnd m) : a < 2 ^ 48 := by
+  have hrd1 : ∃ b, m.rd a = some b := by
+    unfold rd64 at h
+    cases hrd : m.rdN a 8 with
+    | none => rw [hrd] at h; simp at h
+    | some bs =>
+      have h2 := hrd
+      simp only [Mem.rdN, bind, Option.bind] at h2
+      split at h2
+      · rename_i hb'
+        simp [hb'] at h2
+      · rename_i b hb'
+        exact ⟨b, hb'⟩
+  obtain ⟨b, hb2⟩ := hrd1
+  exact rd_lt_of_shapeBnd hb2 hb
+
+set_option maxHeartbeats 0 in
+theorem step_exit1 {s s' : X86Int.St} (hs : ChkExit1 s)
+    (hstep : step stage1Im s = .ok s') : ChkExit1 s' := by
+  obtain ⟨hdisj, hb, hlen⟩ := hs
+  have hW : W = 2 ^ 64 := rfl
+  rcases hdisj with (⟨hrip, sp, h4⟩ | ⟨hrip, sp, h4, hrd⟩ |
+      ⟨hrip, hr0, sp, h4⟩ | ⟨hrip, hr0, sp, h4, hrd⟩ | ⟨hrip, hr0⟩)
+  · -- pushI 60 at aFail1
+    have hexec : exec (.pushI 60) 2 s = .ok s' := by
+      have h := hstep
+      simp only [X86Int.step, hrip, stage1_refuseCode.fail1.d0] at h
+      exact h
+    cases hm' : wr64 s.mem ((sp + W - 8) % W) (60 % W) with
+    | none => simp [exec, h4, hm', lift] at hexec
+    | some m' =>
+      simp only [exec, h4, hm', lift, bind, Option.bind, pure] at hexec
+      cases hexec
+      refine ⟨Or.inr (Or.inl ⟨?_, (sp + W - 8) % W, ?_, ?_⟩),
+        shapeBnd_wr64 hm' hb, ?_⟩
+      · show s.rip + 2 = aFail1 + 2
+        rw [hrip]
+      · show (s.set 4 (some ((sp + W - 8) % W))).reg 4 =
+          some ((sp + W - 8) % W)
+        rw [reg_set_self (by omega)]
+      · show rd64 m' ((sp + W - 8) % W) = some 60
+        have h1 := rd64_wr64 hm'
+        have e : (60 % W) % W = 60 := by
+          rw [Nat.mod_mod, Nat.mod_eq_of_lt (by omega)]
+        rwa [e] at h1
+      · show (s.set 4 _).regs.length ≥ 16
+        simp only [St.set, List.length_set]
+        exact hlen
+  · -- pop 0 at aFail1 + 2
+    have hlt : sp < 2 ^ 48 := rd64_lt_of_shapeBnd hrd hb
+    have hexec : exec (.pop 0) 1 s = .ok s' := by
+      have h := hstep
+      simp only [X86Int.step, hrip, stage1_refuseCode.fail1.d1] at h
+      exact h
+    simp only [exec, h4, hrd, lift, bind, Option.bind, pure] at hexec
+    cases hexec
+    refine ⟨Or.inr (Or.inr (Or.inl ⟨?_, ?_, (sp + 8) % W, ?_⟩)), hb, ?_⟩
+    · show s.rip + 1 = aFail1 + 3
+      rw [hrip]
+    · show ((s.set 4 (some ((sp + 8) % W))).set 0 (some 60)).reg 0 = some 60
+      rw [reg_set_self (by simp only [St.set, List.length_set]; omega)]
+    · show ((s.set 4 (some ((sp + 8) % W))).set 0 (some 60)).reg 4 =
+        some ((sp + 8) % W)
+      rw [reg_set_other (show (4:Nat) ≠ 0 by decide),
+        reg_set_self (by omega)]
+    · show ((s.set 4 (some ((sp + 8) % W))).set 0 (some 60)).regs.length ≥ 16
+      simp only [St.set, List.length_set]
+      exact hlen
+  · -- pushI 1 at aFail1 + 3
+    have hexec : exec (.pushI 1) 2 s = .ok s' := by
+      have h := hstep
+      simp only [X86Int.step, hrip, stage1_refuseCode.fail1.d2] at h
+      exact h
+    cases hm' : wr64 s.mem ((sp + W - 8) % W) (1 % W) with
+    | none => simp [exec, h4, hm', lift] at hexec
+    | some m' =>
+      simp only [exec, h4, hm', lift, bind, Option.bind, pure] at hexec
+      cases hexec
+      refine ⟨Or.inr (Or.inr (Or.inr (Or.inl
+        ⟨?_, ?_, (sp + W - 8) % W, ?_, ?_⟩))), shapeBnd_wr64 hm' hb, ?_⟩
+      · show s.rip + 2 = aFail1 + 5
+        rw [hrip]
+      · show (s.set 4 (some ((sp + W - 8) % W))).reg 0 = some 60
+        rw [reg_set_other (show (0:Nat) ≠ 4 by decide)]
+        exact hr0
+      · show (s.set 4 (some ((sp + W - 8) % W))).reg 4 =
+          some ((sp + W - 8) % W)
+        rw [reg_set_self (by omega)]
+      · show rd64 m' ((sp + W - 8) % W) = some 1
+        have h1 := rd64_wr64 hm'
+        have e : (1 % W) % W = 1 := by
+          rw [Nat.mod_mod, Nat.mod_eq_of_lt (by omega)]
+        rwa [e] at h1
+      · show (s.set 4 _).regs.length ≥ 16
+        simp only [St.set, List.length_set]
+        exact hlen
+  · -- pop 7 at aFail1 + 5
+    have hexec : exec (.pop 7) 1 s = .ok s' := by
+      have h := hstep
+      simp only [X86Int.step, hrip, stage1_refuseCode.fail1.d3] at h
+      exact h
+    simp only [exec, h4, hrd, lift, bind, Option.bind, pure] at hexec
+    cases hexec
+    refine ⟨Or.inr (Or.inr (Or.inr (Or.inr ⟨?_, ?_⟩))), hb, ?_⟩
+    · show s.rip + 1 = aFail1 + 6
+      rw [hrip]
+    · show ((s.set 4 (some ((sp + 8) % W))).set 7 (some 1)).reg 0 = some 60
+      rw [reg_set_other (show (0:Nat) ≠ 7 by decide),
+        reg_set_other (show (0:Nat) ≠ 4 by decide)]
+      exact hr0
+    · show ((s.set 4 (some ((sp + 8) % W))).set 7 (some 1)).regs.length ≥ 16
+      simp only [St.set, List.length_set]
+      exact hlen
+  · -- syscall at aFail1 + 6: never ok
+    have hexec : exec .syscall 2 s = .ok s' := by
+      have h := hstep
+      simp only [X86Int.step, hrip, stage1_refuseCode.fail1.d4] at h
+      exact h
+    exact (syscall60_not_ok hr0 hexec).elim
+
+theorem chk_step {sp0 : Nat} (hsp0 : sp0 ≤ 2 ^ 48)
+    {s s' : X86Int.St} (hs : ChkP sp0 s)
+    (hstep : step stage1Im s = .ok s') : ChkP sp0 s' := by
+  rcases hs with h | h | h | h | h
+  · exact step_main hsp0 h hstep
+  · exact step_l32m hsp0 h hstep
+  · exact step_annl hsp0 h hstep
+  · exact step_l32a hsp0 h hstep
+  · exact Or.inr (Or.inr (Or.inr (Or.inr (step_exit1 h hstep))))
+
+theorem chk_reachable {sp0 : Nat} (hsp0 : sp0 ≤ 2 ^ 48)
+    {s0 : X86Int.St} (h0 : ChkP sp0 s0) :
+    ∀ k s, run stage1Im k (.ok s0) = .ok s → ChkP sp0 s := by
+  intro k
+  induction k generalizing s0 with
+  | zero =>
+    intro s h
+    cases h
+    exact h0
+  | succ k ih =>
+    intro s h
+    have hrun : run stage1Im (k + 1) (.ok s0) =
+        run stage1Im k (step stage1Im s0) := rfl
+    cases hst : step stage1Im s0 with
+    | ok s1 =>
+      apply ih (chk_step hsp0 h0 hst)
+      rwa [hrun, hst] at h
+    | exit c =>
+      rw [hrun, hst, run_exit] at h
+      cases h
+    | stuck =>
+      rw [hrun, hst, run_stuck] at h
+      cases h
+
+/-- No state at a table entry is at a memory syscall: the only
+`syscall` entry has abstract `reg 0 = 60`. -/
+theorem not_atMem_of_entry {s : X86Int.St}
+    {e : Nat × Ins × Nat × List (Option Nat) × Option Nat}
+    {mode : Bool}
+    {ss : List (Nat × List (Option Nat) × Option Nat)}
+    (hdec : stage1Im e.1 = some (e.2.1, e.2.2.1))
+    (hsuccs : succs mode e.1 e.2.1 e.2.2.1 e.2.2.2.1 e.2.2.2.2 = some ss)
+    (hrip : s.rip = e.1)
+    (h0 : ∀ v, e.2.2.2.2 = some v → s.reg 0 = some v)
+    (hmem : AtMemSyscall s) : False := by
+  obtain ⟨h1, h2⟩ := hmem
+  rw [hrip, hdec] at h1
+  have hins : e.2.1 = .syscall := by
+    have := Option.some.inj h1
+    exact congrArg Prod.fst this
+  rw [hins] at hsuccs
+  simp only [succs] at hsuccs
+  split at hsuccs
+  · rename_i h60
+    have hr0 : e.2.2.2.2 = some 60 := by simpa using h60
+    have h60 : s.reg 0 = some 60 := h0 60 hr0
+    rcases h2 with h | h <;> rw [h60] at h <;> simp at h
+  · simp at hsuccs
+
+theorem chk_legal {sp0 : Nat} {s : X86Int.St} (h : ChkP sp0 s) :
+    OracleLegalAt s := by
+  apply oracleLegalAt_of_not_atMemSyscall
+  intro hmem
+  rcases h with h | h | h | h | h
+  · obtain ⟨e, he, sp, hrip, -, -, -, -, h0, -, -, -⟩ := h
+    obtain ⟨ss, hssuccs, -⟩ := annOK_succs (mode := false) chk_ann_ok he
+    exact not_atMem_of_entry (chk_entry_decode he) hssuccs hrip h0 hmem
+  · obtain ⟨hrip, -⟩ := h
+    rcases hrip with hrip | hrip
+    · have h1 := hmem.1
+      rw [hrip, stage1_l32.d0] at h1
+      simp at h1
+    · have h1 := hmem.1
+      rw [hrip, stage1Im_l32_ret] at h1
+      simp at h1
+  · obtain ⟨e, he, spA, e0, he0, hin, _rest⟩ := h
+    obtain ⟨sp, hrip, -, -, -, -, h0, -, -, -⟩ := hin
+    obtain ⟨ss, hssuccs, -⟩ := annOK_succs (mode := true) annl_ann_ok he
+    exact not_atMem_of_entry (annl_entry_decode he) hssuccs hrip h0 hmem
+  · obtain ⟨hrip, -⟩ := h
+    rcases hrip with hrip | hrip
+    · have h1 := hmem.1
+      rw [hrip, stage1_l32.d0] at h1
+      simp at h1
+    · have h1 := hmem.1
+      rw [hrip, stage1Im_l32_ret] at h1
+      simp at h1
+  · obtain ⟨hdisj, -, -⟩ := h
+    rcases hdisj with (⟨hrip, -⟩ | ⟨hrip, -⟩ | ⟨hrip, -, -⟩ |
+      ⟨hrip, -, -⟩ | ⟨hrip, hr0⟩)
+    · have h1 := hmem.1
+      rw [hrip, stage1_refuseCode.fail1.d0] at h1
+      simp at h1
+    · have h1 := hmem.1
+      rw [hrip, stage1_refuseCode.fail1.d1] at h1
+      simp at h1
+    · have h1 := hmem.1
+      rw [hrip, stage1_refuseCode.fail1.d2] at h1
+      simp at h1
+    · have h1 := hmem.1
+      rw [hrip, stage1_refuseCode.fail1.d3] at h1
+      simp at h1
+    · rcases hmem.2 with h | h <;> rw [hr0] at h <;> simp at h
 
 end SporosX1
