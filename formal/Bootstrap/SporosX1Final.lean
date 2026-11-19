@@ -37,7 +37,36 @@ theorem stage1_oracle_exists_target
     (hsize : f.length ≤ 2 ^ 40) (hroom : Room f path argv0 top) :
     ∃ oracle, OracleAdmits (stage1Init f path argv0 stdin oracle top) ∧
       ¬ HitsNomem (stage1Init f path argv0 stdin oracle top) := by
-  sorry
+  obtain ⟨A, -, -, -, -, hcase⟩ := stage1_oracle_prefix hinit hroom
+  refine ⟨stage1Oracle f A, ?_,
+    stage1Oracle_not_hitsNomem f path argv0 stdin A top⟩
+  rcases hcase with ⟨k, hk⟩ |
+    ⟨k, s', hrun, hrip, -, hregs', -, sp0, hr4, hsp0le, hshp⟩
+  · exact oracleAdmits_of_exit hk
+  · refine oracleAdmits_of_milestone hrun ?_
+    intro k' s hk'le hr
+    have hr' : run stage1Im (k' - k) (Out.ok s') = Out.ok s := by
+      have e : k' = k + (k' - k) := by omega
+      rw [e, run_add, hrun] at hr
+      exact hr
+    have hlen : 16 ≤ s'.regs.length := by
+      obtain ⟨v, hv⟩ := hregs' 15 (by decide) (by decide)
+      have h2 : s'.regs[15]? = some (some v) := by
+        cases h3 : s'.regs[15]? with
+        | none =>
+          have h4 : (s'.regs[15]?).getD none = some v := hv
+          rw [h3] at h4
+          simp at h4
+        | some w =>
+          have h4 : (s'.regs[15]?).getD none = some v := hv
+          rw [h3] at h4
+          simp only [Option.getD_some] at h4
+          rw [h4]
+      obtain ⟨h5, -⟩ := List.getElem?_eq_some_iff.1 h2
+      omega
+    have hb : shapeBnd s'.mem := hshp
+    exact chk_legal (chk_reachable hsp0le
+      (Or.inl (chkMain_entry hrip hr4 hb hlen)) (k' - k) s hr')
 
 /-- A PROVISIONAL explicit step bound as a function of the file size.
 The cubic term is a placeholder shape (walk instructions times
