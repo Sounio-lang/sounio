@@ -6600,7 +6600,7 @@ theorem parser_word_tail_short {sp1 p c e r na : Nat} {m48 : Mem}
     (hlen16 : s.regs.length = 16) :
     ∃ s' : X86Int.St,
       run stage1Im 15 (Out.ok s) = Out.ok s' ∧
-      s'.rip = aFail1 ∧
+      s'.rip = aFail1 ∧ s'.reg 4 = some (sp1 + 8) ∧
       (∀ i, i ≠ 0 → i ≠ 1 → i ≠ 2 → i ≠ 4 → i ≠ 6 → i ≠ 7 →
         s'.reg i = s.reg i) ∧
       s'.regs.length = 16 ∧ s'.k = s.k ∧
@@ -7128,6 +7128,11 @@ theorem parser_word_tail_short {sp1 p c e r na : Nat} {m48 : Mem}
   obtain ⟨t14, ht14⟩ : ∃ t : X86Int.St, t =
       { t13 with rip := base + 0x404 } := ⟨_, rfl⟩
   have ht14rip : t14.rip = base + 0x404 := by rw [ht14]
+  have ht14r4 : t14.reg 4 = some (sp1 + 8) := by
+    rw [ht14]
+    show ({ t13 with rip := base + 0x404 }).reg 4 = some (sp1 + 8)
+    rw [reg_with_rip, ht13fr 4, ht12fr 4 (by decide) (by decide)]
+    exact ht3r4
   have ht14fr : ∀ i, i ≠ 0 → i ≠ 1 → i ≠ 2 → i ≠ 4 → i ≠ 6 →
       i ≠ 7 → t14.reg i = s.reg i := by
     intro i hi0 hi1 hi2 hi4 hi6 hi7
@@ -7166,8 +7171,9 @@ theorem parser_word_tail_short {sp1 p c e r na : Nat} {m48 : Mem}
     rw [show (15 : Nat) = 13 + 2 by omega, run_add stage1Im 13 2,
       hrun13, show (2 : Nat) = 1 + 1 by omega, run_add stage1Im 1 1,
       r14, r15]
-  refine ⟨t15, hrun, ?_, ?_, ?_, ?_, ?_⟩
+  refine ⟨t15, hrun, ?_, ?_, ?_, ?_, ?_, ?_⟩
   · rw [ht15rip]; rfl
+  · rw [ht15fr 4]; exact ht14r4
   · intro i hi0 hi1 hi2 hi4 hi6 hi7
     rw [ht15fr i]; exact ht14fr i hi0 hi1 hi2 hi4 hi6 hi7
   · rw [ht15len]; exact ht14len
