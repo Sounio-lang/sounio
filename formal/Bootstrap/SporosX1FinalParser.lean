@@ -11763,7 +11763,7 @@ theorem parser_accept_ok {f path argv0 stdin : List Nat} {top : Nat}
         true := by
   obtain ⟨A, k0, s0, hAmod, hApos, hAbound, hfreeA, hrun0, hs0rip,
     hs0r3, -, hs0r13, -, hs0r4, -, -, -, hs0r9, hs0oracle, -,
-    hmem0, hs0rdN, hs0len, hlegal, hs0room, hs0code⟩ :=
+    hmem0, hs0rdN, -, hs0len, hlegal, hs0room, hs0code⟩ :=
     loader_init_to_loaded hinit hroom
   have hfB : ∀ b ∈ f, b < 256 := hinit.1
   have htop47 : top ≤ 2 ^ 47 := hinit.2.2.2.2.2.2.2.1
