@@ -3299,6 +3299,161 @@ theorem parser_code_bounds_short {c e : Nat} {s : X86Int.St}
   · rw [ht6k]; exact ht5k
 
 set_option maxHeartbeats 0 in
+/-- Code-loop tail refusal: the dispatched instruction length
+runs past the end of the file, so the tail reaches `aFail1`
+in five steps. -/
+theorem parser_code_tail_overrun {c e l : Nat} {s : X86Int.St}
+    (hrip : s.rip = base + 0x3b3) (hr6 : s.reg 6 = some c)
+    (hr15 : s.reg 15 = some e) (hr10 : s.reg 10 = some l)
+    (hce : c ≤ e) (hover : e < c + l) (hcW : c < W) (heW : e < W)
+    (hlen16 : s.regs.length = 16) :
+    ∃ s' : X86Int.St,
+      run stage1Im 5 (Out.ok s) = Out.ok s' ∧
+      s'.rip = aFail1 ∧
+      (∀ i, i ≠ 1 → i ≠ 2 → i ≠ 6 → s'.reg i = s.reg i) ∧
+      s'.mem = s.mem ∧ s'.regs.length = 16 ∧ s'.k = s.k := by
+  have hc := stage1_parserCode
+  have hlen : ∀ i : Nat, i < 16 → i < s.regs.length := by
+    intro i hi; omega
+  have h1W : 1 % W = 1 := Nat.mod_eq_of_lt (by unfold W; decide)
+  -- 0x3b3: mov rdx, r15
+  have e1 : X86Int.step stage1Im s =
+      .ok { s.set 2 (some e) with rip := s.rip + 3 } :=
+    step_mov (by rw [hrip]; exact hc.p3b3) hr15
+  obtain ⟨t1, ht1⟩ : ∃ t : X86Int.St, t =
+      { s.set 2 (some e) with rip := s.rip + 3 } := ⟨_, rfl⟩
+  have ht1rip : t1.rip = base + 0x3b6 := by
+    rw [ht1]; show s.rip + 3 = base + 0x3b6; rw [hrip]
+  have ht1r2 : t1.reg 2 = some e := by
+    rw [ht1]
+    show ({ s.set 2 (some e) with rip := s.rip + 3 }).reg 2 = some e
+    rw [reg_with_rip, reg_set_self (hlen 2 (by decide))]
+  have ht1fr : ∀ i, i ≠ 1 → i ≠ 2 → i ≠ 6 → t1.reg i = s.reg i := by
+    intro i _ hi2 _
+    rw [ht1]
+    show ({ s.set 2 (some e) with rip := s.rip + 3 }).reg i = s.reg i
+    rw [reg_with_rip, reg_set_other hi2]
+  have ht1r6 : t1.reg 6 = some c := by
+    rw [ht1]
+    show ({ s.set 2 (some e) with rip := s.rip + 3 }).reg 6 = some c
+    rw [reg_with_rip, reg_set_other (by decide)]; exact hr6
+  have ht1r10 : t1.reg 10 = some l := by
+    rw [ht1fr 10 (by decide) (by decide) (by decide)]; exact hr10
+  have ht1mem : t1.mem = s.mem := by
+    rw [ht1]
+    show ({ s.set 2 (some e) with rip := s.rip + 3 }).mem = s.mem
+    rw [mem_with_rip, mem_set]
+  have ht1len : t1.regs.length = 16 := by
+    rw [ht1]
+    show ({ s.set 2 (some e) with rip := s.rip + 3 }).regs.length = 16
+    rw [len_with_rip, len_set]; exact hlen16
+  have ht1k : t1.k = s.k := by rw [ht1]; rfl
+  -- 0x3b6: sub rdx, rsi
+  have e2 : X86Int.step stage1Im t1 =
+      .ok { t1.set 2 (some (aluF .sub e c).1) with
+        fl := (aluF .sub e c).2, rip := t1.rip + 3 } :=
+    step_alu_sub (by rw [ht1rip]; exact hc.p3b6) ht1r2 ht1r6
+  obtain ⟨t2, ht2⟩ : ∃ t : X86Int.St, t =
+      { t1.set 2 (some (aluF .sub e c).1) with
+        fl := (aluF .sub e c).2, rip := t1.rip + 3 } := ⟨_, rfl⟩
+  have hsub : (aluF .sub e c).1 = e - c := by
+    rw [aluF_sub_fst, show e + W - c = (e - c) + W by omega,
+      Nat.add_mod_right, Nat.mod_eq_of_lt (by omega)]
+  have ht2rip : t2.rip = base + 0x3b9 := by
+    rw [ht2]; show t1.rip + 3 = base + 0x3b9; rw [ht1rip]
+  have ht2r2 : t2.reg 2 = some (e - c) := by
+    rw [ht2]
+    show (t1.set 2 (some (aluF .sub e c).1)).reg 2 = some (e - c)
+    rw [reg_set_self (by rw [ht1len]; decide), hsub]
+  have ht2fr : ∀ i, i ≠ 1 → i ≠ 2 → i ≠ 6 → t2.reg i = s.reg i := by
+    intro i hi1 hi2 hi6
+    rw [ht2]
+    show (t1.set 2 (some (aluF .sub e c).1)).reg i = s.reg i
+    rw [reg_set_other hi2]; exact ht1fr i hi1 hi2 hi6
+  have ht2r10 : t2.reg 10 = some l := by
+    rw [ht2fr 10 (by decide) (by decide) (by decide)]; exact hr10
+  have ht2mem : t2.mem = s.mem := by
+    rw [ht2]
+    show (t1.set 2 (some (aluF .sub e c).1)).mem = s.mem
+    rw [mem_set]; exact ht1mem
+  have ht2len : t2.regs.length = 16 := by
+    rw [ht2]
+    show (t1.set 2 (some (aluF .sub e c).1)).regs.length = 16
+    rw [len_set]; exact ht1len
+  have ht2k : t2.k = s.k := by rw [ht2]; exact ht1k
+  -- 0x3b9: cmp rdx, r10
+  have e3 : X86Int.step stage1Im t2 =
+      .ok { t2 with fl := (aluF .sub (e - c) l).2, rip := t2.rip + 3 } :=
+    step_cmp (by rw [ht2rip]; exact hc.p3b9) ht2r2 ht2r10
+  obtain ⟨t3, ht3⟩ : ∃ t : X86Int.St, t =
+      { t2 with fl := (aluF .sub (e - c) l).2, rip := t2.rip + 3 } :=
+    ⟨_, rfl⟩
+  have ht3rip : t3.rip = base + 0x3bc := by
+    rw [ht3]; show t2.rip + 3 = base + 0x3bc; rw [ht2rip]
+  have ht3fl : X86Int.cond t3.fl 3 = some false := by
+    have hcf : t3.fl.cf = some true := by
+      rw [ht3]
+      show (aluF .sub (e - c) l).2.cf = some true
+      exact aluF_sub_cf_true (by omega)
+    have hcc := cond_cc3 hcf
+    simpa using hcc
+  have ht3fr : ∀ i, t3.reg i = t2.reg i := by
+    intro i
+    rw [ht3]
+    show t2.reg i = t2.reg i
+    exact rfl
+  have ht3mem : t3.mem = s.mem := by rw [ht3]; exact ht2mem
+  have ht3len : t3.regs.length = 16 := by rw [ht3]; exact ht2len
+  have ht3k : t3.k = s.k := by rw [ht3]; exact ht2k
+  -- 0x3bc: jae not taken
+  have e4 : X86Int.step stage1Im t3 =
+      .ok { t3 with rip := base + 0x3be } := by
+    have h := step_jcc (im := stage1Im) (s := t3)
+      (by rw [ht3rip]; exact hc.p3bc) ht3fl
+    rw [ht3rip] at h
+    simpa using h
+  obtain ⟨t4, ht4⟩ : ∃ t : X86Int.St, t =
+      { t3 with rip := base + 0x3be } := ⟨_, rfl⟩
+  have ht4rip : t4.rip = base + 0x3be := by rw [ht4]
+  have ht4fr : ∀ i, i ≠ 1 → i ≠ 2 → i ≠ 6 → t4.reg i = s.reg i := by
+    intro i hi1 hi2 hi6
+    rw [ht4]
+    show ({ t3 with rip := base + 0x3be }).reg i = s.reg i
+    rw [reg_with_rip, ht3fr i]; exact ht2fr i hi1 hi2 hi6
+  have ht4mem : t4.mem = s.mem := by
+    rw [ht4]
+    show ({ t3 with rip := base + 0x3be }).mem = s.mem
+    rw [mem_with_rip]; exact ht3mem
+  have ht4len : t4.regs.length = 16 := by
+    rw [ht4]
+    show ({ t3 with rip := base + 0x3be }).regs.length = 16
+    rw [len_with_rip]; exact ht3len
+  have ht4k : t4.k = s.k := by rw [ht4]; exact ht3k
+  -- 0x3be: jmp fail1
+  obtain ⟨t5, r5, ht5rip, ht5fr, ht5mem, ht5len, ht5k⟩ :=
+    jmp_step hc.p3be ht4rip
+  have r1 : run stage1Im 1 (Out.ok s) = Out.ok t1 := by
+    rw [run_succ_ok stage1Im 0 s, e1, ← ht1, run_zero]
+  have r2 : run stage1Im 1 (Out.ok t1) = Out.ok t2 := by
+    rw [run_succ_ok stage1Im 0 t1, e2, ← ht2, run_zero]
+  have r3 : run stage1Im 1 (Out.ok t2) = Out.ok t3 := by
+    rw [run_succ_ok stage1Im 0 t2, e3, ← ht3, run_zero]
+  have r4 : run stage1Im 1 (Out.ok t3) = Out.ok t4 := by
+    rw [run_succ_ok stage1Im 0 t3, e4, ← ht4, run_zero]
+  have hrun : run stage1Im 5 (Out.ok s) = Out.ok t5 := by
+    rw [show (5 : Nat) = 1 + 4 by omega, run_add stage1Im 1 4, r1,
+      show (4 : Nat) = 1 + 3 by omega, run_add stage1Im 1 3, r2,
+      show (3 : Nat) = 1 + 2 by omega, run_add stage1Im 1 2, r3,
+      show (2 : Nat) = 1 + 1 by omega, run_add stage1Im 1 1, r4, r5]
+  refine ⟨t5, hrun, ?_, ?_, ?_, ?_, ?_⟩
+  · rw [ht5rip]; rfl
+  · intro i hi1 hi2 hi6
+    rw [ht5fr i]; exact ht4fr i hi1 hi2 hi6
+  · rw [ht5mem]; exact ht4mem
+  · rw [ht5len]; exact ht4len
+  · rw [ht5k]; exact ht4k
+
+set_option maxHeartbeats 0 in
 /-- `mmap` with a refusing oracle returns `-ENOMEM`, memory
 unchanged, and consumes the oracle entry. -/
 theorem syscall_mmap_nomem {k : Kern} {m : Mem} {a2 : Nat}
