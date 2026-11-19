@@ -4376,4 +4376,44 @@ theorem parser_trailing_slot_fail_exit1 {c e mn nw T v sp : Nat}
     (StackRoom_of_mem hmem h4eq hroom)
   exact ⟨16 + k, by rw [run_add stage1Im 16 k, hrun, hk]⟩
 
+/-- A parser `call RDC` site with fewer than four bytes left
+exits 1: `call_rdc_fail` composed with the `fail1` block.  The
+`fail1` slot is the second stack slot, hence `StackRoom s 2`
+at entry and `40 ≤ sp`. -/
+theorem call_rdc_fail_exit1 {site c e sp : Nat} {s : X86Int.St}
+    (hsite : stage1Im site = some (.call aRDC, 5))
+    (hrip : s.rip = site) (hr6 : s.reg 6 = some c)
+    (hr15 : s.reg 15 = some e) (hce : ¬ c + 4 ≤ e)
+    (hcW : c < W) (heW : e < W)
+    (hroom : StackRoom s 2)
+    (hr4 : s.reg 4 = some sp) (hsp40 : 40 ≤ sp) (hspW : sp < W)
+    (hlen16 : s.regs.length = 16) (hregs : RegsOk s) :
+    ∃ k, run stage1Im k (Out.ok s) = Out.exit 1 := by
+  obtain ⟨n, s', hrun, hrip', hr4', -, -, -, -, hsh⟩ :=
+    call_rdc_fail hsite hrip hr6 hr15 hce hcW heW
+      (stackRoom_mono hroom (by decide)) hr4 (by omega) hspW hlen16
+  have hroom' : StackRoom s' 1 := by
+    intro sp' hsp' i hi v
+    have hi0 : i = 0 := by omega
+    subst hi0
+    have hsp'' : sp' = sp - 8 := by
+      rw [hr4'] at hsp'
+      exact (Option.some.inj hsp').symm
+    subst hsp''
+    have h8mod : (sp + W - 8 * (1 + 1)) % W = sp - 16 := by
+      have h : sp + W - 8 * (1 + 1) = (sp - 16) + W := by omega
+      rw [h, Nat.add_mod_right, Nat.mod_eq_of_lt (by omega)]
+    have h1 : (wr64 s.mem (sp - 16) v).isSome := by
+      have h1 := hroom sp hr4 1 (by decide) v
+      rwa [h8mod] at h1
+    have haddr : (sp - 8 + W - 8 * (0 + 1)) % W = sp - 16 := by
+      have h : sp - 8 + W - 8 * (0 + 1) = (sp - 16) + W := by omega
+      rw [h, Nat.add_mod_right, Nat.mod_eq_of_lt (by omega)]
+    rw [haddr]
+    exact wrN_some_of_wshape _ s.mem s'.mem hsh _ h1
+  obtain ⟨k, hk⟩ := exit1_of_fail1 stage1_refuseCode (sp := sp - 8)
+    (by omega) (by omega) s' hrip' hr4' (run_regs_ok hrun hregs)
+    hroom'
+  exact ⟨n + k, by rw [run_add stage1Im n k, hrun, hk]⟩
+
 end SporosX1

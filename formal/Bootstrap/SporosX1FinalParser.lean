@@ -1075,7 +1075,8 @@ theorem call_rdc_fail {site c e sp : Nat} {s : X86Int.St}
       s'.rip = aFail1 ∧ s'.reg 4 = some (sp - 8) ∧
       (∀ i, i ≠ 2 → i ≠ 4 → s'.reg i = s.reg i) ∧
       (∀ x k, x + k ≤ sp - 8 ∨ sp ≤ x → s'.mem.rdN x k = s.mem.rdN x k) ∧
-      s'.regs.length = 16 ∧ s'.k = s.k := by
+      s'.regs.length = 16 ∧ s'.k = s.k ∧
+      wshape s'.mem = wshape s.mem := by
   have hsp8mod : (sp + W - 8) % W = sp - 8 := by
     have h : sp + W - 8 = (sp - 8) + W := by omega
     rw [h, Nat.add_mod_right, Nat.mod_eq_of_lt (by omega)]
@@ -1125,7 +1126,7 @@ theorem call_rdc_fail {site c e sp : Nat} {s : X86Int.St}
     rw [run_succ_ok stage1Im 0 s, e1, ← hs1, run_zero]
   have hrun : run stage1Im (1 + nb) (Out.ok s) = Out.ok s2 := by
     rw [run_add stage1Im 1 nb, r1, hrunb]
-  refine ⟨1 + nb, s2, hrun, hs2rip, ?_, ?_, ?_, hs2len, ?_⟩
+  refine ⟨1 + nb, s2, hrun, hs2rip, ?_, ?_, ?_, hs2len, ?_, ?_⟩
   · have h := hs2fr 4 (by decide)
     rw [h]; exact hs1r4
   · intro i hi2 hi4
@@ -1137,6 +1138,7 @@ theorem call_rdc_fail {site c e sp : Nat} {s : X86Int.St}
     · exact Or.inr h
     · exact Or.inl (by omega)
   · rw [← hs1k]; exact hs2k
+  · rw [hs2mem, hs1mem]; exact wrN_wshape _ _ _ hm1raw
 
 /-- Parser header, first half: from `loaded` (`base + 0x134`,
 `rbx` the file buffer, `r13` its length) to just after the
