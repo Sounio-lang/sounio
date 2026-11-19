@@ -26790,5 +26790,377 @@ theorem parser_code_tail_nh {c e B S l n : Nat} {s : X86Int.St}
     rw [ht11mem']
     exact rdN_wr_other hm8 hd
 
+theorem parser_disp_lt57_nh {op : Nat} {s : X86Int.St}
+    (hrip : s.rip = base + 0x330) (hr0 : s.reg 0 = some op)
+    (hop : op < 57) (hlen16 : s.regs.length = 16) :
+    ∃ s' : X86Int.St,
+      run stage1Im 4 (Out.ok s) = Out.ok s' ∧
+      s'.rip = base + 0x3b3 ∧ s'.reg 10 = some 1 ∧
+      s'.reg 0 = some op ∧
+      (∀ i, i ≠ 10 → s'.reg i = s.reg i) ∧
+      s'.mem = s.mem ∧ s'.regs.length = 16 ∧ s'.k = s.k ∧
+      NoHitUpTo s 4 := by
+  have hc := stage1_parserCode
+  have h57W : 57 % W = 57 := Nat.mod_eq_of_lt (by unfold W; decide)
+  have h1W : 1 % W = 1 := Nat.mod_eq_of_lt (by unfold W; decide)
+  -- 0x330: cmp rax, 57
+  have e1 : X86Int.step stage1Im s =
+      .ok { s with fl := (aluF .sub op (57 % W)).2, rip := s.rip + 4 } :=
+    step_cmpI (by rw [hrip]; exact hc.p330) hr0
+  obtain ⟨t1, ht1⟩ : ∃ t : X86Int.St, t =
+      { s with fl := (aluF .sub op (57 % W)).2, rip := s.rip + 4 } :=
+    ⟨_, rfl⟩
+  have ht1rip : t1.rip = base + 0x334 := by
+    rw [ht1]; show s.rip + 4 = base + 0x334; rw [hrip]
+  have ht1fl : X86Int.cond t1.fl 3 = some false := by
+    have hcf : t1.fl.cf = some true := by
+      rw [ht1]
+      show (aluF .sub op (57 % W)).2.cf = some true
+      rw [h57W]; exact aluF_sub_cf_true hop
+    have hcc := cond_cc3 hcf
+    simpa using hcc
+  have ht1fr : ∀ i, t1.reg i = s.reg i := by
+    intro i
+    rw [ht1]
+    show s.reg i = s.reg i
+    exact rfl
+  have ht1mem : t1.mem = s.mem := by rw [ht1]
+  have ht1len : t1.regs.length = 16 := by rw [ht1]; exact hlen16
+  have ht1k : t1.k = s.k := by rw [ht1]
+  -- 0x334: jae not taken
+  have e2 : X86Int.step stage1Im t1 =
+      .ok { t1 with rip := t1.rip + 2 } := by
+    have h := step_jcc (im := stage1Im) (s := t1)
+      (by rw [ht1rip]; exact hc.p334) ht1fl
+    simpa using h
+  obtain ⟨t2, ht2⟩ : ∃ t : X86Int.St, t =
+      { t1 with rip := t1.rip + 2 } := ⟨_, rfl⟩
+  have ht2rip : t2.rip = base + 0x336 := by
+    rw [ht2]; show t1.rip + 2 = base + 0x336; rw [ht1rip]
+  have ht2fr : ∀ i, t2.reg i = s.reg i := by
+    intro i
+    rw [ht2]
+    show ({ t1 with rip := t1.rip + 2 }).reg i = s.reg i
+    rw [reg_with_rip]; exact ht1fr i
+  have ht2mem : t2.mem = s.mem := by
+    rw [ht2]
+    show ({ t1 with rip := t1.rip + 2 }).mem = s.mem
+    rw [mem_with_rip]; exact ht1mem
+  have ht2len : t2.regs.length = 16 := by
+    rw [ht2]
+    show ({ t1 with rip := t1.rip + 2 }).regs.length = 16
+    rw [len_with_rip]; exact ht1len
+  have ht2k : t2.k = s.k := by rw [ht2]; exact ht1k
+  -- 0x336: jmp 0x3ad
+  have e3 : X86Int.step stage1Im t2 =
+      .ok { t2 with rip := base + 0x3ad } :=
+    step_jmp (by rw [ht2rip]; exact hc.p336)
+  obtain ⟨t3, ht3⟩ : ∃ t : X86Int.St, t =
+      { t2 with rip := base + 0x3ad } := ⟨_, rfl⟩
+  have ht3rip : t3.rip = base + 0x3ad := by rw [ht3]
+  have ht3fr : ∀ i, t3.reg i = s.reg i := by
+    intro i
+    rw [ht3]
+    show ({ t2 with rip := base + 0x3ad }).reg i = s.reg i
+    rw [reg_with_rip]; exact ht2fr i
+  have ht3mem : t3.mem = s.mem := by
+    rw [ht3]
+    show ({ t2 with rip := base + 0x3ad }).mem = s.mem
+    rw [mem_with_rip]; exact ht2mem
+  have ht3len : t3.regs.length = 16 := by
+    rw [ht3]
+    show ({ t2 with rip := base + 0x3ad }).regs.length = 16
+    rw [len_with_rip]; exact ht2len
+  have ht3k : t3.k = s.k := by rw [ht3]; exact ht2k
+  -- 0x3ad: mov r10d, 1
+  have e4 : X86Int.step stage1Im t3 =
+      .ok { t3.set 10 (some (1 % W)) with rip := t3.rip + 6 } :=
+    step_movI (by rw [ht3rip]; exact hc.p3ad)
+  obtain ⟨t4, ht4⟩ : ∃ t : X86Int.St, t =
+      { t3.set 10 (some (1 % W)) with rip := t3.rip + 6 } := ⟨_, rfl⟩
+  have r1 : run stage1Im 1 (Out.ok s) = Out.ok t1 := by
+    rw [run_succ_ok stage1Im 0 s, e1, ← ht1, run_zero]
+  have r2 : run stage1Im 1 (Out.ok t1) = Out.ok t2 := by
+    rw [run_succ_ok stage1Im 0 t1, e2, ← ht2, run_zero]
+  have r3 : run stage1Im 1 (Out.ok t2) = Out.ok t3 := by
+    rw [run_succ_ok stage1Im 0 t2, e3, ← ht3, run_zero]
+  have r4 : run stage1Im 1 (Out.ok t3) = Out.ok t4 := by
+    rw [run_succ_ok stage1Im 0 t3, e4, ← ht4, run_zero]
+  have hrun : run stage1Im 4 (Out.ok s) = Out.ok t4 := by
+    rw [show (4 : Nat) = 1 + 3 by omega, run_add stage1Im 1 3, r1,
+      show (3 : Nat) = 1 + 2 by omega, run_add stage1Im 1 2, r2,
+      show (2 : Nat) = 1 + 1 by omega, run_add stage1Im 1 1, r3, r4]
+  have hnohit : NoHitUpTo s 4 := by
+    intro j t hj hr hmem
+    rcases (by omega : j = 0 ∨ j = 1 ∨ j = 2 ∨ j = 3 ∨ j = 4) with
+      rfl | rfl | rfl | rfl | rfl
+    · rw [run_zero] at hr
+      simp only [Out.ok.injEq] at hr
+      subst hr
+      have h1 := hmem.1
+      rw [hrip, hc.p330] at h1
+      simp at h1
+    · have hrj : run stage1Im 1 (Out.ok s) = Out.ok t1 := by
+        rw [r1]
+      have ht : t = t1 := by
+        have h := hrj.symm.trans hr
+        simp only [Out.ok.injEq] at h
+        exact h.symm
+      rw [ht] at hmem
+      have h1 := hmem.1
+      rw [ht1rip, hc.p334] at h1
+      simp at h1
+    · have hrj : run stage1Im 2 (Out.ok s) = Out.ok t2 := by
+        rw [show (2 : Nat) = 1 + 1 by omega, run_add stage1Im 1 1, r1, r2]
+      have ht : t = t2 := by
+        have h := hrj.symm.trans hr
+        simp only [Out.ok.injEq] at h
+        exact h.symm
+      rw [ht] at hmem
+      have h1 := hmem.1
+      rw [ht2rip, hc.p336] at h1
+      simp at h1
+    · have hrj : run stage1Im 3 (Out.ok s) = Out.ok t3 := by
+        rw [show (3 : Nat) = 1 + 2 by omega, run_add stage1Im 1 2, r1, show (2 : Nat) = 1 + 1 by omega, run_add stage1Im 1 1, r2, r3]
+      have ht : t = t3 := by
+        have h := hrj.symm.trans hr
+        simp only [Out.ok.injEq] at h
+        exact h.symm
+      rw [ht] at hmem
+      have h1 := hmem.1
+      rw [ht3rip, hc.p3ad] at h1
+      simp at h1
+    · have hrj : run stage1Im 4 (Out.ok s) = Out.ok t4 := by
+        rw [show (4 : Nat) = 1 + 3 by omega, run_add stage1Im 1 3, r1, show (3 : Nat) = 1 + 2 by omega, run_add stage1Im 1 2, r2, show (2 : Nat) = 1 + 1 by omega, run_add stage1Im 1 1, r3, r4]
+      have ht : t = t4 := by
+        have h := hrj.symm.trans hr
+        simp only [Out.ok.injEq] at h
+        exact h.symm
+      rw [ht] at hmem
+      have h1 := hmem.1
+      have htErip : t4.rip = base + 0x3b3 := by
+        rw [ht4]; show t3.rip + 6 = base + 0x3b3; rw [ht3rip]
+      rw [htErip, hc.p3b3] at h1
+      simp at h1
+  refine ⟨t4, hrun, ?_, ?_, ?_, ?_, ?_, ?_, ?_, hnohit⟩
+  · rw [ht4]; show t3.rip + 6 = base + 0x3b3; rw [ht3rip]
+  · rw [ht4]
+    show ({ t3.set 10 (some (1 % W)) with rip := t3.rip + 6 }).reg 10 =
+      some 1
+    rw [reg_with_rip, reg_set_self (by rw [ht3len]; decide), h1W]
+  · rw [ht4]
+    show ({ t3.set 10 (some (1 % W)) with rip := t3.rip + 6 }).reg 0 =
+      some op
+    rw [reg_with_rip, reg_set_other (by decide : (0 : Nat) ≠ 10),
+      ht3fr 0]; exact hr0
+  · intro i hi
+    rw [ht4]
+    show ({ t3.set 10 (some (1 % W)) with rip := t3.rip + 6 }).reg i =
+      s.reg i
+    rw [reg_with_rip, reg_set_other hi]; exact ht3fr i
+  · rw [ht4]
+    show ({ t3.set 10 (some (1 % W)) with rip := t3.rip + 6 }).mem =
+      s.mem
+    rw [mem_with_rip, mem_set]; exact ht3mem
+  · rw [ht4]
+    show ({ t3.set 10 (some (1 % W)) with
+      rip := t3.rip + 6 }).regs.length = 16
+    rw [len_with_rip, len_set]; exact ht3len
+  · rw [ht4]; exact ht3k
+
+theorem jmp_step_nh {a t len : Nat} {s : X86Int.St}
+    (hdec : stage1Im a = some (.jmp t, len)) (hrip : s.rip = a)
+    (htns : stage1Im t ≠ some (.syscall, 2)) :
+    ∃ s' : X86Int.St,
+      run stage1Im 1 (Out.ok s) = Out.ok s' ∧ s'.rip = t ∧
+      (∀ i, s'.reg i = s.reg i) ∧ s'.mem = s.mem ∧
+      s'.regs.length = s.regs.length ∧ s'.k = s.k ∧
+      NoHitUpTo s 1 := by
+  have e1 : X86Int.step stage1Im s = .ok { s with rip := t } :=
+    step_jmp (by rw [hrip]; exact hdec)
+  obtain ⟨t1, ht1⟩ : ∃ u : X86Int.St, u = { s with rip := t } :=
+    ⟨_, rfl⟩
+  have r1 : run stage1Im 1 (Out.ok s) = Out.ok t1 := by
+    rw [run_succ_ok stage1Im 0 s, e1, ← ht1, run_zero]
+  have hnohit : NoHitUpTo s 1 := by
+    intro j u hj hr hmem
+    rcases (by omega : j = 0 ∨ j = 1) with rfl | rfl
+    · rw [run_zero] at hr
+      simp only [Out.ok.injEq] at hr
+      subst hr
+      have h1 := hmem.1
+      rw [hrip, hdec] at h1
+      simp at h1
+    · have ht : u = t1 := by
+        have h := r1.symm.trans hr
+        simp only [Out.ok.injEq] at h
+        exact h.symm
+      rw [ht] at hmem
+      have h1 := hmem.1
+      have ht1rip : t1.rip = t := by rw [ht1]
+      rw [ht1rip] at h1
+      exact (htns h1).elim
+  refine ⟨t1, r1, ?_, ?_, ?_, ?_, ?_, hnohit⟩
+  · rw [ht1]
+  · intro i
+    rw [ht1]
+    show ({ s with rip := t }).reg i = s.reg i
+    rw [reg_with_rip]
+  · rw [ht1]
+  · rw [ht1]
+  · rw [ht1]
+
+theorem movI_step_nh {a d imm len : Nat} {s : X86Int.St}
+    (hdec : stage1Im a = some (.movI d imm, len)) (hrip : s.rip = a)
+    (hd : d < s.regs.length)
+    (hfns : stage1Im (a + len) ≠ some (.syscall, 2)) :
+    ∃ s' : X86Int.St,
+      run stage1Im 1 (Out.ok s) = Out.ok s' ∧
+      s'.rip = a + len ∧ s'.reg d = some (imm % W) ∧
+      (∀ i, i ≠ d → s'.reg i = s.reg i) ∧ s'.mem = s.mem ∧
+      s'.regs.length = s.regs.length ∧ s'.k = s.k ∧
+      NoHitUpTo s 1 := by
+  have e1 : X86Int.step stage1Im s =
+      .ok { s.set d (some (imm % W)) with rip := s.rip + len } :=
+    step_movI (by rw [hrip]; exact hdec)
+  obtain ⟨t1, ht1⟩ : ∃ u : X86Int.St, u =
+      { s.set d (some (imm % W)) with rip := s.rip + len } := ⟨_, rfl⟩
+  have r1 : run stage1Im 1 (Out.ok s) = Out.ok t1 := by
+    rw [run_succ_ok stage1Im 0 s, e1, ← ht1, run_zero]
+  have hnohit : NoHitUpTo s 1 := by
+    intro j u hj hr hmem
+    rcases (by omega : j = 0 ∨ j = 1) with rfl | rfl
+    · rw [run_zero] at hr
+      simp only [Out.ok.injEq] at hr
+      subst hr
+      have h1 := hmem.1
+      rw [hrip, hdec] at h1
+      simp at h1
+    · have ht : u = t1 := by
+        have h := r1.symm.trans hr
+        simp only [Out.ok.injEq] at h
+        exact h.symm
+      rw [ht] at hmem
+      have h1 := hmem.1
+      have ht1rip : t1.rip = a + len := by
+        rw [ht1]; show s.rip + len = a + len; rw [hrip]
+      rw [ht1rip] at h1
+      exact (hfns h1).elim
+  refine ⟨t1, r1, ?_, ?_, ?_, ?_, ?_, ?_, hnohit⟩
+  · rw [ht1]; show s.rip + len = a + len; rw [hrip]
+  · rw [ht1]
+    show ({ s.set d (some (imm % W)) with rip := s.rip + len }).reg d =
+      some (imm % W)
+    rw [reg_with_rip, reg_set_self hd]
+  · intro i hi
+    rw [ht1]
+    show ({ s.set d (some (imm % W)) with rip := s.rip + len }).reg i =
+      s.reg i
+    rw [reg_with_rip, reg_set_other hi]
+  · rw [ht1]
+    show ({ s.set d (some (imm % W)) with rip := s.rip + len }).mem =
+      s.mem
+    rw [mem_with_rip, mem_set]
+  · rw [ht1]
+    show ({ s.set d (some (imm % W)) with
+      rip := s.rip + len }).regs.length = s.regs.length
+    rw [len_with_rip, len_set]
+  · rw [ht1]; exact rfl
+
+theorem cmpI_jcc_pair_nh {a t k op clen cc : Nat} {b : Bool}
+    {s : X86Int.St}
+    (hcmp : stage1Im a = some (.cmpI 0 k, clen))
+    (hjcc : stage1Im (a + clen) = some (.jcc cc t, 2))
+    (hrip : s.rip = a) (hr0 : s.reg 0 = some op)
+    (hfl : X86Int.cond (aluF .sub op (k % W)).2 cc = some b)
+    (htns : stage1Im t ≠ some (.syscall, 2))
+    (hfns : stage1Im (a + clen + 2) ≠ some (.syscall, 2)) :
+    ∃ s' : X86Int.St,
+      run stage1Im 2 (Out.ok s) = Out.ok s' ∧
+      s'.rip = (if b then t else a + clen + 2) ∧
+      (∀ i, s'.reg i = s.reg i) ∧ s'.mem = s.mem ∧
+      s'.regs.length = s.regs.length ∧ s'.k = s.k ∧
+      NoHitUpTo s 2 := by
+  have e1 : X86Int.step stage1Im s =
+      .ok { s with fl := (aluF .sub op (k % W)).2, rip := s.rip + clen } :=
+    step_cmpI (by rw [hrip]; exact hcmp) hr0
+  obtain ⟨t1, ht1⟩ : ∃ u : X86Int.St, u =
+      { s with fl := (aluF .sub op (k % W)).2, rip := s.rip + clen } :=
+    ⟨_, rfl⟩
+  have ht1rip : t1.rip = a + clen := by
+    rw [ht1]; show s.rip + clen = a + clen; rw [hrip]
+  have ht1fl : X86Int.cond t1.fl cc = some b := by
+    rw [ht1]
+    show X86Int.cond (aluF .sub op (k % W)).2 cc = some b
+    exact hfl
+  have e2 : X86Int.step stage1Im t1 =
+      .ok { t1 with rip := if b then t else t1.rip + 2 } := by
+    have h := step_jcc (im := stage1Im) (s := t1)
+      (by rw [ht1rip]; exact hjcc) ht1fl
+    exact h
+  obtain ⟨t2, ht2⟩ : ∃ u : X86Int.St, u =
+      { t1 with rip := if b then t else t1.rip + 2 } := ⟨_, rfl⟩
+  have r1 : run stage1Im 1 (Out.ok s) = Out.ok t1 := by
+    rw [run_succ_ok stage1Im 0 s, e1, ← ht1, run_zero]
+  have r2 : run stage1Im 1 (Out.ok t1) = Out.ok t2 := by
+    rw [run_succ_ok stage1Im 0 t1, e2, ← ht2, run_zero]
+  have hrun : run stage1Im 2 (Out.ok s) = Out.ok t2 := by
+    rw [show (2 : Nat) = 1 + 1 by omega, run_add stage1Im 1 1, r1, r2]
+  have hnohit : NoHitUpTo s 2 := by
+    intro j u hj hr hmem
+    rcases (by omega : j = 0 ∨ j = 1 ∨ j = 2) with rfl | rfl | rfl
+    · rw [run_zero] at hr
+      simp only [Out.ok.injEq] at hr
+      subst hr
+      have h1 := hmem.1
+      rw [hrip, hcmp] at h1
+      simp at h1
+    · have ht : u = t1 := by
+        have h := r1.symm.trans hr
+        simp only [Out.ok.injEq] at h
+        exact h.symm
+      rw [ht] at hmem
+      have h1 := hmem.1
+      rw [ht1rip, hjcc] at h1
+      simp at h1
+    · have ht : u = t2 := by
+        have h := hrun.symm.trans hr
+        simp only [Out.ok.injEq] at h
+        exact h.symm
+      rw [ht] at hmem
+      have h1 := hmem.1
+      have ht2rip : t2.rip = (if b then t else a + clen + 2) := by
+        rw [ht2]
+        show (if b then t else t1.rip + 2) =
+          if b then t else a + clen + 2
+        rw [ht1rip]
+      rw [ht2rip] at h1
+      by_cases hb : b
+      · simp [hb] at h1 ⊢
+        exact (htns h1).elim
+      · simp [hb] at h1 ⊢
+        exact (hfns h1).elim
+  refine ⟨t2, hrun, ?_, ?_, ?_, ?_, ?_, hnohit⟩
+  · rw [ht2]
+    show (if b then t else t1.rip + 2) = if b then t else a + clen + 2
+    rw [ht1rip]
+  · intro i
+    rw [ht2]
+    show ({ t1 with rip := if b then t else t1.rip + 2 }).reg i =
+      s.reg i
+    rw [reg_with_rip, ht1]
+    show s.reg i = s.reg i
+    exact rfl
+  · rw [ht2]
+    show ({ t1 with rip := if b then t else t1.rip + 2 }).mem = s.mem
+    rw [mem_with_rip, ht1]
+  · rw [ht2]
+    show ({ t1 with rip := if b then t else t1.rip + 2 }).regs.length =
+      s.regs.length
+    rw [len_with_rip, ht1]
+  · rw [ht2]
+    show ({ t1 with rip := if b then t else t1.rip + 2 }).k = s.k
+    rw [ht1]
+
 
 end SporosX1
