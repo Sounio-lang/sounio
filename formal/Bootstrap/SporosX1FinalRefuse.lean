@@ -8165,4 +8165,53 @@ theorem parser_words_loop_classify : ∀ (n : Nat)
         hs2len, hs2k.trans hs1k, by rw [hs2sh, hs1mem]⟩
 
 
+/-- The trailing checks, classified: either the cursor is at
+the buffer end, `main` is a valid word index with zero `ins`,
+and control falls into the checker entry, or one of the three
+checks reaches `aFail1` with memory unchanged. -/
+theorem parser_trailing_classify {c e mn nw T : Nat}
+    {s : X86Int.St}
+    (hrip : s.rip = base + 0x419) (hr6 : s.reg 6 = some c)
+    (hr15 : s.reg 15 = some e) (hr12 : s.reg 12 = some mn)
+    (hr13 : s.reg 13 = some nw) (hr14 : s.reg 14 = some T)
+    (hcW : c < W) (heW : e < W) (hTW : T + 64 * mn < W)
+    (hrdslot : ∃ v, rd64 s.mem (T + 64 * mn) = some v)
+    (hlen16 : s.regs.length = 16) :
+    (∃ s' : X86Int.St,
+      run stage1Im 15 (Out.ok s) = Out.ok s' ∧
+      s'.rip = base + 0x452 ∧ s'.reg 0 = some 0 ∧
+      c = e ∧ mn < nw ∧ rd64 s.mem (T + 64 * mn) = some 0 ∧
+      (∀ i, i ≠ 0 → i ≠ 2 → s'.reg i = s.reg i) ∧
+      s'.mem = s.mem ∧ s'.regs.length = 16 ∧ s'.k = s.k) ∨
+    (∃ k s', run stage1Im k (Out.ok s) = Out.ok s' ∧
+      s'.rip = aFail1 ∧
+      (∀ i, i ≠ 0 → i ≠ 2 → s'.reg i = s.reg i) ∧
+      s'.mem = s.mem ∧ s'.regs.length = 16 ∧ s'.k = s.k) := by
+  by_cases hne : c ≠ e
+  · obtain ⟨s', hrun, hrip', hfr, hmem, hlen, hk⟩ :=
+      parser_trailing_cursor_fail hrip hr6 hr15 hne hcW heW
+    exact Or.inr ⟨3, s', hrun, hrip',
+      fun i _ _ => hfr i, hmem, by rw [hlen]; exact hlen16, hk⟩
+  have hceq : c = e := by omega
+  by_cases hmn : ¬ mn < nw
+  · obtain ⟨s', hrun, hrip', hfr, hmem, hlen, hk⟩ :=
+      parser_trailing_main_ge hrip hr6 hr15 hr12 hr13 hceq hcW
+        heW (by omega) hlen16
+    exact Or.inr ⟨5, s', hrun, hrip',
+      fun i _ _ => hfr i, hmem, hlen, hk⟩
+  have hmn' : mn < nw := by omega
+  obtain ⟨v, hvslot⟩ := hrdslot
+  by_cases hv : v = 0
+  · rw [hv] at hvslot
+    obtain ⟨s', hrun, hrip', hr0, hfr, hmem, hlen, hk⟩ :=
+      parser_trailing_ok hrip hr6 hr15 hr12 hr13 hr14 hceq hcW
+        heW hmn' hTW hvslot hlen16
+    exact Or.inl ⟨s', hrun, hrip', hr0, hceq, hmn', hvslot, hfr,
+      hmem, hlen, hk⟩
+  · obtain ⟨s', hrun, hrip', hfr, hmem, hlen, hk⟩ :=
+      parser_trailing_slot_fail hrip hr6 hr15 hr12 hr13 hr14 hceq
+        hcW heW hmn' hTW hvslot hv hlen16
+    exact Or.inr ⟨16, s', hrun, hrip', hfr, hmem, hlen, hk⟩
+
+
 end SporosX1
