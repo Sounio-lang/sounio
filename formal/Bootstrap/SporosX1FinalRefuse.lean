@@ -1043,6 +1043,87 @@ theorem parser_header_b_nwords_zero_exit1 {B L sp : Nat}
     (StackRoom_of_mem hmem h4eq hroom)
   exact ⟨16 + k, by rw [run_add stage1Im 16 k, hrun, hk]⟩
 
+/-- Header classification for arbitrary bytes: from `loaded`,
+either the run exits 1 (short file, bad magic or zero
+`nwords`), or it reaches the data-loop head with the three
+header fields in `r12`, `r10` and `rcx`.  The twenty-byte
+window is the one the loaded buffer exposes. -/
+theorem parser_header_classify {B L sp : Nat} {s : X86Int.St}
+    (hrip : s.rip = base + 0x134) (hr3 : s.reg 3 = some B)
+    (hr13 : s.reg 13 = some L) (hBL : B + L < W)
+    (hwin : ∃ bs, s.mem.rdN B 20 = some bs)
+    (hlen16 : s.regs.length = 16)
+    (hr4 : s.reg 4 = some sp) (hsp32 : 32 ≤ sp) (hspW : sp < W)
+    (hregs : RegsOk s) (hroom : StackRoom s 1) :
+    (∃ k, run stage1Im k (Out.ok s) = Out.exit 1) ∨
+    (∃ bs k s', s.mem.rdN B 20 = some bs ∧
+      run stage1Im k (Out.ok s) = Out.ok s' ∧
+      s'.rip = base + 0x18f ∧
+      s'.reg 12 = some (leVal ((bs.drop 4).take 4) % 2 ^ 32) ∧
+      s'.reg 10 = some (leVal ((bs.drop 8).take 4) % 2 ^ 32) ∧
+      leVal ((bs.drop 8).take 4) % 2 ^ 32 ≠ 0 ∧
+      s'.reg 1 = some (leVal ((bs.drop 12).take 4) % 2 ^ 32) ∧
+      s'.reg 6 = some (B + 16) ∧ s'.reg 15 = some (B + L) ∧
+      s'.reg 3 = some B ∧ s'.reg 13 = some L ∧
+      s'.reg 4 = some sp ∧
+      (∀ i, i ≠ 0 → i ≠ 1 → i ≠ 2 → i ≠ 6 → i ≠ 10 → i ≠ 12 →
+        i ≠ 15 → s'.reg i = s.reg i) ∧
+      s'.mem = s.mem ∧ s'.regs.length = 16 ∧ s'.k = s.k) := by
+  obtain ⟨bs, h20⟩ := hwin
+  by_cases hL : L < 16
+  · exact Or.inl (parser_header_a_short_exit1 hrip hr3 hr13 hBL hL
+      hlen16 hr4 hsp32 hspW hregs hroom)
+  · have hL16 : 16 ≤ L := by omega
+    by_cases hmagic : leVal (bs.take 4) % 2 ^ 32 = 827478099
+    · obtain ⟨n1, s1, hrun1, hs1rip, hs1r15, hs1r6, hs1fr, hs1mem,
+          hs1len, hs1k⟩ :=
+        parser_header_a hrip hr3 hr13 hBL hL16 h20 hmagic hlen16
+      have hs1r4 : s1.reg 4 = some sp := by
+        rw [hs1fr 4 (by decide) (by decide) (by decide)]; exact hr4
+      have hs1r3 : s1.reg 3 = some B := by
+        rw [hs1fr 3 (by decide) (by decide) (by decide)]; exact hr3
+      have hs1r13 : s1.reg 13 = some L := by
+        rw [hs1fr 13 (by decide) (by decide) (by decide)]; exact hr13
+      have h20_1 : s1.mem.rdN B 20 = some bs := by
+        rw [hs1mem]; exact h20
+      by_cases hnw0 : leVal ((bs.drop 8).take 4) % 2 ^ 32 = 0
+      · have h4eq : s1.reg 4 = s.reg 4 := by rw [hs1r4, hr4]
+        obtain ⟨k, hk⟩ := parser_header_b_nwords_zero_exit1 hs1rip
+          hs1r6 hBL hL16 h20_1 hnw0 hs1len hs1r4 hsp32 hspW
+          (run_regs_ok hrun1 hregs)
+          (StackRoom_of_mem hs1mem h4eq hroom)
+        exact Or.inl ⟨n1 + k, by
+          rw [run_add stage1Im n1 k, hrun1, hk]⟩
+      · obtain ⟨n2, s2, hrun2, hs2rip, hs2r12, hs2r10, hs2r1, hs2r6,
+            hs2fr, hs2mem, hs2len, hs2k⟩ :=
+          parser_header_b hs1rip hs1r6 hBL hL16 h20_1 hnw0 hs1len
+        have hs2r15 : s2.reg 15 = some (B + L) := by
+          rw [hs2fr 15 (by decide) (by decide) (by decide)
+            (by decide) (by decide) (by decide)]
+          exact hs1r15
+        have hs2r3 : s2.reg 3 = some B := by
+          rw [hs2fr 3 (by decide) (by decide) (by decide)
+            (by decide) (by decide) (by decide)]
+          exact hs1r3
+        have hs2r13 : s2.reg 13 = some L := by
+          rw [hs2fr 13 (by decide) (by decide) (by decide)
+            (by decide) (by decide) (by decide)]
+          exact hs1r13
+        have hs2r4 : s2.reg 4 = some sp := by
+          rw [hs2fr 4 (by decide) (by decide) (by decide)
+            (by decide) (by decide) (by decide)]
+          exact hs1r4
+        exact Or.inr ⟨bs, n1 + n2, s2, h20,
+          by rw [run_add stage1Im n1 n2, hrun1, hrun2],
+          hs2rip, hs2r12, hs2r10, hnw0, hs2r1, hs2r6, hs2r15,
+          hs2r3, hs2r13, hs2r4,
+          fun i hi0 hi1 hi2 hi6 hi10 hi12 hi15 =>
+            (hs2fr i hi0 hi1 hi2 hi6 hi10 hi12).trans
+              (hs1fr i hi0 hi6 hi15),
+          hs2mem.trans hs1mem, hs2len, hs2k.trans hs1k⟩
+    · exact Or.inl (parser_header_a_magic_exit1 hrip hr3 hr13 hBL
+        hL16 h20 hmagic hlen16 hr4 hsp32 hspW hregs hroom)
+
 set_option maxHeartbeats 0 in
 /-- Data-loop refusal, short length field: fewer than four
 bytes remain for the segment length, so the loop step reaches
