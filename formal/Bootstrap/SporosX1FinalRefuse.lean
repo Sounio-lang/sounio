@@ -12294,4 +12294,315 @@ theorem exit2_of_fail2_bnd {sp : Nat} (hsp32 : 32 ≤ sp)
   exact hnot hmem
 
 
+/-! ### §3b. Legality extraction at memory-syscall sites, and
+bounded local exit-2 lemmas
+
+Under `OracleAdmits`, the oracle head at a memory syscall
+with valid arguments is `.at _` (with a successful placement)
+or `.nomem`: a missing or `.count` head makes `place` return
+`none`, hence the syscall `none`, contradicting legality. -/
+
+theorem legal_mmap_ret {s : X86Int.St} {a2 : Nat}
+    (hleg : OracleLegalAt s) (hmem : AtMemSyscall s)
+    (hr0 : s.reg 0 = some 9) (hr7 : s.reg 7 = some 0)
+    (hr6 : s.reg 6 = some a2) (hr2 : s.reg 2 = some 3)
+    (hr10 : s.reg 10 = some 34) (hr8 : s.reg 8 = some (W - 1))
+    (hr9 : s.reg 9 = some 0) :
+    ∃ rax k' m', X86Env.syscall s.k s.mem 9 0 a2 3 34 (W - 1) 0 =
+      some (.ret rax k' m') := by
+  obtain ⟨nr, b1, b2, b3, b4, b5, b6, rax, k', m', h0, h7, h6, h2,
+    h10, h8, h9, hsc⟩ := hleg hmem
+  have e0 : nr = 9 := Option.some.inj (h0.symm.trans hr0)
+  have e1 : b1 = 0 := Option.some.inj (h7.symm.trans hr7)
+  have e2 : b2 = a2 := Option.some.inj (h6.symm.trans hr6)
+  have e3 : b3 = 3 := Option.some.inj (h2.symm.trans hr2)
+  have e4 : b4 = 34 := Option.some.inj (h10.symm.trans hr10)
+  have e5 : b5 = W - 1 := Option.some.inj (h8.symm.trans hr8)
+  have e6 : b6 = 0 := Option.some.inj (h9.symm.trans hr9)
+  subst e0; subst e1; subst e2; subst e3; subst e4; subst e5;
+    subst e6
+  exact ⟨rax, k', m', hsc⟩
+
+theorem syscall9_none_of_place_none {k : Kern} {m : Mem}
+    {a2 : Nat} (ha2 : a2 ≠ 0)
+    (hp : X86Env.place m (Kern.next k).1 (X86Env.pages a2) =
+      none) :
+    X86Env.syscall k m 9 0 a2 3 34 (W - 1) 0 = none := by
+  simp only [X86Env.syscall]
+  rw [if_neg (by simp [X86Env.PROT_RW, X86Env.MAP_PRIVATE_ANON]),
+    if_neg ha2]
+  cases hnext : Kern.next k with
+  | mk c k1 =>
+    rw [hnext] at hp
+    simp only [] at hp
+    simp [hp]
+
+theorem place_of_legal_mmap {s : X86Int.St} {A a2 : Nat}
+    {rest : List Choice}
+    (hleg : OracleLegalAt s) (hmem : AtMemSyscall s)
+    (hr0 : s.reg 0 = some 9) (hr7 : s.reg 7 = some 0)
+    (hr6 : s.reg 6 = some a2) (hr2 : s.reg 2 = some 3)
+    (hr10 : s.reg 10 = some 34) (hr8 : s.reg 8 = some (W - 1))
+    (hr9 : s.reg 9 = some 0) (ha2 : a2 ≠ 0)
+    (horacle : s.k.oracle = .at A :: rest) :
+    X86Env.place s.mem (some (.at A)) (X86Env.pages a2) =
+      some (some A) := by
+  rcases place_at_cases (m := s.mem) (a := A)
+      (n := X86Env.pages a2) with hp | hp
+  · exfalso
+    obtain ⟨rax, k', m', hsc⟩ :=
+      legal_mmap_ret hleg hmem hr0 hr7 hr6 hr2 hr10 hr8 hr9
+    have hnext1 : (Kern.next s.k).1 = some (.at A) := by
+      simp [Kern.next, horacle]
+    have hnone := syscall9_none_of_place_none ha2
+      (by rw [hnext1]; exact hp)
+    rw [hnone] at hsc
+    simp at hsc
+  · exact hp
+
+theorem head_cases_of_legal_mmap {s : X86Int.St} {a2 : Nat}
+    (hleg : OracleLegalAt s) (hmem : AtMemSyscall s)
+    (hr0 : s.reg 0 = some 9) (hr7 : s.reg 7 = some 0)
+    (hr6 : s.reg 6 = some a2) (hr2 : s.reg 2 = some 3)
+    (hr10 : s.reg 10 = some 34) (hr8 : s.reg 8 = some (W - 1))
+    (hr9 : s.reg 9 = some 0) (ha2 : a2 ≠ 0) :
+    (∃ A rest, s.k.oracle = .at A :: rest) ∨
+      s.k.oracle.head? = some .nomem := by
+  cases hor : s.k.oracle with
+  | nil =>
+    exfalso
+    obtain ⟨rax, k', m', hsc⟩ :=
+      legal_mmap_ret hleg hmem hr0 hr7 hr6 hr2 hr10 hr8 hr9
+    have hp : X86Env.place s.mem (Kern.next s.k).1
+        (X86Env.pages a2) = none := by
+      have h1 : (Kern.next s.k).1 = none := by
+        simp [Kern.next, hor]
+      rw [h1]
+      rfl
+    rw [syscall9_none_of_place_none ha2 hp] at hsc
+    simp at hsc
+  | cons c rest =>
+    cases c
+    · rename_i A
+      exact Or.inl ⟨A, rest, rfl⟩
+    · exact Or.inr rfl
+    · rename_i n
+      exfalso
+      obtain ⟨rax, k', m', hsc⟩ :=
+        legal_mmap_ret hleg hmem hr0 hr7 hr6 hr2 hr10 hr8 hr9
+      have hp : X86Env.place s.mem (Kern.next s.k).1
+          (X86Env.pages a2) = none := by
+        have h1 : (Kern.next s.k).1 = some (.count n) := by
+          simp [Kern.next, hor]
+        rw [h1]
+        rfl
+      rw [syscall9_none_of_place_none ha2 hp] at hsc
+      simp at hsc
+
+theorem legal_mremap_ret {s : X86Int.St}
+    {A cap a5 a6 : Nat}
+    (hleg : OracleLegalAt s) (hmem : AtMemSyscall s)
+    (hr0 : s.reg 0 = some 25) (hr7 : s.reg 7 = some A)
+    (hr6 : s.reg 6 = some cap) (hr2 : s.reg 2 = some (cap + cap))
+    (hr10 : s.reg 10 = some MREMAP_MAYMOVE)
+    (hr8 : s.reg 8 = some a5) (hr9 : s.reg 9 = some a6) :
+    ∃ rax k' m', X86Env.syscall s.k s.mem 25 A cap (cap + cap)
+        MREMAP_MAYMOVE a5 a6 = some (.ret rax k' m') := by
+  obtain ⟨nr, b1, b2, b3, b4, b5, b6, rax, k', m', h0, h7, h6, h2,
+    h10, h8, h9, hsc⟩ := hleg hmem
+  have e0 : nr = 25 := Option.some.inj (h0.symm.trans hr0)
+  have e1 : b1 = A := Option.some.inj (h7.symm.trans hr7)
+  have e2 : b2 = cap := Option.some.inj (h6.symm.trans hr6)
+  have e3 : b3 = cap + cap := Option.some.inj (h2.symm.trans hr2)
+  have e4 : b4 = MREMAP_MAYMOVE :=
+    Option.some.inj (h10.symm.trans hr10)
+  have e5 : b5 = a5 := Option.some.inj (h8.symm.trans hr8)
+  have e6 : b6 = a6 := Option.some.inj (h9.symm.trans hr9)
+  subst e0; subst e1; subst e2; subst e3; subst e4; subst e5;
+    subst e6
+  exact ⟨rax, k', m', hsc⟩
+
+theorem syscall25_none_of_place_none {k : Kern} {m : Mem}
+    {A cap a5 a6 i : Nat} {r : Region}
+    (hfind : m.find A 0 = some (i, r)) (hbase : r.base = A)
+    (hlen : r.data.length = X86Env.pages cap) (hrw : r.rw = true)
+    (hshrink : ¬ X86Env.pages (cap + cap) < r.data.length)
+    (hp : X86Env.place (m.eraseIdx i) (Kern.next k).1
+      (X86Env.pages (cap + cap)) = none) :
+    X86Env.syscall k m 25 A cap (cap + cap) MREMAP_MAYMOVE a5 a6 =
+      none := by
+  simp only [X86Env.syscall, hfind, hbase, hlen, hrw, hshrink,
+    if_false]
+  cases hnext : Kern.next k with
+  | mk c k1 =>
+    rw [hnext] at hp
+    simp only [] at hp
+    simp [hp]
+
+theorem place_of_legal_mremap {s : X86Int.St}
+    {A A' cap a5 a6 i : Nat} {r : Region} {rest : List Choice}
+    (hleg : OracleLegalAt s) (hmem : AtMemSyscall s)
+    (hr0 : s.reg 0 = some 25) (hr7 : s.reg 7 = some A)
+    (hr6 : s.reg 6 = some cap) (hr2 : s.reg 2 = some (cap + cap))
+    (hr10 : s.reg 10 = some MREMAP_MAYMOVE)
+    (hr8 : s.reg 8 = some a5) (hr9 : s.reg 9 = some a6)
+    (hfind : s.mem.find A 0 = some (i, r)) (hbase : r.base = A)
+    (hlen : r.data.length = X86Env.pages cap) (hrw : r.rw = true)
+    (hshrink : ¬ X86Env.pages (cap + cap) < r.data.length)
+    (horacle : s.k.oracle = .at A' :: rest) :
+    X86Env.place (s.mem.eraseIdx i) (some (.at A'))
+        (X86Env.pages (cap + cap)) = some (some A') := by
+  rcases place_at_cases (m := s.mem.eraseIdx i) (a := A')
+      (n := X86Env.pages (cap + cap)) with hp | hp
+  · exfalso
+    obtain ⟨rax, k', m', hsc⟩ :=
+      legal_mremap_ret hleg hmem hr0 hr7 hr6 hr2 hr10 hr8 hr9
+    have hnext1 : (Kern.next s.k).1 = some (.at A') := by
+      simp [Kern.next, horacle]
+    have hnone := syscall25_none_of_place_none (a5 := a5)
+      (a6 := a6) hfind hbase hlen hrw hshrink
+      (by rw [hnext1]; exact hp)
+    rw [hnone] at hsc
+    simp at hsc
+  · exact hp
+
+theorem head_cases_of_legal_mremap {s : X86Int.St}
+    {A cap a5 a6 i : Nat} {r : Region}
+    (hleg : OracleLegalAt s) (hmem : AtMemSyscall s)
+    (hr0 : s.reg 0 = some 25) (hr7 : s.reg 7 = some A)
+    (hr6 : s.reg 6 = some cap) (hr2 : s.reg 2 = some (cap + cap))
+    (hr10 : s.reg 10 = some MREMAP_MAYMOVE)
+    (hr8 : s.reg 8 = some a5) (hr9 : s.reg 9 = some a6)
+    (hfind : s.mem.find A 0 = some (i, r)) (hbase : r.base = A)
+    (hlen : r.data.length = X86Env.pages cap) (hrw : r.rw = true)
+    (hshrink : ¬ X86Env.pages (cap + cap) < r.data.length) :
+    (∃ A' rest, s.k.oracle = .at A' :: rest) ∨
+      s.k.oracle.head? = some .nomem := by
+  cases hor : s.k.oracle with
+  | nil =>
+    exfalso
+    obtain ⟨rax, k', m', hsc⟩ :=
+      legal_mremap_ret hleg hmem hr0 hr7 hr6 hr2 hr10 hr8 hr9
+    have hp : X86Env.place (s.mem.eraseIdx i) (Kern.next s.k).1
+        (X86Env.pages (cap + cap)) = none := by
+      have h1 : (Kern.next s.k).1 = none := by
+        simp [Kern.next, hor]
+      rw [h1]
+      rfl
+    rw [syscall25_none_of_place_none hfind hbase hlen hrw hshrink
+      hp] at hsc
+    simp at hsc
+  | cons c rest =>
+    cases c
+    · rename_i A'
+      exact Or.inl ⟨A', rest, rfl⟩
+    · exact Or.inr rfl
+    · rename_i n
+      exfalso
+      obtain ⟨rax, k', m', hsc⟩ :=
+        legal_mremap_ret hleg hmem hr0 hr7 hr6 hr2 hr10 hr8 hr9
+      have hp : X86Env.place (s.mem.eraseIdx i)
+          (Kern.next s.k).1 (X86Env.pages (cap + cap)) = none := by
+        have h1 : (Kern.next s.k).1 = some (.count n) := by
+          simp [Kern.next, hor]
+        rw [h1]
+        rfl
+      rw [syscall25_none_of_place_none hfind hbase hlen hrw
+        hshrink hp] at hsc
+      simp at hsc
+
+theorem loader_mmap1_nomem_exit2_bnd {sp0 : Nat} {s' : X86Int.St}
+    (hrip : s'.rip = base + 0xbf) (hlen16 : s'.regs.length = 16)
+    (hr0 : s'.reg 0 = some 9) (hr7 : s'.reg 7 = some 0)
+    (hr6 : s'.reg 6 = some 65536) (hr2 : s'.reg 2 = some 3)
+    (hr10 : s'.reg 10 = some 34) (hr8 : s'.reg 8 = some (W - 1))
+    (hr9 : s'.reg 9 = some 0)
+    (hr4 : s'.reg 4 = some (sp0 + 24))
+    (hhead : s'.k.oracle.head? = some .nomem)
+    (hregs : RegsOk s') (hroom : StackRoom s' 1)
+    (hsp32 : 32 ≤ sp0 + 24) (hspW : sp0 + 24 < W) :
+    run stage1Im 9 (Out.ok s') = Out.exit 2 := by
+  obtain ⟨s'', hrun, hrip'', hr4'', hmem'', -, -, -⟩ :=
+    loader_mmap1_nomem hrip hlen16 hr0 hr7 hr6 hr2 hr10 hr8 hr9 hr4
+      hhead
+  have hroom'' : StackRoom s'' 1 := by
+    intro sp hsp i hi v
+    have hsp_eq : sp = sp0 + 24 := by
+      rw [hr4''] at hsp
+      exact (Option.some.inj hsp).symm
+    rw [hmem'']
+    exact hroom sp (by rw [hsp_eq]; exact hr4) i hi v
+  obtain ⟨hk, -⟩ := exit2_of_fail2_bnd hsp32 hspW s'' hrip''
+    hr4'' (run_regs_ok hrun hregs) hroom''
+  rw [show (9 : Nat) = 4 + 5 by omega, run_add stage1Im 4 5, hrun,
+    hk]
+
+
+theorem loader_grow_nomem_exit2_bnd {A sp0 cap count : Nat}
+    {s : X86Int.St} {i : Nat} {r : Region}
+    (hrip : s.rip = base + 0xfc) (hlen16 : s.regs.length = 16)
+    (hr3 : s.reg 3 = some A) (hr12 : s.reg 12 = some cap)
+    (hr13 : s.reg 13 = some count) (hr14 : s.reg 14 = some 3)
+    (hr4 : s.reg 4 = some (sp0 + 24))
+    (hr8 : ∃ v, s.reg 8 = some v) (hr9 : ∃ v, s.reg 9 = some v)
+    (hfind : s.mem.find A 0 = some (i, r))
+    (hbase : r.base = A) (hdatalen : r.data.length = cap)
+    (hrw : r.rw = true)
+    (hcapmod : cap % page = 0) (hcapW : cap + cap < W)
+    (hhead : s.k.oracle.head? = some .nomem)
+    (hregs : RegsOk s) (hroom : StackRoom s 1)
+    (hsp32 : 32 ≤ sp0 + 24) (hspW : sp0 + 24 < W) :
+    run stage1Im 14 (Out.ok s) = Out.exit 2 := by
+  obtain ⟨s', hrun, hrip', hr4', hmem', -, -⟩ :=
+    loader_grow_nomem hrip hlen16 hr3 hr12 hr13 hr14 hr4 hr8 hr9
+      hfind hbase hdatalen hrw hcapmod hcapW hhead
+  have hroom' : StackRoom s' 1 := by
+    intro sp hsp i hi v
+    have hsp_eq : sp = sp0 + 24 := by
+      rw [hr4'] at hsp
+      exact (Option.some.inj hsp).symm
+    rw [hmem']
+    exact hroom sp (by rw [hsp_eq]; exact hr4) i hi v
+  obtain ⟨hk, -⟩ := exit2_of_fail2_bnd hsp32 hspW s' hrip' hr4'
+    (run_regs_ok hrun hregs) hroom'
+  rw [show (14 : Nat) = 9 + 5 by omega, run_add stage1Im 9 5, hrun,
+    hk]
+
+
+theorem parser_mmap1_nomem_exit2_bnd {c nw sp : Nat} {s : X86Int.St}
+    (hrip : s.rip = base + 0x1ec) (hr6 : s.reg 6 = some c)
+    (hr10 : s.reg 10 = some nw) (hr4 : s.reg 4 = some sp)
+    (hr7 : ∃ v, s.reg 7 = some v) (hr9 : ∃ v, s.reg 9 = some v)
+    (hroom : StackRoom s 2) (hsp40 : 40 ≤ sp) (hspW : sp < W)
+    (hnw32 : nw < 2 ^ 32) (hnw0 : nw ≠ 0)
+    (hhead : s.k.oracle.head? = some .nomem)
+    (hlen16 : s.regs.length = 16) (hregs : RegsOk s) :
+    run stage1Im 25 (Out.ok s) = Out.exit 2 := by
+  obtain ⟨s', hrun, hrip', hr4', -, hroom', -, -, -⟩ :=
+    parser_mmap1_nomem hrip hr6 hr10 hr4 hr7 hr9 hroom (by omega)
+      hspW hnw32 hnw0 hhead hlen16
+  obtain ⟨hk, -⟩ := exit2_of_fail2_bnd (sp := sp - 8) (by omega)
+    (by omega) s' hrip' hr4' (run_regs_ok hrun hregs) hroom'
+  rw [show (25 : Nat) = 20 + 5 by omega, run_add stage1Im 20 5,
+    hrun, hk]
+
+
+theorem parser_mmap2_nomem_exit2_bnd {L sp1 : Nat} {s : X86Int.St}
+    (hrip : s.rip = base + 0x22d) (hr13 : s.reg 13 = some L)
+    (hr4 : s.reg 4 = some sp1)
+    (hr7 : ∃ v, s.reg 7 = some v) (hr9 : ∃ v, s.reg 9 = some v)
+    (hroom : StackRoom s 1) (hsp32 : 32 ≤ sp1) (hspW : sp1 < W)
+    (hL : L ≠ 0)
+    (hhead : s.k.oracle.head? = some .nomem)
+    (hlen16 : s.regs.length = 16) (hregs : RegsOk s) :
+    run stage1Im 17 (Out.ok s) = Out.exit 2 := by
+  obtain ⟨s', hrun, hrip', hr4', -, hroom', -, -, -⟩ :=
+    parser_mmap2_nomem hrip hr13 hr4 hr7 hr9 hroom (by omega) hspW
+      hL hhead hlen16
+  obtain ⟨hk, -⟩ := exit2_of_fail2_bnd hsp32 hspW s' hrip' hr4'
+    (run_regs_ok hrun hregs) hroom'
+  rw [show (17 : Nat) = 12 + 5 by omega, run_add stage1Im 12 5,
+    hrun, hk]
+
+
 end SporosX1
