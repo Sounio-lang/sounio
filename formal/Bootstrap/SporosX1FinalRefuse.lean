@@ -2400,6 +2400,254 @@ theorem syscall_mremap_nomem {k : Kern} {m : Mem}
     omega
 
 set_option maxHeartbeats 0 in
+/-! ### §2. L1 — initial `mmap` refusal: `base+0xbf → aFail2` in 4 steps
+
+Statement mirrors loader_mmap1_to_readloop's preconditions
+(Loader:1910-1923) with: hhead `.at A` → `.nomem`; DELETED: the
+second state `s`/hshape/hfree and hAal/hApos/hbound (only feed
+place_at, Loader:1940-1954); hr13/hr14 dropped (unused in 4 steps;
+hr14 only threaded to the read loop).  Post-state keeps reg4 and
+mem IDENTICAL to the pre-state — this is what makes the exit-2
+corollary's StackRoom transport trivial, unlike parser_mmap1_nomem
+where sp moves by 8 and StackRoom needs wrN_some_of_wshape
+(Refuse:3015-3030).
+
+Proof = loader_mmap1_to_readloop lines 1972-2079 (b1,b2,b3) with
+three replacements, then parser_mmap1_nomem lines 2929-2946 for the
+fallthrough+jmp:
+  R1. hsc (Loader:1955-1971) → one-liner via syscall_mmap_nomem:
+        have hsc : X86Env.syscall s'.k s'.mem 9 0 65536 PROT_RW
+            MAP_PRIVATE_ANON (W - 1) 0 =
+          some (.ret (X86Env.neg ENOMEM) (Kern.next s'.k).2 s'.mem) :=
+          syscall_mmap_nomem (by decide) hhead
+      (hr2 : reg 2 = some 3 still discharges `some PROT_RW` by defeq,
+      PROT_RW := 3, X86Env:166 — accept proof relies on the same
+      defeq at Loader:1955-1978; MAP_PRIVATE_ANON := 0x22 = 34.)
+  R2. b1 block (Loader:1972-2027): replace `some A` → `some (neg
+      ENOMEM)` and mem `s'.mem ++ [⟨A,…⟩]` → `s'.mem`.  hb1r4 copy
+      unchanged (Loader:1999-2006).  e1 via step_syscall_ret hc.dbf
+      (Loader:500-511 signature).
+  R3. b2 flag fact (Loader:2036-2045) →
+        have hb2fl : X86Int.cond b2.fl 9 = some false :=
+          cond_cc9_of_sf_true (by rw [hb2]; exact sf_test_neg_enomem)
+      (hb2 def: fl := (aluF .and (neg ENOMEM) (neg ENOMEM)).2,
+      rip := b1.rip + 3; e2 via step_test hc.dc1, Loader:2029-2031
+      with A → neg ENOMEM.)
+  R4. jcc NOT taken (mirror parser e19, Refuse:2929-2934 — note the
+      `rw [hrip] at h; simpa using h` idiom, which produces the
+      fallthrough `rip := base + 0xc6`):
+        have e3 : X86Int.step stage1Im b2 =
+            .ok { b2 with rip := base + 0xc6 } := by
+          have h := step_jcc (im := stage1Im) (s := b2)
+            (by rw [hb2rip]; exact hc.dc4) hb2fl
+          rw [hb2rip] at h
+          simpa using h
+  R5. jmp (mirror parser e20, Refuse:2938-2946, hc.p225 → hc.dc6):
+        have e4 : X86Int.step stage1Im b3 =
+            .ok { b3 with rip := base + 0x12c } :=
+          step_jmp (by rw [hb3rip]; exact hc.dc6)
+        -- b4.rip = aFail2 by `show base + 0x12c = aFail2; rfl`
+      (Accept's step_jmp use at Loader:4433-4435 has this direct
+      form; parser wraps in simpa — either may be needed, adjust on
+      elaboration.)
+  Run assembly: r1..r4 one-step runs (run_succ_ok … run_zero idiom,
+  e.g. Loader:4438-4439) composed by run_add as 4 = 1+3, 3 = 1+2,
+  2 = 1+1 (tail of parser's hrun chain, Refuse:2992-2994).
+  Frame fact: b1 writes regs 0,1,11 only (step_syscall_ret form,
+  Loader:509); b2 writes fl/rip; b3/b4 write rip (`reg_with_rip`).
+  Final reg4/mem/k/len: thread hb1r4 (r4), hb1mem := rfl-shape,
+  hb1k, hlenb1 through rip/fl-only updates exactly as accept does
+  for b2/b3 (Loader:2047-2079) and one more rip hop. -/
+
+theorem loader_mmap1_nomem {sp0 : Nat} {s' : X86Int.St}
+    (hrip : s'.rip = base + 0xbf) (hlen16 : s'.regs.length = 16)
+    (hr0 : s'.reg 0 = some 9) (hr7 : s'.reg 7 = some 0)
+    (hr6 : s'.reg 6 = some 65536) (hr2 : s'.reg 2 = some 3)
+    (hr10 : s'.reg 10 = some 34) (hr8 : s'.reg 8 = some (W - 1))
+    (hr9 : s'.reg 9 = some 0)
+    (hr4 : s'.reg 4 = some (sp0 + 24))
+    (hhead : s'.k.oracle.head? = some .nomem) :
+    ∃ s'', run stage1Im 4 (Out.ok s') = Out.ok s'' ∧
+      s''.rip = aFail2 ∧
+      s''.reg 4 = some (sp0 + 24) ∧
+      s''.mem = s'.mem ∧
+      s''.k = (Kern.next s'.k).2 ∧
+      s''.regs.length = 16 ∧
+      (∀ i, i ≠ 0 → i ≠ 1 → i ≠ 11 → s''.reg i = s'.reg i) := by
+  have hc := stage1_loaderCode
+  have hsc : X86Env.syscall s'.k s'.mem 9 0 65536 PROT_RW
+        MAP_PRIVATE_ANON (W - 1) 0 =
+      some (.ret (X86Env.neg ENOMEM) (Kern.next s'.k).2 s'.mem) :=
+    syscall_mmap_nomem (by decide) hhead
+  have e1 : X86Int.step stage1Im s' =
+      .ok { ((s'.set 0 (some (X86Env.neg ENOMEM))).set 1
+          (some (s'.rip + 2))).set 11 none with
+        k := (Kern.next s'.k).2, mem := s'.mem,
+        rip := s'.rip + 2 } :=
+    step_syscall_ret (by rw [hrip]; exact hc.dbf) hr0 hr7 hr6 hr2
+      hr10 hr8 hr9 hsc
+  obtain ⟨b1, hb1⟩ : ∃ t : X86Int.St, t =
+      { ((s'.set 0 (some (X86Env.neg ENOMEM))).set 1
+          (some (s'.rip + 2))).set 11 none with
+        k := (Kern.next s'.k).2, mem := s'.mem,
+        rip := s'.rip + 2 } := ⟨_, rfl⟩
+  have hb1rip : b1.rip = base + 0xc1 := by
+    rw [hb1]; show s'.rip + 2 = base + 0xc1; rw [hrip]
+  have hlenb1 : b1.regs.length = 16 := by
+    rw [hb1]
+    show (((s'.set 0 (some (X86Env.neg ENOMEM))).set 1
+      (some (s'.rip + 2))).set 11 none).regs.length = 16
+    rw [len_set, len_set, len_set]
+    exact hlen16
+  have hb1r0 : b1.reg 0 = some (X86Env.neg ENOMEM) := by
+    rw [hb1]
+    show (((s'.set 0 (some (X86Env.neg ENOMEM))).set 1
+      (some (s'.rip + 2))).set 11 none).reg 0 =
+      some (X86Env.neg ENOMEM)
+    rw [reg_set_other (by decide : (0 : Nat) ≠ 11),
+      reg_set_other (by decide : (0 : Nat) ≠ 1),
+      reg_set_self (by omega)]
+  have hb1r4 : b1.reg 4 = some (sp0 + 24) := by
+    rw [hb1]
+    show (((s'.set 0 (some (X86Env.neg ENOMEM))).set 1
+      (some (s'.rip + 2))).set 11 none).reg 4 = some (sp0 + 24)
+    rw [reg_set_other (by decide : (4 : Nat) ≠ 11),
+      reg_set_other (by decide : (4 : Nat) ≠ 1),
+      reg_set_other (by decide : (4 : Nat) ≠ 0)]
+    exact hr4
+  have hb1fr : ∀ i, i ≠ 0 → i ≠ 1 → i ≠ 11 →
+      b1.reg i = s'.reg i := by
+    intro i hi0 hi1 hi11
+    rw [hb1]
+    show (((s'.set 0 (some (X86Env.neg ENOMEM))).set 1
+      (some (s'.rip + 2))).set 11 none).reg i = s'.reg i
+    rw [reg_set_other hi11, reg_set_other hi1, reg_set_other hi0]
+  have hb1mem : b1.mem = s'.mem := by rw [hb1]
+  have hb1k : b1.k = (Kern.next s'.k).2 := by rw [hb1]
+  -- step 2: test rax, rax (0xc1)
+  have e2 : X86Int.step stage1Im b1 =
+      .ok { b1 with
+        fl := (aluF .and (X86Env.neg ENOMEM) (X86Env.neg ENOMEM)).2,
+        rip := b1.rip + 3 } :=
+    step_test (by rw [hb1rip]; exact hc.dc1) hb1r0 hb1r0
+  obtain ⟨b2, hb2⟩ : ∃ t : X86Int.St, t =
+      { b1 with
+        fl := (aluF .and (X86Env.neg ENOMEM) (X86Env.neg ENOMEM)).2,
+        rip := b1.rip + 3 } := ⟨_, rfl⟩
+  have hb2rip : b2.rip = base + 0xc4 := by
+    rw [hb2]; show b1.rip + 3 = base + 0xc4; rw [hb1rip]
+  have hb2fl : X86Int.cond b2.fl 9 = some false :=
+    cond_cc9_of_sf_true (by rw [hb2]; exact sf_test_neg_enomem)
+  have hb2r4 : b2.reg 4 = some (sp0 + 24) := by rw [hb2]; exact hb1r4
+  have hb2mem : b2.mem = s'.mem := by rw [hb2]; exact hb1mem
+  have hb2k : b2.k = (Kern.next s'.k).2 := by rw [hb2]; exact hb1k
+  have hlenb2 : b2.regs.length = 16 := by rw [hb2]; exact hlenb1
+  have hb2fr : ∀ i, i ≠ 0 → i ≠ 1 → i ≠ 11 →
+      b2.reg i = s'.reg i := by
+    intro i hi0 hi1 hi11; rw [hb2]; exact hb1fr i hi0 hi1 hi11
+  -- step 3: jns 0xcb (0xc4) — NOT taken, sf = true
+  have e3 : X86Int.step stage1Im b2 =
+      .ok { b2 with rip := base + 0xc6 } := by
+    have h := step_jcc (im := stage1Im) (s := b2)
+      (by rw [hb2rip]; exact hc.dc4) hb2fl
+    rw [hb2rip] at h
+    simpa using h
+  obtain ⟨b3, hb3⟩ : ∃ t : X86Int.St, t =
+      { b2 with rip := base + 0xc6 } := ⟨_, rfl⟩
+  have hb3rip : b3.rip = base + 0xc6 := by rw [hb3]
+  have hb3r4 : b3.reg 4 = some (sp0 + 24) := by
+    rw [hb3]
+    show ({ b2 with rip := base + 0xc6 }).reg 4 = some (sp0 + 24)
+    rw [reg_with_rip]; exact hb2r4
+  -- step 4: jmp fail2 (0xc6)
+  have e4 : X86Int.step stage1Im b3 =
+      .ok { b3 with rip := base + 0x12c } := by
+    have h := step_jmp (im := stage1Im) (s := b3)
+      (by rw [hb3rip]; exact hc.dc6)
+    simpa using h
+  obtain ⟨b4, hb4⟩ : ∃ t : X86Int.St, t =
+      { b3 with rip := base + 0x12c } := ⟨_, rfl⟩
+  have r1 : run stage1Im 1 (Out.ok s') = Out.ok b1 := by
+    rw [run_succ_ok stage1Im 0 s', e1, ← hb1, run_zero]
+  have r2 : run stage1Im 1 (Out.ok b1) = Out.ok b2 := by
+    rw [run_succ_ok stage1Im 0 b1, e2, ← hb2, run_zero]
+  have r3 : run stage1Im 1 (Out.ok b2) = Out.ok b3 := by
+    rw [run_succ_ok stage1Im 0 b2, e3, ← hb3, run_zero]
+  have r4 : run stage1Im 1 (Out.ok b3) = Out.ok b4 := by
+    rw [run_succ_ok stage1Im 0 b3, e4, ← hb4, run_zero]
+  have hrun : run stage1Im 4 (Out.ok s') = Out.ok b4 := by
+    rw [show (4 : Nat) = 1 + 3 by omega, run_add stage1Im 1 3, r1,
+      show (3 : Nat) = 1 + 2 by omega, run_add stage1Im 1 2, r2,
+      show (2 : Nat) = 1 + 1 by omega, run_add stage1Im 1 1, r3, r4]
+  refine ⟨b4, hrun, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  · rw [hb4]; show base + 0x12c = aFail2; rfl
+  · rw [hb4]
+    show ({ b3 with rip := base + 0x12c }).reg 4 = some (sp0 + 24)
+    rw [reg_with_rip]; exact hb3r4
+  · have h3m : b3.mem = s'.mem := by
+      rw [hb3]
+      show ({ b2 with rip := base + 0xc6 }).mem = s'.mem
+      rw [mem_with_rip]; exact hb2mem
+    rw [hb4]
+    show ({ b3 with rip := base + 0x12c }).mem = s'.mem
+    rw [mem_with_rip]; exact h3m
+  · have h3k : b3.k = (Kern.next s'.k).2 := by
+      rw [hb3]
+      show ({ b2 with rip := base + 0xc6 }).k = (Kern.next s'.k).2
+      exact hb2k
+    rw [hb4]
+    show ({ b3 with rip := base + 0x12c }).k = (Kern.next s'.k).2
+    exact h3k
+  · have h3l : b3.regs.length = 16 := by
+      rw [hb3]
+      show ({ b2 with rip := base + 0xc6 }).regs.length = 16
+      rw [len_with_rip]; exact hlenb2
+    rw [hb4]
+    show ({ b3 with rip := base + 0x12c }).regs.length = 16
+    rw [len_with_rip]; exact h3l
+  · intro i hi0 hi1 hi11
+    have h3i : b3.reg i = s'.reg i := by
+      rw [hb3]
+      show ({ b2 with rip := base + 0xc6 }).reg i = s'.reg i
+      rw [reg_with_rip]; exact hb2fr i hi0 hi1 hi11
+    rw [hb4]
+    show ({ b3 with rip := base + 0x12c }).reg i = s'.reg i
+    rw [reg_with_rip]; exact h3i
+
+/-- L1 composed to exit 2.  Extra hypotheses are exactly
+exit2_of_fail2's (Loader:5764-5767), specialised at sp := sp0+24:
+`32 ≤ sp0 + 24` (i.e. 8 ≤ sp0 — keep in the sp0+24 form so `omega`
+at the call site, where sp0 = stk.base + stackRoom, closes it like
+parser_mmap1_nomem_exit2's `(by omega)`, Refuse:3076),
+`sp0 + 24 < W`, RegsOk, StackRoom _ 1.  StackRoom transport is the
+identity: StackRoom mentions only reg 4 and mem (SporosX1:77-79),
+both unchanged by the segment. -/
+theorem loader_mmap1_nomem_exit2 {sp0 : Nat} {s' : X86Int.St}
+    (hrip : s'.rip = base + 0xbf) (hlen16 : s'.regs.length = 16)
+    (hr0 : s'.reg 0 = some 9) (hr7 : s'.reg 7 = some 0)
+    (hr6 : s'.reg 6 = some 65536) (hr2 : s'.reg 2 = some 3)
+    (hr10 : s'.reg 10 = some 34) (hr8 : s'.reg 8 = some (W - 1))
+    (hr9 : s'.reg 9 = some 0)
+    (hr4 : s'.reg 4 = some (sp0 + 24))
+    (hhead : s'.k.oracle.head? = some .nomem)
+    (hregs : RegsOk s') (hroom : StackRoom s' 1)
+    (hsp32 : 32 ≤ sp0 + 24) (hspW : sp0 + 24 < W) :
+    ∃ k, run stage1Im k (Out.ok s') = Out.exit 2 := by
+  obtain ⟨s'', hrun, hrip'', hr4'', hmem'', -, -, -⟩ :=
+    loader_mmap1_nomem hrip hlen16 hr0 hr7 hr6 hr2 hr10 hr8 hr9 hr4
+      hhead
+  have hroom'' : StackRoom s'' 1 := by
+    intro sp hsp i hi v
+    have hsp_eq : sp = sp0 + 24 := by
+      rw [hr4''] at hsp
+      exact (Option.some.inj hsp).symm
+    rw [hmem'']
+    exact hroom sp (by rw [hsp_eq]; exact hr4) i hi v
+  obtain ⟨k, hk⟩ := exit2_of_fail2 hsp32 hspW s'' hrip'' hr4''
+    (run_regs_ok hrun hregs) hroom''
+  exact ⟨4 + k, by rw [run_add stage1Im 4 k, hrun, hk]⟩
+
+set_option maxHeartbeats 0 in
 /-- The words-table `mmap`, oracle-refusal case: from
 `base + 0x1ec` to `aFail2` in twenty steps when the oracle
 head is `.nomem`.  The two saved stack slots are the only
