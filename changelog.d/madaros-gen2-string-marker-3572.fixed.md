@@ -1,0 +1,1 @@
+Madaros keeps inferred integer globals on the integer comparison path when their initializer matches the string marker, including zero in the seed-built compiler. String inference now also requires the stored string payload, preventing integer comparisons in a self-compiled compiler from calling the string runtime and crashing.
