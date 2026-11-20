@@ -72,3 +72,43 @@ Os planos de lane também foram para os extremos e para combinações que nunca 
 **Paridade.** Um operador kind=2 não calcula o produto de sedênions, então o `reference.hex` da sonda, que vem das saídas Cayley-Dickson das fixtures, não é a referência dele. A referência bit a bit de cada candidato sai de `r740/operator_reference.py` com a fase do candidato, sobre as mesmas 320 entradas. A aritmética é a de `numeric_fixtures.sio` e do PTX: produto, sinal, soma ascendente, sem FMA. O script se recusa a gerar qualquer coisa se a fase 0 não reproduzir as `output_bits` da Sounio palavra por palavra. A decisão de paridade continua com `material_parity.sio`.
 
 **Expectativa honesta.** O PTX de um kind=2 é instrução por instrução o mesmo de um kind=1 com o mesmo plano de lane. Só a tabela constante `pireus_signs[16]` muda. A fase escolhe qual álgebra se calcula, não quanto ela custa. Então qualquer diferença de tempo vem do plano de lane, e os extremos de plano já perderam ou empataram nos lotes kind=1. Este lote mede, pela primeira vez no r740, operadores de famílias nunca alcançadas, com paridade bit a bit de cada um. Um ganho de 5% sobre o direct seria surpresa.
+
+## Lote b003 (2026-11-20), kind=2 com sign_mode=1
+
+Este é o primeiro lote da extensão 1 da gramática, `sign_mode`. As 16 propostas são kind=2 com `unroll=16` e `sign_mode=1`. Fora isso, usam o mesmo `context` e a mesma serialização do b002.
+
+**O que `sign_mode` muda.** A chave é opcional (bit 17 da máscara de `admission.sio`, valor 131072). Ausente ou 0, nada muda: o PTX e o recibo de toda proposta anterior saem byte a byte iguais. O teste `test_sign_mode_absent_or_zero_keeps_the_b001_b002_bytes` confere isso contra `r740/frozen_inbox_outputs.json`, e `phase_a.check_engine` confere a Phase A.
+
+Com `sign_mode=1`, o PTX não carrega `pireus_signs[j]` nem multiplica o produto por ±1 em cada termo. Ele lê uma vez, por lane, a palavra `pireus_lane_signs[k]`, em que o bit j vale 1 quando sigma(k^j, j) < 0. Em cada termo, faz `sub.rn.f64` ou `add.rn.f64` predicado por esse bit. Por termo, isso tira um `ld.const`, um `selp` e um `mul.rn`.
+
+O resultado é bit a bit o mesmo em IEEE binary64 com arredondamento ao mais próximo: `p*(+1)` é `p` exato, e `a + (-p)` é a mesma operação que `a - p`, inclusive para zeros com sinal. Só a carga de NaN poderia diferir, e o contrato de paridade (finite-bits-nan-class-v1) não a compara.
+
+A admissão recusa `sign_mode>1` com `SIGN_MODE` e `sign_mode=1` sem `unroll=16` com `SIGN_MODE_UNROLL`, porque o bit j precisa ser conhecido na compilação. O recibo ganha `"sign_mode":1`, e o `plan_id` soma 65536. O tensor é o mesmo, porque o operador não muda e só muda a forma de calculá-lo.
+
+**Paridade antes da GPU.** `r740/ptx_sim.py` interpreta exatamente o texto PTX emitido: 16 threads em lockstep, incluindo `shfl.sync`, e recusa qualquer instrução que não conheça. O teste `test_sign_mode_ptx_computes_the_operator_reference_bit_for_bit` roda o PTX nos dois modos, kind=1 e três fases kind=2, sobre as 320 fixtures contra `operator_reference.py`, e exige zero divergências. Um controle que troca um bit da tabela precisa divergir. Isso prova o texto, não o hardware: a paridade material continua sendo a da sonda nas GPUs, decidida por `material_parity.sio`.
+
+**O lote.**
+- b003-01, -02 e -03 são pares exatos de b002-01, -06 e -11: mesmo operador e mesmo plano de lane, e só o `sign_mode` muda. Isso isola o efeito da extensão.
+- As outras 13 são representantes canônicos novos das três famílias que o b002 abriu: 5 em (3, 114), 4 em (7, 114) e 4 em (7, 210). Foram sorteados com a semente 20261120003 entre os que ainda não tinham sido usados.
+- Os planos de lane alternam (load, layout) em ciclo, e nenhum `lane_stride` aparece mais de duas vezes entre as novas.
+
+| arquivo | phase | família | stride | offset | load | layout | origem |
+|---|---|---|---|---|---|---|---|
+| b003-01 | 36077 | C3 (3, 114) | 1 | 15 | 0 | 0 | par de b002-01 |
+| b003-02 | 36076 | C7a (7, 114) | 11 | 3 | 1 | 1 | par de b002-06 |
+| b003-03 | 33825 | C7b (7, 210) | 13 | 9 | 0 | 1 | par de b002-11 |
+| b003-04 | 1123 | C3 (3, 114) | 11 | 2 | 0 | 0 | nova |
+| b003-05 | 32939 | C3 (3, 114) | 9 | 2 | 1 | 0 | nova |
+| b003-06 | 35849 | C3 (3, 114) | 3 | 3 | 0 | 1 | nova |
+| b003-07 | 35947 | C3 (3, 114) | 7 | 14 | 1 | 1 | nova |
+| b003-08 | 34029 | C3 (3, 114) | 15 | 9 | 0 | 0 | nova |
+| b003-09 | 35983 | C7a (7, 114) | 5 | 7 | 1 | 0 | nova |
+| b003-10 | 2081 | C7a (7, 114) | 13 | 4 | 0 | 1 | nova |
+| b003-11 | 33930 | C7a (7, 114) | 1 | 10 | 1 | 1 | nova |
+| b003-12 | 32774 | C7a (7, 114) | 3 | 5 | 0 | 0 | nova |
+| b003-13 | 1056 | C7b (7, 210) | 5 | 10 | 1 | 0 | nova |
+| b003-14 | 33824 | C7b (7, 210) | 9 | 2 | 0 | 1 | nova |
+| b003-15 | 33792 | C7b (7, 210) | 7 | 2 | 1 | 1 | nova |
+| b003-16 | 33 | C7b (7, 210) | 15 | 2 | 0 | 0 | nova |
+
+**Expectativa honesta.** Depois das cargas, cada termo tinha 11 instruções (mul, quatro para achar e ler a palavra da tabela, shr, and, setp, selp, mul por ±1 e add). Agora tem 5 (mul, and, setp e as duas predicadas, das quais só uma executa por lane), sem acesso à memória constante dentro do laço. As cargas de `a` e de `b` (ou o shuffle) continuam iguais, e com 320 vetores o kernel provavelmente é dominado por latência e lançamento, não por aritmética. Os pares b003-01..03 contra b002-01, -06 e -11 dizem se a extensão move o tempo. Um ganho de 5% sobre o direct, nas duas GPUs e com ci95 positivo, continua sendo improvável.
