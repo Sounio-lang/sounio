@@ -88,6 +88,9 @@ def bundle(out, engine, proposals_dir):
         if body.get("kind") == 2:
             # kind=2 is a different operator; its parity reference is operator_reference.py at this phase.
             row["phase"] = body.get("phase")
+        if "sign_mode" in body:
+            # Same operator, different lowering; the parity reference does not change.
+            row["sign_mode"] = body["sign_mode"]
         if decision != "ADMIT":
             row["reason"] = json.loads(stdout).get("reason")
         if decision == "ADMIT":
