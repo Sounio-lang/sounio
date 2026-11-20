@@ -92,7 +92,11 @@ fn emit_sign_table(phase: i64, sign_mode: i64) with IO, Mut, Panic, Div {
     }
 }
 
-fn emit_lowering_body(sm: i64, stride: i64, offset: i64, load: i64, layout: i64, unroll: i64, phase: i64, sign_mode: i64, pack: i64) with IO, Mut, Panic, Div {
+fn emit_lowering_body(sm: i64, stride: i64, offset: i64, load: i64, layout: i64, unroll: i64, phase: i64, sign_mode: i64, pack: i64, vector_load: i64) with IO, Mut, Panic, Div {
+    if load == 2 {
+        emit_staged_body(sm, stride, offset, layout, unroll, phase, sign_mode, pack, vector_load)
+        return
+    }
     if pack == 1 {
         emit_packed_body(sm, stride, offset, load, layout, unroll, phase, sign_mode)
         return
@@ -234,14 +238,115 @@ fn emit_packed_body(sm: i64, stride: i64, offset: i64, load: i64, layout: i64, u
     print("    mul.wide.u32 %rd6, %r17, 8;\n    add.u64 %rd6, %rd2, %rd6;\n    st.global.f64 [%rd6], %fd5;\nDONE:\n    ret;\n}\n")
 }
 
-pub fn emit_lowering_ptx(stride: i64, offset: i64, load: i64, layout: i64, unroll: i64, phase: i64, sign_mode: i64, pack: i64) with IO, Mut, Panic, Div {
-    emit_lowering_body(121, stride, offset, load, layout, unroll, phase, sign_mode, pack)
+// Per-term sign for both accumulators (B only when packed); shared by every body.
+fn emit_signed_accumulate(u: i64, sign_mode: i64, pack: i64) with IO {
+    if sign_mode == 1 {
+        print("    and.b32 %r13, %r14, "); print_int(1 << u); print(";\n    setp.ne.u32 %p1, %r13, 0;\n")
+        print("    @%p1 sub.rn.f64 %fd0, %fd0, %fd3;\n    @!%p1 add.rn.f64 %fd0, %fd0, %fd3;\n")
+        if pack == 1 {
+            print("    @%p1 sub.rn.f64 %fd5, %fd5, %fd8;\n    @!%p1 add.rn.f64 %fd5, %fd5, %fd8;\n")
+        }
+    } else {
+        print("    mov.u64 %rd4, pireus_signs;\n    mul.wide.u32 %rd5, %r5, 4;\n    add.u64 %rd4, %rd4, %rd5;\n    ld.const.u32 %r13, [%rd4];\n")
+        print("    shr.u32 %r13, %r13, %r3;\n    and.b32 %r13, %r13, 1;\n    setp.ne.u32 %p1, %r13, 0;\n")
+        print("    selp.f64 %fd4, 0dBFF0000000000000, 0d3FF0000000000000, %p1;\n")
+        print("    mul.rn.f64 %fd3, %fd3, %fd4;\n    add.rn.f64 %fd0, %fd0, %fd3;\n")
+        if pack == 1 {
+            print("    mul.rn.f64 %fd8, %fd8, %fd4;\n    add.rn.f64 %fd5, %fd5, %fd8;\n")
+        }
+    }
 }
 
-pub fn emit_lowering_ptx_sm(sm: i64, stride: i64, offset: i64, load: i64, layout: i64, unroll: i64, phase: i64, sign_mode: i64, pack: i64) with IO, Mut, Panic, Div {
+// load=2. Lane k loads coefficient k of a and b (of both vectors when packed) once,
+// stores them to shared memory, and bar.sync 0 publishes them to the block; every
+// term then reads a[k^j] and b[j] from shared memory. Only where the operands come
+// from changes: the multiply, sign and add sequence per vector is the unpacked one.
+// vector_load=1 (SoA, pack=1): coefficient k of vectors 2c and 2c+1 is adjacent, so
+// one ld.global.v2.f64 reads both. It needs a 16-byte aligned pair, which holds when
+// the vector count n is even; an odd n takes the scalar staging path instead. Early
+// exits happen before bar.sync and are uniform per block.
+fn emit_staged_body(sm: i64, stride: i64, offset: i64, layout: i64, unroll: i64, phase: i64, sign_mode: i64, pack: i64, vector_load: i64) with IO, Mut, Panic, Div {
+    emit_ptx_header(sm)
+    emit_sign_table(phase, sign_mode)
+    print("};\n// load=2: a and b staged in shared memory, then bar.sync.")
+    if pack == 1 { print(" pack=1: two vectors per 16-lane block.") }
+    if vector_load == 1 { print(" vector_load=1: ld.global.v2.f64 when n is even.") }
+    print("\n")
+    if pack == 1 {
+        print(".shared .align 16 .f64 pireus_sa[32];\n.shared .align 16 .f64 pireus_sb[32];\n")
+    } else {
+        print(".shared .align 16 .f64 pireus_sa[16];\n.shared .align 16 .f64 pireus_sb[16];\n")
+    }
+    print(".visible .entry pireus_candidate(.param .u64 pa, .param .u64 pb, .param .u64 pc)\n.maxntid 16,1,1\n{\n")
+    print("    .reg .b32 %r<32>;\n    .reg .b64 %rd<16>;\n    .reg .f64 %fd<16>;\n    .reg .pred %p<4>;\n")
+    print("    ld.param.u64 %rd0, [pa];\n    ld.param.u64 %rd1, [pb];\n    ld.param.u64 %rd2, [pc];\n")
+    print("    mov.u32 %r0, %tid.x;\n    mov.u32 %r1, %ctaid.x;\n    mov.u32 %r2, %nctaid.x;\n")
+    print("    setp.gt.u32 %p0, %r2, 16777216;\n    @%p0 bra DONE;\n")
+    if pack == 1 {
+        print("    shl.b32 %r1, %r1, 1;\n    setp.ge.u32 %p3, %r1, %r2;\n    @%p3 bra DONE;\n")
+        print("    add.u32 %r15, %r1, 1;\n    sub.u32 %r16, %r2, 1;\n    min.u32 %r15, %r15, %r16;\n")
+    }
+    print("    mad.lo.u32 %r3, %r0, "); print_int(stride); print(", "); print_int(offset); print(";\n    and.b32 %r3, %r3, 15;\n")
+    if vector_load == 1 {
+        print("    and.b32 %r22, %r2, 1;\n    setp.ne.u32 %p2, %r22, 0;\n    @%p2 bra SCALAR;\n")
+        address_index(layout, "%r3")
+        print("    mul.wide.u32 %rd3, %r7, 8;\n    add.u64 %rd6, %rd0, %rd3;\n    ld.global.v2.f64 {%fd1,%fd6}, [%rd6];\n")
+        print("    add.u64 %rd7, %rd1, %rd3;\n    ld.global.v2.f64 {%fd2,%fd7}, [%rd7];\n    bra STAGED;\nSCALAR:\n")
+    }
+    address_index(layout, "%r3")
+    print("    mul.wide.u32 %rd3, %r7, 8;\n    add.u64 %rd6, %rd0, %rd3;\n    ld.global.f64 %fd1, [%rd6];\n")
+    print("    add.u64 %rd7, %rd1, %rd3;\n    ld.global.f64 %fd2, [%rd7];\n")
+    if pack == 1 {
+        address_index_b(layout, "%r3")
+        print("    mul.wide.u32 %rd3, %r17, 8;\n    add.u64 %rd6, %rd0, %rd3;\n    ld.global.f64 %fd6, [%rd6];\n")
+        print("    add.u64 %rd7, %rd1, %rd3;\n    ld.global.f64 %fd7, [%rd7];\n")
+    }
+    if vector_load == 1 { print("STAGED:\n") }
+    print("    mov.u64 %rd8, pireus_sa;\n    mov.u64 %rd9, pireus_sb;\n    mul.wide.u32 %rd10, %r3, 8;\n")
+    print("    add.u64 %rd11, %rd8, %rd10;\n    st.shared.f64 [%rd11], %fd1;\n    add.u64 %rd12, %rd9, %rd10;\n    st.shared.f64 [%rd12], %fd2;\n")
+    if pack == 1 {
+        print("    add.u64 %rd11, %rd11, 128;\n    st.shared.f64 [%rd11], %fd6;\n    add.u64 %rd12, %rd12, 128;\n    st.shared.f64 [%rd12], %fd7;\n")
+    }
+    print("    bar.sync 0;\n")
+    if sign_mode == 1 {
+        print("    mov.u64 %rd4, pireus_lane_signs;\n    mul.wide.u32 %rd5, %r3, 4;\n    add.u64 %rd4, %rd4, %rd5;\n    ld.const.u32 %r14, [%rd4];\n")
+    }
+    print("    mov.f64 %fd0, 0d0000000000000000;\n")
+    if pack == 1 { print("    mov.f64 %fd5, 0d0000000000000000;\n") }
+    print("    mov.u32 %r4, 0;\nLOOP:\n")
+    var u: i64 = 0
+    while u < unroll {
+        print("    add.u32 %r5, %r4, "); print_int(u); print(";\n    xor.b32 %r6, %r3, %r5;\n")
+        print("    mul.wide.u32 %rd10, %r6, 8;\n    add.u64 %rd11, %rd8, %rd10;\n    ld.shared.f64 %fd1, [%rd11];\n")
+        print("    mul.wide.u32 %rd10, %r5, 8;\n    add.u64 %rd12, %rd9, %rd10;\n    ld.shared.f64 %fd2, [%rd12];\n")
+        if pack == 1 {
+            print("    add.u64 %rd11, %rd11, 128;\n    ld.shared.f64 %fd6, [%rd11];\n    add.u64 %rd12, %rd12, 128;\n    ld.shared.f64 %fd7, [%rd12];\n")
+        }
+        print("    mul.rn.f64 %fd3, %fd1, %fd2;\n")
+        if pack == 1 { print("    mul.rn.f64 %fd8, %fd6, %fd7;\n") }
+        emit_signed_accumulate(u, sign_mode, pack)
+        u = u + 1
+    }
+    if unroll < 16 {
+        print("    add.u32 %r4, %r4, "); print_int(unroll); print(";\n    setp.lt.u32 %p2, %r4, 16;\n    @%p2 bra LOOP;\n")
+    }
+    address_index(layout, "%r3")
+    print("    mul.wide.u32 %rd3, %r7, 8;\n    add.u64 %rd3, %rd2, %rd3;\n    st.global.f64 [%rd3], %fd0;\n")
+    if pack == 1 {
+        address_index_b(layout, "%r3")
+        print("    mul.wide.u32 %rd6, %r17, 8;\n    add.u64 %rd6, %rd2, %rd6;\n    st.global.f64 [%rd6], %fd5;\n")
+    }
+    print("DONE:\n    ret;\n}\n")
+}
+
+pub fn emit_lowering_ptx(stride: i64, offset: i64, load: i64, layout: i64, unroll: i64, phase: i64, sign_mode: i64, pack: i64, vector_load: i64) with IO, Mut, Panic, Div {
+    emit_lowering_body(121, stride, offset, load, layout, unroll, phase, sign_mode, pack, vector_load)
+}
+
+pub fn emit_lowering_ptx_sm(sm: i64, stride: i64, offset: i64, load: i64, layout: i64, unroll: i64, phase: i64, sign_mode: i64, pack: i64, vector_load: i64) with IO, Mut, Panic, Div {
     if sm != 121 && sm != 86 && sm != 75 {
         print("UNSUPPORTED_SM\n")
         return
     }
-    emit_lowering_body(sm, stride, offset, load, layout, unroll, phase, sign_mode, pack)
+    emit_lowering_body(sm, stride, offset, load, layout, unroll, phase, sign_mode, pack, vector_load)
 }

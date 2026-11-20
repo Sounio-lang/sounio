@@ -13,6 +13,7 @@ import struct
 
 GLOBAL = {"pa": 1, "pb": 2, "pc": 3}
 CONST_BASE = 8
+SHARED_BASE = 16
 M32 = 0xFFFFFFFF
 M64 = 0xFFFFFFFFFFFFFFFF
 
@@ -28,6 +29,7 @@ def b(value):
 class Kernel:
     def __init__(self, text):
         self.consts = {}
+        self.shared = {}
         self.code = []
         self.labels = {}
         body = False
@@ -38,6 +40,10 @@ class Kernel:
             m = re.match(r"\.const \.align 4 \.u32 (\w+)\[16\] = \{([0-9,]+)\};$", line)
             if m:
                 self.consts[m.group(1)] = (CONST_BASE + len(self.consts), [int(x) for x in m.group(2).split(",")])
+                continue
+            m = re.match(r"\.shared \.align 16 \.f64 (\w+)\[(16|32)\];$", line)
+            if m:
+                self.shared[m.group(1)] = (SHARED_BASE + len(self.shared), int(m.group(2)))
                 continue
             if line == "{":
                 body = True
@@ -63,6 +69,9 @@ class Kernel:
         c = [0x5A5A5A5A5A5A5A5A] * (16 * vectors)
         mem = {1: a, 2: b_in, 3: c}
         for block in range(vectors):
+            # Shared memory is per block and starts as a finite sentinel, like the output.
+            for base, size in self.shared.values():
+                mem[base] = [0x5A5A5A5A5A5A5A5A] * size
             regs = [dict() for _ in range(16)]
             for t in range(16):
                 regs[t].update({"%tid.x": t, "%ctaid.x": block, "%nctaid.x": vectors})
@@ -77,6 +86,11 @@ class Kernel:
                     assert len(taken) == 1, "divergent branch"
                     if taken.pop():
                         pc = self.labels[args[0]]
+                    continue
+                if op == "bar.sync":
+                    # Lockstep execution already completes every thread's earlier
+                    # instructions before this one; the barrier must be unguarded.
+                    assert guard is None and args == ["0"], args
                     continue
                 if op == "shfl.sync.idx.b32":
                     assert args[3] == "15" and args[4] == "65535", args
@@ -104,6 +118,8 @@ class Kernel:
             return int(tok[2:], 16)
         if tok in self.consts:
             return self.consts[tok][0] << 40
+        if tok in self.shared:
+            return self.shared[tok][0] << 40
         return int(tok)
 
     def _addr(self, r, tok):
@@ -152,6 +168,21 @@ class Kernel:
         elif op == "st.global.f64":
             addr = self._addr(r, a[0])
             mem[addr >> 40][(addr & ((1 << 40) - 1)) // 8] = r[a[1]]
+        elif op == "ld.global.v2.f64":
+            addr = self._addr(r, a[1])
+            assert addr % 16 == 0, "misaligned v2 load"
+            lo, hi = [x.strip() for x in a[0].strip("{}").split(",")]
+            buf, at = mem[addr >> 40], (addr & ((1 << 40) - 1)) // 8
+            r[lo], r[hi] = buf[at], buf[at + 1]
+        elif op in ("ld.shared.f64", "st.shared.f64"):
+            addr = self._addr(r, a[1] if op[0] == "l" else a[0])
+            assert addr % 8 == 0
+            buf, at = mem[addr >> 40], (addr & ((1 << 40) - 1)) // 8
+            assert at < len(buf), "shared index out of range"
+            if op[0] == "l":
+                r[a[0]] = buf[at]
+            else:
+                buf[at] = r[a[1]]
         elif op == "ld.const.u32":
             addr = self._addr(r, a[1])
             assert addr % 4 == 0

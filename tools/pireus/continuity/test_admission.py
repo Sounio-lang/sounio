@@ -48,6 +48,11 @@ def main():
    ("sign-mode-rolled","SIGN_MODE_UNROLL",dict(sign_mode=1)),
    ("pack-range","PACK",dict(pack=2)),
    ("pack-with-rolled-sign-mode","SIGN_MODE_UNROLL",dict(pack=1,sign_mode=1)),
+   ("load-range","GRAMMAR",dict(load=3)),
+   ("vector-load-range","VECTOR_LOAD",dict(load=2,layout=1,pack=1,vector_load=2)),
+   ("vector-load-without-staging","VECTOR_LOAD_LOAD",dict(layout=1,pack=1,vector_load=1)),
+   ("vector-load-aos","VECTOR_LOAD_LAYOUT",dict(load=2,pack=1,vector_load=1)),
+   ("vector-load-unpacked","VECTOR_LOAD_PACK",dict(load=2,layout=1,vector_load=1)),
    ("result-injection","PROPOSAL_FORMAT",dict(expected=1)),
    ("authority-injection","PROPOSAL_FORMAT",dict(claim_ready=1))]:
     check(label,reason,changes)
@@ -62,6 +67,11 @@ def main():
   assert packed["tensor_sha256"]==first["tensor_sha256"] and packed["plan_id"]==first["plan_id"]+131072,(packed,first)
   both=check("pack-and-sign-mode",changes=dict(unroll=16,sign_mode=1,pack=1))
   assert both["plan_id"]==fixed["plan_id"]+131072 and both["sign_mode"]==1 and both["pack"]==1,(both,fixed)
+  # load=2 stages through shared memory: same tensor, its own plan id.
+  staged=check("load-staged",changes=dict(load=2))
+  assert staged["load"]==2 and staged["tensor_sha256"]==first["tensor_sha256"],(staged,first)
+  vector=check("load-staged-vector",changes=dict(load=2,layout=1,pack=1,vector_load=1))
+  assert vector["vector_load"]==1 and vector["pack"]==1 and vector["load"]==2,vector
   check("unknown-facts","UNKNOWN_OR_CONTRADICTORY_FACTS",context_changes=dict(facts_state=0))
   check("contradictory-facts","UNKNOWN_OR_CONTRADICTORY_FACTS",context_changes=dict(facts_state=2))
   check("missing-shuffle","CAPABILITY",context_changes=dict(capabilities=39))
