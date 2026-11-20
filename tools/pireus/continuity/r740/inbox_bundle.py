@@ -97,6 +97,9 @@ def bundle(out, engine, proposals_dir):
         if "vector_load" in body:
             # ld.global.v2.f64 staging under load=2; same operator, same parity reference.
             row["vector_load"] = body["vector_load"]
+        if "block_threads" in body:
+            # r740-only wide block (r740_wide_launch.py); same operator, same parity reference.
+            row["block_threads"] = body["block_threads"]
         if decision != "ADMIT":
             row["reason"] = json.loads(stdout).get("reason")
         if decision == "ADMIT":
@@ -108,7 +111,7 @@ def bundle(out, engine, proposals_dir):
             else:
                 for arch, _ in ARCHES:
                     seen[arch][row["ptx_sha256"][arch]] = name
-                admitted.append((name, body["layout"], ptx))
+                admitted.append((name, body["layout"], ptx, body.get("block_threads", 0)))
         ledger.append(row)
     if not admitted:
         raise RuntimeError("no admitted, materially new proposal to measure")
@@ -127,10 +130,14 @@ def bundle(out, engine, proposals_dir):
             layout = json.loads((PHASE / "controls" / (name + ".proposal.json")).read_text())["layout"]
             controls.append(_entry(name, rel, data, layout))
         candidates = []
-        for name, layout, ptx in admitted:
+        for name, layout, ptx, threads in admitted:
             rel = name + ".ptx"
             (arch_dir / rel).write_bytes(ptx[arch])
-            candidates.append(_entry(name, rel, ptx[arch], layout))
+            entry = _entry(name, rel, ptx[arch], layout)
+            if threads not in (0, 16):
+                # Absent for 16 threads, so a historical manifest keeps its bytes.
+                entry["block_threads"] = threads
+            candidates.append(entry)
         gpu = {"schema": 1, "fixtures_sha256": fixture_sha, "candidates": controls + candidates}
         bench = {
             "method": "paired-median-ppm-bootstrap4000-v1",
@@ -148,7 +155,7 @@ def bundle(out, engine, proposals_dir):
         "context_sha256": _sha(context.read_bytes()),
         "engine_sha256": _sha(engine.read_bytes()),
         "engine_reproduces_phase_a": True,
-        "admitted": [name for name, _, _ in admitted],
+        "admitted": [name for name, _, _, _ in admitted],
         "proposals": ledger,
     }
     (out / "PROPOSALS.json").write_text(json.dumps(summary, indent=1, sort_keys=True) + "\n")

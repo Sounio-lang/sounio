@@ -53,6 +53,9 @@ def main():
    ("vector-load-without-staging","VECTOR_LOAD_LOAD",dict(layout=1,pack=1,vector_load=1)),
    ("vector-load-aos","VECTOR_LOAD_LAYOUT",dict(load=2,pack=1,vector_load=1)),
    ("vector-load-unpacked","VECTOR_LOAD_PACK",dict(load=2,layout=1,vector_load=1)),
+   ("block-threads-range","BLOCK_THREADS",dict(block_threads=48)),
+   ("block-threads-above","BLOCK_THREADS",dict(block_threads=256)),
+   ("block-threads-with-pack","BLOCK_THREADS_PACK",dict(block_threads=32,pack=1)),
    ("result-injection","PROPOSAL_FORMAT",dict(expected=1)),
    ("authority-injection","PROPOSAL_FORMAT",dict(claim_ready=1))]:
     check(label,reason,changes)
@@ -72,6 +75,14 @@ def main():
   assert staged["load"]==2 and staged["tensor_sha256"]==first["tensor_sha256"],(staged,first)
   vector=check("load-staged-vector",changes=dict(load=2,layout=1,pack=1,vector_load=1))
   assert vector["vector_load"]==1 and vector["pack"]==1 and vector["load"]==2,vector
+  # block_threads=32/64/128 is the r740-only wide block: same tensor, its own plan id.
+  for threads,step in ((32,1),(64,2),(128,3)):
+    wide=check("block-threads-"+str(threads),changes=dict(block_threads=threads))
+    assert wide["block_threads"]==threads and wide["tensor_sha256"]==first["tensor_sha256"],(wide,first)
+    assert wide["plan_id"]==first["plan_id"]+step*1048576,(wide,first)
+  check("block-threads-spark-target","BLOCK_THREADS_TARGET",changes=dict(block_threads=32),mode="ptx")
+  narrow=check("block-threads-16",changes=dict(block_threads=16))
+  assert "block_threads" not in narrow and narrow["plan_id"]==first["plan_id"],(narrow,first)
   check("unknown-facts","UNKNOWN_OR_CONTRADICTORY_FACTS",context_changes=dict(facts_state=0))
   check("contradictory-facts","UNKNOWN_OR_CONTRADICTORY_FACTS",context_changes=dict(facts_state=2))
   check("missing-shuffle","CAPABILITY",context_changes=dict(capabilities=39))

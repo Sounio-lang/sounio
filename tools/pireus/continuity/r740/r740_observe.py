@@ -14,6 +14,7 @@ from gpu_device_key import (
 )
 from gpu_probe import Driver, hex_frame
 from paired_timing import BLOCKS, GRAPH_WARMUP, REPLAYS, VECTORS, append_timing_block, duration_ns
+from r740_wide_launch import geometry, launch
 from run_inputs import data_root, require_probe_inputs, require_timing_inputs
 
 
@@ -44,6 +45,7 @@ def probe(root, identity, job):
         path = root / candidate["ptx"]
         if hashlib.sha256(path.read_bytes()).hexdigest() != candidate["ptx_sha256"]:
             raise ValueError("ptx digest")
+        threads = geometry(candidate, path.read_bytes())
         module, function = driver.load(path)
         tensors = []
         for key in ("a_bits", "b_bits"):
@@ -52,7 +54,7 @@ def probe(root, identity, job):
                 value = value.T
             tensors.append(torch.from_numpy(np.ascontiguousarray(value)).to("cuda"))
         out = torch.empty_like(tensors[0])
-        driver.launch(function, *tensors, out, len(rows))
+        launch(driver, function, *tensors, out, len(rows), threads)
         torch.cuda.synchronize()
         raw = out.cpu().numpy()
         if candidate["layout"] == 1:
@@ -63,7 +65,7 @@ def probe(root, identity, job):
         print(log_line(
             stage="MATERIAL_OBSERVATION", candidate=candidate["id"],
             sha256=hashlib.sha256(destination.read_bytes()).hexdigest(),
-            components=int(bits.size), gpu_uuid=identity["gpu_uuid_hex"],
+            components=int(bits.size), block_threads=threads, gpu_uuid=identity["gpu_uuid_hex"],
             compute_capability=identity["compute_capability"], sm=identity["sm"],
             key_scope=identity["key_scope"], job=job), flush=True)
         driver.check(driver.lib.cuModuleUnload(module))
@@ -85,16 +87,17 @@ def timing(root, identity, job):
         path = root / item["ptx"]
         if hashlib.sha256(path.read_bytes()).hexdigest() != item["ptx_sha256"]:
             raise ValueError("ptx digest")
+        threads = geometry(item, path.read_bytes())
         module, function = driver.load(path)
         tensors = [torch.from_numpy(np.ascontiguousarray(v.T if item["layout"] else v)).to("cuda")
                    for v in inputs.values()]
         out = torch.empty_like(tensors[0])
-        driver.launch(function, *tensors, out, VECTORS)
+        launch(driver, function, *tensors, out, VECTORS, threads)
         torch.cuda.synchronize()
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
             for _ in range(REPLAYS):
-                driver.launch(function, *tensors, out, VECTORS)
+                launch(driver, function, *tensors, out, VECTORS, threads)
         for _ in range(GRAPH_WARMUP):
             graph.replay()
         torch.cuda.synchronize()

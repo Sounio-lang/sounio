@@ -30,7 +30,7 @@ MEM_MAX_GIB = 64
 SIF = "/scratch/pireus/images/pireus-r740-amd64.sif"
 STAGED = (
     "r740_observe.py", "gpu_device_key.py", "paired_timing.py", "run_inputs.py",
-    "run_in_container_r740.sh",
+    "run_in_container_r740.sh", "r740_wide_launch.py",
 )
 GPUS = (
     {"gres": "gpu:a5000:1", "sm": 86, "arch": "sm_86", "name": "rtx-a5000"},
