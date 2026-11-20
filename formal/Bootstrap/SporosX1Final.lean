@@ -123,7 +123,20 @@ theorem stage1_final_exit2_target
       run stage1Im k
         (Out.ok (stage1Init f path argv0 stdin oracle top)) =
         Out.exit 2 := by
-  sorry
+  obtain ⟨k, hk, hrun⟩ := stage1_exit2_compose hinit horacle hhit
+  refine ⟨k, ?_, hrun⟩
+  have h1cube : f.length + 16 ≤ (f.length + 16) ^ 3 := by
+    calc f.length + 16 = (f.length + 16) * 1 := by
+          rw [Nat.mul_one]
+      _ ≤ (f.length + 16) *
+            ((f.length + 16) * (f.length + 16)) :=
+          Nat.mul_le_mul_left _
+            (Nat.mul_pos (by omega) (by omega))
+      _ = (f.length + 16) ^ 3 := by
+          rw [Nat.pow_succ, Nat.pow_succ, Nat.pow_succ,
+            Nat.pow_zero, Nat.one_mul, Nat.mul_assoc]
+  unfold stage1Bound
+  omega
 
 
 end SporosX1
