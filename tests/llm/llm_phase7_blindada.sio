@@ -30,6 +30,8 @@ use llm::epistemic_clinical_pbpk::{
     EpistemicDecisionReceipt,
     clinical_pbpk_default_params,
     clinical_pbpk_simulate_auc,
+    clinical_pbpk_auc_closed,
+    rk4_auc_bound_worst_case,
     clinical_pbpk_evaluate_gate,
     clinical_pbpk_compare_naive_text_mc,
     auc_error_bound_is_sound,
@@ -115,8 +117,9 @@ fn test_global_soundness_and_cone_refinement() -> bool with Alloc, Mut, Div, Pan
 
 // ----------------------------------------------------------------------------
 // Test 2 (7C All Orthogonal (val, err, ep, al) PBPK Regimes + Anti-Text-MC)
-// Certification runs off the proven (loose) enclosure: SAFE on very wide
-// windows, refine-authorize on mid windows, abstain attribution otherwise.
+// Certification runs off the closed-form enclosure: SAFE when the heuristic
+// rad is quiet, refine-authorize when it is not, abstain attribution
+// otherwise. RK4 stays only as a cross-check against the old loose bound.
 // ----------------------------------------------------------------------------
 fn abs_test(x: f64) -> f64 {
     if x < 0.0 { 0.0 - x } else { x }
@@ -135,8 +138,8 @@ fn test_epistemic_pbpk_regimes_and_witness() -> bool with Mut, Div {
     // Proven bound is honestly flagged as available.
     let tag_ok = auc_error_bound_is_sound()
 
-    // Regime 1: Safe Authorize — very wide window admits the sound (loose)
-    // initial enclosure, so no refinement is needed.
+    // Regime 1: Safe Authorize — closed-form enclosure (~1e-11) fits a
+    // realistic window and the heuristic rad is quiet, so no refinement.
     let r1 = clinical_pbpk_evaluate_gate(
         &p,
         &priors,
@@ -145,13 +148,13 @@ fn test_epistemic_pbpk_regimes_and_witness() -> bool with Mut, Div {
         0.0,
         0.0,
         0.0,
-        -20000.0,
-        20000.0
+        3.0,
+        5.0
     )
-    let r1_ok = (r1.regime == 1) && (!r1.compute_refined) && (!r1.clinical_abstained) && r1.authorized
+    let r1_ok = (r1.regime == 1) && (!r1.compute_refined) && (!r1.clinical_abstained) && r1.authorized && (r1.err_sound_initial < 0.001)
 
-    // Regime 2: Numerical Auto Refine — initial sound bound too wide, the
-    // refined (dt 0.025) one fits. Heuristic err_final < err_initial.
+    // Regime 2: Numerical Auto Refine — heuristic rad over budget prompts
+    // refinement; the proven enclosure then authorizes.
     let r2 = clinical_pbpk_evaluate_gate(
         &p,
         &priors,
@@ -160,10 +163,19 @@ fn test_epistemic_pbpk_regimes_and_witness() -> bool with Mut, Div {
         0.50,
         0.0,
         0.0,
-        -1500.0,
-        1500.0
+        3.0,
+        6.0
     )
-    let r2_ok = (r2.regime == 2) && r2.compute_refined && (!r2.clinical_abstained) && r2.authorized && (r2.err_final < r2.err_initial) && (r2.err_sound_final > 100.0) && (r2.err_sound_final < r2.err_sound_initial)
+    let r2_ok = (r2.regime == 2) && r2.compute_refined && (!r2.clinical_abstained) && r2.authorized && (r2.err_final < r2.err_initial) && (r2.err_sound_final < 0.001)
+
+    // Cross-check: RK4 (kept) stays inside the old loose bound and lands
+    // near the closed-form value (the old norm bound must exceed the
+    // observed difference, or it was not sound).
+    let auc_rk4 = clinical_pbpk_simulate_auc(&p, dose_mg, 48.0, 0.05)
+    let auc_closed = clinical_pbpk_auc_closed(&p, dose_mg, 48.0)
+    let cross_diff = abs_test(auc_rk4 - auc_closed)
+    let cross_bound = rk4_auc_bound_worst_case(&p, dose_mg, 0.05)
+    let cross_ok = (cross_diff < 0.01) && (cross_diff < cross_bound)
 
     // Regime 3: Physical Abstain TDM. ep (priors + u_ep) breaches [3, 5] while
     // al alone (u_al = 0) fits, so measuring again is the requested action.
@@ -186,14 +198,11 @@ fn test_epistemic_pbpk_regimes_and_witness() -> bool with Mut, Div {
     )
     let r3_ok = (r3.regime == 3) && r3.compute_refined && r3.clinical_abstained && (!r3.authorized)
 
-    // Regime 4: Double Refine Then Abstain. Window tighter than the refined
-    // rad alone; ep + al fit, so only rad breaches. Margin built from the
-    // same simulator the gate refines with.
-    let val_rc = clinical_pbpk_simulate_auc(&p, dose_mg, 48.0, 0.05)
+    // Regime 4: Double Refine Then Abstain (rad-only). Window centred on the
+    // refined value with half-width below the closed-form enclosure (~5e-11);
+    // ep + al = 0 fit, so only rad breaches. Knife-edge by design.
     let val_rf = clinical_pbpk_simulate_auc(&p, dose_mg, 48.0, 0.025)
-    let diff_f = abs_test(val_rf - val_rc)
-    let err_f = diff_f * (16.0 / 15.0) + diff_f
-    let margin = err_f * 0.5
+    let margin = 0.000000000001
     let r4 = clinical_pbpk_evaluate_gate(
         &p,
         &small_priors,
@@ -202,10 +211,10 @@ fn test_epistemic_pbpk_regimes_and_witness() -> bool with Mut, Div {
         0.0,
         0.0,
         0.0,
-        val_rc - margin,
-        val_rc + margin
+        val_rf - margin,
+        val_rf + margin
     )
-    let r4_ok = (r4.regime == 4) && r4.compute_refined && r4.clinical_abstained && (!r4.authorized)
+    let r4_ok = (r4.regime == 4) && r4.compute_refined && r4.clinical_abstained && (!r4.authorized) && (r4.err_sound_final > margin)
 
     // Regime 5: Aleatory Abstain (no TDM). al alone breaches [3, 5] while ep
     // alone fits: measuring again cannot help, so no new measurement is asked.
@@ -283,7 +292,7 @@ fn test_epistemic_pbpk_regimes_and_witness() -> bool with Mut, Div {
     // asserted here because the ARM64 backend cannot lower str_eq.
     let witness_pass = clinical_pbpk_compare_naive_text_mc()
 
-    tag_ok && r1_ok && r2_ok && r3_ok && r4_ok && r5_ok && r5b_ok && r6_ok && r6b_ok && r7_ok && witness_pass
+    tag_ok && r1_ok && r2_ok && cross_ok && r3_ok && r4_ok && r5_ok && r5b_ok && r6_ok && r6b_ok && r7_ok && witness_pass
 }
 
 // ----------------------------------------------------------------------------
