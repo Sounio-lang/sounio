@@ -47,6 +47,10 @@ export const docsNavSections: DocsNavSection[] = [
         title: 'Expanded uncertainty',
         href: '/learn/epistemic/expanded-uncertainty/',
       },
+      {
+        title: 'Sounio vs mp-units vs physure',
+        href: '/learn/epistemic/sounio-vs-mp-units-vs-physure/',
+      },
     ],
   },
   {
