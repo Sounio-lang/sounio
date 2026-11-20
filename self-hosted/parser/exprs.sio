@@ -40,6 +40,29 @@ fn parser_is_builtin_effect_name(n: Name) -> bool with Mut, Panic, Div {
     name_eq(n, make_name("IO")) || name_eq(n, make_name("Mut")) || name_eq(n, make_name("Alloc")) || name_eq(n, make_name("Panic")) || name_eq(n, make_name("Div")) || name_eq(n, make_name("GPU")) || name_eq(n, make_name("Async")) || name_eq(n, make_name("Prob")) || name_eq(n, make_name("Epistemic")) || name_eq(n, make_name("Causal")) || name_eq(n, make_name("Network")) || name_eq(n, make_name("Sensor")) || name_eq(n, make_name("Render")) || name_eq(n, make_name("Observe")) || name_eq(n, make_name("NonAssoc")) || name_eq(n, make_name("Audit")) || name_eq(n, make_name("Hypothesis")) || name_eq(n, make_name("MultiTest")) || name_eq(n, make_name("ZD")) || name_eq(n, make_name("Witness")) || name_eq(n, make_name("Temporal")) || name_eq(n, make_name("Learn")) || name_eq(n, make_name("Chaotic")) || name_eq(n, make_name("Approx")) || name_eq(n, make_name("NaturalityG2")) || name_eq(n, make_name("Deterministic")) || name_eq(n, make_name("Perturbative")) || name_eq(n, make_name("NarrowWidthApproximation")) || name_eq(n, make_name("NonUnitary")) || name_eq(n, make_name("Correlated"))
 }
 
+// `if a > V { x: 1.0 }.x {`: in the condition of if/while/match/for a bare
+// `Name {` is the end of the condition and the start of the body, so the
+// literal cannot be written there unparenthesised. Before this the parse went
+// on to fail inside the body at the `:` ("expected expression ... found `:`")
+// and the module was refused with no line naming the literal. `pos` is the
+// token of the literal's name. Same wording family and 20-message cap as
+// parser_report_expected_expression.
+fn exprs_report_struct_lit_in_condition(pos: i64, error_count: i64) with Mut, IO, Panic, Div {
+    if error_count > 20 {
+        return
+    }
+    print("parse error: struct literal not allowed here at line ")
+    if pos >= 0 && pos < 2097152 {
+        print_int(PT_LINE[pos as usize])
+        print(":")
+        print_int(PT_COL[pos as usize])
+    } else {
+        print("unknown")
+    }
+    print(": in the condition of `if`, `while`, `match` or `for`, `Name {` ends the condition and opens the body\n")
+    print("  help: wrap the literal in parentheses, `(Name { field: value })`, or bind it to a local first\n")
+}
+
 impl Parser {
     // ============================================================
     // Expression entry point (dispatches to Pratt parser)
@@ -590,10 +613,15 @@ impl Parser {
     fn parse_paren_expr(self) -> Parser with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip (
+        // Parentheses delimit: `if (Point { x: 1 }).x > 0 {` is legal, so the
+        // condition ban on struct literals is lifted inside and restored after.
+        let outer_nsl = p.no_struct_lit
+        p.no_struct_lit = false
 
         if parser_peek(p) == TokenKind::RParen {
             // Unit value ()
             p = p.advance()
+            p.no_struct_lit = outer_nsl
             let span = p.span_from(start)
             parser_store_expr_box(Box::new(mk_expr(ExprKind::ExprTupleLit, span)))
             p
@@ -616,6 +644,7 @@ impl Parser {
                     }
                 }
                 p = p.expect(TokenKind::RParen)
+                p.no_struct_lit = outer_nsl
                 let span = p.span_from(start)
                 var e = mk_expr(ExprKind::ExprTupleLit, span)
                 e.args = reverse_expr_list_opt(rev_list_opt)
@@ -624,6 +653,7 @@ impl Parser {
             } else {
                 // Just grouping
                 p = p.expect(TokenKind::RParen)
+                p.no_struct_lit = outer_nsl
                 parser_store_expr_box(first_box)
                 p
             }
@@ -637,10 +667,15 @@ impl Parser {
     fn parse_array_literal(self) -> Parser with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip [
+        // Brackets delimit: struct literals are legal inside even when the
+        // array sits in a condition. Restored on every exit below.
+        let outer_nsl = p.no_struct_lit
+        p.no_struct_lit = false
 
         if parser_peek(p) == TokenKind::RBracket {
             // Empty array
             p = p.advance()
+            p.no_struct_lit = outer_nsl
             let span = p.span_from(start)
             parser_store_expr_box(Box::new(mk_expr(ExprKind::ExprArrayLit, span)))
             p
@@ -654,6 +689,7 @@ impl Parser {
                 p = p.parse_expr()
                 let count_box = parser_take_expr_box()
                 p = p.expect(TokenKind::RBracket)
+                p.no_struct_lit = outer_nsl
                 let span = p.span_from(start)
                 var e = mk_expr(ExprKind::ExprArrayLit, span)
                 e.left = Some(first_box)
@@ -673,6 +709,7 @@ impl Parser {
                     rev_list_opt = Some(Box::new(next_node))
                 }
                 p = p.expect(TokenKind::RBracket)
+                p.no_struct_lit = outer_nsl
                 let span = p.span_from(start)
                 var e = mk_expr(ExprKind::ExprArrayLit, span)
                 e.args = reverse_expr_list_opt(rev_list_opt)
@@ -1055,11 +1092,19 @@ impl Parser {
         if parser_peek(p) == TokenKind::Let {
             return p.parse_if_let_expr(start)
         } else {
-            // Restrict struct literals in condition to avoid { ambiguity
+            // Restrict struct literals in condition to avoid { ambiguity.
+            // The flag is saved and restored, not reset to false: a nested
+            // if/match/while inside an enclosing condition used to switch the
+            // ban off for the rest of that condition, so in
+            // `if (match k { _ => 1.0 }) > 0.01 * vf {` the `vf {` was read as
+            // a struct literal. Delimited sub-expressions (parentheses, call
+            // arguments, brackets, blocks, match arms) lift the ban inside
+            // themselves and restore it on exit, the usual rule.
+            let saved_nsl = p.no_struct_lit
             p.no_struct_lit = true
             p = p.parse_expr()
             cond_box = parser_take_expr_box()
-            p.no_struct_lit = false
+            p.no_struct_lit = saved_nsl
         }
         let pair2 = p.parse_block()
         p = pair2.0
@@ -1107,10 +1152,11 @@ impl Parser {
         let success_pattern = pat_pair.1
         p = p.expect(TokenKind::Eq)
 
+        let saved_nsl = p.no_struct_lit
         p.no_struct_lit = true
         p = p.parse_expr()
         let scrutinee_box = parser_take_expr_box()
-        p.no_struct_lit = false
+        p.no_struct_lit = saved_nsl
 
         let then_pair = p.parse_block()
         p = then_pair.0
@@ -1186,7 +1232,10 @@ impl Parser {
     fn parse_match_expr(self) -> Parser with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'match'
-        // Restrict struct literals in scrutinee to avoid { ambiguity
+        // Restrict struct literals in scrutinee to avoid { ambiguity. The arm
+        // list is delimited by the match braces, so the ban is off inside it
+        // (false), and the enclosing value comes back after the closing `}`.
+        let outer_nsl = p.no_struct_lit
         p.no_struct_lit = true
         p = p.parse_expr()
         let scrutinee_box = parser_take_expr_box()
@@ -1266,6 +1315,7 @@ impl Parser {
         }
 
         p = p.expect(TokenKind::RBrace)
+        p.no_struct_lit = outer_nsl
         let span = p.span_from(start)
         var e = mk_expr(ExprKind::ExprMatch, span)
         e.left = Some(scrutinee_box)
@@ -1285,10 +1335,11 @@ impl Parser {
             return p.parse_while_let_expr(start)
         }
         // Restrict struct literals in condition to avoid { ambiguity
+        let saved_nsl = p.no_struct_lit
         p.no_struct_lit = true
         p = p.parse_expr()
         let cond_box = parser_take_expr_box()
-        p.no_struct_lit = false
+        p.no_struct_lit = saved_nsl
         let pair2 = p.parse_block()
         p = pair2.0
         let body = pair2.1
@@ -1307,10 +1358,11 @@ impl Parser {
         let success_pattern = pat_pair.1
         p = p.expect(TokenKind::Eq)
 
+        let saved_nsl = p.no_struct_lit
         p.no_struct_lit = true
         p = p.parse_expr()
         let scrutinee_box = parser_take_expr_box()
-        p.no_struct_lit = false
+        p.no_struct_lit = saved_nsl
 
         let body_pair = p.parse_block()
         p = body_pair.0
@@ -1404,10 +1456,11 @@ impl Parser {
         p = p.expect(TokenKind::In)
 
         // Parse iterator expression (restrict struct lits to avoid { ambiguity)
+        let saved_nsl = p.no_struct_lit
         p.no_struct_lit = true
         p = p.parse_expr()
         let iter_box = parser_take_expr_box()
-        p.no_struct_lit = false
+        p.no_struct_lit = saved_nsl
 
         // Parse body block
         let pair2 = p.parse_block()
@@ -1542,6 +1595,20 @@ impl Parser {
             if !p1.no_struct_lit && parser_peek(p1) == TokenKind::LBrace {
                 // Struct literal: Foo { x: 1, y: 2 }
                 p1.parse_struct_literal(path, start)
+            } else if p1.no_struct_lit
+                && parser_peek(p1) == TokenKind::LBrace
+                && parser_peek_ahead(p1, 1) == TokenKind::Ident
+                && parser_peek_ahead(p1, 2) == TokenKind::Colon {
+                // `if x == m::V { f: 1 } {`: no block statement starts with
+                // `ident :`, so this is a struct literal in a condition.
+                // Report it at the name and recover by reading the literal.
+                p1.had_error = true
+                p1.error_count = p1.error_count + 1
+                exprs_report_struct_lit_in_condition(self.pos, p1.error_count)
+                p1.no_struct_lit = false
+                p1 = p1.parse_struct_literal(path, start)
+                p1.no_struct_lit = true
+                p1
             } else {
                 // Path expression: Foo::Bar or turbofish path
                 let span = p1.span_from(start)
@@ -1559,6 +1626,27 @@ impl Parser {
                 seg_count: 1,
             }
             p.parse_struct_literal(path, start)
+        } else if self.no_struct_lit
+            && parser_peek_ahead(self, 1) == TokenKind::LBrace
+            && parser_peek_ahead(self, 2) == TokenKind::Ident
+            && parser_peek_ahead(self, 3) == TokenKind::Colon {
+            // `if a > V { x: 1.0 }.x {`: no block statement starts with
+            // `ident :`, so this is a struct literal in a condition, not the
+            // body. `if a > b { c }` and `if cf > 0.01 * vf {` never reach
+            // here. Report it at the name and recover by reading the literal,
+            // so the one located message is the only one.
+            var p = self.advance()
+            p.had_error = true
+            p.error_count = p.error_count + 1
+            exprs_report_struct_lit_in_condition(self.pos, p.error_count)
+            let path = AstPath {
+                segments: StringList { head_buf: name.buf, head_len: name.len, tail: None },
+                seg_count: 1,
+            }
+            p.no_struct_lit = false
+            p = p.parse_struct_literal(path, start)
+            p.no_struct_lit = true
+            p
         } else {
             // Simple identifier — may still carry turbofish: vec_new::<f64>()
             let span = self.current_span()
@@ -1678,7 +1766,12 @@ impl Parser {
                 p = parser_advance(p)
             }
         }
+        // A call argument is delimited by `(`/`,`/`)`: `if norm(V { x: 3.0 }) > 1.0 {`
+        // is legal, so the condition ban on struct literals is lifted here.
+        let outer_nsl = p.no_struct_lit
+        p.no_struct_lit = false
         p = p.parse_expr()
+        p.no_struct_lit = outer_nsl
         let expr_box = parser_take_expr_box()
         let node = ExprList { label: label, head: *expr_box, tail: None }
         (p, Box::new(node))
@@ -1935,6 +2028,10 @@ impl Parser {
     fn parse_index_expr_box(self, base: Box<Expr>) -> Parser with Mut, IO, Panic, Div, Alloc {
         let start = base.span
         var p = self.advance()  // skip [
+        // The index is delimited by brackets: lift the condition ban on struct
+        // literals inside and restore it on both exits.
+        let outer_nsl = p.no_struct_lit
+        p.no_struct_lit = false
         // Prefix range index: `bytes[..n]`, `bytes[..=n]`, `bytes[..]`. `..` is
         // not an expression start, so parse_expr stopped at it ("expected
         // expression, found `..`"). The range has no start (left = None); the
@@ -1953,6 +2050,7 @@ impl Parser {
             }
             range_e.span = p.span_from(range_start)
             p = p.expect(TokenKind::RBracket)
+            p.no_struct_lit = outer_nsl
             let span_r = p.span_from(start)
             var e_r = mk_expr(ExprKind::ExprIndex, span_r)
             e_r.left = Some(base)
@@ -1973,6 +2071,7 @@ impl Parser {
             index_box = Box::new(cast_e)
         }
         p = p.expect(TokenKind::RBracket)
+        p.no_struct_lit = outer_nsl
         let span = p.span_from(start)
         var e = mk_expr(ExprKind::ExprIndex, span)
         e.left = Some(base)
