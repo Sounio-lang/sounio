@@ -29655,6 +29655,695 @@ theorem parser_words_loop_nh : ∀ (wds : List Word)
     · rw [hs3sh, hs2sh, hs1mem]
     · intro x k hd1 hd2 hd3
       rw [hs3memfr x k hd1 (by omega) (by omega),
-        hs2memfr x k hd1 (by omega) (by omega), hs1mem]
+        hs2memfr x k hd1 (by omega) (by omega), hs1mem]theorem parser_back_nh {f path argv0 : List Nat} {top A : Nat}
+    {pr : Prog} {s : X86Int.St} {c1 c2 buf' : Region} {cap' : Nat}
+    {S T : Nat}
+    (hdec : Sporos.decode f = some pr)
+    (hchk : Sporos.checkProg pr = true)
+    (hfB : ∀ b ∈ f, b < 256)
+    (hAmod : A % page = 0) (hApos : 0 < A)
+    (hAbound : A + stage1Mf f ≤ 2 ^ 47)
+    (hfreeA : (stage1Init f path argv0 [] [] top).mem.free A
+      (stage1Mf f) = true)
+    (hdisjInit : base + stage1Code.length ≤
+      (X86Env.initStack top [argv0, path]).1.base)
+    (hstkhi : (X86Env.initStack top [argv0, path]).1.hi = top)
+    (htop47 : top ≤ 2 ^ 47)
+    (hrip : s.rip = base + 0x22d)
+    (hr14 : s.reg 14 = some (T))
+    (hr4 : s.reg 4 =
+      some ((X86Env.initStack top [argv0, path]).2 + 24 - 8))
+    (hr3 : s.reg 3 = some A)
+    (hr12 : s.reg 12 = some pr.main)
+    (hr13 : s.reg 13 = some f.length)
+    (hr15 : s.reg 15 = some (A + f.length))
+    (hwshape : wshape s.mem =
+      wshape (([c1, c2, buf'] ++
+        [⟨T,
+          List.replicate (X86Env.pages (64 * pr.words.length)) 0,
+          true⟩])))
+    (hc1b : c1.base = base)
+    (hc1hi : c1.hi = base + stage1Code.length)
+    (hc2b : c2.base = (X86Env.initStack top [argv0, path]).1.base)
+    (hc2hi : c2.hi = (X86Env.initStack top [argv0, path]).1.hi)
+    (hbufb : buf'.base = A) (hbufhi : buf'.hi = A + cap')
+    (hbufbound : cap' ≤ arenaFileBytes f)
+    (hc2rw : c2.rw = true)
+    (hrdN : s.mem.rdN A f.length = some f)
+    (hcur : rd64 s.mem
+      ((X86Env.initStack top [argv0, path]).2 + 24 - 8) =
+        some ((A + 16 + dataBytes pr.data) % W))
+    (hheadS : s.k.oracle.head? = some (.at S))
+    (hSpage : S % page = 0) (hSpos : 0 < S)
+    (hSbound : S + X86Env.pages f.length ≤ 2 ^ 47)
+    (hfreeS : s.mem.free S (X86Env.pages f.length) = true)
+    (hTpage : T % page = 0) (hTpos : 0 < T)
+    (hTbound : T + X86Env.pages (64 * pr.words.length) ≤ 2 ^ 47)
+    (hdisjT : ∀ r ∈ ([c1, c2, buf'] : List Region),
+      T + X86Env.pages (64 * pr.words.length) ≤ r.base ∨ r.hi ≤ T)
+    (hdisjS : ∀ r ∈ ([c1, c2, buf'] ++
+        [⟨T, List.replicate (X86Env.pages (64 * pr.words.length)) 0,
+          true⟩] : List Region),
+      S + X86Env.pages f.length ≤ r.base ∨ r.hi ≤ S)
+    (hcapf : f.length ≤ cap')
+    (hr7 : ∃ v, s.reg 7 = some v)
+    (hr9 : ∃ v, s.reg 9 = some v)
+    (hroom1 : StackRoom s 1)
+    (hlen16 : s.regs.length = 16) :
+    ∃ (k : Nat),
+      k ≤ 42 + (pr.words.map (fun wd => 91 + 37 * wd.code.length)).sum ∧
+      ∃ (s' : X86Int.St),
+      run stage1Im k (Out.ok s) = Out.ok s' ∧
+      s'.rip = base + 0x452 ∧
+      s'.reg 14 = some (T) ∧
+      s'.reg 13 = some pr.words.length ∧
+      s'.reg 4 =
+        some ((X86Env.initStack top [argv0, path]).2 + 24 + 48) ∧
+      TabLay s'.mem A
+        (S)
+        (T)
+        (A + 16 + dataBytes pr.data) pr.words ∧
+      StackRoom s' 6 ∧ s'.regs.length = 16 ∧
+      wshape s'.mem = wshape ([c1, c2, buf'] ++
+        [⟨T,
+          List.replicate (X86Env.pages (64 * pr.words.length)) 0,
+          true⟩,
+         ⟨S,
+          List.replicate (X86Env.pages f.length) 0, true⟩]) ∧
+      s'.k = (Kern.next s.k).2 ∧
+      (s.mem.rdN base stage1Code.length = some stage1Code →
+        s'.mem.rdN base stage1Code.length = some stage1Code) ∧
+      NoHitUpTo s k := by
+  obtain ⟨hfenc, hbmn, hbnw, hbnd, hwB, hdB⟩ := decode_inv hdec hfB
+  obtain ⟨hmn, hins0⟩ := checkProg_main hchk
+  have hnw0 : pr.words.length ≠ 0 := by omega
+  have hLenc : f.length =
+      16 + dataBytes pr.data + wordsBytes pr.words := by
+    rw [hfenc]; exact enc_length pr
+  have hwb20 : 20 ≤ wordsBytes pr.words := by
+    have h := wordsBytes_ge pr.words
+    omega
+  have hL20 : 20 ≤ f.length := by omega
+  have hLe : f.length ≤ stage1Mf f := by
+    have h1 : f.length ≤ arenaFileBytes f := by
+      unfold arenaFileBytes
+      have h2 := pages_ge (65536 + 2 * f.length)
+      omega
+    unfold stage1Mf
+    omega
+  have hAe : A + f.length < W := by
+    have hW : W = 2 ^ 64 := rfl
+    omega
+  have hrdNenc : s.mem.rdN A pr.enc.length = some pr.enc := by
+    rwa [← hfenc]
+  have hdisj : c1.hi ≤ c2.base := by
+    rw [hc1hi, hc2b]; exact hdisjInit
+  have hsp0eq : (X86Env.initStack top [argv0, path]).2 =
+      c2.base + 4096 := by
+    have h1 := initStack_sp top argv0 path
+    rw [← hc2b] at h1
+    have hsr : X86Env.stackRoom = 4096 := rfl
+    rw [hsr] at h1
+    exact h1
+  have hstklen : 8192 ≤
+      (X86Env.initStack top [argv0, path]).1.data.length := by
+    rw [initStack_data_length]
+    have hp : 4096 ≤ X86Env.pages
+        (56 + ((argv0.length + 1) + (path.length + 1)) + 1) := by
+      unfold X86Env.pages X86Env.page
+      have h1 : 1 ≤ (56 + ((argv0.length + 1) +
+          (path.length + 1)) + 1 + 4095) / 4096 :=
+        Nat.div_pos (by omega) (by decide)
+      omega
+    have hsr : X86Env.stackRoom = 4096 := rfl
+    omega
+  have hhival : c2.hi = c2.base +
+      (X86Env.initStack top [argv0, path]).1.data.length := by
+    have e : (X86Env.initStack top [argv0, path]).1.hi =
+        (X86Env.initStack top [argv0, path]).1.base +
+          (X86Env.initStack top [argv0, path]).1.data.length :=
+      rfl
+    rw [hc2hi, e, ← hc2b]
+  have hSP1top :
+      (X86Env.initStack top [argv0, path]).2 + 24 - 8 + 56 ≤
+        c2.hi := by omega
+  have hSP1W :
+      (X86Env.initStack top [argv0, path]).2 + 24 - 8 < W := by
+    have hW : W = 2 ^ 64 := rfl
+    have ht : c2.hi = top := by rw [hc2hi]; exact hstkhi
+    omega
+  -- initial free facts per region
+  have hfree0 := hfreeA
+  rw [stage1Init_mem] at hfree0
+  unfold X86Env.Mem.free at hfree0
+  rw [List.all_eq_true] at hfree0
+  have hfreecode := hfree0 ⟨base, stage1Code, false⟩ (by simp)
+  have hfreestk := hfree0 (X86Env.initStack top [argv0, path]).1
+    (by simp)
+  rw [Bool.or_eq_true] at hfreecode hfreestk
+  simp only [decide_eq_true_eq] at hfreecode hfreestk
+  have hfreecode2 : A + stage1Mf f ≤ base ∨
+      base + stage1Code.length ≤ A := by
+    have hcodehi : (⟨base, stage1Code, false⟩ : Region).hi =
+        base + stage1Code.length := by
+      simp only [X86Env.Region.hi]
+    rwa [hcodehi] at hfreecode
+  have hpgnw : X86Env.pages (64 * pr.words.length) ≤
+      arenaTableBytes f := by
+    unfold arenaTableBytes
+    apply pages_mono
+    have h1 := wordsBytes_ge pr.words
+    omega
+  have hAframe2 : ∀ x k : Nat, A ≤ x → x + k ≤ A + f.length →
+      x + k ≤ (X86Env.initStack top [argv0, path]).2 + 24 - 8 - 8 ∨
+        (X86Env.initStack top [argv0, path]).2 + 24 - 8 ≤ x := by
+    intro x k hx hxk
+    rcases hfreestk with h | h
+    · exact Or.inl (by omega)
+    · exact Or.inr (by omega)
+  -- mmap2: the scratch region
+  obtain ⟨s6, m1, hrun6, hs6rip, hs6r11, hs6r4, hs6mem, hm1fr,
+    hs6fr, hs6len, hs6k, hm1sh, hnh6⟩ :=
+    parser_mmap2_ok_nh hrip hr13 hr4 hr7 hr9 hroom1 (by omega) hSP1W
+      (by omega) hheadS hSpage hSpos hSbound hfreeS hlen16
+  have hs6r14 : s6.reg 14 = some (T) := by
+    rw [hs6fr 14 (by decide) (by decide) (by decide) (by decide)
+      (by decide) (by decide) (by decide) (by decide) (by decide)
+      (by decide)]
+    exact hr14
+  have hs6r3 : s6.reg 3 = some A := by
+    rw [hs6fr 3 (by decide) (by decide) (by decide) (by decide)
+      (by decide) (by decide) (by decide) (by decide) (by decide)
+      (by decide)]
+    exact hr3
+  have hs6r12 : s6.reg 12 = some pr.main := by
+    rw [hs6fr 12 (by decide) (by decide) (by decide) (by decide)
+      (by decide) (by decide) (by decide) (by decide) (by decide)
+      (by decide)]
+    exact hr12
+  have hs6r13 : s6.reg 13 = some f.length := by
+    rw [hs6fr 13 (by decide) (by decide) (by decide) (by decide)
+      (by decide) (by decide) (by decide) (by decide) (by decide)
+      (by decide)]
+    exact hr13
+  have hs6r15 : s6.reg 15 = some (A + f.length) := by
+    rw [hs6fr 15 (by decide) (by decide) (by decide) (by decide)
+      (by decide) (by decide) (by decide) (by decide) (by decide)
+      (by decide)]
+    exact hr15
+  have hrdN6 : s6.mem.rdN A f.length = some f := by
+    have hm1rd : m1.rdN A f.length = some f := by
+      rw [hm1fr A f.length (hAframe2 A f.length (Nat.le_refl _)
+        (by omega))]
+      exact hrdN
+    rw [hs6mem]
+    exact rdN_append_left hm1rd
+  have hrdNenc6 : s6.mem.rdN A pr.enc.length = some pr.enc := by
+    have h := hrdN6
+    rwa [hfenc] at h
+  have hcur6 : rd64 s6.mem
+      ((X86Env.initStack top [argv0, path]).2 + 24 - 8) =
+        some (A + 16 + dataBytes pr.data) := by
+    have h1 : rd64 s6.mem
+        ((X86Env.initStack top [argv0, path]).2 + 24 - 8) =
+          some ((A + 16 + dataBytes pr.data) % W) := by
+      have h' : (s.mem.rdN
+          ((X86Env.initStack top [argv0, path]).2 + 24 - 8) 8).map
+            leVal = some ((A + 16 + dataBytes pr.data) % W) := hcur
+      obtain ⟨bs, hbs, hle⟩ := Option.map_eq_some_iff.mp h'
+      have hm1bs : m1.rdN
+          ((X86Env.initStack top [argv0, path]).2 + 24 - 8) 8 =
+            some bs := by
+        rw [hm1fr _ 8 (Or.inr (Nat.le_refl _))]; exact hbs
+      have h6bs : s6.mem.rdN
+          ((X86Env.initStack top [argv0, path]).2 + 24 - 8) 8 =
+            some bs := by
+        rw [hs6mem]; exact rdN_append_left hm1bs
+      unfold rd64
+      rw [h6bs]
+      exact congrArg some hle
+    rwa [Nat.mod_eq_of_lt (by omega)] at h1
+  -- the nwords field read at B+8
+  obtain ⟨v, hnw6, hvmod⟩ : ∃ v, rd64 s6.mem (A + 8) = some v ∧
+      v % 2 ^ 32 = pr.words.length := by
+    have hok : 8 + 8 ≤ pr.enc.length := by
+      rw [enc_length]; omega
+    have hs := rdN_slice hrdNenc6 hok
+    refine ⟨leVal ((pr.enc.drop 8).take 8), ?_, ?_⟩
+    · unfold rd64
+      rw [hs]
+      rfl
+    · have hlen8 : ((pr.enc.drop 8).take 8).length = 8 := by
+        rw [rdN_length hs]
+      have h1 := leVal_first4_mod hlen8
+      have htake : ((pr.enc.drop 8).take 8).take 4 =
+          (pr.enc.drop 8).take 4 := by
+        rw [List.take_take, Nat.min_eq_left (by decide)]
+      rw [htake, enc_drop8_take4] at h1
+      rw [h1, leVal_leBytes]
+      have h256 : (256 : Nat) ^ 4 = 2 ^ 32 := by decide
+      have hlt : pr.words.length < 2 ^ 32 := by
+        rw [← h256]; exact hbnw
+      rw [h256, Nat.mod_mod]
+      exact Nat.mod_eq_of_lt hlt
+  -- write shape of the post-mmap2 memory, for stack reads/room
+  have hsh6 : wshape s6.mem = wshape ([c1, c2, buf'] ++
+      [⟨T,
+        List.replicate (X86Env.pages (64 * pr.words.length)) 0, true⟩,
+       ⟨S,
+        List.replicate (X86Env.pages f.length) 0, true⟩]) := by
+    have happ : ∀ (m : Mem) (r : Region),
+        wshape (m ++ [r]) = wshape m ++ [(r.base, r.hi, r.rw)] := by
+      intro m r
+      simp [wshape]
+    rw [hs6mem, happ, hm1sh, hwshape]
+    simp [wshape, List.append_assoc]
+  have hrdstk : ∀ a : Nat, c2.base ≤ a → a < c2.hi →
+      (s6.mem.rd a).isSome := by
+    intro a h1 h2
+    apply rd_isSome_of_find
+    have href : ∃ ii r,
+        Mem.find ([c1, c2, buf'] ++
+          [⟨T,
+            List.replicate (X86Env.pages (64 * pr.words.length)) 0,
+            true⟩,
+           ⟨S,
+            List.replicate (X86Env.pages f.length) 0, true⟩]) a 0 =
+          some (ii, r) ∧ r.rw = true :=
+      ⟨1, c2, find_append_left [c1, c2, buf'] _ a 0
+        (find_c2_of_three hdisj h1 h2), hc2rw⟩
+    obtain ⟨ii, r, hf, -⟩ := find_rw_of_wshape hsh6 href
+    exact ⟨ii, r, hf⟩
+  have hpop : ∀ off : Nat, off ≤ 48 →
+      ∃ w, rd64 s6.mem
+        ((X86Env.initStack top [argv0, path]).2 + 24 - 8 + off) =
+          some w := by
+    intro off hoff
+    refine rd64_some_of_forall_rd (fun j hj => ?_)
+    apply hrdstk <;> omega
+  obtain ⟨w1, hp1⟩ := hpop 8 (by decide)
+  obtain ⟨w2, hp2⟩ := hpop 16 (by decide)
+  obtain ⟨w3, hp3⟩ := hpop 24 (by decide)
+  obtain ⟨w4, hp4⟩ := hpop 32 (by decide)
+  obtain ⟨w5, hp5⟩ := hpop 40 (by decide)
+  obtain ⟨w6, hp6⟩ := hpop 48 (by decide)
+  -- setup: restore cursor, reload nwords, make stack room
+  obtain ⟨s7, hrun7, hs7rip, hs7r6, hs7r7, hs7r13, hs7r4, -, hs7mem,
+    hs7fr, hs7len, hs7k, hnh7⟩ :=
+    parser_setup_ok_nh hs6rip hs6r4 hs6r14 hs6r3 (by
+      have ht : c2.hi = top := by rw [hc2hi]; exact hstkhi
+      have hW : W = 2 ^ 64 := rfl
+      omega) (by omega) hcur6 hnw6 hp1 hp2 hp3 hp4 hp5 hp6 hs6len
+  rw [hvmod] at hs7r13
+  have hs7r4' : s7.reg 4 =
+      some ((X86Env.initStack top [argv0, path]).2 + 24 + 48) := by
+    have e : (X86Env.initStack top [argv0, path]).2 + 24 - 8 + 56 =
+        (X86Env.initStack top [argv0, path]).2 + 24 + 48 := by omega
+    rwa [e] at hs7r4
+  have hs7r14 : s7.reg 14 = some (T) := by
+    rw [hs7fr 14 (by decide) (by decide) (by decide) (by decide)
+      (by decide)]
+    exact hs6r14
+  have hs7r3 : s7.reg 3 = some A := by
+    rw [hs7fr 3 (by decide) (by decide) (by decide) (by decide)
+      (by decide)]
+    exact hs6r3
+  have hs7r11 : s7.reg 11 =
+      some (S) := by
+    rw [hs7fr 11 (by decide) (by decide) (by decide) (by decide)
+      (by decide)]
+    exact hs6r11
+  have hs7r12 : s7.reg 12 = some pr.main := by
+    rw [hs7fr 12 (by decide) (by decide) (by decide) (by decide)
+      (by decide)]
+    exact hs6r12
+  have hs7r15 : s7.reg 15 = some (A + f.length) := by
+    rw [hs7fr 15 (by decide) (by decide) (by decide) (by decide)
+      (by decide)]
+    exact hs6r15
+  -- word-loop entry
+  obtain ⟨s8, hrun8, hs8rip, hs8r1, hs8fr, hs8mem, hs8len, hs8k, hnh8⟩ :=
+    parser_words_init_nh hs7rip hs7r13 hs7len
+  have hs8r : ∀ i v, i ≠ 1 → s7.reg i = some v →
+      s8.reg i = some v := by
+    intro i v hi h
+    rw [hs8fr i hi]; exact h
+  -- geometry of the three arena parts and the final stack pointer
+  have hLfile : f.length ≤ arenaFileBytes f := by
+    unfold arenaFileBytes
+    have h2 := pages_ge (65536 + 2 * f.length)
+    omega
+  have h64nw : 64 * pr.words.length ≤ arenaTableBytes f :=
+    Nat.le_trans (pages_ge _) hpgnw
+  have hpgL : f.length ≤ X86Env.pages f.length := pages_ge _
+  have hspFbase : (X86Env.initStack top [argv0, path]).2 + 24 + 48 =
+      c2.base + 4168 := by omega
+  have hspFhi : (X86Env.initStack top [argv0, path]).2 + 24 + 48 ≤
+      c2.hi := by omega
+  have hspFW : (X86Env.initStack top [argv0, path]).2 + 24 + 48 < W := by
+    have ht : c2.hi = top := by rw [hc2hi]; exact hstkhi
+    have hW : W = 2 ^ 64 := rfl
+    omega
+  have hsh8 : wshape s8.mem = wshape ([c1, c2, buf'] ++
+      [⟨T,
+        List.replicate (X86Env.pages (64 * pr.words.length)) 0, true⟩,
+       ⟨S,
+        List.replicate (X86Env.pages f.length) 0, true⟩]) := by
+    rw [hs8mem, hs7mem]; exact hsh6
+  have hroom8 : StackRoom s8 2 :=
+    stackRoom_of_wshape_c2 hsh8 (hs8r 4 _ (by decide) hs7r4') hc2rw
+      hdisj (by omega) hspFhi hspFW
+  have hlay8 : WordsLay s8.mem (A + 16 + dataBytes pr.data) pr.words := by
+    apply WordsLay_of_rdN pr.words _ hwB
+    rw [hs8mem, hs7mem]
+    exact enc_words_slice hrdNenc6
+  -- writability of the table and scratch regions in s8.mem
+  have htabhi : (⟨T,
+        List.replicate (X86Env.pages (64 * pr.words.length)) 0,
+        true⟩ : Region).hi =
+      T + X86Env.pages (64 * pr.words.length) := by
+    simp only [X86Env.Region.hi, List.length_replicate]
+  have hscrhi : (⟨S,
+        List.replicate (X86Env.pages f.length) 0, true⟩ : Region).hi =
+      S +
+        X86Env.pages f.length := by
+    simp only [X86Env.Region.hi, List.length_replicate]
+  have hnonmemT : ∀ a : Nat,
+      T ≤ a → a < T + X86Env.pages (64 * pr.words.length) →
+      ∀ r' ∈ [c1, c2, buf'], ¬ (r'.base ≤ a ∧ a < r'.hi) := by
+    intro a ha1 ha2 r' hr'
+    rcases hdisjT r' hr' with h | h
+    · exact not_mem_region_of_lt (by omega)
+    · exact not_mem_region_of_le (by omega)
+  have hnonmemS : ∀ a : Nat,
+      S ≤ a → a < S + X86Env.pages f.length →
+      ∀ r' ∈ ([c1, c2, buf'] ++
+        [⟨T, List.replicate (X86Env.pages (64 * pr.words.length)) 0,
+          true⟩]), ¬ (r'.base ≤ a ∧ a < r'.hi) := by
+    intro a ha1 ha2 r' hr'
+    rcases hdisjS r' hr' with h | h
+    · exact not_mem_region_of_lt (by omega)
+    · exact not_mem_region_of_le (by omega)
+  have hwrTab : ∀ (off v : Nat), off + 8 ≤ 64 * pr.words.length →
+      (wr64 s8.mem (T + off) v).isSome := by
+    intro off v hoff
+    refine wr64_isSome_of_forall_wr (fun j hj u => ?_)
+    have ha1 : T ≤ T + off + j := by
+      omega
+    have ha2 : T + off + j <
+        T + X86Env.pages (64 * pr.words.length) := by
+      have hpg := pages_ge (64 * pr.words.length)
+      omega
+    have hfind1 : Mem.find (([c1, c2, buf'] ++
+          [⟨T,
+            List.replicate (X86Env.pages (64 * pr.words.length)) 0,
+            true⟩]))
+        (T + off + j) 0 =
+        some (0 + [c1, c2, buf'].length,
+          ⟨T,
+            List.replicate (X86Env.pages (64 * pr.words.length)) 0,
+            true⟩) :=
+      find_append_last [c1, c2, buf'] 0 (hnonmemT _ ha1 ha2)
+        ⟨by omega, by
+          rw [htabhi]
+          have hpg := pages_ge (64 * pr.words.length)
+          omega⟩
+    have hfind2 : Mem.find ((([c1, c2, buf'] ++
+          [⟨T,
+            List.replicate (X86Env.pages (64 * pr.words.length)) 0,
+            true⟩])) ++
+          [⟨S,
+            List.replicate (X86Env.pages f.length) 0, true⟩])
+          (T + off + j) 0 =
+        some (0 + [c1, c2, buf'].length,
+          ⟨T,
+            List.replicate (X86Env.pages (64 * pr.words.length)) 0,
+            true⟩) :=
+      find_append_left _ _ _ 0 hfind1
+    rw [List.append_assoc] at hfind2
+    have href : ∃ ii r,
+        Mem.find ([c1, c2, buf'] ++
+          [⟨T,
+            List.replicate (X86Env.pages (64 * pr.words.length)) 0,
+            true⟩,
+           ⟨S,
+            List.replicate (X86Env.pages f.length) 0, true⟩])
+          (T + off + j) 0 = some (ii, r) ∧
+          r.rw = true :=
+      ⟨0 + [c1, c2, buf'].length, _, hfind2, rfl⟩
+    obtain ⟨ii, r, hf, hrw2⟩ := find_rw_of_wshape hsh8 href
+    exact wr_isSome_iff.mpr ⟨ii, r, hf, hrw2⟩
+  have hwrScr : ∀ a v,
+      S +
+          (A + 16 + dataBytes pr.data - A) ≤ a →
+      a < S +
+          (A + 16 + dataBytes pr.data + wordsBytes pr.words - A) →
+      (s8.mem.wr a v).isSome := by
+    intro a v ha1 ha2
+    have e1 : A + 16 + dataBytes pr.data + wordsBytes pr.words - A =
+        f.length := by omega
+    rw [e1] at ha2
+    have hpgL := pages_ge f.length
+    have hnonmem : ∀ r' ∈ ([c1, c2, buf'] ++
+          [⟨T,
+            List.replicate (X86Env.pages (64 * pr.words.length)) 0,
+            true⟩]),
+        ¬ (r'.base ≤ a ∧ a < r'.hi) :=
+      hnonmemS a (by omega) (by omega)
+    have hfind1 : Mem.find ((([c1, c2, buf'] ++
+          [⟨T,
+            List.replicate (X86Env.pages (64 * pr.words.length)) 0,
+            true⟩])) ++
+          [⟨S,
+            List.replicate (X86Env.pages f.length) 0, true⟩]) a 0 =
+        some (0 + (([c1, c2, buf'] ++
+          [(⟨T,
+            List.replicate (X86Env.pages (64 * pr.words.length)) 0,
+            true⟩ : Region)])).length,
+          ⟨S,
+            List.replicate (X86Env.pages f.length) 0, true⟩) :=
+      @find_append_last _ 0
+        ⟨S,
+          List.replicate (X86Env.pages f.length) 0, true⟩ a hnonmem
+        ⟨by
+          show S ≤ a
+          omega, by rw [hscrhi]; omega⟩
+    have href : ∃ ii r,
+        Mem.find ([c1, c2, buf'] ++
+          [⟨T,
+            List.replicate (X86Env.pages (64 * pr.words.length)) 0,
+            true⟩,
+           ⟨S,
+            List.replicate (X86Env.pages f.length) 0, true⟩]) a 0 =
+          some (ii, r) ∧ r.rw = true := by
+      refine ⟨0 + (([c1, c2, buf'] ++
+          [(⟨T,
+            List.replicate (X86Env.pages (64 * pr.words.length)) 0,
+            true⟩ : Region)])).length,
+        ⟨S,
+          List.replicate (X86Env.pages f.length) 0, true⟩, ?_, rfl⟩
+      rwa [List.append_assoc] at hfind1
+    obtain ⟨ii, r, hf, hrw2⟩ := find_rw_of_wshape hsh8 href
+    exact wr_isSome_iff.mpr ⟨ii, r, hf, hrw2⟩
+  -- disjointness disjunctions for the word loop
+  have hdisjTB : T + 64 * pr.words.length ≤ A ∨
+      A + f.length ≤ T := by
+    have h := hdisjT buf' (by simp)
+    rw [hbufb, hbufhi] at h
+    have hpg := pages_ge (64 * pr.words.length)
+    rcases h with h | h
+    · exact Or.inl (by omega)
+    · exact Or.inr (by omega)
+  have hdisjTStk : T + 64 * pr.words.length ≤
+        (X86Env.initStack top [argv0, path]).2 + 24 + 48 - 16 ∨
+      (X86Env.initStack top [argv0, path]).2 + 24 + 48 ≤
+        T := by
+    have h := hdisjT c2 (by simp)
+    have hpg := pages_ge (64 * pr.words.length)
+    rcases h with h | h
+    · exact Or.inl (by omega)
+    · exact Or.inr (by omega)
+  have hdisjTScr : T + 64 * pr.words.length ≤
+        S +
+          (A + 16 + dataBytes pr.data - A) ∨
+      S +
+          (A + 16 + dataBytes pr.data + wordsBytes pr.words - A) ≤
+        T := by
+    have h := hdisjS (⟨T,
+      List.replicate (X86Env.pages (64 * pr.words.length)) 0,
+      true⟩ : Region) (by simp)
+    have hbase : (⟨T,
+        List.replicate (X86Env.pages (64 * pr.words.length)) 0,
+        true⟩ : Region).base = T := rfl
+    rw [hbase, htabhi] at h
+    have hpg := pages_ge (64 * pr.words.length)
+    have hpgf := pages_ge f.length
+    rcases h with h | h
+    · exact Or.inr (by omega)
+    · exact Or.inl (by omega)
+  have hdisjBStk : A + f.length ≤
+        (X86Env.initStack top [argv0, path]).2 + 24 + 48 - 16 ∨
+      (X86Env.initStack top [argv0, path]).2 + 24 + 48 ≤ A := by
+    rcases hfreestk with h | h
+    · exact Or.inl (by omega)
+    · exact Or.inr (by omega)
+  have hdisjScrB : S +
+          (A + 16 + dataBytes pr.data + wordsBytes pr.words - A) ≤
+        A + 16 + dataBytes pr.data ∨
+      A + 16 + dataBytes pr.data + wordsBytes pr.words ≤
+        S +
+          (A + 16 + dataBytes pr.data - A) := by
+    have h := hdisjS buf' (by simp)
+    rw [hbufb, hbufhi] at h
+    have hpgf := pages_ge f.length
+    rcases h with h | h
+    · exact Or.inl (by omega)
+    · exact Or.inr (by omega)
+  have hdisjScrStk : S +
+          (A + 16 + dataBytes pr.data + wordsBytes pr.words - A) ≤
+        (X86Env.initStack top [argv0, path]).2 + 24 + 48 - 16 ∨
+      (X86Env.initStack top [argv0, path]).2 + 24 + 48 ≤
+        S +
+          (A + 16 + dataBytes pr.data - A) := by
+    have h := hdisjS c2 (by simp)
+    have hpgf := pages_ge f.length
+    rcases h with h | h
+    · exact Or.inl (by omega)
+    · exact Or.inr (by omega)
+  -- the whole word loop
+  obtain ⟨k9, hk9b, s9, hrun9, hs9rip, hs9r1, hs9r6, hs9r7, hs9r4, hs9tab,
+    hs9fr, hs9len, hs9k, hs9sh, hs9room, hs9memfr, hnh9⟩ :=
+    parser_words_loop_nh pr.words hs8rip hs8r1
+      (hs8r 6 _ (by decide) hs7r6) (hs8r 7 _ (by decide) hs7r7)
+      (hs8r 15 _ (by decide) hs7r15) (hs8r 4 _ (by decide) hs7r4')
+      (hs8r 3 _ (by decide) hs7r3) (hs8r 11 _ (by decide) hs7r11)
+      hlay8 (by omega) (by omega) hAe (by
+        have hW : W = 2 ^ 64 := rfl
+        omega) (by
+        have hpg := pages_ge f.length
+        have hW : W = 2 ^ 64 := rfl
+        omega) (by
+        have hW : W = 2 ^ 64 := rfl
+        exact Nat.lt_trans hbnw (by rw [hW]; decide))
+      hroom8 (by omega) hspFW hs8len hdisjTB hdisjTStk hdisjTScr
+      hdisjBStk hdisjScrB hdisjScrStk hwrTab hwrScr
+  -- loop head with no words left: to the trailing checks
+  have hs9r : ∀ i v, i ≠ 0 → i ≠ 1 → i ≠ 2 → i ≠ 4 → i ≠ 6 → i ≠ 7 →
+      i ≠ 10 → s8.reg i = some v → s9.reg i = some v := by
+    intro i v h0 h1 h2 h4 h6 h7 h10 h
+    rw [hs9fr i h0 h1 h2 h4 h6 h7 h10]; exact h
+  obtain ⟨s10, hrun10, hs10rip, hs10fr, hs10mem, hs10len, hs10k, hnh10⟩ :=
+    parser_words_head_zero_nh hs9rip hs9r1
+  have hs10len16 : s10.regs.length = 16 := by rw [hs10len]; exact hs9len
+  have hs10r : ∀ i v, s9.reg i = some v → s10.reg i = some v := by
+    intro i v h
+    rw [hs10fr i]; exact h
+  have hs10r6 : s10.reg 6 =
+      some (A + 16 + dataBytes pr.data + wordsBytes pr.words) :=
+    hs10r 6 _ hs9r6
+  have hs10r15 : s10.reg 15 = some (A + f.length) :=
+    hs10r 15 _ (hs9r 15 _ (by decide) (by decide) (by decide)
+      (by decide) (by decide) (by decide) (by decide)
+      (hs8r 15 _ (by decide) hs7r15))
+  have hs10r12 : s10.reg 12 = some pr.main :=
+    hs10r 12 _ (hs9r 12 _ (by decide) (by decide) (by decide)
+      (by decide) (by decide) (by decide) (by decide)
+      (hs8r 12 _ (by decide) hs7r12))
+  have hs10r13 : s10.reg 13 = some pr.words.length :=
+    hs10r 13 _ (hs9r 13 _ (by decide) (by decide) (by decide)
+      (by decide) (by decide) (by decide) (by decide)
+      (hs8r 13 _ (by decide) hs7r13))
+  have hs10r14 : s10.reg 14 = some (T) :=
+    hs10r 14 _ (hs9r 14 _ (by decide) (by decide) (by decide)
+      (by decide) (by decide) (by decide) (by decide)
+      (hs8r 14 _ (by decide) hs7r14))
+  have hs10r4 : s10.reg 4 =
+      some ((X86Env.initStack top [argv0, path]).2 + 24 + 48) :=
+    hs10r 4 _ hs9r4
+  have hslot : rd64 s10.mem
+      (T + 64 * pr.main) = some 0 := by
+    rw [hs10mem]
+    have h1 := TabLay_ins_at hs9tab pr.main hmn
+    rwa [hins0] at h1
+  -- trailing checks into the checker entry
+  obtain ⟨s11, hrun11, hs11rip, -, hs11fr, hs11mem, hs11len, hs11k, hnh11⟩ :=
+    parser_trailing_ok_nh hs10rip hs10r6 hs10r15 hs10r12 hs10r13 hs10r14
+      (by omega) (by omega) hAe hmn (by
+        have hW : W = 2 ^ 64 := rfl
+        omega) hslot hs10len16
+  have hs11r : ∀ i v, i ≠ 0 → i ≠ 2 → s10.reg i = some v →
+      s11.reg i = some v := by
+    intro i v h0 h2 h
+    rw [hs11fr i h0 h2]; exact h
+  -- assemble the whole run
+  have hrunA : run stage1Im (12 + 11) (Out.ok s) = Out.ok s7 := by
+    rw [run_add, hrun6, hrun7]
+  have hrunB : run stage1Im (12 + 11 + 1) (Out.ok s) = Out.ok s8 := by
+    rw [show 12 + 11 + 1 = (12 + 11) + 1 from rfl, run_add, hrunA, hrun8]
+  have hrunC : run stage1Im (12 + 11 + 1 + k9) (Out.ok s) = Out.ok s9 := by
+    rw [show 12 + 11 + 1 + k9 = (12 + 11 + 1) + k9 from rfl, run_add,
+      hrunB, hrun9]
+  have hrunD : run stage1Im (12 + 11 + 1 + k9 + 3) (Out.ok s) =
+      Out.ok s10 := by
+    rw [show 12 + 11 + 1 + k9 + 3 = (12 + 11 + 1 + k9) + 3 from rfl,
+      run_add, hrunC, hrun10]
+  have hrunTot : run stage1Im (12 + 11 + 1 + k9 + 3 + 15) (Out.ok s) =
+      Out.ok s11 := by
+    rw [show 12 + 11 + 1 + k9 + 3 + 15 = (12 + 11 + 1 + k9 + 3) + 15
+      from rfl, run_add, hrunD, hrun11]
+  have hsh11 : wshape s11.mem = wshape ([c1, c2, buf'] ++
+      [⟨T,
+        List.replicate (X86Env.pages (64 * pr.words.length)) 0, true⟩,
+       ⟨S,
+        List.replicate (X86Env.pages f.length) 0, true⟩]) := by
+    rw [hs11mem, hs10mem, hs9sh]; exact hsh8
+  have hroom11 : StackRoom s11 6 :=
+    stackRoom_of_wshape_c2 hsh11
+      (hs11r 4 _ (by decide) (by decide) hs10r4) hc2rw hdisj
+      (by omega) hspFhi hspFW
+  have hk11 : s11.k = (Kern.next s.k).2 := by
+    rw [hs11k, hs10k, hs9k, hs8k, hs7k]; exact hs6k
+  have hcode11 : s.mem.rdN base stage1Code.length =
+        some stage1Code →
+      s11.mem.rdN base stage1Code.length = some stage1Code := by
+    intro h
+    have hm1c : m1.rdN base stage1Code.length = some stage1Code := by
+      rw [hm1fr base _ (Or.inl (by omega))]; exact h
+    have hs6c : s6.mem.rdN base stage1Code.length =
+        some stage1Code := by
+      rw [hs6mem]; exact rdN_append_left hm1c
+    have hs8c : s8.mem.rdN base stage1Code.length =
+        some stage1Code := by
+      rw [hs8mem, hs7mem]; exact hs6c
+    have hs9c : s9.mem.rdN base stage1Code.length =
+        some stage1Code := by
+      rw [hs9memfr base _ (Or.inl (by omega)) ?_ ?_]; exact hs8c
+      · have h := hdisjT c1 (by simp)
+        rw [hc1b, hc1hi] at h
+        have hpg := pages_ge (64 * pr.words.length)
+        rcases h with hf | hf
+        · exact Or.inl (by omega)
+        · exact Or.inr (by omega)
+      · have h := hdisjS c1 (by simp)
+        rw [hc1b, hc1hi] at h
+        have hpgf := pages_ge f.length
+        rcases h with hf | hf
+        · exact Or.inl (by omega)
+        · exact Or.inr (by omega)
+    rw [hs11mem, hs10mem]; exact hs9c
+  have hNH : NoHitUpTo s (12 + 11 + 1 + k9 + 3 + 15) :=
+    noHitUpTo_mono
+      (noHitUpTo_add hnh6 hrun6
+        (noHitUpTo_add hnh7 hrun7
+          (noHitUpTo_add hnh8 hrun8
+            (noHitUpTo_add hnh9 hrun9
+              (noHitUpTo_add hnh10 hrun10 hnh11))))) (by omega)
+  exact ⟨12 + 11 + 1 + k9 + 3 + 15, by omega, s11, hrunTot, hs11rip,
+    hs11r 14 _ (by decide) (by decide) hs10r14,
+    hs11r 13 _ (by decide) (by decide) hs10r13,
+    hs11r 4 _ (by decide) (by decide) hs10r4,
+    by rw [hs11mem, hs10mem]; exact hs9tab,
+    hroom11, hs11len, hsh11, hk11, hcode11, hNH⟩
+
 
 end SporosX1
