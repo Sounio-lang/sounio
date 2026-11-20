@@ -38552,4 +38552,967 @@ theorem stage1_exit2_compose {f path argv0 stdin : List Nat}
           rw [show kL + kF + 25 = (kL + kF) + 25 by omega,
             run_add, hrunLF, h5]⟩
 
+
+/-- `rdLE` on an encoded little-endian field. -/
+theorem rdLE_leBytes (n k : Nat) (rest : List Nat) :
+    rdLE (leBytes n k ++ rest) k = some (n % 256 ^ k, rest) := by
+  unfold rdLE
+  have hlen : ¬ (leBytes n k ++ rest).length < k := by
+    rw [List.length_append, leBytes_length]
+    omega
+  rw [if_neg hlen]
+  have htake : (leBytes n k ++ rest).take k = leBytes n k := by
+    rw [List.take_append, leBytes_length, Nat.sub_self,
+      List.take_zero, List.append_nil]
+    exact List.take_of_length_le (Nat.le_of_eq (leBytes_length n k))
+  have hdrop : (leBytes n k ++ rest).drop k = rest := by
+    rw [List.drop_append, leBytes_length, Nat.sub_self,
+      List.drop_zero,
+      List.drop_of_length_le (Nat.le_of_eq (leBytes_length n k)),
+      List.nil_append]
+  have hfold : ((leBytes n k).zip (List.range k)).foldl
+        (fun acc x => acc + x.1 * 256 ^ x.2) 0 = n % 256 ^ k := by
+    have h := fold_zip_range (leBytes n k)
+    rw [leBytes_length] at h
+    rw [h]
+    exact leVal_leBytes n k
+  rw [htake, hdrop, hfold]
+
+/-- `decInstr` at the `lit` opcode. -/
+theorem decInstr_80 (bs : List Nat) : decInstr (0x80 :: bs) =
+    (rdLE bs 8).map (fun x => (Instr.lit x.1, x.2)) := rfl
+
+/-- `decInstr` at the `str` opcode. -/
+theorem decInstr_81 (bs : List Nat) : decInstr (0x81 :: bs) =
+    (rdLE bs 4).map (fun x => (Instr.str x.1, x.2)) := rfl
+
+/-- `decInstr` at the `pick` opcode. -/
+theorem decInstr_82 (bs : List Nat) : decInstr (0x82 :: bs) =
+    (rdLE bs 4).map (fun x => (Instr.pick x.1, x.2)) := rfl
+
+/-- `decInstr` at the `tor` opcode. -/
+theorem decInstr_83 (bs : List Nat) : decInstr (0x83 :: bs) =
+    some (Instr.tor, bs) := rfl
+
+/-- `decInstr` at the `fromr` opcode. -/
+theorem decInstr_84 (bs : List Nat) : decInstr (0x84 :: bs) =
+    some (Instr.fromr, bs) := rfl
+
+/-- `decInstr` at the `rfetch` opcode. -/
+theorem decInstr_85 (bs : List Nat) : decInstr (0x85 :: bs) =
+    some (Instr.rfetch, bs) := rfl
+
+/-- `decInstr` at the `locget` opcode. -/
+theorem decInstr_86 (bs : List Nat) : decInstr (0x86 :: bs) =
+    (rdLE bs 4).map (fun x => (Instr.locget x.1, x.2)) := rfl
+
+/-- `decInstr` at the `locset` opcode. -/
+theorem decInstr_87 (bs : List Nat) : decInstr (0x87 :: bs) =
+    (rdLE bs 4).map (fun x => (Instr.locset x.1, x.2)) := rfl
+
+/-- `decInstr` at the `jmp` opcode. -/
+theorem decInstr_88 (bs : List Nat) : decInstr (0x88 :: bs) =
+    (rdLE bs 4).map (fun x => (Instr.jmp x.1, x.2)) := rfl
+
+/-- `decInstr` at the `jz` opcode. -/
+theorem decInstr_89 (bs : List Nat) : decInstr (0x89 :: bs) =
+    (rdLE bs 4).map (fun x => (Instr.jz x.1, x.2)) := rfl
+
+/-- `decInstr` at the `jnz` opcode. -/
+theorem decInstr_8a (bs : List Nat) : decInstr (0x8a :: bs) =
+    (rdLE bs 4).map (fun x => (Instr.jnz x.1, x.2)) := rfl
+
+/-- `decInstr` at the `call` opcode. -/
+theorem decInstr_8b (bs : List Nat) : decInstr (0x8b :: bs) =
+    (rdLE bs 4).map (fun x => (Instr.call x.1, x.2)) := rfl
+
+/-- `decInstr` at the `ret` opcode. -/
+theorem decInstr_8c (bs : List Nat) : decInstr (0x8c :: bs) =
+    some (Instr.ret, bs) := rfl
+
+/-- Decoding an encoded instruction. -/
+theorem decInstr_enc : ∀ (x : Instr), InstrBound x →
+    ∀ (rest : List Nat), decInstr (x.enc ++ rest) = some (x, rest)
+  | .prim p, _, rest => by
+    cases p <;> rfl
+  | .lit n, hb, rest => by
+    show decInstr ((0x80 :: leBytes n 8) ++ rest) =
+      some (Instr.lit n, rest)
+    rw [List.cons_append, decInstr_80, rdLE_leBytes,
+      Nat.mod_eq_of_lt hb]
+    rfl
+  | .str i, hb, rest => by
+    show decInstr ((0x81 :: leBytes i 4) ++ rest) =
+      some (Instr.str i, rest)
+    rw [List.cons_append, decInstr_81, rdLE_leBytes,
+      Nat.mod_eq_of_lt hb]
+    rfl
+  | .pick n, hb, rest => by
+    show decInstr ((0x82 :: leBytes n 4) ++ rest) =
+      some (Instr.pick n, rest)
+    rw [List.cons_append, decInstr_82, rdLE_leBytes,
+      Nat.mod_eq_of_lt hb]
+    rfl
+  | .tor, _, rest => by
+    show decInstr ([0x83] ++ rest) = some (Instr.tor, rest)
+    rw [List.cons_append, List.nil_append, decInstr_83]
+  | .fromr, _, rest => by
+    show decInstr ([0x84] ++ rest) = some (Instr.fromr, rest)
+    rw [List.cons_append, List.nil_append, decInstr_84]
+  | .rfetch, _, rest => by
+    show decInstr ([0x85] ++ rest) = some (Instr.rfetch, rest)
+    rw [List.cons_append, List.nil_append, decInstr_85]
+  | .locget i, hb, rest => by
+    show decInstr ((0x86 :: leBytes i 4) ++ rest) =
+      some (Instr.locget i, rest)
+    rw [List.cons_append, decInstr_86, rdLE_leBytes,
+      Nat.mod_eq_of_lt hb]
+    rfl
+  | .locset i, hb, rest => by
+    show decInstr ((0x87 :: leBytes i 4) ++ rest) =
+      some (Instr.locset i, rest)
+    rw [List.cons_append, decInstr_87, rdLE_leBytes,
+      Nat.mod_eq_of_lt hb]
+    rfl
+  | .jmp t, hb, rest => by
+    show decInstr ((0x88 :: leBytes t 4) ++ rest) =
+      some (Instr.jmp t, rest)
+    rw [List.cons_append, decInstr_88, rdLE_leBytes,
+      Nat.mod_eq_of_lt hb]
+    rfl
+  | .jz t, hb, rest => by
+    show decInstr ((0x89 :: leBytes t 4) ++ rest) =
+      some (Instr.jz t, rest)
+    rw [List.cons_append, decInstr_89, rdLE_leBytes,
+      Nat.mod_eq_of_lt hb]
+    rfl
+  | .jnz t, hb, rest => by
+    show decInstr ((0x8a :: leBytes t 4) ++ rest) =
+      some (Instr.jnz t, rest)
+    rw [List.cons_append, decInstr_8a, rdLE_leBytes,
+      Nat.mod_eq_of_lt hb]
+    rfl
+  | .call w, hb, rest => by
+    show decInstr ((0x8b :: leBytes w 4) ++ rest) =
+      some (Instr.call w, rest)
+    rw [List.cons_append, decInstr_8b, rdLE_leBytes,
+      Nat.mod_eq_of_lt hb]
+    rfl
+  | .ret, _, rest => by
+    show decInstr ([0x8c] ++ rest) = some (Instr.ret, rest)
+    rw [List.cons_append, List.nil_append, decInstr_8c]
+
+/-- Decoding a list of encoded items. -/
+theorem decMany_enc {α : Type} {g : List Nat → Option (α × List Nat)}
+    {e : α → List Nat} {P : α → Prop}
+    (hg : ∀ x, P x → ∀ rest, g (e x ++ rest) = some (x, rest)) :
+    ∀ {xs : List α}, (∀ x ∈ xs, P x) → ∀ rest,
+      decMany g xs.length (xs.flatMap e ++ rest) = some (xs, rest) := by
+  intro xs
+  induction xs with
+  | nil =>
+    intro _ rest
+    rfl
+  | cons x xs ih =>
+    intro hP rest
+    have hx : P x := hP x (.head _)
+    have hxs : ∀ y ∈ xs, P y := fun y hy => hP y (.tail _ hy)
+    have hstep : decMany g (xs.length + 1)
+        (e x ++ (xs.flatMap e ++ rest)) =
+        (g (e x ++ (xs.flatMap e ++ rest))).bind (fun p1 =>
+          (decMany g xs.length p1.2).bind (fun p2 =>
+            some (p1.1 :: p2.1, p2.2))) := rfl
+    show decMany g (x :: xs).length ((x :: xs).flatMap e ++ rest) =
+      some (x :: xs, rest)
+    rw [List.length_cons, List.flatMap_cons, List.append_assoc,
+      hstep, hg x hx]
+    rw [Option.bind_some]
+    rw [ih hxs]
+    rfl
+
+/-- Decoding an encoded annotation entry. -/
+theorem decAnn_enc : ∀ (x : Nat × Height), AnnBound x →
+    ∀ (rest : List Nat),
+      decAnn ((leBytes x.1 4 ++ (leBytes x.2.d 4 ++
+        leBytes x.2.a 4)) ++ rest) = some (x, rest)
+  | ⟨i, ⟨d, a⟩⟩, hb, rest => by
+    obtain ⟨hb1, hb2, hb3⟩ := hb
+    have hstep : ∀ bs, decAnn bs =
+        (rdLE bs 4).bind (fun p1 =>
+          (rdLE p1.2 4).bind (fun p2 =>
+            (rdLE p2.2 4).bind (fun p3 =>
+              some ((p1.1, ⟨p2.1, p3.1⟩), p3.2)))) := fun _ => rfl
+    show decAnn ((leBytes i 4 ++ (leBytes d 4 ++
+        leBytes a 4)) ++ rest) = some (⟨i, ⟨d, a⟩⟩, rest)
+    rw [hstep]
+    simp only [List.append_assoc]
+    rw [rdLE_leBytes, Nat.mod_eq_of_lt hb1]
+    rw [Option.bind_some]
+    rw [rdLE_leBytes, Nat.mod_eq_of_lt hb2]
+    rw [Option.bind_some]
+    rw [rdLE_leBytes, Nat.mod_eq_of_lt hb3]
+    rfl
+
+/-- Decoding an encoded data segment. -/
+theorem decData_enc (d : List Nat) (hb : d.length < 256 ^ 4)
+    (rest : List Nat) :
+    decData ((leBytes d.length 4 ++ d) ++ rest) = some (d, rest) := by
+  have hstep : ∀ bs, decData bs =
+      (rdLE bs 4).bind (fun p =>
+        if p.2.length < p.1 then none
+        else some (p.2.take p.1, p.2.drop p.1)) := fun _ => rfl
+  rw [hstep]
+  simp only [List.append_assoc]
+  rw [rdLE_leBytes, Nat.mod_eq_of_lt hb]
+  rw [Option.bind_some]
+  rw [if_neg (by rw [List.length_append]; omega),
+    List.take_left, List.drop_left]
+
+/-- Decoding an encoded word. -/
+theorem decWord_enc (wd : Word) (hb : WordBound wd)
+    (rest : List Nat) :
+    decWord (wd.enc ++ rest) = some (wd, rest) := by
+  obtain ⟨hb1, hb2, hb3, hb4, hb5, hbc, hba⟩ := hb
+  have hstep : ∀ bs, decWord bs =
+      (rdLE bs 4).bind (fun p1 =>
+        (rdLE p1.2 4).bind (fun p2 =>
+          (rdLE p2.2 4).bind (fun p3 =>
+            (rdLE p3.2 4).bind (fun p4 =>
+              (rdLE p4.2 4).bind (fun p5 =>
+                (decMany decInstr p4.1 p5.2).bind (fun p6 =>
+                  (decMany decAnn p5.1 p6.2).bind (fun p7 =>
+                    some (⟨p1.1, p2.1, p3.1, p6.1, p7.1⟩,
+                      p7.2)))))))) := fun _ => rfl
+  rw [hstep, wordEnc_form]
+  simp only [List.append_assoc]
+  rw [rdLE_leBytes, Nat.mod_eq_of_lt hb1]
+  rw [Option.bind_some]
+  rw [rdLE_leBytes, Nat.mod_eq_of_lt hb2]
+  rw [Option.bind_some]
+  rw [rdLE_leBytes, Nat.mod_eq_of_lt hb3]
+  rw [Option.bind_some]
+  rw [rdLE_leBytes, Nat.mod_eq_of_lt hb4]
+  rw [Option.bind_some]
+  rw [rdLE_leBytes, Nat.mod_eq_of_lt hb5]
+  rw [Option.bind_some]
+  rw [decMany_enc (g := decInstr) (e := Instr.enc)
+    (P := InstrBound) decInstr_enc hbc]
+  rw [Option.bind_some]
+  rw [decMany_enc (g := decAnn)
+    (e := fun x => leBytes x.1 4 ++ (leBytes x.2.d 4 ++
+      leBytes x.2.a 4))
+    (P := AnnBound) decAnn_enc hba]
+  rfl
+
+/-- Fixed-width field bounds of a whole program. -/
+def ProgBound (pr : Prog) : Prop :=
+  pr.main < 256 ^ 4 ∧ pr.words.length < 256 ^ 4 ∧
+    pr.data.length < 256 ^ 4 ∧
+    (∀ d ∈ pr.data, d.length < 256 ^ 4) ∧
+    (∀ w ∈ pr.words, WordBound w)
+
+/-- Decoding an encoded program. -/
+theorem decode_enc (pr : Prog) (hb : ProgBound pr) :
+    Sporos.decode pr.enc = some pr := by
+  obtain ⟨hb1, hb2, hb3, hbd, hbw⟩ := hb
+  have hstep : ∀ bs, Sporos.decode
+        (0x53 :: 0x50 :: 0x52 :: 0x31 :: bs) =
+      (rdLE bs 4).bind (fun p1 =>
+        (rdLE p1.2 4).bind (fun p2 =>
+          (rdLE p2.2 4).bind (fun p3 =>
+            (decMany decData p3.1 p3.2).bind (fun p4 =>
+              (decMany decWord p2.1 p4.2).bind (fun p5 =>
+                if p5.2.isEmpty then some ⟨p5.1, p4.1, p1.1⟩
+                else none))))) := fun _ => rfl
+  have henc : pr.enc = 0x53 :: 0x50 :: 0x52 :: 0x31 ::
+      (leBytes pr.main 4 ++ (leBytes pr.words.length 4 ++
+        (leBytes pr.data.length 4 ++
+          ((pr.data.flatMap fun d => leBytes d.length 4 ++ d) ++
+            pr.words.flatMap Word.enc)))) := rfl
+  rw [henc, hstep, rdLE_leBytes, Nat.mod_eq_of_lt hb1]
+  rw [Option.bind_some]
+  rw [rdLE_leBytes, Nat.mod_eq_of_lt hb2]
+  rw [Option.bind_some]
+  rw [rdLE_leBytes, Nat.mod_eq_of_lt hb3]
+  rw [Option.bind_some]
+  rw [decMany_enc (g := decData)
+    (e := fun d => leBytes d.length 4 ++ d)
+    (P := fun d => d.length < 256 ^ 4) decData_enc hbd]
+  rw [Option.bind_some]
+  have hw := decMany_enc (g := decWord) (e := Word.enc)
+    (P := WordBound) decWord_enc hbw []
+  rw [List.append_nil] at hw
+  rw [hw]
+  rw [Option.bind_some]
+  rfl
+
+/-- Concatenating two adjacent reads. -/
+theorem rdN_concat {m : Mem} : ∀ {a k1 k2 : Nat}
+    {bs1 bs2 : List Nat},
+    m.rdN a k1 = some bs1 → m.rdN (a + k1) k2 = some bs2 →
+    m.rdN a (k1 + k2) = some (bs1 ++ bs2) := by
+  intro a k1
+  induction k1 generalizing a with
+  | zero =>
+    intro k2 bs1 bs2 h1 h2
+    have hz : m.rdN a 0 = some [] := rfl
+    rw [hz] at h1
+    have hbs : bs1 = [] := (Option.some.inj h1).symm
+    subst hbs
+    simpa using h2
+  | succ k1 ih =>
+    intro k2 bs1 bs2 h1 h2
+    have hlen : bs1.length = k1 + 1 := rdN_length h1
+    cases bs1 with
+    | nil => simp at hlen
+    | cons b bs1' =>
+      obtain ⟨hb, hr⟩ := rdN_cons h1
+      have h2' : m.rdN (a + 1 + k1) k2 = some bs2 := by
+        have e : a + 1 + k1 = a + (k1 + 1) := by omega
+        rw [e]
+        exact h2
+      have hcat := ih hr h2'
+      have e2 : k1 + 1 + k2 = (k1 + k2) + 1 := by omega
+      rw [e2, List.cons_append]
+      exact rdN_cons_some hb hcat
+
+/-- A readable byte region, all bytes below 256. -/
+def RdBytes (m : Mem) (c n : Nat) : Prop :=
+  ∀ a l, c ≤ a → a + l ≤ c + n →
+    ∃ bs, m.rdN a l = some bs ∧ ∀ b ∈ bs, b < 256
+
+theorem RdBytes_mono {m : Mem} {c n c' n' : Nat}
+    (h : RdBytes m c n) (hc : c ≤ c') (hn : c' + n' ≤ c + n) :
+    RdBytes m c' n' := fun a l ha hl => h a l (by omega) (by omega)
+
+/-- Four readable bytes equal the encoding of their value. -/
+theorem rd4_eq_leBytes {m : Mem} {a : Nat} {bs : List Nat}
+    (h : m.rdN a 4 = some bs) (hb : ∀ b ∈ bs, b < 256) :
+    bs = leBytes (leVal bs) 4 ∧ leVal bs < 256 ^ 4 := by
+  have hlen : bs.length = 4 := rdN_length h
+  have h1 := leBytes_leVal hb
+  rw [hlen] at h1
+  exact ⟨h1.symm, by
+    have h2 := leVal_bound hb
+    rw [hlen] at h2
+    exact h2⟩
+
+/-- `CodeSeq` as one read of the whole encoding. -/
+theorem CodeSeq_rdN : ∀ (code : List Instr) {m : Mem} {c : Nat},
+    CodeSeq m c code →
+    m.rdN c (codeBytes code) = some (code.flatMap Instr.enc)
+  | [], _, _, _ => rfl
+  | x :: xs, m, c, h => by
+    obtain ⟨h1, h2⟩ := h
+    have ih := CodeSeq_rdN xs h2
+    show m.rdN c (x.enc.length + codeBytes xs) =
+      some ((x :: xs).flatMap Instr.enc)
+    rw [List.flatMap_cons]
+    exact rdN_concat h1 ih
+
+/-- One annotation entry of `AnnLayB` as bytes. -/
+theorem AnnLayB_entry_rdN {m : Mem} {p : Nat}
+    {ann : List (Nat × Height)} (h : AnnLayB m p ann)
+    (hrd : RdBytes m p (12 * ann.length))
+    (i : Nat) (hi : i < ann.length) :
+    m.rdN (p + 12 * i) 12 =
+      some (leBytes ann[i].1 4 ++ leBytes ann[i].2.d 4 ++
+        leBytes ann[i].2.a 4) := by
+  obtain ⟨h1, h2, h3, -⟩ := h i hi
+  obtain ⟨bs1, hb1, hv1⟩ := Option.map_eq_some_iff.mp h1
+  obtain ⟨bs2, hb2, hv2⟩ := Option.map_eq_some_iff.mp h2
+  obtain ⟨bs3, hb3, hv3⟩ := Option.map_eq_some_iff.mp h3
+  obtain ⟨bs1', hb1', hlt1⟩ := hrd (p + 12 * i) 4 (by omega) (by omega)
+  obtain ⟨bs2', hb2', hlt2⟩ := hrd (p + 12 * i + 4) 4 (by omega)
+    (by omega)
+  obtain ⟨bs3', hb3', hlt3⟩ := hrd (p + 12 * i + 8) 4 (by omega)
+    (by omega)
+  have e1 : bs1' = bs1 := Option.some.inj (hb1'.symm.trans hb1)
+  have e2 : bs2' = bs2 := Option.some.inj (hb2'.symm.trans hb2)
+  have e3 : bs3' = bs3 := Option.some.inj (hb3'.symm.trans hb3)
+  rw [← e1] at hb1 hv1
+  rw [← e2] at hb2 hv2
+  rw [← e3] at hb3 hv3
+  obtain ⟨g1, -⟩ := rd4_eq_leBytes hb1' hlt1
+  obtain ⟨g2, -⟩ := rd4_eq_leBytes hb2' hlt2
+  obtain ⟨g3, -⟩ := rd4_eq_leBytes hb3' hlt3
+  rw [hv1] at g1
+  rw [hv2] at g2
+  rw [hv3] at g3
+  have c1 := rdN_concat hb1' hb2'
+  have eaddr : p + 12 * i + 4 + 4 = p + 12 * i + 8 := by omega
+  have hb3'' : m.rdN (p + 12 * i + 4 + 4) 4 = some bs3' := by
+    rw [eaddr]
+    exact hb3'
+  have c2 := rdN_concat c1 hb3''
+  rw [g1, g2, g3] at c2
+  have elen : 4 + 4 + 4 = 12 := by omega
+  rw [elen] at c2
+  exact c2
+
+/-- Shifting `AnnLayB` past its first entry. -/
+theorem AnnLayB_cons_tail {m : Mem} {p : Nat} {x : Nat × Height}
+    {ann : List (Nat × Height)} (h : AnnLayB m p (x :: ann)) :
+    AnnLayB m (p + 12) ann := by
+  intro i hi
+  obtain ⟨h1, h2, h3, h4⟩ := h (i + 1) (by
+    simp only [List.length_cons]
+    omega)
+  have e0 : (x :: ann)[i + 1]'(by
+      simp only [List.length_cons]; omega) = ann[i] :=
+    List.getElem_cons_succ x ann i (by
+      simp only [List.length_cons]; omega)
+  rw [e0] at h1 h2 h3 h4
+  have ep : p + 12 * (i + 1) = p + 12 + 12 * i := by omega
+  rw [ep] at h1
+  have ep2 : p + 12 * (i + 1) + 4 = p + 12 + 12 * i + 4 := by omega
+  rw [ep2] at h2
+  have ep3 : p + 12 * (i + 1) + 8 = p + 12 + 12 * i + 8 := by omega
+  rw [ep3] at h3
+  exact ⟨h1, h2, h3, h4⟩
+
+/-- The head entry of `AnnLayB`, restated at `p`. -/
+theorem AnnLayB_cons_head {m : Mem} {p : Nat} {x : Nat × Height}
+    {ann : List (Nat × Height)} (h : AnnLayB m p (x :: ann)) :
+    (m.rdN p 4).map leVal = some x.1 ∧
+    (m.rdN (p + 4) 4).map leVal = some x.2.d ∧
+    (m.rdN (p + 8) 4).map leVal = some x.2.a ∧ x.1 < W := by
+  obtain ⟨h1, h2, h3, h4⟩ := h 0 (by simp)
+  have e0 : (x :: ann)[0]'(by simp) = x :=
+    List.getElem_cons_zero x ann _
+  rw [e0] at h1 h2 h3 h4
+  have ep : p + 12 * 0 = p := by omega
+  rw [ep] at h1
+  have ep2 : p + 12 * 0 + 4 = p + 4 := by omega
+  rw [ep2] at h2
+  have ep3 : p + 12 * 0 + 8 = p + 8 := by omega
+  rw [ep3] at h3
+  exact ⟨h1, h2, h3, h4⟩
+
+/-- `AnnLayB` as one read of the whole annotation array. -/
+theorem AnnLayB_rdN : ∀ (ann : List (Nat × Height)) {m : Mem}
+    {p : Nat}, AnnLayB m p ann → RdBytes m p (12 * ann.length) →
+    m.rdN p (12 * ann.length) =
+      some (ann.flatMap (fun x => leBytes x.1 4 ++
+        leBytes x.2.d 4 ++ leBytes x.2.a 4))
+  | [], _, _, _, _ => rfl
+  | x :: ann, m, p, h, hrd => by
+    have hhead := AnnLayB_cons_head h
+    have htail := AnnLayB_cons_tail h
+    have hrd12 : RdBytes m p 12 := RdBytes_mono hrd (by omega) (by
+      simp only [List.length_cons]
+      omega)
+    have hentry : m.rdN p 12 =
+        some (leBytes x.1 4 ++ leBytes x.2.d 4 ++
+          leBytes x.2.a 4) := by
+      obtain ⟨h1, h2, h3, -⟩ := hhead
+      obtain ⟨bs1, hb1, hv1⟩ := Option.map_eq_some_iff.mp h1
+      obtain ⟨bs2, hb2, hv2⟩ := Option.map_eq_some_iff.mp h2
+      obtain ⟨bs3, hb3, hv3⟩ := Option.map_eq_some_iff.mp h3
+      obtain ⟨bs1', hb1', hlt1⟩ := hrd12 p 4 (by omega) (by omega)
+      obtain ⟨bs2', hb2', hlt2⟩ := hrd12 (p + 4) 4 (by omega)
+        (by omega)
+      obtain ⟨bs3', hb3', hlt3⟩ := hrd12 (p + 8) 4 (by omega)
+        (by omega)
+      have e1 : bs1' = bs1 := Option.some.inj (hb1'.symm.trans hb1)
+      have e2 : bs2' = bs2 := Option.some.inj (hb2'.symm.trans hb2)
+      have e3 : bs3' = bs3 := Option.some.inj (hb3'.symm.trans hb3)
+      rw [← e1] at hb1 hv1
+      rw [← e2] at hb2 hv2
+      rw [← e3] at hb3 hv3
+      obtain ⟨g1, -⟩ := rd4_eq_leBytes hb1' hlt1
+      obtain ⟨g2, -⟩ := rd4_eq_leBytes hb2' hlt2
+      obtain ⟨g3, -⟩ := rd4_eq_leBytes hb3' hlt3
+      rw [hv1] at g1
+      rw [hv2] at g2
+      rw [hv3] at g3
+      have c1 := rdN_concat hb1' hb2'
+      have hb3'' : m.rdN (p + 4 + 4) 4 = some bs3' := by
+        have eaddr : p + 4 + 4 = p + 8 := by omega
+        rw [eaddr]
+        exact hb3'
+      have c2 := rdN_concat c1 hb3''
+      rw [g1, g2, g3] at c2
+      have elen : 4 + 4 + 4 = 12 := by omega
+      rw [elen] at c2
+      exact c2
+    have hrdtail : RdBytes m (p + 12) (12 * ann.length) :=
+      RdBytes_mono hrd (by omega) (by
+        simp only [List.length_cons]
+        omega)
+    have ih := AnnLayB_rdN ann htail hrdtail
+    have c := rdN_concat hentry ih
+    have elen : 12 + 12 * ann.length =
+        12 * (x :: ann).length := by
+      simp only [List.length_cons]
+      omega
+    rw [elen] at c
+    rw [List.flatMap_cons]
+    exact c
+
+/-- A chunk value below `256 ^ 4` is unchanged modulo `W`. -/
+theorem modW_of_lt_256_4 {v : Nat} (h : v < 256 ^ 4) : v % W = v := by
+  apply Nat.mod_eq_of_lt
+  have e : (256 : Nat) ^ 4 = 2 ^ 32 := by decide
+  have hW : W = 2 ^ 64 := rfl
+  omega
+
+/-- The twenty header bytes of a word, reassembled. -/
+theorem header20_eq {bs : List Nat} {wd : Word}
+    (hlen : bs.length = 20) (hb : ∀ b ∈ bs, b < 256)
+    (hbnd : WordBound wd)
+    (e0 : leVal (bs.take 4) % W = wd.ins)
+    (e1 : leVal ((bs.drop 4).take 4) % W = wd.outs)
+    (e2 : leVal ((bs.drop 8).take 4) % W = wd.locals)
+    (e3 : leVal ((bs.drop 12).take 4) % W = wd.code.length)
+    (e4 : leVal ((bs.drop 16).take 4) % W = wd.ann.length) :
+    bs = leBytes wd.ins 4 ++ (leBytes wd.outs 4 ++
+      (leBytes wd.locals 4 ++ (leBytes wd.code.length 4 ++
+        leBytes wd.ann.length 4))) := by
+  obtain ⟨hb1, hb2, hb3, hb4, hb5, -, -⟩ := hbnd
+  have hchunk : ∀ (k : Nat) (hk : k + 4 ≤ 20),
+      ((bs.drop k).take 4).length = 4 ∧
+      (∀ b ∈ (bs.drop k).take 4, b < 256) ∧
+      leVal ((bs.drop k).take 4) < 256 ^ 4 ∧
+      (bs.drop k).take 4 =
+        leBytes (leVal ((bs.drop k).take 4)) 4 := by
+    intro k hk
+    have hlenk : ((bs.drop k).take 4).length = 4 := by
+      rw [List.length_take, List.length_drop, hlen]
+      omega
+    have hmem : ∀ b ∈ (bs.drop k).take 4, b < 256 := fun b hm =>
+      hb b (List.mem_of_mem_drop (List.mem_of_mem_take hm))
+    have hbound : leVal ((bs.drop k).take 4) < 256 ^ 4 := by
+      have h := leVal_bound hmem
+      rw [hlenk] at h
+      exact h
+    have henc : (bs.drop k).take 4 =
+        leBytes (leVal ((bs.drop k).take 4)) 4 := by
+      have h := leBytes_leVal hmem
+      rw [hlenk] at h
+      exact h.symm
+    exact ⟨hlenk, hmem, hbound, henc⟩
+  obtain ⟨-, -, g0b, g0⟩ := hchunk 0 (by omega)
+  obtain ⟨-, -, g1b, g1⟩ := hchunk 4 (by omega)
+  obtain ⟨-, -, g2b, g2⟩ := hchunk 8 (by omega)
+  obtain ⟨-, -, g3b, g3⟩ := hchunk 12 (by omega)
+  obtain ⟨-, -, g4b, g4⟩ := hchunk 16 (by omega)
+  simp only [List.drop_zero] at g0 g0b
+  rw [modW_of_lt_256_4 g0b] at e0
+  rw [modW_of_lt_256_4 g1b] at e1
+  rw [modW_of_lt_256_4 g2b] at e2
+  rw [modW_of_lt_256_4 g3b] at e3
+  rw [modW_of_lt_256_4 g4b] at e4
+  rw [e0] at g0
+  rw [e1] at g1
+  rw [e2] at g2
+  rw [e3] at g3
+  rw [e4] at g4
+  have d20 : bs.drop 20 = [] :=
+    List.drop_of_length_le (Nat.le_of_eq hlen)
+  have step4 : bs.drop 16 =
+      (bs.drop 16).take 4 ++ (bs.drop 16).drop 4 :=
+    (List.take_append_drop 4 (bs.drop 16)).symm
+  have dd16 : (bs.drop 16).drop 4 = [] := by
+    rw [List.drop_drop]
+    show bs.drop (16 + 4) = []
+    exact d20
+  have h16 : bs.drop 16 = leBytes wd.ann.length 4 := by
+    rw [step4, dd16, List.append_nil, g4]
+  have step3 : bs.drop 12 =
+      (bs.drop 12).take 4 ++ bs.drop 16 := by
+    have e : bs.drop 12 =
+        (bs.drop 12).take 4 ++ (bs.drop 12).drop 4 :=
+      (List.take_append_drop 4 (bs.drop 12)).symm
+    have e2 : (bs.drop 12).drop 4 = bs.drop 16 := by
+      rw [List.drop_drop]
+    rw [e2] at e
+    exact e
+  have h12 : bs.drop 12 = leBytes wd.code.length 4 ++
+      leBytes wd.ann.length 4 := by
+    rw [step3, g3, h16]
+  have step2 : bs.drop 8 =
+      (bs.drop 8).take 4 ++ bs.drop 12 := by
+    have e : bs.drop 8 =
+        (bs.drop 8).take 4 ++ (bs.drop 8).drop 4 :=
+      (List.take_append_drop 4 (bs.drop 8)).symm
+    have e2 : (bs.drop 8).drop 4 = bs.drop 12 := by
+      rw [List.drop_drop]
+    rw [e2] at e
+    exact e
+  have h8 : bs.drop 8 = leBytes wd.locals 4 ++
+      (leBytes wd.code.length 4 ++ leBytes wd.ann.length 4) := by
+    rw [step2, g2, h12]
+  have step1 : bs.drop 4 =
+      (bs.drop 4).take 4 ++ bs.drop 8 := by
+    have e : bs.drop 4 =
+        (bs.drop 4).take 4 ++ (bs.drop 4).drop 4 :=
+      (List.take_append_drop 4 (bs.drop 4)).symm
+    have e2 : (bs.drop 4).drop 4 = bs.drop 8 := by
+      rw [List.drop_drop]
+    rw [e2] at e
+    exact e
+  have h4 : bs.drop 4 = leBytes wd.outs 4 ++
+      (leBytes wd.locals 4 ++ (leBytes wd.code.length 4 ++
+        leBytes wd.ann.length 4)) := by
+    rw [step1, g1, h8]
+  have step0 : bs = bs.take 4 ++ bs.drop 4 :=
+    (List.take_append_drop 4 bs).symm
+  rw [step0, g0, h4]
+
+/-- `WordsLay` as one read of the whole words encoding. -/
+theorem WordsLay_rdN : ∀ (wds : List Word) {m : Mem} {c : Nat},
+    WordsLay m c wds → (∀ w ∈ wds, WordBound w) →
+    RdBytes m c (wordsBytes wds) →
+    m.rdN c (wordsBytes wds) = some (wds.flatMap Word.enc)
+  | [], _, _, _, _, _ => rfl
+  | wd :: wds, m, c, h, hb, hrd => by
+    obtain ⟨⟨bs, h20, e0, e1, e2, e3, e4⟩, hseq, hann, hrest⟩ := h
+    have hbwd := hb wd (.head _)
+    have hbrest : ∀ w ∈ wds, WordBound w :=
+      fun w hw => hb w (.tail _ hw)
+    have hwb : wordsBytes (wd :: wds) =
+        (20 + codeBytes wd.code + 12 * wd.ann.length) +
+          wordsBytes wds := rfl
+    obtain ⟨bs', h20', hbslt⟩ :=
+      hrd c 20 (by omega) (by rw [hwb]; omega)
+    have ebs : bs' = bs := Option.some.inj (h20'.symm.trans h20)
+    rw [ebs] at hbslt
+    have hlen20 : bs.length = 20 := rdN_length h20
+    have hhead : bs = leBytes wd.ins 4 ++ (leBytes wd.outs 4 ++
+        (leBytes wd.locals 4 ++ (leBytes wd.code.length 4 ++
+          leBytes wd.ann.length 4))) :=
+      header20_eq hlen20 hbslt hbwd e0 e1 e2 e3 e4
+    have hcode := CodeSeq_rdN wd.code hseq
+    have hrdann : RdBytes m (c + 20 + codeBytes wd.code)
+        (12 * wd.ann.length) :=
+      RdBytes_mono hrd (by omega) (by rw [hwb]; omega)
+    have hannR := AnnLayB_rdN wd.ann hann hrdann
+    have cat1 := rdN_concat h20 hcode
+    have hannR' : m.rdN (c + (20 + codeBytes wd.code))
+        (12 * wd.ann.length) =
+        some (wd.ann.flatMap (fun x => leBytes x.1 4 ++
+          leBytes x.2.d 4 ++ leBytes x.2.a 4)) := by
+      have e : c + (20 + codeBytes wd.code) =
+          c + 20 + codeBytes wd.code := by omega
+      rw [e]
+      exact hannR
+    have cat2 := rdN_concat cat1 hannR'
+    have hwd : (bs ++ wd.code.flatMap Instr.enc) ++
+        wd.ann.flatMap (fun x => leBytes x.1 4 ++
+          leBytes x.2.d 4 ++ leBytes x.2.a 4) = wd.enc := by
+      rw [hhead, wordEnc_form]
+      simp only [List.append_assoc]
+    rw [hwd] at cat2
+    have hrdrest : RdBytes m
+        (c + 20 + codeBytes wd.code + 12 * wd.ann.length)
+        (wordsBytes wds) :=
+      RdBytes_mono hrd (by omega) (by rw [hwb]; omega)
+    have ih := WordsLay_rdN wds hrest hbrest hrdrest
+    have ih' : m.rdN
+        (c + (20 + codeBytes wd.code + 12 * wd.ann.length))
+        (wordsBytes wds) = some (wds.flatMap Word.enc) := by
+      have e : c + (20 + codeBytes wd.code +
+          12 * wd.ann.length) =
+          c + 20 + codeBytes wd.code + 12 * wd.ann.length := by
+        omega
+      rw [e]
+      exact ih
+    have cat3 := rdN_concat cat2 ih'
+    show m.rdN c (wordsBytes (wd :: wds)) =
+      some ((wd :: wds).flatMap Word.enc)
+    rw [hwb, List.flatMap_cons]
+    exact cat3
+
+/-- A data-segment layout as encoded segments. -/
+theorem DataSeq_enc {m : Mem} : ∀ {c : Nat} {ds : List Nat}
+    {c' : Nat}, DataSeq m c ds c' → RdBytes m c (c' - c) →
+    ∃ data : List (List Nat), data.map List.length = ds ∧
+      (∀ d ∈ data, d.length < 256 ^ 4) ∧
+      m.rdN c (c' - c) =
+        some (data.flatMap (fun d => leBytes d.length 4 ++ d)) := by
+  intro c ds c' h
+  induction h with
+  | nil c =>
+    intro _
+    refine ⟨[], rfl, fun d hd => (List.not_mem_nil hd).elim, ?_⟩
+    show m.rdN c (c - c) = some []
+    rw [Nat.sub_self]
+    rfl
+  | cons hd hrest ih =>
+    intro hrd
+    rename_i c d ds c'
+    have hle : c + 4 + d ≤ c' := hrest.le
+    have hrd4 : RdBytes m c 4 :=
+      RdBytes_mono hrd (by omega) (by omega)
+    obtain ⟨bs4, h4, hlt4⟩ := hrd4 c 4 (by omega) (by omega)
+    have hdv : leVal bs4 = d := by
+      have e : rd32 m c = (m.rdN c 4).map leVal := rfl
+      rw [e, h4] at hd
+      exact Option.some.inj hd
+    obtain ⟨g4, hdlt⟩ := rd4_eq_leBytes h4 hlt4
+    rw [hdv] at g4
+    rw [hdv] at hdlt
+    obtain ⟨bsd, hbsd, -⟩ := hrd (c + 4) d (by omega) (by omega)
+    have hlenbsd : bsd.length = d := rdN_length hbsd
+    have hrdtail : RdBytes m (c + 4 + d) (c' - (c + 4 + d)) :=
+      RdBytes_mono hrd (by omega) (by omega)
+    obtain ⟨data, hmap, hbound, htail⟩ := ih hrdtail
+    have cat1 := rdN_concat h4 hbsd
+    rw [g4] at cat1
+    have cat1' : m.rdN c (4 + bsd.length) =
+        some (leBytes bsd.length 4 ++ bsd) := by
+      rw [hlenbsd]
+      exact cat1
+    have htail' : m.rdN (c + (4 + bsd.length))
+        (c' - (c + 4 + d)) =
+        some (data.flatMap (fun d => leBytes d.length 4 ++ d)) := by
+      have e : c + (4 + bsd.length) = c + 4 + d := by
+        omega
+      rw [e]
+      exact htail
+    have cat2 := rdN_concat cat1' htail'
+    have elen : 4 + bsd.length + (c' - (c + 4 + d)) = c' - c := by
+      omega
+    rw [elen] at cat2
+    refine ⟨bsd :: data, ?_, ?_, ?_⟩
+    · show (bsd :: data).map List.length = d :: ds
+      rw [List.map_cons, hlenbsd, hmap]
+    · intro x hx
+      cases hx with
+      | head => rw [hlenbsd]; exact hdlt
+      | tail _ hx => exact hbound x hx
+    · show m.rdN c (c' - c) =
+        some ((bsd :: data).flatMap
+          (fun d => leBytes d.length 4 ++ d))
+      rw [List.flatMap_cons]
+      exact cat2
+
+/-- Readable bytes over a fully read buffer. -/
+theorem RdBytes_of_rdN {m : Mem} {B L : Nat} {f : List Nat}
+    (hf : m.rdN B L = some f) (hb : ∀ b ∈ f, b < 256) :
+    RdBytes m B L := by
+  intro a l ha hl
+  have hok : (a - B) + l ≤ L := by omega
+  have hs := rdN_slice hf hok
+  have e : B + (a - B) = a := by omega
+  rw [e] at hs
+  exact ⟨(f.drop (a - B)).take l, hs, fun b hm =>
+    hb b (List.mem_of_mem_drop (List.mem_of_mem_take hm))⟩
+
+/-- The four header chunks of the parser's twenty-byte window. -/
+theorem header16_eq {bs : List Nat}
+    (hlen : bs.length = 20) (hb : ∀ b ∈ bs, b < 256)
+    (hmagic : leVal (bs.take 4) % 2 ^ 32 = 827478099) :
+    bs.take 16 = [0x53, 0x50, 0x52, 0x31] ++
+      (leBytes (leVal ((bs.drop 4).take 4) % 2 ^ 32) 4 ++
+        (leBytes (leVal ((bs.drop 8).take 4) % 2 ^ 32) 4 ++
+          leBytes (leVal ((bs.drop 12).take 4) % 2 ^ 32) 4)) ∧
+    leVal ((bs.drop 4).take 4) < 256 ^ 4 ∧
+    leVal ((bs.drop 8).take 4) < 256 ^ 4 ∧
+    leVal ((bs.drop 12).take 4) < 256 ^ 4 := by
+  have hchunk : ∀ (k : Nat) (hk : k + 4 ≤ 20),
+      ((bs.drop k).take 4).length = 4 ∧
+      leVal ((bs.drop k).take 4) < 256 ^ 4 ∧
+      (bs.drop k).take 4 =
+        leBytes (leVal ((bs.drop k).take 4)) 4 := by
+    intro k hk
+    have hlenk : ((bs.drop k).take 4).length = 4 := by
+      rw [List.length_take, List.length_drop, hlen]
+      omega
+    have hmem : ∀ b ∈ (bs.drop k).take 4, b < 256 := fun b hm =>
+      hb b (List.mem_of_mem_drop (List.mem_of_mem_take hm))
+    have hbound : leVal ((bs.drop k).take 4) < 256 ^ 4 := by
+      have h := leVal_bound hmem
+      rw [hlenk] at h
+      exact h
+    have henc : (bs.drop k).take 4 =
+        leBytes (leVal ((bs.drop k).take 4)) 4 := by
+      have h := leBytes_leVal hmem
+      rw [hlenk] at h
+      exact h.symm
+    exact ⟨hlenk, hbound, henc⟩
+  obtain ⟨-, g0b, g0⟩ := hchunk 0 (by omega)
+  obtain ⟨-, g1b, g1⟩ := hchunk 4 (by omega)
+  obtain ⟨-, g2b, g2⟩ := hchunk 8 (by omega)
+  obtain ⟨-, g3b, g3⟩ := hchunk 12 (by omega)
+  simp only [List.drop_zero] at g0 g0b
+  have hmod : ∀ {v : Nat}, v < 256 ^ 4 → v % 2 ^ 32 = v := by
+    intro v hv
+    have e : (256 : Nat) ^ 4 = 2 ^ 32 := by decide
+    rw [e] at hv
+    exact Nat.mod_eq_of_lt hv
+  rw [hmod g0b] at hmagic
+  rw [hmagic] at g0
+  have g0' : bs.take 4 = [0x53, 0x50, 0x52, 0x31] := by
+    rw [g0]
+    decide
+  rw [← hmod g1b] at g1
+  rw [← hmod g2b] at g2
+  rw [← hmod g3b] at g3
+  have tk : ∀ (o : Nat), o ≤ 12 →
+      ((bs.take 16).drop o).take 4 = (bs.drop o).take 4 := by
+    intro o ho
+    rw [List.drop_take, List.take_take, Nat.min_eq_left (by omega)]
+  have len16 : (bs.take 16).length = 16 := by
+    simp [List.length_take, hlen]
+  have d16nil : (bs.take 16).drop 16 = [] :=
+    List.drop_of_length_le (Nat.le_of_eq len16)
+  have s3 : (bs.take 16).drop 12 =
+      ((bs.take 16).drop 12).take 4 := by
+    have e : (bs.take 16).drop 12 =
+        ((bs.take 16).drop 12).take 4 ++
+          ((bs.take 16).drop 12).drop 4 :=
+      (List.take_append_drop 4 ((bs.take 16).drop 12)).symm
+    have e2 : ((bs.take 16).drop 12).drop 4 = [] := by
+      rw [List.drop_drop]
+      show (bs.take 16).drop (12 + 4) = []
+      exact d16nil
+    rw [e2, List.append_nil] at e
+    exact e
+  have s2 : (bs.take 16).drop 8 =
+      ((bs.take 16).drop 8).take 4 ++ (bs.take 16).drop 12 := by
+    have e : (bs.take 16).drop 8 =
+        ((bs.take 16).drop 8).take 4 ++
+          ((bs.take 16).drop 8).drop 4 :=
+      (List.take_append_drop 4 ((bs.take 16).drop 8)).symm
+    have e2 : ((bs.take 16).drop 8).drop 4 =
+        (bs.take 16).drop 12 := by
+      rw [List.drop_drop]
+    rw [e2] at e
+    exact e
+  have s1 : (bs.take 16).drop 4 =
+      ((bs.take 16).drop 4).take 4 ++ (bs.take 16).drop 8 := by
+    have e : (bs.take 16).drop 4 =
+        ((bs.take 16).drop 4).take 4 ++
+          ((bs.take 16).drop 4).drop 4 :=
+      (List.take_append_drop 4 ((bs.take 16).drop 4)).symm
+    have e2 : ((bs.take 16).drop 4).drop 4 =
+        (bs.take 16).drop 8 := by
+      rw [List.drop_drop]
+    rw [e2] at e
+    exact e
+  have s0 : bs.take 16 =
+      (bs.take 16).take 4 ++ (bs.take 16).drop 4 :=
+    (List.take_append_drop 4 (bs.take 16)).symm
+  have t0 : (bs.take 16).take 4 = bs.take 4 := by
+    rw [List.take_take, Nat.min_eq_left (by decide : 4 ≤ 16)]
+  refine ⟨?_, g1b, g2b, g3b⟩
+  have hA : bs.take 16 = bs.take 4 ++
+      ((bs.drop 4).take 4 ++ ((bs.drop 8).take 4 ++
+        (bs.drop 12).take 4)) := by
+    rw [s0, s1, s2, s3, t0, tk 4 (by omega), tk 8 (by omega),
+      tk 12 (by omega)]
+  have hC : (bs.drop 8).take 4 ++ (bs.drop 12).take 4 =
+      leBytes (leVal ((bs.drop 8).take 4) % 2 ^ 32) 4 ++
+        leBytes (leVal ((bs.drop 12).take 4) % 2 ^ 32) 4 :=
+    (congrArg (· ++ (bs.drop 12).take 4) g2).trans
+      (congrArg
+        (leBytes (leVal ((bs.drop 8).take 4) % 2 ^ 32) 4 ++ ·) g3)
+  have hD : (bs.drop 4).take 4 ++
+        ((bs.drop 8).take 4 ++ (bs.drop 12).take 4) =
+      leBytes (leVal ((bs.drop 4).take 4) % 2 ^ 32) 4 ++
+        (leBytes (leVal ((bs.drop 8).take 4) % 2 ^ 32) 4 ++
+          leBytes (leVal ((bs.drop 12).take 4) % 2 ^ 32) 4) :=
+    (congrArg
+      (· ++ ((bs.drop 8).take 4 ++ (bs.drop 12).take 4)) g1).trans
+      (congrArg
+        (leBytes (leVal ((bs.drop 4).take 4) % 2 ^ 32) 4 ++ ·) hC)
+  exact hA.trans
+    ((congrArg
+      (· ++ ((bs.drop 4).take 4 ++ ((bs.drop 8).take 4 ++
+        (bs.drop 12).take 4))) g0').trans
+      (congrArg (([0x53, 0x50, 0x52, 0x31] : List Nat) ++ ·) hD))
+
+/-- Layouts over the loaded file give a decoded program. -/
+theorem decode_of_layouts {m : Mem} {B L c : Nat}
+    {f bs : List Nat} {ds : List Nat} {wds : List Word}
+    (hf : m.rdN B L = some f) (hblt : ∀ b ∈ f, b < 256)
+    (hL20 : 20 ≤ L)
+    (h20 : m.rdN B 20 = some bs)
+    (hmagic : leVal (bs.take 4) % 2 ^ 32 = 827478099)
+    (hdslen : ds.length = leVal ((bs.drop 12).take 4) % 2 ^ 32)
+    (hseq : DataSeq m (B + 16) ds c)
+    (hwdslen : wds.length = leVal ((bs.drop 8).take 4) % 2 ^ 32)
+    (hlay : WordsLay m c wds) (hbw : ∀ w ∈ wds, WordBound w)
+    (hend : c + wordsBytes wds = B + L) :
+    ∃ pr : Prog, Sporos.decode f = some pr ∧ pr.words = wds ∧
+      pr.main = leVal ((bs.drop 4).take 4) % 2 ^ 32 ∧
+      pr.data.map List.length = ds ∧ ProgBound pr ∧ f = pr.enc := by
+  have hrd : RdBytes m B L := RdBytes_of_rdN hf hblt
+  obtain ⟨bs', h20', hbslt⟩ := hrd B 20 (by omega) (by omega)
+  have ebs : bs' = bs := Option.some.inj (h20'.symm.trans h20)
+  rw [ebs] at hbslt
+  have hlen20 : bs.length = 20 := rdN_length h20
+  obtain ⟨hhead, hm1, hm2, hm3⟩ := header16_eq hlen20 hbslt hmagic
+  have hmod : ∀ {v : Nat}, v < 256 ^ 4 → v % 2 ^ 32 = v := by
+    intro v hv
+    have e : (256 : Nat) ^ 4 = 2 ^ 32 := by decide
+    rw [e] at hv
+    exact Nat.mod_eq_of_lt hv
+  have hcle : B + 16 ≤ c := hseq.le
+  have hrdD : RdBytes m (B + 16) (c - (B + 16)) :=
+    RdBytes_mono hrd (by omega) (by omega)
+  obtain ⟨data, hmap, hbdd, hdataR⟩ := DataSeq_enc hseq hrdD
+  have hdatalen : data.length = (leVal ((bs.drop 12).take 4) % 2 ^ 32) := by
+    have e1 : data.length = ds.length := by
+      rw [← hmap]
+      exact (List.length_map List.length).symm
+    rw [e1, hdslen]
+  have hrdW : RdBytes m c (wordsBytes wds) :=
+    RdBytes_mono hrd (by omega) (by omega)
+  have hwordsR := WordsLay_rdN wds hlay hbw hrdW
+  have h16 : m.rdN B 16 = some (bs.take 16) := by
+    have hok : 0 + 16 ≤ 20 := by omega
+    have hs := rdN_slice h20 hok
+    simp only [Nat.add_zero, List.drop_zero] at hs
+    exact hs
+  have cat1 := rdN_concat h16 hdataR
+  have hwordsR' : m.rdN (B + (16 + (c - (B + 16))))
+      (wordsBytes wds) = some (wds.flatMap Word.enc) := by
+    have e : B + (16 + (c - (B + 16))) = c := by omega
+    rw [e]
+    exact hwordsR
+  have cat2 := rdN_concat cat1 hwordsR'
+  have elen : 16 + (c - (B + 16)) + wordsBytes wds = L := by
+    omega
+  rw [elen] at cat2
+  have hfenc : f = (⟨wds, data, (leVal ((bs.drop 4).take 4) % 2 ^ 32)⟩ : Prog).enc := by
+    have hsame : some f =
+        some ((bs.take 16 ++
+          data.flatMap (fun d => leBytes d.length 4 ++ d)) ++
+          wds.flatMap Word.enc) := hf.symm.trans cat2
+    have heq := Option.some.inj hsame
+    rw [hhead] at heq
+    rw [heq]
+    show _ = (⟨wds, data, (leVal ((bs.drop 4).take 4) % 2 ^ 32)⟩ : Prog).enc
+    unfold Prog.enc
+    rw [hdatalen]
+    rw [show (⟨wds, data, (leVal ((bs.drop 4).take 4) % 2 ^ 32)⟩ : Prog).words.length =
+      wds.length from rfl, hwdslen]
+    simp only [List.append_assoc]
+  refine ⟨⟨wds, data, (leVal ((bs.drop 4).take 4) % 2 ^ 32)⟩, ?_, rfl, rfl, hmap, ?_, hfenc⟩
+  · rw [hfenc]
+    apply decode_enc
+    refine ⟨?_, ?_, ?_, hbdd, hbw⟩
+    · show (leVal ((bs.drop 4).take 4) % 2 ^ 32) < 256 ^ 4
+      rw [hmod hm1]
+      exact hm1
+    · show wds.length < 256 ^ 4
+      rw [hwdslen, hmod hm2]
+      exact hm2
+    · show data.length < 256 ^ 4
+      rw [hdatalen, hmod hm3]
+      exact hm3
+  · exact ⟨by
+      show (leVal ((bs.drop 4).take 4) % 2 ^ 32) < 256 ^ 4
+      rw [hmod hm1]
+      exact hm1, by
+      show wds.length < 256 ^ 4
+      rw [hwdslen, hmod hm2]
+      exact hm2, by
+      show data.length < 256 ^ 4
+      rw [hdatalen, hmod hm3]
+      exact hm3, hbdd, hbw⟩
+
 end SporosX1
