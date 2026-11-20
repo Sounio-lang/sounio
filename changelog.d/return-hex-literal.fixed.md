@@ -1,0 +1,1 @@
+Madaros: `return 0x10` (and `break` with a hex value) keeps the value. Hex, binary and octal integers are their own token kinds and the parser's "does an expression follow" list admitted only decimal ones, so the literal was dropped, the return typed as `()`, and the checker reported "expected i64, found ()" at `return` (`tests/run-pass/return_hex_int_literal.sio`).
