@@ -303,7 +303,7 @@ In these domains, the ASHP 2020 §8.3 example above is not academic. It is the
 difference between a compiler catching a fatal drug dosing error and a runtime crash
 (or worse: a silent wrong answer).
 
-No other language in 2026 provides this guarantee at compile time.
+The type checker rejects that under-confident call in [`tests/compile-fail/vancomycin_low_conf.sio`](../tests/compile-fail/vancomycin_low_conf.sio): `Knowledge[f64, ε=0.40]` does not satisfy a parameter that requires `ε >= 0.82` (`error[E036]`, confidence bound is not tight enough).
 
 ---
 
