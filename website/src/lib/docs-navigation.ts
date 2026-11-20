@@ -43,6 +43,10 @@ export const docsNavSections: DocsNavSection[] = [
         title: 'Uncertainty tools compared',
         href: '/learn/epistemic/uncertainty-tools-compared/',
       },
+      {
+        title: 'Sounio vs mp-units vs physure',
+        href: '/learn/epistemic/sounio-vs-mp-units-vs-physure/',
+      },
     ],
   },
   {

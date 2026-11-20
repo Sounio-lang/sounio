@@ -245,6 +245,9 @@ function selfTest() {
   assert.equal(descriptionOf('<meta name="description" content="Knowledge&lt;T&gt; stays quoted.">'), 'Knowledge<T> stays quoted.');
   assert.equal(descriptionOf('<meta name="description" content="Knowledge<T> stays quoted.">'), 'Knowledge<T> stays quoted.');
   assert.equal(RESERVED_SCHEMA_IDS.has(COMPUTER_LANGUAGE_ID), false);
+  const aligned = 'Uncertainty propagation types in the Sounio language';
+  assert.equal(aligned.length >= 50 && aligned.length <= 60, true);
+  assert.equal(ENGLISH_SEARCH['/learn/epistemic/'].title, aligned);
 }
 
 function uncertaintyAppearanceErrors(route, html, blocks, page) {
@@ -526,8 +529,26 @@ for await (const file of walk(dist)) {
   if (!expected) continue;
   if (title !== expected.title) errors.push(`${route}: title is ${JSON.stringify(title)}, expected ${JSON.stringify(expected.title)}`);
   if (description !== expected.description) errors.push(`${route}: description does not match the recommended copy`);
-  if (headings.length === 1 && headings[0] === expected.title) {
+  if (bare === '/learn/epistemic/') {
+    if (headings[0] !== expected.title) {
+      errors.push(`${route}: H1 is ${JSON.stringify(headings[0])}, expected the title ${JSON.stringify(expected.title)}`);
+    }
+    for (const href of [
+      '/learn/epistemic/uncertainty-tools-compared/',
+      '/learn/epistemic/sounio-vs-mp-units-vs-physure/',
+    ]) {
+      if (!html.includes(`href="${href}"`)) errors.push(`${route}: missing link ${href}`);
+    }
+  } else if (headings.length === 1 && headings[0] === expected.title) {
     errors.push(`${route}: the visible H1 was replaced by the search title`);
+  }
+  if (bare === '/learn/') {
+    for (const href of [
+      '/learn/epistemic/uncertainty-tools-compared/',
+      '/learn/epistemic/sounio-vs-mp-units-vs-physure/',
+    ]) {
+      if (!html.includes(`href="${href}"`)) errors.push(`${route}: missing link ${href}`);
+    }
   }
     const article = articles[0];
     if (article) {
