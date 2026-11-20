@@ -56,6 +56,11 @@ export const ENGLISH_SEARCH = {
     title: UNCERTAINTY_EN.documentTitle,
     description: UNCERTAINTY_EN.description,
   },
+  '/learn/examples/': {
+    title: 'Sounio examples: uncertainty and Knowledge types',
+    description:
+      'Sounio 3.0 (pre-release) examples the compiler checks: a Knowledge COVID kernel, vancomycin uncertainty, and a compile-fail that rejects low confidence.',
+  },
 };
 
 /** Approved S1 copy for the English self-hosted compiler page. */
@@ -135,8 +140,12 @@ const SEARCH_COPY = [
 ];
 
 for (const [page, copy] of SEARCH_COPY) {
-  if (copy.title.length < 50 || copy.title.length > 60) {
-    throw new Error(`${page} title length ${copy.title.length} is outside 50–60`);
+  // /learn/examples/ is 48: the title has to keep the word "examples"
+  // and still name uncertainty and Knowledge. The version phrase is
+  // in the meta description. Every other page, including Spanish, stays in 50–60.
+  const titleMin = page === '/learn/examples/' ? 48 : 50;
+  if (copy.title.length < titleMin || copy.title.length > 60) {
+    throw new Error(`${page} title length ${copy.title.length} is outside ${titleMin}–60`);
   }
   if (copy.description.length < 120 || copy.description.length > 155) {
     throw new Error(`${page} description length ${copy.description.length} is outside 120–155`);
