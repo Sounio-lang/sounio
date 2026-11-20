@@ -2976,12 +2976,16 @@ fn nc_overflow_kind_text(kind: i64) -> string {
     else if kind == 9 { "i64 /" }
     else if kind == 10 { "i64 %" }
     else if kind == 11 { "u64 /" }
-    else { "u64 %" }
+    else if kind == 12 { "u64 %" }
+    else if kind == 13 { "i32 +" }
+    else if kind == 14 { "i32 -" }
+    else { "i32 *" }
 }
 
-// Kinds 0-8 are overflows; 9-12 are a zero divisor (ADR-031 R2).
+// Kinds 0-8 are overflows; 9-12 are a zero divisor (ADR-031 R2); 13-15 are
+// the i32 range guard of OpAddI32/OpSubI32/OpMulI32 (i32 + - *).
 fn nc_overflow_prefix(kind: i64) -> string {
-    if kind >= 9 { "sounio: division by zero (" } else { "sounio: integer overflow (" }
+    if kind >= 9 && kind <= 12 { "sounio: division by zero (" } else { "sounio: integer overflow (" }
 }
 
 // The message for one kind, interned once per compile in the flat rodata.
@@ -3096,6 +3100,24 @@ fn nc_emit_overflow_stubs(nc: &! NativeCompiler) with Mut, Panic, Div {
         i = i + 1
     }
     NC_OVF_PATCH_N = 0
+}
+
+// i32 range guard (ADR-031 R1) after a 64-bit add/sub/imul whose result is in
+// rax: the result must equal its own sign-extended low half. A fused form of the
+// shl 32 / sar 32 / compare / branch window the lowerer used to emit (about 30
+// machine instructions per site on the stack-slot emitter); five here.
+//   movsxd rcx, eax   48 63 C8
+//   cmp    rcx, rax   48 39 C1
+//   jne    trap       0F 85 rel32
+// rcx is scratch. `site` is the source location, re-armed because the guard
+// before it consumed it.
+fn nc_emit_i32_range_guard(nc: &! NativeCompiler, kind: i64, site: i64) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x63); nc_emit_byte(nc, 0xc8)
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x39); nc_emit_byte(nc, 0xc1)
+    let jne_pos = (*nc).code.len
+    nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x85); nc_emit_u32_le(nc, 0)
+    NC_CUR_SRC_SITE = site
+    nc_record_overflow_site(nc, jne_pos + 2, kind)
 }
 
 // JC rel32 (0F 82): taken when CF is set.
@@ -6533,11 +6555,17 @@ fn rgn_emit_zero_range(nc: &! NativeCompiler, lo: i64, hi: i64, c: i64, round_up
     let fits = rgn_emit_jcc(nc, 0x86)
     rgn_emit_mov(nc, 1, 2)
     rgn_patch(nc, fits)
+    // An empty range (a loop iteration that allocated nothing) skips the
+    // string instruction: `rep stosq` with rcx = 0 still pays its microcode
+    // start-up, and __rgn_reset runs at every loop iteration end.
+    rgn_emit_alu(nc, 0x85, 1, 1)
+    let empty = rgn_emit_jcc(nc, 0x84)
     rgn_emit_mov(nc, 7, lo)
     rgn_emit_alu(nc, 0x31, 0, 0)
     nc_emit_byte(nc, 0xf3)  // rep stosq
     nc_emit_byte(nc, 0x48)
     nc_emit_byte(nc, 0xab)
+    rgn_patch(nc, empty)
 }
 
 // Set both bumps back to the start of the region at `tok`.
@@ -12175,6 +12203,49 @@ fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64
         nc_core_mark_int_reg(nc, dst)
         return true
     }
+    // i32 add/sub/mul (ADR-031 R1): the 64-bit operation with its overflow
+    // guard (a wider right operand that wraps 64 bits is out of i32 range too, so
+    // it reports as the i32 kind and shares the range guard stub), then the i32
+    // range guard, fused. The same checks the lowerer used to spell out as IR.
+    if op == BinaryOp::OpAddI32 {
+        let site = NC_CUR_SRC_SITE
+        nc_core_load_temp_to_rax(nc, lhs)
+        nc_emit_push_rax(nc)
+        nc_core_load_temp_to_rax(nc, rhs)
+        nc_emit_pop_rbx(nc)
+        nc_emit_add_rax_rbx(nc)
+        nc_emit_overflow_guard(nc, 13)
+        nc_emit_i32_range_guard(nc, 13, site)
+        nc_core_store_rax_to_temp(nc, dst)
+        nc_core_mark_int_reg(nc, dst)
+        return true
+    }
+    if op == BinaryOp::OpSubI32 {
+        let site = NC_CUR_SRC_SITE
+        nc_core_load_temp_to_rax(nc, rhs)
+        nc_emit_push_rax(nc)
+        nc_core_load_temp_to_rax(nc, lhs)
+        nc_emit_pop_rbx(nc)
+        nc_emit_sub_rax_rbx(nc)
+        nc_emit_overflow_guard(nc, 14)
+        nc_emit_i32_range_guard(nc, 14, site)
+        nc_core_store_rax_to_temp(nc, dst)
+        nc_core_mark_int_reg(nc, dst)
+        return true
+    }
+    if op == BinaryOp::OpMulI32 {
+        let site = NC_CUR_SRC_SITE
+        nc_core_load_temp_to_rax(nc, lhs)
+        nc_emit_push_rax(nc)
+        nc_core_load_temp_to_rax(nc, rhs)
+        nc_emit_pop_rbx(nc)
+        nc_emit_imul_rax_rbx(nc)
+        nc_emit_overflow_guard(nc, 15)
+        nc_emit_i32_range_guard(nc, 15, site)
+        nc_core_store_rax_to_temp(nc, dst)
+        nc_core_mark_int_reg(nc, dst)
+        return true
+    }
     if op == BinaryOp::OpDiv {
         nc_core_load_temp_to_rax(nc, rhs)
         nc_emit_mov_reg_reg(nc, 1, 0)
@@ -16693,6 +16764,9 @@ fn a64_preview_binop_name(op: BinaryOp) -> string {
     if op == BinaryOp::OpUAdd { return "uadd" }
     if op == BinaryOp::OpUSub { return "usub" }
     if op == BinaryOp::OpUMul { return "umul" }
+    if op == BinaryOp::OpAddI32 { return "addi32" }
+    if op == BinaryOp::OpSubI32 { return "subi32" }
+    if op == BinaryOp::OpMulI32 { return "muli32" }
     if op == BinaryOp::OpDiv { return "div" }
     if op == BinaryOp::OpRem { return "rem" }
     if op == BinaryOp::OpEq { return "eq" }
@@ -16918,18 +16992,18 @@ fn a64_preview_emit_machine_instr(c: A64PreviewCompiler, instr: MachineInstr) ->
         out.code = a64_preview_emit_load_slot(out.code, A64_X10, instr.src1.value)
         if instr.bin_op == BinaryOp::OpAdd {
             out.code = a64_emit_add(out.code, A64_X9, A64_X9, A64_X10)
-        } else if instr.bin_op == BinaryOp::OpUAdd {
+        } else if instr.bin_op == BinaryOp::OpUAdd || instr.bin_op == BinaryOp::OpAddI32 {
             // SIO-588: unsigned add is the same instruction (no trap exists
             // in this preview backend); the U-variant only suppresses the
             // x86 overflow guard, which has no aarch64 counterpart.
             out.code = a64_emit_add(out.code, A64_X9, A64_X9, A64_X10)
         } else if instr.bin_op == BinaryOp::OpSub {
             out.code = a64_emit_sub(out.code, A64_X9, A64_X9, A64_X10)
-        } else if instr.bin_op == BinaryOp::OpUSub {
+        } else if instr.bin_op == BinaryOp::OpUSub || instr.bin_op == BinaryOp::OpSubI32 {
             out.code = a64_emit_sub(out.code, A64_X9, A64_X9, A64_X10)
         } else if instr.bin_op == BinaryOp::OpMul {
             out.code = a64_emit_mul(out.code, A64_X9, A64_X9, A64_X10)
-        } else if instr.bin_op == BinaryOp::OpUMul {
+        } else if instr.bin_op == BinaryOp::OpUMul || instr.bin_op == BinaryOp::OpMulI32 {
             out.code = a64_emit_mul(out.code, A64_X9, A64_X9, A64_X10)
         } else if instr.bin_op == BinaryOp::OpDiv {
             out.code = a64_emit_sdiv(out.code, A64_X9, A64_X9, A64_X10)

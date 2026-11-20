@@ -353,6 +353,7 @@ fn lower_instr_is_checked_arith(i: &IrInstr) -> bool {
         let b = (*i).bin_op
         return b == BinaryOp::OpAdd || b == BinaryOp::OpSub || b == BinaryOp::OpMul
             || b == BinaryOp::OpUAdd || b == BinaryOp::OpUSub || b == BinaryOp::OpUMul
+            || b == BinaryOp::OpAddI32 || b == BinaryOp::OpSubI32 || b == BinaryOp::OpMulI32
             || b == BinaryOp::OpDiv || b == BinaryOp::OpRem || b == BinaryOp::OpUDiv || b == BinaryOp::OpURem
     }
     if (*i).op == IrOpcode::IrUnaryOp { return (*i).un_op == UnaryOp::OpNeg }
@@ -45802,6 +45803,29 @@ impl Lowerer {
                 return (lo_u, dst)
             }
         }
+        // ADR-031 R1: a dynamic i32 +, - or * takes the fused variant (OpAddI32,
+        // OpSubI32, OpMulI32), whose backend emits the i32 range guard right
+        // after the operation. The gate is the one the check window below uses
+        // (left operand i32-typed, both sides non-float, right integer-
+        // compatible), so the set of trapping operations is unchanged; only the
+        // cost per site drops (one guard, not a five-op IR window). u32 and the
+        // division keep the window.
+        var i32_fused = false
+        if (e.bin_op == BinaryOp::OpAdd || e.bin_op == BinaryOp::OpSub || e.bin_op == BinaryOp::OpMul)
+            && final_op == e.bin_op && !lhs_expr_is_float && !rhs_expr_is_float {
+            if lo3.opt_expr_narrow32_kind_ref(&e.left) == 1 {
+                let rhs_int_f = match e.right {
+                    Some(nrbox) => rhs_is_intlit_p || lo3.expr_is_int_compatible_ref(&(*nrbox)),
+                    None => false,
+                }
+                if rhs_int_f {
+                    i32_fused = true
+                    if e.bin_op == BinaryOp::OpAdd { final_op = BinaryOp::OpAddI32 }
+                    else if e.bin_op == BinaryOp::OpSub { final_op = BinaryOp::OpSubI32 }
+                    else { final_op = BinaryOp::OpMulI32 }
+                }
+            }
+        }
         let lo4 = lo3.emit(ir_binop_typed(dst, lhs, final_op, rhs, lhs_expr_is_float, rhs_expr_is_float))
         // SIO-588 + ADR-031 R1: dynamic narrow-32 enforcement. The checker
         // types an arithmetic result as the LEFT operand (binary_result_type),
@@ -45815,7 +45839,7 @@ impl Lowerer {
         // rules), as does any op the gate cannot positively type.
         // ADR-031 R2: OpDiv joins the check because i32::MIN / -1 = 2^31 does
         // not fit i32 (the 64-bit idiv cannot fault on it).
-        if e.bin_op == BinaryOp::OpAdd || e.bin_op == BinaryOp::OpSub || e.bin_op == BinaryOp::OpMul || e.bin_op == BinaryOp::OpDiv {
+        if !i32_fused && (e.bin_op == BinaryOp::OpAdd || e.bin_op == BinaryOp::OpSub || e.bin_op == BinaryOp::OpMul || e.bin_op == BinaryOp::OpDiv) {
             if !lhs_expr_is_float && !rhs_expr_is_float {
                 let narrow_kind = lo4.opt_expr_narrow32_kind_ref(&e.left)
                 if narrow_kind != 0 {
