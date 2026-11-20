@@ -748,11 +748,26 @@ class Engines(unittest.TestCase):
             (src / "op-packed-bad.proposal.json").write_bytes(raw(dict(base, kind=2, phase=36077, pack=2)))
             (src / "op-staged.proposal.json").write_bytes(raw(dict(base, kind=2, phase=36077, load=2, layout=1, pack=1, vector_load=1)))
             (src / "op-staged-aos.proposal.json").write_bytes(raw(dict(base, kind=2, phase=36077, load=2, layout=0, pack=1, vector_load=1)))
+            (src / "op-wide.proposal.json").write_bytes(raw(dict(base, kind=2, phase=36077, load=2, block_threads=64)))
+            (src / "op-wide-pack.proposal.json").write_bytes(raw(dict(base, kind=2, phase=36077, pack=1, block_threads=32)))
+            (src / "op-wide-bad.proposal.json").write_bytes(raw(dict(base, kind=2, phase=36077, block_threads=96)))
             out = Path(directory) / "bundle"
             inbox_bundle.bundle(out, self.admission, src)
             summary = json.loads((out / "PROPOSALS.json").read_text())
             rows = {row["id"]: row for row in summary["proposals"]}
-            self.assertEqual(summary["admitted"], ["op-a", "op-b", "op-fixed", "op-packed", "op-staged"])
+            self.assertEqual(summary["admitted"], ["op-a", "op-b", "op-fixed", "op-packed", "op-staged", "op-wide"])
+            self.assertEqual(rows["op-wide"]["block_threads"], 64)
+            self.assertEqual(rows["op-wide-pack"]["reason"], "BLOCK_THREADS_PACK")
+            self.assertEqual(rows["op-wide-bad"]["reason"], "BLOCK_THREADS")
+            import r740_wide_launch as wide
+            for arch in ("sm86", "sm75"):
+                entries = {c["id"]: c for c in json.loads((out / arch / "gpu-manifest.json").read_text())["candidates"]}
+                self.assertEqual(entries["op-wide"]["block_threads"], 64)
+                for name, entry in entries.items():
+                    if name != "op-wide":
+                        self.assertNotIn("block_threads", entry, name)
+                    self.assertEqual(wide.geometry(entry, (out / arch / entry["ptx"]).read_bytes()),
+                                     64 if name == "op-wide" else 16, name)
             self.assertEqual(rows["op-staged"]["vector_load"], 1)
             self.assertEqual(rows["op-staged-aos"]["reason"], "VECTOR_LOAD_LAYOUT")
             self.assertEqual(rows["op-packed"]["pack"], 1)
@@ -1078,6 +1093,150 @@ class Engines(unittest.TestCase):
         self.assertGreater(mismatches(swapped, 36077, 1, 320), 0)
         self.assertEqual(mismatches(swapped, 36077, 1, 319), 0)
 
+    def test_b005_outputs_are_frozen_and_block_threads_0_or_16_keeps_them(self):
+        frozen = json.loads((HERE / "frozen_inbox_outputs.json").read_text())
+        b005 = frozen["outputs_b005"]
+        self.assertEqual(len(b005), 16)
+        context = HERE / "phase-a" / "context.json"
+        variant = self.work / "threads.proposal.json"
+        for name, modes in sorted(b005.items()):
+            body = json.loads((CONTINUITY / "inbox" / name).read_text())
+            self.assertEqual(body["load"], 2, name)
+            self.assertNotIn("block_threads", body)
+            for mode, digest in modes.items():
+                argv = [str(self.admission), str(context), str(CONTINUITY / "inbox" / name)]
+                argv += [] if mode == "receipt" else [mode]
+                self.assertEqual(hashlib.sha256(subprocess.run(argv, capture_output=True, timeout=30).stdout).hexdigest(),
+                                 digest, (name, mode))
+                for threads in (0, 16):
+                    variant.write_bytes(raw(dict(body, block_threads=threads)))
+                    argv = [str(self.admission), str(context), str(variant)] + ([] if mode == "receipt" else [mode])
+                    got = subprocess.run(argv, capture_output=True, timeout=30).stdout
+                    if mode == "receipt":
+                        # The proposal bytes (and so proposal_sha256) differ; everything else is equal.
+                        frozen_receipt = json.loads(subprocess.run(
+                            [str(self.admission), str(context), str(CONTINUITY / "inbox" / name)],
+                            capture_output=True, timeout=30).stdout)
+                        got = json.loads(got)
+                        self.assertNotIn("block_threads", got)
+                        got.pop("proposal_sha256")
+                        frozen_receipt.pop("proposal_sha256")
+                        self.assertEqual(got, frozen_receipt, (name, threads))
+                        continue
+                    self.assertEqual(hashlib.sha256(got).hexdigest(), digest, (name, mode, threads))
+
+    def test_block_threads_admission_and_refusals(self):
+        for kind, phase in ((1, None), (2, 36007)):
+            for load in (0, 1, 2):
+                base = json.loads(self.emit(None, kind, phase, dict(load=load, unroll=16)).stdout)
+                for threads, step in ((32, 1), (64, 2), (128, 3)):
+                    wide = json.loads(self.emit(None, kind, phase, dict(load=load, unroll=16, block_threads=threads)).stdout)
+                    self.assertEqual(wide["decision"], "ADMIT", wide)
+                    self.assertEqual(wide["block_threads"], threads)
+                    self.assertEqual(wide["plan_id"] - step * 1048576, base["plan_id"])
+                    self.assertEqual(wide["tensor_sha256"], base["tensor_sha256"])
+                self.assertNotIn("block_threads", base)
+                for threads in (0, 16):
+                    same = json.loads(self.emit(None, kind, phase, dict(load=load, unroll=16, block_threads=threads)).stdout)
+                    self.assertEqual(same["plan_id"], base["plan_id"])
+                    self.assertNotIn("block_threads", same)
+        for plan, mode, reason in ((dict(block_threads=8), "ptx-sm86", "BLOCK_THREADS"),
+                                   (dict(block_threads=17), "ptx-sm86", "BLOCK_THREADS"),
+                                   (dict(block_threads=48), "ptx-sm75", "BLOCK_THREADS"),
+                                   (dict(block_threads=256), "ptx-sm86", "BLOCK_THREADS"),
+                                   (dict(block_threads=1024), None, "BLOCK_THREADS"),
+                                   (dict(block_threads=32, pack=1), "ptx-sm86", "BLOCK_THREADS_PACK"),
+                                   (dict(block_threads=64, pack=1, load=2, layout=1, vector_load=1), None, "BLOCK_THREADS_PACK"),
+                                   (dict(block_threads=32, load=2, layout=1, vector_load=1), "ptx-sm86", "VECTOR_LOAD_PACK"),
+                                   (dict(block_threads=32), "ptx", "BLOCK_THREADS_TARGET"),
+                                   (dict(block_threads=128, load=2), "ptx", "BLOCK_THREADS_TARGET"),
+                                   (dict(block_threads=32, sign_mode=1, unroll=8), "ptx-sm86", "SIGN_MODE_UNROLL")):
+            run = self.emit(mode, 2, 35, plan)
+            self.assertEqual(run.returncode, 1, plan)
+            self.assertEqual(json.loads(run.stdout)["reason"], reason, plan)
+            self.assertNotIn(b".target", run.stdout)
+        # The sm_121 (Spark) mode keeps its bytes when block_threads is 0 or 16.
+        for threads in (0, 16):
+            self.assertEqual(self.emit("ptx", 2, 35, dict(block_threads=threads)).stdout, self.emit("ptx", 2, 35).stdout)
+
+    def test_wide_ptx_structure(self):
+        for threads in (32, 64, 128):
+            for load in (0, 1, 2):
+                for arch in ("ptx-sm86", "ptx-sm75"):
+                    ptx = self.emit(arch, 2, 36007, dict(load=load, layout=1, unroll=4, block_threads=threads)).stdout
+                    self.assertIn(b".maxntid " + str(threads).encode() + b",1,1\n", ptx)
+                    self.assertNotIn(b".maxntid 16,", ptx)
+                    self.assertIn(b"(.param .u64 pa, .param .u64 pb, .param .u64 pc, .param .u32 pn)\n", ptx)
+                    self.assertIn(b"ld.param.u32 %r2, [pn];", ptx)
+                    self.assertNotIn(b"%nctaid", ptx)
+                    self.assertIn(b"mad.lo.u32 %r24, %r1, " + str(threads // 16).encode() + b", %r23;", ptx)
+                    self.assertEqual(ptx.count(b"st.global.f64"), 1)
+                    self.assertEqual(ptx.count(b"@%p3 st.global.f64"), 1)
+                    self.assertNotIn(b"fma", ptx)
+                    self.assertNotIn(b".f32", ptx)
+                    self.assertEqual(ptx.count(b"bar.sync 0;"), 1 if load == 2 else 0)
+                    if load == 2:
+                        self.assertIn(b"pireus_sa[" + str(threads).encode() + b"];", ptx)
+                        barrier = ptx.index(b"bar.sync 0;")
+                        self.assertLess(ptx.rindex(b"st.shared.f64"), barrier)
+                        self.assertGreater(ptx.index(b"ld.shared.f64"), barrier)
+                        # No thread leaves between the guard and the barrier.
+                        self.assertNotIn(b"bra DONE", ptx[ptx.index(b"min.u32"):barrier])
+                    shuffles = ptx.count(b"shfl.sync.idx.b32")
+                    self.assertEqual(shuffles, 8 if load == 1 else 0)
+                    self.assertEqual(ptx.count(b", 4127, -1;"), shuffles)
+                    self.assertNotIn(b"65535", ptx)
+
+    def test_wide_ptx_computes_the_operator_reference_bit_for_bit(self):
+        import operator_reference as ref
+        import ptx_sim
+        rows = ref.load_rows(HERE / "phase-a" / "numeric-fixtures.jsonl")
+
+        def mismatches(ptx, phase, layout, count):
+            got = ptx_sim.run_rows(ptx.decode() if isinstance(ptx, bytes) else ptx, rows[:count], layout)
+            bad = 0
+            for v, row in enumerate(rows[:count]):
+                for k, word in enumerate(ref.outputs(phase, row)):
+                    other = got[v][k]
+                    if word != other and not (ref.is_nan(word & ptx_sim.M64) and ref.is_nan(other & ptx_sim.M64)):
+                        bad += 1
+            return bad
+
+        # 320 fills every block; 319 leaves a short last block for 32, 64 and 128.
+        cases = ((1, None, dict(lane_stride=1, lane_offset=0, layout=0, unroll=1, load=0, block_threads=32), 320),
+                 (2, 36007, dict(lane_stride=9, lane_offset=10, layout=0, unroll=1, load=2, block_threads=32), 319),
+                 (2, 33825, dict(lane_stride=13, lane_offset=9, layout=1, unroll=16, load=2, block_threads=64), 319),
+                 (2, 36077, dict(lane_stride=1, lane_offset=15, layout=0, unroll=16, load=1, sign_mode=1, block_threads=128), 319),
+                 (2, 36076, dict(lane_stride=11, lane_offset=3, layout=1, unroll=4, load=1, block_threads=64), 320),
+                 (2, 3183, dict(lane_stride=13, lane_offset=4, layout=1, unroll=16, load=2, sign_mode=1, block_threads=128), 320))
+        for kind, phase, plan, count in cases:
+            ptx = self.emit("ptx-sm86", kind, phase, plan).stdout
+            self.assertEqual(mismatches(ptx, phase or 0, plan["layout"], count), 0, (kind, phase, plan, count))
+        # Controls. Each must diverge: a flipped sign bit; groups that share one shared-memory
+        # slice; a wrong vectors-per-block factor; a shuffle that ignores the 16-lane segment.
+        ptx = self.emit("ptx-sm86", 2, 36007, dict(lane_stride=9, lane_offset=10, layout=1, unroll=2, load=2,
+                                                    block_threads=64)).stdout.decode()
+        head, rest = ptx.split("pireus_signs[16] = {", 1)
+        words, tail = rest.split("}", 1)
+        words = words.split(",")
+        words[5] = str(int(words[5]) ^ 4)
+        self.assertGreater(mismatches(head + "pireus_signs[16] = {" + ",".join(words) + "}" + tail, 36007, 1, 320), 0)
+        shared = ptx.replace("mul.wide.u32 %rd13, %r23, 128;", "mul.wide.u32 %rd13, %r23, 0;")
+        self.assertNotEqual(shared, ptx)
+        self.assertGreater(mismatches(shared, 36007, 1, 320), 0)
+        mapping = ptx.replace("mad.lo.u32 %r24, %r1, 4, %r23;", "mad.lo.u32 %r24, %r1, 3, %r23;")
+        self.assertNotEqual(mapping, ptx)
+        self.assertGreater(mismatches(mapping, 36007, 1, 320), 0)
+        shuffled = self.emit("ptx-sm86", 2, 36076, dict(lane_stride=11, lane_offset=3, layout=1, unroll=4, load=1,
+                                                         block_threads=32)).stdout.decode()
+        self.assertEqual(mismatches(shuffled, 36076, 1, 320), 0)
+        crossed = shuffled.replace("and.b32 %r8, %r8, 15;", "and.b32 %r8, %r8, 15;\n    xor.b32 %r8, %r8, 1;")
+        self.assertNotEqual(crossed, shuffled)
+        self.assertGreater(mismatches(crossed, 36076, 1, 320), 0)
+        # A shuffle without the 16-lane segment (c = 31) is not the emitted contract: refused.
+        with self.assertRaises(AssertionError):
+            mismatches(shuffled.replace(", 4127, -1;", ", 31, -1;"), 36076, 1, 320)
+
     def test_per_architecture_rule_matches_the_spark_bootstrap(self):
         text = "".join(f"{i} {i % 2} {900000 + (i * 17) % 50} 1000000\n" for i in range(30))
         paths = []
@@ -1215,10 +1374,116 @@ class OperatorReference(unittest.TestCase):
                 ref.reference(bad, fixtures)
 
 
+class WideLaunch(unittest.TestCase):
+    """The r740-only launch for block_threads 32/64/128. gpu_probe.py's call stays the 16 path."""
+
+    class Lib:
+        def __init__(self):
+            self.calls = []
+
+        def cuLaunchKernel(self, *argv):
+            # Read the parameter block now: the driver copies it at launch time too.
+            import ctypes
+            block = argv[9]
+            values = [ctypes.cast(block[i], ctypes.POINTER(ctypes.c_uint64)).contents.value for i in range(3)]
+            values.append(ctypes.cast(block[3], ctypes.POINTER(ctypes.c_uint32)).contents.value)
+            self.calls.append(argv[:9] + (values, argv[10]))
+            return 0
+
+    class FakeDriver:
+        def __init__(self):
+            self.lib = WideLaunch.Lib()
+            self.narrow = []
+
+        def launch(self, function, a, b, c, n):
+            self.narrow.append((function, n))
+
+        def check(self, code):
+            assert code == 0
+
+    class Tensor:
+        def __init__(self, address):
+            self.address = address
+
+        def data_ptr(self):
+            return self.address
+
+    def header(self, threads):
+        params = ".param .u64 pa, .param .u64 pb, .param .u64 pc"
+        if threads != 16:
+            params += ", .param .u32 pn"
+        return (".version 9.0\n.target sm_86\n.address_size 64\n.visible .entry pireus_candidate(" + params
+                + ")\n.maxntid " + str(threads) + ",1,1\n{\n}\n").encode()
+
+    def test_geometry_is_read_from_the_ptx_and_must_match_the_manifest(self):
+        import r740_wide_launch as wide
+        for threads in (16, 32, 64, 128):
+            item = {} if threads == 16 else {"block_threads": threads}
+            self.assertEqual(wide.geometry(item, self.header(threads)), threads)
+        with self.assertRaises(ValueError):
+            wide.geometry({"block_threads": 32}, self.header(64))
+        with self.assertRaises(ValueError):
+            wide.geometry({}, self.header(32))
+        for bad in (0, 8, 48, 256, True, "32"):
+            with self.assertRaises(ValueError):
+                wide.declared_threads({"block_threads": bad})
+        wrong = self.header(32).replace(b", .param .u32 pn", b"")
+        with self.assertRaises(ValueError):
+            wide.ptx_threads(wrong)
+        with self.assertRaises(ValueError):
+            wide.ptx_threads(self.header(16) + b".maxntid 16,1,1\n")
+        # Every vendored Phase A PTX is a 16-thread gpu_probe.py body.
+        for path in sorted((HERE / "phase-a" / "ptx").rglob("*.ptx")):
+            self.assertEqual(wide.ptx_threads(path.read_bytes()), 16, path)
+
+    def test_grid_and_launch_arguments(self):
+        import r740_wide_launch as wide
+        self.assertEqual([wide.grid(320, t) for t in (16, 32, 64, 128)], [320, 160, 80, 40])
+        self.assertEqual([wide.grid(319, t) for t in (16, 32, 64, 128)], [319, 160, 80, 40])
+        self.assertEqual([wide.grid(16384, t) for t in (32, 64, 128)], [8192, 4096, 2048])
+        for n in (0, 16777217, True):
+            with self.assertRaises(ValueError):
+                wide.grid(n, 32)
+        a, b, c = self.Tensor(4096), self.Tensor(8192), self.Tensor(12288)
+        driver = self.FakeDriver()
+        wide.launch(driver, "f16", a, b, c, 320, 16, stream=7)
+        self.assertEqual(driver.narrow, [("f16", 320)])
+        self.assertEqual(driver.lib.calls, [])
+        for threads, blocks in ((32, 160), (64, 80), (128, 40)):
+            wide.launch(driver, "fw", a, b, c, 320, threads, stream=7)
+            argv = driver.lib.calls[-1]
+            self.assertEqual(argv[:8], ("fw", blocks, 1, 1, threads, 1, 1, 0))
+            self.assertEqual(argv[8].value, 7)
+            self.assertIsNone(argv[10])
+            self.assertEqual(argv[9], [4096, 8192, 12288, 320])
+        self.assertEqual(driver.narrow, [("f16", 320)])
+
+    def test_observer_launches_only_through_the_wide_module_and_it_is_staged(self):
+        observe = (HERE / "r740_observe.py").read_text()
+        self.assertNotIn("driver.launch(", observe)
+        self.assertEqual(observe.count("launch(driver, function, *tensors, out, "), 3)
+        self.assertIn("r740_wide_launch.py", launch.STAGED)
+        with tempfile.TemporaryDirectory() as directory:
+            bindir = launch.stage_into(directory)
+            self.assertEqual((bindir / "r740_wide_launch.py").read_bytes(), (HERE / "r740_wide_launch.py").read_bytes())
+            self.assertEqual((bindir / "gpu_probe.py").read_bytes(), (CONTINUITY / "gpu_probe.py").read_bytes())
+        source = (HERE / "r740_wide_launch.py").read_text()
+        for word in launch.FORBIDDEN:
+            self.assertNotIn(word, source)
+
+
 class SparkUntouched(unittest.TestCase):
     def test_spark_sources_keep_their_prechange_hashes(self):
         for rel, digest in UNCHANGED.items():
             self.assertEqual(sha(ROOT / rel), digest, rel)
+
+    def test_gpu_probe_is_byte_identical_to_bae639fe(self):
+        # gpu_probe.py at bae639fe (the b005 head) is d9a01f4c...; the r740 wide launch
+        # lives in r740/r740_wide_launch.py and never edits it.
+        probe = CONTINUITY / "gpu_probe.py"
+        self.assertEqual(sha(probe), "d9a01f4c4c3e9a3b33cc7150fc11e72cd8627aa3b143e11e4942a245c75ec959")
+        self.assertEqual(UNCHANGED["tools/pireus/continuity/gpu_probe.py"], sha(probe))
+        self.assertIn(b"self.lib.cuLaunchKernel(function,n,1,1,16,1,1,0,", probe.read_bytes())
 
 
 if __name__ == "__main__":
