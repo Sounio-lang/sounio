@@ -11,9 +11,9 @@ import { UNCERTAINTY_EN } from './uncertainty-page.mjs';
  */
 export const ENGLISH_SEARCH = {
   '/': {
-    title: 'Sounio language: units, effects, and uncertainty types',
+    title: 'Sounio, a programming language: units, uncertainty',
     description:
-      'Sounio is a self-hosted systems language for uncertainty, physical units, and declared effects. Follow a program back to the compiler sources.',
+      'Metres added to seconds is refused before the program runs, and a Knowledge value carries a standard uncertainty. Sounio 3.0 (pre-release).',
   },
   '/learn/': {
     title: 'Sounio guides: effect system, units, and uncertainty',
@@ -23,7 +23,7 @@ export const ENGLISH_SEARCH = {
   '/learn/getting-started/': {
     title: 'Sounio getting started: Linux prebuilt or macOS build',
     description:
-      'Clone Sounio, then check and run a .sio program. Linux x86-64 uses the committed prebuilt; macOS ARM64 builds the compiler from source.',
+      'Open the Sounio demo Codespace, or clone and run hello.sio. Linux x86-64 uses the committed prebuilt; macOS ARM64 builds from source.',
   },
   '/learn/epistemic/': {
     title: 'Uncertainty propagation types in the Sounio language',
