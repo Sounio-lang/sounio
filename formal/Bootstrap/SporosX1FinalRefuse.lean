@@ -68177,4 +68177,260 @@ theorem words_loopB {im : Nat → Option (Ins × Nat)}
       rw [run_add im k1 k2, hrun1]
       exact hrun2⟩
 
+theorem CheckStart_tripleB {im : Nat → Option (Ins × Nat)}
+    (oc : OuterCode im) {nw tbl : Nat} :
+    ∀ s, s.rip = aCheckStart → s.reg 14 = some tbl → s.reg 13 = some nw →
+      ∃ m s', m ≤ 2 ∧ run im m (Out.ok s) = Out.ok s' ∧ s'.rip = aCheckWord ∧
+        s'.reg 7 = some tbl ∧ s'.reg 5 = some nw ∧
+        (∀ q, q ≠ 5 → q ≠ 7 → s'.reg q = s.reg q) ∧ s'.mem = s.mem ∧
+        s'.regs.length = s.regs.length := by
+  intro s hrip hr14 hr13
+  have e1 : X86Int.step im s = .ok { s.set 7 (some tbl) with
+      rip := s.rip + 3 } :=
+    step_mov (by rw [hrip]; exact oc.cs0) hr14
+  obtain ⟨a1, ha1⟩ : ∃ u : X86Int.St, u = { s.set 7 (some tbl) with
+    rip := s.rip + 3 } := ⟨_, rfl⟩
+  have ha1rip : a1.rip = aCheckStart + 3 := by
+    rw [ha1]; show s.rip + 3 = aCheckStart + 3; rw [hrip]
+  have ga1 : ∀ q, q ≠ 7 → a1.reg q = s.reg q := by
+    intro q hq
+    rw [ha1]
+    show (s.set 7 (some tbl)).reg q = s.reg q
+    rw [reg_set_other hq]
+  have ha1r7 : a1.reg 7 = some tbl := by
+    rw [ha1]
+    show (s.set 7 (some tbl)).reg 7 = some tbl
+    rw [reg_set_self (by
+      have : 13 < s.regs.length := reg_some_len hr13
+      omega)]
+  have e2 : X86Int.step im a1 = .ok { a1.set 5 (some nw) with
+      rip := a1.rip + 3 } :=
+    step_mov (by rw [ha1rip]; exact oc.cs1)
+      (by rw [ga1 13 (by decide)]; exact hr13)
+  obtain ⟨a2, ha2⟩ : ∃ u : X86Int.St, u = { a1.set 5 (some nw) with
+    rip := a1.rip + 3 } := ⟨_, rfl⟩
+  have rr1 : run im 1 (Out.ok s) = Out.ok a1 := by
+    rw [run_succ_ok im 0 s, e1, ← ha1, run_zero]
+  have rr2 : run im 1 (Out.ok a1) = Out.ok a2 := by
+    rw [run_succ_ok im 0 a1, e2, ← ha2, run_zero]
+  refine ⟨1 + 1, a2, by decide, by rw [run_add im 1 1, rr1, rr2], ?_, ?_, ?_, ?_, ?_, ?_⟩
+  · rw [ha2]; show a1.rip + 3 = aCheckWord; rw [ha1rip]; rfl
+  · rw [ha2]
+    show (a1.set 5 (some nw)).reg 7 = some tbl
+    rw [reg_set_other (by decide)]; exact ha1r7
+  · rw [ha2]
+    show (a1.set 5 (some nw)).reg 5 = some nw
+    rw [reg_set_self (by
+      have e : a1.regs.length = s.regs.length := by
+        rw [ha1]
+        show (s.set 7 (some tbl)).regs.length = s.regs.length
+        exact List.length_set
+      have : 13 < s.regs.length := reg_some_len hr13
+      omega)]
+  · intro q h5 h7
+    rw [ha2]
+    show (a1.set 5 (some nw)).reg q = s.reg q
+    rw [reg_set_other h5]; exact ga1 q h7
+  · rw [ha2, ha1]; exact rfl
+  · rw [ha2, ha1]
+    exact List.length_set.trans List.length_set
+
+/-- Bounded accept direction of the stage-1 checker at `check_word`. -/
+theorem checker_acceptsB {im : Nat → Option (Ins × Nat)}
+    (ac : AllCode im) (oc : OuterCode im)
+    {pr : Prog} {tbl sp : Nat} (hsp48 : 48 ≤ sp) (hspW : sp < W)
+    (htblW : tbl + 64 * pr.words.length < W)
+    (htab : ∀ j, j < pr.words.length →
+      sp ≤ tbl + 64 * j ∨ tbl + 64 * j + 64 ≤ sp - 48)
+    (hdisjEff48 : aEff + 114 ≤ sp - 48 ∨ sp ≤ aEff)
+    (hchk : Sporos.checkProg1 pr = true) :
+    ∀ s, OuterSt pr tbl sp pr.words s →
+      ∃ m, m ≤ ((pr.words.map (fun wd => ((7 + (wd.ann.length + 1) * (60 + 20 * (wd.ann.length + 1)) + (30 + 20 * (wd.ann.length + 1))) + (wd.code.length + 1) * (200 + 60 * (wd.ann.length + 1))) + 3)).sum + 8) ∧ run im m (Out.ok s) = Out.exit 0 := by
+  have hall : ∀ wd ∈ pr.words, Sporos.checkWord1 pr wd = true := by
+    have h2 : (pr.words.all fun wd => Sporos.checkWord1 pr wd) = true := by
+      have hh := hchk
+      simp only [Sporos.checkProg1, Bool.and_eq_true] at hh
+      exact hh.1
+    exact fun wd hmem => List.all_eq_true.mp h2 wd hmem
+  intro s hs
+  obtain ⟨k, hk, hrun⟩ := words_loopB ac oc hsp48 hspW htblW htab
+    hdisjEff48 hall pr.words [] (by simp) s hs
+  exact ⟨k, hk, hrun⟩
+
+/-- Bounded accept direction against `Sporos.checkProg`. -/
+theorem checker_accepts_checkProgB {im : Nat → Option (Ins × Nat)}
+    (ac : AllCode im) (oc : OuterCode im)
+    {pr : Prog} {tbl sp : Nat} (hsp48 : 48 ≤ sp) (hspW : sp < W)
+    (htblW : tbl + 64 * pr.words.length < W)
+    (htab : ∀ j, j < pr.words.length →
+      sp ≤ tbl + 64 * j ∨ tbl + 64 * j + 64 ≤ sp - 48)
+    (hdisjEff48 : aEff + 114 ≤ sp - 48 ∨ sp ≤ aEff)
+    (hchk : Sporos.checkProg pr = true) :
+    ∀ s, OuterSt pr tbl sp pr.words s →
+      ∃ m, m ≤ ((pr.words.map (fun wd => ((7 + (wd.ann.length + 1) * (60 + 20 * (wd.ann.length + 1)) + (30 + 20 * (wd.ann.length + 1))) + (wd.code.length + 1) * (200 + 60 * (wd.ann.length + 1))) + 3)).sum + 8) ∧ run im m (Out.ok s) = Out.exit 0 :=
+  fun s hs => checker_acceptsB ac oc hsp48 hspW htblW htab hdisjEff48
+    (by rw [Sporos.checkProg1_eq]; exact hchk) s hs
+
+/-- Bounded accept direction from `check_start`. -/
+theorem checker_accepts_from_startB {im : Nat → Option (Ins × Nat)}
+    (ac : AllCode im) (oc : OuterCode im)
+    {pr : Prog} {tbl sp : Nat} (hsp48 : 48 ≤ sp) (hspW : sp < W)
+    (htblW : tbl + 64 * pr.words.length < W)
+    (htab : ∀ j, j < pr.words.length →
+      sp ≤ tbl + 64 * j ∨ tbl + 64 * j + 64 ≤ sp - 48)
+    (hdisjEff48 : aEff + 114 ≤ sp - 48 ∨ sp ≤ aEff)
+    (hchk : Sporos.checkProg pr = true) :
+    ∀ s, s.rip = aCheckStart → s.reg 14 = some tbl →
+      s.reg 13 = some pr.words.length → s.reg 4 = some sp →
+      16 ≤ s.regs.length → RegsOk s → StackRoom s 6 → EffTable s →
+      WordTab pr tbl sp s →
+      ∃ m, m ≤ ((pr.words.map (fun wd => ((7 + (wd.ann.length + 1) * (60 + 20 * (wd.ann.length + 1)) + (30 + 20 * (wd.ann.length + 1))) + (wd.code.length + 1) * (200 + 60 * (wd.ann.length + 1))) + 3)).sum + 10) ∧ run im m (Out.ok s) = Out.exit 0 := by
+  intro s hrip hr14 hr13 hr4 h16 hregs hroom heff htabS
+  obtain ⟨k1, s1, hk1, hrun1, hs1rip, hs1r7, hs1r5, gb1, hs1mem, hlen1⟩ :=
+    CheckStart_tripleB oc s hrip hr14 hr13
+  have hs1 : OuterSt pr tbl sp pr.words s1 := by
+    refine ⟨hs1rip, hs1r5, by simpa using hs1r7,
+      by rw [gb1 13 (by decide) (by decide)]; exact hr13,
+      by rw [gb1 14 (by decide) (by decide)]; exact hr14,
+      by rw [gb1 4 (by decide) (by decide)]; exact hr4, by omega,
+      run_regs_ok hrun1 hregs,
+      StackRoom_of_mem hs1mem (by
+        rw [gb1 4 (by decide) (by decide)]) hroom,
+      by
+        intro q
+        rw [hs1mem]; exact heff q,
+      by
+        apply WordTab_of_frame htabS htab
+        intro x n _
+        rw [hs1mem]⟩
+  obtain ⟨k2, hk2, hrun2⟩ := checker_accepts_checkProgB ac oc hsp48 hspW htblW htab
+    hdisjEff48 hchk s1 hs1
+  exact ⟨k1 + k2, by omega, by
+    rw [run_add im k1 k2, hrun1]
+    exact hrun2⟩
+
+
+theorem code_sum_le : ∀ (wds : List Word),
+    (wds.map (fun wd => wd.code.length)).sum ≤ wordsBytes wds
+  | [] => by simp [wordsBytes]
+  | wd :: wds => by
+    have ih := code_sum_le wds
+    have hcb := code_length_le_bytes wd.code
+    simp only [List.map_cons, List.sum_cons, wordsBytes]
+    omega
+
+theorem ann12_sum_le : ∀ (wds : List Word),
+    12 * (wds.map (fun wd => wd.ann.length)).sum ≤ wordsBytes wds
+  | [] => by simp [wordsBytes]
+  | wd :: wds => by
+    have ih := ann12_sum_le wds
+    simp only [List.map_cons, List.sum_cons, wordsBytes, Nat.left_distrib]
+    omega
+
+theorem mem_bytes_le : ∀ (wds : List Word) (wd : Word), wd ∈ wds →
+    codeBytes wd.code + 12 * wd.ann.length ≤ wordsBytes wds
+  | [], _, hm => by simp at hm
+  | x :: xs, wd, hm => by
+    simp only [List.mem_cons] at hm
+    rcases hm with rfl | hm
+    · simp only [wordsBytes]; omega
+    · have ih := mem_bytes_le xs wd hm
+      simp only [wordsBytes]; omega
+
+theorem wordCost_lin_le (E : Nat) (wd : Word)
+    (hc : wd.code.length ≤ E) (ha : wd.ann.length ≤ E) :
+    ((7 + (wd.ann.length + 1) * (60 + 20 * (wd.ann.length + 1)) + (30 + 20 * (wd.ann.length + 1))) + (wd.code.length + 1) * (200 + 60 * (wd.ann.length + 1))) + 3 ≤ 10 + (wd.ann.length + 1) * (60 + 20 * (E + 1)) +
+      (30 + 20 * (E + 1)) + (wd.code.length + 1) * (200 + 60 * (E + 1)) := by
+  have e1 : 60 + 20 * (wd.ann.length + 1) ≤ 60 + 20 * (E + 1) := by omega
+  have e2 : 200 + 60 * (wd.ann.length + 1) ≤ 200 + 60 * (E + 1) := by omega
+  have t1 : (wd.ann.length + 1) * (60 + 20 * (wd.ann.length + 1)) ≤
+      (wd.ann.length + 1) * (60 + 20 * (E + 1)) :=
+    Nat.mul_le_mul (Nat.le_refl _) e1
+  have t3 : (wd.code.length + 1) * (200 + 60 * (wd.ann.length + 1)) ≤
+      (wd.code.length + 1) * (200 + 60 * (E + 1)) :=
+    Nat.mul_le_mul (Nat.le_refl _) e2
+  omega
+
+
+theorem map_sum_le_length : ∀ (wds : List Word) (f : Word → Nat) (M : Nat),
+    (∀ wd ∈ wds, f wd ≤ M) → (wds.map f).sum ≤ wds.length * M
+  | [], _, _, _ => by simp
+  | x :: xs, f, M, h => by
+    have h1 := h x (List.mem_cons.mpr (Or.inl rfl))
+    have ih := map_sum_le_length xs f M
+      (fun wd hm => h wd (List.mem_cons_of_mem _ hm))
+    simp only [List.map_cons, List.sum_cons, List.length_cons]
+    rw [Nat.add_mul, Nat.one_mul]
+    omega
+
+theorem checker_cost_fit (E : Nat) (wds : List Word)
+    (hE : wordsBytes wds ≤ E) :
+    (wds.map (fun wd => ((7 + (wd.ann.length + 1) * (60 + 20 * (wd.ann.length + 1)) + (30 + 20 * (wd.ann.length + 1))) + (wd.code.length + 1) * (200 + 60 * (wd.ann.length + 1))) + 3)).sum + 10 ≤ 10000 * (E + 16)^3 := by
+  have hcap : ∀ wd ∈ wds, ((7 + (wd.ann.length + 1) * (60 + 20 * (wd.ann.length + 1)) + (30 + 20 * (wd.ann.length + 1))) + (wd.code.length + 1) * (200 + 60 * (wd.ann.length + 1))) + 3 ≤ 10 + (E + 1) * (60 + 20 * (E + 1)) + (30 + 20 * (E + 1)) + (E + 1) * (200 + 60 * (E + 1)) := by
+    intro wd hm
+    have hb := mem_bytes_le wds wd hm
+    have hc0 := code_length_le_bytes wd.code
+    have hc : wd.code.length ≤ E := by omega
+    have ha : wd.ann.length ≤ E := by omega
+    have hlin := wordCost_lin_le E wd hc ha
+    have m1 : (wd.ann.length + 1) * (60 + 20 * (E + 1)) ≤
+        (E + 1) * (60 + 20 * (E + 1)) :=
+      Nat.mul_le_mul (by omega) (Nat.le_refl _)
+    have m3 : (wd.code.length + 1) * (200 + 60 * (E + 1)) ≤
+        (E + 1) * (200 + 60 * (E + 1)) :=
+      Nat.mul_le_mul (by omega) (Nat.le_refl _)
+    omega
+  have hsum := map_sum_le_length wds (fun wd => ((7 + (wd.ann.length + 1) * (60 + 20 * (wd.ann.length + 1)) + (30 + 20 * (wd.ann.length + 1))) + (wd.code.length + 1) * (200 + 60 * (wd.ann.length + 1))) + 3) (10 + (E + 1) * (60 + 20 * (E + 1)) + (30 + 20 * (E + 1)) + (E + 1) * (200 + 60 * (E + 1))) hcap
+  have hn : wds.length ≤ E := by
+    have hw := wordsBytes_ge wds; omega
+  have eP1 : E + 1 ≤ E + 16 := by omega
+  have e1P : 1 ≤ E + 16 := by omega
+  have hK1 : 60 + 20 * (E + 1) ≤ 80 * (E + 16) := by omega
+  have hK2 : 200 + 60 * (E + 1) ≤ 200 * (E + 16) := by omega
+  have hC0 : 30 + 20 * (E + 1) ≤ 40 * (E + 16) := by omega
+  have t1 : (E + 1) * (60 + 20 * (E + 1)) ≤ (E + 16) * (80 * (E + 16)) :=
+    Nat.mul_le_mul eP1 hK1
+  have t3 : (E + 1) * (200 + 60 * (E + 1)) ≤ (E + 16) * (200 * (E + 16)) :=
+    Nat.mul_le_mul eP1 hK2
+  have hPP : E + 16 ≤ (E + 16) * (E + 16) := by
+    have h := Nat.mul_le_mul (Nat.le_refl (E + 16)) e1P
+    rwa [Nat.mul_one] at h
+  have hQ1 : 1 ≤ (E + 16) * (E + 16) := by
+    have h := Nat.mul_le_mul e1P e1P
+    simpa using h
+  have s10 : 10 ≤ 10 * ((E + 16) * (E + 16)) := by
+    have h := Nat.mul_le_mul (Nat.le_refl 10) hQ1
+    rwa [Nat.mul_one] at h
+  have s1 : (E + 16) * (80 * (E + 16)) = 80 * ((E + 16) * (E + 16)) := by
+    rw [Nat.mul_left_comm]
+  have s40 : (E + 16) * (40 * (E + 16)) = 40 * ((E + 16) * (E + 16)) := by
+    rw [Nat.mul_left_comm]
+  have s3 : (E + 16) * (200 * (E + 16)) = 200 * ((E + 16) * (E + 16)) := by
+    rw [Nat.mul_left_comm]
+  have hQR : (E + 16) * (E + 16) ≤ (((E + 16) * (E + 16)) * (E + 16)) := by
+    have h := Nat.mul_le_mul (Nat.le_refl ((E + 16) * (E + 16))) e1P
+    rwa [Nat.mul_one] at h
+  have u10 : (E + 16) * (10 * ((E + 16) * (E + 16))) = 10 * (((E + 16) * (E + 16)) * (E + 16)) := by
+    rw [Nat.mul_left_comm, Nat.mul_comm (E + 16) ((E + 16) * (E + 16))]
+  have u80 : (E + 16) * (80 * ((E + 16) * (E + 16))) = 80 * (((E + 16) * (E + 16)) * (E + 16)) := by
+    rw [Nat.mul_left_comm, Nat.mul_comm (E + 16) ((E + 16) * (E + 16))]
+  have u40 : (E + 16) * (40 * ((E + 16) * (E + 16))) = 40 * (((E + 16) * (E + 16)) * (E + 16)) := by
+    rw [Nat.mul_left_comm, Nat.mul_comm (E + 16) ((E + 16) * (E + 16))]
+  have u200 : (E + 16) * (200 * ((E + 16) * (E + 16))) = 200 * (((E + 16) * (E + 16)) * (E + 16)) := by
+    rw [Nat.mul_left_comm, Nat.mul_comm (E + 16) ((E + 16) * (E + 16))]
+  have hST : (10 + (E + 16) * (80 * (E + 16)) + 40 * (E + 16) + (E + 16) * (200 * (E + 16))) ≤ (10 * ((E + 16) * (E + 16)) + 80 * ((E + 16) * (E + 16)) + 40 * ((E + 16) * (E + 16)) + 200 * ((E + 16) * (E + 16))) := by omega
+  have step1 : wds.length * (10 + (E + 1) * (60 + 20 * (E + 1)) + (30 + 20 * (E + 1)) + (E + 1) * (200 + 60 * (E + 1))) ≤ E * (10 + (E + 16) * (80 * (E + 16)) + 40 * (E + 16) + (E + 16) * (200 * (E + 16))) :=
+    Nat.mul_le_mul hn (by omega)
+  have eE : E * (10 + (E + 16) * (80 * (E + 16)) + 40 * (E + 16) + (E + 16) * (200 * (E + 16))) ≤ (E + 16) * (10 + (E + 16) * (80 * (E + 16)) + 40 * (E + 16) + (E + 16) * (200 * (E + 16))) :=
+    Nat.mul_le_mul (by omega) (Nat.le_refl _)
+  have g1 : (E + 16) * (10 + (E + 16) * (80 * (E + 16)) + 40 * (E + 16) + (E + 16) * (200 * (E + 16))) ≤ (E + 16) * (10 * ((E + 16) * (E + 16)) + 80 * ((E + 16) * (E + 16)) + 40 * ((E + 16) * (E + 16)) + 200 * ((E + 16) * (E + 16))) :=
+    Nat.mul_le_mul (Nat.le_refl _) hST
+  have g2 : (E + 16) * (10 * ((E + 16) * (E + 16)) + 80 * ((E + 16) * (E + 16)) + 40 * ((E + 16) * (E + 16)) + 200 * ((E + 16) * (E + 16))) = ((E + 16) * (10 * ((E + 16) * (E + 16))) + (E + 16) * (80 * ((E + 16) * (E + 16))) + (E + 16) * (40 * ((E + 16) * (E + 16))) + (E + 16) * (200 * ((E + 16) * (E + 16)))) := by
+    rw [Nat.left_distrib, Nat.left_distrib, Nat.left_distrib]
+  have g3 : ((E + 16) * (10 * ((E + 16) * (E + 16))) + (E + 16) * (80 * ((E + 16) * (E + 16))) + (E + 16) * (40 * ((E + 16) * (E + 16))) + (E + 16) * (200 * ((E + 16) * (E + 16)))) ≤ 10000 * (((E + 16) * (E + 16)) * (E + 16)) := by omega
+  have hP3 : (E + 16)^3 = (((E + 16) * (E + 16)) * (E + 16)) := by
+    rw [Nat.pow_succ, Nat.pow_succ, Nat.pow_one]
+  rw [hP3]
+  omega
+
 end SporosX1
