@@ -45,6 +45,13 @@ export const ENGLISH_SEARCH = {
     description:
       'Effect system in Sounio: side effects sit in the function signature. Built-in names form a closed checked list. A caller that omits one is rejected.',
   },
+  '/learn/compiler/effect-system/': {
+    title: 'Sounio effect system: how the effect checker works',
+    description:
+      'How the Sounio compiler checks the effect system: source map of self-hosted/check/effects.sio and the effects subsystem, and what handlers do today.',
+    // last_validated on en/compiler/effect-system.mdx. Not a release version.
+    dateModified: '2026-10-29',
+  },
   '/learn/epistemic/uncertainty/': {
     title: UNCERTAINTY_EN.documentTitle,
     description: UNCERTAINTY_EN.description,
@@ -101,17 +108,41 @@ export const EFFECTS_PAGE = {
   dateModified: '2026-11-06',
 };
 
+/**
+ * Spanish learn hub. The nav label "Aprender — Sounio" was a second result
+ * for the query "sounio", next to the homepage. The visible H1 stays the
+ * journey line; only the document title and meta description change.
+ */
+export const SPANISH_SEARCH = {
+  '/learn/': {
+    title: 'Guías de Sounio: efectos, unidades e incertidumbre',
+    description:
+      'Guías del lenguaje Sounio: unidades de medida, el sistema de efectos, tipos de refinamiento, propagación de incertidumbre y el compilador autoalojado.',
+  },
+};
+
 export function englishSearchFor(barePath, locale) {
   if (locale !== 'en') return undefined;
   return ENGLISH_SEARCH[barePath];
 }
 
+export function searchCopyFor(barePath, locale) {
+  if (locale === 'en') return ENGLISH_SEARCH[barePath];
+  if (locale === 'es') return SPANISH_SEARCH[barePath];
+  return undefined;
+}
+
 const COMPILER_VERSION = /v0\.80|v0\.99|v0\.100|v1\.0/;
 
-for (const [page, copy] of Object.entries(ENGLISH_SEARCH)) {
+const SEARCH_COPY = [
+  ...Object.entries(ENGLISH_SEARCH),
+  ...Object.entries(SPANISH_SEARCH).map(([pathName, copy]) => [`es:${pathName}`, copy]),
+];
+
+for (const [page, copy] of SEARCH_COPY) {
   // /learn/examples/ is 48: the title has to keep the word "examples"
   // and still name uncertainty and Knowledge. The version phrase is
-  // in the meta description. Every other page stays in 50–60.
+  // in the meta description. Every other page, including Spanish, stays in 50–60.
   const titleMin = page === '/learn/examples/' ? 48 : 50;
   if (copy.title.length < titleMin || copy.title.length > 60) {
     throw new Error(`${page} title length ${copy.title.length} is outside ${titleMin}–60`);

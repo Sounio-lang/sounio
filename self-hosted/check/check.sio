@@ -38,6 +38,7 @@ use check::ontology_side_table_cache::{
 use check::mod::{check_policy_requirements_to_ir}
 use parser::ast::*
 use ir::ir::*
+use check::hyper::{resolve_algebra_name}
 
 // ============================================================
 // Visibility / module-path helpers
@@ -5656,6 +5657,13 @@ fn checker_collect_runtime_builtins_inplace(c: *mut Checker) with Mut, Panic, Di
     checker_bind_import_unknown_inplace(c, make_name("variance_of"))
     checker_bind_import_unknown_inplace(c, make_name("sign"))
     checker_bind_import_unknown_inplace(c, make_name("covariance_of"))
+    checker_bind_import_unknown_inplace(c, make_name("meet"))
+    checker_bind_import_unknown_inplace(c, make_name("meet_birge"))
+    checker_bind_import_unknown_inplace(c, make_name("en_of"))
+    checker_bind_import_unknown_inplace(c, make_name("birge_of"))
+    checker_bind_import_unknown_inplace(c, make_name("neff_of"))
+    checker_bind_import_unknown_inplace(c, make_name("contest"))
+    checker_bind_import_unknown_inplace(c, make_name("retract"))
     checker_bind_import_unknown_inplace(c, make_name("sensitivity_of"))
     checker_bind_import_unknown_inplace(c, make_name("uncertainty_of"))
     checker_bind_import_unknown_inplace(c, make_name("hessian_of"))
@@ -12436,6 +12444,8 @@ fn call_expr_should_bridge_by_value(e: Expr) -> bool with Mut, Panic, Div, Alloc
     if call_expr_is_builtin_sign(e.left) && expr_list_handle_count(expr_list_handle(e.args)) == 2 { return true }
     if call_expr_is_builtin_variance_of(e.left) { return true }
     if call_expr_is_builtin_covariance_of(e.left) { return true }
+    if call_expr_merge_kind(e.left) >= 0 { return true }
+    if call_expr_contest_kind(e.left) >= 0 { return true }
     if call_expr_is_builtin_uncertainty_of(e.left) { return true }
     if call_expr_is_builtin_sensitivity_of(e.left) { return true }
     if call_expr_is_builtin_hessian_of(e.left) { return true }
@@ -14459,11 +14469,119 @@ fn checker_validate_call_qualifier_inplace(c: *mut Checker, callee: Expr, span: 
     -1
 }
 
+// ADR-016 fusion builtins: 0 meet, 1 meet_birge, 2 en_of, 3 birge_of, 4 neff_of.
+fn call_expr_merge_kind(opt: Option<Box<Expr> >) -> i64 with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent { return 0 - 1 }
+            let n = (*expr).name
+            if name_eq_lit(n, "meet") { return 0 }
+            if name_eq_lit(n, "meet_birge") { return 1 }
+            if name_eq_lit(n, "en_of") { return 2 }
+            if name_eq_lit(n, "birge_of") { return 3 }
+            if name_eq_lit(n, "neff_of") { return 4 }
+            0 - 1
+        }
+        None => 0 - 1
+    }
+}
+
+// meet(x1, ..., xn [, consistency: lim]) and the statistics fuse or describe
+// 2 to 8 measured f64 values (en_of: exactly 2). The policy `consistency:` is
+// only for meet and must be a positive numeric literal: it is a declared
+// modelling choice, not a value computed at run time (ADR-016, decision 3.3).
+fn checker_check_merge_expr_inplace(c: *mut Checker, e: Expr, kind: i64) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    var n: i64 = 0
+    var h = expr_list_handle(e.args)
+    while h.ptr != 0 as *mut ExprList {
+        if name_eq_lit((*h.ptr).label, "consistency") {
+            let k = (*h.ptr).head.kind
+            var ok = false
+            if kind == 0 && k == ExprKind::ExprFloatLit && (*h.ptr).head.float_val > 0.0 { ok = true }
+            if kind == 0 && k == ExprKind::ExprIntLit && (*h.ptr).head.int_val > 0 { ok = true }
+            if !ok { checker_report_error_at_inplace(c, e.span, 305, 0, 0, 0) }
+        } else {
+            n = n + 1
+        }
+        h = expr_list_handle_next(h)
+    }
+    if n == 1 {
+        // One source is a contest: meet of a contest a retraction reduced to one
+        // source returns it; the statistics need two (checked when lowering).
+        match expr_list_head(e.args) {
+            Some(first) => {
+                let t = checker_check_expr_inplace(c, *first)
+                if t.kind != TypeKind::TyContest { checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0) }
+            }
+            None => {}
+        }
+        return ty_f64()
+    }
+    if n < 1 || n > 8 || (kind == 2 && n != 2) {
+        checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+    }
+    checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+    ty_f64()
+}
+
+// contest(x1, ..., xn) carries 2 to 8 measured values that disagree, without
+// combining them (ADR-016, decision 2.3): its type is Contest<f64>, so it never
+// passes for a value. retract(c, x, because: "...") is the only exit (decision
+// 4.3): it removes source x, and the reason must be written down.
+fn checker_check_contest_expr_inplace(c: *mut Checker, e: Expr, retract: bool) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    var n: i64 = 0
+    var because = false
+    var h = expr_list_handle(e.args)
+    while h.ptr != 0 as *mut ExprList {
+        if name_eq_lit((*h.ptr).label, "because") {
+            if (*h.ptr).head.kind == ExprKind::ExprStringLit && (*h.ptr).head.name.len > 0 { because = true }
+        } else {
+            n = n + 1
+        }
+        h = expr_list_handle_next(h)
+    }
+    if retract {
+        if n != 2 { checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0) }
+        if !because { checker_report_error_at_inplace(c, e.span, 306, 0, 0, 0) }
+        match expr_list_head(e.args) {
+            Some(first) => {
+                let t = checker_check_expr_inplace(c, *first)
+                if t.kind != TypeKind::TyContest { checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0) }
+            }
+            None => {}
+        }
+    } else {
+        if n < 2 || n > 8 { checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0) }
+        checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+    }
+    ty_contest(ty_f64(), 0 - 1)
+}
+
+fn call_expr_contest_kind(opt: Option<Box<Expr> >) -> i64 with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent { return 0 - 1 }
+            if name_eq_lit((*expr).name, "contest") { return 0 }
+            if name_eq_lit((*expr).name, "retract") { return 1 }
+            0 - 1
+        }
+        None => 0 - 1
+    }
+}
+
 fn checker_check_call_metric_forms_inplace(c: *mut Checker, e: Expr) -> (bool, TypeEntry) with Mut, Panic, Div, Alloc, IO {
     // Intercept the common epistemic builtin measure() with an inplace handler before the
     // by-value bridge below (which SRET-smashes on the 164KB Checker return).
     if call_expr_is_builtin_measure(e.left) {
         return (true, checker_check_measure_expr_inplace(c, e))
+    }
+    let merge_kind = call_expr_merge_kind(e.left)
+    if merge_kind >= 0 {
+        return (true, checker_check_merge_expr_inplace(c, e, merge_kind))
+    }
+    let contest_kind = call_expr_contest_kind(e.left)
+    if contest_kind >= 0 {
+        return (true, checker_check_contest_expr_inplace(c, e, contest_kind == 1))
     }
     // Two Knowledge arguments: the shared-interval contest. One argument is
     // math/pure::sign, including tan's sign(sin(x)).
@@ -21550,6 +21668,8 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 250 { print("call to an `extern \"C\"` function the native backend does not implement") }
     else if code == 242 { print("epistemic channel index is out of range") }
     else if code == 232 { print("the same array local initialises two fields; the value copy is shallow, so they would be one array -- give each field its own literal") }
+    else if code == 306 { print("retract needs `because:` with a non-empty string literal: leaving a contest is explicit and its reason is recorded (ADR-016, decision 4.3)") }
+    else if code == 305 { print("the consistency policy of meet must be a positive numeric literal: an E_n limit is a declared modelling choice, not a value computed at run time (ADR-016)") }
     else if code == 243 { print("the correlation coefficient must be a compile-time literal; a runtime value silently becomes 0.0, which asserts independence") }
     else if code == 230 { print("independence-assuming operation over correlated uncertainty") }
     else if code == 72 { print("malformed conditional-independence claim: IndepKnowledge<T, A, B | Z> needs two distinct variables") }

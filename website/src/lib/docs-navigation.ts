@@ -43,6 +43,10 @@ export const docsNavSections: DocsNavSection[] = [
         title: 'Uncertainty tools compared',
         href: '/learn/epistemic/uncertainty-tools-compared/',
       },
+      {
+        title: 'Expanded uncertainty',
+        href: '/learn/epistemic/expanded-uncertainty/',
+      },
     ],
   },
   {
