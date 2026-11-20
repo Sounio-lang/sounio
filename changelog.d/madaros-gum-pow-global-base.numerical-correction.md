@@ -1,0 +1,1 @@
+Madaros: `variance_of(pow(c, x))` with a base `c` that is a module-level `f64` global (not a literal) returned 0.0 instead of `(ln(c) * c^x * u(x))^2`, because the first-order lowering bailed out when the first argument carried no variance. Kind 9 (pow) is now exempt from that early exit, as kinds 3, 4 and 13 already were.
