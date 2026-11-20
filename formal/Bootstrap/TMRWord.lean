@@ -176,7 +176,6 @@ theorem length_memFlips (s : St) : (memFlips s).length = 8 * nBytes s := by
     | succ n ih => rw [List.range_succ, List.map_append, List.sum_append, ih]; simp; omega
   rw [List.map_congr_left (fun i _ => this i)]
   have h := sum_range_getElem? (fun o => 8 * ((o.map fun r => r.data.length).getD 0)) s.mem
-  simp only at h
   rw [h]
   simp only [Option.map_some, Option.getD_some]
   generalize s.mem = l
