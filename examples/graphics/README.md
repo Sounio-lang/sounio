@@ -17,7 +17,7 @@ A comprehensive terminal-based graphics library for Sounio that provides 2D plot
 
 ## Vision
 
-Make Sounio the premier language for **scientific terminal graphics**, combining native epistemic types, units of measure, and advanced visualization in a way no other language can match.
+Make Sounio a language for **scientific terminal graphics**. `bar_chart_vertical_epistemic` in [lib/13_bar_chart.sio](lib/13_bar_chart.sio) draws a vertical bar from the baseline to `Bar.value` and, when `Bar.error` is greater than zero, a capped error line from `Bar.value - Bar.error` to `Bar.value + Bar.error`.
 
 **Why terminal graphics?**
 - **SSH-friendly**: Works over remote connections without X11 forwarding
