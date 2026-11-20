@@ -32961,5 +32961,421 @@ theorem parser_header_b_nwords_zero_nh {B L : Nat} {bs : List Nat}
     noHitUpTo_add hnh1 hrun1
       (noHitUpTo_add hnh2 hrun2 (noHitUpTo_add hnh3 hrun3 hntail))
   exact ⟨t4, hrun, ht4rip, ht4fr, ht4mem, ht4len, ht4k, hnohit⟩
+/-- Each `DataSeq` entry consumes at least four bytes. -/
+theorem DataSeq.four_mul_length_le {m : Mem} {c : Nat}
+    {ds : List Nat} {c' : Nat} (h : DataSeq m c ds c') :
+    c + 4 * ds.length ≤ c' := by
+  induction h with
+  | nil c => simp
+  | cons hd hrest ih => simp only [List.length_cons]; omega
+
+/-- Bounded `NoHitUpTo` data-loop classification: the loop
+either consumes `n` well-formed segments and reaches the
+guard, or reaches `aFail1` after a well-formed prefix. -/
+theorem parser_data_loop_classify_nh :
+    ∀ (n : Nat) {c e : Nat} {s : X86Int.St},
+      s.rip = base + 0x18f → s.reg 1 = some n →
+      s.reg 6 = some c → s.reg 15 = some e → c ≤ e → e < W →
+      n < W →
+      (∀ a, c ≤ a → a + 4 ≤ e → ∃ d, rd32 s.mem a = some d) →
+      s.regs.length = 16 →
+      (∃ ds c' k s', k ≤ 16 * (n + 1) ∧ ds.length = n ∧
+          DataSeq s.mem c ds c' ∧
+          c' ≤ e ∧ run stage1Im k (Out.ok s) = Out.ok s' ∧
+          s'.rip = base + 0x1c7 ∧ s'.reg 1 = some 0 ∧
+          s'.reg 6 = some c' ∧ s'.reg 15 = some e ∧
+          (∀ i, i ≠ 0 → i ≠ 1 → i ≠ 2 → i ≠ 6 →
+            s'.reg i = s.reg i) ∧
+          s'.mem = s.mem ∧ s'.regs.length = 16 ∧ s'.k = s.k ∧
+          NoHitUpTo s k) ∨
+      (∃ ds c' k s', DataSeq s.mem c ds c' ∧ c' ≤ e ∧
+          k ≤ 16 * ds.length + 14 ∧
+          run stage1Im k (Out.ok s) = Out.ok s' ∧
+          s'.rip = aFail1 ∧ s'.reg 15 = some e ∧
+          (∀ i, i ≠ 0 → i ≠ 1 → i ≠ 2 → i ≠ 6 →
+            s'.reg i = s.reg i) ∧
+          s'.mem = s.mem ∧ s'.regs.length = 16 ∧ s'.k = s.k ∧
+          NoHitUpTo s k) := by
+  intro n
+  induction n with
+  | zero =>
+    intro c e s hrip hr1 hr6 hr15 hce heW _hnW _hrd hlen16
+    obtain ⟨k, hk, s', hrun, hsrip, hsr1, hsr6, hsr15, hsfr,
+        hsmem, hslen, hsk, hnh⟩ :=
+      parser_data_loop_ok_nh (DataSeq.nil c) hrip hr1 hr6 hr15
+        hce heW (by simp [W]) hlen16
+    exact Or.inl ⟨[], c, k, s', by omega, rfl, DataSeq.nil c, hce,
+      hrun, hsrip, hsr1, hsr6, hsr15, hsfr, hsmem, hslen, hsk,
+      hnh⟩
+  | succ n ih =>
+    intro c e s hrip hr1 hr6 hr15 hce heW hnW hrd hlen16
+    by_cases hshort : e < c + 4
+    · obtain ⟨s', hrun, hsrip, hsfr, hsmem, hslen, hsk, hnh⟩ :=
+        parser_data_step_short_nh hrip hr1 hr6 hr15 (by omega)
+          hce hshort heW hlen16
+      have hs15 : s'.reg 15 = some e := by
+        rw [hsfr 15 (by decide)]; exact hr15
+      exact Or.inr ⟨[], c, 7, s', DataSeq.nil c, hce, by simp,
+        hrun, hsrip, hs15,
+        fun i _ _ hi2 _ => hsfr i hi2, hsmem, hslen, hsk, hnh⟩
+    · have hc4 : c + 4 ≤ e := by omega
+      obtain ⟨d, hd⟩ := hrd c (Nat.le_refl c) hc4
+      by_cases hover : e < c + 4 + d
+      · obtain ⟨s', hrun, hsrip, hsfr, hsmem, hslen, hsk, hnh⟩ :=
+          parser_data_step_overrun_nh hrip hr1 hr6 hr15 (by omega)
+            hc4 hd hover heW hlen16
+        have hs15 : s'.reg 15 = some e := by
+          rw [hsfr 15 (by decide) (by decide) (by decide)]
+          exact hr15
+        exact Or.inr ⟨[], c, 14, s', DataSeq.nil c, hce, by simp,
+          hrun, hsrip, hs15,
+          fun i hi0 _ hi2 hi6 => hsfr i hi0 hi2 hi6,
+          hsmem, hslen, hsk, hnh⟩
+      · have hcd : c + 4 + d ≤ e := by omega
+        obtain ⟨s1, hrun1, hs1rip, hs1r1, hs1r6, hs1r15, hs1fr,
+            hs1mem, hs1len, hs1k, hs1nh⟩ :=
+          parser_data_step_ok_nh hrip hr1 hr6 hr15 (by omega) hnW
+            hc4 hd hcd heW hlen16
+        have hs1r1' : s1.reg 1 = some n := by
+          have h : n + 1 - 1 = n := by omega
+          rw [h] at hs1r1
+          exact hs1r1
+        have hrd1 : ∀ a, c + 4 + d ≤ a → a + 4 ≤ e →
+            ∃ d', rd32 s1.mem a = some d' := by
+          intro a ha hb
+          obtain ⟨d', hd'⟩ := hrd a (by omega) hb
+          exact ⟨d', by rw [hs1mem]; exact hd'⟩
+        rcases ih hs1rip hs1r1' hs1r6 hs1r15 hcd heW (by omega)
+            hrd1 hs1len with hleft | hright
+        · obtain ⟨ds, c', k, s2, hk, hdslen, hseq, hc'e, hrun2,
+              hs2rip, hs2r1, hs2r6, hs2r15, hs2fr, hs2mem, hs2len,
+              hs2k, hs2nh⟩ := hleft
+          have hrest : DataSeq s.mem (c + 4 + d) ds c' := by
+            rw [hs1mem] at hseq
+            exact hseq
+          exact Or.inl ⟨d :: ds, c', 16 + k, s2, by omega,
+            by simp [hdslen], DataSeq.cons hd hrest, hc'e,
+            by rw [run_add stage1Im 16 k, hrun1, hrun2],
+            hs2rip, hs2r1, hs2r6, hs2r15,
+            fun i hi0 hi1 hi2 hi6 =>
+              (hs2fr i hi0 hi1 hi2 hi6).trans
+                (hs1fr i hi0 hi1 hi2 hi6),
+            hs2mem.trans hs1mem, hs2len, hs2k.trans hs1k,
+            noHitUpTo_add hs1nh hrun1 hs2nh⟩
+        · obtain ⟨ds, c', k, s2, hseq, hc'e, hk, hrun2, hs2rip,
+              hs2r15, hs2fr, hs2mem, hs2len, hs2k, hs2nh⟩ := hright
+          have hrest : DataSeq s.mem (c + 4 + d) ds c' := by
+            rw [hs1mem] at hseq
+            exact hseq
+          exact Or.inr ⟨d :: ds, c', 16 + k, s2,
+            DataSeq.cons hd hrest, hc'e,
+            by simp only [List.length_cons]; omega,
+            by rw [run_add stage1Im 16 k, hrun1, hrun2],
+            hs2rip, hs2r15,
+            fun i hi0 hi1 hi2 hi6 =>
+              (hs2fr i hi0 hi1 hi2 hi6).trans
+                (hs1fr i hi0 hi1 hi2 hi6),
+            hs2mem.trans hs1mem, hs2len, hs2k.trans hs1k,
+            noHitUpTo_add hs1nh hrun1 hs2nh⟩
+
+/-- Bounded `NoHitUpTo` header classification. -/
+theorem parser_header_classify_nh {B L sp : Nat}
+    {s : X86Int.St}
+    (hrip : s.rip = base + 0x134) (hr3 : s.reg 3 = some B)
+    (hr13 : s.reg 13 = some L) (hBL : B + L < W)
+    (hwin : ∃ bs, s.mem.rdN B 20 = some bs)
+    (hlen16 : s.regs.length = 16)
+    (hr4 : s.reg 4 = some sp) (hsp32 : 32 ≤ sp) (hspW : sp < W)
+    (hregs : RegsOk s) (hroom : StackRoom s 1) :
+    (∃ k, k ≤ 40 ∧ run stage1Im k (Out.ok s) = Out.exit 1 ∧
+      NoHitUpTo s k) ∨
+    (∃ bs s', s.mem.rdN B 20 = some bs ∧ 16 ≤ L ∧
+      leVal (bs.take 4) % 2 ^ 32 = 827478099 ∧
+      run stage1Im 24 (Out.ok s) = Out.ok s' ∧
+      s'.rip = base + 0x18f ∧
+      s'.reg 12 = some (leVal ((bs.drop 4).take 4) % 2 ^ 32) ∧
+      s'.reg 10 = some (leVal ((bs.drop 8).take 4) % 2 ^ 32) ∧
+      leVal ((bs.drop 8).take 4) % 2 ^ 32 ≠ 0 ∧
+      s'.reg 1 = some (leVal ((bs.drop 12).take 4) % 2 ^ 32) ∧
+      s'.reg 6 = some (B + 16) ∧ s'.reg 15 = some (B + L) ∧
+      s'.reg 3 = some B ∧ s'.reg 13 = some L ∧
+      s'.reg 4 = some sp ∧
+      (∀ i, i ≠ 0 → i ≠ 1 → i ≠ 2 → i ≠ 6 → i ≠ 10 → i ≠ 12 →
+        i ≠ 15 → s'.reg i = s.reg i) ∧
+      s'.mem = s.mem ∧ s'.regs.length = 16 ∧ s'.k = s.k ∧
+      NoHitUpTo s 24) := by
+  obtain ⟨bs, h20⟩ := hwin
+  by_cases hL : L < 16
+  · obtain ⟨s', hrun, hrip', hfr, hmem, hlen', hk', hnh⟩ :=
+      parser_header_a_short_nh hrip hr3 hr13 hBL hL hlen16
+    have hr4' : s'.reg 4 = some sp := by
+      rw [hfr 4 (by decide) (by decide)]; exact hr4
+    have h4eq : s'.reg 4 = s.reg 4 := by rw [hr4', hr4]
+    obtain ⟨h5, hnh5⟩ := exit1_of_fail1_bnd hsp32 hspW s' hrip'
+      hr4' (run_regs_ok hrun hregs)
+      (StackRoom_of_mem hmem h4eq hroom)
+    exact Or.inl ⟨11, by omega,
+      by rw [show (11 : Nat) = 6 + 5 by omega,
+        run_add stage1Im 6 5, hrun, h5],
+      noHitUpTo_add hnh hrun hnh5⟩
+  · have hL16 : 16 ≤ L := by omega
+    by_cases hmagic : leVal (bs.take 4) % 2 ^ 32 = 827478099
+    · obtain ⟨s1, hrun1, hs1rip, hs1r15, hs1r6, hs1fr, hs1mem,
+          hs1len, hs1k, hs1nh⟩ :=
+        parser_header_a_nh hrip hr3 hr13 hBL hL16 h20 hmagic
+          hlen16
+      have hs1r4 : s1.reg 4 = some sp := by
+        rw [hs1fr 4 (by decide) (by decide) (by decide)]
+        exact hr4
+      have hs1r3 : s1.reg 3 = some B := by
+        rw [hs1fr 3 (by decide) (by decide) (by decide)]
+        exact hr3
+      have hs1r13 : s1.reg 13 = some L := by
+        rw [hs1fr 13 (by decide) (by decide) (by decide)]
+        exact hr13
+      have h20_1 : s1.mem.rdN B 20 = some bs := by
+        rw [hs1mem]; exact h20
+      by_cases hnw0 : leVal ((bs.drop 8).take 4) % 2 ^ 32 = 0
+      · obtain ⟨s', hrun2, hrip', hfr, hmem, hlen', hk', hnh2⟩ :=
+          parser_header_b_nwords_zero_nh hs1rip hs1r6 hBL hL16
+            h20_1 hnw0 hs1len
+        have hrun12 : run stage1Im 25 (Out.ok s) = Out.ok s' := by
+          rw [show (25 : Nat) = 9 + 16 by omega,
+            run_add stage1Im 9 16, hrun1, hrun2]
+        have hr4' : s'.reg 4 = some sp := by
+          rw [hfr 4 (by decide) (by decide) (by decide)
+            (by decide) (by decide) (by decide)]
+          exact hs1r4
+        have hmem' : s'.mem = s.mem := hmem.trans hs1mem
+        have h4eq : s'.reg 4 = s.reg 4 := by rw [hr4', hr4]
+        obtain ⟨h5, hnh5⟩ := exit1_of_fail1_bnd hsp32 hspW s'
+          hrip' hr4' (run_regs_ok hrun12 hregs)
+          (StackRoom_of_mem hmem' h4eq hroom)
+        exact Or.inl ⟨30, by omega,
+          by rw [show (30 : Nat) = 25 + 5 by omega,
+            run_add stage1Im 25 5, hrun12, h5],
+          noHitUpTo_add (noHitUpTo_add hs1nh hrun1 hnh2) hrun12
+            hnh5⟩
+      · obtain ⟨s2, hrun2, hs2rip, hs2r12, hs2r10, hs2r1, hs2r6,
+            hs2fr, hs2mem, hs2len, hs2k, hs2nh⟩ :=
+          parser_header_b_nh hs1rip hs1r6 hBL hL16 h20_1 hnw0
+            hs1len
+        have hs2r15 : s2.reg 15 = some (B + L) := by
+          rw [hs2fr 15 (by decide) (by decide) (by decide)
+            (by decide) (by decide) (by decide)]
+          exact hs1r15
+        have hs2r3 : s2.reg 3 = some B := by
+          rw [hs2fr 3 (by decide) (by decide) (by decide)
+            (by decide) (by decide) (by decide)]
+          exact hs1r3
+        have hs2r13 : s2.reg 13 = some L := by
+          rw [hs2fr 13 (by decide) (by decide) (by decide)
+            (by decide) (by decide) (by decide)]
+          exact hs1r13
+        have hs2r4 : s2.reg 4 = some sp := by
+          rw [hs2fr 4 (by decide) (by decide) (by decide)
+            (by decide) (by decide) (by decide)]
+          exact hs1r4
+        refine Or.inr ⟨bs, s2, h20, hL16, hmagic, ?_, hs2rip,
+          hs2r12, hs2r10, hnw0, hs2r1, hs2r6, hs2r15, hs2r3,
+          hs2r13, hs2r4, ?_, hs2mem.trans hs1mem, hs2len,
+          hs2k.trans hs1k, ?_⟩
+        · rw [show (24 : Nat) = 9 + 15 by omega,
+            run_add stage1Im 9 15, hrun1, hrun2]
+        · intro i hi0 hi1 hi2 hi6 hi10 hi12 hi15
+          exact (hs2fr i hi0 hi1 hi2 hi6 hi10 hi12).trans
+            (hs1fr i hi0 hi6 hi15)
+        · exact noHitUpTo_add hs1nh hrun1 hs2nh
+    · obtain ⟨s', hrun, hrip', hfr, hmem, hlen', hk', hnh⟩ :=
+        parser_header_a_magic_nh hrip hr3 hr13 hBL hL16 h20
+          hmagic hlen16
+      have hr4' : s'.reg 4 = some sp := by
+        rw [hfr 4 (by decide) (by decide) (by decide)]
+        exact hr4
+      have h4eq : s'.reg 4 = s.reg 4 := by rw [hr4', hr4]
+      obtain ⟨h5, hnh5⟩ := exit1_of_fail1_bnd hsp32 hspW s'
+        hrip' hr4' (run_regs_ok hrun hregs)
+        (StackRoom_of_mem hmem h4eq hroom)
+      exact Or.inl ⟨15, by omega,
+        by rw [show (15 : Nat) = 10 + 5 by omega,
+          run_add stage1Im 10 5, hrun, h5],
+        noHitUpTo_add hnh hrun hnh5⟩
+
+/-- Bounded `NoHitUpTo` front classification: from the loaded
+state, either exit 1, or the words-table `mmap` site with a
+well-formed header and data section. -/
+theorem parser_front_classify_nh {B L sp : Nat}
+    {s : X86Int.St}
+    (hrip : s.rip = base + 0x134) (hr3 : s.reg 3 = some B)
+    (hr13 : s.reg 13 = some L) (hBL : B + L < W)
+    (hwin : ∃ bs, s.mem.rdN B 20 = some bs)
+    (hrd : ∀ a, B + 16 ≤ a → a + 4 ≤ B + L →
+      ∃ d, rd32 s.mem a = some d)
+    (hlen16 : s.regs.length = 16)
+    (hr4 : s.reg 4 = some sp) (hsp32 : 32 ≤ sp) (hspW : sp < W)
+    (hregs : RegsOk s) (hroom : StackRoom s 1) :
+    (∃ k, k ≤ 100 + 16 * (L + 1) ∧
+      run stage1Im k (Out.ok s) = Out.exit 1 ∧ NoHitUpTo s k) ∨
+    (∃ bs ds c N s', N ≤ 100 + 16 * (L + 1) ∧
+      s.mem.rdN B 20 = some bs ∧ 16 ≤ L ∧
+      leVal (bs.take 4) % 2 ^ 32 = 827478099 ∧
+      ds.length = leVal ((bs.drop 12).take 4) % 2 ^ 32 ∧
+      DataSeq s.mem (B + 16) ds c ∧ c ≤ B + L ∧
+      20 * (leVal ((bs.drop 8).take 4) % 2 ^ 32) ≤ B + L - c ∧
+      run stage1Im N (Out.ok s) = Out.ok s' ∧
+      s'.rip = base + 0x1ec ∧
+      s'.reg 12 = some (leVal ((bs.drop 4).take 4) % 2 ^ 32) ∧
+      s'.reg 10 = some (leVal ((bs.drop 8).take 4) % 2 ^ 32) ∧
+      leVal ((bs.drop 8).take 4) % 2 ^ 32 ≠ 0 ∧
+      s'.reg 1 = some 0 ∧ s'.reg 6 = some c ∧
+      s'.reg 15 = some (B + L) ∧ s'.reg 3 = some B ∧
+      s'.reg 13 = some L ∧ s'.reg 4 = some sp ∧
+      (∀ i, i ≠ 0 → i ≠ 1 → i ≠ 2 → i ≠ 6 → i ≠ 10 → i ≠ 12 →
+        i ≠ 15 → s'.reg i = s.reg i) ∧
+      s'.mem = s.mem ∧ s'.regs.length = 16 ∧ s'.k = s.k ∧
+      NoHitUpTo s N) := by
+  rcases parser_header_classify_nh hrip hr3 hr13 hBL hwin
+      hlen16 hr4 hsp32 hspW hregs hroom with hexit | hhead
+  · obtain ⟨k, hk, hrun, hnh⟩ := hexit
+    exact Or.inl ⟨k, by omega, hrun, hnh⟩
+  · obtain ⟨bs, s1, h20, hL16, hmagic, hrun1, hs1rip, hs1r12,
+        hs1r10, hnw0, hs1r1, hs1r6, hs1r15, hs1r3, hs1r13, hs1r4,
+        hs1fr, hs1mem, hs1len, hs1k, hs1nh⟩ := hhead
+    have hs1regs : RegsOk s1 := run_regs_ok hrun1 hregs
+    have hndW : leVal ((bs.drop 12).take 4) % 2 ^ 32 < W := by
+      have h := Nat.mod_lt (leVal ((bs.drop 12).take 4))
+        (show 0 < 2 ^ 32 by decide)
+      unfold W
+      omega
+    have hnw32 : leVal ((bs.drop 8).take 4) % 2 ^ 32 < 2 ^ 32 :=
+      Nat.mod_lt _ (by decide)
+    have hrd1 : ∀ a, B + 16 ≤ a → a + 4 ≤ B + L →
+        ∃ d, rd32 s1.mem a = some d := by
+      intro a ha hb
+      obtain ⟨d, hd⟩ := hrd a ha hb
+      exact ⟨d, by rw [hs1mem]; exact hd⟩
+    rcases parser_data_loop_classify_nh
+        (leVal ((bs.drop 12).take 4) % 2 ^ 32) hs1rip hs1r1 hs1r6
+        hs1r15 (by omega) (by omega) hndW hrd1 hs1len with
+      hdata | hdatafail
+    · obtain ⟨ds, c, k2, s2, hk2, hdslen, hseq, hcL, hrun2,
+          hs2rip, hs2r1, hs2r6, hs2r15, hs2fr, hs2mem, hs2len,
+          hs2k, hs2nh⟩ := hdata
+      have hseq0 : DataSeq s.mem (B + 16) ds c := by
+        rw [hs1mem] at hseq
+        exact hseq
+      have hdsL : ds.length ≤ L := by
+        have h := hseq0.four_mul_length_le
+        omega
+      have hs2r10 : s2.reg 10 =
+          some (leVal ((bs.drop 8).take 4) % 2 ^ 32) := by
+        rw [hs2fr 10 (by decide) (by decide) (by decide)
+          (by decide)]
+        exact hs1r10
+      have hs2r12 : s2.reg 12 =
+          some (leVal ((bs.drop 4).take 4) % 2 ^ 32) := by
+        rw [hs2fr 12 (by decide) (by decide) (by decide)
+          (by decide)]
+        exact hs1r12
+      have hs2r3 : s2.reg 3 = some B := by
+        rw [hs2fr 3 (by decide) (by decide) (by decide)
+          (by decide)]
+        exact hs1r3
+      have hs2r13 : s2.reg 13 = some L := by
+        rw [hs2fr 13 (by decide) (by decide) (by decide)
+          (by decide)]
+        exact hs1r13
+      have hs2r4 : s2.reg 4 = some sp := by
+        rw [hs2fr 4 (by decide) (by decide) (by decide)
+          (by decide)]
+        exact hs1r4
+      have hrun12 : run stage1Im (24 + k2) (Out.ok s) =
+          Out.ok s2 := by
+        rw [run_add stage1Im 24 k2, hrun1, hrun2]
+      have hnh12 : NoHitUpTo s (24 + k2) :=
+        noHitUpTo_add hs1nh hrun1 hs2nh
+      by_cases hguard :
+          20 * (leVal ((bs.drop 8).take 4) % 2 ^ 32) ≤ B + L - c
+      · obtain ⟨s3, hrun3, hs3rip, hs3fr, hs3mem, hs3len, hs3k,
+            hs3nh⟩ :=
+          parser_guard_ok_nh hs2rip hs2r10 hs2r6 hs2r15 hnw32
+            hcL (by omega) hguard hs2len
+        have hreg3 : ∀ {i : Nat} {v : Nat}, i ≠ 0 → i ≠ 2 →
+            s2.reg i = some v → s3.reg i = some v := by
+          intro i v hi0 hi2 hv
+          rw [hs3fr i hi0 hi2]
+          exact hv
+        refine Or.inr ⟨bs, ds, c, 24 + k2 + 11, s3, by omega,
+          h20, hL16, hmagic, hdslen, hseq0, hcL, hguard, ?_,
+          hs3rip,
+          hreg3 (by decide) (by decide) hs2r12,
+          hreg3 (by decide) (by decide) hs2r10, hnw0,
+          hreg3 (by decide) (by decide) hs2r1,
+          hreg3 (by decide) (by decide) hs2r6,
+          hreg3 (by decide) (by decide) hs2r15,
+          hreg3 (by decide) (by decide) hs2r3,
+          hreg3 (by decide) (by decide) hs2r13,
+          hreg3 (by decide) (by decide) hs2r4,
+          fun i hi0 hi1 hi2 hi6 hi10 hi12 hi15 =>
+            (hs3fr i hi0 hi2).trans
+              ((hs2fr i hi0 hi1 hi2 hi6).trans
+                (hs1fr i hi0 hi1 hi2 hi6 hi10 hi12 hi15)),
+          (hs3mem.trans hs2mem).trans hs1mem, hs3len,
+          (hs3k.trans hs2k).trans hs1k, ?_⟩
+        · rw [show 24 + k2 + 11 = (24 + k2) + 11 by omega,
+            run_add stage1Im (24 + k2) 11, hrun12, hrun3]
+        · exact noHitUpTo_add hnh12 hrun12 hs3nh
+      · have hguardf : B + L - c <
+            20 * (leVal ((bs.drop 8).take 4) % 2 ^ 32) := by omega
+        obtain ⟨s3, hrun3, hs3rip, hs3fr, hs3mem, hs3len, hs3k,
+            hs3nh⟩ :=
+          parser_guard_fail_nh hs2rip hs2r10 hs2r6 hs2r15 hnw32
+            hcL (by omega) hguardf hs2len
+        have hrun123 : run stage1Im (24 + k2 + 12) (Out.ok s) =
+            Out.ok s3 := by
+          rw [show 24 + k2 + 12 = (24 + k2) + 12 by omega,
+            run_add stage1Im (24 + k2) 12, hrun12, hrun3]
+        have hs3r4 : s3.reg 4 = some sp := by
+          rw [hs3fr 4 (by decide) (by decide)]
+          exact hs2r4
+        have hmem3 : s3.mem = s.mem :=
+          (hs3mem.trans hs2mem).trans hs1mem
+        have h4eq3 : s3.reg 4 = s.reg 4 := by rw [hs3r4, hr4]
+        obtain ⟨h5, hnh5⟩ := exit1_of_fail1_bnd hsp32 hspW s3
+          hs3rip hs3r4 (run_regs_ok hrun123 hregs)
+          (StackRoom_of_mem hmem3 h4eq3 hroom)
+        exact Or.inl ⟨24 + k2 + 12 + 5, by omega,
+          by rw [show 24 + k2 + 12 + 5 = (24 + k2 + 12) + 5 by
+              omega, run_add stage1Im (24 + k2 + 12) 5, hrun123,
+            h5],
+          noHitUpTo_add (noHitUpTo_add hnh12 hrun12 hs3nh)
+            hrun123 hnh5⟩
+    · obtain ⟨ds, c', k2, s2, hseq, hc'L, hk2, hrun2, hs2rip,
+          _hs2r15, hs2fr, hs2mem, hs2len, hs2k, hs2nh⟩ :=
+        hdatafail
+      have hseq0 : DataSeq s.mem (B + 16) ds c' := by
+        rw [hs1mem] at hseq
+        exact hseq
+      have hdsL : ds.length ≤ L := by
+        have h := hseq0.four_mul_length_le
+        omega
+      have hrun12 : run stage1Im (24 + k2) (Out.ok s) =
+          Out.ok s2 := by
+        rw [run_add stage1Im 24 k2, hrun1, hrun2]
+      have hs2r4 : s2.reg 4 = some sp := by
+        rw [hs2fr 4 (by decide) (by decide) (by decide)
+          (by decide)]
+        exact hs1r4
+      have hmem2 : s2.mem = s.mem := hs2mem.trans hs1mem
+      have h4eq2 : s2.reg 4 = s.reg 4 := by rw [hs2r4, hr4]
+      obtain ⟨h5, hnh5⟩ := exit1_of_fail1_bnd hsp32 hspW s2
+        hs2rip hs2r4 (run_regs_ok hrun12 hregs)
+        (StackRoom_of_mem hmem2 h4eq2 hroom)
+      exact Or.inl ⟨24 + k2 + 5, by omega,
+        by rw [show 24 + k2 + 5 = (24 + k2) + 5 by omega,
+          run_add stage1Im (24 + k2) 5, hrun12, h5],
+        noHitUpTo_add (noHitUpTo_add hs1nh hrun1 hs2nh) hrun12
+          hnh5⟩
+
 
 end SporosX1
