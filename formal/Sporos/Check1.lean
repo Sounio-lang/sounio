@@ -389,6 +389,135 @@ theorem checkProg1_eq (pr : Prog) : checkProg1 pr = checkProg pr := by
   congr 1
   exact all_congr_mem (fun wd _ => checkWord1_eq pr wd)
 
+/-- BRIDGE (generic): one word failing the single-pass checker
+falsifies `checkProg`, via `checkProg1_eq`.  This is the semantic
+conclusion that `SporosX1.checker_refuses_empty` and
+`SporosX1.checker_refuses_ann_range` (SporosX1Comp.lean) are
+missing. -/
+theorem checkProg_false_of_checkWord1_false {pr : Prog} {wd : Word}
+    (hmem : wd ∈ pr.words) (hwd : checkWord1 pr wd = false) :
+    checkProg pr = false := by
+  rw [← checkProg1_eq]
+  have hall : (pr.words.all fun w => checkWord1 pr w) = false := by
+    cases h : pr.words.all (fun w => checkWord1 pr w) with
+    | false => rfl
+    | true =>
+      have h1 : checkWord1 pr wd = true :=
+        List.all_eq_true.mp h wd hmem
+      rw [hwd] at h1
+      exact absurd h1 (by decide)
+  simp [checkProg1, hall]
+
+/-- Falsifier, empty code (first `checkWord1` conjunct).
+-/
+theorem checkWord1_false_of_code_empty {pr : Prog} {wd : Word}
+    (hcode : wd.code = []) : checkWord1 pr wd = false := by
+  simp [checkWord1, hcode]
+
+/-- Semantic side of `checker_refuses_empty`
+(SporosX1Comp.lean:6765), same append form of hypotheses.
+-/
+theorem checkProg_false_of_code_empty_append {pr : Prog}
+    {wd : Word} {rest pre : List Word}
+    (happ : pr.words = pre ++ wd :: rest) (hcode : wd.code = []) :
+    checkProg pr = false :=
+  checkProg_false_of_checkWord1_false
+    (by rw [happ]; exact List.mem_append_right _ List.mem_cons_self)
+    (checkWord1_false_of_code_empty hcode)
+
+/-- Falsifier, annotation index out of range (`annOk` range
+part).  -/
+theorem annOk_false_of_ann_range {wd : Word} {t : Nat} {h : Height}
+    (hmem : (t, h) ∈ wd.ann) (hge : wd.code.length ≤ t) :
+    annOk wd = false := by
+  cases hall : annOk wd with
+  | false => rfl
+  | true =>
+    have hpt : (decide (t < wd.code.length) &&
+        (wd.ann.lookup t == some h)) = true :=
+      List.all_eq_true.mp hall (t, h) hmem
+    obtain ⟨hpt1, -⟩ : decide (t < wd.code.length) = true ∧
+        (wd.ann.lookup t == some h) = true := by simpa using hpt
+    exact absurd (of_decide_eq_true hpt1) (Nat.not_lt.mpr hge)
+
+/-- Falsifier, annotation lookup mismatch (`annOk` lookup part;
+duplicate index with a different first height).  No machine
+refusal lemma consumes this yet.  -/
+theorem annOk_false_of_ann_lookup_ne {wd : Word} {t : Nat}
+    {h : Height} (hmem : (t, h) ∈ wd.ann)
+    (hlk : wd.ann.lookup t ≠ some h) : annOk wd = false := by
+  cases hall : annOk wd with
+  | false => rfl
+  | true =>
+    have hpt : (decide (t < wd.code.length) &&
+        (wd.ann.lookup t == some h)) = true :=
+      List.all_eq_true.mp hall (t, h) hmem
+    obtain ⟨-, hpt2⟩ : decide (t < wd.code.length) = true ∧
+        (wd.ann.lookup t == some h) = true := by simpa using hpt
+    exact absurd (eq_of_beq hpt2) hlk
+
+/-- Semantic side of `checker_refuses_ann_range`
+(SporosX1Comp.lean:6805), same append form; the good-prefix and
+nonempty hypotheses of the machine lemma are not needed.
+-/
+theorem checkProg_false_of_ann_range_append {pr : Prog}
+    {wd : Word} {rest pre : List Word}
+    {good tail : List (Nat × Height)} {t : Nat} {h : Height}
+    (happ : pr.words = pre ++ wd :: rest)
+    (hann : wd.ann = good ++ (t, h) :: tail)
+    (hge : wd.code.length ≤ t) :
+    checkProg pr = false := by
+  have hannOk : annOk wd = false :=
+    annOk_false_of_ann_range (by rw [hann]; exact List.mem_append_right _ List.mem_cons_self) hge
+  exact checkProg_false_of_checkWord1_false
+    (by rw [happ]; exact List.mem_append_right _ List.mem_cons_self)
+    (by simp [checkWord1, hannOk])
+
+/-- Falsifier, annotation at 0 mismatching the entry height
+(second `checkWord1` conjunct; hypothesis shape copied from
+`SporosX1.codewalk_entry`, SporosX1Comp.lean:4510-4512, negated).
+No machine refusal lemma yet.  -/
+theorem checkWord1_false_of_ann0 {pr : Prog} {wd : Word}
+    (h0 : (match wd.ann.lookup 0 with
+      | some a => a == ⟨wd.ins, 0⟩
+      | none => true) = false) :
+    checkWord1 pr wd = false := by
+  simp [checkWord1, h0]
+
+/-- Falsifier, `walk = false` (last `checkWord1` conjunct).
+Semantic only: the machine side has just the accept direction
+`SporosX1.walk_loop` (SporosX1Comp.lean:1354).  No machine consumer exists yet. -/
+theorem checkWord1_false_of_walk_false {pr : Prog} {wd : Word}
+    (hwalk : walk pr wd wd.code 0 ⟨wd.ins, 0⟩ = false) :
+    checkWord1 pr wd = false := by
+  simp [checkWord1, hwalk]
+
+/-- Falsifier, main clause: `main` at or beyond the word count.
+Semantic side of `parser_trailing_main_ge` and, with
+`pr.words = []`, of `parser_header_b_nwords_zero`.
+-/
+theorem checkProg_false_of_main_ge {pr : Prog}
+    (h : pr.words.length ≤ pr.main) : checkProg pr = false := by
+  have hnone : pr.words[pr.main]? = none := by
+    cases hwm : pr.words[pr.main]? with
+    | none => rfl
+    | some m =>
+      obtain ⟨hlt, -⟩ := List.getElem?_eq_some_iff.mp hwm
+      exact absurd hlt (Nat.not_lt.mpr h)
+  simp [checkProg, hnone]
+
+/-- Falsifier, main clause: the main word takes inputs.
+Semantic side of `parser_trailing_slot_fail`.
+-/
+theorem checkProg_false_of_main_ins_ne {pr : Prog} {m : Word}
+    (hm : pr.words[pr.main]? = some m) (hins : m.ins ≠ 0) :
+    checkProg pr = false := by
+  have hbeq : (m.ins == 0) = false := by
+    cases hb : m.ins == 0 with
+    | false => rfl
+    | true => exact absurd (beq_iff_eq.mp hb) hins
+  simp [checkProg, hm, hbeq]
+
 example : checkProg1 Examples.hello = true := by decide +kernel
 example : checkProg1 Examples.upper = true := by decide +kernel
 example : checkProg1 Examples.fib = true := by decide +kernel

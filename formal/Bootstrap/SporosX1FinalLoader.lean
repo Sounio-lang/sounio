@@ -1,0 +1,5789 @@
+/-
+Stage-1 final proof, loader phase: placement infrastructure,
+the loader layout, initial-stack facts, and the entry-to-`loaded`
+composition.  Split out of `Bootstrap.SporosX1Final` unchanged;
+the next phase is `Bootstrap.SporosX1FinalParser`.
+-/
+import Bootstrap.SporosX1FinalDefs
+
+open X86Env X86Int X86Dec Sporos
+
+namespace SporosX1
+
+/-! ### Placement infrastructure for the loader-prefix invariant
+
+The four allocation sites each need three facts: the placement the
+witness oracle offers is legal in the memory reached at that site
+(`place_at`, fed by `Mem.free` facts transported through appends,
+subintervals and erasure), the reads in between do not consume a
+witness entry (`kern_count_at_head`), and those two assemble into
+`OracleLegalAt` at an mmap/mremap-shaped state
+(`oracleLegalAt_mmap`, `oracleLegalAt_mremap`).  What then remains
+for `stage1_oracle_exists_target` is reachability: at each site,
+the register/region shapes below and the drop count of the witness. -/
+
+theorem place_at {m : Mem} {a n : Nat} (ha : a % page = 0)
+    (hpos : 0 < a) (hbound : a + n ≤ 2 ^ 47) (hfree : m.free a n = true) :
+    X86Env.place m (some (.at a)) n = some (some a) := by
+  simp [X86Env.place, ha, hpos, hbound, hfree]
+
+theorem free_sub {m : Mem} {A n1 n2 : Nat}
+    (h : m.free A (n1 + n2) = true) : m.free (A + n1) n2 = true := by
+  rw [Mem.free, List.all_eq_true]
+  intro r hr
+  rcases X86Env.free_spec h r hr with h1 | h1 <;>
+    simp only [Bool.or_eq_true, decide_eq_true_eq] <;> omega
+
+theorem free_prefix {m : Mem} {A n1 n2 : Nat}
+    (h : m.free A (n1 + n2) = true) : m.free A n1 = true := by
+  rw [Mem.free, List.all_eq_true]
+  intro r hr
+  rcases X86Env.free_spec h r hr with h1 | h1 <;>
+    simp only [Bool.or_eq_true, decide_eq_true_eq] <;> omega
+
+theorem free_append {m : Mem} {a n : Nat} {r : Region}
+    (h : m.free a n = true) (hdisj : a + n ≤ r.base ∨ r.hi ≤ a) :
+    Mem.free (m ++ [r]) a n = true := by
+  rw [Mem.free, List.all_eq_true] at h ⊢
+  intro s hs
+  rcases List.mem_append.1 hs with hs | hs
+  · exact h s hs
+  · simp at hs
+    subst hs
+    simp only [Bool.or_eq_true, decide_eq_true_eq]
+    exact hdisj
+
+theorem free_eraseIdx {m : Mem} {a n i : Nat}
+    (h : m.free a n = true) : Mem.free (m.eraseIdx i) a n = true := by
+  rw [Mem.free, List.all_eq_true] at h ⊢
+  exact fun s hs => h s (List.mem_of_mem_eraseIdx hs)
+
+/-- A read/write count never consumes a placement entry: with an
+`at` head, `Kern.count` moves the full amount and keeps the kernel. -/
+theorem kern_count_at_head {k : Kern} {A want avail : Nat}
+    (h : k.oracle.head? = some (.at A)) :
+    Kern.count k want avail = (min want avail, k) := by
+  cases ho : k.oracle with
+  | nil => simp [ho] at h
+  | cons c rest =>
+    simp [ho] at h
+    subst h
+    simp [Kern.count, Kern.next, ho]
+
+/-- Every entry of the witness oracle is a placement. -/
+theorem stage1Oracle_mem_at {f : List Nat} {A : Nat} {c : Choice}
+    (hc : c ∈ stage1Oracle f A) : ∃ x, c = .at x := by
+  simp [stage1Oracle] at hc
+  rcases hc with ⟨-, rfl⟩ | rfl | rfl <;> exact ⟨_, rfl⟩
+
+theorem oracleLegalAt_mmap {s : X86Int.St} {B : Nat}
+    (hrip : stage1Im s.rip = some (.syscall, 2))
+    (h0 : s.reg 0 = some 9) (h7 : s.reg 7 = some 0)
+    {a2 : Nat} (h6 : s.reg 6 = some a2) (h2 : s.reg 2 = some PROT_RW)
+    (h10 : s.reg 10 = some MAP_PRIVATE_ANON)
+    (h8 : s.reg 8 = some (W - 1)) (h9 : s.reg 9 = some 0)
+    (ha2 : a2 ≠ 0) (hhead : s.k.oracle.head? = some (.at B))
+    (hplace : X86Env.place s.mem (some (.at B)) (X86Env.pages a2) =
+      some (some B)) :
+    OracleLegalAt s := by
+  intro _hmem
+  obtain ⟨rax, k', m', hsc⟩ :=
+    syscall_mmap_ret_of_place ha2 hhead hplace
+  exact ⟨9, 0, a2, PROT_RW, MAP_PRIVATE_ANON, W - 1, 0, rax, k', m',
+    h0, h7, h6, h2, h10, h8, h9, hsc⟩
+
+theorem oracleLegalAt_mremap {s : X86Int.St} {B : Nat}
+    (hrip : stage1Im s.rip = some (.syscall, 2))
+    (h0 : s.reg 0 = some 25)
+    {a1 a2 a3 : Nat} (h7 : s.reg 7 = some a1) (h6 : s.reg 6 = some a2)
+    (h2 : s.reg 2 = some a3) (h10 : s.reg 10 = some MREMAP_MAYMOVE)
+    (h8 : s.reg 8 = some 0) (h9 : s.reg 9 = some 0)
+    {i : Nat} {r : Region}
+    (hfind : s.mem.find a1 0 = some (i, r))
+    (hbase : r.base = a1) (hlen : r.data.length = X86Env.pages a2)
+    (hrw : r.rw = true) (hgrow : ¬ X86Env.pages a3 < r.data.length)
+    (hhead : s.k.oracle.head? = some (.at B))
+    (hplace : X86Env.place (s.mem.eraseIdx i) (some (.at B))
+      (X86Env.pages a3) = some (some B)) :
+    OracleLegalAt s := by
+  intro _hmem
+  obtain ⟨rax, k', m', hsc⟩ :=
+    syscall_mremap_ret_of_place hfind hbase hlen hrw hgrow hhead hplace
+  exact ⟨25, a1, a2, a3, MREMAP_MAYMOVE, 0, 0, rax, k', m',
+    h0, h7, h6, h2, h10, h8, h9, hsc⟩
+
+/-! ### The loader prefix layout (entry to `loaded`, plus the fail blocks)
+
+Offsets are the listing's.  The two memory syscalls of this region
+are the initial file-buffer `mmap` at `base + 0xbf` and the growth
+`mremap` at `base + 0x113`; the syscalls at `0x92`, `0xe8`, `0x12a`
+and `0x132` are `open`, `read` and the two exits, none of which is a
+memory syscall. -/
+
+structure LoaderCode (im : Nat → Option (Ins × Nat)) : Prop where
+  d78 : im (base + 0x78) = some (.pop 0, 1)
+  d79 : im (base + 0x79) = some (.cmpI 0 2, 4)
+  d7d : im (base + 0x7d) = some (.jcc 13 (base + 0x84), 2)
+  d7f : im (base + 0x7f) = some (.jmp (base + 0x124), 5)
+  d84 : im (base + 0x84) = some (.pop 6, 1)
+  d85 : im (base + 0x85) = some (.pop 6, 1)
+  d86 : im (base + 0x86) = some (.movI 0 2, 5)
+  d8b : im (base + 0x8b) = some (.mov 7 6, 3)
+  d8e : im (base + 0x8e) = some (.alu .xor 6 6, 2)
+  d90 : im (base + 0x90) = some (.alu .xor 2 2, 2)
+  d92 : im (base + 0x92) = some (.syscall, 2)
+  d94 : im (base + 0x94) = some (.test 0 0, 3)
+  d97 : im (base + 0x97) = some (.jcc 9 (base + 0x9e), 2)
+  d99 : im (base + 0x99) = some (.jmp (base + 0x124), 5)
+  d9e : im (base + 0x9e) = some (.mov 14 0, 3)
+  da1 : im (base + 0xa1) = some (.movI 0 9, 5)
+  da6 : im (base + 0xa6) = some (.alu .xor 7 7, 2)
+  da8 : im (base + 0xa8) = some (.movI 6 65536, 5)
+  dad : im (base + 0xad) = some (.movI 2 3, 5)
+  db2 : im (base + 0xb2) = some (.movI 10 34, 6)
+  db8 : im (base + 0xb8) = some (.pushI (W - 1), 2)
+  dba : im (base + 0xba) = some (.pop 8, 2)
+  dbc : im (base + 0xbc) = some (.alu .xor 9 9, 3)
+  dbf : im (base + 0xbf) = some (.syscall, 2)
+  dc1 : im (base + 0xc1) = some (.test 0 0, 3)
+  dc4 : im (base + 0xc4) = some (.jcc 9 (base + 0xcb), 2)
+  dc6 : im (base + 0xc6) = some (.jmp (base + 0x12c), 5)
+  dcb : im (base + 0xcb) = some (.mov 3 0, 3)
+  dce : im (base + 0xce) = some (.movI 12 65536, 6)
+  dd4 : im (base + 0xd4) = some (.alu .xor 13 13, 3)
+  dd7 : im (base + 0xd7) = some (.mov 6 3, 3)
+  dda : im (base + 0xda) = some (.alu .add 6 13, 3)
+  ddd : im (base + 0xdd) = some (.mov 2 12, 3)
+  de0 : im (base + 0xe0) = some (.alu .sub 2 13, 3)
+  de3 : im (base + 0xe3) = some (.alu .xor 0 0, 2)
+  de5 : im (base + 0xe5) = some (.mov32 7 14, 3)
+  de8 : im (base + 0xe8) = some (.syscall, 2)
+  dea : im (base + 0xea) = some (.test 0 0, 3)
+  ded : im (base + 0xed) = some (.jcc 8 (base + 0x124), 2)
+  def_ : im (base + 0xef) = some (.jcc 4 (base + 0x122), 2)
+  df1 : im (base + 0xf1) = some (.alu .add 13 0, 3)
+  df4 : im (base + 0xf4) = some (.mov 2 12, 3)
+  df7 : im (base + 0xf7) = some (.alu .sub 2 13, 3)
+  dfa : im (base + 0xfa) = some (.jcc 5 (base + 0xd7), 2)
+  dfc : im (base + 0xfc) = some (.movI 0 25, 5)
+  d101 : im (base + 0x101) = some (.mov 7 3, 3)
+  d104 : im (base + 0x104) = some (.mov 6 12, 3)
+  d107 : im (base + 0x107) = some (.mov 2 12, 3)
+  d10a : im (base + 0x10a) = some (.alu .add 2 2, 3)
+  d10d : im (base + 0x10d) = some (.movI 10 1, 6)
+  d113 : im (base + 0x113) = some (.syscall, 2)
+  d115 : im (base + 0x115) = some (.test 0 0, 3)
+  d118 : im (base + 0x118) = some (.jcc 8 (base + 0x12c), 2)
+  d11a : im (base + 0x11a) = some (.mov 3 0, 3)
+  d11d : im (base + 0x11d) = some (.mov 12 2, 3)
+  d120 : im (base + 0x120) = some (.jmp (base + 0xd7), 2)
+  d122 : im (base + 0x122) = some (.jmp (base + 0x134), 2)
+  d124 : im (base + 0x124) = some (.pushI 60, 2)
+  d126 : im (base + 0x126) = some (.pop 0, 1)
+  d127 : im (base + 0x127) = some (.pushI 1, 2)
+  d129 : im (base + 0x129) = some (.pop 7, 1)
+  d12a : im (base + 0x12a) = some (.syscall, 2)
+  d12c : im (base + 0x12c) = some (.pushI 60, 2)
+  d12e : im (base + 0x12e) = some (.pop 0, 1)
+  d12f : im (base + 0x12f) = some (.pushI 2, 2)
+  d131 : im (base + 0x131) = some (.pop 7, 1)
+  d132 : im (base + 0x132) = some (.syscall, 2)
+
+theorem stage1_loaderCode : LoaderCode stage1Im := by
+  apply LoaderCode.mk <;> decide +kernel
+
+/-! ### Initial-stack facts for the loader prefix
+
+The three `pop`s at entry read `argc` and the two `argv` pointers
+from the stack the kernel built.  These lemmas discharge those
+reads against `X86Env.initStack` for a two-string `argv`, in the
+two-region initial memory: the bytes from `sp` are the seven head
+words followed by the two NUL-terminated strings. -/
+
+theorem pages_ge (n : Nat) : n ≤ X86Env.pages n := by
+  unfold X86Env.pages X86Env.page
+  have h := Nat.div_add_mod (n + 4096 - 1) 4096
+  have hlt := Nat.mod_lt (n + 4096 - 1) (by decide : 0 < 4096)
+  omega
+
+theorem le64_length (v : Nat) : (X86Env.le64 v).length = 8 := rfl
+
+theorem getElem?_append_of_lt {l1 l2 : List Nat} {n : Nat}
+    (h : n < l1.length) : (l1 ++ l2)[n]? = l1[n]? := by
+  induction l1 generalizing n with
+  | nil => simp at h
+  | cons a t ih =>
+    cases n with
+    | zero => rfl
+    | succ k => exact ih (by simpa using h)
+
+theorem getElem?_replicate_append (n j : Nat) {bs : List Nat} :
+    (List.replicate n 0 ++ bs)[n + j]? = bs[j]? := by
+  induction n with
+  | zero => simp
+  | succ k ih =>
+    rw [List.replicate_succ, List.cons_append,
+      show k + 1 + j = (k + j) + 1 from by omega]
+    exact ih
+
+set_option maxHeartbeats 400000 in
+/-- The bytes the initial stack holds from `sp`: argc, the two argv
+pointers, four zero words, then the two NUL-terminated strings. -/
+theorem initStack_data_at (top : Nat) (x y : List Nat) {j : Nat}
+    (hj : j < 56 + (x.length + 1) + (y.length + 1)) :
+    (X86Env.initStack top [x, y]).1.data[X86Env.stackRoom + j]? =
+      (X86Env.le64 2 ++ (X86Env.le64 ((X86Env.initStack top [x, y]).2 + 56) ++
+        (X86Env.le64 ((X86Env.initStack top [x, y]).2 + 56 + x.length + 1) ++
+        (X86Env.le64 0 ++ (X86Env.le64 0 ++ (X86Env.le64 0 ++ (X86Env.le64 0 ++
+        (x ++ ([0] ++ (y ++ [0]))))))))))[j]? := by
+  have hsp : (X86Env.initStack top [x, y]).2 =
+      (X86Env.initStack top [x, y]).1.base + X86Env.stackRoom := by
+    simp only [X86Env.initStack]
+  rw [hsp]
+  simp only [X86Env.initStack, X86Env.layStrings, List.flatten_cons,
+    List.map_cons, List.map_nil, List.flatten_nil, List.append_nil]
+  rw [getElem?_append_of_lt (by simp [le64_length]; omega)]
+  rw [getElem?_replicate_append]
+  simp only [List.append_assoc]
+  congr 2 <;> simp
+
+theorem getElem?_append_skip {l1 l2 : List Nat} {i : Nat} :
+    (l1 ++ l2)[l1.length + i]? = l2[i]? := by
+  induction l1 with
+  | nil => simp
+  | cons a t ih =>
+    simp only [List.length_cons, List.cons_append]
+    rw [show t.length + 1 + i = (t.length + i) + 1 from by omega]
+    exact ih
+
+theorem mem_rd_second {c r : Region} {a v : Nat}
+    (hdisj : c.hi ≤ r.base) (hge : r.base ≤ a)
+    (hbyte : r.data[a - r.base]? = some v) :
+    Mem.rd [c, r] a = some v := by
+  have hlt : a < r.hi := by
+    have h1 := (List.getElem?_eq_some_iff.1 hbyte).1
+    unfold Region.hi
+    omega
+  have hnot : ¬ (c.base ≤ a ∧ a < c.hi) := by omega
+  simp [Mem.rd, Mem.find, hnot, hge, hlt, hbyte]
+
+theorem rdN_of_rd {m : Mem} {a n : Nat} {L : List Nat} (hL : L.length = n)
+    (h : ∀ i (hi : i < n), ∃ v, m.rd (a + i) = some v ∧ L[i]? = some v) :
+    m.rdN a n = some L := by
+  induction n generalizing a L with
+  | zero =>
+    have : L = [] := by cases L <;> simp_all
+    simp [Mem.rdN, this]
+  | succ k ih =>
+    cases L with
+    | nil => simp at hL
+    | cons b t =>
+      have ht : t.length = k := by simpa using hL
+      obtain ⟨v, hv, hb⟩ := h 0 (by omega)
+      simp at hb
+      subst hb
+      have hrec : Mem.rdN m (a + 1) k = some t := by
+        apply ih ht
+        intro i hi
+        obtain ⟨w, hw, htw⟩ := h (i + 1) (by omega)
+        refine ⟨w, ?_, ?_⟩
+        · rwa [show a + 1 + i = a + (i + 1) from by omega]
+        · simpa using htw
+      simp only [Mem.rdN]
+      rw [show m.rd a = some b from by simpa using hv, hrec]
+      rfl
+
+set_option maxHeartbeats 800000 in
+theorem leVal_le64 (v : Nat) : leVal (X86Env.le64 v) = v % W := by
+  have h1 : X86Env.le64 v = bytes8 v := rfl
+  rw [h1]
+  have hd := leVal_digits 8 v
+  have hw : 256 ^ 8 = W := rfl
+  rwa [hw] at hd
+
+set_option maxHeartbeats 800000 in
+theorem rd64_second_of_bytes {c r : Region} {a : Nat} {L : List Nat}
+    (hdisj : c.hi ≤ r.base) (hge : r.base ≤ a) (hL : L.length = 8)
+    (h : ∀ i (hi : i < 8), r.data[a - r.base + i]? = L[i]?) :
+    rd64 [c, r] a = some (leVal L) := by
+  unfold rd64
+  rw [rdN_of_rd hL]
+  · simp
+  · intro i hi
+    have hb := h i hi
+    obtain ⟨v, hv⟩ : ∃ v, L[i]? = some v := by
+      cases hLi : L[i]? with
+      | some v => exact ⟨v, rfl⟩
+      | none =>
+        simp [hL] at hLi
+        omega
+    refine ⟨v, ?_, hv⟩
+    apply mem_rd_second hdisj (by omega)
+    rwa [show a + i - r.base = a - r.base + i from by omega, hb]
+
+theorem initStack_sp (top : Nat) (x y : List Nat) :
+    (X86Env.initStack top [x, y]).2 =
+      (X86Env.initStack top [x, y]).1.base + X86Env.stackRoom := by
+  simp only [X86Env.initStack]
+
+theorem initStack_data_length (top : Nat) (x y : List Nat) :
+    (X86Env.initStack top [x, y]).1.data.length =
+      X86Env.stackRoom +
+        X86Env.pages (56 + ((x.length + 1) + (y.length + 1)) + 1) := by
+  have hneed : 56 + ((x.length + 1) + (y.length + 1)) ≤
+      X86Env.pages (56 + ((x.length + 1) + (y.length + 1)) + 1) :=
+    Nat.le_trans (Nat.le_succ _) (pages_ge _)
+  simp only [X86Env.initStack]
+  simp [X86Env.layStrings, le64_length]
+  omega
+
+theorem initStack_rd64_argc {c : Region} {top : Nat} {x y : List Nat}
+    (hdisj : c.hi ≤ (X86Env.initStack top [x, y]).1.base) :
+    rd64 [c, (X86Env.initStack top [x, y]).1]
+      ((X86Env.initStack top [x, y]).2) = some 2 := by
+  have hsp := initStack_sp top x y
+  have key := rd64_second_of_bytes (L := X86Env.le64 2) hdisj (by omega)
+    (le64_length _) (a := (X86Env.initStack top [x, y]).2) (by
+      intro i hi
+      rw [hsp, Nat.add_sub_cancel_left, initStack_data_at top x y (by omega)]
+      exact getElem?_append_of_lt (by rw [le64_length]; exact hi))
+  rwa [leVal_le64] at key
+
+theorem initStack_rd64_argv0 {c : Region} {top : Nat} {x y : List Nat}
+    (hdisj : c.hi ≤ (X86Env.initStack top [x, y]).1.base) :
+    rd64 [c, (X86Env.initStack top [x, y]).1]
+        ((X86Env.initStack top [x, y]).2 + 8) =
+      some (((X86Env.initStack top [x, y]).2 + 56) % W) := by
+  have hsp := initStack_sp top x y
+  have key := rd64_second_of_bytes
+    (L := X86Env.le64 ((X86Env.initStack top [x, y]).2 + 56)) hdisj
+    (by omega) (le64_length _) (a := (X86Env.initStack top [x, y]).2 + 8) (by
+      intro i hi
+      rw [show (X86Env.initStack top [x, y]).2 + 8 -
+            (X86Env.initStack top [x, y]).1.base + i =
+          X86Env.stackRoom + (8 + i) from by omega,
+        initStack_data_at top x y (by omega),
+        show 8 + i = (X86Env.le64 2).length + i from by rw [le64_length],
+        getElem?_append_skip]
+      exact getElem?_append_of_lt (by rw [le64_length]; exact hi))
+  rwa [leVal_le64] at key
+
+theorem initStack_rd64_argv1 {c : Region} {top : Nat} {x y : List Nat}
+    (hdisj : c.hi ≤ (X86Env.initStack top [x, y]).1.base) :
+    rd64 [c, (X86Env.initStack top [x, y]).1]
+        ((X86Env.initStack top [x, y]).2 + 16) =
+      some (((X86Env.initStack top [x, y]).2 + 56 + x.length + 1) % W) := by
+  have hsp := initStack_sp top x y
+  have key := rd64_second_of_bytes
+    (L := X86Env.le64 ((X86Env.initStack top [x, y]).2 + 56 + x.length + 1))
+    hdisj (by omega) (le64_length _)
+    (a := (X86Env.initStack top [x, y]).2 + 16) (by
+      intro i hi
+      rw [show (X86Env.initStack top [x, y]).2 + 16 -
+            (X86Env.initStack top [x, y]).1.base + i =
+          X86Env.stackRoom + (16 + i) from by omega,
+        initStack_data_at top x y (by omega),
+        show 16 + i = (X86Env.le64 2).length + (8 + i) from by
+          have h8 := le64_length 2; omega,
+        getElem?_append_skip,
+        show 8 + i =
+          (X86Env.le64 ((X86Env.initStack top [x, y]).2 + 56)).length + i from by
+          rw [le64_length],
+        getElem?_append_skip]
+      exact getElem?_append_of_lt (by rw [le64_length]; exact hi))
+  rwa [leVal_le64] at key
+
+theorem cstr_of_bytes {m : Mem} {a n : Nat} {s : List Nat}
+    (hn : s.length < n)
+    (h : ∀ i (hi : i < s.length), ∃ v, m.rd (a + i) = some v ∧ s[i]? = some v)
+    (h0 : ∀ b ∈ s, b ≠ 0) (hend : m.rd (a + s.length) = some 0) :
+    m.cstr a n = some s := by
+  induction s generalizing a n with
+  | nil =>
+    cases n with
+    | zero => simp at hn
+    | succ k =>
+      simp only [List.length_nil, Nat.add_zero] at hend
+      simp [Mem.cstr, hend]
+  | cons b t ih =>
+    cases n with
+    | zero => simp at hn
+    | succ k =>
+      obtain ⟨v, hv, hb⟩ := h 0 (by simp)
+      simp at hb
+      subst hb
+      have hb0 : b ≠ 0 := h0 b (by simp)
+      have hrec : m.cstr (a + 1) k = some t := by
+        apply ih (by simpa using hn)
+        · intro i hi
+          obtain ⟨w, hw, htw⟩ := h (i + 1) (by simpa using hi)
+          refine ⟨w, ?_, ?_⟩
+          · rwa [show a + 1 + i = a + (i + 1) from by omega]
+          · simpa using htw
+        · exact fun z hz => h0 z (List.mem_cons_of_mem b hz)
+        · rwa [show a + 1 + t.length = a + (b :: t).length from by simp; omega]
+      simp only [Mem.cstr]
+      rw [show m.rd a = some b from by simpa using hv]
+      simp [hb0, hrec]
+
+theorem initStack_rd_path {c : Region} {top : Nat} {x y : List Nat}
+    (hdisj : c.hi ≤ (X86Env.initStack top [x, y]).1.base) {i : Nat}
+    (hi : i ≤ y.length) :
+    Mem.rd [c, (X86Env.initStack top [x, y]).1]
+        ((X86Env.initStack top [x, y]).2 + 56 + x.length + 1 + i) =
+      (y ++ [0])[i]? := by
+  have hsp := initStack_sp top x y
+  obtain ⟨v, hv⟩ : ∃ v, (y ++ [0])[i]? = some v := by
+    cases hLi : (y ++ [0])[i]? with
+    | some v => exact ⟨v, rfl⟩
+    | none =>
+      simp [List.getElem?_eq_none_iff] at hLi
+      omega
+  rw [hv]
+  apply mem_rd_second hdisj (by omega)
+  rw [show (X86Env.initStack top [x, y]).2 + 56 + x.length + 1 + i -
+        (X86Env.initStack top [x, y]).1.base =
+      X86Env.stackRoom + (56 + x.length + 1 + i) from by omega,
+    initStack_data_at top x y (by omega)]
+  rw [show 56 + x.length + 1 + i = (X86Env.le64 2).length + (48 + x.length + 1 + i)
+      from by have h8 := le64_length 2; omega, getElem?_append_skip,
+    show 48 + x.length + 1 + i =
+        (X86Env.le64 ((X86Env.initStack top [x, y]).2 + 56)).length +
+          (40 + x.length + 1 + i)
+      from by have h8 := le64_length ((X86Env.initStack top [x, y]).2 + 56); omega, getElem?_append_skip,
+    show 40 + x.length + 1 + i =
+        (X86Env.le64 ((X86Env.initStack top [x, y]).2 + 56 + x.length + 1)).length +
+          (32 + x.length + 1 + i)
+      from by have h8 := le64_length ((X86Env.initStack top [x, y]).2 + 56 + x.length + 1); omega, getElem?_append_skip,
+    show 32 + x.length + 1 + i = (X86Env.le64 0).length + (24 + x.length + 1 + i)
+      from by have h8 := le64_length 0; omega, getElem?_append_skip,
+    show 24 + x.length + 1 + i = (X86Env.le64 0).length + (16 + x.length + 1 + i)
+      from by have h8 := le64_length 0; omega, getElem?_append_skip,
+    show 16 + x.length + 1 + i = (X86Env.le64 0).length + (8 + x.length + 1 + i)
+      from by have h8 := le64_length 0; omega, getElem?_append_skip,
+    show 8 + x.length + 1 + i = (X86Env.le64 0).length + (x.length + 1 + i)
+      from by have h8 := le64_length 0; omega, getElem?_append_skip,
+    show x.length + 1 + i = x.length + (1 + i) from by omega,
+    getElem?_append_skip,
+    show 1 + i = [0].length + i from rfl, getElem?_append_skip]
+  exact hv
+
+theorem initStack_cstr_path {c : Region} {top : Nat} {x y : List Nat}
+    (hdisj : c.hi ≤ (X86Env.initStack top [x, y]).1.base)
+    (h0 : 0 ∉ y) (hlen : y.length < 4096) :
+    Mem.cstr [c, (X86Env.initStack top [x, y]).1]
+        ((X86Env.initStack top [x, y]).2 + 56 + x.length + 1) 4096 =
+      some y := by
+  apply cstr_of_bytes hlen
+  · intro i hi
+    have hb := initStack_rd_path hdisj (i := i) (by omega)
+    obtain ⟨v, hv⟩ : ∃ v, y[i]? = some v := by
+      cases hLi : y[i]? with
+      | some v => exact ⟨v, rfl⟩
+      | none =>
+        simp [List.getElem?_eq_none_iff] at hLi
+        omega
+    refine ⟨v, ?_, hv⟩
+    have hsplit : (y ++ [0])[i]? = y[i]? :=
+      getElem?_append_of_lt hi
+    rwa [hsplit, hv] at hb
+  · intro b hb hb0
+    exact h0 (hb0 ▸ hb)
+  · have hb := initStack_rd_path hdisj (i := y.length) (Nat.le_refl _)
+    rw [show (y ++ [0])[y.length]? = some 0 from by
+      rw [show y.length = y.length + 0 from by omega, getElem?_append_skip]
+      rfl] at hb
+    exact hb
+
+/-! ### Entry to the initial `mmap`: step infrastructure -/
+
+theorem step_syscall_ret {im : Nat → Option (Ins × Nat)} {s : X86Int.St}
+    {len nr a1 a2 a3 a4 a5 a6 rax : Nat} {k' : Kern} {m' : Mem}
+    (hi : im s.rip = some (.syscall, len)) (h0 : s.reg 0 = some nr)
+    (h7 : s.reg 7 = some a1) (h6 : s.reg 6 = some a2)
+    (h2 : s.reg 2 = some a3) (h10 : s.reg 10 = some a4)
+    (h8 : s.reg 8 = some a5) (h9 : s.reg 9 = some a6)
+    (hsc : X86Env.syscall s.k s.mem nr a1 a2 a3 a4 a5 a6 =
+      some (.ret rax k' m')) :
+    X86Int.step im s =
+      .ok { ((s.set 0 (some rax)).set 1 (some (s.rip + len))).set 11 none with
+        k := k', mem := m', rip := s.rip + len } := by
+  simp only [X86Int.step, exec, hi, h0, h7, h6, h2, h10, h8, h9, hsc]
+
+theorem free_of_wshape {m m' : Mem} (h : wshape m' = wshape m)
+    {a n : Nat} : m'.free a n = m.free a n := by
+  induction m generalizing m' with
+  | nil =>
+    cases m' with
+    | nil => rfl
+    | cons r t => simp [wshape] at h
+  | cons r t ih =>
+    cases m' with
+    | nil => simp [wshape] at h
+    | cons r' t' =>
+      have h1 : (r'.base, r'.hi, r'.rw) = (r.base, r.hi, r.rw) := by
+        have := List.cons.inj h
+        exact this.1
+      have h2 : wshape t' = wshape t := (List.cons.inj h).2
+      simp only [Mem.free, List.all_cons]
+      have ih' : t'.all (fun r => a + n ≤ r.base || r.hi ≤ a) =
+          t.all (fun r => a + n ≤ r.base || r.hi ≤ a) := ih h2
+      rw [ih']
+      have hb : r'.base = r.base := by
+        have := congrArg Prod.fst h1
+        simpa using this
+      have hh : r'.hi = r.hi := by
+        have := congrArg (fun p => p.2.1) h1
+        simpa using this
+      rw [hb, hh]
+
+theorem mem_wr_second {c r : Region} {a v : Nat}
+    (hdisj : c.hi ≤ r.base) (hge : r.base ≤ a) (hlt : a < r.hi)
+    (hrw : r.rw = true) :
+    Mem.wr [c, r] a v =
+      some [c, { r with data := r.data.set (a - r.base) (v % 256) }] := by
+  have hnot : ¬ (c.base ≤ a ∧ a < c.hi) := by omega
+  simp [Mem.wr, Mem.find, hnot, hge, hlt, hrw]
+
+theorem wrN_second_some : ∀ (bs : List Nat) {c r : Region} {a : Nat},
+    c.hi ≤ r.base → r.rw = true → r.base ≤ a → a + bs.length ≤ r.hi →
+    ∃ r', Mem.wrN [c, r] a bs = some [c, r'] ∧ r'.base = r.base ∧
+      r'.hi = r.hi ∧ r'.rw = r.rw
+  | [], c, r, a, _, _, _, _ => ⟨r, by simp [Mem.wrN], rfl, rfl, rfl⟩
+  | b :: t, c, r, a, hdisj, hrw, hge, hhi => by
+    have hlt : a < r.hi := by
+      simp at hhi
+      omega
+    rw [Mem.wrN, mem_wr_second hdisj hge hlt hrw]
+    have hlen : ({ r with data := r.data.set (a - r.base) (b % 256) } :
+        Region).hi = r.hi := by
+      simp [Region.hi, List.length_set]
+    obtain ⟨r'', hr'', hb, hh, hrw'⟩ :=
+      wrN_second_some (c := c)
+        (r := { r with data := r.data.set (a - r.base) (b % 256) })
+        (a := a + 1) t hdisj (by simpa using hrw) (by show r.base ≤ a + 1; omega) (by
+        rw [hlen]
+        simp at hhi
+        omega)
+    exact ⟨r'', by simpa using hr'', by simpa using hb,
+      by rw [hh, hlen], by simpa using hrw'⟩
+
+theorem stage1Init_rip (f path argv0 stdin : List Nat)
+    (oracle : List Choice) (top : Nat) :
+    (stage1Init f path argv0 stdin oracle top).rip = base + 0x78 := by
+  simp [stage1Init, elfEntry_eq]
+
+theorem stage1Init_mem (f path argv0 stdin : List Nat)
+    (oracle : List Choice) (top : Nat) :
+    (stage1Init f path argv0 stdin oracle top).mem =
+      [⟨base, stage1Code, false⟩,
+        (X86Env.initStack top [argv0, path]).1] := by
+  simp [stage1Init, phVaddr_eq, loadSegment_eq]
+
+theorem stage1Init_reg4 (f path argv0 stdin : List Nat)
+    (oracle : List Choice) (top : Nat) :
+    (stage1Init f path argv0 stdin oracle top).reg 4 =
+      some (X86Env.initStack top [argv0, path]).2 := by
+  simp [stage1Init, St.reg]
+
+theorem stage1Init_reg_ne4 (f path argv0 stdin : List Nat)
+    (oracle : List Choice) (top : Nat) {i : Nat} (hi : i < 16)
+    (h4 : i ≠ 4) :
+    (stage1Init f path argv0 stdin oracle top).reg i = some 0 := by
+  simp only [stage1Init, St.reg, List.getElem?_set]
+  rw [if_neg (by omega : ¬ (4 = i))]
+  have hrep : (List.replicate 16 (some 0))[i]? = some (some 0) := by
+    rw [List.getElem?_replicate]
+    simp [hi]
+  rw [hrep]
+  rfl
+
+theorem stage1Init_regs_length (f path argv0 stdin : List Nat)
+    (oracle : List Choice) (top : Nat) :
+    (stage1Init f path argv0 stdin oracle top).regs.length = 16 := by
+  simp [stage1Init]
+
+theorem cond_cc13_of_sf_eq_of {f : Flags} {b : Bool}
+    (hsf : f.sf = some b) (hof : f.of = some b) :
+    X86Int.cond f 13 = some true := by
+  simp [X86Int.cond, hsf, hof]
+
+theorem cond_cc9_of_sf_false {f : Flags} (hsf : f.sf = some false) :
+    X86Int.cond f 9 = some true := by
+  simp [X86Int.cond, hsf]
+
+theorem cond_cc8_of_sf_false {f : Flags} (hsf : f.sf = some false) :
+    X86Int.cond f 8 = some false := by
+  simp [X86Int.cond, hsf]
+
+theorem find_some_mem : ∀ {m : Mem} {a k i : Nat} {r : Region},
+    Mem.find m a k = some (i, r) → r ∈ m ∧ r.base ≤ a ∧ a < r.hi
+  | [], _, _, _, _, h => by simp [Mem.find] at h
+  | r :: t, a, k, i, r', h => by
+    unfold Mem.find at h
+    by_cases hc : r.base ≤ a ∧ a < r.hi
+    · rw [if_pos hc] at h
+      simp only [Option.some.injEq, Prod.mk.injEq] at h
+      obtain ⟨-, rfl⟩ := h
+      exact ⟨List.mem_cons_self, hc.1, hc.2⟩
+    · rw [if_neg hc] at h
+      obtain ⟨h1, h2, h3⟩ := find_some_mem h
+      exact ⟨List.mem_cons_of_mem r h1, h2, h3⟩
+
+theorem rd_some_region {m : Mem} {a v : Nat}
+    (h : Mem.rd m a = some v) : ∃ r ∈ m, r.base ≤ a ∧ a < r.hi := by
+  unfold Mem.rd at h
+  cases hfind : Mem.find m a 0 with
+  | none => simp [hfind] at h
+  | some ir =>
+    obtain ⟨i, r⟩ := ir
+    obtain ⟨h1, h2, h3⟩ := find_some_mem hfind
+    exact ⟨r, h1, h2, h3⟩
+
+/-- A read entirely inside the first region reads that region's
+data. -/
+theorem rdN_first_region : ∀ (n : Nat) {r : Region} {t : Mem}
+    {x : Nat}, r.base ≤ x → x + n ≤ r.hi →
+    Mem.rdN (r :: t) x n = some ((r.data.drop (x - r.base)).take n) := by
+  intro n
+  induction n with
+  | zero =>
+    intro r t x _ _
+    rfl
+  | succ n ih =>
+    intro r t x h1 h2
+    have hfind : Mem.find (r :: t) x 0 = some (0, r) := by
+      have hg : Mem.find (r :: t) x 0 =
+          (if r.base ≤ x ∧ x < r.hi then some (0, r)
+            else Mem.find t x 1) := rfl
+      rw [hg, if_pos ⟨h1, by omega⟩]
+    have hlen : x - r.base < r.data.length := by
+      have hh : r.hi = r.base + r.data.length := rfl
+      omega
+    have hrd : Mem.rd (r :: t) x = some (r.data[x - r.base]'hlen) := by
+      have he : Mem.rd (r :: t) x =
+          (do let y ← Mem.find (r :: t) x 0; y.2.data[x - y.2.base]?) :=
+        rfl
+      rw [he, hfind]
+      exact List.getElem?_eq_getElem hlen
+    have htail : Mem.rdN (r :: t) (x + 1) n =
+        some ((r.data.drop (x + 1 - r.base)).take n) :=
+      ih (by omega) (by omega)
+    have hj : x + 1 - r.base = (x - r.base) + 1 := by omega
+    rw [rdN_cons_some hrd htail, hj, List.drop_eq_getElem_cons hlen,
+      List.take_succ_cons]
+
+/-- Primitive codes are below 57. -/
+theorem prim_code_lt : ∀ p : Prim, p.code < 57 := by
+  intro p
+  cases p <;> decide
+
+set_option maxHeartbeats 0 in
+/-- The Eff table bytes in the image are `Prim.eff` in code order,
+checked by the kernel. -/
+theorem eff_bytes : ∀ p : Prim,
+    (stage1Code.drop (0x91d + 2 * p.code)).take 2 =
+      [p.eff.1, p.eff.2] := by
+  intro p
+  cases p <;> decide +kernel
+
+/-- Entry to the initial `mmap` site: 21 steps.  From a
+loader-shaped state the run reaches `base + 0xbf` with the exact
+`mmap` argument registers, fd 3 open on the file, the oracle
+untouched (neither `open` nor the arithmetic consumes a choice),
+and memory of the same shape (the one `pushI` writes inside the
+stack region). -/
+theorem loader_entry_to_mmap {f path argv0 : List Nat} {oracle : List Choice}
+    {top sp0 : Nat} {stdinL : List Nat} {stk : Region} {s : X86Int.St}
+    (hstk : stk = (X86Env.initStack top [argv0, path]).1)
+    (hsp0 : sp0 = (X86Env.initStack top [argv0, path]).2)
+    (hrip : s.rip = base + 0x78) (hlen16 : s.regs.length = 16)
+    (hr4 : s.reg 4 = some sp0)
+    (hr0 : ∀ i, i ≠ 4 → i < 16 → s.reg i = some 0)
+    (hmem : s.mem = [⟨base, stage1Code, false⟩, stk])
+    (hk : s.k = ⟨[(path, f)], [], stdinL, [], oracle⟩)
+    (hdisj : base + stage1Code.length ≤ stk.base)
+    (hstkhi : stk.hi = top) (htop47 : top ≤ 2 ^ 47)
+    (hpath0 : 0 ∉ path) (hpathlen : path.length < 4096) :
+    ∃ s', run stage1Im 21 (Out.ok s) = Out.ok s' ∧
+      s'.rip = base + 0xbf ∧
+      s'.reg 0 = some 9 ∧ s'.reg 7 = some 0 ∧ s'.reg 6 = some 65536 ∧
+      s'.reg 2 = some 3 ∧ s'.reg 10 = some 34 ∧
+      s'.reg 8 = some (W - 1) ∧ s'.reg 9 = some 0 ∧
+      s'.reg 14 = some 3 ∧ s'.reg 4 = some (sp0 + 24) ∧
+      s'.k = ⟨[(path, f)], [some ⟨f, 0⟩], stdinL, [], oracle⟩ ∧
+      wshape s'.mem = wshape s.mem ∧ s'.regs.length = 16 ∧
+      (∃ stk', s'.mem = [⟨base, stage1Code, false⟩, stk']) := by
+  have hc := stage1_loaderCode
+  have hSR : X86Env.stackRoom = 4096 := rfl
+  have hsp0eq : sp0 = stk.base + X86Env.stackRoom := by
+    rw [hsp0, hstk]
+    exact initStack_sp top argv0 path
+  have hdatalen : stk.data.length =
+      X86Env.stackRoom +
+        X86Env.pages (56 + ((argv0.length + 1) + (path.length + 1)) + 1) := by
+    rw [hstk]
+    exact initStack_data_length top argv0 path
+  have hsp0le : sp0 ≤ top := by
+    have h1 : stk.base + X86Env.stackRoom ≤ stk.hi := by
+      unfold Region.hi
+      omega
+    omega
+  have hspW : sp0 + 24 < W := by
+    unfold W
+    omega
+  have hdisj' : (⟨base, stage1Code, false⟩ : Region).hi ≤ stk.base := by
+    simp only [Region.hi]
+    exact hdisj
+  -- the path pointer and its bound
+  have hP : sp0 + 56 + argv0.length + 1 < W := by
+    have hb := initStack_rd_path (c := ⟨base, stage1Code, false⟩)
+      (top := top) (x := argv0) (y := path) (by rw [← hstk]; exact hdisj')
+      (i := 0) (by omega)
+    rw [← hstk, ← hsp0] at hb
+    obtain ⟨v, hv⟩ : ∃ v, Mem.rd [⟨base, stage1Code, false⟩, stk]
+        (sp0 + 56 + argv0.length + 1 + 0) = some v := by
+      cases hLi : (path ++ [0])[0]? with
+      | some v => exact ⟨v, by rwa [hLi] at hb⟩
+      | none =>
+        cases path with
+        | nil => simp at hLi
+        | cons b t => simp at hLi
+    obtain ⟨r, hr, -, hlt⟩ := rd_some_region hv
+    have hr2 : r = ⟨base, stage1Code, false⟩ ∨ r = stk := by simpa using hr
+    have hrhi : r.hi ≤ top := by
+      rcases hr2 with rfl | rfl
+      · have h1 : stk.base ≤ stk.hi := by
+          unfold Region.hi
+          omega
+        omega
+      · omega
+    unfold W
+    omega
+  have hPmod : (sp0 + 56 + argv0.length + 1) % W =
+      sp0 + 56 + argv0.length + 1 := Nat.mod_eq_of_lt hP
+  have hA0mod : (sp0 + 56) % W = sp0 + 56 :=
+    Nat.mod_eq_of_lt (by omega)
+  -- step 1: pop rax (argc = 2)
+  have hrd1 : rd64 s.mem sp0 = some 2 := by
+    have h := initStack_rd64_argc (by rw [← hstk]; exact hdisj')
+    rw [← hstk, ← hsp0] at h
+    rwa [hmem]
+  have e1 : X86Int.step stage1Im s =
+      .ok { (s.set 4 (some ((sp0 + 8) % W))).set 0 (some 2) with
+        rip := s.rip + 1 } :=
+    step_pop (by rw [hrip]; exact hc.d78) hr4 hrd1
+  obtain ⟨a1, ha1⟩ : ∃ t : X86Int.St, t =
+      { (s.set 4 (some ((sp0 + 8) % W))).set 0 (some 2) with
+        rip := s.rip + 1 } := ⟨_, rfl⟩
+  have ha1rip : a1.rip = base + 0x79 := by
+    rw [ha1]; show s.rip + 1 = base + 0x79; rw [hrip]
+  have hlen1 : a1.regs.length = 16 := by
+    rw [ha1]
+    show ({ (s.set 4 (some ((sp0 + 8) % W))).set 0 (some 2) with
+      rip := s.rip + 1 }).regs.length = 16
+    rw [len_with_rip, len_set, len_set]
+    exact hlen16
+  have ha1r0 : a1.reg 0 = some 2 := by
+    rw [ha1]
+    show ({ (s.set 4 (some ((sp0 + 8) % W))).set 0 (some 2) with
+      rip := s.rip + 1 }).reg 0 = some 2
+    rw [reg_with_rip, reg_set_self (by
+      show 0 < (s.set 4 (some ((sp0 + 8) % W))).regs.length
+      rw [len_set]; omega)]
+  have ha1r4 : a1.reg 4 = some (sp0 + 8) := by
+    rw [ha1]
+    show ({ (s.set 4 (some ((sp0 + 8) % W))).set 0 (some 2) with
+      rip := s.rip + 1 }).reg 4 = some (sp0 + 8)
+    rw [reg_with_rip, reg_set_other (by decide : (4 : Nat) ≠ 0),
+      reg_set_self (by omega), Nat.mod_eq_of_lt (by omega)]
+  have ha1mem : a1.mem = s.mem := by rw [ha1]; rfl
+  have ha1k : a1.k = s.k := by rw [ha1]; rfl
+  -- step 2: cmp rax, 2
+  have e2 : X86Int.step stage1Im a1 =
+      .ok { a1 with fl := (aluF .sub 2 (2 % W)).2, rip := a1.rip + 4 } :=
+    step_cmpI (by rw [ha1rip]; exact hc.d79) ha1r0
+  obtain ⟨a2, ha2⟩ : ∃ t : X86Int.St, t =
+      { a1 with fl := (aluF .sub 2 (2 % W)).2, rip := a1.rip + 4 } := ⟨_, rfl⟩
+  have ha2rip : a2.rip = base + 0x7d := by
+    rw [ha2]; show a1.rip + 4 = base + 0x7d; rw [ha1rip]
+  have ha2fl : X86Int.cond a2.fl 13 = some true := by
+    have h2W : (2 : Nat) % W = 2 := by decide
+    rw [ha2]
+    show X86Int.cond (aluF .sub 2 (2 % W)).2 13 = some true
+    rw [h2W]
+    apply cond_cc13_of_sf_eq_of (b := false) <;> decide
+  have ha2r4 : a2.reg 4 = some (sp0 + 8) := by rw [ha2]; exact ha1r4
+  have ha2mem : a2.mem = s.mem := by rw [ha2]; exact ha1mem
+  have ha2k : a2.k = s.k := by rw [ha2]; exact ha1k
+  -- step 3: jge 0x84 (taken)
+  have e3 : X86Int.step stage1Im a2 = .ok { a2 with rip := base + 0x84 } := by
+    have h := step_jcc (im := stage1Im) (s := a2)
+      (by rw [ha2rip]; exact hc.d7d) ha2fl
+    simpa using h
+  obtain ⟨a3, ha3⟩ : ∃ t : X86Int.St, t =
+      { a2 with rip := base + 0x84 } := ⟨_, rfl⟩
+  have ha3rip : a3.rip = base + 0x84 := by rw [ha3]
+  have ha3r4 : a3.reg 4 = some (sp0 + 8) := by
+    rw [ha3]; show ({ a2 with rip := base + 0x84 }).reg 4 = some (sp0 + 8)
+    rw [reg_with_rip]; exact ha2r4
+  have ha3mem : a3.mem = s.mem := by rw [ha3]; exact ha2mem
+  have ha3k : a3.k = s.k := by rw [ha3]; exact ha2k
+  have hlen3 : a3.regs.length = 16 := by
+    rw [ha3]; show a2.regs.length = 16
+    rw [ha2]; show a1.regs.length = 16
+    exact hlen1
+  -- steps 4-5: pop rsi twice (argv[0] discarded, argv[1] kept)
+  have hrd4 : rd64 a3.mem (sp0 + 8) = some (sp0 + 56) := by
+    have h := initStack_rd64_argv0 (by rw [← hstk]; exact hdisj')
+    rw [← hstk, ← hsp0, hA0mod] at h
+    rwa [ha3mem, hmem]
+  have e4 : X86Int.step stage1Im a3 =
+      .ok { (a3.set 4 (some ((sp0 + 8 + 8) % W))).set 6 (some (sp0 + 56)) with
+        rip := a3.rip + 1 } :=
+    step_pop (by rw [ha3rip]; exact hc.d84) ha3r4 hrd4
+  obtain ⟨a4, ha4⟩ : ∃ t : X86Int.St, t =
+      { (a3.set 4 (some ((sp0 + 8 + 8) % W))).set 6 (some (sp0 + 56)) with
+        rip := a3.rip + 1 } := ⟨_, rfl⟩
+  have ha4rip : a4.rip = base + 0x85 := by
+    rw [ha4]; show a3.rip + 1 = base + 0x85; rw [ha3rip]
+  have hlen4 : a4.regs.length = 16 := by
+    rw [ha4]
+    show ({ (a3.set 4 (some ((sp0 + 8 + 8) % W))).set 6 (some (sp0 + 56)) with
+      rip := a3.rip + 1 }).regs.length = 16
+    rw [len_with_rip, len_set, len_set]
+    exact hlen3
+  have ha4r4 : a4.reg 4 = some (sp0 + 16) := by
+    rw [ha4]
+    show ({ (a3.set 4 (some ((sp0 + 8 + 8) % W))).set 6 (some (sp0 + 56)) with
+      rip := a3.rip + 1 }).reg 4 = some (sp0 + 16)
+    rw [reg_with_rip, reg_set_other (by decide : (4 : Nat) ≠ 6),
+      reg_set_self (by omega), Nat.mod_eq_of_lt (by omega)]
+  have ha4mem : a4.mem = s.mem := by rw [ha4]; exact ha3mem
+  have ha4k : a4.k = s.k := by rw [ha4]; exact ha3k
+  have hrd5 : rd64 a4.mem (sp0 + 16) =
+      some (sp0 + 56 + argv0.length + 1) := by
+    have h := initStack_rd64_argv1 (by rw [← hstk]; exact hdisj')
+    rw [← hstk, ← hsp0, hPmod] at h
+    rwa [ha4mem, hmem]
+  have e5 : X86Int.step stage1Im a4 =
+      .ok { (a4.set 4 (some ((sp0 + 16 + 8) % W))).set 6
+          (some (sp0 + 56 + argv0.length + 1)) with rip := a4.rip + 1 } :=
+    step_pop (by rw [ha4rip]; exact hc.d85) ha4r4 hrd5
+  obtain ⟨a5, ha5⟩ : ∃ t : X86Int.St, t =
+      { (a4.set 4 (some ((sp0 + 16 + 8) % W))).set 6
+          (some (sp0 + 56 + argv0.length + 1)) with rip := a4.rip + 1 } :=
+    ⟨_, rfl⟩
+  have ha5rip : a5.rip = base + 0x86 := by
+    rw [ha5]; show a4.rip + 1 = base + 0x86; rw [ha4rip]
+  have hlen5 : a5.regs.length = 16 := by
+    rw [ha5]
+    show ({ (a4.set 4 (some ((sp0 + 16 + 8) % W))).set 6
+        (some (sp0 + 56 + argv0.length + 1)) with
+      rip := a4.rip + 1 }).regs.length = 16
+    rw [len_with_rip, len_set, len_set]
+    exact hlen4
+  have ha5r6 : a5.reg 6 = some (sp0 + 56 + argv0.length + 1) := by
+    rw [ha5]
+    show ({ (a4.set 4 (some ((sp0 + 16 + 8) % W))).set 6
+        (some (sp0 + 56 + argv0.length + 1)) with
+      rip := a4.rip + 1 }).reg 6 = some (sp0 + 56 + argv0.length + 1)
+    rw [reg_with_rip, reg_set_self (by
+      show 6 < (a4.set 4 (some ((sp0 + 16 + 8) % W))).regs.length
+      rw [len_set]; omega)]
+  have ha5r4 : a5.reg 4 = some (sp0 + 24) := by
+    rw [ha5]
+    show ({ (a4.set 4 (some ((sp0 + 16 + 8) % W))).set 6
+        (some (sp0 + 56 + argv0.length + 1)) with
+      rip := a4.rip + 1 }).reg 4 = some (sp0 + 24)
+    rw [reg_with_rip, reg_set_other (by decide : (4 : Nat) ≠ 6),
+      reg_set_self (by omega), Nat.mod_eq_of_lt (by omega)]
+  have ha5mem : a5.mem = s.mem := by rw [ha5]; exact ha4mem
+  have ha5k : a5.k = s.k := by rw [ha5]; exact ha4k
+  have ha5r2 : a5.reg 2 = some 0 := by
+    rw [ha5]
+    show ({ (a4.set 4 (some ((sp0 + 16 + 8) % W))).set 6
+        (some (sp0 + 56 + argv0.length + 1)) with
+      rip := a4.rip + 1 }).reg 2 = some 0
+    rw [reg_with_rip, reg_set_other (by decide : (2 : Nat) ≠ 6),
+      reg_set_other (by decide : (2 : Nat) ≠ 4)]
+    rw [ha4]
+    show ({ (a3.set 4 (some ((sp0 + 8 + 8) % W))).set 6 (some (sp0 + 56)) with
+      rip := a3.rip + 1 }).reg 2 = some 0
+    rw [reg_with_rip, reg_set_other (by decide : (2 : Nat) ≠ 6),
+      reg_set_other (by decide : (2 : Nat) ≠ 4)]
+    rw [ha3]
+    show ({ a2 with rip := base + 0x84 }).reg 2 = some 0
+    rw [reg_with_rip, ha2]
+    show ({ a1 with fl := (aluF .sub 2 (2 % W)).2, rip := a1.rip + 4 }).reg 2 = some 0
+    rw [ha1]
+    show ({ (s.set 4 (some ((sp0 + 8) % W))).set 0 (some 2) with
+      rip := s.rip + 1 }).reg 2 = some 0
+    rw [reg_with_rip, reg_set_other (by decide : (2 : Nat) ≠ 0),
+      reg_set_other (by decide : (2 : Nat) ≠ 4)]
+    exact hr0 2 (by decide) (by decide)
+  have ha5r10 : a5.reg 10 = some 0 := by
+    rw [ha5]
+    show ({ (a4.set 4 (some ((sp0 + 16 + 8) % W))).set 6
+        (some (sp0 + 56 + argv0.length + 1)) with
+      rip := a4.rip + 1 }).reg 10 = some 0
+    rw [reg_with_rip, reg_set_other (by decide : (10 : Nat) ≠ 6),
+      reg_set_other (by decide : (10 : Nat) ≠ 4)]
+    rw [ha4]
+    show ({ (a3.set 4 (some ((sp0 + 8 + 8) % W))).set 6 (some (sp0 + 56)) with
+      rip := a3.rip + 1 }).reg 10 = some 0
+    rw [reg_with_rip, reg_set_other (by decide : (10 : Nat) ≠ 6),
+      reg_set_other (by decide : (10 : Nat) ≠ 4)]
+    rw [ha3]
+    show ({ a2 with rip := base + 0x84 }).reg 10 = some 0
+    rw [reg_with_rip, ha2]
+    show ({ a1 with fl := (aluF .sub 2 (2 % W)).2, rip := a1.rip + 4 }).reg 10 = some 0
+    rw [ha1]
+    show ({ (s.set 4 (some ((sp0 + 8) % W))).set 0 (some 2) with
+      rip := s.rip + 1 }).reg 10 = some 0
+    rw [reg_with_rip, reg_set_other (by decide : (10 : Nat) ≠ 0),
+      reg_set_other (by decide : (10 : Nat) ≠ 4)]
+    exact hr0 10 (by decide) (by decide)
+  have ha5r8 : a5.reg 8 = some 0 := by
+    rw [ha5]
+    show ({ (a4.set 4 (some ((sp0 + 16 + 8) % W))).set 6
+        (some (sp0 + 56 + argv0.length + 1)) with
+      rip := a4.rip + 1 }).reg 8 = some 0
+    rw [reg_with_rip, reg_set_other (by decide : (8 : Nat) ≠ 6),
+      reg_set_other (by decide : (8 : Nat) ≠ 4)]
+    rw [ha4]
+    show ({ (a3.set 4 (some ((sp0 + 8 + 8) % W))).set 6 (some (sp0 + 56)) with
+      rip := a3.rip + 1 }).reg 8 = some 0
+    rw [reg_with_rip, reg_set_other (by decide : (8 : Nat) ≠ 6),
+      reg_set_other (by decide : (8 : Nat) ≠ 4)]
+    rw [ha3]
+    show ({ a2 with rip := base + 0x84 }).reg 8 = some 0
+    rw [reg_with_rip, ha2]
+    show ({ a1 with fl := (aluF .sub 2 (2 % W)).2, rip := a1.rip + 4 }).reg 8 = some 0
+    rw [ha1]
+    show ({ (s.set 4 (some ((sp0 + 8) % W))).set 0 (some 2) with
+      rip := s.rip + 1 }).reg 8 = some 0
+    rw [reg_with_rip, reg_set_other (by decide : (8 : Nat) ≠ 0),
+      reg_set_other (by decide : (8 : Nat) ≠ 4)]
+    exact hr0 8 (by decide) (by decide)
+  have ha5r9 : a5.reg 9 = some 0 := by
+    rw [ha5]
+    show ({ (a4.set 4 (some ((sp0 + 16 + 8) % W))).set 6
+        (some (sp0 + 56 + argv0.length + 1)) with
+      rip := a4.rip + 1 }).reg 9 = some 0
+    rw [reg_with_rip, reg_set_other (by decide : (9 : Nat) ≠ 6),
+      reg_set_other (by decide : (9 : Nat) ≠ 4)]
+    rw [ha4]
+    show ({ (a3.set 4 (some ((sp0 + 8 + 8) % W))).set 6 (some (sp0 + 56)) with
+      rip := a3.rip + 1 }).reg 9 = some 0
+    rw [reg_with_rip, reg_set_other (by decide : (9 : Nat) ≠ 6),
+      reg_set_other (by decide : (9 : Nat) ≠ 4)]
+    rw [ha3]
+    show ({ a2 with rip := base + 0x84 }).reg 9 = some 0
+    rw [reg_with_rip, ha2]
+    show ({ a1 with fl := (aluF .sub 2 (2 % W)).2, rip := a1.rip + 4 }).reg 9 = some 0
+    rw [ha1]
+    show ({ (s.set 4 (some ((sp0 + 8) % W))).set 0 (some 2) with
+      rip := s.rip + 1 }).reg 9 = some 0
+    rw [reg_with_rip, reg_set_other (by decide : (9 : Nat) ≠ 0),
+      reg_set_other (by decide : (9 : Nat) ≠ 4)]
+    exact hr0 9 (by decide) (by decide)
+  have reg_with_kmr : ∀ (t : X86Int.St) (k' : Kern) (m' : Mem) (x i : Nat),
+      ({ t with k := k', mem := m', rip := x }).reg i = t.reg i :=
+    fun _ _ _ _ _ => rfl
+  -- step 6: mov eax, 2 (open)
+  have e6 : X86Int.step stage1Im a5 =
+      .ok { a5.set 0 (some (2 % W)) with rip := a5.rip + 5 } :=
+    step_movI (by rw [ha5rip]; exact hc.d86)
+  obtain ⟨a6, ha6⟩ : ∃ t : X86Int.St, t =
+      { a5.set 0 (some (2 % W)) with rip := a5.rip + 5 } := ⟨_, rfl⟩
+  have ha6rip : a6.rip = base + 0x8b := by
+    rw [ha6]; show a5.rip + 5 = base + 0x8b; rw [ha5rip]
+  have hlen6 : a6.regs.length = 16 := by
+    rw [ha6]
+    show ({ a5.set 0 (some (2 % W)) with rip := a5.rip + 5 }).regs.length = 16
+    rw [len_with_rip, len_set]
+    exact hlen5
+  have ha6r0 : a6.reg 0 = some 2 := by
+    rw [ha6]
+    show ({ a5.set 0 (some (2 % W)) with rip := a5.rip + 5 }).reg 0 = some 2
+    rw [reg_with_rip, reg_set_self (by omega)]
+    decide
+  have ha6r6 : a6.reg 6 = some (sp0 + 56 + argv0.length + 1) := by
+    rw [ha6]
+    show ({ a5.set 0 (some (2 % W)) with rip := a5.rip + 5 }).reg 6 =
+      some (sp0 + 56 + argv0.length + 1)
+    rw [reg_with_rip, reg_set_other (by decide : (6 : Nat) ≠ 0)]
+    exact ha5r6
+  have ha6r2 : a6.reg 2 = some 0 := by
+    rw [ha6]
+    show ({ a5.set 0 (some (2 % W)) with rip := a5.rip + 5 }).reg 2 = some 0
+    rw [reg_with_rip, reg_set_other (by decide : (2 : Nat) ≠ 0)]
+    exact ha5r2
+  have ha6r10 : a6.reg 10 = some 0 := by
+    rw [ha6]
+    show ({ a5.set 0 (some (2 % W)) with rip := a5.rip + 5 }).reg 10 = some 0
+    rw [reg_with_rip, reg_set_other (by decide : (10 : Nat) ≠ 0)]
+    exact ha5r10
+  have ha6r8 : a6.reg 8 = some 0 := by
+    rw [ha6]
+    show ({ a5.set 0 (some (2 % W)) with rip := a5.rip + 5 }).reg 8 = some 0
+    rw [reg_with_rip, reg_set_other (by decide : (8 : Nat) ≠ 0)]
+    exact ha5r8
+  have ha6r9 : a6.reg 9 = some 0 := by
+    rw [ha6]
+    show ({ a5.set 0 (some (2 % W)) with rip := a5.rip + 5 }).reg 9 = some 0
+    rw [reg_with_rip, reg_set_other (by decide : (9 : Nat) ≠ 0)]
+    exact ha5r9
+  have ha6r4 : a6.reg 4 = some (sp0 + 24) := by
+    rw [ha6]
+    show ({ a5.set 0 (some (2 % W)) with rip := a5.rip + 5 }).reg 4 =
+      some (sp0 + 24)
+    rw [reg_with_rip, reg_set_other (by decide : (4 : Nat) ≠ 0)]
+    exact ha5r4
+  have ha6mem : a6.mem = s.mem := by rw [ha6]; exact ha5mem
+  have ha6k : a6.k = s.k := by rw [ha6]; exact ha5k
+  -- step 7: mov rdi, rsi (the path)
+  have e7 : X86Int.step stage1Im a6 =
+      .ok { a6.set 7 (some (sp0 + 56 + argv0.length + 1)) with
+        rip := a6.rip + 3 } :=
+    step_mov (by rw [ha6rip]; exact hc.d8b) ha6r6
+  obtain ⟨a7, ha7⟩ : ∃ t : X86Int.St, t =
+      { a6.set 7 (some (sp0 + 56 + argv0.length + 1)) with
+        rip := a6.rip + 3 } := ⟨_, rfl⟩
+  have ha7rip : a7.rip = base + 0x8e := by
+    rw [ha7]; show a6.rip + 3 = base + 0x8e; rw [ha6rip]
+  have hlen7 : a7.regs.length = 16 := by
+    rw [ha7]
+    show ({ a6.set 7 (some (sp0 + 56 + argv0.length + 1)) with
+      rip := a6.rip + 3 }).regs.length = 16
+    rw [len_with_rip, len_set]
+    exact hlen6
+  have ha7r7 : a7.reg 7 = some (sp0 + 56 + argv0.length + 1) := by
+    rw [ha7]
+    show ({ a6.set 7 (some (sp0 + 56 + argv0.length + 1)) with
+      rip := a6.rip + 3 }).reg 7 = some (sp0 + 56 + argv0.length + 1)
+    rw [reg_with_rip, reg_set_self (by omega)]
+  have ha7r0 : a7.reg 0 = some 2 := by
+    rw [ha7]
+    show ({ a6.set 7 (some (sp0 + 56 + argv0.length + 1)) with
+      rip := a6.rip + 3 }).reg 0 = some 2
+    rw [reg_with_rip, reg_set_other (by decide : (0 : Nat) ≠ 7)]
+    exact ha6r0
+  have ha7r6 : a7.reg 6 = some (sp0 + 56 + argv0.length + 1) := by
+    rw [ha7]
+    show ({ a6.set 7 (some (sp0 + 56 + argv0.length + 1)) with
+      rip := a6.rip + 3 }).reg 6 = some (sp0 + 56 + argv0.length + 1)
+    rw [reg_with_rip, reg_set_other (by decide : (6 : Nat) ≠ 7)]
+    exact ha6r6
+  have ha7r2 : a7.reg 2 = some 0 := by
+    rw [ha7]
+    show ({ a6.set 7 (some (sp0 + 56 + argv0.length + 1)) with
+      rip := a6.rip + 3 }).reg 2 = some 0
+    rw [reg_with_rip, reg_set_other (by decide : (2 : Nat) ≠ 7)]
+    exact ha6r2
+  have ha7r10 : a7.reg 10 = some 0 := by
+    rw [ha7]
+    show ({ a6.set 7 (some (sp0 + 56 + argv0.length + 1)) with
+      rip := a6.rip + 3 }).reg 10 = some 0
+    rw [reg_with_rip, reg_set_other (by decide : (10 : Nat) ≠ 7)]
+    exact ha6r10
+  have ha7r8 : a7.reg 8 = some 0 := by
+    rw [ha7]
+    show ({ a6.set 7 (some (sp0 + 56 + argv0.length + 1)) with
+      rip := a6.rip + 3 }).reg 8 = some 0
+    rw [reg_with_rip, reg_set_other (by decide : (8 : Nat) ≠ 7)]
+    exact ha6r8
+  have ha7r9 : a7.reg 9 = some 0 := by
+    rw [ha7]
+    show ({ a6.set 7 (some (sp0 + 56 + argv0.length + 1)) with
+      rip := a6.rip + 3 }).reg 9 = some 0
+    rw [reg_with_rip, reg_set_other (by decide : (9 : Nat) ≠ 7)]
+    exact ha6r9
+  have ha7r4 : a7.reg 4 = some (sp0 + 24) := by
+    rw [ha7]
+    show ({ a6.set 7 (some (sp0 + 56 + argv0.length + 1)) with
+      rip := a6.rip + 3 }).reg 4 = some (sp0 + 24)
+    rw [reg_with_rip, reg_set_other (by decide : (4 : Nat) ≠ 7)]
+    exact ha6r4
+  have ha7mem : a7.mem = s.mem := by rw [ha7]; exact ha6mem
+  have ha7k : a7.k = s.k := by rw [ha7]; exact ha6k
+  -- step 8: xor esi, esi
+  have e8 : X86Int.step stage1Im a7 =
+      .ok { a7.set 6 (some (aluF .xor (sp0 + 56 + argv0.length + 1)
+          (sp0 + 56 + argv0.length + 1)).1) with
+        fl := (aluF .xor (sp0 + 56 + argv0.length + 1)
+          (sp0 + 56 + argv0.length + 1)).2, rip := a7.rip + 2 } :=
+    step_alu_xor (by rw [ha7rip]; exact hc.d8e) ha7r6 ha7r6
+  obtain ⟨a8, ha8⟩ : ∃ t : X86Int.St, t =
+      { a7.set 6 (some (aluF .xor (sp0 + 56 + argv0.length + 1)
+          (sp0 + 56 + argv0.length + 1)).1) with
+        fl := (aluF .xor (sp0 + 56 + argv0.length + 1)
+          (sp0 + 56 + argv0.length + 1)).2, rip := a7.rip + 2 } := ⟨_, rfl⟩
+  have ha8rip : a8.rip = base + 0x90 := by
+    rw [ha8]; show a7.rip + 2 = base + 0x90; rw [ha7rip]
+  have hlen8 : a8.regs.length = 16 := by
+    rw [ha8]
+    show (a7.set 6 (some (aluF .xor (sp0 + 56 + argv0.length + 1) (sp0 + 56 + argv0.length + 1)).1)).regs.length = 16
+    rw [len_set]
+    exact hlen7
+  have ha8r6 : a8.reg 6 = some 0 := by
+    rw [ha8]
+    show (a7.set 6 (some (aluF .xor (sp0 + 56 + argv0.length + 1) (sp0 + 56 + argv0.length + 1)).1)).reg 6 = some 0
+    rw [reg_set_self (by
+      show 6 < a7.regs.length
+      omega), aluF_xor_fst_self]
+  have ha8r0 : a8.reg 0 = some 2 := by
+    rw [ha8]
+    show (a7.set 6 (some (aluF .xor (sp0 + 56 + argv0.length + 1) (sp0 + 56 + argv0.length + 1)).1)).reg 0 = some 2
+    rw [reg_set_other (by decide : (0 : Nat) ≠ 6)]
+    exact ha7r0
+  have ha8r7 : a8.reg 7 = some (sp0 + 56 + argv0.length + 1) := by
+    rw [ha8]
+    show (a7.set 6 (some (aluF .xor (sp0 + 56 + argv0.length + 1) (sp0 + 56 + argv0.length + 1)).1)).reg 7 = some (sp0 + 56 + argv0.length + 1)
+    rw [reg_set_other (by decide : (7 : Nat) ≠ 6)]
+    exact ha7r7
+  have ha8r2 : a8.reg 2 = some 0 := by
+    rw [ha8]
+    show (a7.set 6 (some (aluF .xor (sp0 + 56 + argv0.length + 1) (sp0 + 56 + argv0.length + 1)).1)).reg 2 = some 0
+    rw [reg_set_other (by decide : (2 : Nat) ≠ 6)]
+    exact ha7r2
+  have ha8r10 : a8.reg 10 = some 0 := by
+    rw [ha8]
+    show (a7.set 6 (some (aluF .xor (sp0 + 56 + argv0.length + 1) (sp0 + 56 + argv0.length + 1)).1)).reg 10 = some 0
+    rw [reg_set_other (by decide : (10 : Nat) ≠ 6)]
+    exact ha7r10
+  have ha8r8 : a8.reg 8 = some 0 := by
+    rw [ha8]
+    show (a7.set 6 (some (aluF .xor (sp0 + 56 + argv0.length + 1) (sp0 + 56 + argv0.length + 1)).1)).reg 8 = some 0
+    rw [reg_set_other (by decide : (8 : Nat) ≠ 6)]
+    exact ha7r8
+  have ha8r9 : a8.reg 9 = some 0 := by
+    rw [ha8]
+    show (a7.set 6 (some (aluF .xor (sp0 + 56 + argv0.length + 1) (sp0 + 56 + argv0.length + 1)).1)).reg 9 = some 0
+    rw [reg_set_other (by decide : (9 : Nat) ≠ 6)]
+    exact ha7r9
+  have ha8r4 : a8.reg 4 = some (sp0 + 24) := by
+    rw [ha8]
+    show (a7.set 6 (some (aluF .xor (sp0 + 56 + argv0.length + 1) (sp0 + 56 + argv0.length + 1)).1)).reg 4 = some (sp0 + 24)
+    rw [reg_set_other (by decide : (4 : Nat) ≠ 6)]
+    exact ha7r4
+  have ha8mem : a8.mem = s.mem := by rw [ha8]; exact ha7mem
+  have ha8k : a8.k = s.k := by rw [ha8]; exact ha7k
+  -- step 9: xor edx, edx
+  have e9 : X86Int.step stage1Im a8 =
+      .ok { a8.set 2 (some (aluF .xor 0 0).1) with
+        fl := (aluF .xor 0 0).2, rip := a8.rip + 2 } :=
+    step_alu_xor (by rw [ha8rip]; exact hc.d90) ha8r2 ha8r2
+  obtain ⟨a9, ha9⟩ : ∃ t : X86Int.St, t =
+      { a8.set 2 (some (aluF .xor 0 0).1) with
+        fl := (aluF .xor 0 0).2, rip := a8.rip + 2 } := ⟨_, rfl⟩
+  have ha9rip : a9.rip = base + 0x92 := by
+    rw [ha9]; show a8.rip + 2 = base + 0x92; rw [ha8rip]
+  have hlen9 : a9.regs.length = 16 := by
+    rw [ha9]
+    show (a8.set 2 (some (aluF .xor 0 0).1)).regs.length = 16
+    rw [len_set]
+    exact hlen8
+  have ha9r0 : a9.reg 0 = some 2 := by
+    rw [ha9]
+    show (a8.set 2 (some (aluF .xor 0 0).1)).reg 0 = some 2
+    rw [reg_set_other (by decide : (0 : Nat) ≠ 2)]
+    exact ha8r0
+  have ha9r7 : a9.reg 7 = some (sp0 + 56 + argv0.length + 1) := by
+    rw [ha9]
+    show (a8.set 2 (some (aluF .xor 0 0).1)).reg 7 = some (sp0 + 56 + argv0.length + 1)
+    rw [reg_set_other (by decide : (7 : Nat) ≠ 2)]
+    exact ha8r7
+  have ha9r6 : a9.reg 6 = some 0 := by
+    rw [ha9]
+    show (a8.set 2 (some (aluF .xor 0 0).1)).reg 6 = some 0
+    rw [reg_set_other (by decide : (6 : Nat) ≠ 2)]
+    exact ha8r6
+  have ha9r2 : a9.reg 2 = some 0 := by
+    rw [ha9]
+    show (a8.set 2 (some (aluF .xor 0 0).1)).reg 2 = some 0
+    rw [reg_set_self (by show 2 < a8.regs.length; omega), aluF_xor_fst_self]
+  have ha9r10 : a9.reg 10 = some 0 := by
+    rw [ha9]
+    show (a8.set 2 (some (aluF .xor 0 0).1)).reg 10 = some 0
+    rw [reg_set_other (by decide : (10 : Nat) ≠ 2)]
+    exact ha8r10
+  have ha9r8 : a9.reg 8 = some 0 := by
+    rw [ha9]
+    show (a8.set 2 (some (aluF .xor 0 0).1)).reg 8 = some 0
+    rw [reg_set_other (by decide : (8 : Nat) ≠ 2)]
+    exact ha8r8
+  have ha9r9 : a9.reg 9 = some 0 := by
+    rw [ha9]
+    show (a8.set 2 (some (aluF .xor 0 0).1)).reg 9 = some 0
+    rw [reg_set_other (by decide : (9 : Nat) ≠ 2)]
+    exact ha8r9
+  have ha9r4 : a9.reg 4 = some (sp0 + 24) := by
+    rw [ha9]
+    show (a8.set 2 (some (aluF .xor 0 0).1)).reg 4 = some (sp0 + 24)
+    rw [reg_set_other (by decide : (4 : Nat) ≠ 2)]
+    exact ha8r4
+  have ha9mem : a9.mem = s.mem := by rw [ha9]; exact ha8mem
+  have ha9k : a9.k = s.k := by rw [ha9]; exact ha8k
+  -- step 10: open(path, O_RDONLY) = 3
+  have hcstr : Mem.cstr a9.mem (sp0 + 56 + argv0.length + 1) 4096 =
+      some path := by
+    have h := initStack_cstr_path (by rw [← hstk]; exact hdisj')
+      hpath0 hpathlen
+    rw [← hstk, ← hsp0] at h
+    rwa [ha9mem, hmem]
+  have hsc : X86Env.syscall a9.k a9.mem 2
+        (sp0 + 56 + argv0.length + 1) 0 0 0 0 0 =
+      some (.ret 3 ⟨[(path, f)], [some ⟨f, 0⟩], stdinL, [], oracle⟩
+        a9.mem) := by
+    rw [ha9k, hk]
+    simp only [X86Env.syscall]
+    rw [if_neg (by simp), hcstr]
+    simp [X86Env.lookup, X86Env.freeSlot, X86Env.setSlot]
+  have e10 : X86Int.step stage1Im a9 =
+      .ok { ((a9.set 0 (some 3)).set 1 (some (a9.rip + 2))).set 11 none with
+        k := ⟨[(path, f)], [some ⟨f, 0⟩], stdinL, [], oracle⟩,
+        mem := a9.mem, rip := a9.rip + 2 } :=
+    step_syscall_ret (by rw [ha9rip]; exact hc.d92) ha9r0 ha9r7 ha9r6
+      ha9r2 ha9r10 ha9r8 ha9r9 hsc
+  obtain ⟨a10, ha10⟩ : ∃ t : X86Int.St, t =
+      { ((a9.set 0 (some 3)).set 1 (some (a9.rip + 2))).set 11 none with
+        k := ⟨[(path, f)], [some ⟨f, 0⟩], stdinL, [], oracle⟩,
+        mem := a9.mem, rip := a9.rip + 2 } := ⟨_, rfl⟩
+  have ha10rip : a10.rip = base + 0x94 := by
+    rw [ha10]; show a9.rip + 2 = base + 0x94; rw [ha9rip]
+  have hlen10 : a10.regs.length = 16 := by
+    rw [ha10]
+    show (((a9.set 0 (some 3)).set 1 (some (a9.rip + 2))).set 11
+      none).regs.length = 16
+    rw [len_set, len_set, len_set]
+    exact hlen9
+  have ha10r0 : a10.reg 0 = some 3 := by
+    rw [ha10, reg_with_kmr, reg_set_other (by decide : (0 : Nat) ≠ 11),
+      reg_set_other (by decide : (0 : Nat) ≠ 1),
+      reg_set_self (by omega)]
+  have ha10r7 : a10.reg 7 = some (sp0 + 56 + argv0.length + 1) := by
+    rw [ha10, reg_with_kmr, reg_set_other (by decide : (7 : Nat) ≠ 11),
+      reg_set_other (by decide : (7 : Nat) ≠ 1),
+      reg_set_other (by decide : (7 : Nat) ≠ 0)]
+    exact ha9r7
+  have ha10r6 : a10.reg 6 = some 0 := by
+    rw [ha10, reg_with_kmr, reg_set_other (by decide : (6 : Nat) ≠ 11),
+      reg_set_other (by decide : (6 : Nat) ≠ 1),
+      reg_set_other (by decide : (6 : Nat) ≠ 0)]
+    exact ha9r6
+  have ha10r2 : a10.reg 2 = some 0 := by
+    rw [ha10, reg_with_kmr, reg_set_other (by decide : (2 : Nat) ≠ 11),
+      reg_set_other (by decide : (2 : Nat) ≠ 1),
+      reg_set_other (by decide : (2 : Nat) ≠ 0)]
+    exact ha9r2
+  have ha10r10 : a10.reg 10 = some 0 := by
+    rw [ha10, reg_with_kmr, reg_set_other (by decide : (10 : Nat) ≠ 11),
+      reg_set_other (by decide : (10 : Nat) ≠ 1),
+      reg_set_other (by decide : (10 : Nat) ≠ 0)]
+    exact ha9r10
+  have ha10r8 : a10.reg 8 = some 0 := by
+    rw [ha10, reg_with_kmr, reg_set_other (by decide : (8 : Nat) ≠ 11),
+      reg_set_other (by decide : (8 : Nat) ≠ 1),
+      reg_set_other (by decide : (8 : Nat) ≠ 0)]
+    exact ha9r8
+  have ha10r9 : a10.reg 9 = some 0 := by
+    rw [ha10, reg_with_kmr, reg_set_other (by decide : (9 : Nat) ≠ 11),
+      reg_set_other (by decide : (9 : Nat) ≠ 1),
+      reg_set_other (by decide : (9 : Nat) ≠ 0)]
+    exact ha9r9
+  have ha10r4 : a10.reg 4 = some (sp0 + 24) := by
+    rw [ha10, reg_with_kmr, reg_set_other (by decide : (4 : Nat) ≠ 11),
+      reg_set_other (by decide : (4 : Nat) ≠ 1),
+      reg_set_other (by decide : (4 : Nat) ≠ 0)]
+    exact ha9r4
+  have ha10mem : a10.mem = s.mem := by rw [ha10]; exact ha9mem
+  have ha10k : a10.k =
+      ⟨[(path, f)], [some ⟨f, 0⟩], stdinL, [], oracle⟩ := by
+    rw [ha10]
+  -- step 11: test rax, rax (fd = 3, not negative)
+  have e11 : X86Int.step stage1Im a10 =
+      .ok { a10 with fl := (aluF .and 3 3).2, rip := a10.rip + 3 } :=
+    step_test (by rw [ha10rip]; exact hc.d94) ha10r0 ha10r0
+  obtain ⟨a11, ha11⟩ : ∃ t : X86Int.St, t =
+      { a10 with fl := (aluF .and 3 3).2, rip := a10.rip + 3 } := ⟨_, rfl⟩
+  have ha11rip : a11.rip = base + 0x97 := by
+    rw [ha11]; show a10.rip + 3 = base + 0x97; rw [ha10rip]
+  have ha11fl : X86Int.cond a11.fl 9 = some true := by
+    rw [ha11]
+    show X86Int.cond (aluF .and 3 3).2 9 = some true
+    apply cond_cc9_of_sf_false
+    decide
+  have ha11r0 : a11.reg 0 = some 3 := by rw [ha11]; exact ha10r0
+  have ha11r4 : a11.reg 4 = some (sp0 + 24) := by rw [ha11]; exact ha10r4
+  have ha11mem : a11.mem = s.mem := by rw [ha11]; exact ha10mem
+  have ha11k : a11.k =
+      ⟨[(path, f)], [some ⟨f, 0⟩], stdinL, [], oracle⟩ := by rw [ha11]; exact ha10k
+  have hlen11 : a11.regs.length = 16 := by
+    rw [ha11]; show a10.regs.length = 16
+    exact hlen10
+  -- step 12: jns 0x9e (taken)
+  have e12 : X86Int.step stage1Im a11 =
+      .ok { a11 with rip := base + 0x9e } := by
+    have h := step_jcc (im := stage1Im) (s := a11)
+      (by rw [ha11rip]; exact hc.d97) ha11fl
+    simpa using h
+  obtain ⟨a12, ha12⟩ : ∃ t : X86Int.St, t =
+      { a11 with rip := base + 0x9e } := ⟨_, rfl⟩
+  have ha12rip : a12.rip = base + 0x9e := by rw [ha12]
+  have ha12r0 : a12.reg 0 = some 3 := by
+    rw [ha12]; show ({ a11 with rip := base + 0x9e }).reg 0 = some 3
+    rw [reg_with_rip]; exact ha11r0
+  have ha12r4 : a12.reg 4 = some (sp0 + 24) := by
+    rw [ha12]; show ({ a11 with rip := base + 0x9e }).reg 4 = some (sp0 + 24)
+    rw [reg_with_rip]; exact ha11r4
+  have ha12mem : a12.mem = s.mem := by rw [ha12]; exact ha11mem
+  have ha12k : a12.k =
+      ⟨[(path, f)], [some ⟨f, 0⟩], stdinL, [], oracle⟩ := by rw [ha12]; exact ha11k
+  have hlen12 : a12.regs.length = 16 := by
+    rw [ha12]; show ({ a11 with rip := base + 0x9e }).regs.length = 16
+    rw [len_with_rip]; exact hlen11
+  have ha12r7 : a12.reg 7 = some (sp0 + 56 + argv0.length + 1) := by rw [ha12, ha11]; exact ha10r7
+  have ha12r6 : a12.reg 6 = some 0 := by rw [ha12, ha11]; exact ha10r6
+  have ha12r2 : a12.reg 2 = some 0 := by rw [ha12, ha11]; exact ha10r2
+  have ha12r10 : a12.reg 10 = some 0 := by rw [ha12, ha11]; exact ha10r10
+  have ha12r8 : a12.reg 8 = some 0 := by rw [ha12, ha11]; exact ha10r8
+  have ha12r9 : a12.reg 9 = some 0 := by rw [ha12, ha11]; exact ha10r9
+  -- step 13: mov r14, rax (keep the fd)
+  have e13 : X86Int.step stage1Im a12 =
+      .ok { a12.set 14 (some 3) with rip := a12.rip + 3 } :=
+    step_mov (by rw [ha12rip]; exact hc.d9e) ha12r0
+  obtain ⟨a13, ha13⟩ : ∃ t : X86Int.St, t =
+      { a12.set 14 (some 3) with rip := a12.rip + 3 } := ⟨_, rfl⟩
+  have ha13rip : a13.rip = base + 0xa1 := by
+    rw [ha13]; show a12.rip + 3 = base + 0xa1; rw [ha12rip]
+  have hlen13 : a13.regs.length = 16 := by
+    rw [ha13]
+    show ({ a12.set 14 (some 3) with rip := a12.rip + 3 }).regs.length = 16
+    rw [len_with_rip, len_set]
+    exact hlen12
+  have ha13r14 : a13.reg 14 = some 3 := by
+    rw [ha13]
+    show ({ a12.set 14 (some 3) with rip := a12.rip + 3 }).reg 14 = some 3
+    rw [reg_with_rip, reg_set_self (by omega)]
+  have ha13r0 : a13.reg 0 = some 3 := by
+    rw [ha13]
+    show ({ a12.set 14 (some 3) with rip := a12.rip + 3 }).reg 0 = some 3
+    rw [reg_with_rip, reg_set_other (by decide : (0 : Nat) ≠ 14)]
+    exact ha12r0
+  have ha13r7 : a13.reg 7 = some (sp0 + 56 + argv0.length + 1) := by
+    rw [ha13]
+    show ({ a12.set 14 (some 3) with rip := a12.rip + 3 }).reg 7 =
+      some (sp0 + 56 + argv0.length + 1)
+    rw [reg_with_rip, reg_set_other (by decide : (7 : Nat) ≠ 14)]
+    exact ha12r7
+  have ha13r4 : a13.reg 4 = some (sp0 + 24) := by
+    rw [ha13]
+    show ({ a12.set 14 (some 3) with rip := a12.rip + 3 }).reg 4 =
+      some (sp0 + 24)
+    rw [reg_with_rip, reg_set_other (by decide : (4 : Nat) ≠ 14)]
+    exact ha12r4
+  have ha13mem : a13.mem = s.mem := by rw [ha13]; exact ha12mem
+  have ha13k : a13.k =
+      ⟨[(path, f)], [some ⟨f, 0⟩], stdinL, [], oracle⟩ := by rw [ha13]; exact ha12k
+  -- step 14: mov eax, 9 (mmap)
+  have e14 : X86Int.step stage1Im a13 =
+      .ok { a13.set 0 (some (9 % W)) with rip := a13.rip + 5 } :=
+    step_movI (by rw [ha13rip]; exact hc.da1)
+  obtain ⟨a14, ha14⟩ : ∃ t : X86Int.St, t =
+      { a13.set 0 (some (9 % W)) with rip := a13.rip + 5 } := ⟨_, rfl⟩
+  have ha14rip : a14.rip = base + 0xa6 := by
+    rw [ha14]; show a13.rip + 5 = base + 0xa6; rw [ha13rip]
+  have hlen14 : a14.regs.length = 16 := by
+    rw [ha14]
+    show ({ a13.set 0 (some (9 % W)) with rip := a13.rip + 5 }).regs.length = 16
+    rw [len_with_rip, len_set]
+    exact hlen13
+  have ha14r0 : a14.reg 0 = some 9 := by
+    rw [ha14]
+    show ({ a13.set 0 (some (9 % W)) with rip := a13.rip + 5 }).reg 0 = some 9
+    rw [reg_with_rip, reg_set_self (by omega)]
+    decide
+  have ha14r7 : a14.reg 7 = some (sp0 + 56 + argv0.length + 1) := by
+    rw [ha14]
+    show ({ a13.set 0 (some (9 % W)) with rip := a13.rip + 5 }).reg 7 =
+      some (sp0 + 56 + argv0.length + 1)
+    rw [reg_with_rip, reg_set_other (by decide : (7 : Nat) ≠ 0)]
+    exact ha13r7
+  have ha14r14 : a14.reg 14 = some 3 := by
+    rw [ha14]
+    show ({ a13.set 0 (some (9 % W)) with rip := a13.rip + 5 }).reg 14 = some 3
+    rw [reg_with_rip, reg_set_other (by decide : (14 : Nat) ≠ 0)]
+    exact ha13r14
+  have ha14r4 : a14.reg 4 = some (sp0 + 24) := by
+    rw [ha14]
+    show ({ a13.set 0 (some (9 % W)) with rip := a13.rip + 5 }).reg 4 =
+      some (sp0 + 24)
+    rw [reg_with_rip, reg_set_other (by decide : (4 : Nat) ≠ 0)]
+    exact ha13r4
+  have ha14mem : a14.mem = s.mem := by rw [ha14]; exact ha13mem
+  have ha14k : a14.k =
+      ⟨[(path, f)], [some ⟨f, 0⟩], stdinL, [], oracle⟩ := by rw [ha14]; exact ha13k
+  -- step 15: xor edi, edi
+  have e15 : X86Int.step stage1Im a14 =
+      .ok { a14.set 7 (some (aluF .xor (sp0 + 56 + argv0.length + 1)
+          (sp0 + 56 + argv0.length + 1)).1) with
+        fl := (aluF .xor (sp0 + 56 + argv0.length + 1)
+          (sp0 + 56 + argv0.length + 1)).2, rip := a14.rip + 2 } :=
+    step_alu_xor (by rw [ha14rip]; exact hc.da6) ha14r7 ha14r7
+  obtain ⟨a15, ha15⟩ : ∃ t : X86Int.St, t =
+      { a14.set 7 (some (aluF .xor (sp0 + 56 + argv0.length + 1)
+          (sp0 + 56 + argv0.length + 1)).1) with
+        fl := (aluF .xor (sp0 + 56 + argv0.length + 1)
+          (sp0 + 56 + argv0.length + 1)).2, rip := a14.rip + 2 } := ⟨_, rfl⟩
+  have ha15rip : a15.rip = base + 0xa8 := by
+    rw [ha15]; show a14.rip + 2 = base + 0xa8; rw [ha14rip]
+  have hlen15 : a15.regs.length = 16 := by
+    rw [ha15]
+    show ({ a14.set 7 (some (aluF .xor (sp0 + 56 + argv0.length + 1)
+        (sp0 + 56 + argv0.length + 1)).1) with
+      fl := (aluF .xor (sp0 + 56 + argv0.length + 1)
+        (sp0 + 56 + argv0.length + 1)).2, rip := a14.rip + 2 }).regs.length = 16
+    rw [len_set]
+    exact hlen14
+  have ha15r7 : a15.reg 7 = some 0 := by
+    rw [ha15]
+    show (a14.set 7 (some (aluF .xor (sp0 + 56 + argv0.length + 1)
+        (sp0 + 56 + argv0.length + 1)).1)).reg 7 = some 0
+    rw [reg_set_self (by omega), aluF_xor_fst_self]
+  have ha15r0 : a15.reg 0 = some 9 := by
+    rw [ha15]
+    show (a14.set 7 (some (aluF .xor (sp0 + 56 + argv0.length + 1)
+        (sp0 + 56 + argv0.length + 1)).1)).reg 0 = some 9
+    rw [reg_set_other (by decide : (0 : Nat) ≠ 7)]
+    exact ha14r0
+  have ha15r14 : a15.reg 14 = some 3 := by
+    rw [ha15]
+    show (a14.set 7 (some (aluF .xor (sp0 + 56 + argv0.length + 1)
+        (sp0 + 56 + argv0.length + 1)).1)).reg 14 = some 3
+    rw [reg_set_other (by decide : (14 : Nat) ≠ 7)]
+    exact ha14r14
+  have ha15r4 : a15.reg 4 = some (sp0 + 24) := by
+    rw [ha15]
+    show (a14.set 7 (some (aluF .xor (sp0 + 56 + argv0.length + 1)
+        (sp0 + 56 + argv0.length + 1)).1)).reg 4 = some (sp0 + 24)
+    rw [reg_set_other (by decide : (4 : Nat) ≠ 7)]
+    exact ha14r4
+  have ha15mem : a15.mem = s.mem := by rw [ha15]; exact ha14mem
+  have ha15k : a15.k =
+      ⟨[(path, f)], [some ⟨f, 0⟩], stdinL, [], oracle⟩ := by rw [ha15]; exact ha14k
+  -- steps 16-18: mov esi, 65536; mov edx, 3; mov r10d, 34
+  have e16 : X86Int.step stage1Im a15 =
+      .ok { a15.set 6 (some (65536 % W)) with rip := a15.rip + 5 } :=
+    step_movI (by rw [ha15rip]; exact hc.da8)
+  obtain ⟨a16, ha16⟩ : ∃ t : X86Int.St, t =
+      { a15.set 6 (some (65536 % W)) with rip := a15.rip + 5 } := ⟨_, rfl⟩
+  have ha16rip : a16.rip = base + 0xad := by
+    rw [ha16]; show a15.rip + 5 = base + 0xad; rw [ha15rip]
+  have hlen16 : a16.regs.length = 16 := by
+    rw [ha16]
+    show ({ a15.set 6 (some (65536 % W)) with
+      rip := a15.rip + 5 }).regs.length = 16
+    rw [len_with_rip, len_set]
+    exact hlen15
+  have ha16r6 : a16.reg 6 = some 65536 := by
+    rw [ha16]
+    show ({ a15.set 6 (some (65536 % W)) with
+      rip := a15.rip + 5 }).reg 6 = some 65536
+    rw [reg_with_rip, reg_set_self (by omega)]
+    decide
+  have e17 : X86Int.step stage1Im a16 =
+      .ok { a16.set 2 (some (3 % W)) with rip := a16.rip + 5 } :=
+    step_movI (by rw [ha16rip]; exact hc.dad)
+  obtain ⟨a17, ha17⟩ : ∃ t : X86Int.St, t =
+      { a16.set 2 (some (3 % W)) with rip := a16.rip + 5 } := ⟨_, rfl⟩
+  have ha17rip : a17.rip = base + 0xb2 := by
+    rw [ha17]; show a16.rip + 5 = base + 0xb2; rw [ha16rip]
+  have hlen17 : a17.regs.length = 16 := by
+    rw [ha17]
+    show ({ a16.set 2 (some (3 % W)) with rip := a16.rip + 5 }).regs.length = 16
+    rw [len_with_rip, len_set]
+    exact hlen16
+  have e18 : X86Int.step stage1Im a17 =
+      .ok { a17.set 10 (some (34 % W)) with rip := a17.rip + 6 } :=
+    step_movI (by rw [ha17rip]; exact hc.db2)
+  obtain ⟨a18, ha18⟩ : ∃ t : X86Int.St, t =
+      { a17.set 10 (some (34 % W)) with rip := a17.rip + 6 } := ⟨_, rfl⟩
+  have ha18rip : a18.rip = base + 0xb8 := by
+    rw [ha18]; show a17.rip + 6 = base + 0xb8; rw [ha17rip]
+  have hlen18 : a18.regs.length = 16 := by
+    rw [ha18]
+    show ({ a17.set 10 (some (34 % W)) with
+      rip := a17.rip + 6 }).regs.length = 16
+    rw [len_with_rip, len_set]
+    exact hlen17
+  have ha18mem : a18.mem = s.mem := by rw [ha18, ha17, ha16]; exact ha15mem
+  have ha18k : a18.k =
+      ⟨[(path, f)], [some ⟨f, 0⟩], stdinL, [], oracle⟩ := by rw [ha18, ha17, ha16]; exact ha15k
+  have ha18r4 : a18.reg 4 = some (sp0 + 24) := by
+    rw [ha18]
+    show ({ a17.set 10 (some (34 % W)) with rip := a17.rip + 6 }).reg 4 =
+      some (sp0 + 24)
+    rw [reg_with_rip, reg_set_other (by decide : (4 : Nat) ≠ 10)]
+    rw [ha17]
+    show ({ a16.set 2 (some (3 % W)) with rip := a16.rip + 5 }).reg 4 =
+      some (sp0 + 24)
+    rw [reg_with_rip, reg_set_other (by decide : (4 : Nat) ≠ 2)]
+    rw [ha16]
+    show ({ a15.set 6 (some (65536 % W)) with rip := a15.rip + 5 }).reg 4 =
+      some (sp0 + 24)
+    rw [reg_with_rip, reg_set_other (by decide : (4 : Nat) ≠ 6)]
+    exact ha15r4
+  -- step 19: push -1
+  have hwr : ∃ stk', wr64 a18.mem (sp0 + 16) ((W - 1) % W) =
+      some [⟨base, stage1Code, false⟩, stk'] ∧ stk'.base = stk.base ∧
+      stk'.hi = stk.hi ∧ stk'.rw = stk.rw := by
+    rw [ha18mem, hmem]
+    have h := wrN_second_some (r := stk) (a := sp0 + 16)
+      (bytes8 ((W - 1) % W)) hdisj' (by
+      rw [hstk]
+      simp [X86Env.initStack]) (by omega) (by
+      have hlen8 : (bytes8 ((W - 1) % W)).length = 8 := by simp [bytes8]
+      rw [hlen8]
+      have hge : X86Env.stackRoom + 24 ≤ stk.data.length := by
+        rw [hdatalen]
+        have := pages_ge (56 + ((argv0.length + 1) + (path.length + 1)) + 1)
+        omega
+      unfold Region.hi
+      omega)
+    obtain ⟨stk', h1, h2, h3, h4⟩ := h
+    exact ⟨stk', h1, h2, h3, h4⟩
+  obtain ⟨stk', hwr, hstk'b, hstk'hi, hstk'rw⟩ := hwr
+  have hwshape : wshape [⟨base, stage1Code, false⟩, stk'] =
+      wshape a18.mem := by
+    have h := wrN_wshape (bytes8 ((W - 1) % W)) a18.mem (sp0 + 16) hwr
+    exact h
+  have e19 : X86Int.step stage1Im a18 =
+      .ok { a18.set 4 (some ((sp0 + 24 + W - 8) % W)) with
+        mem := [⟨base, stage1Code, false⟩, stk'], rip := a18.rip + 2 } :=
+    step_pushI (by rw [ha18rip]; exact hc.db8) ha18r4 (by
+      rw [show (sp0 + 24 + W - 8) % W = sp0 + 16 from by
+        rw [show sp0 + 24 + W - 8 = (sp0 + 16) + W from by omega,
+          Nat.add_mod_right]
+        exact Nat.mod_eq_of_lt (by omega)]
+      exact hwr)
+  obtain ⟨a19, ha19⟩ : ∃ t : X86Int.St, t =
+      { a18.set 4 (some ((sp0 + 24 + W - 8) % W)) with
+        mem := [⟨base, stage1Code, false⟩, stk'], rip := a18.rip + 2 } :=
+    ⟨_, rfl⟩
+  have ha19rip : a19.rip = base + 0xba := by
+    rw [ha19]; show a18.rip + 2 = base + 0xba; rw [ha18rip]
+  have hlen19 : a19.regs.length = 16 := by
+    rw [ha19]
+    show (a18.set 4 (some ((sp0 + 24 + W - 8) % W))).regs.length = 16
+    rw [len_set]
+    exact hlen18
+  have ha19r4 : a19.reg 4 = some (sp0 + 16) := by
+    rw [ha19]
+    show (a18.set 4 (some ((sp0 + 24 + W - 8) % W))).reg 4 = some (sp0 + 16)
+    rw [reg_set_self (by omega),
+      show (sp0 + 24 + W - 8) % W = sp0 + 16 from by
+        rw [show sp0 + 24 + W - 8 = (sp0 + 16) + W from by omega,
+          Nat.add_mod_right]
+        exact Nat.mod_eq_of_lt (by omega)]
+  have ha19mem : a19.mem = [⟨base, stage1Code, false⟩, stk'] := by
+    rw [ha19]
+  have ha19k : a19.k =
+      ⟨[(path, f)], [some ⟨f, 0⟩], stdinL, [], oracle⟩ := by rw [ha19]; exact ha18k
+  -- step 20: pop r8 (the -1 just pushed)
+  have hrd20 : rd64 a19.mem (sp0 + 16) = some (W - 1) := by
+    rw [ha19mem]
+    have h := rd64_wr64 hwr
+    rw [Nat.mod_mod, Nat.mod_eq_of_lt (by unfold W; omega)] at h
+    exact h
+  have e20 : X86Int.step stage1Im a19 =
+      .ok { (a19.set 4 (some ((sp0 + 16 + 8) % W))).set 8 (some (W - 1)) with
+        rip := a19.rip + 2 } :=
+    step_pop (by rw [ha19rip]; exact hc.dba) ha19r4 hrd20
+  obtain ⟨a20, ha20⟩ : ∃ t : X86Int.St, t =
+      { (a19.set 4 (some ((sp0 + 16 + 8) % W))).set 8 (some (W - 1)) with
+        rip := a19.rip + 2 } := ⟨_, rfl⟩
+  have ha20rip : a20.rip = base + 0xbc := by
+    rw [ha20]; show a19.rip + 2 = base + 0xbc; rw [ha19rip]
+  have hlen20 : a20.regs.length = 16 := by
+    rw [ha20]
+    show ({ (a19.set 4 (some ((sp0 + 16 + 8) % W))).set 8 (some (W - 1)) with
+      rip := a19.rip + 2 }).regs.length = 16
+    rw [len_with_rip, len_set, len_set]
+    exact hlen19
+  have ha20r9 : a20.reg 9 = some 0 := by
+    rw [ha20]
+    show ({ (a19.set 4 (some ((sp0 + 16 + 8) % W))).set 8 (some (W - 1)) with
+      rip := a19.rip + 2 }).reg 9 = some 0
+    rw [reg_with_rip, reg_set_other (by decide : (9 : Nat) ≠ 8),
+      reg_set_other (by decide : (9 : Nat) ≠ 4)]
+    rw [ha19]
+    show (a18.set 4 (some ((sp0 + 24 + W - 8) % W))).reg 9 = some 0
+    rw [reg_set_other (by decide : (9 : Nat) ≠ 4)]
+    rw [ha18]
+    show ({ a17.set 10 (some (34 % W)) with rip := a17.rip + 6 }).reg 9 = some 0
+    rw [reg_with_rip, reg_set_other (by decide : (9 : Nat) ≠ 10)]
+    rw [ha17]
+    show ({ a16.set 2 (some (3 % W)) with rip := a16.rip + 5 }).reg 9 = some 0
+    rw [reg_with_rip, reg_set_other (by decide : (9 : Nat) ≠ 2)]
+    rw [ha16]
+    show ({ a15.set 6 (some (65536 % W)) with rip := a15.rip + 5 }).reg 9 =
+      some 0
+    rw [reg_with_rip, reg_set_other (by decide : (9 : Nat) ≠ 6)]
+    rw [ha15]
+    show (a14.set 7 (some (aluF .xor (sp0 + 56 + argv0.length + 1)
+        (sp0 + 56 + argv0.length + 1)).1)).reg 9 = some 0
+    rw [reg_set_other (by decide : (9 : Nat) ≠ 7)]
+    rw [ha14]
+    show ({ a13.set 0 (some (9 % W)) with rip := a13.rip + 5 }).reg 9 = some 0
+    rw [reg_with_rip, reg_set_other (by decide : (9 : Nat) ≠ 0)]
+    rw [ha13]
+    show ({ a12.set 14 (some 3) with rip := a12.rip + 3 }).reg 9 = some 0
+    rw [reg_with_rip, reg_set_other (by decide : (9 : Nat) ≠ 14)]
+    exact ha12r9
+  have ha20mem : a20.mem = [⟨base, stage1Code, false⟩, stk'] := by rw [ha20]; exact ha19mem
+  have ha20k : a20.k =
+      ⟨[(path, f)], [some ⟨f, 0⟩], stdinL, [], oracle⟩ := by rw [ha20]; exact ha19k
+  -- step 21: xor r9d, r9d
+  have e21 : X86Int.step stage1Im a20 =
+      .ok { a20.set 9 (some (aluF .xor 0 0).1) with
+        fl := (aluF .xor 0 0).2, rip := a20.rip + 3 } :=
+    step_alu_xor (by rw [ha20rip]; exact hc.dbc) ha20r9 ha20r9
+  obtain ⟨a21, ha21⟩ : ∃ t : X86Int.St, t =
+      { a20.set 9 (some (aluF .xor 0 0).1) with
+        fl := (aluF .xor 0 0).2, rip := a20.rip + 3 } := ⟨_, rfl⟩
+  have ha21rip : a21.rip = base + 0xbf := by
+    rw [ha21]; show a20.rip + 3 = base + 0xbf; rw [ha20rip]
+  have hlen21 : a21.regs.length = 16 := by
+    rw [ha21]
+    show ({ a20.set 9 (some (aluF .xor 0 0).1) with
+      fl := (aluF .xor 0 0).2, rip := a20.rip + 3 }).regs.length = 16
+    rw [len_set]
+    exact hlen20
+  -- register conclusions at a21, by unwinding the set-chains
+  have ha21r9 : a21.reg 9 = some 0 := by
+    rw [ha21]
+    show (a20.set 9 (some (aluF .xor 0 0).1)).reg 9 = some 0
+    rw [reg_set_self (by omega), aluF_xor_fst_self]
+  have ha20r8 : a20.reg 8 = some (W - 1) := by
+    rw [ha20]
+    show ({ (a19.set 4 (some ((sp0 + 16 + 8) % W))).set 8 (some (W - 1)) with
+      rip := a19.rip + 2 }).reg 8 = some (W - 1)
+    rw [reg_with_rip, reg_set_self (by
+      show 8 < (a19.set 4 (some ((sp0 + 16 + 8) % W))).regs.length
+      rw [len_set]; omega)]
+  have ha21r8 : a21.reg 8 = some (W - 1) := by
+    rw [ha21]
+    show (a20.set 9 (some (aluF .xor 0 0).1)).reg 8 = some (W - 1)
+    rw [reg_set_other (by decide : (8 : Nat) ≠ 9)]
+    exact ha20r8
+  have ha20r4 : a20.reg 4 = some (sp0 + 24) := by
+    rw [ha20]
+    show ({ (a19.set 4 (some ((sp0 + 16 + 8) % W))).set 8 (some (W - 1)) with
+      rip := a19.rip + 2 }).reg 4 = some (sp0 + 24)
+    rw [reg_with_rip, reg_set_other (by decide : (4 : Nat) ≠ 8),
+      reg_set_self (by omega), Nat.mod_eq_of_lt (by omega)]
+  have ha21r4 : a21.reg 4 = some (sp0 + 24) := by
+    rw [ha21]
+    show (a20.set 9 (some (aluF .xor 0 0).1)).reg 4 = some (sp0 + 24)
+    rw [reg_set_other (by decide : (4 : Nat) ≠ 9)]
+    exact ha20r4
+  have ha20r0 : a20.reg 0 = some 9 := by
+    rw [ha20]
+    show ({ (a19.set 4 (some ((sp0 + 16 + 8) % W))).set 8 (some (W - 1)) with
+      rip := a19.rip + 2 }).reg 0 = some 9
+    rw [reg_with_rip, reg_set_other (by decide : (0 : Nat) ≠ 8),
+      reg_set_other (by decide : (0 : Nat) ≠ 4)]
+    rw [ha19]
+    show (a18.set 4 (some ((sp0 + 24 + W - 8) % W))).reg 0 = some 9
+    rw [reg_set_other (by decide : (0 : Nat) ≠ 4)]
+    rw [ha18]
+    show ({ a17.set 10 (some (34 % W)) with rip := a17.rip + 6 }).reg 0 = some 9
+    rw [reg_with_rip, reg_set_other (by decide : (0 : Nat) ≠ 10)]
+    rw [ha17]
+    show ({ a16.set 2 (some (3 % W)) with rip := a16.rip + 5 }).reg 0 = some 9
+    rw [reg_with_rip, reg_set_other (by decide : (0 : Nat) ≠ 2)]
+    rw [ha16]
+    show ({ a15.set 6 (some (65536 % W)) with rip := a15.rip + 5 }).reg 0 =
+      some 9
+    rw [reg_with_rip, reg_set_other (by decide : (0 : Nat) ≠ 6)]
+    exact ha15r0
+  have ha21r0 : a21.reg 0 = some 9 := by
+    rw [ha21]
+    show (a20.set 9 (some (aluF .xor 0 0).1)).reg 0 = some 9
+    rw [reg_set_other (by decide : (0 : Nat) ≠ 9)]
+    exact ha20r0
+  have ha20r7 : a20.reg 7 = some 0 := by
+    rw [ha20]
+    show ({ (a19.set 4 (some ((sp0 + 16 + 8) % W))).set 8 (some (W - 1)) with
+      rip := a19.rip + 2 }).reg 7 = some 0
+    rw [reg_with_rip, reg_set_other (by decide : (7 : Nat) ≠ 8),
+      reg_set_other (by decide : (7 : Nat) ≠ 4)]
+    rw [ha19]
+    show (a18.set 4 (some ((sp0 + 24 + W - 8) % W))).reg 7 = some 0
+    rw [reg_set_other (by decide : (7 : Nat) ≠ 4)]
+    rw [ha18]
+    show ({ a17.set 10 (some (34 % W)) with rip := a17.rip + 6 }).reg 7 = some 0
+    rw [reg_with_rip, reg_set_other (by decide : (7 : Nat) ≠ 10)]
+    rw [ha17]
+    show ({ a16.set 2 (some (3 % W)) with rip := a16.rip + 5 }).reg 7 = some 0
+    rw [reg_with_rip, reg_set_other (by decide : (7 : Nat) ≠ 2)]
+    rw [ha16]
+    show ({ a15.set 6 (some (65536 % W)) with rip := a15.rip + 5 }).reg 7 =
+      some 0
+    rw [reg_with_rip, reg_set_other (by decide : (7 : Nat) ≠ 6)]
+    exact ha15r7
+  have ha21r7 : a21.reg 7 = some 0 := by
+    rw [ha21]
+    show (a20.set 9 (some (aluF .xor 0 0).1)).reg 7 = some 0
+    rw [reg_set_other (by decide : (7 : Nat) ≠ 9)]
+    exact ha20r7
+  have ha20r6 : a20.reg 6 = some 65536 := by
+    rw [ha20]
+    show ({ (a19.set 4 (some ((sp0 + 16 + 8) % W))).set 8 (some (W - 1)) with
+      rip := a19.rip + 2 }).reg 6 = some 65536
+    rw [reg_with_rip, reg_set_other (by decide : (6 : Nat) ≠ 8),
+      reg_set_other (by decide : (6 : Nat) ≠ 4)]
+    rw [ha19]
+    show (a18.set 4 (some ((sp0 + 24 + W - 8) % W))).reg 6 = some 65536
+    rw [reg_set_other (by decide : (6 : Nat) ≠ 4)]
+    rw [ha18]
+    show ({ a17.set 10 (some (34 % W)) with rip := a17.rip + 6 }).reg 6 =
+      some 65536
+    rw [reg_with_rip, reg_set_other (by decide : (6 : Nat) ≠ 10)]
+    rw [ha17]
+    show ({ a16.set 2 (some (3 % W)) with rip := a16.rip + 5 }).reg 6 =
+      some 65536
+    rw [reg_with_rip, reg_set_other (by decide : (6 : Nat) ≠ 2)]
+    exact ha16r6
+  have ha21r6 : a21.reg 6 = some 65536 := by
+    rw [ha21]
+    show (a20.set 9 (some (aluF .xor 0 0).1)).reg 6 = some 65536
+    rw [reg_set_other (by decide : (6 : Nat) ≠ 9)]
+    exact ha20r6
+  have ha20r2 : a20.reg 2 = some 3 := by
+    rw [ha20]
+    show ({ (a19.set 4 (some ((sp0 + 16 + 8) % W))).set 8 (some (W - 1)) with
+      rip := a19.rip + 2 }).reg 2 = some 3
+    rw [reg_with_rip, reg_set_other (by decide : (2 : Nat) ≠ 8),
+      reg_set_other (by decide : (2 : Nat) ≠ 4)]
+    rw [ha19]
+    show (a18.set 4 (some ((sp0 + 24 + W - 8) % W))).reg 2 = some 3
+    rw [reg_set_other (by decide : (2 : Nat) ≠ 4)]
+    rw [ha18]
+    show ({ a17.set 10 (some (34 % W)) with rip := a17.rip + 6 }).reg 2 = some 3
+    rw [reg_with_rip, reg_set_other (by decide : (2 : Nat) ≠ 10)]
+    rw [ha17]
+    show ({ a16.set 2 (some (3 % W)) with rip := a16.rip + 5 }).reg 2 = some 3
+    rw [reg_with_rip, reg_set_self (by omega)]
+    decide
+  have ha21r2 : a21.reg 2 = some 3 := by
+    rw [ha21]
+    show (a20.set 9 (some (aluF .xor 0 0).1)).reg 2 = some 3
+    rw [reg_set_other (by decide : (2 : Nat) ≠ 9)]
+    exact ha20r2
+  have ha20r10 : a20.reg 10 = some 34 := by
+    rw [ha20]
+    show ({ (a19.set 4 (some ((sp0 + 16 + 8) % W))).set 8 (some (W - 1)) with
+      rip := a19.rip + 2 }).reg 10 = some 34
+    rw [reg_with_rip, reg_set_other (by decide : (10 : Nat) ≠ 8),
+      reg_set_other (by decide : (10 : Nat) ≠ 4)]
+    rw [ha19]
+    show (a18.set 4 (some ((sp0 + 24 + W - 8) % W))).reg 10 = some 34
+    rw [reg_set_other (by decide : (10 : Nat) ≠ 4)]
+    rw [ha18]
+    show ({ a17.set 10 (some (34 % W)) with rip := a17.rip + 6 }).reg 10 =
+      some 34
+    rw [reg_with_rip, reg_set_self (by omega)]
+    decide
+  have ha21r10 : a21.reg 10 = some 34 := by
+    rw [ha21]
+    show (a20.set 9 (some (aluF .xor 0 0).1)).reg 10 = some 34
+    rw [reg_set_other (by decide : (10 : Nat) ≠ 9)]
+    exact ha20r10
+  have ha20r14 : a20.reg 14 = some 3 := by
+    rw [ha20]
+    show ({ (a19.set 4 (some ((sp0 + 16 + 8) % W))).set 8 (some (W - 1)) with
+      rip := a19.rip + 2 }).reg 14 = some 3
+    rw [reg_with_rip, reg_set_other (by decide : (14 : Nat) ≠ 8),
+      reg_set_other (by decide : (14 : Nat) ≠ 4)]
+    rw [ha19]
+    show (a18.set 4 (some ((sp0 + 24 + W - 8) % W))).reg 14 = some 3
+    rw [reg_set_other (by decide : (14 : Nat) ≠ 4)]
+    rw [ha18]
+    show ({ a17.set 10 (some (34 % W)) with rip := a17.rip + 6 }).reg 14 =
+      some 3
+    rw [reg_with_rip, reg_set_other (by decide : (14 : Nat) ≠ 10)]
+    rw [ha17]
+    show ({ a16.set 2 (some (3 % W)) with rip := a16.rip + 5 }).reg 14 = some 3
+    rw [reg_with_rip, reg_set_other (by decide : (14 : Nat) ≠ 2)]
+    rw [ha16]
+    show ({ a15.set 6 (some (65536 % W)) with rip := a15.rip + 5 }).reg 14 =
+      some 3
+    rw [reg_with_rip, reg_set_other (by decide : (14 : Nat) ≠ 6)]
+    rw [ha15]
+    show (a14.set 7 (some (aluF .xor (sp0 + 56 + argv0.length + 1)
+        (sp0 + 56 + argv0.length + 1)).1)).reg 14 = some 3
+    rw [reg_set_other (by decide : (14 : Nat) ≠ 7)]
+    exact ha14r14
+  have ha21r14 : a21.reg 14 = some 3 := by
+    rw [ha21]
+    show (a20.set 9 (some (aluF .xor 0 0).1)).reg 14 = some 3
+    rw [reg_set_other (by decide : (14 : Nat) ≠ 9)]
+    exact ha20r14
+  have ha21mem : a21.mem = [⟨base, stage1Code, false⟩, stk'] := by rw [ha21]; exact ha20mem
+  have ha21k : a21.k =
+      ⟨[(path, f)], [some ⟨f, 0⟩], stdinL, [], oracle⟩ := by rw [ha21]; exact ha20k
+  -- fold the run
+  have r1 : run stage1Im 1 (Out.ok s) = Out.ok a1 := by
+    rw [run_succ_ok stage1Im 0 s, e1, ← ha1, run_zero]
+  have r2 : run stage1Im 1 (Out.ok a1) = Out.ok a2 := by
+    rw [run_succ_ok stage1Im 0 a1, e2, ← ha2, run_zero]
+  have r3 : run stage1Im 1 (Out.ok a2) = Out.ok a3 := by
+    rw [run_succ_ok stage1Im 0 a2, e3, ← ha3, run_zero]
+  have r4 : run stage1Im 1 (Out.ok a3) = Out.ok a4 := by
+    rw [run_succ_ok stage1Im 0 a3, e4, ← ha4, run_zero]
+  have r5 : run stage1Im 1 (Out.ok a4) = Out.ok a5 := by
+    rw [run_succ_ok stage1Im 0 a4, e5, ← ha5, run_zero]
+  have r6 : run stage1Im 1 (Out.ok a5) = Out.ok a6 := by
+    rw [run_succ_ok stage1Im 0 a5, e6, ← ha6, run_zero]
+  have r7 : run stage1Im 1 (Out.ok a6) = Out.ok a7 := by
+    rw [run_succ_ok stage1Im 0 a6, e7, ← ha7, run_zero]
+  have r8 : run stage1Im 1 (Out.ok a7) = Out.ok a8 := by
+    rw [run_succ_ok stage1Im 0 a7, e8, ← ha8, run_zero]
+  have r9 : run stage1Im 1 (Out.ok a8) = Out.ok a9 := by
+    rw [run_succ_ok stage1Im 0 a8, e9, ← ha9, run_zero]
+  have r10 : run stage1Im 1 (Out.ok a9) = Out.ok a10 := by
+    rw [run_succ_ok stage1Im 0 a9, e10, ← ha10, run_zero]
+  have r11 : run stage1Im 1 (Out.ok a10) = Out.ok a11 := by
+    rw [run_succ_ok stage1Im 0 a10, e11, ← ha11, run_zero]
+  have r12 : run stage1Im 1 (Out.ok a11) = Out.ok a12 := by
+    rw [run_succ_ok stage1Im 0 a11, e12, ← ha12, run_zero]
+  have r13 : run stage1Im 1 (Out.ok a12) = Out.ok a13 := by
+    rw [run_succ_ok stage1Im 0 a12, e13, ← ha13, run_zero]
+  have r14 : run stage1Im 1 (Out.ok a13) = Out.ok a14 := by
+    rw [run_succ_ok stage1Im 0 a13, e14, ← ha14, run_zero]
+  have r15 : run stage1Im 1 (Out.ok a14) = Out.ok a15 := by
+    rw [run_succ_ok stage1Im 0 a14, e15, ← ha15, run_zero]
+  have r16 : run stage1Im 1 (Out.ok a15) = Out.ok a16 := by
+    rw [run_succ_ok stage1Im 0 a15, e16, ← ha16, run_zero]
+  have r17 : run stage1Im 1 (Out.ok a16) = Out.ok a17 := by
+    rw [run_succ_ok stage1Im 0 a16, e17, ← ha17, run_zero]
+  have r18 : run stage1Im 1 (Out.ok a17) = Out.ok a18 := by
+    rw [run_succ_ok stage1Im 0 a17, e18, ← ha18, run_zero]
+  have r19 : run stage1Im 1 (Out.ok a18) = Out.ok a19 := by
+    rw [run_succ_ok stage1Im 0 a18, e19, ← ha19, run_zero]
+  have r20 : run stage1Im 1 (Out.ok a19) = Out.ok a20 := by
+    rw [run_succ_ok stage1Im 0 a19, e20, ← ha20, run_zero]
+  have r21 : run stage1Im 1 (Out.ok a20) = Out.ok a21 := by
+    rw [run_succ_ok stage1Im 0 a20, e21, ← ha21, run_zero]
+  have hrun : run stage1Im 21 (Out.ok s) = Out.ok a21 := by
+    rw [show (21 : Nat) = 1 + 20 from rfl, run_add stage1Im 1 20, r1,
+      show (20 : Nat) = 1 + 19 from rfl, run_add stage1Im 1 19, r2,
+      show (19 : Nat) = 1 + 18 from rfl, run_add stage1Im 1 18, r3,
+      show (18 : Nat) = 1 + 17 from rfl, run_add stage1Im 1 17, r4,
+      show (17 : Nat) = 1 + 16 from rfl, run_add stage1Im 1 16, r5,
+      show (16 : Nat) = 1 + 15 from rfl, run_add stage1Im 1 15, r6,
+      show (15 : Nat) = 1 + 14 from rfl, run_add stage1Im 1 14, r7,
+      show (14 : Nat) = 1 + 13 from rfl, run_add stage1Im 1 13, r8,
+      show (13 : Nat) = 1 + 12 from rfl, run_add stage1Im 1 12, r9,
+      show (12 : Nat) = 1 + 11 from rfl, run_add stage1Im 1 11, r10,
+      show (11 : Nat) = 1 + 10 from rfl, run_add stage1Im 1 10, r11,
+      show (10 : Nat) = 1 + 9 from rfl, run_add stage1Im 1 9, r12,
+      show (9 : Nat) = 1 + 8 from rfl, run_add stage1Im 1 8, r13,
+      show (8 : Nat) = 1 + 7 from rfl, run_add stage1Im 1 7, r14,
+      show (7 : Nat) = 1 + 6 from rfl, run_add stage1Im 1 6, r15,
+      show (6 : Nat) = 1 + 5 from rfl, run_add stage1Im 1 5, r16,
+      show (5 : Nat) = 1 + 4 from rfl, run_add stage1Im 1 4, r17,
+      show (4 : Nat) = 1 + 3 from rfl, run_add stage1Im 1 3, r18,
+      show (3 : Nat) = 1 + 2 from rfl, run_add stage1Im 1 2, r19,
+      show (2 : Nat) = 1 + 1 from rfl, run_add stage1Im 1 1, r20, r21]
+  exact ⟨a21, hrun, ha21rip, ha21r0, ha21r7, ha21r6, ha21r2, ha21r10,
+    ha21r8, ha21r9, ha21r14, ha21r4, ha21k, by
+      rw [ha21mem, hwshape, ha18mem], hlen21, ⟨stk', ha21mem⟩⟩
+
+/-- The initial `mmap` is legal for a placement in the room
+interval, and six further steps reach the read loop head with the
+file buffer mapped at `A`, capacity 65536 in `r12`, count 0 in
+`r13`, one oracle entry consumed. -/
+theorem loader_mmap1_to_readloop {f : List Nat} {A sp0 : Nat}
+    {s s' : X86Int.St}
+    (hrip : s'.rip = base + 0xbf) (hlen16 : s'.regs.length = 16)
+    (hr0 : s'.reg 0 = some 9) (hr7 : s'.reg 7 = some 0)
+    (hr6 : s'.reg 6 = some 65536) (hr2 : s'.reg 2 = some 3)
+    (hr10 : s'.reg 10 = some 34) (hr8 : s'.reg 8 = some (W - 1))
+    (hr9 : s'.reg 9 = some 0) (hr14 : s'.reg 14 = some 3)
+    (hr4 : s'.reg 4 = some (sp0 + 24))
+    (hr13 : ∃ v, s'.reg 13 = some v)
+    (hshape : wshape s'.mem = wshape s.mem)
+    (hhead : s'.k.oracle.head? = some (.at A))
+    (hAal : A % page = 0) (hApos : 0 < A)
+    (hbound : A + stage1Mf f ≤ 2 ^ 47)
+    (hfree : s.mem.free A (stage1Mf f) = true) :
+    OracleLegalAt s' ∧
+    ∃ s'', run stage1Im 6 (Out.ok s') = Out.ok s'' ∧
+      s''.rip = base + 0xd7 ∧
+      s''.reg 3 = some A ∧ s''.reg 12 = some 65536 ∧
+      s''.reg 13 = some 0 ∧ s''.reg 14 = some 3 ∧
+      s''.reg 4 = some (sp0 + 24) ∧
+      (∃ v, s''.reg 0 = some v) ∧ (∃ v, s''.reg 10 = some v) ∧
+      (∃ v, s''.reg 8 = some v) ∧ (∃ v, s''.reg 9 = some v) ∧
+      s''.mem = s'.mem ++ [⟨A, List.replicate 65536 0, true⟩] ∧
+      s''.k = (Kern.next s'.k).2 ∧ s''.regs.length = 16 := by
+  have hc := stage1_loaderCode
+  have hpages : X86Env.pages 65536 = 65536 := by decide
+  have hMf : 65536 ≤ stage1Mf f := by
+    unfold stage1Mf arenaFileBytes
+    have h := pages_ge (65536 + 2 * f.length)
+    omega
+  have hfree' : s'.mem.free A 65536 = true := by
+    have h1 : s'.mem.free A (stage1Mf f) = true := by
+      rw [free_of_wshape hshape]
+      exact hfree
+    have h2 : s'.mem.free A (65536 + (stage1Mf f - 65536)) = true := by
+      rw [Nat.add_sub_cancel' hMf]
+      exact h1
+    exact free_prefix h2
+  have hplace : X86Env.place s'.mem (some (.at A)) (X86Env.pages 65536) =
+      some (some A) := by
+    rw [hpages]
+    exact place_at hAal hApos (by omega) hfree'
+  have hlegal : OracleLegalAt s' :=
+    oracleLegalAt_mmap (by rw [hrip]; exact hc.dbf) hr0 hr7 hr6 hr2 hr10
+      hr8 hr9 (by decide) hhead hplace
+  have hsc : X86Env.syscall s'.k s'.mem 9 0 65536 PROT_RW
+        MAP_PRIVATE_ANON (W - 1) 0 =
+      some (.ret A (Kern.next s'.k).2
+        (s'.mem ++ [⟨A, List.replicate 65536 0, true⟩])) := by
+    have hnext1 : (Kern.next s'.k).1 = some (.at A) :=
+      kern_next_of_head hhead
+    simp only [X86Env.syscall]
+    rw [if_neg (by simp [PROT_RW, MAP_PRIVATE_ANON]),
+      if_neg (by decide : ¬ ((65536 : Nat) = 0))]
+    cases hnext : Kern.next s'.k with
+    | mk c k1 =>
+      rw [hnext] at hnext1
+      simp only [] at hnext1
+      subst hnext1
+      simp only [hplace]
+      rw [hpages]
+      rfl
+  have e1 : X86Int.step stage1Im s' =
+      .ok { ((s'.set 0 (some A)).set 1 (some (s'.rip + 2))).set 11 none with
+        k := (Kern.next s'.k).2,
+        mem := s'.mem ++ [⟨A, List.replicate 65536 0, true⟩],
+        rip := s'.rip + 2 } :=
+    step_syscall_ret (by rw [hrip]; exact hc.dbf) hr0 hr7 hr6 hr2 hr10
+      hr8 hr9 hsc
+  obtain ⟨b1, hb1⟩ : ∃ t : X86Int.St, t =
+      { ((s'.set 0 (some A)).set 1 (some (s'.rip + 2))).set 11 none with
+        k := (Kern.next s'.k).2,
+        mem := s'.mem ++ [⟨A, List.replicate 65536 0, true⟩],
+        rip := s'.rip + 2 } := ⟨_, rfl⟩
+  have hb1rip : b1.rip = base + 0xc1 := by
+    rw [hb1]; show s'.rip + 2 = base + 0xc1; rw [hrip]
+  have hlenb1 : b1.regs.length = 16 := by
+    rw [hb1]
+    show (((s'.set 0 (some A)).set 1 (some (s'.rip + 2))).set 11
+      none).regs.length = 16
+    rw [len_set, len_set, len_set]
+    exact hlen16
+  have hb1r0 : b1.reg 0 = some A := by
+    rw [hb1]
+    show (((s'.set 0 (some A)).set 1 (some (s'.rip + 2))).set 11
+      none).reg 0 = some A
+    rw [reg_set_other (by decide : (0 : Nat) ≠ 11),
+      reg_set_other (by decide : (0 : Nat) ≠ 1),
+      reg_set_self (by omega)]
+  have hb1r4 : b1.reg 4 = some (sp0 + 24) := by
+    rw [hb1]
+    show (((s'.set 0 (some A)).set 1 (some (s'.rip + 2))).set 11
+      none).reg 4 = some (sp0 + 24)
+    rw [reg_set_other (by decide : (4 : Nat) ≠ 11),
+      reg_set_other (by decide : (4 : Nat) ≠ 1),
+      reg_set_other (by decide : (4 : Nat) ≠ 0)]
+    exact hr4
+  have hb1r14 : b1.reg 14 = some 3 := by
+    rw [hb1]
+    show (((s'.set 0 (some A)).set 1 (some (s'.rip + 2))).set 11
+      none).reg 14 = some 3
+    rw [reg_set_other (by decide : (14 : Nat) ≠ 11),
+      reg_set_other (by decide : (14 : Nat) ≠ 1),
+      reg_set_other (by decide : (14 : Nat) ≠ 0)]
+    exact hr14
+  obtain ⟨v13, hb1r13⟩ : ∃ v, b1.reg 13 = some v := by
+    obtain ⟨v, hv⟩ := hr13
+    exact ⟨v, by
+      rw [hb1]
+      show (((s'.set 0 (some A)).set 1 (some (s'.rip + 2))).set 11
+        none).reg 13 = some v
+      rw [reg_set_other (by decide : (13 : Nat) ≠ 11),
+        reg_set_other (by decide : (13 : Nat) ≠ 1),
+        reg_set_other (by decide : (13 : Nat) ≠ 0)]
+      exact hv⟩
+  have hb1mem : b1.mem = s'.mem ++ [⟨A, List.replicate 65536 0, true⟩] := by
+    rw [hb1]
+  have hb1k : b1.k = (Kern.next s'.k).2 := by rw [hb1]
+  -- test rax, rax: A < 2^63 so not negative
+  have e2 : X86Int.step stage1Im b1 =
+      .ok { b1 with fl := (aluF .and A A).2, rip := b1.rip + 3 } :=
+    step_test (by rw [hb1rip]; exact hc.dc1) hb1r0 hb1r0
+  obtain ⟨b2, hb2⟩ : ∃ t : X86Int.St, t =
+      { b1 with fl := (aluF .and A A).2, rip := b1.rip + 3 } := ⟨_, rfl⟩
+  have hb2rip : b2.rip = base + 0xc4 := by
+    rw [hb2]; show b1.rip + 3 = base + 0xc4; rw [hb1rip]
+  have hb2fl : X86Int.cond b2.fl 9 = some true := by
+    rw [hb2]
+    show X86Int.cond (aluF .and A A).2 9 = some true
+    apply cond_cc9_of_sf_false
+    have hland : Nat.land A A = A := by simp
+    have hmsb : X86Int.msb A = false := by
+      simp only [X86Int.msb]
+      rw [Nat.div_eq_of_lt (by omega : A < 2 ^ 63)]
+      decide
+    simp [aluF, hland, hmsb]
+  have hb2r0 : b2.reg 0 = some A := by rw [hb2]; exact hb1r0
+  have hb2r4 : b2.reg 4 = some (sp0 + 24) := by rw [hb2]; exact hb1r4
+  have hb2r14 : b2.reg 14 = some 3 := by rw [hb2]; exact hb1r14
+  have hb2r13 : b2.reg 13 = some v13 := by rw [hb2]; exact hb1r13
+  have hb2mem : b2.mem = s'.mem ++ [⟨A, List.replicate 65536 0, true⟩] := by rw [hb2]; exact hb1mem
+  have hb2k : b2.k = (Kern.next s'.k).2 := by rw [hb2]; exact hb1k
+  have hlenb2 : b2.regs.length = 16 := by
+    rw [hb2]; show b1.regs.length = 16
+    exact hlenb1
+  -- jns 0xcb (taken)
+  have e3 : X86Int.step stage1Im b2 = .ok { b2 with rip := base + 0xcb } := by
+    have h := step_jcc (im := stage1Im) (s := b2)
+      (by rw [hb2rip]; exact hc.dc4) hb2fl
+    simpa using h
+  obtain ⟨b3, hb3⟩ : ∃ t : X86Int.St, t =
+      { b2 with rip := base + 0xcb } := ⟨_, rfl⟩
+  have hb3rip : b3.rip = base + 0xcb := by rw [hb3]
+  have hb3r0 : b3.reg 0 = some A := by
+    rw [hb3]; show ({ b2 with rip := base + 0xcb }).reg 0 = some A
+    rw [reg_with_rip]; exact hb2r0
+  have hb3r4 : b3.reg 4 = some (sp0 + 24) := by
+    rw [hb3]; show ({ b2 with rip := base + 0xcb }).reg 4 = some (sp0 + 24)
+    rw [reg_with_rip]; exact hb2r4
+  have hb3r14 : b3.reg 14 = some 3 := by
+    rw [hb3]; show ({ b2 with rip := base + 0xcb }).reg 14 = some 3
+    rw [reg_with_rip]; exact hb2r14
+  have hb3r13 : b3.reg 13 = some v13 := by
+    rw [hb3]; show ({ b2 with rip := base + 0xcb }).reg 13 = some v13
+    rw [reg_with_rip]; exact hb2r13
+  have hb3mem : b3.mem = s'.mem ++ [⟨A, List.replicate 65536 0, true⟩] := by rw [hb3]; exact hb2mem
+  have hb3k : b3.k = (Kern.next s'.k).2 := by rw [hb3]; exact hb2k
+  have hlenb3 : b3.regs.length = 16 := by
+    rw [hb3]; show ({ b2 with rip := base + 0xcb }).regs.length = 16
+    rw [len_with_rip]; exact hlenb2
+  -- mov rbx, rax
+  have e4 : X86Int.step stage1Im b3 =
+      .ok { b3.set 3 (some A) with rip := b3.rip + 3 } :=
+    step_mov (by rw [hb3rip]; exact hc.dcb) hb3r0
+  obtain ⟨b4, hb4⟩ : ∃ t : X86Int.St, t =
+      { b3.set 3 (some A) with rip := b3.rip + 3 } := ⟨_, rfl⟩
+  have hb4rip : b4.rip = base + 0xce := by
+    rw [hb4]; show b3.rip + 3 = base + 0xce; rw [hb3rip]
+  have hlenb4 : b4.regs.length = 16 := by
+    rw [hb4]
+    show ({ b3.set 3 (some A) with rip := b3.rip + 3 }).regs.length = 16
+    rw [len_with_rip, len_set]
+    exact hlenb3
+  have hb4r3 : b4.reg 3 = some A := by
+    rw [hb4]
+    show ({ b3.set 3 (some A) with rip := b3.rip + 3 }).reg 3 = some A
+    rw [reg_with_rip, reg_set_self (by omega)]
+  have hb4r4 : b4.reg 4 = some (sp0 + 24) := by
+    rw [hb4]
+    show ({ b3.set 3 (some A) with rip := b3.rip + 3 }).reg 4 =
+      some (sp0 + 24)
+    rw [reg_with_rip, reg_set_other (by decide : (4 : Nat) ≠ 3)]
+    exact hb3r4
+  have hb4r14 : b4.reg 14 = some 3 := by
+    rw [hb4]
+    show ({ b3.set 3 (some A) with rip := b3.rip + 3 }).reg 14 = some 3
+    rw [reg_with_rip, reg_set_other (by decide : (14 : Nat) ≠ 3)]
+    exact hb3r14
+  have hb4r13 : b4.reg 13 = some v13 := by
+    rw [hb4]
+    show ({ b3.set 3 (some A) with rip := b3.rip + 3 }).reg 13 = some v13
+    rw [reg_with_rip, reg_set_other (by decide : (13 : Nat) ≠ 3)]
+    exact hb3r13
+  have hb4mem : b4.mem = s'.mem ++ [⟨A, List.replicate 65536 0, true⟩] := by rw [hb4]; exact hb3mem
+  have hb4k : b4.k = (Kern.next s'.k).2 := by rw [hb4]; exact hb3k
+  -- mov r12d, 65536
+  have e5 : X86Int.step stage1Im b4 =
+      .ok { b4.set 12 (some (65536 % W)) with rip := b4.rip + 6 } :=
+    step_movI (by rw [hb4rip]; exact hc.dce)
+  obtain ⟨b5, hb5⟩ : ∃ t : X86Int.St, t =
+      { b4.set 12 (some (65536 % W)) with rip := b4.rip + 6 } := ⟨_, rfl⟩
+  have hb5rip : b5.rip = base + 0xd4 := by
+    rw [hb5]; show b4.rip + 6 = base + 0xd4; rw [hb4rip]
+  have hlenb5 : b5.regs.length = 16 := by
+    rw [hb5]
+    show ({ b4.set 12 (some (65536 % W)) with
+      rip := b4.rip + 6 }).regs.length = 16
+    rw [len_with_rip, len_set]
+    exact hlenb4
+  have hb5r12 : b5.reg 12 = some 65536 := by
+    rw [hb5]
+    show ({ b4.set 12 (some (65536 % W)) with
+      rip := b4.rip + 6 }).reg 12 = some 65536
+    rw [reg_with_rip, reg_set_self (by omega)]
+    decide
+  have hb5r3 : b5.reg 3 = some A := by
+    rw [hb5]
+    show ({ b4.set 12 (some (65536 % W)) with rip := b4.rip + 6 }).reg 3 =
+      some A
+    rw [reg_with_rip, reg_set_other (by decide : (3 : Nat) ≠ 12)]
+    exact hb4r3
+  have hb5r4 : b5.reg 4 = some (sp0 + 24) := by
+    rw [hb5]
+    show ({ b4.set 12 (some (65536 % W)) with rip := b4.rip + 6 }).reg 4 =
+      some (sp0 + 24)
+    rw [reg_with_rip, reg_set_other (by decide : (4 : Nat) ≠ 12)]
+    exact hb4r4
+  have hb5r14 : b5.reg 14 = some 3 := by
+    rw [hb5]
+    show ({ b4.set 12 (some (65536 % W)) with rip := b4.rip + 6 }).reg 14 =
+      some 3
+    rw [reg_with_rip, reg_set_other (by decide : (14 : Nat) ≠ 12)]
+    exact hb4r14
+  have hb5r13 : b5.reg 13 = some v13 := by
+    rw [hb5]
+    show ({ b4.set 12 (some (65536 % W)) with rip := b4.rip + 6 }).reg 13 =
+      some v13
+    rw [reg_with_rip, reg_set_other (by decide : (13 : Nat) ≠ 12)]
+    exact hb4r13
+  have hb5mem : b5.mem = s'.mem ++ [⟨A, List.replicate 65536 0, true⟩] := by rw [hb5]; exact hb4mem
+  have hb5k : b5.k = (Kern.next s'.k).2 := by rw [hb5]; exact hb4k
+  -- xor r13, r13
+  have e6 : X86Int.step stage1Im b5 =
+      .ok { b5.set 13 (some (aluF .xor v13 v13).1) with
+        fl := (aluF .xor v13 v13).2, rip := b5.rip + 3 } :=
+    step_alu_xor (by rw [hb5rip]; exact hc.dd4) hb5r13 hb5r13
+  obtain ⟨b6, hb6⟩ : ∃ t : X86Int.St, t =
+      { b5.set 13 (some (aluF .xor v13 v13).1) with
+        fl := (aluF .xor v13 v13).2, rip := b5.rip + 3 } := ⟨_, rfl⟩
+  have hb6rip : b6.rip = base + 0xd7 := by
+    rw [hb6]; show b5.rip + 3 = base + 0xd7; rw [hb5rip]
+  have hlenb6 : b6.regs.length = 16 := by
+    rw [hb6]
+    show (b5.set 13 (some (aluF .xor v13 v13).1)).regs.length = 16
+    rw [len_set]
+    exact hlenb5
+  have hb6r13 : b6.reg 13 = some 0 := by
+    rw [hb6]
+    show (b5.set 13 (some (aluF .xor v13 v13).1)).reg 13 = some 0
+    rw [reg_set_self (by omega), aluF_xor_fst_self]
+  have hb6r3 : b6.reg 3 = some A := by
+    rw [hb6]
+    show (b5.set 13 (some (aluF .xor v13 v13).1)).reg 3 = some A
+    rw [reg_set_other (by decide : (3 : Nat) ≠ 13)]
+    exact hb5r3
+  have hb6r12 : b6.reg 12 = some 65536 := by
+    rw [hb6]
+    show (b5.set 13 (some (aluF .xor v13 v13).1)).reg 12 = some 65536
+    rw [reg_set_other (by decide : (12 : Nat) ≠ 13)]
+    exact hb5r12
+  have hb6r14 : b6.reg 14 = some 3 := by
+    rw [hb6]
+    show (b5.set 13 (some (aluF .xor v13 v13).1)).reg 14 = some 3
+    rw [reg_set_other (by decide : (14 : Nat) ≠ 13)]
+    exact hb5r14
+  have hb6r4 : b6.reg 4 = some (sp0 + 24) := by
+    rw [hb6]
+    show (b5.set 13 (some (aluF .xor v13 v13).1)).reg 4 = some (sp0 + 24)
+    rw [reg_set_other (by decide : (4 : Nat) ≠ 13)]
+    exact hb5r4
+  have hb6mem : b6.mem = s'.mem ++ [⟨A, List.replicate 65536 0, true⟩] := by rw [hb6]; exact hb5mem
+  have hb6k : b6.k = (Kern.next s'.k).2 := by rw [hb6]; exact hb5k
+  have hb6r0 : b6.reg 0 = some A := by
+    rw [hb6]
+    show (b5.set 13 (some (aluF .xor v13 v13).1)).reg 0 = some A
+    rw [reg_set_other (by decide : (0 : Nat) ≠ 13)]
+    rw [hb5]
+    show ({ b4.set 12 (some (65536 % W)) with
+      rip := b4.rip + 6 }).reg 0 = some A
+    rw [reg_with_rip, reg_set_other (by decide : (0 : Nat) ≠ 12)]
+    rw [hb4]
+    show ({ b3.set 3 (some A) with rip := b3.rip + 3 }).reg 0 =
+      some A
+    rw [reg_with_rip, reg_set_other (by decide : (0 : Nat) ≠ 3)]
+    rw [hb3]
+    show ({ b2 with rip := base + 0xcb }).reg 0 = some A
+    rw [reg_with_rip]
+    rw [hb2]
+    exact hb1r0
+  have hb1r10 : b1.reg 10 = some 34 := by
+    rw [hb1]
+    show (((s'.set 0 (some A)).set 1 (some (s'.rip + 2))).set 11
+      none).reg 10 = some 34
+    rw [reg_set_other (by decide : (10 : Nat) ≠ 11),
+      reg_set_other (by decide : (10 : Nat) ≠ 1),
+      reg_set_other (by decide : (10 : Nat) ≠ 0)]
+    exact hr10
+  have hb6r10 : b6.reg 10 = some 34 := by
+    rw [hb6]
+    show (b5.set 13 (some (aluF .xor v13 v13).1)).reg 10 = some 34
+    rw [reg_set_other (by decide : (10 : Nat) ≠ 13)]
+    rw [hb5]
+    show ({ b4.set 12 (some (65536 % W)) with
+      rip := b4.rip + 6 }).reg 10 = some 34
+    rw [reg_with_rip, reg_set_other (by decide : (10 : Nat) ≠ 12)]
+    rw [hb4]
+    show ({ b3.set 3 (some A) with rip := b3.rip + 3 }).reg 10 =
+      some 34
+    rw [reg_with_rip, reg_set_other (by decide : (10 : Nat) ≠ 3)]
+    rw [hb3]
+    show ({ b2 with rip := base + 0xcb }).reg 10 = some 34
+    rw [reg_with_rip]
+    rw [hb2]
+    exact hb1r10
+  have hb1r8 : b1.reg 8 = some (W - 1) := by
+    rw [hb1]
+    show (((s'.set 0 (some A)).set 1 (some (s'.rip + 2))).set 11
+      none).reg 8 = some (W - 1)
+    rw [reg_set_other (by decide : (8 : Nat) ≠ 11),
+      reg_set_other (by decide : (8 : Nat) ≠ 1),
+      reg_set_other (by decide : (8 : Nat) ≠ 0)]
+    exact hr8
+  have hb6r8 : b6.reg 8 = some (W - 1) := by
+    rw [hb6]
+    show (b5.set 13 (some (aluF .xor v13 v13).1)).reg 8 = some (W - 1)
+    rw [reg_set_other (by decide : (8 : Nat) ≠ 13)]
+    rw [hb5]
+    show ({ b4.set 12 (some (65536 % W)) with
+      rip := b4.rip + 6 }).reg 8 = some (W - 1)
+    rw [reg_with_rip, reg_set_other (by decide : (8 : Nat) ≠ 12)]
+    rw [hb4]
+    show ({ b3.set 3 (some A) with rip := b3.rip + 3 }).reg 8 =
+      some (W - 1)
+    rw [reg_with_rip, reg_set_other (by decide : (8 : Nat) ≠ 3)]
+    rw [hb3]
+    show ({ b2 with rip := base + 0xcb }).reg 8 = some (W - 1)
+    rw [reg_with_rip]
+    rw [hb2]
+    exact hb1r8
+  have hb1r9 : b1.reg 9 = some 0 := by
+    rw [hb1]
+    show (((s'.set 0 (some A)).set 1 (some (s'.rip + 2))).set 11
+      none).reg 9 = some 0
+    rw [reg_set_other (by decide : (9 : Nat) ≠ 11),
+      reg_set_other (by decide : (9 : Nat) ≠ 1),
+      reg_set_other (by decide : (9 : Nat) ≠ 0)]
+    exact hr9
+  have hb6r9 : b6.reg 9 = some 0 := by
+    rw [hb6]
+    show (b5.set 13 (some (aluF .xor v13 v13).1)).reg 9 = some 0
+    rw [reg_set_other (by decide : (9 : Nat) ≠ 13)]
+    rw [hb5]
+    show ({ b4.set 12 (some (65536 % W)) with
+      rip := b4.rip + 6 }).reg 9 = some 0
+    rw [reg_with_rip, reg_set_other (by decide : (9 : Nat) ≠ 12)]
+    rw [hb4]
+    show ({ b3.set 3 (some A) with rip := b3.rip + 3 }).reg 9 =
+      some 0
+    rw [reg_with_rip, reg_set_other (by decide : (9 : Nat) ≠ 3)]
+    rw [hb3]
+    show ({ b2 with rip := base + 0xcb }).reg 9 = some 0
+    rw [reg_with_rip]
+    rw [hb2]
+    exact hb1r9
+  have r1 : run stage1Im 1 (Out.ok s') = Out.ok b1 := by
+    rw [run_succ_ok stage1Im 0 s', e1, ← hb1, run_zero]
+  have r2 : run stage1Im 1 (Out.ok b1) = Out.ok b2 := by
+    rw [run_succ_ok stage1Im 0 b1, e2, ← hb2, run_zero]
+  have r3 : run stage1Im 1 (Out.ok b2) = Out.ok b3 := by
+    rw [run_succ_ok stage1Im 0 b2, e3, ← hb3, run_zero]
+  have r4 : run stage1Im 1 (Out.ok b3) = Out.ok b4 := by
+    rw [run_succ_ok stage1Im 0 b3, e4, ← hb4, run_zero]
+  have r5 : run stage1Im 1 (Out.ok b4) = Out.ok b5 := by
+    rw [run_succ_ok stage1Im 0 b4, e5, ← hb5, run_zero]
+  have r6 : run stage1Im 1 (Out.ok b5) = Out.ok b6 := by
+    rw [run_succ_ok stage1Im 0 b5, e6, ← hb6, run_zero]
+  have hrun : run stage1Im 6 (Out.ok s') = Out.ok b6 := by
+    rw [show (6 : Nat) = 1 + 5 from rfl, run_add stage1Im 1 5, r1,
+      show (5 : Nat) = 1 + 4 from rfl, run_add stage1Im 1 4, r2,
+      show (4 : Nat) = 1 + 3 from rfl, run_add stage1Im 1 3, r3,
+      show (3 : Nat) = 1 + 2 from rfl, run_add stage1Im 1 2, r4,
+      show (2 : Nat) = 1 + 1 from rfl, run_add stage1Im 1 1, r5, r6]
+  exact ⟨hlegal, b6, hrun, hb6rip, hb6r3, hb6r12, hb6r13, hb6r14, hb6r4,
+    ⟨A, hb6r0⟩, ⟨34, hb6r10⟩, ⟨W - 1, hb6r8⟩, ⟨0, hb6r9⟩,
+    hb6mem, hb6k, hlenb6⟩
+
+/-! ### Read-loop infrastructure -/
+
+theorem step_mov32 {im : Nat → Option (Ins × Nat)} {s : X86Int.St}
+    {d r len v : Nat} (hi : im s.rip = some (.mov32 d r, len))
+    (hr : s.reg r = some v) :
+    X86Int.step im s =
+      .ok { s.set d (some (v % 2 ^ 32)) with rip := s.rip + len } := by
+  simp only [X86Int.step, exec, hi, hr, lift, bind, Option.bind, pure]
+
+theorem step_st {im : Nat → Option (Ins × Nat)} {s : X86Int.St}
+    {b disp r len x v : Nat} {m : Mem}
+    (hi : im s.rip = some (.st b disp r, len)) (hx : s.reg b = some x)
+    (hv : s.reg r = some v) (hm : wr64 s.mem (ea x disp) v = some m) :
+    X86Int.step im s =
+      .ok { s with mem := m, rip := s.rip + len } := by
+  simp only [X86Int.step, exec, hi, hx, hv, hm, lift, bind, Option.bind, pure]
+
+theorem step_st8 {im : Nat → Option (Ins × Nat)} {s : X86Int.St}
+    {b disp r len x v : Nat} {m : Mem}
+    (hi : im s.rip = some (.st8 b disp r, len)) (hx : s.reg b = some x)
+    (hv : s.reg r = some v) (hm : s.mem.wr (ea x disp) (v % 256) = some m) :
+    X86Int.step im s =
+      .ok { s with mem := m, rip := s.rip + len } := by
+  simp only [X86Int.step, exec, hi, hx, hv, hm, lift, bind, Option.bind, pure]
+
+theorem pages_mono {a b : Nat} (h : a ≤ b) :
+    X86Env.pages a ≤ X86Env.pages b := by
+  unfold X86Env.pages
+  have hdiv : (a + page - 1) / page ≤ (b + page - 1) / page :=
+    Nat.div_le_div_right (by omega)
+  have hpage : 0 < page := by decide
+  exact Nat.mul_le_mul_right page hdiv
+
+theorem mem_wr_third {c1 c2 r : Region} {a v : Nat}
+    (hdisj1 : c1.hi ≤ r.base ∨ r.hi ≤ c1.base)
+    (hdisj2 : c2.hi ≤ r.base ∨ r.hi ≤ c2.base)
+    (hge : r.base ≤ a) (hlt : a < r.hi) (hrw : r.rw = true) :
+    Mem.wr [c1, c2, r] a v =
+      some [c1, c2, { r with data := r.data.set (a - r.base) (v % 256) }] := by
+  have hnot1 : ¬ (c1.base ≤ a ∧ a < c1.hi) := by
+    rcases hdisj1 with h | h <;> omega
+  have hnot2 : ¬ (c2.base ≤ a ∧ a < c2.hi) := by
+    rcases hdisj2 with h | h <;> omega
+  simp [Mem.wr, Mem.find, hnot1, hnot2, hge, hlt, hrw]
+
+theorem wrN_third_some : ∀ (bs : List Nat) {c1 c2 r : Region} {a : Nat},
+    (c1.hi ≤ r.base ∨ r.hi ≤ c1.base) →
+    (c2.hi ≤ r.base ∨ r.hi ≤ c2.base) → r.rw = true → r.base ≤ a →
+    a + bs.length ≤ r.hi →
+    ∃ r', Mem.wrN [c1, c2, r] a bs = some [c1, c2, r'] ∧
+      r'.base = r.base ∧ r'.hi = r.hi ∧ r'.rw = r.rw
+  | [], c1, c2, r, a, _, _, _, _, _ =>
+    ⟨r, by simp [Mem.wrN], rfl, rfl, rfl⟩
+  | b :: t, c1, c2, r, a, hdisj1, hdisj2, hrw, hge, hhi => by
+    have hlt : a < r.hi := by
+      simp at hhi
+      omega
+    rw [Mem.wrN, mem_wr_third hdisj1 hdisj2 hge hlt hrw]
+    have hlen : ({ r with data := r.data.set (a - r.base) (b % 256) } :
+        Region).hi = r.hi := by
+      simp [Region.hi, List.length_set]
+    have hd1 : c1.hi ≤ r.base ∨
+        ({ r with data := r.data.set (a - r.base) (b % 256) } :
+          Region).hi ≤ c1.base := by
+      rcases hdisj1 with h | h
+      · exact Or.inl h
+      · exact Or.inr (by rw [hlen]; exact h)
+    have hd2 : c2.hi ≤ r.base ∨
+        ({ r with data := r.data.set (a - r.base) (b % 256) } :
+          Region).hi ≤ c2.base := by
+      rcases hdisj2 with h | h
+      · exact Or.inl h
+      · exact Or.inr (by rw [hlen]; exact h)
+    obtain ⟨r'', hr'', hb, hh, hrw'⟩ :=
+      wrN_third_some (c1 := c1) (c2 := c2)
+        (r := { r with data := r.data.set (a - r.base) (b % 256) })
+        (a := a + 1) t hd1 hd2 (by simpa using hrw)
+        (by show r.base ≤ a + 1; omega) (by
+        rw [hlen]
+        simp at hhi
+        omega)
+    exact ⟨r'', by simpa using hr'', by simpa using hb,
+      by rw [hh, hlen], by simpa using hrw'⟩
+
+theorem rdN_combine {m : Mem} :
+    ∀ {a n : Nat} {xs : List Nat}, xs.length = n →
+      m.rdN a n = some xs →
+      ∀ {k : Nat} {ys : List Nat}, ys.length = k →
+        m.rdN (a + n) k = some ys →
+        m.rdN a (n + k) = some (xs ++ ys) := by
+  intro a n
+  induction n generalizing a with
+  | zero =>
+    intro xs hxs h k ys hys h2
+    have : xs = [] := by cases xs <;> simp_all
+    subst this
+    simpa using h2
+  | succ j ih =>
+    intro xs hxs h k ys hys h2
+    cases xs with
+    | nil => simp at hxs
+    | cons b t =>
+      have ht : t.length = j := by simpa using hxs
+      obtain ⟨hb, ht2⟩ := rdN_cons h
+      have hrec : m.rdN (a + 1) (j + k) = some (t ++ ys) := by
+        apply ih ht ht2 hys
+        rw [show a + 1 + j = a + (j + 1) from by omega]
+        exact h2
+      rw [show j + 1 + k = (j + k) + 1 from by omega]
+      simp only [Mem.rdN]
+      simp [hb, hrec]
+
+theorem rdN_wrN_prefix : ∀ (bs : List Nat) {m m' : Mem} {a k : Nat},
+    m.wrN (a + k) bs = some m' → m'.rdN a k = m.rdN a k
+  | bs, m, m', a, 0, _ => rfl
+  | bs, m, m', a, k + 1, h => by
+    have h1 : m'.rd a = m.rd a :=
+      rd_wrN_other bs m (a + (k + 1)) a h (fun i _ => by omega)
+    have h2 : m'.rdN (a + 1) k = m.rdN (a + 1) k := by
+      have h' : m.wrN (a + 1 + k) bs = some m' := by
+        rwa [show a + 1 + k = a + (k + 1) from by omega]
+      exact rdN_wrN_prefix bs h'
+    simp only [Mem.rdN, h1, h2]
+
+theorem syscall_read_file {k : Kern} {m m' : Mem} {f : List Nat}
+    {buf count want A : Nat} (hfd : k.fds = [some ⟨f, count⟩])
+    (hhead : k.oracle.head? = some (.at A))
+    (hwr : m.wrN buf
+      ((f.drop count).take (min want ((f.drop count).length))) = some m') :
+    X86Env.syscall k m 0 3 buf want 0 0 0 =
+      some (.ret (min want ((f.drop count).length))
+        { k with fds :=
+          [some ⟨f, count + min want ((f.drop count).length)⟩] } m') := by
+  simp only [X86Env.syscall]
+  rw [if_neg (by decide : ¬ ((3 : Nat) = 0)), if_pos (by decide : 3 ≤ 3)]
+  rw [hfd]
+  simp only [show (3 : Nat) - 3 = 0 from rfl, List.getElem?_cons_zero]
+  rw [kern_count_at_head hhead]
+  rw [hwr]
+  rfl
+
+/-- One read from the loop head to just after the `jz` (10 steps):
+the byte count is `n = min (cap - count) (f.length - count)`, the
+oracle is not consumed (its head is a placement, and `Kern.count`
+keeps the kernel), the buffer prefix now holds `f.take (count+n)`,
+and control is at `loaded`'s jump when `n = 0`, else at the
+count-update. -/
+theorem loader_read_once {f : List Nat} {A sp0 cap count capB : Nat}
+    {c1 c2 buf : Region} {s : X86Int.St}
+    (hrip : s.rip = base + 0xd7) (hlen16 : s.regs.length = 16)
+    (hr3 : s.reg 3 = some A) (hr12 : s.reg 12 = some cap)
+    (hr13 : s.reg 13 = some count) (hr14 : s.reg 14 = some 3)
+    (hr4 : s.reg 4 = some (sp0 + 24))
+    (hr0 : ∃ v, s.reg 0 = some v) (hr10 : ∃ v, s.reg 10 = some v)
+    (hr8 : ∃ v, s.reg 8 = some v) (hr9 : ∃ v, s.reg 9 = some v)
+    (hmem : s.mem = [c1, c2, buf]) (hbufbase : buf.base = A)
+    (hbufrw : buf.rw = true) (hbufhi : buf.hi = A + cap)
+    (hdisj1 : c1.hi ≤ A ∨ A + capB ≤ c1.base)
+    (hdisj2 : c2.hi ≤ A ∨ A + capB ≤ c2.base) (hcapB : cap ≤ capB)
+    (hcontent : s.mem.rdN A count = some (f.take count))
+    (hfd : s.k.fds = [some ⟨f, count⟩])
+    (hhead : ∃ B, s.k.oracle.head? = some (.at B))
+    (hfB : ∀ b ∈ f, b < 256)
+    (hcount : count ≤ f.length) (hcountcap : count < cap)
+    (hAcap : A + cap < W) (hcap63 : cap < 2 ^ 63) :
+    ∃ s', run stage1Im 10 (Out.ok s) = Out.ok s' ∧
+      (s'.rip = base + 0x122 ∧ f.length = count ∨
+        s'.rip = base + 0xf1 ∧ count < f.length) ∧
+      s'.reg 0 = some (min (cap - count) (f.length - count)) ∧
+      s'.reg 3 = some A ∧ s'.reg 12 = some cap ∧
+      s'.reg 13 = some count ∧ s'.reg 14 = some 3 ∧
+      s'.reg 4 = some (sp0 + 24) ∧
+      (∃ v, s'.reg 10 = some v) ∧ (∃ v, s'.reg 8 = some v) ∧
+      (∃ v, s'.reg 9 = some v) ∧
+      s'.k.oracle = s.k.oracle ∧
+      s'.k.fds =
+        [some ⟨f, count + min (cap - count) (f.length - count)⟩] ∧
+      (∃ buf', s'.mem = [c1, c2, buf'] ∧ buf'.base = A ∧
+        buf'.hi = A + cap ∧ buf'.rw = true) ∧
+      s'.mem.rdN A (count + min (cap - count) (f.length - count)) =
+        some (f.take (count + min (cap - count) (f.length - count))) ∧
+      s'.regs.length = 16 := by
+  have hc := stage1_loaderCode
+  obtain ⟨n, hn⟩ : ∃ m : Nat, m = min (cap - count) (f.length - count) :=
+    ⟨_, rfl⟩
+  rw [← hn]
+  have hdrop : (f.drop count).length = f.length - count := by
+    rw [List.length_drop]
+  have hnmin : (f.drop count).take (min (cap - count)
+      ((f.drop count).length)) = (f.drop count).take n := by
+    rw [hdrop, ← hn]
+  obtain ⟨B, hheadB⟩ := hhead
+  obtain ⟨v0, hr0v⟩ := hr0
+  obtain ⟨v10, hr10v⟩ := hr10
+  obtain ⟨v8, hr8v⟩ := hr8
+  obtain ⟨v9, hr9v⟩ := hr9
+  have hbslen : ((f.drop count).take n).length = n := by
+    rw [List.length_take, hn, hdrop]
+    omega
+  have hdwr1 : c1.hi ≤ buf.base ∨ buf.hi ≤ c1.base := by
+    rcases hdisj1 with h | h
+    · exact Or.inl (by omega)
+    · exact Or.inr (by omega)
+  have hdwr2 : c2.hi ≤ buf.base ∨ buf.hi ≤ c2.base := by
+    rcases hdisj2 with h | h
+    · exact Or.inl (by omega)
+    · exact Or.inr (by omega)
+  obtain ⟨buf', hwr, hbuf'b, hbuf'hi, hbuf'rw⟩ :=
+    wrN_third_some (c1 := c1) (c2 := c2) (r := buf) (a := A + count)
+      ((f.drop count).take n) hdwr1 hdwr2 hbufrw (by omega) (by
+      rw [hbslen, hbufhi]
+      have hnn : n ≤ cap - count := by rw [hn]; exact Nat.min_le_left _ _
+      omega)
+  have hwr' : s.mem.wrN (A + count) ((f.drop count).take n) =
+      some [c1, c2, buf'] := by
+    rwa [hmem] 
+  have hsc : X86Env.syscall s.k s.mem 0 3 (A + count) (cap - count) 0 0 0 =
+      some (.ret n
+        { s.k with fds := [some ⟨f, count + n⟩] } [c1, c2, buf']) := by
+    have h := syscall_read_file (k := s.k) (m := s.mem)
+      (m' := [c1, c2, buf']) (f := f) (buf := A + count)
+      (count := count) (want := cap - count) (A := B) hfd hheadB (by
+      rwa [hnmin])
+    rwa [hdrop, ← hn] at h
+  have hrdN' : Mem.rdN [c1, c2, buf'] A (count + n) =
+      some (f.take (count + n)) := by
+    have hpre : Mem.rdN [c1, c2, buf'] A count = some (f.take count) := by
+      have h := rdN_wrN_prefix ((f.drop count).take n) hwr'
+      rwa [hcontent] at h
+    have hnew : Mem.rdN [c1, c2, buf'] (A + count) n =
+        some ((f.drop count).take n) := by
+      have h := rdN_wrN_same ((f.drop count).take n) s.mem (A + count) hwr'
+      rw [hbslen] at h
+      have hmapid : ∀ l : List Nat, (∀ b ∈ l, b < 256) →
+          l.map (· % 256) = l := by
+        intro l hl
+        induction l with
+        | nil => rfl
+        | cons a l ih =>
+          simp only [List.map_cons]
+          rw [Nat.mod_eq_of_lt (hl a (by simp)),
+            ih (fun b hb => hl b (List.mem_cons_of_mem a hb))]
+      have hmap : ((f.drop count).take n).map (· % 256) =
+          (f.drop count).take n :=
+        hmapid _ (fun b hb => hfB b
+          (List.mem_of_mem_drop (List.mem_of_mem_take hb)))
+      rwa [hmap] at h
+    have hcomb := rdN_combine (m := [c1, c2, buf']) (a := A) (n := count)
+      (xs := f.take count) (by rw [List.length_take]; omega) hpre
+      (k := n) (ys := (f.drop count).take n) hbslen hnew
+    rw [List.take_add]
+    exact hcomb
+  -- steps 1-2: mov rsi, rbx; add rsi, r13
+  have e1 : X86Int.step stage1Im s =
+      .ok { s.set 6 (some A) with rip := s.rip + 3 } :=
+    step_mov (by rw [hrip]; exact hc.dd7) hr3
+  obtain ⟨d1, hd1⟩ : ∃ t : X86Int.St, t =
+      { s.set 6 (some A) with rip := s.rip + 3 } := ⟨_, rfl⟩
+  have hd1rip : d1.rip = base + 0xda := by
+    rw [hd1]; show s.rip + 3 = base + 0xda; rw [hrip]
+  have hlen1 : d1.regs.length = 16 := by
+    rw [hd1]
+    show ({ s.set 6 (some A) with rip := s.rip + 3 }).regs.length = 16
+    rw [len_with_rip, len_set]
+    exact hlen16
+  have hd1r6 : d1.reg 6 = some A := by
+    rw [hd1]
+    show ({ s.set 6 (some A) with rip := s.rip + 3 }).reg 6 = some A
+    rw [reg_with_rip, reg_set_self (by omega)]
+  have hd1r13 : d1.reg 13 = some count := by
+    rw [hd1]
+    show ({ s.set 6 (some A) with rip := s.rip + 3 }).reg 13 = some count
+    rw [reg_with_rip, reg_set_other (by decide : (13 : Nat) ≠ 6)]
+    exact hr13
+  have e2 : X86Int.step stage1Im d1 =
+      .ok { d1.set 6 (some (aluF .add A count).1) with
+        fl := (aluF .add A count).2, rip := d1.rip + 3 } :=
+    step_alu_add (by rw [hd1rip]; exact hc.dda) hd1r6 hd1r13
+  obtain ⟨d2, hd2⟩ : ∃ t : X86Int.St, t =
+      { d1.set 6 (some (aluF .add A count).1) with
+        fl := (aluF .add A count).2, rip := d1.rip + 3 } := ⟨_, rfl⟩
+  have hd2rip : d2.rip = base + 0xdd := by
+    rw [hd2]; show d1.rip + 3 = base + 0xdd; rw [hd1rip]
+  have hlen2 : d2.regs.length = 16 := by
+    rw [hd2]
+    show (d1.set 6 (some (aluF .add A count).1)).regs.length = 16
+    rw [len_set]
+    exact hlen1
+  have hd2r6 : d2.reg 6 = some (A + count) := by
+    rw [hd2]
+    show (d1.set 6 (some (aluF .add A count).1)).reg 6 = some (A + count)
+    rw [reg_set_self (by omega), aluF_add_fst,
+      Nat.mod_eq_of_lt (by omega)]
+  -- steps 3-4: mov rdx, r12; sub rdx, r13
+  have hd2r12 : d2.reg 12 = some cap := by
+    rw [hd2]
+    show (d1.set 6 (some (aluF .add A count).1)).reg 12 = some cap
+    rw [reg_set_other (by decide : (12 : Nat) ≠ 6)]
+    rw [hd1]
+    show ({ s.set 6 (some A) with rip := s.rip + 3 }).reg 12 = some cap
+    rw [reg_with_rip, reg_set_other (by decide : (12 : Nat) ≠ 6)]
+    exact hr12
+  have e3 : X86Int.step stage1Im d2 =
+      .ok { d2.set 2 (some cap) with rip := d2.rip + 3 } :=
+    step_mov (by rw [hd2rip]; exact hc.ddd) hd2r12
+  obtain ⟨d3, hd3⟩ : ∃ t : X86Int.St, t =
+      { d2.set 2 (some cap) with rip := d2.rip + 3 } := ⟨_, rfl⟩
+  have hd3rip : d3.rip = base + 0xe0 := by
+    rw [hd3]; show d2.rip + 3 = base + 0xe0; rw [hd2rip]
+  have hlen3 : d3.regs.length = 16 := by
+    rw [hd3]
+    show ({ d2.set 2 (some cap) with rip := d2.rip + 3 }).regs.length = 16
+    rw [len_with_rip, len_set]
+    exact hlen2
+  have hd3r2 : d3.reg 2 = some cap := by
+    rw [hd3]
+    show ({ d2.set 2 (some cap) with rip := d2.rip + 3 }).reg 2 = some cap
+    rw [reg_with_rip, reg_set_self (by omega)]
+  have hd3r13 : d3.reg 13 = some count := by
+    rw [hd3]
+    show ({ d2.set 2 (some cap) with rip := d2.rip + 3 }).reg 13 = some count
+    rw [reg_with_rip, reg_set_other (by decide : (13 : Nat) ≠ 2)]
+    rw [hd2]
+    show (d1.set 6 (some (aluF .add A count).1)).reg 13 = some count
+    rw [reg_set_other (by decide : (13 : Nat) ≠ 6)]
+    exact hd1r13
+  have e4 : X86Int.step stage1Im d3 =
+      .ok { d3.set 2 (some (aluF .sub cap count).1) with
+        fl := (aluF .sub cap count).2, rip := d3.rip + 3 } :=
+    step_alu_sub (by rw [hd3rip]; exact hc.de0) hd3r2 hd3r13
+  obtain ⟨d4, hd4⟩ : ∃ t : X86Int.St, t =
+      { d3.set 2 (some (aluF .sub cap count).1) with
+        fl := (aluF .sub cap count).2, rip := d3.rip + 3 } := ⟨_, rfl⟩
+  have hd4rip : d4.rip = base + 0xe3 := by
+    rw [hd4]; show d3.rip + 3 = base + 0xe3; rw [hd3rip]
+  have hlen4 : d4.regs.length = 16 := by
+    rw [hd4]
+    show (d3.set 2 (some (aluF .sub cap count).1)).regs.length = 16
+    rw [len_set]
+    exact hlen3
+  have hd4r2 : d4.reg 2 = some (cap - count) := by
+    rw [hd4]
+    show (d3.set 2 (some (aluF .sub cap count).1)).reg 2 = some (cap - count)
+    rw [reg_set_self (by omega), aluF_sub_fst]
+    have h1 : cap + W - count = (cap - count) + W := by omega
+    rw [h1, Nat.add_mod_right, Nat.mod_eq_of_lt (by omega)]
+  -- steps 5-6: xor eax, eax; mov edi, r14d
+  have hd4r0 : d4.reg 0 = some v0 := by
+    rw [hd4]
+    show (d3.set 2 (some (aluF .sub cap count).1)).reg 0 = some v0
+    rw [reg_set_other (by decide : (0 : Nat) ≠ 2)]
+    rw [hd3]
+    show ({ d2.set 2 (some cap) with rip := d2.rip + 3 }).reg 0 = some v0
+    rw [reg_with_rip, reg_set_other (by decide : (0 : Nat) ≠ 2)]
+    rw [hd2]
+    show (d1.set 6 (some (aluF .add A count).1)).reg 0 = some v0
+    rw [reg_set_other (by decide : (0 : Nat) ≠ 6)]
+    rw [hd1]
+    show ({ s.set 6 (some A) with rip := s.rip + 3 }).reg 0 = some v0
+    rw [reg_with_rip, reg_set_other (by decide : (0 : Nat) ≠ 6)]
+    exact hr0v
+  have e5 : X86Int.step stage1Im d4 =
+      .ok { d4.set 0 (some (aluF .xor v0 v0).1) with
+        fl := (aluF .xor v0 v0).2, rip := d4.rip + 2 } :=
+    step_alu_xor (by rw [hd4rip]; exact hc.de3) hd4r0 hd4r0
+  obtain ⟨d5, hd5⟩ : ∃ t : X86Int.St, t =
+      { d4.set 0 (some (aluF .xor v0 v0).1) with
+        fl := (aluF .xor v0 v0).2, rip := d4.rip + 2 } := ⟨_, rfl⟩
+  have hd5rip : d5.rip = base + 0xe5 := by
+    rw [hd5]; show d4.rip + 2 = base + 0xe5; rw [hd4rip]
+  have hlen5 : d5.regs.length = 16 := by
+    rw [hd5]
+    show (d4.set 0 (some (aluF .xor v0 v0).1)).regs.length = 16
+    rw [len_set]
+    exact hlen4
+  have hd5r0 : d5.reg 0 = some 0 := by
+    rw [hd5]
+    show (d4.set 0 (some (aluF .xor v0 v0).1)).reg 0 = some 0
+    rw [reg_set_self (by omega), aluF_xor_fst_self]
+  have hd5r14 : d5.reg 14 = some 3 := by
+    rw [hd5]
+    show (d4.set 0 (some (aluF .xor v0 v0).1)).reg 14 = some 3
+    rw [reg_set_other (by decide : (14 : Nat) ≠ 0)]
+    rw [hd4]
+    show (d3.set 2 (some (aluF .sub cap count).1)).reg 14 = some 3
+    rw [reg_set_other (by decide : (14 : Nat) ≠ 2)]
+    rw [hd3]
+    show ({ d2.set 2 (some cap) with rip := d2.rip + 3 }).reg 14 = some 3
+    rw [reg_with_rip, reg_set_other (by decide : (14 : Nat) ≠ 2)]
+    rw [hd2]
+    show (d1.set 6 (some (aluF .add A count).1)).reg 14 = some 3
+    rw [reg_set_other (by decide : (14 : Nat) ≠ 6)]
+    rw [hd1]
+    show ({ s.set 6 (some A) with rip := s.rip + 3 }).reg 14 = some 3
+    rw [reg_with_rip, reg_set_other (by decide : (14 : Nat) ≠ 6)]
+    exact hr14
+  have e6 : X86Int.step stage1Im d5 =
+      .ok { d5.set 7 (some (3 % 2 ^ 32)) with rip := d5.rip + 3 } :=
+    step_mov32 (by rw [hd5rip]; exact hc.de5) hd5r14
+  obtain ⟨d6, hd6⟩ : ∃ t : X86Int.St, t =
+      { d5.set 7 (some (3 % 2 ^ 32)) with rip := d5.rip + 3 } := ⟨_, rfl⟩
+  have hd6rip : d6.rip = base + 0xe8 := by
+    rw [hd6]; show d5.rip + 3 = base + 0xe8; rw [hd5rip]
+  have hlen6 : d6.regs.length = 16 := by
+    rw [hd6]
+    show ({ d5.set 7 (some (3 % 2 ^ 32)) with
+      rip := d5.rip + 3 }).regs.length = 16
+    rw [len_with_rip, len_set]
+    exact hlen5
+  have hd6r7 : d6.reg 7 = some 3 := by
+    rw [hd6]
+    show ({ d5.set 7 (some (3 % 2 ^ 32)) with rip := d5.rip + 3 }).reg 7 =
+      some 3
+    rw [reg_with_rip, reg_set_self (by omega)]
+  have hd6r0 : d6.reg 0 = some 0 := by
+    rw [hd6]
+    show ({ d5.set 7 (some (3 % 2 ^ 32)) with rip := d5.rip + 3 }).reg 0 =
+      some 0
+    rw [reg_with_rip, reg_set_other (by decide : (0 : Nat) ≠ 7)]
+    exact hd5r0
+  have hd6r6 : d6.reg 6 = some (A + count) := by
+    rw [hd6]
+    show ({ d5.set 7 (some (3 % 2 ^ 32)) with rip := d5.rip + 3 }).reg 6 =
+      some (A + count)
+    rw [reg_with_rip, reg_set_other (by decide : (6 : Nat) ≠ 7)]
+    rw [hd5]
+    show (d4.set 0 (some (aluF .xor v0 v0).1)).reg 6 = some (A + count)
+    rw [reg_set_other (by decide : (6 : Nat) ≠ 0)]
+    rw [hd4]
+    show (d3.set 2 (some (aluF .sub cap count).1)).reg 6 = some (A + count)
+    rw [reg_set_other (by decide : (6 : Nat) ≠ 2)]
+    rw [hd3]
+    show ({ d2.set 2 (some cap) with rip := d2.rip + 3 }).reg 6 =
+      some (A + count)
+    rw [reg_with_rip, reg_set_other (by decide : (6 : Nat) ≠ 2)]
+    exact hd2r6
+  have hd6r2 : d6.reg 2 = some (cap - count) := by
+    rw [hd6]
+    show ({ d5.set 7 (some (3 % 2 ^ 32)) with rip := d5.rip + 3 }).reg 2 =
+      some (cap - count)
+    rw [reg_with_rip, reg_set_other (by decide : (2 : Nat) ≠ 7)]
+    rw [hd5]
+    show (d4.set 0 (some (aluF .xor v0 v0).1)).reg 2 = some (cap - count)
+    rw [reg_set_other (by decide : (2 : Nat) ≠ 0)]
+    exact hd4r2
+  have hd6r10 : d6.reg 10 = some v10 := by
+    rw [hd6]
+    show ({ d5.set 7 (some (3 % 2 ^ 32)) with rip := d5.rip + 3 }).reg 10 =
+      some v10
+    rw [reg_with_rip, reg_set_other (by decide : (10 : Nat) ≠ 7)]
+    rw [hd5]
+    show (d4.set 0 (some (aluF .xor v0 v0).1)).reg 10 = some v10
+    rw [reg_set_other (by decide : (10 : Nat) ≠ 0)]
+    rw [hd4]
+    show (d3.set 2 (some (aluF .sub cap count).1)).reg 10 = some v10
+    rw [reg_set_other (by decide : (10 : Nat) ≠ 2)]
+    rw [hd3]
+    show ({ d2.set 2 (some cap) with rip := d2.rip + 3 }).reg 10 = some v10
+    rw [reg_with_rip, reg_set_other (by decide : (10 : Nat) ≠ 2)]
+    rw [hd2]
+    show (d1.set 6 (some (aluF .add A count).1)).reg 10 = some v10
+    rw [reg_set_other (by decide : (10 : Nat) ≠ 6)]
+    rw [hd1]
+    show ({ s.set 6 (some A) with rip := s.rip + 3 }).reg 10 = some v10
+    rw [reg_with_rip, reg_set_other (by decide : (10 : Nat) ≠ 6)]
+    exact hr10v
+  have hd6r8 : d6.reg 8 = some v8 := by
+    rw [hd6]
+    show ({ d5.set 7 (some (3 % 2 ^ 32)) with rip := d5.rip + 3 }).reg 8 =
+      some v8
+    rw [reg_with_rip, reg_set_other (by decide : (8 : Nat) ≠ 7)]
+    rw [hd5]
+    show (d4.set 0 (some (aluF .xor v0 v0).1)).reg 8 = some v8
+    rw [reg_set_other (by decide : (8 : Nat) ≠ 0)]
+    rw [hd4]
+    show (d3.set 2 (some (aluF .sub cap count).1)).reg 8 = some v8
+    rw [reg_set_other (by decide : (8 : Nat) ≠ 2)]
+    rw [hd3]
+    show ({ d2.set 2 (some cap) with rip := d2.rip + 3 }).reg 8 = some v8
+    rw [reg_with_rip, reg_set_other (by decide : (8 : Nat) ≠ 2)]
+    rw [hd2]
+    show (d1.set 6 (some (aluF .add A count).1)).reg 8 = some v8
+    rw [reg_set_other (by decide : (8 : Nat) ≠ 6)]
+    rw [hd1]
+    show ({ s.set 6 (some A) with rip := s.rip + 3 }).reg 8 = some v8
+    rw [reg_with_rip, reg_set_other (by decide : (8 : Nat) ≠ 6)]
+    exact hr8v
+  have hd6r9 : d6.reg 9 = some v9 := by
+    rw [hd6]
+    show ({ d5.set 7 (some (3 % 2 ^ 32)) with rip := d5.rip + 3 }).reg 9 =
+      some v9
+    rw [reg_with_rip, reg_set_other (by decide : (9 : Nat) ≠ 7)]
+    rw [hd5]
+    show (d4.set 0 (some (aluF .xor v0 v0).1)).reg 9 = some v9
+    rw [reg_set_other (by decide : (9 : Nat) ≠ 0)]
+    rw [hd4]
+    show (d3.set 2 (some (aluF .sub cap count).1)).reg 9 = some v9
+    rw [reg_set_other (by decide : (9 : Nat) ≠ 2)]
+    rw [hd3]
+    show ({ d2.set 2 (some cap) with rip := d2.rip + 3 }).reg 9 = some v9
+    rw [reg_with_rip, reg_set_other (by decide : (9 : Nat) ≠ 2)]
+    rw [hd2]
+    show (d1.set 6 (some (aluF .add A count).1)).reg 9 = some v9
+    rw [reg_set_other (by decide : (9 : Nat) ≠ 6)]
+    rw [hd1]
+    show ({ s.set 6 (some A) with rip := s.rip + 3 }).reg 9 = some v9
+    rw [reg_with_rip, reg_set_other (by decide : (9 : Nat) ≠ 6)]
+    exact hr9v
+  have hd6mem : d6.mem = s.mem := by
+    rw [hd6, hd5, hd4, hd3, hd2, hd1]
+    rfl
+  have hd6k : d6.k = s.k := by
+    rw [hd6, hd5, hd4, hd3, hd2, hd1]
+    rfl
+  have hd6r3 : d6.reg 3 = some A := by
+    rw [hd6]
+    show ({ d5.set 7 (some (3 % 2 ^ 32)) with rip := d5.rip + 3 }).reg 3 =
+      some A
+    rw [reg_with_rip, reg_set_other (by decide : (3 : Nat) ≠ 7)]
+    rw [hd5]
+    show (d4.set 0 (some (aluF .xor v0 v0).1)).reg 3 = some A
+    rw [reg_set_other (by decide : (3 : Nat) ≠ 0)]
+    rw [hd4]
+    show (d3.set 2 (some (aluF .sub cap count).1)).reg 3 = some A
+    rw [reg_set_other (by decide : (3 : Nat) ≠ 2)]
+    rw [hd3]
+    show ({ d2.set 2 (some cap) with rip := d2.rip + 3 }).reg 3 = some A
+    rw [reg_with_rip, reg_set_other (by decide : (3 : Nat) ≠ 2)]
+    rw [hd2]
+    show (d1.set 6 (some (aluF .add A count).1)).reg 3 = some A
+    rw [reg_set_other (by decide : (3 : Nat) ≠ 6)]
+    rw [hd1]
+    show ({ s.set 6 (some A) with rip := s.rip + 3 }).reg 3 = some A
+    rw [reg_with_rip, reg_set_other (by decide : (3 : Nat) ≠ 6)]
+    exact hr3
+  have hd6r12 : d6.reg 12 = some cap := by
+    rw [hd6]
+    show ({ d5.set 7 (some (3 % 2 ^ 32)) with rip := d5.rip + 3 }).reg 12 =
+      some cap
+    rw [reg_with_rip, reg_set_other (by decide : (12 : Nat) ≠ 7)]
+    rw [hd5]
+    show (d4.set 0 (some (aluF .xor v0 v0).1)).reg 12 = some cap
+    rw [reg_set_other (by decide : (12 : Nat) ≠ 0)]
+    rw [hd4]
+    show (d3.set 2 (some (aluF .sub cap count).1)).reg 12 = some cap
+    rw [reg_set_other (by decide : (12 : Nat) ≠ 2)]
+    rw [hd3]
+    show ({ d2.set 2 (some cap) with rip := d2.rip + 3 }).reg 12 = some cap
+    rw [reg_with_rip, reg_set_other (by decide : (12 : Nat) ≠ 2)]
+    exact hd2r12
+  have hd6r13 : d6.reg 13 = some count := by
+    rw [hd6]
+    show ({ d5.set 7 (some (3 % 2 ^ 32)) with rip := d5.rip + 3 }).reg 13 =
+      some count
+    rw [reg_with_rip, reg_set_other (by decide : (13 : Nat) ≠ 7)]
+    rw [hd5]
+    show (d4.set 0 (some (aluF .xor v0 v0).1)).reg 13 = some count
+    rw [reg_set_other (by decide : (13 : Nat) ≠ 0)]
+    rw [hd4]
+    show (d3.set 2 (some (aluF .sub cap count).1)).reg 13 = some count
+    rw [reg_set_other (by decide : (13 : Nat) ≠ 2)]
+    exact hd3r13
+  have hd6r4 : d6.reg 4 = some (sp0 + 24) := by
+    rw [hd6]
+    show ({ d5.set 7 (some (3 % 2 ^ 32)) with rip := d5.rip + 3 }).reg 4 =
+      some (sp0 + 24)
+    rw [reg_with_rip, reg_set_other (by decide : (4 : Nat) ≠ 7)]
+    rw [hd5]
+    show (d4.set 0 (some (aluF .xor v0 v0).1)).reg 4 = some (sp0 + 24)
+    rw [reg_set_other (by decide : (4 : Nat) ≠ 0)]
+    rw [hd4]
+    show (d3.set 2 (some (aluF .sub cap count).1)).reg 4 = some (sp0 + 24)
+    rw [reg_set_other (by decide : (4 : Nat) ≠ 2)]
+    rw [hd3]
+    show ({ d2.set 2 (some cap) with rip := d2.rip + 3 }).reg 4 =
+      some (sp0 + 24)
+    rw [reg_with_rip, reg_set_other (by decide : (4 : Nat) ≠ 2)]
+    rw [hd2]
+    show (d1.set 6 (some (aluF .add A count).1)).reg 4 = some (sp0 + 24)
+    rw [reg_set_other (by decide : (4 : Nat) ≠ 6)]
+    rw [hd1]
+    show ({ s.set 6 (some A) with rip := s.rip + 3 }).reg 4 = some (sp0 + 24)
+    rw [reg_with_rip, reg_set_other (by decide : (4 : Nat) ≠ 6)]
+    exact hr4
+  -- step 7: read(3, buf + count, cap - count)
+  have hsc6 : X86Env.syscall d6.k d6.mem 0 3 (A + count) (cap - count)
+        0 0 0 =
+      some (.ret n { s.k with fds := [some ⟨f, count + n⟩] }
+        [c1, c2, buf']) := by
+    rw [hd6k, hd6mem]
+    exact hsc
+  have e7 : X86Int.step stage1Im d6 =
+      .ok { ((d6.set 0 (some n)).set 1 (some (d6.rip + 2))).set 11 none with
+        k := { s.k with fds := [some ⟨f, count + n⟩] },
+        mem := [c1, c2, buf'], rip := d6.rip + 2 } :=
+    step_syscall_ret (by rw [hd6rip]; exact hc.de8) hd6r0 hd6r7 hd6r6
+      hd6r2 hd6r10 hd6r8 hd6r9 hsc6
+  obtain ⟨d7, hd7⟩ : ∃ t : X86Int.St, t =
+      { ((d6.set 0 (some n)).set 1 (some (d6.rip + 2))).set 11 none with
+        k := { s.k with fds := [some ⟨f, count + n⟩] },
+        mem := [c1, c2, buf'], rip := d6.rip + 2 } := ⟨_, rfl⟩
+  have hd7rip : d7.rip = base + 0xea := by
+    rw [hd7]; show d6.rip + 2 = base + 0xea; rw [hd6rip]
+  have hlen7 : d7.regs.length = 16 := by
+    rw [hd7]
+    show (((d6.set 0 (some n)).set 1 (some (d6.rip + 2))).set 11
+      none).regs.length = 16
+    rw [len_set, len_set, len_set]
+    exact hlen6
+  have hd7r0 : d7.reg 0 = some n := by
+    rw [hd7]
+    show (((d6.set 0 (some n)).set 1 (some (d6.rip + 2))).set 11
+      none).reg 0 = some n
+    rw [reg_set_other (by decide : (0 : Nat) ≠ 11),
+      reg_set_other (by decide : (0 : Nat) ≠ 1),
+      reg_set_self (by omega)]
+  have hd7r3 : d7.reg 3 = some A := by
+    rw [hd7]
+    show (((d6.set 0 (some n)).set 1 (some (d6.rip + 2))).set 11
+      none).reg 3 = some A
+    rw [reg_set_other (by decide : (3 : Nat) ≠ 11),
+      reg_set_other (by decide : (3 : Nat) ≠ 1),
+      reg_set_other (by decide : (3 : Nat) ≠ 0)]
+    exact hd6r3
+  have hd7r12 : d7.reg 12 = some cap := by
+    rw [hd7]
+    show (((d6.set 0 (some n)).set 1 (some (d6.rip + 2))).set 11
+      none).reg 12 = some cap
+    rw [reg_set_other (by decide : (12 : Nat) ≠ 11),
+      reg_set_other (by decide : (12 : Nat) ≠ 1),
+      reg_set_other (by decide : (12 : Nat) ≠ 0)]
+    exact hd6r12
+  have hd7r13 : d7.reg 13 = some count := by
+    rw [hd7]
+    show (((d6.set 0 (some n)).set 1 (some (d6.rip + 2))).set 11
+      none).reg 13 = some count
+    rw [reg_set_other (by decide : (13 : Nat) ≠ 11),
+      reg_set_other (by decide : (13 : Nat) ≠ 1),
+      reg_set_other (by decide : (13 : Nat) ≠ 0)]
+    exact hd6r13
+  have hd7r14 : d7.reg 14 = some 3 := by
+    rw [hd7]
+    show (((d6.set 0 (some n)).set 1 (some (d6.rip + 2))).set 11
+      none).reg 14 = some 3
+    rw [reg_set_other (by decide : (14 : Nat) ≠ 11),
+      reg_set_other (by decide : (14 : Nat) ≠ 1),
+      reg_set_other (by decide : (14 : Nat) ≠ 0)]
+    rw [hd6]
+    show ({ d5.set 7 (some (3 % 2 ^ 32)) with rip := d5.rip + 3 }).reg 14 =
+      some 3
+    rw [reg_with_rip, reg_set_other (by decide : (14 : Nat) ≠ 7)]
+    exact hd5r14
+  have hd7r4 : d7.reg 4 = some (sp0 + 24) := by
+    rw [hd7]
+    show (((d6.set 0 (some n)).set 1 (some (d6.rip + 2))).set 11
+      none).reg 4 = some (sp0 + 24)
+    rw [reg_set_other (by decide : (4 : Nat) ≠ 11),
+      reg_set_other (by decide : (4 : Nat) ≠ 1),
+      reg_set_other (by decide : (4 : Nat) ≠ 0)]
+    exact hd6r4
+  have hd7r10 : d7.reg 10 = some v10 := by
+    rw [hd7]
+    show (((d6.set 0 (some n)).set 1 (some (d6.rip + 2))).set 11
+      none).reg 10 = some v10
+    rw [reg_set_other (by decide : (10 : Nat) ≠ 11),
+      reg_set_other (by decide : (10 : Nat) ≠ 1),
+      reg_set_other (by decide : (10 : Nat) ≠ 0)]
+    exact hd6r10
+  have hd7r8 : d7.reg 8 = some v8 := by
+    rw [hd7]
+    show (((d6.set 0 (some n)).set 1 (some (d6.rip + 2))).set 11
+      none).reg 8 = some v8
+    rw [reg_set_other (by decide : (8 : Nat) ≠ 11),
+      reg_set_other (by decide : (8 : Nat) ≠ 1),
+      reg_set_other (by decide : (8 : Nat) ≠ 0)]
+    exact hd6r8
+  have hd7r9 : d7.reg 9 = some v9 := by
+    rw [hd7]
+    show (((d6.set 0 (some n)).set 1 (some (d6.rip + 2))).set 11
+      none).reg 9 = some v9
+    rw [reg_set_other (by decide : (9 : Nat) ≠ 11),
+      reg_set_other (by decide : (9 : Nat) ≠ 1),
+      reg_set_other (by decide : (9 : Nat) ≠ 0)]
+    exact hd6r9
+  have hd7mem : d7.mem = [c1, c2, buf'] := by rw [hd7]
+  have hd7k : d7.k = { s.k with fds := [some ⟨f, count + n⟩] } := by
+    rw [hd7]
+  -- step 8: test rax, rax
+  have e8 : X86Int.step stage1Im d7 =
+      .ok { d7 with fl := (aluF .and n n).2, rip := d7.rip + 3 } :=
+    step_test (by rw [hd7rip]; exact hc.dea) hd7r0 hd7r0
+  obtain ⟨d8, hd8⟩ : ∃ t : X86Int.St, t =
+      { d7 with fl := (aluF .and n n).2, rip := d7.rip + 3 } := ⟨_, rfl⟩
+  have hd8rip : d8.rip = base + 0xed := by
+    rw [hd8]; show d7.rip + 3 = base + 0xed; rw [hd7rip]
+  have hn63 : n < 2 ^ 63 := by
+    have hle : n ≤ cap - count := by
+      rw [hn]; exact Nat.min_le_left _ _
+    omega
+  have hd8sf : d8.fl.sf = some false := by
+    rw [hd8]
+    show (aluF .and n n).2.sf = some false
+    have hland : Nat.land n n = n := by simp
+    have hmsb : X86Int.msb n = false := by
+      simp only [X86Int.msb]
+      rw [Nat.div_eq_of_lt hn63]
+      decide
+    simp [aluF, hland, hmsb]
+  have hd8zf : d8.fl.zf = some (n == 0) := by
+    rw [hd8]
+    show (aluF .and n n).2.zf = some (n == 0)
+    rw [aluF_zf, aluF_and_fst_self]
+  have hd8r0 : d8.reg 0 = some n := by rw [hd8]; exact hd7r0
+  have hd8r3 : d8.reg 3 = some A := by rw [hd8]; exact hd7r3
+  have hd8r12 : d8.reg 12 = some cap := by rw [hd8]; exact hd7r12
+  have hd8r13 : d8.reg 13 = some count := by rw [hd8]; exact hd7r13
+  have hd8r14 : d8.reg 14 = some 3 := by rw [hd8]; exact hd7r14
+  have hd8r4 : d8.reg 4 = some (sp0 + 24) := by rw [hd8]; exact hd7r4
+  have hd8r10 : d8.reg 10 = some v10 := by rw [hd8]; exact hd7r10
+  have hd8r8 : d8.reg 8 = some v8 := by rw [hd8]; exact hd7r8
+  have hd8r9 : d8.reg 9 = some v9 := by rw [hd8]; exact hd7r9
+  have hd8mem : d8.mem = [c1, c2, buf'] := by rw [hd8]; exact hd7mem
+  have hd8k : d8.k = { s.k with fds := [some ⟨f, count + n⟩] } := by rw [hd8]; exact hd7k
+  have hlen8 : d8.regs.length = 16 := by rw [hd8]; exact hlen7
+  -- step 9: js fail1 (not taken: n ≥ 0)
+  have hd8fl8 : X86Int.cond d8.fl 8 = some false :=
+    cond_cc8_of_sf_false hd8sf
+  have e9 : X86Int.step stage1Im d8 =
+      .ok { d8 with rip := d8.rip + 2 } := by
+    have h := step_jcc (im := stage1Im) (s := d8)
+      (by rw [hd8rip]; exact hc.ded) hd8fl8
+    simpa using h
+  obtain ⟨d9, hd9⟩ : ∃ t : X86Int.St, t =
+      { d8 with rip := d8.rip + 2 } := ⟨_, rfl⟩
+  have hd9rip : d9.rip = base + 0xef := by
+    rw [hd9]; show d8.rip + 2 = base + 0xef; rw [hd8rip]
+  have hd9r0 : d9.reg 0 = some n := by
+    rw [hd9]; show ({ d8 with rip := d8.rip + 2 }).reg 0 = some n
+    rw [reg_with_rip]; exact hd8r0
+  have hd9r3 : d9.reg 3 = some A := by
+    rw [hd9]; show ({ d8 with rip := d8.rip + 2 }).reg 3 = some A
+    rw [reg_with_rip]; exact hd8r3
+  have hd9r12 : d9.reg 12 = some cap := by
+    rw [hd9]; show ({ d8 with rip := d8.rip + 2 }).reg 12 = some cap
+    rw [reg_with_rip]; exact hd8r12
+  have hd9r13 : d9.reg 13 = some count := by
+    rw [hd9]; show ({ d8 with rip := d8.rip + 2 }).reg 13 = some count
+    rw [reg_with_rip]; exact hd8r13
+  have hd9r14 : d9.reg 14 = some 3 := by
+    rw [hd9]; show ({ d8 with rip := d8.rip + 2 }).reg 14 = some 3
+    rw [reg_with_rip]; exact hd8r14
+  have hd9r4 : d9.reg 4 = some (sp0 + 24) := by
+    rw [hd9]; show ({ d8 with rip := d8.rip + 2 }).reg 4 = some (sp0 + 24)
+    rw [reg_with_rip]; exact hd8r4
+  have hd9r10 : d9.reg 10 = some v10 := by
+    rw [hd9]; show ({ d8 with rip := d8.rip + 2 }).reg 10 = some v10
+    rw [reg_with_rip]; exact hd8r10
+  have hd9r8 : d9.reg 8 = some v8 := by
+    rw [hd9]; show ({ d8 with rip := d8.rip + 2 }).reg 8 = some v8
+    rw [reg_with_rip]; exact hd8r8
+  have hd9r9 : d9.reg 9 = some v9 := by
+    rw [hd9]; show ({ d8 with rip := d8.rip + 2 }).reg 9 = some v9
+    rw [reg_with_rip]; exact hd8r9
+  have hd9mem : d9.mem = [c1, c2, buf'] := by rw [hd9]; exact hd8mem
+  have hd9k : d9.k = { s.k with fds := [some ⟨f, count + n⟩] } := by rw [hd9]; exact hd8k
+  have hlen9 : d9.regs.length = 16 := by
+    rw [hd9]; show ({ d8 with rip := d8.rip + 2 }).regs.length = 16
+    rw [len_with_rip]; exact hlen8
+  have hd9fl : d9.fl = d8.fl := by rw [hd9]
+  -- step 10: jz loaded / fallthrough on n
+  have hd9fl4 : X86Int.cond d9.fl 4 = some (n == 0) := by
+    rw [hd9fl]
+    exact cond_cc4 hd8zf
+  have r1 : run stage1Im 1 (Out.ok s) = Out.ok d1 := by
+    rw [run_succ_ok stage1Im 0 s, e1, ← hd1, run_zero]
+  have r2 : run stage1Im 1 (Out.ok d1) = Out.ok d2 := by
+    rw [run_succ_ok stage1Im 0 d1, e2, ← hd2, run_zero]
+  have r3 : run stage1Im 1 (Out.ok d2) = Out.ok d3 := by
+    rw [run_succ_ok stage1Im 0 d2, e3, ← hd3, run_zero]
+  have r4 : run stage1Im 1 (Out.ok d3) = Out.ok d4 := by
+    rw [run_succ_ok stage1Im 0 d3, e4, ← hd4, run_zero]
+  have r5 : run stage1Im 1 (Out.ok d4) = Out.ok d5 := by
+    rw [run_succ_ok stage1Im 0 d4, e5, ← hd5, run_zero]
+  have r6 : run stage1Im 1 (Out.ok d5) = Out.ok d6 := by
+    rw [run_succ_ok stage1Im 0 d5, e6, ← hd6, run_zero]
+  have r7 : run stage1Im 1 (Out.ok d6) = Out.ok d7 := by
+    rw [run_succ_ok stage1Im 0 d6, e7, ← hd7, run_zero]
+  have r8 : run stage1Im 1 (Out.ok d7) = Out.ok d8 := by
+    rw [run_succ_ok stage1Im 0 d7, e8, ← hd8, run_zero]
+  have r9 : run stage1Im 1 (Out.ok d8) = Out.ok d9 := by
+    rw [run_succ_ok stage1Im 0 d8, e9, ← hd9, run_zero]
+  by_cases hn0 : n = 0
+  · have hfl : X86Int.cond d9.fl 4 = some true := by
+      rw [hd9fl4, hn0]
+      decide
+    have e10 : X86Int.step stage1Im d9 =
+        .ok { d9 with rip := base + 0x122 } := by
+      have h := step_jcc (im := stage1Im) (s := d9)
+        (by rw [hd9rip]; exact hc.def_) hfl
+      simpa using h
+    obtain ⟨d10, hd10⟩ : ∃ t : X86Int.St, t =
+        { d9 with rip := base + 0x122 } := ⟨_, rfl⟩
+    have r10 : run stage1Im 1 (Out.ok d9) = Out.ok d10 := by
+      rw [run_succ_ok stage1Im 0 d9, e10, ← hd10, run_zero]
+    have hrun : run stage1Im 10 (Out.ok s) = Out.ok d10 := by
+      rw [show (10 : Nat) = 1 + 9 from rfl, run_add stage1Im 1 9, r1,
+        show (9 : Nat) = 1 + 8 from rfl, run_add stage1Im 1 8, r2,
+        show (8 : Nat) = 1 + 7 from rfl, run_add stage1Im 1 7, r3,
+        show (7 : Nat) = 1 + 6 from rfl, run_add stage1Im 1 6, r4,
+        show (6 : Nat) = 1 + 5 from rfl, run_add stage1Im 1 5, r5,
+        show (5 : Nat) = 1 + 4 from rfl, run_add stage1Im 1 4, r6,
+        show (4 : Nat) = 1 + 3 from rfl, run_add stage1Im 1 3, r7,
+        show (3 : Nat) = 1 + 2 from rfl, run_add stage1Im 1 2, r8,
+        show (2 : Nat) = 1 + 1 from rfl, run_add stage1Im 1 1, r9, r10]
+    have hfeq : f.length = count := by
+      rw [hn] at hn0
+      omega
+    refine ⟨d10, hrun, Or.inl ⟨by rw [hd10], hfeq⟩, ?_, ?_, ?_, ?_, ?_,
+      ?_, ?_, ?_, ?_, ?_, ?_, ⟨buf', ?_, hbuf'b.trans hbufbase, hbuf'hi.trans hbufhi, hbuf'rw.trans hbufrw⟩, ?_, ?_⟩
+    · rw [hd10]
+      show ({ d9 with rip := base + 0x122 }).reg 0 = some n
+      rw [reg_with_rip]; exact hd9r0
+    · rw [hd10]
+      show ({ d9 with rip := base + 0x122 }).reg 3 = some A
+      rw [reg_with_rip]; exact hd9r3
+    · rw [hd10]
+      show ({ d9 with rip := base + 0x122 }).reg 12 = some cap
+      rw [reg_with_rip]; exact hd9r12
+    · rw [hd10]
+      show ({ d9 with rip := base + 0x122 }).reg 13 = some count
+      rw [reg_with_rip]; exact hd9r13
+    · rw [hd10]
+      show ({ d9 with rip := base + 0x122 }).reg 14 = some 3
+      rw [reg_with_rip]; exact hd9r14
+    · rw [hd10]
+      show ({ d9 with rip := base + 0x122 }).reg 4 = some (sp0 + 24)
+      rw [reg_with_rip]; exact hd9r4
+    · refine ⟨v10, ?_⟩
+      rw [hd10]
+      show ({ d9 with rip := base + 0x122 }).reg 10 = some v10
+      rw [reg_with_rip]; exact hd9r10
+    · refine ⟨v8, ?_⟩
+      rw [hd10]
+      show ({ d9 with rip := base + 0x122 }).reg 8 = some v8
+      rw [reg_with_rip]; exact hd9r8
+    · refine ⟨v9, ?_⟩
+      rw [hd10]
+      show ({ d9 with rip := base + 0x122 }).reg 9 = some v9
+      rw [reg_with_rip]; exact hd9r9
+    · rw [hd10]
+      show d9.k.oracle = s.k.oracle
+      rw [hd9k]
+    · rw [hd10]
+      exact congrArg X86Env.Kern.fds hd9k
+    · rw [hd10]
+      exact hd9mem
+    · rw [hd10]
+      show Mem.rdN d9.mem A (count + n) = some (f.take (count + n))
+      rw [hd9mem]
+      exact hrdN'
+    · rw [hd10]
+      show ({ d9 with rip := base + 0x122 }).regs.length = 16
+      rw [len_with_rip]; exact hlen9
+  · have hfl : X86Int.cond d9.fl 4 = some false := by
+      rw [hd9fl4]
+      simp [hn0]
+    have e10 : X86Int.step stage1Im d9 =
+        .ok { d9 with rip := d9.rip + 2 } := by
+      have h := step_jcc (im := stage1Im) (s := d9)
+        (by rw [hd9rip]; exact hc.def_) hfl
+      simpa using h
+    obtain ⟨d10, hd10⟩ : ∃ t : X86Int.St, t =
+        { d9 with rip := d9.rip + 2 } := ⟨_, rfl⟩
+    have r10 : run stage1Im 1 (Out.ok d9) = Out.ok d10 := by
+      rw [run_succ_ok stage1Im 0 d9, e10, ← hd10, run_zero]
+    have hrun : run stage1Im 10 (Out.ok s) = Out.ok d10 := by
+      rw [show (10 : Nat) = 1 + 9 from rfl, run_add stage1Im 1 9, r1,
+        show (9 : Nat) = 1 + 8 from rfl, run_add stage1Im 1 8, r2,
+        show (8 : Nat) = 1 + 7 from rfl, run_add stage1Im 1 7, r3,
+        show (7 : Nat) = 1 + 6 from rfl, run_add stage1Im 1 6, r4,
+        show (6 : Nat) = 1 + 5 from rfl, run_add stage1Im 1 5, r5,
+        show (5 : Nat) = 1 + 4 from rfl, run_add stage1Im 1 4, r6,
+        show (4 : Nat) = 1 + 3 from rfl, run_add stage1Im 1 3, r7,
+        show (3 : Nat) = 1 + 2 from rfl, run_add stage1Im 1 2, r8,
+        show (2 : Nat) = 1 + 1 from rfl, run_add stage1Im 1 1, r9, r10]
+    have hflt : count < f.length := by
+      rw [hn] at hn0
+      omega
+    refine ⟨d10, hrun, Or.inr ⟨by
+        rw [hd10]; show d9.rip + 2 = base + 0xf1; rw [hd9rip], hflt⟩, ?_,
+      ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ⟨buf', ?_, hbuf'b.trans hbufbase, hbuf'hi.trans hbufhi, hbuf'rw.trans hbufrw⟩,
+      ?_, ?_⟩
+    · rw [hd10]
+      show ({ d9 with rip := d9.rip + 2 }).reg 0 = some n
+      rw [reg_with_rip]; exact hd9r0
+    · rw [hd10]
+      show ({ d9 with rip := d9.rip + 2 }).reg 3 = some A
+      rw [reg_with_rip]; exact hd9r3
+    · rw [hd10]
+      show ({ d9 with rip := d9.rip + 2 }).reg 12 = some cap
+      rw [reg_with_rip]; exact hd9r12
+    · rw [hd10]
+      show ({ d9 with rip := d9.rip + 2 }).reg 13 = some count
+      rw [reg_with_rip]; exact hd9r13
+    · rw [hd10]
+      show ({ d9 with rip := d9.rip + 2 }).reg 14 = some 3
+      rw [reg_with_rip]; exact hd9r14
+    · rw [hd10]
+      show ({ d9 with rip := d9.rip + 2 }).reg 4 = some (sp0 + 24)
+      rw [reg_with_rip]; exact hd9r4
+    · refine ⟨v10, ?_⟩
+      rw [hd10]
+      show ({ d9 with rip := d9.rip + 2 }).reg 10 = some v10
+      rw [reg_with_rip]; exact hd9r10
+    · refine ⟨v8, ?_⟩
+      rw [hd10]
+      show ({ d9 with rip := d9.rip + 2 }).reg 8 = some v8
+      rw [reg_with_rip]; exact hd9r8
+    · refine ⟨v9, ?_⟩
+      rw [hd10]
+      show ({ d9 with rip := d9.rip + 2 }).reg 9 = some v9
+      rw [reg_with_rip]; exact hd9r9
+    · rw [hd10]
+      show d9.k.oracle = s.k.oracle
+      rw [hd9k]
+    · rw [hd10]
+      exact congrArg X86Env.Kern.fds hd9k
+    · rw [hd10]
+      exact hd9mem
+    · rw [hd10]
+      show Mem.rdN d9.mem A (count + n) = some (f.take (count + n))
+      rw [hd9mem]
+      exact hrdN'
+    · rw [hd10]
+      show ({ d9 with rip := d9.rip + 2 }).regs.length = 16
+      rw [len_with_rip]; exact hlen9
+
+/-- The count update after a positive read (4 steps from
+`base + 0xf1`): `count += n`, then back to the loop head while
+room remains, else fall through to the growth block at
+`base + 0xfc` with the buffer exactly full. -/
+theorem loader_count_update {A sp0 cap count n : Nat} {s : X86Int.St}
+    (hrip : s.rip = base + 0xf1) (hlen16 : s.regs.length = 16)
+    (hr0 : s.reg 0 = some n) (hr3 : s.reg 3 = some A)
+    (hr12 : s.reg 12 = some cap) (hr13 : s.reg 13 = some count)
+    (hr14 : s.reg 14 = some 3) (hr4 : s.reg 4 = some (sp0 + 24))
+    (hr10 : ∃ v, s.reg 10 = some v) (hr8 : ∃ v, s.reg 8 = some v)
+    (hr9 : ∃ v, s.reg 9 = some v)
+    (hnle : count + n ≤ cap) (hcapW : cap < W) :
+    ∃ s', run stage1Im 4 (Out.ok s) = Out.ok s' ∧
+      (s'.rip = base + 0xd7 ∧ count + n < cap ∨
+        s'.rip = base + 0xfc ∧ count + n = cap) ∧
+      s'.reg 13 = some (count + n) ∧ s'.reg 3 = some A ∧
+      s'.reg 12 = some cap ∧ s'.reg 14 = some 3 ∧
+      s'.reg 4 = some (sp0 + 24) ∧
+      (∃ v, s'.reg 0 = some v) ∧ (∃ v, s'.reg 10 = some v) ∧
+      (∃ v, s'.reg 8 = some v) ∧ (∃ v, s'.reg 9 = some v) ∧
+      s'.mem = s.mem ∧ s'.k = s.k ∧ s'.regs.length = 16 := by
+  have hc := stage1_loaderCode
+  have hadd : (aluF .add count n).1 = count + n := by
+    rw [aluF_add_fst, Nat.mod_eq_of_lt (by omega)]
+  -- step 1: add r13, rax
+  have e1 : X86Int.step stage1Im s =
+      .ok { s.set 13 (some (aluF .add count n).1) with
+        fl := (aluF .add count n).2, rip := s.rip + 3 } :=
+    step_alu_add (by rw [hrip]; exact hc.df1) hr13 hr0
+  obtain ⟨u1, hu1⟩ : ∃ t : X86Int.St, t =
+      { s.set 13 (some (aluF .add count n).1) with
+        fl := (aluF .add count n).2, rip := s.rip + 3 } := ⟨_, rfl⟩
+  have hu1rip : u1.rip = base + 0xf4 := by
+    rw [hu1]; show s.rip + 3 = base + 0xf4; rw [hrip]
+  have hlen1 : u1.regs.length = 16 := by
+    rw [hu1]
+    show (s.set 13 (some (aluF .add count n).1)).regs.length = 16
+    rw [len_set]; exact hlen16
+  have hu1r13 : u1.reg 13 = some (count + n) := by
+    rw [hu1]
+    show (s.set 13 (some (aluF .add count n).1)).reg 13 = some (count + n)
+    rw [reg_set_self (by omega), hadd]
+  have hu1r12 : u1.reg 12 = some cap := by
+    rw [hu1]
+    show (s.set 13 (some (aluF .add count n).1)).reg 12 = some cap
+    rw [reg_set_other (by decide : (12 : Nat) ≠ 13)]; exact hr12
+  have hu1r3 : u1.reg 3 = some A := by
+    rw [hu1]
+    show (s.set 13 (some (aluF .add count n).1)).reg 3 = some A
+    rw [reg_set_other (by decide : (3 : Nat) ≠ 13)]; exact hr3
+  have hu1mem : u1.mem = s.mem := by rw [hu1]; rfl
+  have hu1k : u1.k = s.k := by rw [hu1]; rfl
+  -- step 2: mov rdx, r12
+  have e2 : X86Int.step stage1Im u1 =
+      .ok { u1.set 2 (some cap) with rip := u1.rip + 3 } :=
+    step_mov (by rw [hu1rip]; exact hc.df4) hu1r12
+  obtain ⟨u2, hu2⟩ : ∃ t : X86Int.St, t =
+      { u1.set 2 (some cap) with rip := u1.rip + 3 } := ⟨_, rfl⟩
+  have hu2rip : u2.rip = base + 0xf7 := by
+    rw [hu2]; show u1.rip + 3 = base + 0xf7; rw [hu1rip]
+  have hlen2 : u2.regs.length = 16 := by
+    rw [hu2]
+    show ({ u1.set 2 (some cap) with rip := u1.rip + 3 }).regs.length = 16
+    rw [len_with_rip, len_set]; exact hlen1
+  have hu2r2 : u2.reg 2 = some cap := by
+    rw [hu2]
+    show ({ u1.set 2 (some cap) with rip := u1.rip + 3 }).reg 2 = some cap
+    rw [reg_with_rip, reg_set_self (by omega)]
+  have hu2r13 : u2.reg 13 = some (count + n) := by
+    rw [hu2]
+    show ({ u1.set 2 (some cap) with rip := u1.rip + 3 }).reg 13 =
+      some (count + n)
+    rw [reg_with_rip, reg_set_other (by decide : (13 : Nat) ≠ 2)]
+    exact hu1r13
+  have hu2r3 : u2.reg 3 = some A := by
+    rw [hu2]
+    show ({ u1.set 2 (some cap) with rip := u1.rip + 3 }).reg 3 = some A
+    rw [reg_with_rip, reg_set_other (by decide : (3 : Nat) ≠ 2)]
+    exact hu1r3
+  have hu2r12 : u2.reg 12 = some cap := by
+    rw [hu2]
+    show ({ u1.set 2 (some cap) with rip := u1.rip + 3 }).reg 12 = some cap
+    rw [reg_with_rip, reg_set_other (by decide : (12 : Nat) ≠ 2)]
+    exact hu1r12
+  have hu2mem : u2.mem = s.mem := by rw [hu2]; exact hu1mem
+  have hu2k : u2.k = s.k := by rw [hu2]; exact hu1k
+  -- step 3: sub rdx, r13
+  have hsub : (aluF .sub cap (count + n)).1 = cap - (count + n) := by
+    rw [aluF_sub_fst,
+      show cap + W - (count + n) = (cap - (count + n)) + W by omega,
+      Nat.add_mod_right, Nat.mod_eq_of_lt (by omega)]
+  have e3 : X86Int.step stage1Im u2 =
+      .ok { u2.set 2 (some (aluF .sub cap (count + n)).1) with
+        fl := (aluF .sub cap (count + n)).2, rip := u2.rip + 3 } :=
+    step_alu_sub (by rw [hu2rip]; exact hc.df7) hu2r2 hu2r13
+  obtain ⟨u3, hu3⟩ : ∃ t : X86Int.St, t =
+      { u2.set 2 (some (aluF .sub cap (count + n)).1) with
+        fl := (aluF .sub cap (count + n)).2, rip := u2.rip + 3 } :=
+    ⟨_, rfl⟩
+  have hu3rip : u3.rip = base + 0xfa := by
+    rw [hu3]; show u2.rip + 3 = base + 0xfa; rw [hu2rip]
+  have hlen3 : u3.regs.length = 16 := by
+    rw [hu3]
+    show (u2.set 2 (some (aluF .sub cap (count + n)).1)).regs.length = 16
+    rw [len_set]; exact hlen2
+  have hu3zf : u3.fl.zf = some (cap - (count + n) == 0) := by
+    rw [hu3]
+    show (aluF .sub cap (count + n)).2.zf = some (cap - (count + n) == 0)
+    rw [aluF_zf, hsub]
+  have hu3r13 : u3.reg 13 = some (count + n) := by
+    rw [hu3]
+    show (u2.set 2 (some (aluF .sub cap (count + n)).1)).reg 13 =
+      some (count + n)
+    rw [reg_set_other (by decide : (13 : Nat) ≠ 2)]; exact hu2r13
+  have hu3r3 : u3.reg 3 = some A := by
+    rw [hu3]
+    show (u2.set 2 (some (aluF .sub cap (count + n)).1)).reg 3 = some A
+    rw [reg_set_other (by decide : (3 : Nat) ≠ 2)]; exact hu2r3
+  have hu3r12 : u3.reg 12 = some cap := by
+    rw [hu3]
+    show (u2.set 2 (some (aluF .sub cap (count + n)).1)).reg 12 = some cap
+    rw [reg_set_other (by decide : (12 : Nat) ≠ 2)]; exact hu2r12
+  have hu3r14 : u3.reg 14 = some 3 := by
+    rw [hu3]
+    show (u2.set 2 (some (aluF .sub cap (count + n)).1)).reg 14 = some 3
+    rw [reg_set_other (by decide : (14 : Nat) ≠ 2)]
+    rw [hu2]
+    show ({ u1.set 2 (some cap) with rip := u1.rip + 3 }).reg 14 = some 3
+    rw [reg_with_rip, reg_set_other (by decide : (14 : Nat) ≠ 2)]
+    rw [hu1]
+    show (s.set 13 (some (aluF .add count n).1)).reg 14 = some 3
+    rw [reg_set_other (by decide : (14 : Nat) ≠ 13)]; exact hr14
+  have hu3r4 : u3.reg 4 = some (sp0 + 24) := by
+    rw [hu3]
+    show (u2.set 2 (some (aluF .sub cap (count + n)).1)).reg 4 =
+      some (sp0 + 24)
+    rw [reg_set_other (by decide : (4 : Nat) ≠ 2)]
+    rw [hu2]
+    show ({ u1.set 2 (some cap) with rip := u1.rip + 3 }).reg 4 =
+      some (sp0 + 24)
+    rw [reg_with_rip, reg_set_other (by decide : (4 : Nat) ≠ 2)]
+    rw [hu1]
+    show (s.set 13 (some (aluF .add count n).1)).reg 4 = some (sp0 + 24)
+    rw [reg_set_other (by decide : (4 : Nat) ≠ 13)]; exact hr4
+  have hu3r0 : ∃ v, u3.reg 0 = some v := by
+    refine ⟨n, ?_⟩
+    rw [hu3]
+    show (u2.set 2 (some (aluF .sub cap (count + n)).1)).reg 0 = some n
+    rw [reg_set_other (by decide : (0 : Nat) ≠ 2)]
+    rw [hu2]
+    show ({ u1.set 2 (some cap) with rip := u1.rip + 3 }).reg 0 = some n
+    rw [reg_with_rip, reg_set_other (by decide : (0 : Nat) ≠ 2)]
+    rw [hu1]
+    show (s.set 13 (some (aluF .add count n).1)).reg 0 = some n
+    rw [reg_set_other (by decide : (0 : Nat) ≠ 13)]; exact hr0
+  have hu3r10 : ∃ v, u3.reg 10 = some v := by
+    obtain ⟨v, hv⟩ := hr10
+    refine ⟨v, ?_⟩
+    rw [hu3]
+    show (u2.set 2 (some (aluF .sub cap (count + n)).1)).reg 10 = some v
+    rw [reg_set_other (by decide : (10 : Nat) ≠ 2)]
+    rw [hu2]
+    show ({ u1.set 2 (some cap) with rip := u1.rip + 3 }).reg 10 = some v
+    rw [reg_with_rip, reg_set_other (by decide : (10 : Nat) ≠ 2)]
+    rw [hu1]
+    show (s.set 13 (some (aluF .add count n).1)).reg 10 = some v
+    rw [reg_set_other (by decide : (10 : Nat) ≠ 13)]; exact hv
+  have hu3r8 : ∃ v, u3.reg 8 = some v := by
+    obtain ⟨v, hv⟩ := hr8
+    refine ⟨v, ?_⟩
+    rw [hu3]
+    show (u2.set 2 (some (aluF .sub cap (count + n)).1)).reg 8 = some v
+    rw [reg_set_other (by decide : (8 : Nat) ≠ 2)]
+    rw [hu2]
+    show ({ u1.set 2 (some cap) with rip := u1.rip + 3 }).reg 8 = some v
+    rw [reg_with_rip, reg_set_other (by decide : (8 : Nat) ≠ 2)]
+    rw [hu1]
+    show (s.set 13 (some (aluF .add count n).1)).reg 8 = some v
+    rw [reg_set_other (by decide : (8 : Nat) ≠ 13)]; exact hv
+  have hu3r9 : ∃ v, u3.reg 9 = some v := by
+    obtain ⟨v, hv⟩ := hr9
+    refine ⟨v, ?_⟩
+    rw [hu3]
+    show (u2.set 2 (some (aluF .sub cap (count + n)).1)).reg 9 = some v
+    rw [reg_set_other (by decide : (9 : Nat) ≠ 2)]
+    rw [hu2]
+    show ({ u1.set 2 (some cap) with rip := u1.rip + 3 }).reg 9 = some v
+    rw [reg_with_rip, reg_set_other (by decide : (9 : Nat) ≠ 2)]
+    rw [hu1]
+    show (s.set 13 (some (aluF .add count n).1)).reg 9 = some v
+    rw [reg_set_other (by decide : (9 : Nat) ≠ 13)]; exact hv
+  have hu3mem : u3.mem = s.mem := by rw [hu3]; exact hu2mem
+  have hu3k : u3.k = s.k := by rw [hu3]; exact hu2k
+  -- step 4: jnz readloop / fall through to growth
+  have hu3fl5 : X86Int.cond u3.fl 5 = some (!(cap - (count + n) == 0)) :=
+    cond_cc5 hu3zf
+  have r1 : run stage1Im 1 (Out.ok s) = Out.ok u1 := by
+    rw [run_succ_ok stage1Im 0 s, e1, ← hu1, run_zero]
+  have r2 : run stage1Im 1 (Out.ok u1) = Out.ok u2 := by
+    rw [run_succ_ok stage1Im 0 u1, e2, ← hu2, run_zero]
+  have r3 : run stage1Im 1 (Out.ok u2) = Out.ok u3 := by
+    rw [run_succ_ok stage1Im 0 u2, e3, ← hu3, run_zero]
+  by_cases hfull : count + n = cap
+  · have hfl : X86Int.cond u3.fl 5 = some false := by
+      rw [hu3fl5]
+      simp [show cap - (count + n) = 0 by omega]
+    have e4 : X86Int.step stage1Im u3 =
+        .ok { u3 with rip := u3.rip + 2 } := by
+      have h := step_jcc (im := stage1Im) (s := u3)
+        (by rw [hu3rip]; exact hc.dfa) hfl
+      simpa using h
+    obtain ⟨u4, hu4⟩ : ∃ t : X86Int.St, t =
+        { u3 with rip := u3.rip + 2 } := ⟨_, rfl⟩
+    have r4 : run stage1Im 1 (Out.ok u3) = Out.ok u4 := by
+      rw [run_succ_ok stage1Im 0 u3, e4, ← hu4, run_zero]
+    have hrun : run stage1Im 4 (Out.ok s) = Out.ok u4 := by
+      rw [show (4 : Nat) = 1 + 3 from rfl, run_add stage1Im 1 3, r1,
+        show (3 : Nat) = 1 + 2 from rfl, run_add stage1Im 1 2, r2,
+        show (2 : Nat) = 1 + 1 from rfl, run_add stage1Im 1 1, r3, r4]
+    refine ⟨u4, hrun, Or.inr ⟨by
+        rw [hu4]; show u3.rip + 2 = base + 0xfc; rw [hu3rip], hfull⟩, ?_,
+      ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+    · rw [hu4]
+      show ({ u3 with rip := u3.rip + 2 }).reg 13 = some (count + n)
+      rw [reg_with_rip]; exact hu3r13
+    · rw [hu4]
+      show ({ u3 with rip := u3.rip + 2 }).reg 3 = some A
+      rw [reg_with_rip]; exact hu3r3
+    · rw [hu4]
+      show ({ u3 with rip := u3.rip + 2 }).reg 12 = some cap
+      rw [reg_with_rip]; exact hu3r12
+    · rw [hu4]
+      show ({ u3 with rip := u3.rip + 2 }).reg 14 = some 3
+      rw [reg_with_rip]; exact hu3r14
+    · rw [hu4]
+      show ({ u3 with rip := u3.rip + 2 }).reg 4 = some (sp0 + 24)
+      rw [reg_with_rip]; exact hu3r4
+    · obtain ⟨v, hv⟩ := hu3r0
+      refine ⟨v, ?_⟩
+      rw [hu4]
+      show ({ u3 with rip := u3.rip + 2 }).reg 0 = some v
+      rw [reg_with_rip]; exact hv
+    · obtain ⟨v, hv⟩ := hu3r10
+      refine ⟨v, ?_⟩
+      rw [hu4]
+      show ({ u3 with rip := u3.rip + 2 }).reg 10 = some v
+      rw [reg_with_rip]; exact hv
+    · obtain ⟨v, hv⟩ := hu3r8
+      refine ⟨v, ?_⟩
+      rw [hu4]
+      show ({ u3 with rip := u3.rip + 2 }).reg 8 = some v
+      rw [reg_with_rip]; exact hv
+    · obtain ⟨v, hv⟩ := hu3r9
+      refine ⟨v, ?_⟩
+      rw [hu4]
+      show ({ u3 with rip := u3.rip + 2 }).reg 9 = some v
+      rw [reg_with_rip]; exact hv
+    · rw [hu4]; exact hu3mem
+    · rw [hu4]; exact hu3k
+    · rw [hu4]
+      show ({ u3 with rip := u3.rip + 2 }).regs.length = 16
+      rw [len_with_rip]; exact hlen3
+  · have hfl : X86Int.cond u3.fl 5 = some true := by
+      rw [hu3fl5]
+      simp [show cap - (count + n) ≠ 0 by omega]
+    have e4 : X86Int.step stage1Im u3 =
+        .ok { u3 with rip := base + 0xd7 } := by
+      have h := step_jcc (im := stage1Im) (s := u3)
+        (by rw [hu3rip]; exact hc.dfa) hfl
+      simpa using h
+    obtain ⟨u4, hu4⟩ : ∃ t : X86Int.St, t =
+        { u3 with rip := base + 0xd7 } := ⟨_, rfl⟩
+    have r4 : run stage1Im 1 (Out.ok u3) = Out.ok u4 := by
+      rw [run_succ_ok stage1Im 0 u3, e4, ← hu4, run_zero]
+    have hrun : run stage1Im 4 (Out.ok s) = Out.ok u4 := by
+      rw [show (4 : Nat) = 1 + 3 from rfl, run_add stage1Im 1 3, r1,
+        show (3 : Nat) = 1 + 2 from rfl, run_add stage1Im 1 2, r2,
+        show (2 : Nat) = 1 + 1 from rfl, run_add stage1Im 1 1, r3, r4]
+    refine ⟨u4, hrun, Or.inl ⟨by rw [hu4], by omega⟩, ?_, ?_, ?_, ?_,
+      ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+    · rw [hu4]
+      show ({ u3 with rip := base + 0xd7 }).reg 13 = some (count + n)
+      rw [reg_with_rip]; exact hu3r13
+    · rw [hu4]
+      show ({ u3 with rip := base + 0xd7 }).reg 3 = some A
+      rw [reg_with_rip]; exact hu3r3
+    · rw [hu4]
+      show ({ u3 with rip := base + 0xd7 }).reg 12 = some cap
+      rw [reg_with_rip]; exact hu3r12
+    · rw [hu4]
+      show ({ u3 with rip := base + 0xd7 }).reg 14 = some 3
+      rw [reg_with_rip]; exact hu3r14
+    · rw [hu4]
+      show ({ u3 with rip := base + 0xd7 }).reg 4 = some (sp0 + 24)
+      rw [reg_with_rip]; exact hu3r4
+    · obtain ⟨v, hv⟩ := hu3r0
+      refine ⟨v, ?_⟩
+      rw [hu4]
+      show ({ u3 with rip := base + 0xd7 }).reg 0 = some v
+      rw [reg_with_rip]; exact hv
+    · obtain ⟨v, hv⟩ := hu3r10
+      refine ⟨v, ?_⟩
+      rw [hu4]
+      show ({ u3 with rip := base + 0xd7 }).reg 10 = some v
+      rw [reg_with_rip]; exact hv
+    · obtain ⟨v, hv⟩ := hu3r8
+      refine ⟨v, ?_⟩
+      rw [hu4]
+      show ({ u3 with rip := base + 0xd7 }).reg 8 = some v
+      rw [reg_with_rip]; exact hv
+    · obtain ⟨v, hv⟩ := hu3r9
+      refine ⟨v, ?_⟩
+      rw [hu4]
+      show ({ u3 with rip := base + 0xd7 }).reg 9 = some v
+      rw [reg_with_rip]; exact hv
+    · rw [hu4]; exact hu3mem
+    · rw [hu4]; exact hu3k
+    · rw [hu4]
+      show ({ u3 with rip := base + 0xd7 }).regs.length = 16
+      rw [len_with_rip]; exact hlen3
+
+theorem pages_eq_of_mod_zero {n : Nat} (h : n % page = 0) :
+    X86Env.pages n = n := by
+  have hp : page = 4096 := rfl
+  obtain ⟨q, hq⟩ := Nat.dvd_of_mod_eq_zero h
+  unfold X86Env.pages
+  rw [hq, hp]
+  omega
+
+theorem find_third {c1 c2 r : Region} {A : Nat}
+    (h1 : c1.hi ≤ A ∨ A < c1.base) (h2 : c2.hi ≤ A ∨ A < c2.base)
+    (hge : r.base ≤ A)
+    (hlt : A < r.hi) :
+    Mem.find [c1, c2, r] A 0 = some (2, r) := by
+  have hnot1 : ¬ (c1.base ≤ A ∧ A < c1.hi) := by
+    rcases h1 with h | h <;> omega
+  have hnot2 : ¬ (c2.base ≤ A ∧ A < c2.hi) := by
+    rcases h2 with h | h <;> omega
+  simp [Mem.find, hnot1, hnot2, hge, hlt]
+
+theorem free_pair {c1 c2 : Region} {A n : Nat}
+    (h1 : c1.hi ≤ A ∨ A + n ≤ c1.base)
+    (h2 : c2.hi ≤ A ∨ A + n ≤ c2.base) :
+    Mem.free [c1, c2] A n = true := by
+  rw [Mem.free, List.all_eq_true]
+  intro r hr
+  simp at hr
+  rcases hr with rfl | rfl <;>
+    simp only [Bool.or_eq_true, decide_eq_true_eq]
+  · rcases h1 with h | h
+    · exact Or.inr h
+    · exact Or.inl h
+  · rcases h2 with h | h
+    · exact Or.inr h
+    · exact Or.inl h
+
+theorem mem_rd_third {c1 c2 r : Region} {a v : Nat}
+    (h1 : c1.hi ≤ a ∨ a < c1.base) (h2 : c2.hi ≤ a ∨ a < c2.base)
+    (hge : r.base ≤ a)
+    (hbyte : r.data[a - r.base]? = some v) :
+    Mem.rd [c1, c2, r] a = some v := by
+  have hlt : a < r.hi := by
+    have hh := (List.getElem?_eq_some_iff.1 hbyte).1
+    unfold Region.hi
+    omega
+  have hnot1 : ¬ (c1.base ≤ a ∧ a < c1.hi) := by
+    rcases h1 with h | h <;> omega
+  have hnot2 : ¬ (c2.base ≤ a ∧ a < c2.hi) := by
+    rcases h2 with h | h <;> omega
+  simp [Mem.rd, Mem.find, hnot1, hnot2, hge, hlt, hbyte]
+
+theorem rdN_third_take {c1 c2 r : Region} {A k capB : Nat}
+    (h1 : c1.hi ≤ A ∨ A + capB ≤ c1.base)
+    (h2 : c2.hi ≤ A ∨ A + capB ≤ c2.base) (hb : r.base = A)
+    (hk : k ≤ r.data.length) (hkB : k ≤ capB) :
+    Mem.rdN [c1, c2, r] A k = some (r.data.take k) := by
+  apply rdN_of_rd (by rw [List.length_take, Nat.min_eq_left hk])
+  intro i hi
+  have hilen : i < r.data.length := by omega
+  have hgi : r.data[i]? = some r.data[i] := List.getElem?_eq_getElem hilen
+  refine ⟨r.data[i], ?_, ?_⟩
+  · have hbyte : r.data[(A + i) - r.base]? = some r.data[i] := by
+      rw [hb, show A + i - A = i by omega]; exact hgi
+    have hd1 : c1.hi ≤ A + i ∨ A + i < c1.base := by
+      rcases h1 with h | h
+      · exact Or.inl (by omega)
+      · exact Or.inr (by omega)
+    have hd2 : c2.hi ≤ A + i ∨ A + i < c2.base := by
+      rcases h2 with h | h
+      · exact Or.inl (by omega)
+      · exact Or.inr (by omega)
+    exact mem_rd_third hd1 hd2 (by omega) hbyte
+  · rw [List.getElem?_take]
+    simp [hi, hgi]
+
+theorem rdN_grow_preserve {c1 c2 r : Region} {A k z capB : Nat}
+    {L : List Nat}
+    (h1 : c1.hi ≤ A ∨ A + capB ≤ c1.base)
+    (h2 : c2.hi ≤ A ∨ A + capB ≤ c2.base) (hb : r.base = A)
+    (hk : k ≤ r.data.length) (hkB : k ≤ capB)
+    (hold : Mem.rdN [c1, c2, r] A k = some L) :
+    Mem.rdN [c1, c2, ⟨A, r.data ++ List.replicate z 0, true⟩] A k =
+      some L := by
+  have hlen : (r.data ++ List.replicate z 0).length =
+      r.data.length + z := by
+    rw [List.length_append, List.length_replicate]
+  have hk' : k ≤ (r.data ++ List.replicate z 0).length := by
+    rw [hlen]; omega
+  have hnew := rdN_third_take (r := ⟨A, r.data ++ List.replicate z 0, true⟩)
+    h1 h2 rfl hk' hkB
+  have htake : (r.data ++ List.replicate z 0).take k = r.data.take k := by
+    rw [List.take_append, show k - r.data.length = 0 by omega,
+      List.take_zero, List.append_nil]
+  rw [htake] at hnew
+  have hold' := rdN_third_take h1 h2 hb hk hkB
+  rw [hold'] at hold
+  injection hold with hL
+  rw [← hL]
+  exact hnew
+
+theorem syscall_mremap_grow {k : Kern} {c1 c2 r : Region}
+    {A cap a5 a6 : Nat} {rest : List Choice}
+    (hfind : Mem.find [c1, c2, r] A 0 = some (2, r))
+    (hbase : r.base = A) (hlen : r.data.length = cap)
+    (hrw : r.rw = true)
+    (hpages : X86Env.pages cap = cap)
+    (hpages2 : X86Env.pages (cap + cap) = cap + cap)
+    (horacle : k.oracle = .at A :: rest)
+    (hplace : X86Env.place [c1, c2] (some (.at A)) (cap + cap) =
+      some (some A)) :
+    X86Env.syscall k [c1, c2, r] 25 A cap (cap + cap) MREMAP_MAYMOVE
+        a5 a6 =
+      some (.ret A { k with oracle := rest }
+        [c1, c2, ⟨A, r.data ++ List.replicate cap 0, true⟩]) := by
+  have hval : ¬ (r.base ≠ A ∨ r.data.length ≠ X86Env.pages cap ∨
+      ¬ r.rw) := by simp [hbase, hlen, hrw, hpages]
+  have hgrow : ¬ X86Env.pages (cap + cap) < r.data.length := by
+    rw [hpages2, hlen]; omega
+  have herase : List.eraseIdx [c1, c2, r] 2 = [c1, c2] := rfl
+  have hplace' : X86Env.place (List.eraseIdx [c1, c2, r] 2)
+      (some (.at A)) (X86Env.pages (cap + cap)) = some (some A) := by
+    rw [herase, hpages2]; exact hplace
+  have hnextv : Kern.next k = (some (.at A), { k with oracle := rest }) := by
+    simp [Kern.next, horacle]
+  have hnext1 : (Kern.next k).1 = some (.at A) := by
+    rw [hnextv]
+  have hk1 : (Kern.next k).2 = { k with oracle := rest } := by
+    rw [hnextv]
+  simp only [X86Env.syscall, hfind, hbase, hlen, hrw]
+  rw [if_neg (by simp), if_neg (by simp [hpages]),
+    if_neg (by rw [hpages2]; omega : ¬ X86Env.pages (cap + cap) < cap)]
+  cases hnext : Kern.next k with
+  | mk c k1 =>
+    rw [hnext] at hnext1 hk1
+    simp only [] at hnext1 hk1
+    subst hnext1
+    subst hk1
+    dsimp only []
+    rw [hplace', herase]
+    simp [hpages2, hlen]
+
+/-- The growth block (12 steps from `base + 0xfc`): `mremap`
+doubles the file buffer in place at `A`, consuming one oracle
+placement; the state at the syscall (after 6 steps) is
+oracle-legal.  The count and the buffer prefix are preserved. -/
+theorem loader_grow {f : List Nat} {A sp0 cap count capB : Nat}
+    {c1 c2 buf : Region} {s : X86Int.St} {rest : List Choice}
+    (hrip : s.rip = base + 0xfc) (hlen16 : s.regs.length = 16)
+    (hr3 : s.reg 3 = some A) (hr12 : s.reg 12 = some cap)
+    (hr13 : s.reg 13 = some count) (hr14 : s.reg 14 = some 3)
+    (hr4 : s.reg 4 = some (sp0 + 24))
+    (hr8 : ∃ v, s.reg 8 = some v) (hr9 : ∃ v, s.reg 9 = some v)
+    (hmem : s.mem = [c1, c2, buf]) (hbufbase : buf.base = A)
+    (hbufrw : buf.rw = true) (hbufhi : buf.hi = A + cap)
+    (hdisj1 : c1.hi ≤ A ∨ A + capB ≤ c1.base)
+    (hdisj2 : c2.hi ≤ A ∨ A + capB ≤ c2.base)
+    (hcapB : cap + cap ≤ capB)
+    (hcontent : s.mem.rdN A count = some (f.take count))
+    (hfd : s.k.fds = [some ⟨f, count⟩])
+    (horacle : s.k.oracle = .at A :: rest)
+    (hcountcap : count ≤ cap)
+    (hAmod : A % page = 0) (hApos : 0 < A)
+    (hbound : A + (cap + cap) ≤ 2 ^ 47)
+    (hcapmod : cap % page = 0) (hcappos : 0 < cap)
+    (hcapW : cap + cap < W) (hA63 : A < 2 ^ 63) :
+    ∃ s', run stage1Im 12 (Out.ok s) = Out.ok s' ∧
+      s'.rip = base + 0xd7 ∧
+      s'.reg 3 = some A ∧ s'.reg 12 = some (cap + cap) ∧
+      s'.reg 13 = some count ∧ s'.reg 14 = some 3 ∧
+      s'.reg 4 = some (sp0 + 24) ∧
+      (∃ v, s'.reg 0 = some v) ∧ (∃ v, s'.reg 10 = some v) ∧
+      (∃ v, s'.reg 8 = some v) ∧ (∃ v, s'.reg 9 = some v) ∧
+      s'.k.oracle = rest ∧ s'.k.fds = [some ⟨f, count⟩] ∧
+      (∃ buf', s'.mem = [c1, c2, buf'] ∧ buf'.base = A ∧
+        buf'.hi = A + (cap + cap) ∧ buf'.rw = true) ∧
+      s'.mem.rdN A count = some (f.take count) ∧
+      s'.regs.length = 16 ∧
+      (∃ t, run stage1Im 6 (Out.ok s) = Out.ok t ∧ OracleLegalAt t) := by
+  have hc := stage1_loaderCode
+  obtain ⟨v8, hr8v⟩ := hr8
+  obtain ⟨v9, hr9v⟩ := hr9
+  have hdatalen : buf.data.length = cap := by
+    have h := hbufhi
+    unfold Region.hi at h
+    omega
+  have hpages : X86Env.pages cap = cap := pages_eq_of_mod_zero hcapmod
+  have hpages2 : X86Env.pages (cap + cap) = cap + cap :=
+    pages_eq_of_mod_zero (by simp [Nat.add_mod, hcapmod])
+  have hfind : Mem.find [c1, c2, buf] A 0 = some (2, buf) := by
+    have hd1 : c1.hi ≤ A ∨ A < c1.base := by
+      rcases hdisj1 with h | h
+      · exact Or.inl h
+      · exact Or.inr (by omega)
+    have hd2 : c2.hi ≤ A ∨ A < c2.base := by
+      rcases hdisj2 with h | h
+      · exact Or.inl h
+      · exact Or.inr (by omega)
+    exact find_third hd1 hd2 (by omega) (by rw [hbufhi]; omega)
+  have hplace : X86Env.place [c1, c2] (some (.at A)) (cap + cap) =
+      some (some A) := by
+    have hd1 : c1.hi ≤ A ∨ A + (cap + cap) ≤ c1.base := by
+      rcases hdisj1 with h | h
+      · exact Or.inl h
+      · exact Or.inr (by omega)
+    have hd2 : c2.hi ≤ A ∨ A + (cap + cap) ≤ c2.base := by
+      rcases hdisj2 with h | h
+      · exact Or.inl h
+      · exact Or.inr (by omega)
+    exact place_at hAmod hApos hbound (free_pair hd1 hd2)
+  have hsc : X86Env.syscall s.k s.mem 25 A cap (cap + cap)
+        MREMAP_MAYMOVE v8 v9 =
+      some (.ret A { s.k with oracle := rest }
+        [c1, c2, ⟨A, buf.data ++ List.replicate cap 0, true⟩]) := by
+    rw [hmem]
+    exact syscall_mremap_grow hfind hbufbase hdatalen hbufrw hpages
+      hpages2 horacle hplace
+  have hcontent' : Mem.rdN [c1, c2, buf] A count =
+      some (f.take count) := by
+    rwa [hmem] at hcontent
+  have hrdN' : Mem.rdN [c1, c2,
+        ⟨A, buf.data ++ List.replicate cap 0, true⟩] A count =
+      some (f.take count) :=
+    rdN_grow_preserve hdisj1 hdisj2 hbufbase (by omega) (by omega) hcontent'
+  -- step 1: mov eax, 25
+  have e1 : X86Int.step stage1Im s =
+      .ok { s.set 0 (some (25 % W)) with rip := s.rip + 5 } :=
+    step_movI (by rw [hrip]; exact hc.dfc)
+  obtain ⟨g1, hg1⟩ : ∃ t : X86Int.St, t =
+      { s.set 0 (some (25 % W)) with rip := s.rip + 5 } := ⟨_, rfl⟩
+  have hg1rip : g1.rip = base + 0x101 := by
+    rw [hg1]; show s.rip + 5 = base + 0x101; rw [hrip]
+  have hlen1 : g1.regs.length = 16 := by
+    rw [hg1]
+    show ({ s.set 0 (some (25 % W)) with rip := s.rip + 5 }).regs.length =
+      16
+    rw [len_with_rip, len_set]; exact hlen16
+  have hg1r0 : g1.reg 0 = some 25 := by
+    rw [hg1]
+    show ({ s.set 0 (some (25 % W)) with rip := s.rip + 5 }).reg 0 =
+      some 25
+    rw [reg_with_rip, reg_set_self (by omega)]
+    decide
+  have hg1r3 : g1.reg 3 = some A := by
+    rw [hg1]
+    show ({ s.set 0 (some (25 % W)) with rip := s.rip + 5 }).reg 3 =
+      some A
+    rw [reg_with_rip, reg_set_other (by decide : (3 : Nat) ≠ 0)]
+    exact hr3
+  have hg1r12 : g1.reg 12 = some cap := by
+    rw [hg1]
+    show ({ s.set 0 (some (25 % W)) with rip := s.rip + 5 }).reg 12 =
+      some cap
+    rw [reg_with_rip, reg_set_other (by decide : (12 : Nat) ≠ 0)]
+    exact hr12
+  have hg1mem : g1.mem = s.mem := by rw [hg1]; rfl
+  have hg1k : g1.k = s.k := by rw [hg1]; rfl
+  -- step 2: mov rdi, rbx
+  have e2 : X86Int.step stage1Im g1 =
+      .ok { g1.set 7 (some A) with rip := g1.rip + 3 } :=
+    step_mov (by rw [hg1rip]; exact hc.d101) hg1r3
+  obtain ⟨g2, hg2⟩ : ∃ t : X86Int.St, t =
+      { g1.set 7 (some A) with rip := g1.rip + 3 } := ⟨_, rfl⟩
+  have hg2rip : g2.rip = base + 0x104 := by
+    rw [hg2]; show g1.rip + 3 = base + 0x104; rw [hg1rip]
+  have hlen2 : g2.regs.length = 16 := by
+    rw [hg2]
+    show ({ g1.set 7 (some A) with rip := g1.rip + 3 }).regs.length = 16
+    rw [len_with_rip, len_set]; exact hlen1
+  have hg2r7 : g2.reg 7 = some A := by
+    rw [hg2]
+    show ({ g1.set 7 (some A) with rip := g1.rip + 3 }).reg 7 = some A
+    rw [reg_with_rip, reg_set_self (by omega)]
+  have hg2r0 : g2.reg 0 = some 25 := by
+    rw [hg2]
+    show ({ g1.set 7 (some A) with rip := g1.rip + 3 }).reg 0 = some 25
+    rw [reg_with_rip, reg_set_other (by decide : (0 : Nat) ≠ 7)]
+    exact hg1r0
+  have hg2r12 : g2.reg 12 = some cap := by
+    rw [hg2]
+    show ({ g1.set 7 (some A) with rip := g1.rip + 3 }).reg 12 = some cap
+    rw [reg_with_rip, reg_set_other (by decide : (12 : Nat) ≠ 7)]
+    exact hg1r12
+  have hg2mem : g2.mem = s.mem := by rw [hg2]; exact hg1mem
+  have hg2k : g2.k = s.k := by rw [hg2]; exact hg1k
+  -- step 3: mov rsi, r12
+  have e3 : X86Int.step stage1Im g2 =
+      .ok { g2.set 6 (some cap) with rip := g2.rip + 3 } :=
+    step_mov (by rw [hg2rip]; exact hc.d104) hg2r12
+  obtain ⟨g3, hg3⟩ : ∃ t : X86Int.St, t =
+      { g2.set 6 (some cap) with rip := g2.rip + 3 } := ⟨_, rfl⟩
+  have hg3rip : g3.rip = base + 0x107 := by
+    rw [hg3]; show g2.rip + 3 = base + 0x107; rw [hg2rip]
+  have hlen3 : g3.regs.length = 16 := by
+    rw [hg3]
+    show ({ g2.set 6 (some cap) with rip := g2.rip + 3 }).regs.length = 16
+    rw [len_with_rip, len_set]; exact hlen2
+  have hg3r6 : g3.reg 6 = some cap := by
+    rw [hg3]
+    show ({ g2.set 6 (some cap) with rip := g2.rip + 3 }).reg 6 = some cap
+    rw [reg_with_rip, reg_set_self (by omega)]
+  have hg3r7 : g3.reg 7 = some A := by
+    rw [hg3]
+    show ({ g2.set 6 (some cap) with rip := g2.rip + 3 }).reg 7 = some A
+    rw [reg_with_rip, reg_set_other (by decide : (7 : Nat) ≠ 6)]
+    exact hg2r7
+  have hg3r0 : g3.reg 0 = some 25 := by
+    rw [hg3]
+    show ({ g2.set 6 (some cap) with rip := g2.rip + 3 }).reg 0 = some 25
+    rw [reg_with_rip, reg_set_other (by decide : (0 : Nat) ≠ 6)]
+    exact hg2r0
+  have hg3r12 : g3.reg 12 = some cap := by
+    rw [hg3]
+    show ({ g2.set 6 (some cap) with rip := g2.rip + 3 }).reg 12 =
+      some cap
+    rw [reg_with_rip, reg_set_other (by decide : (12 : Nat) ≠ 6)]
+    exact hg2r12
+  have hg3mem : g3.mem = s.mem := by rw [hg3]; exact hg2mem
+  have hg3k : g3.k = s.k := by rw [hg3]; exact hg2k
+  -- step 4: mov rdx, r12
+  have e4 : X86Int.step stage1Im g3 =
+      .ok { g3.set 2 (some cap) with rip := g3.rip + 3 } :=
+    step_mov (by rw [hg3rip]; exact hc.d107) hg3r12
+  obtain ⟨g4, hg4⟩ : ∃ t : X86Int.St, t =
+      { g3.set 2 (some cap) with rip := g3.rip + 3 } := ⟨_, rfl⟩
+  have hg4rip : g4.rip = base + 0x10a := by
+    rw [hg4]; show g3.rip + 3 = base + 0x10a; rw [hg3rip]
+  have hlen4 : g4.regs.length = 16 := by
+    rw [hg4]
+    show ({ g3.set 2 (some cap) with rip := g3.rip + 3 }).regs.length = 16
+    rw [len_with_rip, len_set]; exact hlen3
+  have hg4r2 : g4.reg 2 = some cap := by
+    rw [hg4]
+    show ({ g3.set 2 (some cap) with rip := g3.rip + 3 }).reg 2 = some cap
+    rw [reg_with_rip, reg_set_self (by omega)]
+  have hg4r6 : g4.reg 6 = some cap := by
+    rw [hg4]
+    show ({ g3.set 2 (some cap) with rip := g3.rip + 3 }).reg 6 = some cap
+    rw [reg_with_rip, reg_set_other (by decide : (6 : Nat) ≠ 2)]
+    exact hg3r6
+  have hg4r7 : g4.reg 7 = some A := by
+    rw [hg4]
+    show ({ g3.set 2 (some cap) with rip := g3.rip + 3 }).reg 7 = some A
+    rw [reg_with_rip, reg_set_other (by decide : (7 : Nat) ≠ 2)]
+    exact hg3r7
+  have hg4r0 : g4.reg 0 = some 25 := by
+    rw [hg4]
+    show ({ g3.set 2 (some cap) with rip := g3.rip + 3 }).reg 0 = some 25
+    rw [reg_with_rip, reg_set_other (by decide : (0 : Nat) ≠ 2)]
+    exact hg3r0
+  have hg4mem : g4.mem = s.mem := by rw [hg4]; exact hg3mem
+  have hg4k : g4.k = s.k := by rw [hg4]; exact hg3k
+  -- step 5: add rdx, rdx
+  have hadd : (aluF .add cap cap).1 = cap + cap := by
+    rw [aluF_add_fst, Nat.mod_eq_of_lt hcapW]
+  have e5 : X86Int.step stage1Im g4 =
+      .ok { g4.set 2 (some (aluF .add cap cap).1) with
+        fl := (aluF .add cap cap).2, rip := g4.rip + 3 } :=
+    step_alu_add (by rw [hg4rip]; exact hc.d10a) hg4r2 hg4r2
+  obtain ⟨g5, hg5⟩ : ∃ t : X86Int.St, t =
+      { g4.set 2 (some (aluF .add cap cap).1) with
+        fl := (aluF .add cap cap).2, rip := g4.rip + 3 } := ⟨_, rfl⟩
+  have hg5rip : g5.rip = base + 0x10d := by
+    rw [hg5]; show g4.rip + 3 = base + 0x10d; rw [hg4rip]
+  have hlen5 : g5.regs.length = 16 := by
+    rw [hg5]
+    show (g4.set 2 (some (aluF .add cap cap).1)).regs.length = 16
+    rw [len_set]; exact hlen4
+  have hg5r2 : g5.reg 2 = some (cap + cap) := by
+    rw [hg5]
+    show (g4.set 2 (some (aluF .add cap cap).1)).reg 2 = some (cap + cap)
+    rw [reg_set_self (by omega), hadd]
+  have hg5r6 : g5.reg 6 = some cap := by
+    rw [hg5]
+    show (g4.set 2 (some (aluF .add cap cap).1)).reg 6 = some cap
+    rw [reg_set_other (by decide : (6 : Nat) ≠ 2)]; exact hg4r6
+  have hg5r7 : g5.reg 7 = some A := by
+    rw [hg5]
+    show (g4.set 2 (some (aluF .add cap cap).1)).reg 7 = some A
+    rw [reg_set_other (by decide : (7 : Nat) ≠ 2)]; exact hg4r7
+  have hg5r0 : g5.reg 0 = some 25 := by
+    rw [hg5]
+    show (g4.set 2 (some (aluF .add cap cap).1)).reg 0 = some 25
+    rw [reg_set_other (by decide : (0 : Nat) ≠ 2)]; exact hg4r0
+  have hg5mem : g5.mem = s.mem := by rw [hg5]; exact hg4mem
+  have hg5k : g5.k = s.k := by rw [hg5]; exact hg4k
+  -- step 6: mov r10, 1 (MREMAP_MAYMOVE)
+  have e6 : X86Int.step stage1Im g5 =
+      .ok { g5.set 10 (some (1 % W)) with rip := g5.rip + 6 } :=
+    step_movI (by rw [hg5rip]; exact hc.d10d)
+  obtain ⟨g6, hg6⟩ : ∃ t : X86Int.St, t =
+      { g5.set 10 (some (1 % W)) with rip := g5.rip + 6 } := ⟨_, rfl⟩
+  have hg6rip : g6.rip = base + 0x113 := by
+    rw [hg6]; show g5.rip + 6 = base + 0x113; rw [hg5rip]
+  have hlen6 : g6.regs.length = 16 := by
+    rw [hg6]
+    show ({ g5.set 10 (some (1 % W)) with rip := g5.rip + 6 }).regs.length =
+      16
+    rw [len_with_rip, len_set]; exact hlen5
+  have hg6r10 : g6.reg 10 = some MREMAP_MAYMOVE := by
+    rw [hg6]
+    show ({ g5.set 10 (some (1 % W)) with rip := g5.rip + 6 }).reg 10 =
+      some MREMAP_MAYMOVE
+    rw [reg_with_rip, reg_set_self (by omega)]
+    decide
+  have hg6r0 : g6.reg 0 = some 25 := by
+    rw [hg6]
+    show ({ g5.set 10 (some (1 % W)) with rip := g5.rip + 6 }).reg 0 =
+      some 25
+    rw [reg_with_rip, reg_set_other (by decide : (0 : Nat) ≠ 10)]
+    exact hg5r0
+  have hg6r7 : g6.reg 7 = some A := by
+    rw [hg6]
+    show ({ g5.set 10 (some (1 % W)) with rip := g5.rip + 6 }).reg 7 =
+      some A
+    rw [reg_with_rip, reg_set_other (by decide : (7 : Nat) ≠ 10)]
+    exact hg5r7
+  have hg6r6 : g6.reg 6 = some cap := by
+    rw [hg6]
+    show ({ g5.set 10 (some (1 % W)) with rip := g5.rip + 6 }).reg 6 =
+      some cap
+    rw [reg_with_rip, reg_set_other (by decide : (6 : Nat) ≠ 10)]
+    exact hg5r6
+  have hg6r2 : g6.reg 2 = some (cap + cap) := by
+    rw [hg6]
+    show ({ g5.set 10 (some (1 % W)) with rip := g5.rip + 6 }).reg 2 =
+      some (cap + cap)
+    rw [reg_with_rip, reg_set_other (by decide : (2 : Nat) ≠ 10)]
+    exact hg5r2
+  have hg6mem : g6.mem = s.mem := by rw [hg6]; exact hg5mem
+  have hg6k : g6.k = s.k := by rw [hg6]; exact hg5k
+  have hg6r8 : g6.reg 8 = some v8 := by
+    rw [hg6]
+    show ({ g5.set 10 (some (1 % W)) with rip := g5.rip + 6 }).reg 8 =
+      some v8
+    rw [reg_with_rip, reg_set_other (by decide : (8 : Nat) ≠ 10)]
+    rw [hg5]
+    show (g4.set 2 (some (aluF .add cap cap).1)).reg 8 = some v8
+    rw [reg_set_other (by decide : (8 : Nat) ≠ 2)]
+    rw [hg4]
+    show ({ g3.set 2 (some cap) with rip := g3.rip + 3 }).reg 8 = some v8
+    rw [reg_with_rip, reg_set_other (by decide : (8 : Nat) ≠ 2)]
+    rw [hg3]
+    show ({ g2.set 6 (some cap) with rip := g2.rip + 3 }).reg 8 = some v8
+    rw [reg_with_rip, reg_set_other (by decide : (8 : Nat) ≠ 6)]
+    rw [hg2]
+    show ({ g1.set 7 (some A) with rip := g1.rip + 3 }).reg 8 = some v8
+    rw [reg_with_rip, reg_set_other (by decide : (8 : Nat) ≠ 7)]
+    rw [hg1]
+    show ({ s.set 0 (some (25 % W)) with rip := s.rip + 5 }).reg 8 =
+      some v8
+    rw [reg_with_rip, reg_set_other (by decide : (8 : Nat) ≠ 0)]
+    exact hr8v
+  have hg6r9 : g6.reg 9 = some v9 := by
+    rw [hg6]
+    show ({ g5.set 10 (some (1 % W)) with rip := g5.rip + 6 }).reg 9 =
+      some v9
+    rw [reg_with_rip, reg_set_other (by decide : (9 : Nat) ≠ 10)]
+    rw [hg5]
+    show (g4.set 2 (some (aluF .add cap cap).1)).reg 9 = some v9
+    rw [reg_set_other (by decide : (9 : Nat) ≠ 2)]
+    rw [hg4]
+    show ({ g3.set 2 (some cap) with rip := g3.rip + 3 }).reg 9 = some v9
+    rw [reg_with_rip, reg_set_other (by decide : (9 : Nat) ≠ 2)]
+    rw [hg3]
+    show ({ g2.set 6 (some cap) with rip := g2.rip + 3 }).reg 9 = some v9
+    rw [reg_with_rip, reg_set_other (by decide : (9 : Nat) ≠ 6)]
+    rw [hg2]
+    show ({ g1.set 7 (some A) with rip := g1.rip + 3 }).reg 9 = some v9
+    rw [reg_with_rip, reg_set_other (by decide : (9 : Nat) ≠ 7)]
+    rw [hg1]
+    show ({ s.set 0 (some (25 % W)) with rip := s.rip + 5 }).reg 9 =
+      some v9
+    rw [reg_with_rip, reg_set_other (by decide : (9 : Nat) ≠ 0)]
+    exact hr9v
+  have hg6r13 : g6.reg 13 = some count := by
+    rw [hg6]
+    show ({ g5.set 10 (some (1 % W)) with rip := g5.rip + 6 }).reg 13 =
+      some count
+    rw [reg_with_rip, reg_set_other (by decide : (13 : Nat) ≠ 10)]
+    rw [hg5]
+    show (g4.set 2 (some (aluF .add cap cap).1)).reg 13 = some count
+    rw [reg_set_other (by decide : (13 : Nat) ≠ 2)]
+    rw [hg4]
+    show ({ g3.set 2 (some cap) with rip := g3.rip + 3 }).reg 13 =
+      some count
+    rw [reg_with_rip, reg_set_other (by decide : (13 : Nat) ≠ 2)]
+    rw [hg3]
+    show ({ g2.set 6 (some cap) with rip := g2.rip + 3 }).reg 13 =
+      some count
+    rw [reg_with_rip, reg_set_other (by decide : (13 : Nat) ≠ 6)]
+    rw [hg2]
+    show ({ g1.set 7 (some A) with rip := g1.rip + 3 }).reg 13 = some count
+    rw [reg_with_rip, reg_set_other (by decide : (13 : Nat) ≠ 7)]
+    rw [hg1]
+    show ({ s.set 0 (some (25 % W)) with rip := s.rip + 5 }).reg 13 =
+      some count
+    rw [reg_with_rip, reg_set_other (by decide : (13 : Nat) ≠ 0)]
+    exact hr13
+  have hg6r14 : g6.reg 14 = some 3 := by
+    rw [hg6]
+    show ({ g5.set 10 (some (1 % W)) with rip := g5.rip + 6 }).reg 14 =
+      some 3
+    rw [reg_with_rip, reg_set_other (by decide : (14 : Nat) ≠ 10)]
+    rw [hg5]
+    show (g4.set 2 (some (aluF .add cap cap).1)).reg 14 = some 3
+    rw [reg_set_other (by decide : (14 : Nat) ≠ 2)]
+    rw [hg4]
+    show ({ g3.set 2 (some cap) with rip := g3.rip + 3 }).reg 14 = some 3
+    rw [reg_with_rip, reg_set_other (by decide : (14 : Nat) ≠ 2)]
+    rw [hg3]
+    show ({ g2.set 6 (some cap) with rip := g2.rip + 3 }).reg 14 = some 3
+    rw [reg_with_rip, reg_set_other (by decide : (14 : Nat) ≠ 6)]
+    rw [hg2]
+    show ({ g1.set 7 (some A) with rip := g1.rip + 3 }).reg 14 = some 3
+    rw [reg_with_rip, reg_set_other (by decide : (14 : Nat) ≠ 7)]
+    rw [hg1]
+    show ({ s.set 0 (some (25 % W)) with rip := s.rip + 5 }).reg 14 =
+      some 3
+    rw [reg_with_rip, reg_set_other (by decide : (14 : Nat) ≠ 0)]
+    exact hr14
+  have hg6r4 : g6.reg 4 = some (sp0 + 24) := by
+    rw [hg6]
+    show ({ g5.set 10 (some (1 % W)) with rip := g5.rip + 6 }).reg 4 =
+      some (sp0 + 24)
+    rw [reg_with_rip, reg_set_other (by decide : (4 : Nat) ≠ 10)]
+    rw [hg5]
+    show (g4.set 2 (some (aluF .add cap cap).1)).reg 4 = some (sp0 + 24)
+    rw [reg_set_other (by decide : (4 : Nat) ≠ 2)]
+    rw [hg4]
+    show ({ g3.set 2 (some cap) with rip := g3.rip + 3 }).reg 4 =
+      some (sp0 + 24)
+    rw [reg_with_rip, reg_set_other (by decide : (4 : Nat) ≠ 2)]
+    rw [hg3]
+    show ({ g2.set 6 (some cap) with rip := g2.rip + 3 }).reg 4 =
+      some (sp0 + 24)
+    rw [reg_with_rip, reg_set_other (by decide : (4 : Nat) ≠ 6)]
+    rw [hg2]
+    show ({ g1.set 7 (some A) with rip := g1.rip + 3 }).reg 4 =
+      some (sp0 + 24)
+    rw [reg_with_rip, reg_set_other (by decide : (4 : Nat) ≠ 7)]
+    rw [hg1]
+    show ({ s.set 0 (some (25 % W)) with rip := s.rip + 5 }).reg 4 =
+      some (sp0 + 24)
+    rw [reg_with_rip, reg_set_other (by decide : (4 : Nat) ≠ 0)]
+    exact hr4
+  -- legality at the syscall state, and the syscall itself
+  have hsc6 : X86Env.syscall g6.k g6.mem 25 A cap (cap + cap)
+        MREMAP_MAYMOVE v8 v9 =
+      some (.ret A { s.k with oracle := rest }
+        [c1, c2, ⟨A, buf.data ++ List.replicate cap 0, true⟩]) := by
+    rw [hg6k, hg6mem]; exact hsc
+  have hlegal : OracleLegalAt g6 := by
+    intro _hmem
+    exact ⟨25, A, cap, cap + cap, MREMAP_MAYMOVE, v8, v9, A,
+      { s.k with oracle := rest },
+      [c1, c2, ⟨A, buf.data ++ List.replicate cap 0, true⟩],
+      hg6r0, hg6r7, hg6r6, hg6r2, hg6r10, hg6r8, hg6r9, hsc6⟩
+  -- step 7: mremap(buf, cap, 2 * cap, MREMAP_MAYMOVE)
+  have e7 : X86Int.step stage1Im g6 =
+      .ok { ((g6.set 0 (some A)).set 1 (some (g6.rip + 2))).set 11 none with
+        k := { s.k with oracle := rest },
+        mem := [c1, c2, ⟨A, buf.data ++ List.replicate cap 0, true⟩],
+        rip := g6.rip + 2 } :=
+    step_syscall_ret (by rw [hg6rip]; exact hc.d113) hg6r0 hg6r7 hg6r6
+      hg6r2 hg6r10 hg6r8 hg6r9 hsc6
+  obtain ⟨g7, hg7⟩ : ∃ t : X86Int.St, t =
+      { ((g6.set 0 (some A)).set 1 (some (g6.rip + 2))).set 11 none with
+        k := { s.k with oracle := rest },
+        mem := [c1, c2, ⟨A, buf.data ++ List.replicate cap 0, true⟩],
+        rip := g6.rip + 2 } := ⟨_, rfl⟩
+  have hg7rip : g7.rip = base + 0x115 := by
+    rw [hg7]; show g6.rip + 2 = base + 0x115; rw [hg6rip]
+  have hlen7 : g7.regs.length = 16 := by
+    rw [hg7]
+    show (((g6.set 0 (some A)).set 1 (some (g6.rip + 2))).set 11
+      none).regs.length = 16
+    rw [len_set, len_set, len_set]; exact hlen6
+  have hg7r0 : g7.reg 0 = some A := by
+    rw [hg7]
+    show (((g6.set 0 (some A)).set 1 (some (g6.rip + 2))).set 11
+      none).reg 0 = some A
+    rw [reg_set_other (by decide : (0 : Nat) ≠ 11),
+      reg_set_other (by decide : (0 : Nat) ≠ 1),
+      reg_set_self (by omega)]
+  have hg7r2 : g7.reg 2 = some (cap + cap) := by
+    rw [hg7]
+    show (((g6.set 0 (some A)).set 1 (some (g6.rip + 2))).set 11
+      none).reg 2 = some (cap + cap)
+    rw [reg_set_other (by decide : (2 : Nat) ≠ 11),
+      reg_set_other (by decide : (2 : Nat) ≠ 1),
+      reg_set_other (by decide : (2 : Nat) ≠ 0)]
+    exact hg6r2
+  have hg7r13 : g7.reg 13 = some count := by
+    rw [hg7]
+    show (((g6.set 0 (some A)).set 1 (some (g6.rip + 2))).set 11
+      none).reg 13 = some count
+    rw [reg_set_other (by decide : (13 : Nat) ≠ 11),
+      reg_set_other (by decide : (13 : Nat) ≠ 1),
+      reg_set_other (by decide : (13 : Nat) ≠ 0)]
+    exact hg6r13
+  have hg7r14 : g7.reg 14 = some 3 := by
+    rw [hg7]
+    show (((g6.set 0 (some A)).set 1 (some (g6.rip + 2))).set 11
+      none).reg 14 = some 3
+    rw [reg_set_other (by decide : (14 : Nat) ≠ 11),
+      reg_set_other (by decide : (14 : Nat) ≠ 1),
+      reg_set_other (by decide : (14 : Nat) ≠ 0)]
+    exact hg6r14
+  have hg7r4 : g7.reg 4 = some (sp0 + 24) := by
+    rw [hg7]
+    show (((g6.set 0 (some A)).set 1 (some (g6.rip + 2))).set 11
+      none).reg 4 = some (sp0 + 24)
+    rw [reg_set_other (by decide : (4 : Nat) ≠ 11),
+      reg_set_other (by decide : (4 : Nat) ≠ 1),
+      reg_set_other (by decide : (4 : Nat) ≠ 0)]
+    exact hg6r4
+  have hg7r10 : g7.reg 10 = some MREMAP_MAYMOVE := by
+    rw [hg7]
+    show (((g6.set 0 (some A)).set 1 (some (g6.rip + 2))).set 11
+      none).reg 10 = some MREMAP_MAYMOVE
+    rw [reg_set_other (by decide : (10 : Nat) ≠ 11),
+      reg_set_other (by decide : (10 : Nat) ≠ 1),
+      reg_set_other (by decide : (10 : Nat) ≠ 0)]
+    exact hg6r10
+  have hg7r8 : g7.reg 8 = some v8 := by
+    rw [hg7]
+    show (((g6.set 0 (some A)).set 1 (some (g6.rip + 2))).set 11
+      none).reg 8 = some v8
+    rw [reg_set_other (by decide : (8 : Nat) ≠ 11),
+      reg_set_other (by decide : (8 : Nat) ≠ 1),
+      reg_set_other (by decide : (8 : Nat) ≠ 0)]
+    exact hg6r8
+  have hg7r9 : g7.reg 9 = some v9 := by
+    rw [hg7]
+    show (((g6.set 0 (some A)).set 1 (some (g6.rip + 2))).set 11
+      none).reg 9 = some v9
+    rw [reg_set_other (by decide : (9 : Nat) ≠ 11),
+      reg_set_other (by decide : (9 : Nat) ≠ 1),
+      reg_set_other (by decide : (9 : Nat) ≠ 0)]
+    exact hg6r9
+  have hg7mem : g7.mem =
+      [c1, c2, ⟨A, buf.data ++ List.replicate cap 0, true⟩] := by rw [hg7]
+  have hg7k : g7.k = { s.k with oracle := rest } := by rw [hg7]
+  -- step 8: test rax, rax
+  have e8 : X86Int.step stage1Im g7 =
+      .ok { g7 with fl := (aluF .and A A).2, rip := g7.rip + 3 } :=
+    step_test (by rw [hg7rip]; exact hc.d115) hg7r0 hg7r0
+  obtain ⟨g8, hg8⟩ : ∃ t : X86Int.St, t =
+      { g7 with fl := (aluF .and A A).2, rip := g7.rip + 3 } := ⟨_, rfl⟩
+  have hg8rip : g8.rip = base + 0x118 := by
+    rw [hg8]; show g7.rip + 3 = base + 0x118; rw [hg7rip]
+  have hg8sf : g8.fl.sf = some false := by
+    rw [hg8]
+    show (aluF .and A A).2.sf = some false
+    have hland : Nat.land A A = A := by simp
+    have hmsb : X86Int.msb A = false := by
+      simp only [X86Int.msb]
+      rw [Nat.div_eq_of_lt hA63]
+      decide
+    simp [aluF, hland, hmsb]
+  have hg8r0 : g8.reg 0 = some A := by rw [hg8]; exact hg7r0
+  have hg8r2 : g8.reg 2 = some (cap + cap) := by rw [hg8]; exact hg7r2
+  have hg8r13 : g8.reg 13 = some count := by rw [hg8]; exact hg7r13
+  have hg8r14 : g8.reg 14 = some 3 := by rw [hg8]; exact hg7r14
+  have hg8r4 : g8.reg 4 = some (sp0 + 24) := by rw [hg8]; exact hg7r4
+  have hg8r10 : g8.reg 10 = some MREMAP_MAYMOVE := by
+    rw [hg8]; exact hg7r10
+  have hg8r8 : g8.reg 8 = some v8 := by rw [hg8]; exact hg7r8
+  have hg8r9 : g8.reg 9 = some v9 := by rw [hg8]; exact hg7r9
+  have hg8mem : g8.mem =
+      [c1, c2, ⟨A, buf.data ++ List.replicate cap 0, true⟩] := by
+    rw [hg8]; exact hg7mem
+  have hg8k : g8.k = { s.k with oracle := rest } := by
+    rw [hg8]; exact hg7k
+  have hlen8 : g8.regs.length = 16 := by rw [hg8]; exact hlen7
+  -- step 9: js fail2 (not taken: A ≥ 0)
+  have hg8fl8 : X86Int.cond g8.fl 8 = some false :=
+    cond_cc8_of_sf_false hg8sf
+  have e9 : X86Int.step stage1Im g8 =
+      .ok { g8 with rip := g8.rip + 2 } := by
+    have h := step_jcc (im := stage1Im) (s := g8)
+      (by rw [hg8rip]; exact hc.d118) hg8fl8
+    simpa using h
+  obtain ⟨g9, hg9⟩ : ∃ t : X86Int.St, t =
+      { g8 with rip := g8.rip + 2 } := ⟨_, rfl⟩
+  have hg9rip : g9.rip = base + 0x11a := by
+    rw [hg9]; show g8.rip + 2 = base + 0x11a; rw [hg8rip]
+  have hg9r0 : g9.reg 0 = some A := by
+    rw [hg9]; show ({ g8 with rip := g8.rip + 2 }).reg 0 = some A
+    rw [reg_with_rip]; exact hg8r0
+  have hg9r2 : g9.reg 2 = some (cap + cap) := by
+    rw [hg9]
+    show ({ g8 with rip := g8.rip + 2 }).reg 2 = some (cap + cap)
+    rw [reg_with_rip]; exact hg8r2
+  have hg9r13 : g9.reg 13 = some count := by
+    rw [hg9]; show ({ g8 with rip := g8.rip + 2 }).reg 13 = some count
+    rw [reg_with_rip]; exact hg8r13
+  have hg9r14 : g9.reg 14 = some 3 := by
+    rw [hg9]; show ({ g8 with rip := g8.rip + 2 }).reg 14 = some 3
+    rw [reg_with_rip]; exact hg8r14
+  have hg9r4 : g9.reg 4 = some (sp0 + 24) := by
+    rw [hg9]
+    show ({ g8 with rip := g8.rip + 2 }).reg 4 = some (sp0 + 24)
+    rw [reg_with_rip]; exact hg8r4
+  have hg9r10 : g9.reg 10 = some MREMAP_MAYMOVE := by
+    rw [hg9]
+    show ({ g8 with rip := g8.rip + 2 }).reg 10 = some MREMAP_MAYMOVE
+    rw [reg_with_rip]; exact hg8r10
+  have hg9r8 : g9.reg 8 = some v8 := by
+    rw [hg9]; show ({ g8 with rip := g8.rip + 2 }).reg 8 = some v8
+    rw [reg_with_rip]; exact hg8r8
+  have hg9r9 : g9.reg 9 = some v9 := by
+    rw [hg9]; show ({ g8 with rip := g8.rip + 2 }).reg 9 = some v9
+    rw [reg_with_rip]; exact hg8r9
+  have hg9mem : g9.mem =
+      [c1, c2, ⟨A, buf.data ++ List.replicate cap 0, true⟩] := by
+    rw [hg9]; exact hg8mem
+  have hg9k : g9.k = { s.k with oracle := rest } := by
+    rw [hg9]; exact hg8k
+  have hlen9 : g9.regs.length = 16 := by
+    rw [hg9]; show ({ g8 with rip := g8.rip + 2 }).regs.length = 16
+    rw [len_with_rip]; exact hlen8
+  -- step 10: mov rbx, rax
+  have e10 : X86Int.step stage1Im g9 =
+      .ok { g9.set 3 (some A) with rip := g9.rip + 3 } :=
+    step_mov (by rw [hg9rip]; exact hc.d11a) hg9r0
+  obtain ⟨g10, hg10⟩ : ∃ t : X86Int.St, t =
+      { g9.set 3 (some A) with rip := g9.rip + 3 } := ⟨_, rfl⟩
+  have hg10rip : g10.rip = base + 0x11d := by
+    rw [hg10]; show g9.rip + 3 = base + 0x11d; rw [hg9rip]
+  have hlen10 : g10.regs.length = 16 := by
+    rw [hg10]
+    show ({ g9.set 3 (some A) with rip := g9.rip + 3 }).regs.length = 16
+    rw [len_with_rip, len_set]; exact hlen9
+  have hg10r3 : g10.reg 3 = some A := by
+    rw [hg10]
+    show ({ g9.set 3 (some A) with rip := g9.rip + 3 }).reg 3 = some A
+    rw [reg_with_rip, reg_set_self (by omega)]
+  have hg10r2 : g10.reg 2 = some (cap + cap) := by
+    rw [hg10]
+    show ({ g9.set 3 (some A) with rip := g9.rip + 3 }).reg 2 =
+      some (cap + cap)
+    rw [reg_with_rip, reg_set_other (by decide : (2 : Nat) ≠ 3)]
+    exact hg9r2
+  have hg10r0 : g10.reg 0 = some A := by
+    rw [hg10]
+    show ({ g9.set 3 (some A) with rip := g9.rip + 3 }).reg 0 = some A
+    rw [reg_with_rip, reg_set_other (by decide : (0 : Nat) ≠ 3)]
+    exact hg9r0
+  have hg10r13 : g10.reg 13 = some count := by
+    rw [hg10]
+    show ({ g9.set 3 (some A) with rip := g9.rip + 3 }).reg 13 =
+      some count
+    rw [reg_with_rip, reg_set_other (by decide : (13 : Nat) ≠ 3)]
+    exact hg9r13
+  have hg10r14 : g10.reg 14 = some 3 := by
+    rw [hg10]
+    show ({ g9.set 3 (some A) with rip := g9.rip + 3 }).reg 14 = some 3
+    rw [reg_with_rip, reg_set_other (by decide : (14 : Nat) ≠ 3)]
+    exact hg9r14
+  have hg10r4 : g10.reg 4 = some (sp0 + 24) := by
+    rw [hg10]
+    show ({ g9.set 3 (some A) with rip := g9.rip + 3 }).reg 4 =
+      some (sp0 + 24)
+    rw [reg_with_rip, reg_set_other (by decide : (4 : Nat) ≠ 3)]
+    exact hg9r4
+  have hg10r10 : g10.reg 10 = some MREMAP_MAYMOVE := by
+    rw [hg10]
+    show ({ g9.set 3 (some A) with rip := g9.rip + 3 }).reg 10 =
+      some MREMAP_MAYMOVE
+    rw [reg_with_rip, reg_set_other (by decide : (10 : Nat) ≠ 3)]
+    exact hg9r10
+  have hg10r8 : g10.reg 8 = some v8 := by
+    rw [hg10]
+    show ({ g9.set 3 (some A) with rip := g9.rip + 3 }).reg 8 = some v8
+    rw [reg_with_rip, reg_set_other (by decide : (8 : Nat) ≠ 3)]
+    exact hg9r8
+  have hg10r9 : g10.reg 9 = some v9 := by
+    rw [hg10]
+    show ({ g9.set 3 (some A) with rip := g9.rip + 3 }).reg 9 = some v9
+    rw [reg_with_rip, reg_set_other (by decide : (9 : Nat) ≠ 3)]
+    exact hg9r9
+  have hg10mem : g10.mem =
+      [c1, c2, ⟨A, buf.data ++ List.replicate cap 0, true⟩] := by
+    rw [hg10]; exact hg9mem
+  have hg10k : g10.k = { s.k with oracle := rest } := by
+    rw [hg10]; exact hg9k
+  -- step 11: mov r12, rdx
+  have e11 : X86Int.step stage1Im g10 =
+      .ok { g10.set 12 (some (cap + cap)) with rip := g10.rip + 3 } :=
+    step_mov (by rw [hg10rip]; exact hc.d11d) hg10r2
+  obtain ⟨g11, hg11⟩ : ∃ t : X86Int.St, t =
+      { g10.set 12 (some (cap + cap)) with rip := g10.rip + 3 } :=
+    ⟨_, rfl⟩
+  have hg11rip : g11.rip = base + 0x120 := by
+    rw [hg11]; show g10.rip + 3 = base + 0x120; rw [hg10rip]
+  have hlen11 : g11.regs.length = 16 := by
+    rw [hg11]
+    show ({ g10.set 12 (some (cap + cap)) with
+      rip := g10.rip + 3 }).regs.length = 16
+    rw [len_with_rip, len_set]; exact hlen10
+  have hg11r12 : g11.reg 12 = some (cap + cap) := by
+    rw [hg11]
+    show ({ g10.set 12 (some (cap + cap)) with
+      rip := g10.rip + 3 }).reg 12 = some (cap + cap)
+    rw [reg_with_rip, reg_set_self (by omega)]
+  have hg11r3 : g11.reg 3 = some A := by
+    rw [hg11]
+    show ({ g10.set 12 (some (cap + cap)) with
+      rip := g10.rip + 3 }).reg 3 = some A
+    rw [reg_with_rip, reg_set_other (by decide : (3 : Nat) ≠ 12)]
+    exact hg10r3
+  have hg11r0 : g11.reg 0 = some A := by
+    rw [hg11]
+    show ({ g10.set 12 (some (cap + cap)) with
+      rip := g10.rip + 3 }).reg 0 = some A
+    rw [reg_with_rip, reg_set_other (by decide : (0 : Nat) ≠ 12)]
+    exact hg10r0
+  have hg11r13 : g11.reg 13 = some count := by
+    rw [hg11]
+    show ({ g10.set 12 (some (cap + cap)) with
+      rip := g10.rip + 3 }).reg 13 = some count
+    rw [reg_with_rip, reg_set_other (by decide : (13 : Nat) ≠ 12)]
+    exact hg10r13
+  have hg11r14 : g11.reg 14 = some 3 := by
+    rw [hg11]
+    show ({ g10.set 12 (some (cap + cap)) with
+      rip := g10.rip + 3 }).reg 14 = some 3
+    rw [reg_with_rip, reg_set_other (by decide : (14 : Nat) ≠ 12)]
+    exact hg10r14
+  have hg11r4 : g11.reg 4 = some (sp0 + 24) := by
+    rw [hg11]
+    show ({ g10.set 12 (some (cap + cap)) with
+      rip := g10.rip + 3 }).reg 4 = some (sp0 + 24)
+    rw [reg_with_rip, reg_set_other (by decide : (4 : Nat) ≠ 12)]
+    exact hg10r4
+  have hg11r10 : g11.reg 10 = some MREMAP_MAYMOVE := by
+    rw [hg11]
+    show ({ g10.set 12 (some (cap + cap)) with
+      rip := g10.rip + 3 }).reg 10 = some MREMAP_MAYMOVE
+    rw [reg_with_rip, reg_set_other (by decide : (10 : Nat) ≠ 12)]
+    exact hg10r10
+  have hg11r8 : g11.reg 8 = some v8 := by
+    rw [hg11]
+    show ({ g10.set 12 (some (cap + cap)) with
+      rip := g10.rip + 3 }).reg 8 = some v8
+    rw [reg_with_rip, reg_set_other (by decide : (8 : Nat) ≠ 12)]
+    exact hg10r8
+  have hg11r9 : g11.reg 9 = some v9 := by
+    rw [hg11]
+    show ({ g10.set 12 (some (cap + cap)) with
+      rip := g10.rip + 3 }).reg 9 = some v9
+    rw [reg_with_rip, reg_set_other (by decide : (9 : Nat) ≠ 12)]
+    exact hg10r9
+  have hg11mem : g11.mem =
+      [c1, c2, ⟨A, buf.data ++ List.replicate cap 0, true⟩] := by
+    rw [hg11]; exact hg10mem
+  have hg11k : g11.k = { s.k with oracle := rest } := by
+    rw [hg11]; exact hg10k
+  -- step 12: jmp readloop
+  have e12 : X86Int.step stage1Im g11 =
+      .ok { g11 with rip := base + 0xd7 } :=
+    step_jmp (by rw [hg11rip]; exact hc.d120)
+  obtain ⟨g12, hg12⟩ : ∃ t : X86Int.St, t =
+      { g11 with rip := base + 0xd7 } := ⟨_, rfl⟩
+  have r1 : run stage1Im 1 (Out.ok s) = Out.ok g1 := by
+    rw [run_succ_ok stage1Im 0 s, e1, ← hg1, run_zero]
+  have r2 : run stage1Im 1 (Out.ok g1) = Out.ok g2 := by
+    rw [run_succ_ok stage1Im 0 g1, e2, ← hg2, run_zero]
+  have r3 : run stage1Im 1 (Out.ok g2) = Out.ok g3 := by
+    rw [run_succ_ok stage1Im 0 g2, e3, ← hg3, run_zero]
+  have r4 : run stage1Im 1 (Out.ok g3) = Out.ok g4 := by
+    rw [run_succ_ok stage1Im 0 g3, e4, ← hg4, run_zero]
+  have r5 : run stage1Im 1 (Out.ok g4) = Out.ok g5 := by
+    rw [run_succ_ok stage1Im 0 g4, e5, ← hg5, run_zero]
+  have r6 : run stage1Im 1 (Out.ok g5) = Out.ok g6 := by
+    rw [run_succ_ok stage1Im 0 g5, e6, ← hg6, run_zero]
+  have r7 : run stage1Im 1 (Out.ok g6) = Out.ok g7 := by
+    rw [run_succ_ok stage1Im 0 g6, e7, ← hg7, run_zero]
+  have r8 : run stage1Im 1 (Out.ok g7) = Out.ok g8 := by
+    rw [run_succ_ok stage1Im 0 g7, e8, ← hg8, run_zero]
+  have r9 : run stage1Im 1 (Out.ok g8) = Out.ok g9 := by
+    rw [run_succ_ok stage1Im 0 g8, e9, ← hg9, run_zero]
+  have r10 : run stage1Im 1 (Out.ok g9) = Out.ok g10 := by
+    rw [run_succ_ok stage1Im 0 g9, e10, ← hg10, run_zero]
+  have r11 : run stage1Im 1 (Out.ok g10) = Out.ok g11 := by
+    rw [run_succ_ok stage1Im 0 g10, e11, ← hg11, run_zero]
+  have r12 : run stage1Im 1 (Out.ok g11) = Out.ok g12 := by
+    rw [run_succ_ok stage1Im 0 g11, e12, ← hg12, run_zero]
+  have hrun6 : run stage1Im 6 (Out.ok s) = Out.ok g6 := by
+    rw [show (6 : Nat) = 1 + 5 from rfl, run_add stage1Im 1 5, r1,
+      show (5 : Nat) = 1 + 4 from rfl, run_add stage1Im 1 4, r2,
+      show (4 : Nat) = 1 + 3 from rfl, run_add stage1Im 1 3, r3,
+      show (3 : Nat) = 1 + 2 from rfl, run_add stage1Im 1 2, r4,
+      show (2 : Nat) = 1 + 1 from rfl, run_add stage1Im 1 1, r5, r6]
+  have hrun : run stage1Im 12 (Out.ok s) = Out.ok g12 := by
+    rw [show (12 : Nat) = 6 + 6 from rfl, run_add stage1Im 6 6, hrun6,
+      show (6 : Nat) = 1 + 5 from rfl, run_add stage1Im 1 5, r7,
+      show (5 : Nat) = 1 + 4 from rfl, run_add stage1Im 1 4, r8,
+      show (4 : Nat) = 1 + 3 from rfl, run_add stage1Im 1 3, r9,
+      show (3 : Nat) = 1 + 2 from rfl, run_add stage1Im 1 2, r10,
+      show (2 : Nat) = 1 + 1 from rfl, run_add stage1Im 1 1, r11, r12]
+  have hhi' : (⟨A, buf.data ++ List.replicate cap 0, true⟩ :
+      Region).hi = A + (cap + cap) := by
+    show A + (buf.data ++ List.replicate cap 0).length = A + (cap + cap)
+    rw [List.length_append, List.length_replicate, hdatalen]
+  refine ⟨g12, hrun, by rw [hg12], ?_, ?_, ?_, ?_, ?_, ⟨A, ?_⟩,
+    ⟨MREMAP_MAYMOVE, ?_⟩, ⟨v8, ?_⟩, ⟨v9, ?_⟩, ?_, ?_,
+    ⟨⟨A, buf.data ++ List.replicate cap 0, true⟩, ?_, rfl, hhi', rfl⟩,
+    ?_, ?_, ⟨g6, hrun6, hlegal⟩⟩
+  · rw [hg12]
+    show ({ g11 with rip := base + 0xd7 }).reg 3 = some A
+    rw [reg_with_rip]; exact hg11r3
+  · rw [hg12]
+    show ({ g11 with rip := base + 0xd7 }).reg 12 = some (cap + cap)
+    rw [reg_with_rip]; exact hg11r12
+  · rw [hg12]
+    show ({ g11 with rip := base + 0xd7 }).reg 13 = some count
+    rw [reg_with_rip]; exact hg11r13
+  · rw [hg12]
+    show ({ g11 with rip := base + 0xd7 }).reg 14 = some 3
+    rw [reg_with_rip]; exact hg11r14
+  · rw [hg12]
+    show ({ g11 with rip := base + 0xd7 }).reg 4 = some (sp0 + 24)
+    rw [reg_with_rip]; exact hg11r4
+  · rw [hg12]
+    show ({ g11 with rip := base + 0xd7 }).reg 0 = some A
+    rw [reg_with_rip]; exact hg11r0
+  · rw [hg12]
+    show ({ g11 with rip := base + 0xd7 }).reg 10 = some MREMAP_MAYMOVE
+    rw [reg_with_rip]; exact hg11r10
+  · rw [hg12]
+    show ({ g11 with rip := base + 0xd7 }).reg 8 = some v8
+    rw [reg_with_rip]; exact hg11r8
+  · rw [hg12]
+    show ({ g11 with rip := base + 0xd7 }).reg 9 = some v9
+    rw [reg_with_rip]; exact hg11r9
+  · rw [hg12]
+    show ({ g11 with rip := base + 0xd7 }).k.oracle = rest
+    rw [hg11k]
+  · rw [hg12]
+    show ({ g11 with rip := base + 0xd7 }).k.fds = [some ⟨f, count⟩]
+    rw [hg11k]
+    exact hfd
+  · rw [hg12]
+    show ({ g11 with rip := base + 0xd7 }).mem =
+      [c1, c2, ⟨A, buf.data ++ List.replicate cap 0, true⟩]
+    exact hg11mem
+  · rw [hg12]
+    show Mem.rdN ({ g11 with rip := base + 0xd7 }).mem A count =
+      some (f.take count)
+    rw [hg11mem]
+    exact hrdN'
+  · rw [hg12]
+    show ({ g11 with rip := base + 0xd7 }).regs.length = 16
+    rw [len_with_rip]; exact hlen11
+
+/-- The whole read loop, by strong induction on the bytes
+remaining: every iteration moves at least one byte, growths
+consume one replicated placement each, and the capacity bound
+`f.length < cap * 2 ^ g` is preserved (with `A + cap * 2 ^ g`
+inside the address bound).  The tail after the replicated
+placements begins with a placement, which is all the reads need
+once the growth entries run out (reads do not consume it).  Ends
+just after the jump at `loaded`, at the parser entry
+`base + 0x134`, with the whole file in the buffer. -/
+theorem loader_read_loop : ∀ rem : Nat,
+    ∀ {f : List Nat} {A sp0 cap count g capB : Nat}
+      {c1 c2 buf : Region} {s : X86Int.St} {tail : List Choice},
+      f.length - count = rem →
+      s.rip = base + 0xd7 → s.regs.length = 16 →
+      s.reg 3 = some A → s.reg 12 = some cap →
+      s.reg 13 = some count → s.reg 14 = some 3 →
+      s.reg 4 = some (sp0 + 24) →
+      (∃ v, s.reg 0 = some v) → (∃ v, s.reg 10 = some v) →
+      (∃ v, s.reg 8 = some v) → (∃ v, s.reg 9 = some v) →
+      s.mem = [c1, c2, buf] → buf.base = A → buf.rw = true →
+      buf.hi = A + cap → (c1.hi ≤ A ∨ A + capB ≤ c1.base) →
+      (c2.hi ≤ A ∨ A + capB ≤ c2.base) → cap * 2 ^ g ≤ capB →
+      s.mem.rdN A count = some (f.take count) →
+      s.k.fds = [some ⟨f, count⟩] →
+      s.k.oracle = List.replicate g (.at A) ++ tail →
+      (∃ B, tail.head? = some (.at B)) →
+      (∀ b ∈ f, b < 256) →
+      count ≤ f.length → count < cap →
+      A % page = 0 → 0 < A → A < 2 ^ 63 →
+      cap % page = 0 → 0 < cap →
+      A + cap * 2 ^ g ≤ 2 ^ 47 → f.length < cap * 2 ^ g →
+      (g = 0 ∨ cap * 2 ^ (g - 1) ≤ f.length) → 20 ≤ cap →
+      ∃ k s', run stage1Im k (Out.ok s) = Out.ok s' ∧
+        s'.rip = base + 0x134 ∧
+        s'.reg 3 = some A ∧ (∃ cap', s'.reg 12 = some cap') ∧
+        s'.reg 13 = some f.length ∧ s'.reg 14 = some 3 ∧
+        s'.reg 4 = some (sp0 + 24) ∧
+        (∃ v, s'.reg 0 = some v) ∧ (∃ v, s'.reg 10 = some v) ∧
+        (∃ v, s'.reg 8 = some v) ∧ (∃ v, s'.reg 9 = some v) ∧
+        s'.k.oracle = tail ∧
+        s'.k.fds = [some ⟨f, f.length⟩] ∧
+        (∃ buf', s'.mem = [c1, c2, buf'] ∧ buf'.base = A ∧
+          (∃ cap', buf'.hi = A + cap' ∧ cap' ≤ capB) ∧
+          buf'.rw = true) ∧
+        s'.mem.rdN A f.length = some f ∧
+        (∃ bs, s'.mem.rdN A 20 = some bs) ∧
+        s'.regs.length = 16 := by
+  intro rem
+  induction rem using Nat.strongRecOn with
+  | _ rem ih =>
+  intro f A sp0 cap count g capB c1 c2 buf s tail hrem hrip hlen16 hr3
+    hr12 hr13 hr14 hr4 hr0 hr10 hr8 hr9 hmem hbufbase hbufrw hbufhi
+    hdisj1 hdisj2 hcapB hcontent hfd horacle htail hfB hcount hcountcap
+    hAmod hApos hA63 hcapmod hcappos hbound hflen hgmin h20cap
+  have hc := stage1_loaderCode
+  have hcaple : cap ≤ cap * 2 ^ g := by
+    cases g with
+    | zero => simp
+    | succ g =>
+      have h1 : 1 ≤ 2 ^ (g + 1) := Nat.one_le_two_pow
+      calc cap = cap * 1 := by rw [Nat.mul_one]
+        _ ≤ cap * 2 ^ (g + 1) := Nat.mul_le_mul_left cap h1
+  have hW : W = 2 ^ 64 := rfl
+  have hAcap : A + cap < W := by omega
+  have hcap63 : cap < 2 ^ 63 := by omega
+  have hhead : ∃ B, s.k.oracle.head? = some (.at B) := by
+    cases g with
+    | zero =>
+      obtain ⟨B, hB⟩ := htail
+      refine ⟨B, ?_⟩
+      rw [horacle]
+      simpa using hB
+    | succ g' =>
+      refine ⟨A, ?_⟩
+      rw [horacle, List.replicate_succ]
+      simp
+  obtain ⟨s1, hrun1, hor1, hs1r0, hs1r3, hs1r12, hs1r13, hs1r14, hs1r4,
+    hs1r10, hs1r8, hs1r9, hs1oracle, hs1fds,
+    ⟨buf1, hs1mem, hbuf1base, hbuf1hi, hbuf1rw⟩, hs1content, hs1len⟩ :=
+    loader_read_once hrip hlen16 hr3 hr12 hr13 hr14 hr4 hr0 hr10 hr8 hr9
+      hmem hbufbase hbufrw hbufhi hdisj1 hdisj2 (by omega) hcontent hfd
+      hhead hfB hcount hcountcap hAcap hcap63
+  obtain ⟨n, hn⟩ : ∃ m : Nat,
+      m = min (cap - count) (f.length - count) := ⟨_, rfl⟩
+  rw [← hn] at hs1r0 hs1fds hs1content
+  have hncap : count + n ≤ cap := by
+    have h1 : n ≤ cap - count := by
+      rw [hn]; exact Nat.min_le_left _ _
+    omega
+  have hnlen : count + n ≤ f.length := by
+    have h1 : n ≤ f.length - count := by
+      rw [hn]; exact Nat.min_le_right _ _
+    omega
+  rcases hor1 with ⟨hs1rip, hlen_eq⟩ | ⟨hs1rip, hlt⟩
+  · -- EOF: jump from loaded (0x122) to the parser entry (0x134)
+    have hn0 : n = 0 := by
+      rw [hn]
+      simp [show f.length - count = 0 by omega]
+    have e11 : X86Int.step stage1Im s1 =
+        .ok { s1 with rip := base + 0x134 } :=
+      step_jmp (by rw [hs1rip]; exact hc.d122)
+    obtain ⟨s2, hs2⟩ : ∃ t : X86Int.St, t =
+        { s1 with rip := base + 0x134 } := ⟨_, rfl⟩
+    have r11 : run stage1Im 1 (Out.ok s1) = Out.ok s2 := by
+      rw [run_succ_ok stage1Im 0 s1, e11, ← hs2, run_zero]
+    have hrun : run stage1Im 11 (Out.ok s) = Out.ok s2 := by
+      rw [show (11 : Nat) = 10 + 1 from rfl, run_add stage1Im 10 1,
+        hrun1, r11]
+    have hcontent2 : s2.mem.rdN A f.length = some f := by
+      rw [hn0, Nat.add_zero] at hs1content
+      rw [hs2]
+      show Mem.rdN ({ s1 with rip := base + 0x134 }).mem A f.length =
+        some f
+      have htf : f.take f.length = f := by simp
+      rw [← hlen_eq, htf] at hs1content
+      exact hs1content
+    have hg0 : g = 0 := by
+      by_cases hg0 : g = 0
+      · exact hg0
+      · have hge : cap * 2 ^ (g - 1) ≤ f.length := by
+          rcases hgmin with h | h
+          · omega
+          · exact h
+        have h1 : cap ≤ cap * 2 ^ (g - 1) := by
+          calc cap = cap * 1 := by rw [Nat.mul_one]
+            _ ≤ cap * 2 ^ (g - 1) :=
+              Nat.mul_le_mul_left cap Nat.one_le_two_pow
+        omega
+    refine ⟨11, s2, hrun, by rw [hs2], ?_, ⟨cap, ?_⟩, ?_, ?_, ?_,
+      ⟨n, ?_⟩, ?_, ?_, ?_, ?_, ?_,
+      ⟨buf1, ?_, hbuf1base, ⟨cap, hbuf1hi, by omega⟩, hbuf1rw⟩,
+      hcontent2, ?_, ?_⟩
+    · rw [hs2]
+      show ({ s1 with rip := base + 0x134 }).reg 3 = some A
+      rw [reg_with_rip]; exact hs1r3
+    · rw [hs2]
+      show ({ s1 with rip := base + 0x134 }).reg 12 = some cap
+      rw [reg_with_rip]; exact hs1r12
+    · rw [hs2]
+      show ({ s1 with rip := base + 0x134 }).reg 13 = some f.length
+      rw [reg_with_rip, hlen_eq]; exact hs1r13
+    · rw [hs2]
+      show ({ s1 with rip := base + 0x134 }).reg 14 = some 3
+      rw [reg_with_rip]; exact hs1r14
+    · rw [hs2]
+      show ({ s1 with rip := base + 0x134 }).reg 4 = some (sp0 + 24)
+      rw [reg_with_rip]; exact hs1r4
+    · rw [hs2]
+      show ({ s1 with rip := base + 0x134 }).reg 0 = some n
+      rw [reg_with_rip]; exact hs1r0
+    · obtain ⟨v, hv⟩ := hs1r10
+      refine ⟨v, ?_⟩
+      rw [hs2]
+      show ({ s1 with rip := base + 0x134 }).reg 10 = some v
+      rw [reg_with_rip]; exact hv
+    · obtain ⟨v, hv⟩ := hs1r8
+      refine ⟨v, ?_⟩
+      rw [hs2]
+      show ({ s1 with rip := base + 0x134 }).reg 8 = some v
+      rw [reg_with_rip]; exact hv
+    · obtain ⟨v, hv⟩ := hs1r9
+      refine ⟨v, ?_⟩
+      rw [hs2]
+      show ({ s1 with rip := base + 0x134 }).reg 9 = some v
+      rw [reg_with_rip]; exact hv
+    · rw [hs2]
+      show ({ s1 with rip := base + 0x134 }).k.oracle = tail
+      rw [hs1oracle, horacle, hg0]
+      simp
+    · rw [hs2]
+      show ({ s1 with rip := base + 0x134 }).k.fds = [some ⟨f, f.length⟩]
+      rw [hs1fds, hn0, Nat.add_zero, ← hlen_eq]
+    · rw [hs2]
+      show ({ s1 with rip := base + 0x134 }).mem = [c1, c2, buf1]
+      exact hs1mem
+    · have hbuflen : buf1.data.length = cap := by
+        have h := hbuf1hi
+        simp only [Region.hi, hbuf1base] at h
+        omega
+      refine ⟨buf1.data.take 20, ?_⟩
+      rw [hs2]
+      show Mem.rdN ({ s1 with rip := base + 0x134 }).mem A 20 =
+        some (buf1.data.take 20)
+      rw [hs1mem]
+      exact rdN_third_take hdisj1 hdisj2 hbuf1base (by omega)
+        (by omega)
+    · rw [hs2]
+      show ({ s1 with rip := base + 0x134 }).regs.length = 16
+      rw [len_with_rip]; exact hs1len
+  · -- a positive read: update the count, then loop or grow
+    have hn1 : 0 < n := Nat.pos_of_ne_zero (by
+      intro hn0
+      rw [hn] at hn0
+      omega)
+    have hrem2 : f.length - (count + n) < rem := by omega
+    obtain ⟨s2, hrun2, hor2, hs2r13, hs2r3, hs2r12, hs2r14, hs2r4,
+      hs2r0, hs2r10, hs2r8, hs2r9, hs2mem, hs2k, hs2len⟩ :=
+      loader_count_update hs1rip hs1len hs1r0 hs1r3 hs1r12 hs1r13
+        hs1r14 hs1r4 hs1r10 hs1r8 hs1r9 hncap (by omega)
+    have hs2content : s2.mem.rdN A (count + n) =
+        some (f.take (count + n)) := by
+      rwa [hs2mem]
+    have hs2fds : s2.k.fds = [some ⟨f, count + n⟩] := by
+      rw [hs2k]; exact hs1fds
+    have hs2oracle : s2.k.oracle = List.replicate g (.at A) ++ tail := by
+      rw [hs2k, hs1oracle, horacle]
+    have hs2mem' : s2.mem = [c1, c2, buf1] := by
+      rw [hs2mem]; exact hs1mem
+    rcases hor2 with ⟨hs2rip, hltcap⟩ | ⟨hs2rip, hfull⟩
+    · obtain ⟨k, s3, hrun3, hrip3, hr33, hcap3, hr133, hr143, hr43,
+        hr03, hr103, hr83, hr93, hor3, hfd3, hmem3, hcontent3, hwin3,
+        hlen3⟩ :=
+        ih (f.length - (count + n)) hrem2 rfl hs2rip hs2len hs2r3
+          hs2r12 hs2r13 hs2r14 hs2r4 hs2r0 hs2r10 hs2r8 hs2r9 hs2mem'
+          hbuf1base hbuf1rw hbuf1hi hdisj1 hdisj2 hcapB hs2content hs2fds
+          hs2oracle htail hfB hnlen hltcap hAmod hApos hA63 hcapmod
+          hcappos hbound hflen hgmin h20cap
+      have hrun : run stage1Im (14 + k) (Out.ok s) = Out.ok s3 := by
+        rw [show 14 + k = 10 + (4 + k) by omega, run_add stage1Im 10 _,
+          hrun1, show 4 + k = 4 + k from rfl, run_add stage1Im 4 k,
+          hrun2, hrun3]
+      exact ⟨14 + k, s3, hrun, hrip3, hr33, hcap3, hr133, hr143, hr43,
+        hr03, hr103, hr83, hr93, hor3, hfd3, hmem3, hcontent3, hwin3,
+        hlen3⟩
+    · -- the buffer is exactly full: grow, then loop
+      have hg1 : 1 ≤ g := by
+        by_cases hg0 : g = 0
+        · rw [hg0] at hflen
+          simp at hflen
+          omega
+        · omega
+      obtain ⟨g', hg'⟩ : ∃ g', g = g' + 1 := ⟨g - 1, by omega⟩
+      have hor2' : s2.k.oracle =
+          .at A :: (List.replicate g' (.at A) ++ tail) := by
+        rw [hs2oracle, hg', List.replicate_succ, List.cons_append]
+      have hbound2 : A + (cap + cap) ≤ 2 ^ 47 := by
+        have h1 : cap + cap ≤ cap * 2 ^ g := by
+          rw [hg']
+          have h2 : (2 : Nat) ≤ 2 ^ (g' + 1) := by
+            calc (2 : Nat) = 2 ^ 1 := by decide
+              _ ≤ 2 ^ (g' + 1) :=
+                Nat.pow_le_pow_right (by decide) (by omega)
+          calc cap + cap = cap * 2 := by omega
+            _ ≤ cap * 2 ^ (g' + 1) := Nat.mul_le_mul_left cap h2
+        omega
+      obtain ⟨s3, hrun3, hs3rip, hs3r3, hs3r12, hs3r13, hs3r14, hs3r4,
+        hs3r0, hs3r10, hs3r8, hs3r9, hs3oracle, hs3fds,
+        ⟨buf3, hs3mem, hbuf3base, hbuf3hi, hbuf3rw⟩, hs3content,
+        hs3len, -⟩ :=
+        loader_grow hs2rip hs2len hs2r3 hs2r12 hs2r13 hs2r14 hs2r4
+          hs2r8 hs2r9 hs2mem' hbuf1base hbuf1rw hbuf1hi hdisj1 hdisj2
+          (by
+            have hcc : cap + cap ≤ cap * 2 ^ g := by
+              rw [hg']
+              have h2 : (2 : Nat) ≤ 2 ^ (g' + 1) := by
+                calc (2 : Nat) = 2 ^ 1 := by decide
+                  _ ≤ 2 ^ (g' + 1) :=
+                    Nat.pow_le_pow_right (by decide) (by omega)
+              calc cap + cap = cap * 2 := by omega
+                _ ≤ cap * 2 ^ (g' + 1) := Nat.mul_le_mul_left cap h2
+            omega)
+          hs2content hs2fds hor2' (by omega) hAmod hApos hbound2
+          hcapmod hcappos (by omega) hA63
+      have hcapmod2 : (cap + cap) % page = 0 := by
+        simp [Nat.add_mod, hcapmod]
+      have hpow : (2 : Nat) * 2 ^ g' = 2 ^ (g' + 1) := by
+        rw [Nat.pow_succ, Nat.mul_comm]
+      have hcapgrow : (cap + cap) * 2 ^ g' = cap * 2 ^ g := by
+        rw [hg', ← hpow, show cap + cap = cap * 2 by omega,
+          Nat.mul_assoc]
+      have hbound3 : A + (cap + cap) * 2 ^ g' ≤ 2 ^ 47 := by omega
+      have hflen3 : f.length < (cap + cap) * 2 ^ g' := by omega
+      obtain ⟨k, s4, hrun4, hrip4, hr34, hcap4, hr134, hr144, hr44,
+          hr04, hr104, hr84, hr94, hor4, hfd4, hmem4, hcontent4, hwin4,
+          hlen4⟩ :=
+        ih (f.length - (count + n)) hrem2 rfl hs3rip hs3len hs3r3
+          hs3r12 hs3r13 hs3r14 hs3r4 hs3r0 hs3r10 hs3r8 hs3r9 hs3mem
+          hbuf3base hbuf3rw hbuf3hi hdisj1 hdisj2
+          (by rwa [hcapgrow]) hs3content hs3fds
+          hs3oracle htail hfB hnlen (by omega) hAmod hApos hA63
+          hcapmod2 (by omega) hbound3 hflen3 (by
+            by_cases hg'0 : g' = 0
+            · exact Or.inl hg'0
+            · refine Or.inr ?_
+              have hge : cap * 2 ^ (g - 1) ≤ f.length := by
+                rcases hgmin with h | h
+                · omega
+                · exact h
+              have e1 : g - 1 = g' := by omega
+              have e2 : (cap + cap) * 2 ^ (g' - 1) = cap * 2 ^ g' := by
+                obtain ⟨g'', hg''⟩ : ∃ m, g' = m + 1 := ⟨g' - 1, by omega⟩
+                rw [hg'']
+                simp only [Nat.add_sub_cancel]
+                calc (cap + cap) * 2 ^ g'' = cap * (2 * 2 ^ g'') := by
+                      rw [show cap + cap = cap * 2 by omega,
+                        Nat.mul_assoc]
+                  _ = cap * 2 ^ (g'' + 1) := by
+                      rw [Nat.pow_succ, Nat.mul_comm (2 ^ g'') 2]
+              rw [e2, ← e1]
+              exact hge) (by omega)
+      have hrun : run stage1Im (26 + k) (Out.ok s) = Out.ok s4 := by
+        rw [show 26 + k = 10 + (16 + k) by omega, run_add stage1Im 10 _,
+          hrun1, show 16 + k = 4 + (12 + k) by omega,
+          run_add stage1Im 4 _, hrun2, show 12 + k = 12 + k from rfl,
+          run_add stage1Im 12 k, hrun3, hrun4]
+      exact ⟨26 + k, s4, hrun, hrip4, hr34, hcap4, hr134, hr144, hr44,
+        hr04, hr104, hr84, hr94, hor4, hfd4, hmem4, hcontent4, hwin4,
+        hlen4⟩
+
+/-- The growth budget is exact: one fewer growth would not
+hold the file. -/
+theorem growths_min (L : Nat) :
+    stage1Growths L = 0 ∨
+      65536 * 2 ^ (stage1Growths L - 1) ≤ L := by
+  unfold stage1Growths
+  by_cases hL : L < 65536
+  · rw [if_pos hL]
+    exact Or.inl rfl
+  · rw [if_neg hL]
+    refine Or.inr ?_
+    have hq : 0 < L / 65536 := by
+      rw [Nat.div_pos_iff]
+      omega
+    have hle : 2 ^ (Nat.log2 (L / 65536)) ≤ L / 65536 := by
+      by_cases h : L / 65536 < 2 ^ (Nat.log2 (L / 65536))
+      · have h2 := (Nat.log2_lt (show L / 65536 ≠ 0 by omega)).2 h
+        omega
+      · omega
+    have h1 : 65536 * 2 ^ (Nat.log2 (L / 65536)) ≤
+        65536 * (L / 65536) := Nat.mul_le_mul_left 65536 hle
+    have h2 : 65536 * (L / 65536) ≤ L := Nat.mul_div_le L 65536
+    have e : Nat.log2 (L / 65536) + 1 - 1 = Nat.log2 (L / 65536) := by
+      omega
+    rw [e]
+    omega
+
+theorem growths_cap_gt (L : Nat) :
+    L < 65536 * 2 ^ (stage1Growths L) := by
+  unfold stage1Growths
+  by_cases hL : L < 65536
+  · rw [if_pos hL]
+    simp [hL]
+  · rw [if_neg hL]
+    have hq : 0 < L / 65536 := by
+      rw [Nat.div_pos_iff]
+      omega
+    have hlt : L / 65536 < 2 ^ (Nat.log2 (L / 65536) + 1) :=
+      (Nat.log2_lt (by omega)).1 (Nat.lt_succ_self _)
+    have hdiv := Nat.div_add_mod L 65536
+    have hmod := Nat.mod_lt L (by decide : 0 < 65536)
+    have h1 : L < 65536 * (L / 65536 + 1) := by omega
+    have h2 : 65536 * (L / 65536 + 1) ≤
+        65536 * 2 ^ (Nat.log2 (L / 65536) + 1) :=
+      Nat.mul_le_mul_left 65536 hlt
+    omega
+
+theorem growths_cap_le_arena (f : List Nat) :
+    65536 * 2 ^ (stage1Growths f.length) ≤ arenaFileBytes f := by
+  have hge : 65536 + 2 * f.length ≤ arenaFileBytes f := by
+    unfold arenaFileBytes
+    exact pages_ge _
+  unfold stage1Growths
+  by_cases hL : f.length < 65536
+  · rw [if_pos hL]
+    simp
+    omega
+  · rw [if_neg hL]
+    have hq : 0 < f.length / 65536 := by
+      rw [Nat.div_pos_iff]
+      omega
+    have hle : 2 ^ (Nat.log2 (f.length / 65536)) ≤ f.length / 65536 := by
+      by_cases h : f.length / 65536 < 2 ^ (Nat.log2 (f.length / 65536))
+      · have := (Nat.log2_lt (by omega :
+          f.length / 65536 ≠ 0)).2 h
+        omega
+      · omega
+    have hdm : f.length / 65536 * 65536 ≤ f.length :=
+      Nat.div_mul_le_self _ _
+    have h1 : 65536 * 2 ^ (Nat.log2 (f.length / 65536) + 1) ≤
+        65536 + 2 * f.length := by
+      rw [Nat.pow_succ]
+      omega
+    omega
+
+/-- A register other than `r11` (the one register a syscall
+clears) that holds a value keeps holding a value after any
+single step, and hence after any run: every other write is a
+`some`. -/
+theorem exec_reg_some_ne11 {ins : Ins} {len : Nat} {s s' : X86Int.St}
+    {i v : Nat} (hi : i ≠ 11) (hv : s.reg i = some v)
+    (h : exec ins len s = .ok s') : ∃ v', s'.reg i = some v' := by
+  cases ins <;> simp only [exec] at h
+  all_goals
+    first
+      | (injection h with h; cases h)
+      | (have h1 := lift_ok h
+         obtain ⟨a, -, h1⟩ := bind_some h1
+         cases h1)
+      | (have h1 := lift_ok h
+         obtain ⟨a, -, h1⟩ := bind_some h1
+         obtain ⟨b, -, h1⟩ := bind_some h1
+         cases h1)
+      | (have h1 := lift_ok h
+         obtain ⟨a, -, h1⟩ := bind_some h1
+         obtain ⟨b, -, h1⟩ := bind_some h1
+         obtain ⟨c, -, h1⟩ := bind_some h1
+         cases h1)
+      | (split at h <;> (try split at h) <;>
+          (first
+            | cases h
+            | (injection h with hh; cases hh)))
+  all_goals
+    simp only [St.reg, St.set, List.getElem?_set]
+    <;> (try split) <;> (try split) <;> (try split) <;> (try split)
+    <;> (try split)
+    <;> (first | simp_all [St.reg] | (exfalso; omega) | simp_all)
+
+theorem step_reg_some_ne11 {im : Nat → Option (Ins × Nat)}
+    {s s' : X86Int.St} {i v : Nat} (hi : i ≠ 11)
+    (hv : s.reg i = some v) (h : X86Int.step im s = .ok s') :
+    ∃ v', s'.reg i = some v' := by
+  unfold X86Int.step at h
+  cases him : im s.rip with
+  | none => rw [him] at h; cases h
+  | some p =>
+    obtain ⟨ins, len⟩ := p
+    rw [him] at h
+    exact exec_reg_some_ne11 hi hv h
+
+theorem run_reg_some_ne11 {im : Nat → Option (Ins × Nat)} :
+    ∀ (n : Nat) {s s' : X86Int.St} {i v : Nat}, i ≠ 11 →
+      s.reg i = some v → run im n (Out.ok s) = Out.ok s' →
+      ∃ v', s'.reg i = some v' := by
+  intro n
+  induction n with
+  | zero =>
+    intro s s' i v hi hv h
+    simp only [X86Int.run] at h
+    rw [← Out.ok.inj h]
+    exact ⟨v, hv⟩
+  | succ n ih =>
+    intro s s' i v hi hv h
+    have h1 : run im (n + 1) (Out.ok s) = run im n (X86Int.step im s) :=
+      rfl
+    rw [h1] at h
+    cases hs : X86Int.step im s with
+    | ok t =>
+      rw [hs] at h
+      obtain ⟨v', hv'⟩ := step_reg_some_ne11 hi hv hs
+      exact ih hi hv' h
+    | exit c =>
+      rw [hs] at h
+      cases n <;> simp [X86Int.run] at h
+    | stuck =>
+      rw [hs] at h
+      cases n <;> simp [X86Int.run] at h
+
+/-- A byte write succeeds exactly when `find` hits a writable
+region (the written value is irrelevant). -/
+theorem wr_isSome_iff {m : Mem} {a u : Nat} :
+    (m.wr a u).isSome ↔
+      ∃ i r, Mem.find m a 0 = some (i, r) ∧ r.rw = true := by
+  constructor
+  · intro h
+    cases hf : Mem.find m a 0 with
+    | none => simp [Mem.wr, hf] at h
+    | some p =>
+      obtain ⟨i, r⟩ := p
+      refine ⟨i, r, rfl, ?_⟩
+      by_cases hrw : r.rw = true
+      · exact hrw
+      · simp [Mem.wr, hf, hrw] at h
+  · rintro ⟨i, r, hf, hrw⟩
+    simp [Mem.wr, hf, hrw]
+
+/-- `find` in an append whose last region is the first hit. -/
+theorem find_append_last : ∀ (m : Mem) (k : Nat) {r : Region}
+    {a : Nat},
+    (∀ r' ∈ m, ¬ (r'.base ≤ a ∧ a < r'.hi)) →
+    r.base ≤ a ∧ a < r.hi →
+    Mem.find (m ++ [r]) a k = some (k + m.length, r) := by
+  intro m
+  induction m with
+  | nil =>
+    intro k r a _ hr
+    show Mem.find [r] a k = some (k, r)
+    unfold Mem.find
+    rw [if_pos hr]
+  | cons r0 rest ih =>
+    intro k r a hm hr
+    have h0 : ¬ (r0.base ≤ a ∧ a < r0.hi) := hm r0 (.head _)
+    have hg : Mem.find ((r0 :: rest) ++ [r]) a k =
+        (if r0.base ≤ a ∧ a < r0.hi then some (k, r0)
+          else Mem.find (rest ++ [r]) a (k + 1)) := rfl
+    have hih := ih (k + 1) (fun r' hr' => hm r' (.tail _ hr')) hr
+    have eidx : k + (r0 :: rest).length = k + 1 + rest.length := by
+      simp only [List.length_cons]; omega
+    rw [hg, if_neg h0, hih, eidx]
+
+/-- One step of a successful `wrN`. -/
+theorem wrN_cons_isSome {m : Mem} {a b : Nat} {bs : List Nat}
+    (h : (m.wrN a (b :: bs)).isSome) :
+    ∃ m1, m.wr a b = some m1 ∧ (m1.wrN (a + 1) bs).isSome := by
+  have h2 : ((m.wr a b).bind (fun mm => mm.wrN (a + 1) bs)).isSome := h
+  obtain ⟨m', hm'⟩ := Option.isSome_iff_exists.mp h2
+  rw [Option.bind_eq_some_iff] at hm'
+  obtain ⟨m1, h1, h3⟩ := hm'
+  exact ⟨m1, h1, Option.isSome_iff_exists.mpr ⟨m', h3⟩⟩
+
+/-- From a successful `wrN`, every byte offset is writable with
+any value. -/
+theorem wrN_isSome_decomp : ∀ (bs : List Nat) {m : Mem} {a : Nat},
+    (m.wrN a bs).isSome → ∀ (j : Nat), j < bs.length → ∀ u,
+      (m.wr (a + j) u).isSome := by
+  intro bs
+  induction bs with
+  | nil => intro m a _ j hj _; simp at hj
+  | cons b bs ih =>
+    intro m a h j hj u
+    obtain ⟨m1, h1, hrest⟩ := wrN_cons_isSome h
+    cases j with
+    | zero =>
+      have hh : (m.wr a b).isSome :=
+        Option.isSome_iff_exists.mpr ⟨m1, h1⟩
+      have hf := wr_isSome_iff.mp hh
+      exact wr_isSome_iff.mpr hf
+    | succ j =>
+      have hj' : j < bs.length := by
+        simp only [List.length_cons] at hj; omega
+      have hh := ih hrest j hj' u
+      have hsh : wshape m = wshape m1 := (wr_wshape h1).symm
+      have hw := wr_some_of_wshape hsh hh
+      rwa [show a + 1 + j = a + (j + 1) by omega] at hw
+
+/-- Assemble a `wrN` over a same-shape memory from per-byte
+writability in the original. -/
+theorem wrN_isSome_of_forall_wr : ∀ (bs : List Nat) {m m' : Mem}
+    {a : Nat},
+    wshape m' = wshape m →
+    (∀ (j : Nat), j < bs.length → ∀ u, (m.wr (a + j) u).isSome) →
+    (m'.wrN a bs).isSome := by
+  intro bs
+  induction bs with
+  | nil =>
+    intro m m' a _ _
+    exact Option.isSome_iff_exists.mpr ⟨m', rfl⟩
+  | cons b bs ih =>
+    intro m m' a hsh h
+    have hw : (m'.wr a b).isSome :=
+      wr_some_of_wshape hsh (h 0 (by simp) b)
+    obtain ⟨m'', hm''⟩ := Option.isSome_iff_exists.mp hw
+    have h2 : ((m'.wr a b).bind (fun mm => mm.wrN (a + 1) bs)).isSome := by
+      rw [hm'']
+      show (m''.wrN (a + 1) bs).isSome
+      have hsh2 : wshape m'' = wshape m := (wr_wshape hm'').trans hsh
+      refine ih hsh2 (fun j hj u => ?_)
+      have hh := h (j + 1) (by simp only [List.length_cons]; omega) u
+      rwa [show a + 1 + j = a + (j + 1) by omega]
+    exact h2
+
+theorem bytes8_length (v : Nat) : (bytes8 v).length = 8 := by
+  simp [bytes8]
+
+/-- A `wr64` from per-byte writability. -/
+theorem wr64_isSome_of_forall_wr {m : Mem} {a v : Nat}
+    (h : ∀ (j : Nat), j < 8 → ∀ u, (m.wr (a + j) u).isSome) :
+    (wr64 m a v).isSome := by
+  show (m.wrN a (bytes8 v)).isSome
+  exact wrN_isSome_of_forall_wr (bs := bytes8 v) rfl
+    (fun j hj u => h j (by rw [bytes8_length] at hj; exact hj) u)
+
+/-- From a successful `wr64`, every byte offset is writable. -/
+theorem wr_isSome_of_wr64 {m : Mem} {a v : Nat}
+    (h : (wr64 m a v).isSome) {j : Nat} (hj : j < 8) (u : Nat) :
+    (m.wr (a + j) u).isSome := by
+  have h2 : (m.wrN a (bytes8 v)).isSome := h
+  exact wrN_isSome_decomp _ h2 j (by rw [bytes8_length]; exact hj) u
+
+/-- `StackRoom` is monotone in the depth. -/
+theorem stackRoom_mono {s : X86Int.St} {k k' : Nat}
+    (h : StackRoom s k) (hle : k' ≤ k) : StackRoom s k' := by
+  intro sp hr4 i hi v
+  exact h sp hr4 i (by omega) v
+
+/-- `StackRoom` transports to a same-shape memory with the
+stack pointer lowered by whole slots. -/
+theorem stackRoom_transport {s s' : X86Int.St}
+    {k k' t sp : Nat}
+    (hsh : wshape s'.mem = wshape s.mem)
+    (hr4 : s.reg 4 = some sp) (hr4' : s'.reg 4 = some (sp - 8 * t))
+    (hroom : StackRoom s k) (hk : t + k' ≤ k)
+    (hge : 8 * k ≤ sp) (hspW : sp < W) :
+    StackRoom s' k' := by
+  intro sp'' h4'' i hi v
+  have hsp'' : sp'' = sp - 8 * t := by
+    rw [hr4'] at h4''
+    exact (Option.some.inj h4'').symm
+  have hmod : ∀ d : Nat, d ≤ sp → (sp + W - d) % W = sp - d := by
+    intro d hd
+    have hh : sp + W - d = (sp - d) + W := by omega
+    rw [hh, Nat.add_mod_right, Nat.mod_eq_of_lt (by omega)]
+  have hA : (sp'' + W - 8 * (i + 1)) % W = sp - 8 * (t + i + 1) := by
+    have ee : sp - 8 * t + W - 8 * (i + 1) =
+        sp + W - 8 * (t + i + 1) := by omega
+    rw [hsp'', ee, hmod (8 * (t + i + 1)) (by omega)]
+  have hw64 := hroom sp hr4 (t + i) (by omega) v
+  rw [hmod (8 * (t + i + 1)) (by omega)] at hw64
+  rw [hA]
+  exact wr64_isSome_of_forall_wr (fun j hj u =>
+    wr_some_of_wshape hsh (wr_isSome_of_wr64 hw64 hj u))
+
+/-- A read succeeds when `find` hits a region. -/
+theorem rd_isSome_of_find {m : Mem} {a : Nat}
+    (h : ∃ i r, Mem.find m a 0 = some (i, r)) :
+    (m.rd a).isSome := by
+  obtain ⟨i, r, hf⟩ := h
+  obtain ⟨-, hle, hlt⟩ := find_some_mem hf
+  have hidx : a - r.base < r.data.length := by
+    unfold X86Env.Region.hi at hlt
+    omega
+  have hv : ∃ v, r.data[a - r.base]? = some v :=
+    ⟨r.data[a - r.base]'hidx, List.getElem?_eq_getElem hidx⟩
+  obtain ⟨v, hv⟩ := hv
+  refine Option.isSome_iff_exists.mpr ⟨v, ?_⟩
+  have he : m.rd a =
+      (do let x ← Mem.find m a 0; x.2.data[a - x.2.base]?) := rfl
+  rw [he, hf]
+  exact hv
+
+/-- An `rdN` from per-byte readability. -/
+theorem rdN_isSome_of_forall_rd : ∀ (n : Nat) {m : Mem} {a : Nat},
+    (∀ (j : Nat), j < n → (m.rd (a + j)).isSome) →
+    (m.rdN a n).isSome := by
+  intro n
+  induction n with
+  | zero => intro m a _; exact Option.isSome_iff_exists.mpr ⟨[], rfl⟩
+  | succ n ih =>
+    intro m a h
+    have h0 := h 0 (by omega)
+    obtain ⟨b, hb⟩ := Option.isSome_iff_exists.mp h0
+    have hr := ih (a := a + 1) (fun j hj => by
+      have hh := h (j + 1) (by omega)
+      rwa [show a + 1 + j = a + (j + 1) by omega])
+    obtain ⟨bs, hbs⟩ := Option.isSome_iff_exists.mp hr
+    exact Option.isSome_iff_exists.mpr
+      ⟨b :: bs, rdN_cons_some hb hbs⟩
+
+/-- An `rd64` from per-byte readability. -/
+theorem rd64_some_of_forall_rd {m : Mem} {a : Nat}
+    (h : ∀ (j : Nat), j < 8 → (m.rd (a + j)).isSome) :
+    ∃ v, rd64 m a = some v := by
+  have h8 := rdN_isSome_of_forall_rd 8 h
+  obtain ⟨bs, hbs⟩ := Option.isSome_iff_exists.mp h8
+  exact ⟨leVal bs, by rw [rd64, hbs]; rfl⟩
+
+/-- `StackRoom` for a three-region memory whose second region
+is the writable stack, disjoint from the first. -/
+theorem stackRoom_of_c2 {s : X86Int.St} {c1 c2 buf : Region}
+    {sp k : Nat}
+    (hmem : s.mem = [c1, c2, buf]) (hr4 : s.reg 4 = some sp)
+    (hrw : c2.rw = true) (hdisj : c1.hi ≤ c2.base)
+    (hlo : c2.base + 8 * k ≤ sp) (hhi : sp ≤ c2.hi)
+    (hspW : sp < W) :
+    StackRoom s k := by
+  have hfind : ∀ a : Nat, c2.base ≤ a → a < c2.hi →
+      Mem.find [c1, c2, buf] a 0 = some (1, c2) := by
+    intro a h1 h2
+    have hg : Mem.find [c1, c2, buf] a 0 =
+        (if c1.base ≤ a ∧ a < c1.hi then some (0, c1)
+          else if c2.base ≤ a ∧ a < c2.hi then some (1, c2)
+            else Mem.find [buf] a 2) := rfl
+    rw [hg, if_neg (by omega), if_pos ⟨h1, h2⟩]
+  intro sp' h4' i hi v
+  have hsp' : sp' = sp := by
+    rw [hr4] at h4'
+    exact (Option.some.inj h4').symm
+  rw [hsp']
+  have hmod : (sp + W - 8 * (i + 1)) % W = sp - 8 * (i + 1) := by
+    have hh : sp + W - 8 * (i + 1) = (sp - 8 * (i + 1)) + W := by
+      omega
+    rw [hh, Nat.add_mod_right, Nat.mod_eq_of_lt (by omega)]
+  rw [hmod]
+  have hslot : c2.base ≤ sp - 8 * (i + 1) := by omega
+  refine wr64_isSome_of_forall_wr (fun j hj u => ?_)
+  rw [hmem]
+  exact wr_isSome_iff.mpr ⟨1, c2,
+    hfind _ (by omega) (by omega), hrw⟩
+
+set_option maxRecDepth 8192 in
+/-- Entry to `loaded` under the witness: the 21-step prefix, the
+initial `mmap` (oracle-legal at its site) and the whole read
+loop, composed.  The oracle at the end is the remaining
+replicated placements over the table/scratch tail. -/
+theorem loader_init_to_loaded {f path argv0 stdin : List Nat}
+    {top : Nat} (hinit : Stage1InitOk f path argv0 top)
+    (hroom : Room f path argv0 top) :
+    ∃ A k s', A % page = 0 ∧ 0 < A ∧ A + stage1Mf f ≤ 2 ^ 47 ∧
+      (stage1Init f path argv0 [] [] top).mem.free A (stage1Mf f) =
+        true ∧
+      run stage1Im k
+        (Out.ok (stage1Init f path argv0 stdin (stage1Oracle f A)
+          top)) = Out.ok s' ∧
+      s'.rip = base + 0x134 ∧
+      s'.reg 3 = some A ∧ (∃ cap', s'.reg 12 = some cap') ∧
+      s'.reg 13 = some f.length ∧ s'.reg 14 = some 3 ∧
+      s'.reg 4 =
+        some ((X86Env.initStack top [argv0, path]).2 + 24) ∧
+      (∃ v, s'.reg 0 = some v) ∧ (∃ v, s'.reg 10 = some v) ∧
+      (∃ v, s'.reg 8 = some v) ∧ (∃ v, s'.reg 9 = some v) ∧
+      s'.k.oracle =
+        [.at (A + arenaFileBytes f),
+         .at (A + (arenaFileBytes f + arenaTableBytes f))] ∧
+      s'.k.fds = [some ⟨f, f.length⟩] ∧
+      (∃ c1 c2 buf', s'.mem = [c1, c2, buf'] ∧
+        c1.base = base ∧ c1.hi = base + stage1Code.length ∧
+        c2.base = (X86Env.initStack top [argv0, path]).1.base ∧
+        c2.hi = (X86Env.initStack top [argv0, path]).1.hi ∧
+        buf'.base = A ∧ (∃ cap', buf'.hi = A + cap' ∧
+          cap' ≤ arenaFileBytes f) ∧
+        buf'.rw = true ∧ c2.rw = true) ∧
+      s'.mem.rdN A f.length = some f ∧
+      (∃ bs, s'.mem.rdN A 20 = some bs) ∧
+      s'.regs.length = 16 ∧
+      (∃ t, run stage1Im 21
+        (Out.ok (stage1Init f path argv0 stdin (stage1Oracle f A)
+          top)) = Out.ok t ∧ OracleLegalAt t) ∧
+      StackRoom s' 10 ∧
+      s'.mem.rdN base stage1Code.length = some stage1Code := by
+  obtain ⟨hfB, -, -, hpath0, -, hpathlen, -, htop47, hleInit,
+    hstkhi⟩ := hinit
+  obtain ⟨A, hAmod, hApos, hAbound, hfree⟩ := hroom
+  have hdisjInit : base + stage1Code.length ≤
+      (X86Env.initStack top [argv0, path]).1.base := by
+    have h := hleInit
+    rw [phVaddr_eq, phMemsz_eq] at h
+    exact h
+  have hk0 : (stage1Init f path argv0 stdin (stage1Oracle f A)
+        top).k =
+      ⟨[(path, f)], [], stdin, [], stage1Oracle f A⟩ := by
+    simp [stage1Init]
+  obtain ⟨s1, hrun1, hs1rip, hs1r0, hs1r7, hs1r6, hs1r2, hs1r10, hs1r8,
+    hs1r9, hs1r14, hs1r4, hs1k, hshape, hs1len, ⟨stk1, hs1memC⟩⟩ :=
+    loader_entry_to_mmap
+      (stk := (X86Env.initStack top [argv0, path]).1)
+      (sp0 := (X86Env.initStack top [argv0, path]).2)
+      (stdinL := stdin) (oracle := stage1Oracle f A)
+      rfl rfl (stage1Init_rip _ _ _ _ _ _)
+      (stage1Init_regs_length _ _ _ _ _ _)
+      (stage1Init_reg4 _ _ _ _ _ _)
+      (fun i hi4 hi16 => stage1Init_reg_ne4 _ _ _ _ _ _ hi16 hi4)
+      (stage1Init_mem _ _ _ _ _ _) hk0 hdisjInit hstkhi htop47 hpath0
+      hpathlen
+  have hs1oracle : s1.k.oracle = stage1Oracle f A := by rw [hs1k]
+  have hhead : s1.k.oracle.head? = some (.at A) := by
+    rw [hs1oracle]
+    simp [stage1Oracle, List.replicate_succ]
+  have hfree1 : (stage1Init f path argv0 stdin (stage1Oracle f A)
+        top).mem.free A (stage1Mf f) = true := by
+    have hws : wshape (stage1Init f path argv0 stdin
+        (stage1Oracle f A) top).mem =
+        wshape (stage1Init f path argv0 [] [] top).mem := by
+      rw [stage1Init_mem, stage1Init_mem]
+    rw [free_of_wshape hws]
+    exact hfree
+  obtain ⟨hlegal, s2, hrun2, hs2rip, hs2rest⟩ :=
+    loader_mmap1_to_readloop (s' := s1) hs1rip hs1len hs1r0
+      hs1r7 hs1r6 hs1r2 hs1r10 hs1r8 hs1r9 hs1r14 hs1r4
+      (run_reg_some_ne11 21 (by decide)
+        (stage1Init_reg_ne4 _ _ _ _ _ _ (by decide) (by decide)) hrun1)
+      hshape hhead hAmod hApos hAbound hfree1
+  have hs2r3 := hs2rest.1
+  have hs2r12 := hs2rest.2.1
+  have hs2r13 := hs2rest.2.2.1
+  have hs2r14 := hs2rest.2.2.2.1
+  have hs2r4 := hs2rest.2.2.2.2.1
+  have hs2r0 := hs2rest.2.2.2.2.2.1
+  have hs2r10 := hs2rest.2.2.2.2.2.2.1
+  have hs2r8 := hs2rest.2.2.2.2.2.2.2.1
+  have hs2r9 := hs2rest.2.2.2.2.2.2.2.2.1
+  have hs2mem := hs2rest.2.2.2.2.2.2.2.2.2.1
+  have hs2k := hs2rest.2.2.2.2.2.2.2.2.2.2.1
+  have hs2len := hs2rest.2.2.2.2.2.2.2.2.2.2.2
+  have hshape2 : wshape s1.mem =
+      [(base, base + stage1Code.length, false),
+        ((X86Env.initStack top [argv0, path]).1.base,
+          (X86Env.initStack top [argv0, path]).1.hi,
+          (X86Env.initStack top [argv0, path]).1.rw)] := by
+    rw [hshape]
+    simp [stage1Init_mem, wshape, Region.hi]
+  have hlen2 : s1.mem.length = 2 := by
+    have h := congrArg List.length hshape2
+    simp only [wshape, List.length_map, List.length_cons,
+      List.length_nil] at h
+    exact h
+  obtain ⟨c1, c2, hs1mem⟩ : ∃ c1 c2, s1.mem = [c1, c2] := by
+    cases hm : s1.mem with
+    | nil => rw [hm] at hlen2; simp at hlen2
+    | cons c1 rest =>
+      cases rest with
+      | nil => rw [hm] at hlen2; simp at hlen2
+      | cons c2 rest2 =>
+        cases rest2 with
+        | nil => exact ⟨c1, c2, rfl⟩
+        | cons c3 rest3 => rw [hm] at hlen2; simp at hlen2
+  have hshape3 : ((c1.base, c1.hi, c1.rw) =
+      (base, base + stage1Code.length, false)) ∧
+      ((c2.base, c2.hi, c2.rw) =
+        ((X86Env.initStack top [argv0, path]).1.base,
+          (X86Env.initStack top [argv0, path]).1.hi,
+          (X86Env.initStack top [argv0, path]).1.rw)) := by
+    rw [hs1mem] at hshape2
+    simp only [wshape, List.map_cons, List.map_nil,
+      List.cons.injEq] at hshape2
+    exact ⟨hshape2.1, hshape2.2.1⟩
+  have hc1b : c1.base = base := by
+    have h := hshape3.1
+    simp only [Prod.mk.injEq] at h
+    exact h.1
+  have hc1hi : c1.hi = base + stage1Code.length := by
+    have h := hshape3.1
+    simp only [Prod.mk.injEq] at h
+    exact h.2.1
+  have hc2b : c2.base =
+      (X86Env.initStack top [argv0, path]).1.base := by
+    have h := hshape3.2
+    simp only [Prod.mk.injEq] at h
+    exact h.1
+  have hc2hi : c2.hi =
+      (X86Env.initStack top [argv0, path]).1.hi := by
+    have h := hshape3.2
+    simp only [Prod.mk.injEq] at h
+    exact h.2.1
+  have hc1eq : c1 = ⟨base, stage1Code, false⟩ := by
+    rw [hs1mem] at hs1memC
+    simp only [List.cons.injEq] at hs1memC
+    exact hs1memC.1
+  have hs2mem' : s2.mem =
+      [c1, c2, ⟨A, List.replicate 65536 0, true⟩] := by
+    rw [hs2mem, hs1mem]
+    rfl
+  have hfreeC : ∀ r ∈ ([⟨base, stage1Code, false⟩,
+        (X86Env.initStack top [argv0, path]).1] : Mem),
+      r.hi ≤ A ∨ A + stage1Mf f ≤ r.base := by
+    intro r hr
+    have h := X86Env.free_spec hfree r (by
+      have h2 : (stage1Init f path argv0 [] [] top).mem =
+          [⟨base, stage1Code, false⟩,
+            (X86Env.initStack top [argv0, path]).1] :=
+        stage1Init_mem _ _ _ _ _ _
+      rwa [h2])
+    rcases h with h | h
+    · exact Or.inr h
+    · exact Or.inl h
+  have hMfge : arenaFileBytes f ≤ stage1Mf f := by
+    unfold stage1Mf
+    omega
+  have hdisj1 : c1.hi ≤ A ∨ A + arenaFileBytes f ≤ c1.base := by
+    have h := hfreeC ⟨base, stage1Code, false⟩ List.mem_cons_self
+    have hhi : (⟨base, stage1Code, false⟩ : Region).hi =
+        base + stage1Code.length := by
+      simp only [Region.hi]
+    have hb : (⟨base, stage1Code, false⟩ : Region).base = base := rfl
+    rw [hhi, hb] at h
+    rcases h with h | h
+    · exact Or.inl (by rw [hc1hi]; exact h)
+    · exact Or.inr (by rw [hc1b]; omega)
+  have hdisj2 : c2.hi ≤ A ∨ A + arenaFileBytes f ≤ c2.base := by
+    have h := hfreeC (X86Env.initStack top [argv0, path]).1
+      (List.mem_cons_of_mem _ List.mem_cons_self)
+    rcases h with h | h
+    · exact Or.inl (by rw [hc2hi]; exact h)
+    · exact Or.inr (by rw [hc2b]; omega)
+  have hnext2 : (Kern.next s1.k).2.oracle =
+      List.replicate (stage1Growths f.length) (.at A) ++
+        [.at (A + arenaFileBytes f),
+         .at (A + (arenaFileBytes f + arenaTableBytes f))] := by
+    have ho : s1.k.oracle = .at A ::
+        (List.replicate (stage1Growths f.length) (.at A) ++
+          [.at (A + arenaFileBytes f),
+           .at (A + (arenaFileBytes f + arenaTableBytes f))]) := by
+      rw [hs1oracle, stage1Oracle, List.replicate_succ,
+        List.cons_append]
+    cases ho2 : s1.k.oracle with
+    | nil => simp [ho2] at ho
+    | cons c rest =>
+      have hnx : Kern.next s1.k =
+          (some c, { s1.k with oracle := rest }) := by
+        simp [Kern.next, ho2]
+      rw [hnx]
+      rw [ho2] at ho
+      injection ho with h1 h2
+  have hs2oracle : s2.k.oracle =
+      List.replicate (stage1Growths f.length) (.at A) ++
+        [.at (A + arenaFileBytes f),
+         .at (A + (arenaFileBytes f + arenaTableBytes f))] := by
+    rw [hs2k]
+    exact hnext2
+  have hs2fds : s2.k.fds = [some ⟨f, 0⟩] := by
+    have hnx : (Kern.next s1.k).2.fds = s1.k.fds := by
+      cases ho2 : s1.k.oracle with
+      | nil => simp [Kern.next, ho2]
+      | cons c rest => simp [Kern.next, ho2]
+    rw [hs2k, hnx, hs1k]
+  have hbuf0hi : (⟨A, List.replicate 65536 0, true⟩ : Region).hi =
+      A + 65536 := by
+    show A + (List.replicate 65536 0).length = A + 65536
+    rw [List.length_replicate]
+  have hA63 : A < 2 ^ 63 := by omega
+  have hboundL : A + 65536 * 2 ^ (stage1Growths f.length) ≤ 2 ^ 47 := by
+    have h1 := growths_cap_le_arena f
+    omega
+  obtain ⟨k, s3, hrun3, hs3rip, hs3r3, ⟨cap', hs3r12⟩, hs3r13, hs3r14,
+    hs3r4, hs3r0, hs3r10, hs3r8, hs3r9, hs3oracle, hs3fds,
+    ⟨buf3, hs3mem, hbuf3base, ⟨cap'', hbuf3hi, hbuf3bound⟩, hbuf3rw⟩,
+    hs3content, hs3win,
+    hs3len⟩ :=
+    loader_read_loop (f.length - 0) (by rw [Nat.sub_zero]) hs2rip
+      hs2len hs2r3 hs2r12 hs2r13 hs2r14 hs2r4 hs2r0 hs2r10 hs2r8 hs2r9
+      hs2mem' rfl rfl hbuf0hi hdisj1 hdisj2 (growths_cap_le_arena f)
+      (by simp [Mem.rdN]) hs2fds hs2oracle ⟨A + arenaFileBytes f, rfl⟩
+      hfB (Nat.zero_le _) (by decide) hAmod hApos hA63 (by decide)
+      (by decide) hboundL (growths_cap_gt f.length)
+      (growths_min f.length) (by decide)
+  have hrun : run stage1Im (21 + 6 + k)
+      (Out.ok (stage1Init f path argv0 stdin (stage1Oracle f A)
+        top)) = Out.ok s3 := by
+    rw [show 21 + 6 + k = 21 + (6 + k) by omega, run_add stage1Im 21 _,
+      hrun1, run_add stage1Im 6 k, hrun2, hrun3]
+  exact ⟨A, 21 + 6 + k, s3, hAmod, hApos, hAbound, hfree, hrun, hs3rip,
+    hs3r3, ⟨cap', hs3r12⟩, hs3r13, hs3r14, hs3r4, hs3r0, hs3r10, hs3r8,
+    hs3r9, hs3oracle, hs3fds,
+    ⟨c1, c2, buf3, hs3mem, hc1b, hc1hi, hc2b, hc2hi, hbuf3base,
+      ⟨cap'', hbuf3hi, hbuf3bound⟩, hbuf3rw, by
+        have h := hshape3.2
+        simp only [Prod.mk.injEq] at h
+        rw [h.2.2]
+        exact rfl⟩, hs3content, hs3win, hs3len,
+    ⟨s1, hrun1, hlegal⟩, by
+      have hc2rw : c2.rw = true := by
+        have h := hshape3.2
+        simp only [Prod.mk.injEq] at h
+        rw [h.2.2]
+        exact rfl
+      have hsp0 : (X86Env.initStack top [argv0, path]).2 =
+          c2.base + 4096 := by
+        have h1 := initStack_sp top argv0 path
+        rw [← hc2b] at h1
+        have hsr : X86Env.stackRoom = 4096 := rfl
+        rw [hsr] at h1
+        exact h1
+      have hhi2 : (X86Env.initStack top [argv0, path]).2 + 24 ≤
+          c2.hi := by
+        have hlen := initStack_data_length top argv0 path
+        have hp : 4096 ≤ X86Env.pages
+            (56 + ((argv0.length + 1) + (path.length + 1)) + 1) := by
+          unfold X86Env.pages X86Env.page
+          have h1 : 1 ≤ (56 + ((argv0.length + 1) +
+              (path.length + 1)) + 1 + 4095) / 4096 :=
+            Nat.div_pos (by omega) (by decide)
+          omega
+        have hh : c2.hi = c2.base +
+            (X86Env.initStack top [argv0, path]).1.data.length := by
+          have e : (X86Env.initStack top [argv0, path]).1.hi =
+              (X86Env.initStack top [argv0, path]).1.base +
+                (X86Env.initStack top [argv0, path]).1.data.length :=
+            rfl
+          rw [hc2hi, e, ← hc2b]
+        have hsr : X86Env.stackRoom = 4096 := rfl
+        omega
+      refine stackRoom_of_c2 hs3mem hs3r4 hc2rw ?_ ?_ hhi2 ?_
+      · rw [hc1hi, hc2b]; exact hdisjInit
+      · omega
+      · have hW : W = 2 ^ 64 := rfl
+        have ht : c2.hi = top := by rw [hc2hi]; exact hstkhi
+        omega, by
+      have h1 := rdN_first_region stage1Code.length
+        (r := c1) (t := [c2, buf3]) (x := base) (Nat.le_of_eq hc1b)
+        (Nat.le_of_eq hc1hi.symm)
+      rw [hs3mem, hc1eq]
+      rw [hc1eq] at h1
+      have h1' : Mem.rdN (⟨base, stage1Code, false⟩ :: [c2, buf3])
+            base stage1Code.length =
+          some ((stage1Code.drop (base - base)).take
+            stage1Code.length) := h1
+      have h2 : (stage1Code.drop (base - base)).take
+            stage1Code.length = stage1Code := by
+        rw [Nat.sub_self]
+        exact List.take_length
+      rw [h2] at h1'
+      exact h1'⟩
+
+/-- Layout of the parser region `base + 0x134` to `aCheckStart`
+(`base + 0x452`): every instruction of the header checks, the two
+allocation sites and the word-table decode, discharged against
+the real image by `decide +kernel`. -/
+structure ParserCode (im : Nat → Option (Ins × Nat)) : Prop where
+  p134 : im (base + 0x134) = some (.mov 15 3, 3)
+  p137 : im (base + 0x137) = some (.alu (.add) 15 13, 3)
+  p13a : im (base + 0x13a) = some (.mov 6 3, 3)
+  p13d : im (base + 0x13d) = some (.cmpI 13 16, 4)
+  p141 : im (base + 0x141) = some (.jcc 3 (base + 0x148), 2)
+  p143 : im (base + 0x143) = some (.jmp (base + 0x124), 5)
+  p148 : im (base + 0x148) = some (.ld 0 6 0, 3)
+  p14b : im (base + 0x14b) = some (.mov32 0 0, 2)
+  p14d : im (base + 0x14d) = some (.cmpI 0 827478099, 7)
+  p154 : im (base + 0x154) = some (.jcc 4 (base + 0x15b), 2)
+  p156 : im (base + 0x156) = some (.jmp (base + 0x124), 5)
+  p15b : im (base + 0x15b) = some (.mov 2 6, 3)
+  p15e : im (base + 0x15e) = some (.aluI (.add) 2 4, 4)
+  p162 : im (base + 0x162) = some (.ld 0 2 0, 3)
+  p165 : im (base + 0x165) = some (.mov32 12 0, 3)
+  p168 : im (base + 0x168) = some (.mov 2 6, 3)
+  p16b : im (base + 0x16b) = some (.aluI (.add) 2 8, 4)
+  p16f : im (base + 0x16f) = some (.ld 0 2 0, 3)
+  p172 : im (base + 0x172) = some (.mov32 10 0, 3)
+  p175 : im (base + 0x175) = some (.mov 2 6, 3)
+  p178 : im (base + 0x178) = some (.aluI (.add) 2 12, 4)
+  p17c : im (base + 0x17c) = some (.ld 0 2 0, 3)
+  p17f : im (base + 0x17f) = some (.mov32 1 0, 2)
+  p181 : im (base + 0x181) = some (.aluI (.add) 6 16, 4)
+  p185 : im (base + 0x185) = some (.test 10 10, 3)
+  p188 : im (base + 0x188) = some (.jcc 5 (base + 0x18f), 2)
+  p18a : im (base + 0x18a) = some (.jmp (base + 0x124), 5)
+  p18f : im (base + 0x18f) = some (.test 1 1, 3)
+  p192 : im (base + 0x192) = some (.jcc 4 (base + 0x1c7), 2)
+  p194 : im (base + 0x194) = some (.mov 2 15, 3)
+  p197 : im (base + 0x197) = some (.alu (.sub) 2 6, 3)
+  p19a : im (base + 0x19a) = some (.cmpI 2 4, 4)
+  p19e : im (base + 0x19e) = some (.jcc 3 (base + 0x1a5), 2)
+  p1a0 : im (base + 0x1a0) = some (.jmp (base + 0x124), 5)
+  p1a5 : im (base + 0x1a5) = some (.ld32 0 6 0, 2)
+  p1a7 : im (base + 0x1a7) = some (.mov 0 0, 3)
+  p1aa : im (base + 0x1aa) = some (.aluI (.add) 6 4, 4)
+  p1ae : im (base + 0x1ae) = some (.mov 2 15, 3)
+  p1b1 : im (base + 0x1b1) = some (.alu (.sub) 2 6, 3)
+  p1b4 : im (base + 0x1b4) = some (.alu (.sub) 2 0, 3)
+  p1b7 : im (base + 0x1b7) = some (.jcc 3 (base + 0x1be), 2)
+  p1b9 : im (base + 0x1b9) = some (.jmp (base + 0x124), 5)
+  p1be : im (base + 0x1be) = some (.alu (.add) 6 0, 3)
+  p1c1 : im (base + 0x1c1) = some (.aluI (.sub) 1 1, 4)
+  p1c5 : im (base + 0x1c5) = some (.jmp (base + 0x18f), 2)
+  p1c7 : im (base + 0x1c7) = some (.mov 0 10, 3)
+  p1ca : im (base + 0x1ca) = some (.alu (.add) 0 0, 3)
+  p1cd : im (base + 0x1cd) = some (.alu (.add) 0 0, 3)
+  p1d0 : im (base + 0x1d0) = some (.mov 2 0, 3)
+  p1d3 : im (base + 0x1d3) = some (.alu (.add) 0 0, 3)
+  p1d6 : im (base + 0x1d6) = some (.alu (.add) 0 0, 3)
+  p1d9 : im (base + 0x1d9) = some (.alu (.add) 0 2, 3)
+  p1dc : im (base + 0x1dc) = some (.mov 2 15, 3)
+  p1df : im (base + 0x1df) = some (.alu (.sub) 2 6, 3)
+  p1e2 : im (base + 0x1e2) = some (.cmp 0 2, 3)
+  p1e5 : im (base + 0x1e5) = some (.jcc 6 (base + 0x1ec), 2)
+  p1e7 : im (base + 0x1e7) = some (.jmp (base + 0x124), 5)
+  p1ec : im (base + 0x1ec) = some (.push 6, 1)
+  p1ed : im (base + 0x1ed) = some (.mov32 2 10, 3)
+  p1f0 : im (base + 0x1f0) = some (.alu (.add) 2 2, 3)
+  p1f3 : im (base + 0x1f3) = some (.alu (.add) 2 2, 3)
+  p1f6 : im (base + 0x1f6) = some (.alu (.add) 2 2, 3)
+  p1f9 : im (base + 0x1f9) = some (.alu (.add) 2 2, 3)
+  p1fc : im (base + 0x1fc) = some (.alu (.add) 2 2, 3)
+  p1ff : im (base + 0x1ff) = some (.alu (.add) 2 2, 3)
+  p202 : im (base + 0x202) = some (.movI 0 9, 5)
+  p207 : im (base + 0x207) = some (.alu (.xor) 7 7, 2)
+  p209 : im (base + 0x209) = some (.mov 6 2, 3)
+  p20c : im (base + 0x20c) = some (.movI 2 3, 5)
+  p211 : im (base + 0x211) = some (.movI 10 34, 6)
+  p217 : im (base + 0x217) = some (.pushI 18446744073709551615, 2)
+  p219 : im (base + 0x219) = some (.pop 8, 2)
+  p21b : im (base + 0x21b) = some (.alu (.xor) 9 9, 3)
+  p21e : im (base + 0x21e) = some (.syscall, 2)
+  p220 : im (base + 0x220) = some (.test 0 0, 3)
+  p223 : im (base + 0x223) = some (.jcc 9 (base + 0x22a), 2)
+  p225 : im (base + 0x225) = some (.jmp (base + 0x12c), 5)
+  p22a : im (base + 0x22a) = some (.mov 14 0, 3)
+  p22d : im (base + 0x22d) = some (.movI 0 9, 5)
+  p232 : im (base + 0x232) = some (.alu (.xor) 7 7, 2)
+  p234 : im (base + 0x234) = some (.mov 6 13, 3)
+  p237 : im (base + 0x237) = some (.movI 2 3, 5)
+  p23c : im (base + 0x23c) = some (.movI 10 34, 6)
+  p242 : im (base + 0x242) = some (.pushI 18446744073709551615, 2)
+  p244 : im (base + 0x244) = some (.pop 8, 2)
+  p246 : im (base + 0x246) = some (.alu (.xor) 9 9, 3)
+  p249 : im (base + 0x249) = some (.syscall, 2)
+  p24b : im (base + 0x24b) = some (.test 0 0, 3)
+  p24e : im (base + 0x24e) = some (.jcc 9 (base + 0x255), 2)
+  p250 : im (base + 0x250) = some (.jmp (base + 0x12c), 5)
+  p255 : im (base + 0x255) = some (.mov 11 0, 3)
+  p258 : im (base + 0x258) = some (.pop 6, 1)
+  p259 : im (base + 0x259) = some (.mov 7 14, 3)
+  p25c : im (base + 0x25c) = some (.ld 13 3 8, 4)
+  p260 : im (base + 0x260) = some (.mov32 13 13, 3)
+  p263 : im (base + 0x263) = some (.pop 0, 1)
+  p264 : im (base + 0x264) = some (.pop 0, 1)
+  p265 : im (base + 0x265) = some (.pop 0, 1)
+  p266 : im (base + 0x266) = some (.pop 0, 1)
+  p267 : im (base + 0x267) = some (.pop 0, 1)
+  p268 : im (base + 0x268) = some (.pop 0, 1)
+  p269 : im (base + 0x269) = some (.jmp (base + 0x2c9), 5)
+  p26e : im (base + 0x26e) = some (.ld32 0 2 0, 2)
+  p270 : im (base + 0x270) = some (.ret, 1)
+  p271 : im (base + 0x271) = some (.mov 2 15, 3)
+  p274 : im (base + 0x274) = some (.alu (.sub) 2 6, 3)
+  p277 : im (base + 0x277) = some (.jcc 3 (base + 0x27e), 2)
+  p279 : im (base + 0x279) = some (.jmp (base + 0x124), 5)
+  p27e : im (base + 0x27e) = some (.cmpI 2 4, 4)
+  p282 : im (base + 0x282) = some (.jcc 3 (base + 0x289), 2)
+  p284 : im (base + 0x284) = some (.jmp (base + 0x124), 5)
+  p289 : im (base + 0x289) = some (.mov 2 6, 3)
+  p28c : im (base + 0x28c) = some (.call (base + 0x26e), 5)
+  p291 : im (base + 0x291) = some (.aluI (.add) 6 4, 4)
+  p295 : im (base + 0x295) = some (.ret, 1)
+  p296 : im (base + 0x296) = some (.push 1, 1)
+  p297 : im (base + 0x297) = some (.ld 0 7 48, 4)
+  p29b : im (base + 0x29b) = some (.ld 1 7 32, 4)
+  p29f : im (base + 0x29f) = some (.test 1 1, 3)
+  p2a2 : im (base + 0x2a2) = some (.jcc 4 (base + 0x2c0), 2)
+  p2a4 : im (base + 0x2a4) = some (.mov 2 0, 3)
+  p2a7 : im (base + 0x2a7) = some (.push 0, 1)
+  p2a8 : im (base + 0x2a8) = some (.call (base + 0x26e), 5)
+  p2ad : im (base + 0x2ad) = some (.pop 2, 1)
+  p2ae : im (base + 0x2ae) = some (.cmp 0 12, 3)
+  p2b1 : im (base + 0x2b1) = some (.jcc 4 (base + 0x2c4), 2)
+  p2b3 : im (base + 0x2b3) = some (.mov 0 2, 3)
+  p2b6 : im (base + 0x2b6) = some (.aluI (.add) 0 12, 4)
+  p2ba : im (base + 0x2ba) = some (.aluI (.sub) 1 1, 4)
+  p2be : im (base + 0x2be) = some (.jmp (base + 0x29f), 2)
+  p2c0 : im (base + 0x2c0) = some (.alu (.xor) 0 0, 2)
+  p2c2 : im (base + 0x2c2) = some (.pop 1, 1)
+  p2c3 : im (base + 0x2c3) = some (.ret, 1)
+  p2c4 : im (base + 0x2c4) = some (.mov 0 2, 3)
+  p2c7 : im (base + 0x2c7) = some (.pop 1, 1)
+  p2c8 : im (base + 0x2c8) = some (.ret, 1)
+  p2c9 : im (base + 0x2c9) = some (.mov 1 13, 3)
+  p2cc : im (base + 0x2cc) = some (.test 1 1, 3)
+  p2cf : im (base + 0x2cf) = some (.jcc 5 (base + 0x2d6), 2)
+  p2d1 : im (base + 0x2d1) = some (.jmp (base + 0x419), 5)
+  p2d6 : im (base + 0x2d6) = some (.call (base + 0x271), 5)
+  p2db : im (base + 0x2db) = some (.st 7 0 0, 3)
+  p2de : im (base + 0x2de) = some (.call (base + 0x271), 5)
+  p2e3 : im (base + 0x2e3) = some (.st 7 8 0, 4)
+  p2e7 : im (base + 0x2e7) = some (.call (base + 0x271), 5)
+  p2ec : im (base + 0x2ec) = some (.st 7 16 0, 4)
+  p2f0 : im (base + 0x2f0) = some (.call (base + 0x271), 5)
+  p2f5 : im (base + 0x2f5) = some (.st 7 24 0, 4)
+  p2f9 : im (base + 0x2f9) = some (.call (base + 0x271), 5)
+  p2fe : im (base + 0x2fe) = some (.st 7 32 0, 4)
+  p302 : im (base + 0x302) = some (.st 7 40 6, 4)
+  p306 : im (base + 0x306) = some (.push 1, 1)
+  p307 : im (base + 0x307) = some (.ld 1 7 24, 4)
+  p30b : im (base + 0x30b) = some (.test 1 1, 3)
+  p30e : im (base + 0x30e) = some (.jcc 5 (base + 0x315), 2)
+  p310 : im (base + 0x310) = some (.jmp (base + 0x3db), 5)
+  p315 : im (base + 0x315) = some (.mov 2 15, 3)
+  p318 : im (base + 0x318) = some (.alu (.sub) 2 6, 3)
+  p31b : im (base + 0x31b) = some (.jcc 3 (base + 0x322), 2)
+  p31d : im (base + 0x31d) = some (.jmp (base + 0x124), 5)
+  p322 : im (base + 0x322) = some (.cmpI 2 1, 4)
+  p326 : im (base + 0x326) = some (.jcc 3 (base + 0x32d), 2)
+  p328 : im (base + 0x328) = some (.jmp (base + 0x124), 5)
+  p32d : im (base + 0x32d) = some (.ld8 0 6 0, 3)
+  p330 : im (base + 0x330) = some (.cmpI 0 57, 4)
+  p334 : im (base + 0x334) = some (.jcc 3 (base + 0x33b), 2)
+  p336 : im (base + 0x336) = some (.jmp (base + 0x3ad), 5)
+  p33b : im (base + 0x33b) = some (.cmpI 0 128, 7)
+  p342 : im (base + 0x342) = some (.jcc 5 (base + 0x349), 2)
+  p344 : im (base + 0x344) = some (.jmp (base + 0x3a5), 5)
+  p349 : im (base + 0x349) = some (.cmpI 0 131, 7)
+  p350 : im (base + 0x350) = some (.jcc 5 (base + 0x357), 2)
+  p352 : im (base + 0x352) = some (.jmp (base + 0x3ad), 5)
+  p357 : im (base + 0x357) = some (.cmpI 0 132, 7)
+  p35e : im (base + 0x35e) = some (.jcc 5 (base + 0x365), 2)
+  p360 : im (base + 0x360) = some (.jmp (base + 0x3ad), 5)
+  p365 : im (base + 0x365) = some (.cmpI 0 133, 7)
+  p36c : im (base + 0x36c) = some (.jcc 5 (base + 0x373), 2)
+  p36e : im (base + 0x36e) = some (.jmp (base + 0x3ad), 5)
+  p373 : im (base + 0x373) = some (.cmpI 0 140, 7)
+  p37a : im (base + 0x37a) = some (.jcc 5 (base + 0x381), 2)
+  p37c : im (base + 0x37c) = some (.jmp (base + 0x3ad), 5)
+  p381 : im (base + 0x381) = some (.cmpI 0 129, 7)
+  p388 : im (base + 0x388) = some (.jcc 3 (base + 0x38f), 2)
+  p38a : im (base + 0x38a) = some (.jmp (base + 0x124), 5)
+  p38f : im (base + 0x38f) = some (.cmpI 0 139, 7)
+  p396 : im (base + 0x396) = some (.jcc 6 (base + 0x39d), 2)
+  p398 : im (base + 0x398) = some (.jmp (base + 0x124), 5)
+  p39d : im (base + 0x39d) = some (.movI 10 5, 6)
+  p3a3 : im (base + 0x3a3) = some (.jmp (base + 0x3b3), 2)
+  p3a5 : im (base + 0x3a5) = some (.movI 10 9, 6)
+  p3ab : im (base + 0x3ab) = some (.jmp (base + 0x3b3), 2)
+  p3ad : im (base + 0x3ad) = some (.movI 10 1, 6)
+  p3b3 : im (base + 0x3b3) = some (.mov 2 15, 3)
+  p3b6 : im (base + 0x3b6) = some (.alu (.sub) 2 6, 3)
+  p3b9 : im (base + 0x3b9) = some (.cmp 2 10, 3)
+  p3bc : im (base + 0x3bc) = some (.jcc 3 (base + 0x3c3), 2)
+  p3be : im (base + 0x3be) = some (.jmp (base + 0x124), 5)
+  p3c3 : im (base + 0x3c3) = some (.mov 2 6, 3)
+  p3c6 : im (base + 0x3c6) = some (.alu (.sub) 2 3, 3)
+  p3c9 : im (base + 0x3c9) = some (.alu (.add) 2 11, 3)
+  p3cc : im (base + 0x3cc) = some (.st8 2 0 10, 3)
+  p3cf : im (base + 0x3cf) = some (.alu (.add) 6 10, 3)
+  p3d2 : im (base + 0x3d2) = some (.aluI (.sub) 1 1, 4)
+  p3d6 : im (base + 0x3d6) = some (.jmp (base + 0x30b), 5)
+  p3db : im (base + 0x3db) = some (.pop 1, 1)
+  p3dc : im (base + 0x3dc) = some (.st 7 48 6, 4)
+  p3e0 : im (base + 0x3e0) = some (.ld 0 7 32, 4)
+  p3e4 : im (base + 0x3e4) = some (.mov 2 0, 3)
+  p3e7 : im (base + 0x3e7) = some (.alu (.add) 0 0, 3)
+  p3ea : im (base + 0x3ea) = some (.alu (.add) 0 0, 3)
+  p3ed : im (base + 0x3ed) = some (.alu (.add) 2 2, 3)
+  p3f0 : im (base + 0x3f0) = some (.alu (.add) 2 2, 3)
+  p3f3 : im (base + 0x3f3) = some (.alu (.add) 2 2, 3)
+  p3f6 : im (base + 0x3f6) = some (.alu (.add) 0 2, 3)
+  p3f9 : im (base + 0x3f9) = some (.mov 2 15, 3)
+  p3fc : im (base + 0x3fc) = some (.alu (.sub) 2 6, 3)
+  p3ff : im (base + 0x3ff) = some (.cmp 2 0, 3)
+  p402 : im (base + 0x402) = some (.jcc 3 (base + 0x409), 2)
+  p404 : im (base + 0x404) = some (.jmp (base + 0x124), 5)
+  p409 : im (base + 0x409) = some (.alu (.add) 6 0, 3)
+  p40c : im (base + 0x40c) = some (.aluI (.add) 7 64, 4)
+  p410 : im (base + 0x410) = some (.aluI (.sub) 1 1, 4)
+  p414 : im (base + 0x414) = some (.jmp (base + 0x2cc), 5)
+  p419 : im (base + 0x419) = some (.cmp 6 15, 3)
+  p41c : im (base + 0x41c) = some (.jcc 4 (base + 0x423), 2)
+  p41e : im (base + 0x41e) = some (.jmp (base + 0x124), 5)
+  p423 : im (base + 0x423) = some (.cmp 12 13, 3)
+  p426 : im (base + 0x426) = some (.jcc 2 (base + 0x42d), 2)
+  p428 : im (base + 0x428) = some (.jmp (base + 0x124), 5)
+  p42d : im (base + 0x42d) = some (.mov 2 12, 3)
+  p430 : im (base + 0x430) = some (.alu (.add) 2 2, 3)
+  p433 : im (base + 0x433) = some (.alu (.add) 2 2, 3)
+  p436 : im (base + 0x436) = some (.alu (.add) 2 2, 3)
+  p439 : im (base + 0x439) = some (.alu (.add) 2 2, 3)
+  p43c : im (base + 0x43c) = some (.alu (.add) 2 2, 3)
+  p43f : im (base + 0x43f) = some (.alu (.add) 2 2, 3)
+  p442 : im (base + 0x442) = some (.alu (.add) 2 14, 3)
+  p445 : im (base + 0x445) = some (.ld 0 2 0, 3)
+  p448 : im (base + 0x448) = some (.test 0 0, 3)
+  p44b : im (base + 0x44b) = some (.jcc 4 (base + 0x452), 2)
+  p44d : im (base + 0x44d) = some (.jmp (base + 0x124), 5)
+
+set_option maxHeartbeats 0 in
+theorem stage1_parserCode : ParserCode stage1Im := by
+  apply ParserCode.mk <;> decide +kernel
+/-- The `fail2` block has the same status-exit shape as `fail1`,
+with status 2. -/
+theorem stage1_exitCode_fail2 : ExitCode stage1Im aFail2 2 := by
+  constructor <;> decide +kernel
+
+/-- Any state that reaches `fail2` with the registers defined and
+stack room exits 2. -/
+theorem exit2_of_fail2 {sp : Nat} (hsp32 : 32 ≤ sp) (hspW : sp < W) :
+    ∀ s, s.rip = aFail2 → s.reg 4 = some sp → RegsOk s →
+      StackRoom s 1 →
+      ∃ k, run stage1Im k (Out.ok s) = Out.exit 2 := by
+  intro s hrip hr4 hregs hroom
+  obtain ⟨k, hk⟩ := Status_exit_of_room stage1_exitCode_fail2
+    (by unfold W; decide) (by omega) hspW s hrip hr4 hregs hroom
+  exact ⟨k, by simpa using hk⟩
+
+
+end SporosX1

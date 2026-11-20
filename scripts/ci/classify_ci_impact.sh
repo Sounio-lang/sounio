@@ -99,7 +99,7 @@ else
     case "$path" in stdlib/*) mark stdlib; recognized=true ;; esac
     # The SCO examples and their expected stdout are scientific regression fixtures.
     case "$path" in tests/*|examples/sco_corpus/*|check_sounio.sh) mark tests; recognized=true ;; esac
-    case "$path" in formal/lean4/*|formal/*.lean|formal/lakefile.lean|formal/lean-toolchain|formal/lake-manifest.json|scripts/ci/lean_axiom_report.sh|bootstrap/model/sporos_*) mark lean; recognized=true ;; esac
+    case "$path" in formal/lean4/*|formal/*.lean|formal/lakefile.lean|formal/lean-toolchain|formal/lake-manifest.json|scripts/ci/lean_axiom_report.sh|bootstrap/model/*) mark lean; recognized=true ;; esac
     case "$path" in
       formal/lean4/*|scripts/ci/sedenion_*|scripts/ci/cd_tower_*|scripts/ci/gresnigt_*|scripts/ci/furey_*|scripts/ci/octonion_probes_gate.sh|scripts/research/sedenion_*|scripts/research/cd_tower_*|scripts/research/oct_*|scripts/research/ossm_*|scripts/ci/ade_wildgen_*|scripts/research/ade_wildgen_*)
         mark math
