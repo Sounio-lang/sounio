@@ -10,6 +10,7 @@
 import assert from 'node:assert/strict';
 import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
+import { parseFragment } from 'parse5';
 
 export const STATUS_LABEL = 'Sounio 3.0 (pre-release)';
 
@@ -18,12 +19,41 @@ const RELEASE_TOKEN = /\b(?:pre-1\.0|v\d+(?:\.\d+){1,2}(?:[-+][0-9A-Za-z.]+)?|(?
 const websiteRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
 const distDir = path.join(websiteRoot, 'dist');
 
+function attr(node, name) {
+  return (node.attrs || []).find((item) => item.name === name)?.value ?? '';
+}
+
+function collectProse(node, parts) {
+  if (!node || typeof node !== 'object') return;
+  const name = node.nodeName;
+  if (name === 'script') {
+    if (attr(node, 'type') === 'application/ld+json') {
+      for (const child of node.childNodes || []) {
+        if (child.nodeName === '#text') parts.push(child.value);
+      }
+    }
+    return;
+  }
+  if (name === 'style' || name === 'svg') return;
+  if (name === 'meta' && attr(node, 'name').toLowerCase() === 'generator') return;
+  if (name === '#text') {
+    parts.push(node.value);
+    return;
+  }
+  if (name === 'meta') {
+    const content = attr(node, 'content');
+    if (content) parts.push(content);
+  }
+  const label = attr(node, 'aria-label');
+  if (label) parts.push(label);
+  for (const child of node.childNodes || []) collectProse(child, parts);
+  if (node.content) collectProse(node.content, parts);
+}
+
 export function proseForVersionScan(html) {
-  return html
-    .replace(/<meta\b[^>]*\bname="generator"[^>]*>/gi, '')
-    .replace(/<script\b(?![^>]*type="application\/ld\+json")[^>]*>[\s\S]*?<\/script>/gi, '')
-    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '')
-    .replace(/<svg\b[^>]*>[\s\S]*?<\/svg>/gi, '');
+  const parts = [];
+  collectProse(parseFragment(html), parts);
+  return parts.join('\n');
 }
 
 export function releaseTokens(html) {
