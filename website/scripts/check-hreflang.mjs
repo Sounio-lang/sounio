@@ -70,6 +70,28 @@ function assertExamples() {
   if (aboutCodes.length !== aboutExpected.length || aboutExpected.some((code) => !aboutCodes.includes(code))) {
     errors.push(`about hreflang codes drifted: ${aboutCodes.join(',')}`);
   }
+  const expandedCodes = hreflangLinks('/learn/epistemic/expanded-uncertainty/').map((link) => link.hreflang);
+  const expandedExpected = ['en', 'ja', 'x-default'];
+  if (
+    expandedCodes.length !== expandedExpected.length
+    || expandedExpected.some((code) => !expandedCodes.includes(code))
+    || expandedCodes.includes('pt-BR')
+    || expandedCodes.includes('zh-CN')
+  ) {
+    errors.push(`expanded-uncertainty hreflang drifted: ${expandedCodes.join(',')}`);
+  }
+  const expandedJa = canonicalPathname('/ja/learn/epistemic/expanded-uncertainty/');
+  if (expandedJa !== '/ja/learn/epistemic/expanded-uncertainty/') {
+    errors.push(`expected ja expanded-uncertainty to self-canonicalize, got ${expandedJa}`);
+  }
+  const expandedPt = canonicalPathname('/pt/learn/epistemic/expanded-uncertainty/');
+  if (expandedPt !== '/pt/learn/epistemic/expanded-uncertainty/' || isIndexableUrl('/pt/learn/epistemic/expanded-uncertainty/')) {
+    errors.push(`expected pt expanded-uncertainty to self-canonicalize and stay out of the index, got ${expandedPt}`);
+  }
+  const expandedDefault = hreflangLinks('/ja/learn/epistemic/expanded-uncertainty/').find((link) => link.hreflang === 'x-default');
+  if (expandedDefault?.href !== absoluteUrl('/learn/epistemic/expanded-uncertainty/')) {
+    errors.push(`expanded-uncertainty x-default is ${expandedDefault?.href ?? '(missing)'}`);
+  }
   const homeDefault = hreflangLinks('/').find((link) => link.hreflang === 'x-default');
   if (homeDefault?.href !== `${SITE}/`) errors.push(`home x-default is ${homeDefault?.href}`);
   const esHome = canonicalPathname('/es/');
@@ -169,6 +191,7 @@ function parseHead(html) {
   }
   return {
     htmlLang: htmlLangMatch?.[1] ?? '',
+    robots: robots?.[1] ?? '',
     noindex: Boolean(robots?.[1]?.includes('noindex')),
     refresh,
     canonicals: links.filter((link) => link.rel === 'canonical').map((link) => link.href),
@@ -308,6 +331,34 @@ async function run() {
   const effectsLoc = absoluteUrl('/learn/effects/');
   if (!sitemapLocs.some((entry) => entry.loc === effectsLoc)) {
     errors.push(`sitemap missing ${effectsLoc}`);
+  }
+
+  const ptExpanded = absoluteUrl('/pt/learn/epistemic/expanded-uncertainty/');
+  const ptPage = pages.get(ptExpanded);
+  if (!ptPage) {
+    errors.push(`missing pt expanded-uncertainty stub ${ptExpanded}`);
+  } else {
+    if (ptPage.head.robots !== 'noindex, follow') {
+      errors.push(`pt expanded-uncertainty robots ${ptPage.head.robots || '(missing)'} != noindex, follow`);
+    }
+    if (ptPage.head.alternates.length > 0) {
+      errors.push('pt expanded-uncertainty stub emits hreflang');
+    }
+    if (ptPage.head.canonicals[0] !== ptExpanded) {
+      errors.push(`pt expanded-uncertainty canonical ${ptPage.head.canonicals[0]} != ${ptExpanded}`);
+    }
+    if (!ptPage.head.noindex) {
+      errors.push('pt expanded-uncertainty stub is indexable');
+    }
+  }
+  if (sitemapLocs.some((entry) => entry.loc === ptExpanded)) {
+    errors.push(`sitemap lists noindex pt expanded-uncertainty stub ${ptExpanded}`);
+  }
+  for (const [url, page] of pages) {
+    if (!url.includes('/pt/') || page.head.noindex) continue;
+    if (new URL(url).pathname.includes('/learn/epistemic/expanded-uncertainty/')) {
+      errors.push(`${page.rel}: indexable dist/pt expanded-uncertainty page`);
+    }
   }
 
   if (errors.length > 0) {

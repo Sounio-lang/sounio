@@ -55,6 +55,7 @@ What counts as a translation:
 - **`/honesty/`** has a full Portuguese article; other locales render the English article.
 - **`/about/`** has a full Portuguese article; other locales render the English article. `/about/vision/` and `/about/roadmap/` stay English-only.
 - **`/releases/`** has a distinct notes array for every locale, including `zh-hk`.
+- **`/learn/epistemic/expanded-uncertainty/`** is an English article with a Japanese mirror. hreflang on those two URLs is `en`, `ja`, and `x-default` (the English URL). The header and footer language lists on that page are the same two locales. `/pt/learn/epistemic/expanded-uncertainty/` is a stub of the English article: it canonicalizes to itself, is `noindex, follow`, emits no hreflang, and is not in the sitemap. No other locale of this path is generated.
 - **Everything else** is English-only even when the chrome or the `<title>` is translated. That includes `/packages/` (the Spanish URL is the English package index), `/proof/` (a few Portuguese labels inside an English article), `/playground/`, `/plan/`, `/credits/`, `/dissertation/`, the insights index (it lists English posts only), and the showcases index.
 
 Redirects (`/blog/`, `/docs/**`, `/showcases/<slug>/`, `/registry/**`, `/changelog/`, `/manifesto/`, `/roadmap/`, `/platform/`) are not in the sitemap and are not hreflang targets.
