@@ -182,10 +182,27 @@ theorem runChunks_eq :
 
 def stage1HexChunks : List (List Nat) := X86Min.Data.sporosStage1HexChunks
 
+private theorem foldl_append_eq_append_flatten :
+    ∀ (xs : List (List Nat)) (acc : List Nat),
+      xs.foldl (· ++ ·) acc = acc ++ xs.flatten := by
+  intro xs
+  induction xs with
+  | nil => intro acc; simp
+  | cons x xs ih =>
+    intro acc
+    simp only [List.foldl_cons, List.flatten_cons, ih, List.append_assoc]
+
 set_option maxRecDepth 10000 in
 theorem hex_flatten : X86Min.Data.sporosStage1Hex = stage1HexChunks.flatten := by
-  simp only [stage1HexChunks, X86Min.Data.sporosStage1HexChunks, X86Min.Data.sporosStage1Hex, List.flatten_cons,
-    List.flatten_nil, List.append_nil, List.append_assoc]
+  have h := foldl_append_eq_append_flatten
+    X86Min.Data.sporosStage1HexChunks.tail X86Min.Data.sporosStage1Hex_0
+  have h1 : X86Min.Data.sporosStage1Hex =
+      X86Min.Data.sporosStage1HexChunks.tail.foldl (· ++ ·) X86Min.Data.sporosStage1Hex_0 := rfl
+  have h2 : stage1HexChunks.flatten =
+      X86Min.Data.sporosStage1Hex_0 ++ X86Min.Data.sporosStage1HexChunks.tail.flatten := by
+    simp only [stage1HexChunks, X86Min.Data.sporosStage1HexChunks, List.tail_cons, List.flatten_cons]
+  rw [h1, h2]
+  exact h
 
 set_option maxHeartbeats 0 in
 theorem chunks_finish :

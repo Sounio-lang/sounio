@@ -105,7 +105,7 @@ theorem foldPlan2_den (ar : Arena) (f g : Nat → DVal) (l : List Nat) :
 theorem α_ld (t : DSt) (a n : Nat) :
     (α t).ld a n = (t.ld a n).map (fun r => (r.1, r.2.den (leaves t.ar))) := by
   simp only [St.ld, DSt.ld, α]
-  split <;> simp [foldPlan_den, αv]
+  by_cases h : a + n ≤ t.msize <;> simp [h, foldPlan_den, αv]
 
 theorem α_st (t : DSt) (a n v qn : Nat) :
     (α t).st a n v (leaves t.ar qn) = (t.st a n v qn).map α := by

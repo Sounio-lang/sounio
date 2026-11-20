@@ -328,7 +328,7 @@ theorem trun_ok (C : Channel σ) : ∀ n o, (trun C n o).ok := by
 theorem trun_clean (C : Channel σ) : ∀ n s, ∀ y ∈ faultFree (trun C n (some s)), y = some (iter C.f n s) := by
   intro n
   induction n with
-  | zero => intro s y hy; simpa [trun, faultFree_pureF] using hy
+  | zero => intro s y hy; simpa [trun, faultFree_pureF, iter] using hy
   | succ n ih =>
     intro s y hy
     simp only [trun, faultFree_bindF, List.mem_flatMap] at hy
