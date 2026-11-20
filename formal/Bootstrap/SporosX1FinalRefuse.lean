@@ -62624,4 +62624,1165 @@ theorem None_tripleB {im : Nat → Option (Ins × Nat)} {entry walk l32 annl : N
         rw [hm15w, wrN_wshape _ _ _ hm5s, hg10mem]
         exact hshm4
 
+
+theorem hand_litB {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
+    {pr : Prog} {wd : Word} {w p sp tbl : Nat} (st : WalkStatic pr wd w p sp tbl)
+    {n : Nat} {rest : List Instr} {i c : Nat} {cur hm : Height} {s : X86Int.St}
+    (inv : WalkInv pr wd w p sp tbl s (Instr.lit n :: rest) i c cur hm) :
+    ∃ m s2, m ≤ 48 ∧ run im m (Out.ok s) = Out.ok s2 ∧ s2.rip = aFallTail ∧
+      HPost s s2 ⟨hm.d + 1, hm.a⟩ (c + 9) sp := by
+  have hge : ((wd.ann.lookup i).getD cur) = hm := inv.hlink.symm
+  have hbhead := hBnd_head inv.hb
+  rw [hge] at hbhead
+  have hltlen : i < wd.code.length := by
+    have h := inv.isum
+    simp only [List.length_cons] at h
+    omega
+  have hcW : c < W := by
+    have h := inv.cbound
+    have ecb0 : codeBytes (Instr.lit n :: rest) =
+        (Instr.lit n).enc.length + codeBytes rest := rfl
+    rw [ecb0] at h
+    omega
+  have hclen : c + 9 < W := by
+    have h := inv.cbound
+    have ecb0 : codeBytes (Instr.lit n :: rest) =
+        (Instr.lit n).enc.length + codeBytes rest := rfl
+    rw [ecb0] at h
+    have hlen : (Instr.lit n).enc.length = 9 := rfl
+    rw [hlen] at h
+    omega
+  have hcs : s.mem.rdN c (Instr.lit n).enc.length = some (Instr.lit n).enc ∧
+      CodeSeq s.mem (c + (Instr.lit n).enc.length) rest := inv.csq
+  have h9 : s.mem.rdN c 9 = some (0x80 :: leBytes n 8) := hcs.1
+  have hbyte : s.mem.rd c = some 128 := (rdN_cons h9).1
+  have hs : hstep pr wd hm (Instr.lit n) = some (some ⟨hm.d + 1, hm.a⟩) := rfl
+  obtain ⟨k1, s1, hk1, hr1, hrip1, -, hr11, hr61, hr71, hr81, hr91, hr41, hg1, hm1⟩ :=
+    WalkLit_tripleB cfg.walk (by decide) hm c i w sp wd.code.length st.w56 hltlen
+      hcW s inv.rip inv.r8 inv.r9 inv.r6 inv.r4 inv.r7 inv.r1 inv.len16 inv.fnc
+      hbyte
+  obtain ⟨k2, s2, hk2, hr2, hrip2, hfall2, -, hr62, hm2, hg2⟩ :=
+    (Lit_tripleFB cfg.lit pr wd n) hm c (Option.isSome_iff_exists.mpr ⟨_, hs⟩)
+      hbhead.1 hbhead.2 hclen s1 hrip1
+      ⟨hr81, hr91, hr61, by rw [hm1]; exact Option.isSome_iff_exists.mpr ⟨_, h9⟩⟩
+  obtain ⟨hs2r8, hs2r9⟩ := hfall2 _ hs
+  refine ⟨k1 + k2, s2, (by omega), by rw [run_add im k1 k2, hr1, hr2], hrip2,
+    hs2r8, hs2r9, hr62,
+    by rw [hg2 4 (by decide) (by decide) (by decide), hg1 4 (by decide)]; exact inv.r4,
+    by rw [hg2 1 (by decide) (by decide) (by decide), hg1 1 (by decide)],
+    by rw [hg2 7 (by decide) (by decide) (by decide), hg1 7 (by decide)],
+    by rw [hg2 13 (by decide) (by decide) (by decide), hg1 13 (by decide)],
+    by rw [hg2 14 (by decide) (by decide) (by decide), hg1 14 (by decide)],
+    by intro x m _; rw [hm2, hm1],
+    by rw [hm2, hm1],
+    (run_regs_length k2 hr2).trans (run_regs_length k1 hr1),
+    by rw [hg2 5 (by decide) (by decide) (by decide), hg1 5 (by decide)]⟩
+
+theorem hand_torB {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
+    {pr : Prog} {wd : Word} {w p sp tbl : Nat} (st : WalkStatic pr wd w p sp tbl)
+    {rest : List Instr} {i c : Nat} {cur hm : Height} {s : X86Int.St}
+    (inv : WalkInv pr wd w p sp tbl s (Instr.tor :: rest) i c cur hm)
+    (hs : hstep pr wd hm Instr.tor = some (some ⟨hm.d - 1, hm.a + 1⟩)) :
+    ∃ m s2, m ≤ 48 ∧ run im m (Out.ok s) = Out.ok s2 ∧ s2.rip = aFallTail ∧
+      HPost s s2 ⟨hm.d - 1, hm.a + 1⟩ (c + 1) sp := by
+  have hge : ((wd.ann.lookup i).getD cur) = hm := inv.hlink.symm
+  have hbhead := hBnd_head inv.hb
+  rw [hge] at hbhead
+  have hltlen : i < wd.code.length := by
+    have h := inv.isum
+    simp only [List.length_cons] at h
+    omega
+  have hcW : c < W := by
+    have h := inv.cbound
+    have ecb0 : codeBytes (Instr.tor :: rest) =
+        Instr.tor.enc.length + codeBytes rest := rfl
+    rw [ecb0] at h
+    omega
+  have hclen : c + 1 < W := by
+    have h := inv.cbound
+    have ecb0 : codeBytes (Instr.tor :: rest) =
+        Instr.tor.enc.length + codeBytes rest := rfl
+    rw [ecb0] at h
+    have hlen : Instr.tor.enc.length = 1 := rfl
+    rw [hlen] at h
+    omega
+  have hcs : s.mem.rdN c Instr.tor.enc.length = some Instr.tor.enc ∧
+      CodeSeq s.mem (c + Instr.tor.enc.length) rest := inv.csq
+  have h1b : s.mem.rdN c 1 = some [131] := hcs.1
+  have hbyte : s.mem.rd c = some 131 := (rdN_cons h1b).1
+  obtain ⟨k1, s1, hk1, hr1, hrip1, -, hr11, hr61, hr71, hr81, hr91, hr41, hg1, hm1⟩ :=
+    WalkTor_tripleB cfg.walk (by decide) hm c i w sp wd.code.length st.w56 hltlen
+      hcW s inv.rip inv.r8 inv.r9 inv.r6 inv.r4 inv.r7 inv.r1 inv.len16 inv.fnc
+      hbyte
+  obtain ⟨k2, s2, hk2, hr2, hrip2, hfall2, -, hr62, hm2, hg2⟩ :=
+    (Tor_tripleFB cfg.tor pr wd) hm c (Option.isSome_iff_exists.mpr ⟨_, hs⟩)
+      hbhead.1 hbhead.2 hclen s1 hrip1
+      ⟨hr81, hr91, hr61, by rw [hm1]; exact Option.isSome_iff_exists.mpr ⟨_, h1b⟩⟩
+  obtain ⟨hs2r8, hs2r9⟩ := hfall2 _ hs
+  refine ⟨k1 + k2, s2, (by omega), by rw [run_add im k1 k2, hr1, hr2], hrip2,
+    hs2r8, hs2r9, hr62,
+    by rw [hg2 4 (by decide) (by decide) (by decide), hg1 4 (by decide)]; exact inv.r4,
+    by rw [hg2 1 (by decide) (by decide) (by decide), hg1 1 (by decide)],
+    by rw [hg2 7 (by decide) (by decide) (by decide), hg1 7 (by decide)],
+    by rw [hg2 13 (by decide) (by decide) (by decide), hg1 13 (by decide)],
+    by rw [hg2 14 (by decide) (by decide) (by decide), hg1 14 (by decide)],
+    by intro x m _; rw [hm2, hm1],
+    by rw [hm2, hm1],
+    (run_regs_length k2 hr2).trans (run_regs_length k1 hr1),
+    by rw [hg2 5 (by decide) (by decide) (by decide), hg1 5 (by decide)]⟩
+
+theorem hand_strB {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
+    {pr : Prog} {wd : Word} {w p sp tbl : Nat} (st : WalkStatic pr wd w p sp tbl)
+    {n : Nat} {rest : List Instr} {i c : Nat} {cur hm : Height} {s : X86Int.St}
+    (inv : WalkInv pr wd w p sp tbl s (Instr.str n :: rest) i c cur hm) :
+    ∃ m s2, m ≤ 48 ∧ run im m (Out.ok s) = Out.ok s2 ∧ s2.rip = aFallTail ∧
+      HPost s s2 ⟨hm.d + 2, hm.a⟩ (c + 5) sp := by
+  have hbhead : hm.d + 2 < W ∧ hm.a + 1 < W := by
+    have h1 := hBnd_head inv.hb
+    rwa [inv.hlink.symm] at h1
+  have hcs : s.mem.rdN c (Instr.str n).enc.length = some (Instr.str n).enc ∧
+      CodeSeq s.mem (c + (Instr.str n).enc.length) rest := inv.csq
+  have h5 : s.mem.rdN c 5 = some (0x81 :: leBytes n 4) := hcs.1
+  have hbyte : s.mem.rd c = some 129 := (rdN_cons h5).1
+  have hs : hstep pr wd hm (Instr.str n) = some (some ⟨hm.d + 2, hm.a⟩) := rfl
+  obtain ⟨k1, s1, hk1, hr1, hrip1, -, hr11, hr61, hr71, hr81, hr91, hr41, hg1, hm1⟩ :=
+    WalkStr_tripleB cfg.walk (by decide) hm c i w sp wd.code.length st.w56
+      (i_lt_of_inv inv) (c_lt_of_inv inv) s inv.rip inv.r8 inv.r9 inv.r6 inv.r4
+      inv.r7 inv.r1 inv.len16 inv.fnc hbyte
+  obtain ⟨k2, s2, hk2, hr2, hrip2, hfall2, -, hr62, hm2, hg2⟩ :=
+    (Str_tripleFB cfg.strc pr wd n) hm c (Option.isSome_iff_exists.mpr ⟨_, hs⟩)
+      hbhead.1 hbhead.2 (c_add_len_lt inv rfl) s1 hrip1
+      ⟨hr81, hr91, hr61, by rw [hm1]; exact Option.isSome_iff_exists.mpr ⟨_, h5⟩⟩
+  obtain ⟨hs2r8, hs2r9⟩ := hfall2 _ hs
+  refine ⟨k1 + k2, s2, (by omega), by rw [run_add im k1 k2, hr1, hr2], hrip2,
+    hs2r8, hs2r9, hr62,
+    by rw [hg2 4 (by decide) (by decide) (by decide), hg1 4 (by decide)]; exact inv.r4,
+    by rw [hg2 1 (by decide) (by decide) (by decide), hg1 1 (by decide)],
+    by rw [hg2 7 (by decide) (by decide) (by decide), hg1 7 (by decide)],
+    by rw [hg2 13 (by decide) (by decide) (by decide), hg1 13 (by decide)],
+    by rw [hg2 14 (by decide) (by decide) (by decide), hg1 14 (by decide)],
+    by intro x m _; rw [hm2, hm1],
+    by rw [hm2, hm1],
+    (run_regs_length k2 hr2).trans (run_regs_length k1 hr1),
+    by rw [hg2 5 (by decide) (by decide) (by decide), hg1 5 (by decide)]⟩
+
+theorem hand_fromrB {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
+    {pr : Prog} {wd : Word} {w p sp tbl : Nat} (st : WalkStatic pr wd w p sp tbl)
+    {rest : List Instr} {i c : Nat} {cur hm : Height} {s : X86Int.St}
+    (inv : WalkInv pr wd w p sp tbl s (Instr.fromr :: rest) i c cur hm)
+    (hs : hstep pr wd hm Instr.fromr = some (some ⟨hm.d + 1, hm.a - 1⟩)) :
+    ∃ m s2, m ≤ 48 ∧ run im m (Out.ok s) = Out.ok s2 ∧ s2.rip = aFallTail ∧
+      HPost s s2 ⟨hm.d + 1, hm.a - 1⟩ (c + 1) sp := by
+  have hbhead : hm.d + 2 < W ∧ hm.a + 1 < W := by
+    have h1 := hBnd_head inv.hb
+    rwa [inv.hlink.symm] at h1
+  have hcs : s.mem.rdN c Instr.fromr.enc.length = some Instr.fromr.enc ∧
+      CodeSeq s.mem (c + Instr.fromr.enc.length) rest := inv.csq
+  have h1b : s.mem.rdN c 1 = some [132] := hcs.1
+  have hbyte : s.mem.rd c = some 132 := (rdN_cons h1b).1
+  obtain ⟨k1, s1, hk1, hr1, hrip1, -, hr11, hr61, hr71, hr81, hr91, hr41, hg1, hm1⟩ :=
+    WalkFromr_tripleB cfg.walk (by decide) hm c i w sp wd.code.length st.w56
+      (i_lt_of_inv inv) (c_lt_of_inv inv) s inv.rip inv.r8 inv.r9 inv.r6 inv.r4
+      inv.r7 inv.r1 inv.len16 inv.fnc hbyte
+  obtain ⟨k2, s2, hk2, hr2, hrip2, hfall2, -, hr62, hm2, hg2⟩ :=
+    (Fromr_tripleFB cfg.fromr pr wd) hm c (Option.isSome_iff_exists.mpr ⟨_, hs⟩)
+      hbhead.1 hbhead.2 (c_add_len_lt inv rfl) s1 hrip1
+      ⟨hr81, hr91, hr61, by rw [hm1]; exact Option.isSome_iff_exists.mpr ⟨_, h1b⟩⟩
+  obtain ⟨hs2r8, hs2r9⟩ := hfall2 _ hs
+  refine ⟨k1 + k2, s2, (by omega), by rw [run_add im k1 k2, hr1, hr2], hrip2,
+    hs2r8, hs2r9, hr62,
+    by rw [hg2 4 (by decide) (by decide) (by decide), hg1 4 (by decide)]; exact inv.r4,
+    by rw [hg2 1 (by decide) (by decide) (by decide), hg1 1 (by decide)],
+    by rw [hg2 7 (by decide) (by decide) (by decide), hg1 7 (by decide)],
+    by rw [hg2 13 (by decide) (by decide) (by decide), hg1 13 (by decide)],
+    by rw [hg2 14 (by decide) (by decide) (by decide), hg1 14 (by decide)],
+    by intro x m _; rw [hm2, hm1],
+    by rw [hm2, hm1],
+    (run_regs_length k2 hr2).trans (run_regs_length k1 hr1),
+    by rw [hg2 5 (by decide) (by decide) (by decide), hg1 5 (by decide)]⟩
+
+theorem hand_rfetchB {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
+    {pr : Prog} {wd : Word} {w p sp tbl : Nat} (st : WalkStatic pr wd w p sp tbl)
+    {rest : List Instr} {i c : Nat} {cur hm : Height} {s : X86Int.St}
+    (inv : WalkInv pr wd w p sp tbl s (Instr.rfetch :: rest) i c cur hm)
+    (hs : hstep pr wd hm Instr.rfetch = some (some ⟨hm.d + 1, hm.a⟩)) :
+    ∃ m s2, m ≤ 48 ∧ run im m (Out.ok s) = Out.ok s2 ∧ s2.rip = aFallTail ∧
+      HPost s s2 ⟨hm.d + 1, hm.a⟩ (c + 1) sp := by
+  have hbhead : hm.d + 2 < W ∧ hm.a + 1 < W := by
+    have h1 := hBnd_head inv.hb
+    rwa [inv.hlink.symm] at h1
+  have hcs : s.mem.rdN c Instr.rfetch.enc.length = some Instr.rfetch.enc ∧
+      CodeSeq s.mem (c + Instr.rfetch.enc.length) rest := inv.csq
+  have h1b : s.mem.rdN c 1 = some [133] := hcs.1
+  have hbyte : s.mem.rd c = some 133 := (rdN_cons h1b).1
+  obtain ⟨k1, s1, hk1, hr1, hrip1, -, hr11, hr61, hr71, hr81, hr91, hr41, hg1, hm1⟩ :=
+    WalkRfetch_tripleB cfg.walk (by decide) hm c i w sp wd.code.length st.w56
+      (i_lt_of_inv inv) (c_lt_of_inv inv) s inv.rip inv.r8 inv.r9 inv.r6 inv.r4
+      inv.r7 inv.r1 inv.len16 inv.fnc hbyte
+  obtain ⟨k2, s2, hk2, hr2, hrip2, hfall2, -, hr62, hm2, hg2⟩ :=
+    (Rfetch_tripleFB cfg.rfetch pr wd) hm c (Option.isSome_iff_exists.mpr ⟨_, hs⟩)
+      hbhead.1 hbhead.2 (c_add_len_lt inv rfl) s1 hrip1
+      ⟨hr81, hr91, hr61, by rw [hm1]; exact Option.isSome_iff_exists.mpr ⟨_, h1b⟩⟩
+  obtain ⟨hs2r8, hs2r9⟩ := hfall2 _ hs
+  refine ⟨k1 + k2, s2, (by omega), by rw [run_add im k1 k2, hr1, hr2], hrip2,
+    hs2r8, hs2r9, hr62,
+    by rw [hg2 4 (by decide) (by decide) (by decide), hg1 4 (by decide)]; exact inv.r4,
+    by rw [hg2 1 (by decide) (by decide) (by decide), hg1 1 (by decide)],
+    by rw [hg2 7 (by decide) (by decide) (by decide), hg1 7 (by decide)],
+    by rw [hg2 13 (by decide) (by decide) (by decide), hg1 13 (by decide)],
+    by rw [hg2 14 (by decide) (by decide) (by decide), hg1 14 (by decide)],
+    by intro x m _; rw [hm2, hm1],
+    by rw [hm2, hm1],
+    (run_regs_length k2 hr2).trans (run_regs_length k1 hr1),
+    by rw [hg2 5 (by decide) (by decide) (by decide), hg1 5 (by decide)]⟩
+
+theorem hand_pickB {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
+    {pr : Prog} {wd : Word} {w p sp tbl : Nat} (st : WalkStatic pr wd w p sp tbl)
+    {n : Nat} {rest : List Instr} {i c : Nat} {cur hm : Height} {s : X86Int.St}
+    (inv : WalkInv pr wd w p sp tbl s (Instr.pick n :: rest) i c cur hm)
+    (hs : hstep pr wd hm (Instr.pick n) = some (some ⟨hm.d + 1, hm.a⟩)) :
+    ∃ m s2, m ≤ 52 ∧ run im m (Out.ok s) = Out.ok s2 ∧ s2.rip = aFallTail ∧
+      HPost s s2 ⟨hm.d + 1, hm.a⟩ (c + 5) sp := by
+  have hbhead : hm.d + 2 < W ∧ hm.a + 1 < W := by
+    have h1 := hBnd_head inv.hb
+    rwa [inv.hlink.symm] at h1
+  have hnlt : n < hm.d := (hstep_pick hs).1
+  have himmok : n < 256 ^ 4 := inv.imm _ (List.mem_cons_self)
+  have hcs : s.mem.rdN c (Instr.pick n).enc.length = some (Instr.pick n).enc ∧
+      CodeSeq s.mem (c + (Instr.pick n).enc.length) rest := inv.csq
+  have h5 : s.mem.rdN c 5 = some (0x82 :: leBytes n 4) := hcs.1
+  have hbyte : s.mem.rd c = some 130 := (rdN_cons h5).1
+  have hw8s : ∀ v, (wr64 s.mem (sp - 8) v).isSome := by
+    intro v
+    have hh := inv.room sp inv.r4 0 (by decide) v
+    rwa [slot_sub (k := 0 + 1) (by have h32 := st.sp32; omega) st.spW] at hh
+  obtain ⟨k1, s1, hk1, hr1, hrip1, -, hr11, hr61, hr71, hr81, hr91, hr41, hg1, hm1⟩ :=
+    WalkPick_tripleB cfg.walk (by decide) hm c i w sp wd.code.length st.w56
+      (i_lt_of_inv inv) (c_lt_of_inv inv) s inv.rip inv.r8 inv.r9 inv.r6 inv.r4
+      inv.r7 inv.r1 inv.len16 inv.fnc hbyte
+  have himm : (s1.mem.rdN (c + 1) 4).map leVal = some n := by
+    rw [hm1]
+    obtain ⟨-, himm0⟩ := imm32_of_enc h5
+    rwa [Nat.mod_eq_of_lt himmok] at himm0
+  have hframeL : ∀ m, wr64 s1.mem (sp - 8) (aPick + 12) = some m →
+      m.rdN (c + 1) 4 = s1.mem.rdN (c + 1) 4 := by
+    intro m hmwr
+    exact rdN_wr64_other hmwr (by
+      have h2 := (disjC5_of_inv inv rfl).1
+      have h32 := st.sp32
+      cases h2 with
+      | inl h => exact Or.inl (by omega)
+      | inr h => exact Or.inr (by omega))
+  obtain ⟨k2, s2, hk2, hr2, hrip2, hs2r8, hs2r9, hr62, hs2r4, hfr2, hg2, hsh2⟩ :=
+    (Pick_tripleB cfg.pick cfg.l32 (by decide)) hm c n sp hnlt (by omega)
+      (c_add_len_lt inv rfl) (by have h32 := st.sp32; omega) st.spW s1 hrip1
+      hr81 hr91 hr61 hr41 himm (by intro v; rw [hm1]; exact hw8s v) hframeL
+  refine ⟨k1 + k2, s2, (by omega), by rw [run_add im k1 k2, hr1, hr2], hrip2,
+    hs2r8, hs2r9, hr62, hs2r4,
+    by rw [hg2 1 (by decide) (by decide) (by decide) (by decide) (by decide), hg1 1 (by decide)],
+    by rw [hg2 7 (by decide) (by decide) (by decide) (by decide) (by decide), hg1 7 (by decide)],
+    by rw [hg2 13 (by decide) (by decide) (by decide) (by decide) (by decide), hg1 13 (by decide)],
+    by rw [hg2 14 (by decide) (by decide) (by decide) (by decide) (by decide), hg1 14 (by decide)],
+    by
+      intro x m hx
+      have hx8 : x + m ≤ sp - 8 ∨ sp ≤ x := by
+        have h32 := st.sp32
+        cases hx with
+        | inl h => exact Or.inl (by omega)
+        | inr h => exact Or.inr h
+      rw [hfr2 x m hx8, hm1],
+    hsh2.trans (congrArg wshape hm1),
+    (run_regs_length k2 hr2).trans (run_regs_length k1 hr1),
+    by rw [hg2 5 (by decide) (by decide) (by decide) (by decide) (by decide), hg1 5 (by decide)]⟩
+
+theorem hand_locgetB {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
+    {pr : Prog} {wd : Word} {w p sp tbl : Nat} (st : WalkStatic pr wd w p sp tbl)
+    {n : Nat} {rest : List Instr} {i c : Nat} {cur hm : Height} {s : X86Int.St}
+    (inv : WalkInv pr wd w p sp tbl s (Instr.locget n :: rest) i c cur hm)
+    (hs : hstep pr wd hm (Instr.locget n) = some (some ⟨hm.d + 1, hm.a⟩)) :
+    ∃ m s2, m ≤ 52 ∧ run im m (Out.ok s) = Out.ok s2 ∧ s2.rip = aFallTail ∧
+      HPost s s2 ⟨hm.d + 1, hm.a⟩ (c + 5) sp := by
+  have hbhead : hm.d + 2 < W ∧ hm.a + 1 < W := by
+    have h1 := hBnd_head inv.hb
+    rwa [inv.hlink.symm] at h1
+  have hnlt : n < wd.locals := (hstep_locget hs).1
+  have himmok : n < 256 ^ 4 := inv.imm _ (List.mem_cons_self)
+  have hcs : s.mem.rdN c (Instr.locget n).enc.length = some (Instr.locget n).enc ∧
+      CodeSeq s.mem (c + (Instr.locget n).enc.length) rest := inv.csq
+  have h5 : s.mem.rdN c 5 = some (0x86 :: leBytes n 4) := hcs.1
+  have hbyte : s.mem.rd c = some 134 := (rdN_cons h5).1
+  have hw8s : ∀ v, (wr64 s.mem (sp - 8) v).isSome := by
+    intro v
+    have hh := inv.room sp inv.r4 0 (by decide) v
+    rwa [slot_sub (k := 0 + 1) (by have h32 := st.sp32; omega) st.spW] at hh
+  obtain ⟨k1, s1, hk1, hr1, hrip1, -, hr11, hr61, hr71, hr81, hr91, hr41, hg1, hm1⟩ :=
+    WalkLocget_tripleB cfg.walk (by decide) hm c i w sp wd.code.length st.w56
+      (i_lt_of_inv inv) (c_lt_of_inv inv) s inv.rip inv.r8 inv.r9 inv.r6 inv.r4
+      inv.r7 inv.r1 inv.len16 inv.fnc hbyte
+  have hlen1 : 16 ≤ s1.regs.length := by
+    have e := run_regs_length k1 hr1
+    rw [e]; exact inv.len16
+  have himm : (s1.mem.rdN (c + 1) 4).map leVal = some n := by
+    rw [hm1]
+    obtain ⟨-, himm0⟩ := imm32_of_enc h5
+    rwa [Nat.mod_eq_of_lt himmok] at himm0
+  have hdisjw8 : sp ≤ w + 16 ∨ w + 24 ≤ sp - 8 := by
+    have h32 := st.sp32
+    cases st.disjw with
+    | inl h => exact Or.inl (by omega)
+    | inr h => exact Or.inr (by omega)
+  obtain ⟨k2, s2, hk2, hr2, hrip2, hs2r8, hs2r9, hr62, hs2r4, hg2, hfr2, hsh2⟩ :=
+    (Locget_tripleB cfg.locget cfg.l32 (by decide)) hm c n sp w hnlt (by omega)
+      (c_add_len_lt inv rfl) (by have h56 := st.w56; omega)
+      (by have h32 := st.sp32; omega) st.spW (disjC5_of_inv inv rfl).2 hdisjw8
+      s1 hrip1 hr81 hr91 hr61 hr41 hr71 hlen1 himm
+      (by rw [hm1]; exact inv.floc) (by intro v; rw [hm1]; exact hw8s v)
+  refine ⟨k1 + k2, s2, (by omega), by rw [run_add im k1 k2, hr1, hr2], hrip2,
+    hs2r8, hs2r9, hr62, hs2r4,
+    by rw [hg2 1 (by decide) (by decide) (by decide) (by decide) (by decide) (by decide), hg1 1 (by decide)],
+    by rw [hg2 7 (by decide) (by decide) (by decide) (by decide) (by decide) (by decide), hg1 7 (by decide)],
+    by rw [hg2 13 (by decide) (by decide) (by decide) (by decide) (by decide) (by decide), hg1 13 (by decide)],
+    by rw [hg2 14 (by decide) (by decide) (by decide) (by decide) (by decide) (by decide), hg1 14 (by decide)],
+    by
+      intro x m hx
+      have hx8 : x + m ≤ sp - 8 ∨ sp ≤ x := by
+        have h32 := st.sp32
+        cases hx with
+        | inl h => exact Or.inl (by omega)
+        | inr h => exact Or.inr h
+      rw [hfr2 x m hx8, hm1],
+    hsh2.trans (congrArg wshape hm1),
+    (run_regs_length k2 hr2).trans (run_regs_length k1 hr1),
+    by rw [hg2 5 (by decide) (by decide) (by decide) (by decide) (by decide) (by decide), hg1 5 (by decide)]⟩
+
+theorem hand_locsetB {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
+    {pr : Prog} {wd : Word} {w p sp tbl : Nat} (st : WalkStatic pr wd w p sp tbl)
+    {n : Nat} {rest : List Instr} {i c : Nat} {cur hm : Height} {s : X86Int.St}
+    (inv : WalkInv pr wd w p sp tbl s (Instr.locset n :: rest) i c cur hm)
+    (hs : hstep pr wd hm (Instr.locset n) = some (some ⟨hm.d - 1, hm.a⟩)) :
+    ∃ m s2, m ≤ 54 ∧ run im m (Out.ok s) = Out.ok s2 ∧ s2.rip = aFallTail ∧
+      HPost s s2 ⟨hm.d - 1, hm.a⟩ (c + 5) sp := by
+  have hbhead : hm.d + 2 < W ∧ hm.a + 1 < W := by
+    have h1 := hBnd_head inv.hb
+    rwa [inv.hlink.symm] at h1
+  obtain ⟨hd1, hnlt, -⟩ := hstep_locset hs
+  have himmok : n < 256 ^ 4 := inv.imm _ (List.mem_cons_self)
+  have hcs : s.mem.rdN c (Instr.locset n).enc.length = some (Instr.locset n).enc ∧
+      CodeSeq s.mem (c + (Instr.locset n).enc.length) rest := inv.csq
+  have h5 : s.mem.rdN c 5 = some (0x87 :: leBytes n 4) := hcs.1
+  have hbyte : s.mem.rd c = some 135 := (rdN_cons h5).1
+  have hw8s : ∀ v, (wr64 s.mem (sp - 8) v).isSome := by
+    intro v
+    have hh := inv.room sp inv.r4 0 (by decide) v
+    rwa [slot_sub (k := 0 + 1) (by have h32 := st.sp32; omega) st.spW] at hh
+  obtain ⟨k1, s1, hk1, hr1, hrip1, -, hr11, hr61, hr71, hr81, hr91, hr41, hg1, hm1⟩ :=
+    WalkLocset_tripleB cfg.walk (by decide) hm c i w sp wd.code.length st.w56
+      (i_lt_of_inv inv) (c_lt_of_inv inv) s inv.rip inv.r8 inv.r9 inv.r6 inv.r4
+      inv.r7 inv.r1 inv.len16 inv.fnc hbyte
+  have hlen1 : 16 ≤ s1.regs.length := by
+    have e := run_regs_length k1 hr1
+    rw [e]; exact inv.len16
+  have himm : (s1.mem.rdN (c + 1) 4).map leVal = some n := by
+    rw [hm1]
+    obtain ⟨-, himm0⟩ := imm32_of_enc h5
+    rwa [Nat.mod_eq_of_lt himmok] at himm0
+  have hdisjw8 : sp ≤ w + 16 ∨ w + 24 ≤ sp - 8 := by
+    have h32 := st.sp32
+    cases st.disjw with
+    | inl h => exact Or.inl (by omega)
+    | inr h => exact Or.inr (by omega)
+  obtain ⟨k2, s2, hk2, hr2, hrip2, hs2r8, hs2r9, hr62, hs2r4, hg2, hfr2, hsh2⟩ :=
+    (Locset_tripleB cfg.locset cfg.l32 (by decide)) hm c n sp w hd1 hnlt (by omega)
+      (c_add_len_lt inv rfl) (by have h56 := st.w56; omega)
+      (by have h32 := st.sp32; omega) st.spW (disjC5_of_inv inv rfl).2 hdisjw8
+      s1 hrip1 hr81 hr91 hr61 hr41 hr71 hlen1 himm
+      (by rw [hm1]; exact inv.floc) (by intro v; rw [hm1]; exact hw8s v)
+  refine ⟨k1 + k2, s2, (by omega), by rw [run_add im k1 k2, hr1, hr2], hrip2,
+    hs2r8, hs2r9, hr62, hs2r4,
+    by rw [hg2 1 (by decide) (by decide) (by decide) (by decide) (by decide) (by decide), hg1 1 (by decide)],
+    by rw [hg2 7 (by decide) (by decide) (by decide) (by decide) (by decide) (by decide), hg1 7 (by decide)],
+    by rw [hg2 13 (by decide) (by decide) (by decide) (by decide) (by decide) (by decide), hg1 13 (by decide)],
+    by rw [hg2 14 (by decide) (by decide) (by decide) (by decide) (by decide) (by decide), hg1 14 (by decide)],
+    by
+      intro x m hx
+      have hx8 : x + m ≤ sp - 8 ∨ sp ≤ x := by
+        have h32 := st.sp32
+        cases hx with
+        | inl h => exact Or.inl (by omega)
+        | inr h => exact Or.inr h
+      rw [hfr2 x m hx8, hm1],
+    hsh2.trans (congrArg wshape hm1),
+    (run_regs_length k2 hr2).trans (run_regs_length k1 hr1),
+    by rw [hg2 5 (by decide) (by decide) (by decide) (by decide) (by decide) (by decide), hg1 5 (by decide)]⟩
+
+theorem hand_jzB {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
+    {pr : Prog} {wd : Word} {w p sp tbl : Nat} (st : WalkStatic pr wd w p sp tbl)
+    {t : Nat} {rest : List Instr} {i c : Nat} {cur hm : Height} {s : X86Int.St}
+    (inv : WalkInv pr wd w p sp tbl s (Instr.jz t :: rest) i c cur hm)
+    (hs : hstep pr wd hm (Instr.jz t) = some (some ⟨hm.d - 1, hm.a⟩)) :
+    ∃ m s2, m ≤ 80 + 20 * (wd.ann.length + 1) ∧ run im m (Out.ok s) = Out.ok s2 ∧ s2.rip = aFallTail ∧
+      HPost s s2 ⟨hm.d - 1, hm.a⟩ (c + 5) sp := by
+  have hbhead : hm.d + 2 < W ∧ hm.a + 1 < W := by
+    have h1 := hBnd_head inv.hb
+    rwa [inv.hlink.symm] at h1
+  obtain ⟨hd1, hlk, -⟩ := hstep_jz hs
+  have himmok : t < 256 ^ 4 := inv.imm _ List.mem_cons_self
+  have hcs : s.mem.rdN c (Instr.jz t).enc.length = some (Instr.jz t).enc ∧
+      CodeSeq s.mem (c + (Instr.jz t).enc.length) rest := inv.csq
+  have h5 : s.mem.rdN c 5 = some (0x89 :: leBytes t 4) := hcs.1
+  have hbyte : s.mem.rd c = some 137 := (rdN_cons h5).1
+  obtain ⟨k1, s1, hk1, hr1, hrip1, -, hr11, hr61, hr71, hr81, hr91, hr41, hg1, hm1⟩ :=
+    WalkJz_tripleB cfg.walk (by decide) hm c i w sp wd.code.length st.w56
+      (i_lt_of_inv inv) (c_lt_of_inv inv) s inv.rip inv.r8 inv.r9 inv.r6 inv.r4
+      inv.r7 inv.r1 inv.len16 inv.fnc hbyte
+  have hlen1 : 16 ≤ s1.regs.length := by
+    have e := run_regs_length k1 hr1
+    rw [e]; exact inv.len16
+  have himm : (s1.mem.rdN (c + 1) 4).map leVal = some t := by
+    rw [hm1]
+    obtain ⟨-, himm0⟩ := imm32_of_enc h5
+    rwa [Nat.mod_eq_of_lt himmok] at himm0
+  have lay1 : AnnLayout s1 wd.ann p := AnnLayout_of_mem hm1 inv.lay
+  have room1 : StackRoom s1 4 :=
+    StackRoom_of_mem hm1 (by rw [hr41, inv.r4]) inv.room
+  have annls : ANNLSpecB im aANNL aL32 := ANNL_tripleB cfg.annl cfg.l32 (by decide)
+  obtain ⟨k2, s2, hk2, hr2, hrip2, hs2r8, hs2r9, hr62, hs2r4, hs2r1, hg2, hfr2, hsh2⟩ :=
+    (Jz_tripleB cfg.jz cfg.l32 annls (show aJz + 104 < W by decide)) wd hm c t w p sp i hd1 hlk
+      (Nat.lt_trans himmok (by decide))
+      (by have h1 := i_lt_of_inv inv; have h2 := st.clenW; omega)
+      st.p0 st.w56 st.pann (by have h1 := hbhead.1; omega)
+      (by have h2 := hbhead.2; omega) (c_add_len_lt inv rfl) st.sp32 st.spW
+      st.disjw st.disjp (disjC5_of_inv inv rfl).1 s1 hrip1 hr81 hr91 hr61 hr41
+      hr71 hr11 hlen1 himm (by rw [hm1]; exact inv.fannp)
+      (by rw [hm1]; exact inv.fnann) lay1 room1
+  refine ⟨k1 + k2, s2, (by omega), by rw [run_add im k1 k2, hr1, hr2], hrip2,
+    hs2r8, hs2r9, hr62, hs2r4,
+    by rw [hs2r1, inv.r1],
+    by rw [hg2 7 (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide), hg1 7 (by decide)],
+    by rw [hg2 13 (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide), hg1 13 (by decide)],
+    by rw [hg2 14 (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide), hg1 14 (by decide)],
+    by intro x m hx; rw [hfr2 x m hx, hm1],
+    hsh2.trans (congrArg wshape hm1),
+    (run_regs_length k2 hr2).trans (run_regs_length k1 hr1),
+    by rw [hg2 5 (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide), hg1 5 (by decide)]⟩
+
+theorem hand_jnzB {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
+    {pr : Prog} {wd : Word} {w p sp tbl : Nat} (st : WalkStatic pr wd w p sp tbl)
+    {t : Nat} {rest : List Instr} {i c : Nat} {cur hm : Height} {s : X86Int.St}
+    (inv : WalkInv pr wd w p sp tbl s (Instr.jnz t :: rest) i c cur hm)
+    (hs : hstep pr wd hm (Instr.jnz t) = some (some ⟨hm.d - 1, hm.a⟩)) :
+    ∃ m s2, m ≤ 80 + 20 * (wd.ann.length + 1) ∧ run im m (Out.ok s) = Out.ok s2 ∧ s2.rip = aFallTail ∧
+      HPost s s2 ⟨hm.d - 1, hm.a⟩ (c + 5) sp := by
+  have hbhead : hm.d + 2 < W ∧ hm.a + 1 < W := by
+    have h1 := hBnd_head inv.hb
+    rwa [inv.hlink.symm] at h1
+  obtain ⟨hd1, hlk, -⟩ := hstep_jnz hs
+  have himmok : t < 256 ^ 4 := inv.imm _ List.mem_cons_self
+  have hcs : s.mem.rdN c (Instr.jnz t).enc.length = some (Instr.jnz t).enc ∧
+      CodeSeq s.mem (c + (Instr.jnz t).enc.length) rest := inv.csq
+  have h5 : s.mem.rdN c 5 = some (0x8a :: leBytes t 4) := hcs.1
+  have hbyte : s.mem.rd c = some 138 := (rdN_cons h5).1
+  obtain ⟨k1, s1, hk1, hr1, hrip1, -, hr11, hr61, hr71, hr81, hr91, hr41, hg1, hm1⟩ :=
+    WalkJnz_tripleB cfg.walk (by decide) hm c i w sp wd.code.length st.w56
+      (i_lt_of_inv inv) (c_lt_of_inv inv) s inv.rip inv.r8 inv.r9 inv.r6 inv.r4
+      inv.r7 inv.r1 inv.len16 inv.fnc hbyte
+  have hlen1 : 16 ≤ s1.regs.length := by
+    have e := run_regs_length k1 hr1
+    rw [e]; exact inv.len16
+  have himm : (s1.mem.rdN (c + 1) 4).map leVal = some t := by
+    rw [hm1]
+    obtain ⟨-, himm0⟩ := imm32_of_enc h5
+    rwa [Nat.mod_eq_of_lt himmok] at himm0
+  have lay1 : AnnLayout s1 wd.ann p := AnnLayout_of_mem hm1 inv.lay
+  have room1 : StackRoom s1 4 :=
+    StackRoom_of_mem hm1 (by rw [hr41, inv.r4]) inv.room
+  have annls : ANNLSpecB im aANNL aL32 := ANNL_tripleB cfg.annl cfg.l32 (by decide)
+  obtain ⟨k2, s2, hk2, hr2, hrip2, hs2r8, hs2r9, hr62, hs2r4, hs2r1, hg2, hfr2, hsh2⟩ :=
+    (Jz_tripleB cfg.jz cfg.l32 annls (show aJz + 104 < W by decide)) wd hm c t w p sp i hd1 hlk
+      (Nat.lt_trans himmok (by decide))
+      (by have h1 := i_lt_of_inv inv; have h2 := st.clenW; omega)
+      st.p0 st.w56 st.pann (by have h1 := hbhead.1; omega)
+      (by have h2 := hbhead.2; omega) (c_add_len_lt inv rfl) st.sp32 st.spW
+      st.disjw st.disjp (disjC5_of_inv inv rfl).1 s1 hrip1 hr81 hr91 hr61 hr41
+      hr71 hr11 hlen1 himm (by rw [hm1]; exact inv.fannp)
+      (by rw [hm1]; exact inv.fnann) lay1 room1
+  refine ⟨k1 + k2, s2, (by omega), by rw [run_add im k1 k2, hr1, hr2], hrip2,
+    hs2r8, hs2r9, hr62, hs2r4,
+    by rw [hs2r1, inv.r1],
+    by rw [hg2 7 (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide), hg1 7 (by decide)],
+    by rw [hg2 13 (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide), hg1 13 (by decide)],
+    by rw [hg2 14 (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide), hg1 14 (by decide)],
+    by intro x m hx; rw [hfr2 x m hx, hm1],
+    hsh2.trans (congrArg wshape hm1),
+    (run_regs_length k2 hr2).trans (run_regs_length k1 hr1),
+    by rw [hg2 5 (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide), hg1 5 (by decide)]⟩
+
+theorem hand_jmpB {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
+    {pr : Prog} {wd : Word} {w p sp tbl : Nat} (st : WalkStatic pr wd w p sp tbl)
+    {t : Nat} {rest : List Instr} {i c : Nat} {cur hm : Height} {s : X86Int.St}
+    (inv : WalkInv pr wd w p sp tbl s (Instr.jmp t :: rest) i c cur hm)
+    (hs : hstep pr wd hm (Instr.jmp t) = some none) :
+    ∃ m s2, m ≤ 80 + 20 * (wd.ann.length + 1) ∧ run im m (Out.ok s) = Out.ok s2 ∧ s2.rip = aNoneTail ∧
+      HPost s s2 hm (c + 5) sp := by
+  have hbhead : hm.d + 2 < W ∧ hm.a + 1 < W := by
+    have h1 := hBnd_head inv.hb
+    rwa [inv.hlink.symm] at h1
+  have hlk : wd.ann.lookup t = some hm := hstep_jmp hs
+  have himmok : t < 256 ^ 4 := inv.imm _ List.mem_cons_self
+  have hcs : s.mem.rdN c (Instr.jmp t).enc.length = some (Instr.jmp t).enc ∧
+      CodeSeq s.mem (c + (Instr.jmp t).enc.length) rest := inv.csq
+  have h5 : s.mem.rdN c 5 = some (0x88 :: leBytes t 4) := hcs.1
+  have hbyte : s.mem.rd c = some 136 := (rdN_cons h5).1
+  obtain ⟨k1, s1, hk1, hr1, hrip1, -, hr11, hr61, hr71, hr81, hr91, hr41, hg1, hm1⟩ :=
+    WalkJmp_tripleB cfg.walk (by decide) hm c i w sp wd.code.length st.w56
+      (i_lt_of_inv inv) (c_lt_of_inv inv) s inv.rip inv.r8 inv.r9 inv.r6 inv.r4
+      inv.r7 inv.r1 inv.len16 inv.fnc hbyte
+  have hlen1 : 16 ≤ s1.regs.length := by
+    have e := run_regs_length k1 hr1
+    rw [e]; exact inv.len16
+  have himm : (s1.mem.rdN (c + 1) 4).map leVal = some t := by
+    rw [hm1]
+    obtain ⟨-, himm0⟩ := imm32_of_enc h5
+    rwa [Nat.mod_eq_of_lt himmok] at himm0
+  have lay1 : AnnLayout s1 wd.ann p := AnnLayout_of_mem hm1 inv.lay
+  have room1 : StackRoom s1 4 :=
+    StackRoom_of_mem hm1 (by rw [hr41, inv.r4]) inv.room
+  have annls : ANNLSpecB im aANNL aL32 := ANNL_tripleB cfg.annl cfg.l32 (by decide)
+  obtain ⟨k2, s2, hk2, hr2, hrip2, hs2r8, hs2r9, hr62, hs2r4, hs2r1, hg2, hfr2, hsh2⟩ :=
+    (Jmp_tripleB cfg.jmp cfg.l32 annls (show aJmp + 82 < W by decide)) wd hm c t w p sp i hlk
+      (Nat.lt_trans himmok (by decide))
+      (by have h1 := i_lt_of_inv inv; have h2 := st.clenW; omega)
+      st.p0 st.w56 st.pann (by have h1 := hbhead.1; omega)
+      (by have h2 := hbhead.2; omega) (c_add_len_lt inv rfl) st.sp32 st.spW
+      st.disjw st.disjp (disjC5_of_inv inv rfl).1 s1 hrip1 hr81 hr91 hr61 hr41
+      hr71 hr11 hlen1 himm (by rw [hm1]; exact inv.fannp)
+      (by rw [hm1]; exact inv.fnann) lay1 room1
+  refine ⟨k1 + k2, s2, (by omega), by rw [run_add im k1 k2, hr1, hr2], hrip2,
+    hs2r8, hs2r9, hr62, hs2r4,
+    by rw [hs2r1, inv.r1],
+    by rw [hg2 7 (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide), hg1 7 (by decide)],
+    by rw [hg2 13 (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide), hg1 13 (by decide)],
+    by rw [hg2 14 (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide), hg1 14 (by decide)],
+    by intro x m hx; rw [hfr2 x m hx, hm1],
+    hsh2.trans (congrArg wshape hm1),
+    (run_regs_length k2 hr2).trans (run_regs_length k1 hr1),
+    by rw [hg2 5 (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide), hg1 5 (by decide)]⟩
+
+theorem hand_callB {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
+    {pr : Prog} {wd : Word} {w p sp tbl : Nat} (st : WalkStatic pr wd w p sp tbl)
+    {n : Nat} {rest : List Instr} {i c : Nat} {cur hm h' : Height} {s : X86Int.St}
+    (inv : WalkInv pr wd w p sp tbl s (Instr.call n :: rest) i c cur hm)
+    (hs : hstep pr wd hm (Instr.call n) = some (some h')) :
+    ∃ m s2, m ≤ 66 ∧ run im m (Out.ok s) = Out.ok s2 ∧ s2.rip = aFallTail ∧
+      HPost s s2 h' (c + 5) sp := by
+  have hbhead : hm.d + 2 < W ∧ hm.a + 1 < W := by
+    have h1 := hBnd_head inv.hb
+    rwa [inv.hlink.symm] at h1
+  have hs0 : hstep pr wd ((wd.ann.lookup i).getD cur) (Instr.call n) =
+      some (some h') := by
+    rw [inv.hlink.symm]; exact hs
+  obtain ⟨hbd, -, -⟩ := hBnd_some_some inv.hb hs0
+  obtain ⟨cw, hcwq, hins, hh'⟩ := hstep_call hs
+  have hnlt : n < pr.words.length := (List.getElem?_eq_some_iff.mp hcwq).1
+  have hcw : pr.words[n] = cw := (List.getElem?_eq_some_iff.mp hcwq).2
+  have himmok : n < 256 ^ 4 := inv.imm _ List.mem_cons_self
+  have hbound : hm.d - cw.ins + cw.outs < W := by
+    have hbd' : hm.d - cw.ins + cw.outs + 2 < W := by rw [hh'] at hbd; exact hbd
+    omega
+  have hcs : s.mem.rdN c (Instr.call n).enc.length = some (Instr.call n).enc ∧
+      CodeSeq s.mem (c + (Instr.call n).enc.length) rest := inv.csq
+  have h5 : s.mem.rdN c 5 = some (0x8b :: leBytes n 4) := hcs.1
+  have hbyte : s.mem.rd c = some 139 := (rdN_cons h5).1
+  have hw8s : ∀ v, (wr64 s.mem (sp - 8) v).isSome := by
+    intro v
+    have hh := inv.room sp inv.r4 0 (by decide) v
+    rwa [slot_sub (k := 0 + 1) (by have h32 := st.sp32; omega) st.spW] at hh
+  obtain ⟨k1, s1, hk1, hr1, hrip1, -, hr11, hr61, hr71, hr81, hr91, hr41, hg1, hm1⟩ :=
+    WalkCall_tripleB cfg.walk (by decide) hm c i w sp wd.code.length st.w56
+      (i_lt_of_inv inv) (c_lt_of_inv inv) s inv.rip inv.r8 inv.r9 inv.r6 inv.r4
+      inv.r7 inv.r1 inv.len16 inv.fnc hbyte
+  have hlen1 : 16 ≤ s1.regs.length := by
+    have e := run_regs_length k1 hr1
+    rw [e]; exact inv.len16
+  have himm : (s1.mem.rdN (c + 1) 4).map leVal = some n := by
+    rw [hm1]
+    obtain ⟨-, himm0⟩ := imm32_of_enc h5
+    rwa [Nat.mod_eq_of_lt himmok] at himm0
+  have hr13 : s1.reg 13 = some pr.words.length := by
+    rw [hg1 13 (by decide)]; exact inv.r13
+  have hr14 : s1.reg 14 = some tbl := by
+    rw [hg1 14 (by decide)]; exact inv.r14
+  have hdisjT : sp ≤ tbl + n * 64 ∨ tbl + n * 64 + 16 ≤ sp - 8 := by
+    have h32 := st.sp32
+    cases (st.wordsB n hnlt).2 with
+    | inl h => exact Or.inl h
+    | inr h => exact Or.inr (by omega)
+  obtain ⟨k2, s2, hk2, hr2, hrip2, hs2r8, hs2r9, hr62, hs2r4, hg2, hfr2, hsh2⟩ :=
+    (Call_tripleB cfg.call cfg.l32 (by decide)) cw hm c n sp tbl pr.words.length
+      hnlt hins (by have h1 := hbhead.1; omega) hbound (c_add_len_lt inv rfl)
+      (by have h32 := st.sp32; omega) st.spW (st.wordsB n hnlt).1
+      (disjC5_of_inv inv rfl).2 hdisjT s1 hrip1 hr81 hr91 hr61 hr41 hr13 hr14
+      hlen1 himm
+      (by rw [hm1, ← hcw]; exact (inv.words n hnlt).1)
+      (by rw [hm1, ← hcw]; exact (inv.words n hnlt).2)
+      (by intro v; rw [hm1]; exact hw8s v)
+  refine ⟨k1 + k2, s2, (by omega), by rw [run_add im k1 k2, hr1, hr2], hrip2,
+    by rw [hh']; exact hs2r8,
+    by rw [hh']; exact hs2r9,
+    hr62, hs2r4,
+    by rw [hg2 1 (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide), hg1 1 (by decide)],
+    by rw [hg2 7 (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide), hg1 7 (by decide)],
+    by rw [hg2 13 (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide), hg1 13 (by decide)],
+    by rw [hg2 14 (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide), hg1 14 (by decide)],
+    by
+      intro x m hx
+      have hx8 : x + m ≤ sp - 8 ∨ sp ≤ x := by
+        have h32 := st.sp32
+        cases hx with
+        | inl h => exact Or.inl (by omega)
+        | inr h => exact Or.inr h
+      rw [hfr2 x m hx8, hm1],
+    hsh2.trans (congrArg wshape hm1),
+    (run_regs_length k2 hr2).trans (run_regs_length k1 hr1),
+    by rw [hg2 5 (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide), hg1 5 (by decide)]⟩
+
+theorem hand_prim_fallB {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
+    {pr : Prog} {wd : Word} {w p sp tbl : Nat} (st : WalkStatic pr wd w p sp tbl)
+    {q : Prim} {rest : List Instr} {i c : Nat} {cur hm h' : Height} {s : X86Int.St}
+    (inv : WalkInv pr wd w p sp tbl s (Instr.prim q :: rest) i c cur hm)
+    (hs : hstep pr wd hm (Instr.prim q) = some (some h')) :
+    ∃ m s2, m ≤ 56 ∧ run im m (Out.ok s) = Out.ok s2 ∧ s2.rip = aFallTail ∧
+      HPost s s2 h' (c + 1) sp := by
+  have hbhead : hm.d + 2 < W ∧ hm.a + 1 < W := by
+    have h1 := hBnd_head inv.hb
+    rwa [inv.hlink.symm] at h1
+  have hs0 : hstep pr wd ((wd.ann.lookup i).getD cur) (Instr.prim q) =
+      some (some h') := by
+    rw [inv.hlink.symm]; exact hs
+  obtain ⟨hbd, -, -⟩ := hBnd_some_some inv.hb hs0
+  obtain ⟨hguard, hne, hh'⟩ := hstep_prim_some hs
+  have hbound : hm.d - q.eff.1 + q.eff.2 < W := by
+    have hbd' : hm.d - q.eff.1 + q.eff.2 + 2 < W := by rw [hh'] at hbd; exact hbd
+    omega
+  have hcs : s.mem.rdN c (Instr.prim q).enc.length = some (Instr.prim q).enc ∧
+      CodeSeq s.mem (c + (Instr.prim q).enc.length) rest := inv.csq
+  have h1b : s.mem.rdN c 1 = some [q.code] := hcs.1
+  have hbyte : s.mem.rd c = some q.code := (rdN_cons h1b).1
+  obtain ⟨k1, s1, hk1, hr1, hrip1, hr01, hr11, hr61, hr71, hr81, hr91, hr41, hg1, hm1⟩ :=
+    WalkPrim_tripleB cfg.walk (by decide) hm c i w sp wd.code.length st.w56
+      (i_lt_of_inv inv) (c_lt_of_inv inv) q.code (Prim_code_lt q) s inv.rip
+      inv.r8 inv.r9 inv.r6 inv.r4 inv.r7 inv.r1 inv.len16 inv.fnc hbyte
+  have hlen1 : 16 ≤ s1.regs.length := by
+    have e := run_regs_length k1 hr1
+    rw [e]; exact inv.len16
+  have heffW : aEff + 2 * q.code + 2 ≤ W := by
+    have h1 : aEff + 114 ≤ W := by decide
+    have h2 : q.code ≤ 56 := by have h57 := Prim_code_lt q; omega
+    omega
+  obtain ⟨k2, s2, hk2, hr2, hrip2, hs2r8, hs2r9, hr62, hm2, hg2⟩ :=
+    (PrimFall_tripleB cfg.prim) q hm c (Prim_code_ne_50 hne) hguard
+      (by have h1 := hbhead.1; omega) hbound (c_add_len_lt inv rfl) heffW s1
+      hrip1 hr01 hr81 hr91 hr61 hlen1 (by rw [hm1]; exact inv.eff q)
+  refine ⟨k1 + k2, s2, (by omega), by rw [run_add im k1 k2, hr1, hr2], hrip2,
+    by rw [hh']; exact hs2r8,
+    by rw [hh']; exact hs2r9,
+    hr62,
+    by rw [hg2 4 (by decide) (by decide) (by decide) (by decide) (by decide), hg1 4 (by decide)]; exact inv.r4,
+    by rw [hg2 1 (by decide) (by decide) (by decide) (by decide) (by decide), hg1 1 (by decide)],
+    by rw [hg2 7 (by decide) (by decide) (by decide) (by decide) (by decide), hg1 7 (by decide)],
+    by rw [hg2 13 (by decide) (by decide) (by decide) (by decide) (by decide), hg1 13 (by decide)],
+    by rw [hg2 14 (by decide) (by decide) (by decide) (by decide) (by decide), hg1 14 (by decide)],
+    by intro x m _; rw [hm2, hm1],
+    by rw [hm2, hm1],
+    (run_regs_length k2 hr2).trans (run_regs_length k1 hr1),
+    by rw [hg2 5 (by decide) (by decide) (by decide) (by decide) (by decide), hg1 5 (by decide)]⟩
+
+theorem hand_prim_exitB {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
+    {pr : Prog} {wd : Word} {w p sp tbl : Nat} (st : WalkStatic pr wd w p sp tbl)
+    {q : Prim} {rest : List Instr} {i c : Nat} {cur hm : Height} {s : X86Int.St}
+    (inv : WalkInv pr wd w p sp tbl s (Instr.prim q :: rest) i c cur hm)
+    (hs : hstep pr wd hm (Instr.prim q) = some none) :
+    ∃ m s2, m ≤ 52 ∧ run im m (Out.ok s) = Out.ok s2 ∧ s2.rip = aNoneTail ∧
+      HPost s s2 hm (c + 1) sp := by
+  have hbhead : hm.d + 2 < W ∧ hm.a + 1 < W := by
+    have h1 := hBnd_head inv.hb
+    rwa [inv.hlink.symm] at h1
+  obtain ⟨hguard, hq⟩ := hstep_prim_none hs
+  have hcs : s.mem.rdN c (Instr.prim q).enc.length = some (Instr.prim q).enc ∧
+      CodeSeq s.mem (c + (Instr.prim q).enc.length) rest := inv.csq
+  have h1b : s.mem.rdN c 1 = some [q.code] := hcs.1
+  have hbyte : s.mem.rd c = some q.code := (rdN_cons h1b).1
+  obtain ⟨k1, s1, hk1, hr1, hrip1, hr01, hr11, hr61, hr71, hr81, hr91, hr41, hg1, hm1⟩ :=
+    WalkPrim_tripleB cfg.walk (by decide) hm c i w sp wd.code.length st.w56
+      (i_lt_of_inv inv) (c_lt_of_inv inv) q.code (Prim_code_lt q) s inv.rip
+      inv.r8 inv.r9 inv.r6 inv.r4 inv.r7 inv.r1 inv.len16 inv.fnc hbyte
+  have hlen1 : 16 ≤ s1.regs.length := by
+    have e := run_regs_length k1 hr1
+    rw [e]; exact inv.len16
+  have heffW : aEff + 2 * q.code + 2 ≤ W := by
+    have h1 : aEff + 114 ≤ W := by decide
+    have h2 : q.code ≤ 56 := by have h57 := Prim_code_lt q; omega
+    omega
+  have hcode50 : q.code = 50 := by rw [hq]; exact Prim_exit_code
+  obtain ⟨k2, s2, hk2, hr2, hrip2, hs2r8, hs2r9, hr62, hm2, hg2⟩ :=
+    (PrimExit_tripleB cfg.prim) q hm c hcode50 hguard
+      (by have h1 := hbhead.1; omega) (c_add_len_lt inv rfl) heffW s1
+      hrip1 hr01 hr81 hr91 hr61 hlen1 (by rw [hm1]; exact inv.eff q)
+  refine ⟨k1 + k2, s2, (by omega), by rw [run_add im k1 k2, hr1, hr2], hrip2,
+    hs2r8, hs2r9, hr62,
+    by rw [hg2 4 (by decide) (by decide) (by decide) (by decide) (by decide), hg1 4 (by decide)]; exact inv.r4,
+    by rw [hg2 1 (by decide) (by decide) (by decide) (by decide) (by decide), hg1 1 (by decide)],
+    by rw [hg2 7 (by decide) (by decide) (by decide) (by decide) (by decide), hg1 7 (by decide)],
+    by rw [hg2 13 (by decide) (by decide) (by decide) (by decide) (by decide), hg1 13 (by decide)],
+    by rw [hg2 14 (by decide) (by decide) (by decide) (by decide) (by decide), hg1 14 (by decide)],
+    by intro x m _; rw [hm2, hm1],
+    by rw [hm2, hm1],
+    (run_regs_length k2 hr2).trans (run_regs_length k1 hr1),
+    by rw [hg2 5 (by decide) (by decide) (by decide) (by decide) (by decide), hg1 5 (by decide)]⟩
+
+theorem hand_retB {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
+    {pr : Prog} {wd : Word} {w p sp tbl : Nat} (st : WalkStatic pr wd w p sp tbl)
+    {rest : List Instr} {i c : Nat} {cur hm : Height} {s : X86Int.St}
+    (inv : WalkInv pr wd w p sp tbl s (Instr.ret :: rest) i c cur hm)
+    (hs : hstep pr wd hm Instr.ret = some none) :
+    ∃ m s2, m ≤ 48 ∧ run im m (Out.ok s) = Out.ok s2 ∧ s2.rip = aNoneTail ∧
+      HPost s s2 hm (c + 1) sp := by
+  have hbhead : hm.d + 2 < W ∧ hm.a + 1 < W := by
+    have h1 := hBnd_head inv.hb
+    rwa [inv.hlink.symm] at h1
+  have hmeq : hm = ⟨wd.outs, 0⟩ := hstep_ret hs
+  have hcs : s.mem.rdN c Instr.ret.enc.length = some Instr.ret.enc ∧
+      CodeSeq s.mem (c + Instr.ret.enc.length) rest := inv.csq
+  have h1b : s.mem.rdN c 1 = some [140] := hcs.1
+  have hbyte : s.mem.rd c = some 140 := (rdN_cons h1b).1
+  obtain ⟨k1, s1, hk1, hr1, hrip1, -, hr11, hr61, hr71, hr81, hr91, hr41, hg1, hm1⟩ :=
+    WalkRet_tripleB cfg.walk (by decide) hm c i w sp wd.code.length st.w56
+      (i_lt_of_inv inv) (c_lt_of_inv inv) s inv.rip inv.r8 inv.r9 inv.r6 inv.r4
+      inv.r7 inv.r1 inv.len16 inv.fnc hbyte
+  have hr81' : s1.reg 8 = some wd.outs := by
+    rw [hr81]
+    congr 1
+    exact congrArg Height.d hmeq
+  have hr91' : s1.reg 9 = some 0 := by
+    rw [hr91]
+    congr 1
+    exact congrArg Height.a hmeq
+  have houtW : wd.outs < W := by
+    have h1 : hm.d = wd.outs := congrArg Height.d hmeq
+    have h2 := hbhead.1
+    omega
+  obtain ⟨k2, s2, hk2, hr2, hrip2, hs2r8, hs2r9, hr62, hm2, hg2⟩ :=
+    (Ret_tripleB cfg.ret) c w houtW (c_add_len_lt inv rfl)
+      (by have h56 := st.w56; omega) s1 hrip1 hr81' hr91' hr61 hr71
+      (by rw [hm1]; exact inv.fouts)
+  refine ⟨k1 + k2, s2, (by omega), by rw [run_add im k1 k2, hr1, hr2], hrip2,
+    by rw [hs2r8]; congr 1; exact (congrArg Height.d hmeq).symm,
+    by rw [hs2r9]; congr 1; exact (congrArg Height.a hmeq).symm,
+    hr62,
+    by rw [hg2 4 (by decide) (by decide), hg1 4 (by decide)]; exact inv.r4,
+    by rw [hg2 1 (by decide) (by decide), hg1 1 (by decide)],
+    by rw [hg2 7 (by decide) (by decide), hg1 7 (by decide)],
+    by rw [hg2 13 (by decide) (by decide), hg1 13 (by decide)],
+    by rw [hg2 14 (by decide) (by decide), hg1 14 (by decide)],
+    by intro x m _; rw [hm2, hm1],
+    by rw [hm2, hm1],
+    (run_regs_length k2 hr2).trans (run_regs_length k1 hr1),
+    by rw [hg2 5 (by decide) (by decide), hg1 5 (by decide)]⟩
+
+theorem fall_finishB {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
+    {pr : Prog} {wd : Word} {w p sp tbl : Nat} (st : WalkStatic pr wd w p sp tbl)
+    {ins : Instr} {rest : List Instr} {i c len : Nat} {cur hm h' : Height}
+    {s s1 s2 : X86Int.St} {k1 k2 : Nat}
+    (inv : WalkInv pr wd w p sp tbl s (ins :: rest) i c cur hm)
+    (hs : hstep pr wd hm ins = some (some h'))
+    (hann : wd.ann.lookup (i + 1) = none ∨ wd.ann.lookup (i + 1) = some h')
+    (hi1 : i + 1 < wd.code.length)
+    (hlen : ins.enc.length = len)
+    (hr1 : run im k1 (Out.ok s) = Out.ok s1) (hk1 : k1 ≤ 80 + 20 * (wd.ann.length + 1))
+    (hr2 : run im k2 (Out.ok s1) = Out.ok s2) (hk2 : k2 ≤ 40 + 20 * (wd.ann.length + 1))
+    (hrip2 : s2.rip = aFallTail)
+    (hpost : HPost s s2 h' (c + len) sp) :
+    ∃ m s3, m ≤ 156 + 60 * (wd.ann.length + 1) ∧ run im m (Out.ok s) = Out.ok s3 ∧
+      WalkInv pr wd w p sp tbl s3 rest (i + 1) (c + len) h' h' ∧
+      (∀ x m, x + m ≤ sp - 32 ∨ sp ≤ x → s3.mem.rdN x m = s.mem.rdN x m) ∧
+      wshape s3.mem = wshape s.mem ∧ s3.reg 5 = s.reg 5 := by
+  obtain ⟨hs2r8, hs2r9, hs2r6, hs2r4, hs2r1, hs2r7, hs2r13, hs2r14, hfr2, hsh2,
+    hlen2, hs2r5⟩ := hpost
+  have hs0 : hstep pr wd ((wd.ann.lookup i).getD cur) ins = some (some h') := by
+    rw [← inv.hlink]; exact hs
+  obtain ⟨hb'd, hb'a, hbrest⟩ := hBnd_some_some inv.hb hs0
+  have annls : ANNLSpecB im aANNL aL32 := ANNL_tripleB cfg.annl cfg.l32 (by decide)
+  have falls : FallSpecB im aFallTail aWalk aL32 aANNL :=
+    Fall_tripleB cfg.fall cfg.l32 annls (by decide)
+  have hs2r7v : s2.reg 7 = some w := by rw [hs2r7]; exact inv.r7
+  have hs2r1v : s2.reg 1 = some i := by rw [hs2r1]; exact inv.r1
+  have hlen16 : 16 ≤ s2.regs.length := by rw [hlen2]; exact inv.len16
+  have lay2 : AnnLayout s2 wd.ann p := AnnLayout_of_frame inv.lay (by
+    intro x k hx1 hx2
+    apply hfr2
+    cases st.disjp with
+    | inl h => exact Or.inr (by omega)
+    | inr h => exact Or.inl (by omega))
+  have room2 : StackRoom s2 4 :=
+    StackRoom_of_wshape hsh2 (by rw [hs2r4, inv.r4]) inv.room
+  obtain ⟨kt, s3, hkt, hrt, hrip3, hs3r1, hs3r8, hs3r9, hs3r6, hs3r4, hgen3, hfr3, hsh3⟩ :=
+    falls wd h' (c + len) i w p sp hi1 st.clenW hann st.p0 st.w56 st.pann
+      (by omega) (by omega) st.sp32 st.spW st.disjw st.disjp s2 hrip2 hs2r8 hs2r9
+      hs2r6 hs2r4 hs2r7v hs2r1v hlen16
+      (rd64_of_frame_of_disjw st.disjw hfr2 (by decide) inv.fannp)
+      (rd64_of_frame_of_disjw st.disjw hfr2 (by decide) inv.fnann)
+      (rd64_of_frame_of_disjw st.disjw hfr2 (by decide) inv.fnc)
+      lay2 room2
+  have frS : ∀ x m, x + m ≤ sp - 32 ∨ sp ≤ x → s3.mem.rdN x m = s.mem.rdN x m :=
+    fun x m hx => (hfr3 x m hx).trans (hfr2 x m hx)
+  have ecb : codeBytes (ins :: rest) = len + codeBytes rest := by
+    show ins.enc.length + codeBytes rest = len + codeBytes rest
+    rw [hlen]
+  have hcs : s.mem.rdN c ins.enc.length = some ins.enc ∧
+      CodeSeq s.mem (c + ins.enc.length) rest := inv.csq
+  have htail : CodeSeq s.mem (c + len) rest := by rw [hlen] at hcs; exact hcs.2
+  have csq3 : CodeSeq s3.mem (c + len) rest := CodeSeq_of_frame htail (by
+    intro x k hx1 hx2
+    apply frS
+    have hdisj := inv.disjC
+    rw [ecb] at hdisj
+    cases hdisj with
+    | inl h => exact Or.inl (by omega)
+    | inr h => exact Or.inr (by omega))
+  refine ⟨k1 + (k2 + kt), s3, (by omega), by
+      rw [run_add im k1 (k2 + kt), hr1, run_add im k2 kt, hr2, hrt],
+    ⟨hrip3, hs3r8, hs3r9, hs3r6, hs3r4, ?_, hs3r1, ?_, ?_, ?_, ?_, csq3, ?_,
+    rd64_of_frame_of_disjw st.disjw frS (by decide) inv.fnc,
+    rd64_of_frame_of_disjw st.disjw frS (by decide) inv.fnann,
+    rd64_of_frame_of_disjw st.disjw frS (by decide) inv.fannp,
+    rd64_of_frame_of_disjw st.disjw frS (by decide) inv.floc,
+    rd64_of_frame_of_disjw st.disjw frS (by decide) inv.fouts,
+    ?_, ?_, ?_, ?_, ?_, ?_,
+    fun x hx => inv.imm x (List.mem_cons_of_mem ins hx), hbrest⟩, frS,
+    hsh3.trans hsh2, by rw [hgen3 5 (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide)]; exact hs2r5⟩
+  · rw [hgen3 7 (by decide) (by decide) (by decide) (by decide) (by decide)
+      (by decide) (by decide) (by decide), hs2r7]; exact inv.r7
+  · rw [hgen3 13 (by decide) (by decide) (by decide) (by decide) (by decide)
+      (by decide) (by decide) (by decide), hs2r13]; exact inv.r13
+  · rw [hgen3 14 (by decide) (by decide) (by decide) (by decide) (by decide)
+      (by decide) (by decide) (by decide), hs2r14]; exact inv.r14
+  · have e1 := run_regs_length kt hrt
+    rw [e1, hlen2]; exact inv.len16
+  · cases hann with
+    | inl hn => simp [hn]
+    | inr hn => simp [hn]
+  · have h := inv.isum
+    simp only [List.length_cons] at h
+    omega
+  · exact AnnLayout_of_frame inv.lay (by
+      intro x k hx1 hx2
+      apply frS
+      cases st.disjp with
+      | inl h => exact Or.inr (by omega)
+      | inr h => exact Or.inl (by omega))
+  · exact StackRoom_of_wshape (hsh3.trans hsh2) (by rw [hs3r4, inv.r4]) inv.room
+  · intro q
+    show (s3.mem.rdN (aEff + 2 * q.code) 2) = some [q.eff.1, q.eff.2]
+    rw [frS (aEff + 2 * q.code) 2 (by
+      have hq : q.code ≤ 56 := by have h57 := Prim_code_lt q; omega
+      cases st.disjEff with
+      | inl h => exact Or.inl (by omega)
+      | inr h => exact Or.inr (by omega))]
+    exact inv.eff q
+  · intro n hn
+    obtain ⟨h1, h2⟩ := inv.words n hn
+    obtain ⟨hb1, hb2⟩ := st.wordsB n hn
+    refine ⟨?_, ?_⟩
+    · show (s3.mem.rdN (tbl + n * 64) 8).map leVal = some _
+      rw [frS _ _ (by
+        cases hb2 with
+        | inl h => exact Or.inr h
+        | inr h => exact Or.inl (by omega))]
+      exact h1
+    · show (s3.mem.rdN (tbl + n * 64 + 8) 8).map leVal = some _
+      rw [frS _ _ (by
+        cases hb2 with
+        | inl h => exact Or.inr (by omega)
+        | inr h => exact Or.inl (by omega))]
+      exact h2
+  · have hdisj := inv.disjC
+    rw [ecb] at hdisj
+    cases hdisj with
+    | inl h => exact Or.inl (by omega)
+    | inr h => exact Or.inr (by omega)
+  · have hcb := inv.cbound
+    rw [ecb] at hcb
+    omega
+
+theorem none_finish_consB {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
+    {pr : Prog} {wd : Word} {w p sp tbl : Nat} (st : WalkStatic pr wd w p sp tbl)
+    {ins : Instr} {rest : List Instr} {i c len : Nat} {cur hm : Height}
+    {s s1 s2 : X86Int.St} {k1 k2 : Nat}
+    (inv : WalkInv pr wd w p sp tbl s (ins :: rest) i c cur hm)
+    (hs : hstep pr wd hm ins = some none)
+    (hi1 : i + 1 < wd.code.length)
+    (hlen : ins.enc.length = len)
+    (hr1 : run im k1 (Out.ok s) = Out.ok s1) (hk1 : k1 ≤ 80 + 20 * (wd.ann.length + 1))
+    (hr2 : run im k2 (Out.ok s1) = Out.ok s2) (hk2 : k2 ≤ 40 + 20 * (wd.ann.length + 1))
+    (hrip2 : s2.rip = aNoneTail)
+    (hpost : HPost s s2 hm (c + len) sp) :
+    ∃ m s3, m ≤ 156 + 60 * (wd.ann.length + 1) ∧ run im m (Out.ok s) = Out.ok s3 ∧
+      WalkInv pr wd w p sp tbl s3 rest (i + 1) (c + len)
+        ((wd.ann.lookup (i + 1)).getD ⟨0, 0⟩)
+        ((wd.ann.lookup (i + 1)).getD ⟨0, 0⟩) ∧
+      (∀ x m, x + m ≤ sp - 32 ∨ sp ≤ x → s3.mem.rdN x m = s.mem.rdN x m) ∧
+      wshape s3.mem = wshape s.mem ∧ s3.reg 5 = s.reg 5 := by
+  obtain ⟨hs2r8, hs2r9, hs2r6, hs2r4, hs2r1, hs2r7, hs2r13, hs2r14, hfr2, hsh2,
+    hlen2, hs2r5⟩ := hpost
+  have hs0 : hstep pr wd ((wd.ann.lookup i).getD cur) ins = some none := by
+    rw [← inv.hlink]; exact hs
+  have hbrest := hBnd_some_none inv.hb hs0
+  have hhead := hBnd_head inv.hb
+  have hge : ((wd.ann.lookup i).getD cur) = hm := inv.hlink.symm
+  rw [hge] at hhead
+  have annls : ANNLSpecB im aANNL aL32 := ANNL_tripleB cfg.annl cfg.l32 (by decide)
+  have nones : NoneSpecB im aNoneTail aWalk aL32 aANNL :=
+    None_tripleB cfg.none cfg.l32 annls (by decide)
+  have hs2r7v : s2.reg 7 = some w := by rw [hs2r7]; exact inv.r7
+  have hs2r1v : s2.reg 1 = some i := by rw [hs2r1]; exact inv.r1
+  have hlen16 : 16 ≤ s2.regs.length := by rw [hlen2]; exact inv.len16
+  have lay2 : AnnLayout s2 wd.ann p := AnnLayout_of_frame inv.lay (by
+    intro x k hx1 hx2
+    apply hfr2
+    cases st.disjp with
+    | inl h => exact Or.inr (by omega)
+    | inr h => exact Or.inl (by omega))
+  have room2 : StackRoom s2 4 :=
+    StackRoom_of_wshape hsh2 (by rw [hs2r4, inv.r4]) inv.room
+  obtain ⟨kt, s3, hkt, hrt, hrip3, hs3r1, hs3r8, hs3r9, hs3r6, hs3r4, hgen3, hfr3, hsh3⟩ :=
+    nones wd hm ((wd.ann.lookup (i + 1)).getD ⟨0, 0⟩) (c + len) i w p sp
+      (by have hcl := st.clenW; omega) st.clenW (Or.inr ⟨hi1, rfl⟩) st.p0 st.w56 st.pann
+      (by have h1 := hhead.1; omega) (by have h2 := hhead.2; omega) st.sp32 st.spW st.disjw st.disjp s2 hrip2 hs2r8 hs2r9
+      hs2r6 hs2r4 hs2r7v hs2r1v hlen16
+      (rd64_of_frame_of_disjw st.disjw hfr2 (by decide) inv.fannp)
+      (rd64_of_frame_of_disjw st.disjw hfr2 (by decide) inv.fnann)
+      (rd64_of_frame_of_disjw st.disjw hfr2 (by decide) inv.fnc)
+      lay2 room2
+  have frS : ∀ x m, x + m ≤ sp - 32 ∨ sp ≤ x → s3.mem.rdN x m = s.mem.rdN x m :=
+    fun x m hx => (hfr3 x m hx).trans (hfr2 x m hx)
+  have ecb : codeBytes (ins :: rest) = len + codeBytes rest := by
+    show ins.enc.length + codeBytes rest = len + codeBytes rest
+    rw [hlen]
+  have hcs : s.mem.rdN c ins.enc.length = some ins.enc ∧
+      CodeSeq s.mem (c + ins.enc.length) rest := inv.csq
+  have htail : CodeSeq s.mem (c + len) rest := by rw [hlen] at hcs; exact hcs.2
+  have csq3 : CodeSeq s3.mem (c + len) rest := CodeSeq_of_frame htail (by
+    intro x k hx1 hx2
+    apply frS
+    have hdisj := inv.disjC
+    rw [ecb] at hdisj
+    cases hdisj with
+    | inl h => exact Or.inl (by omega)
+    | inr h => exact Or.inr (by omega))
+  refine ⟨k1 + (k2 + kt), s3, (by omega), by
+      rw [run_add im k1 (k2 + kt), hr1, run_add im k2 kt, hr2, hrt],
+    ⟨hrip3, hs3r8, hs3r9, hs3r6, hs3r4, ?_, hs3r1, ?_, ?_, ?_, ?_, csq3, ?_,
+    rd64_of_frame_of_disjw st.disjw frS (by decide) inv.fnc,
+    rd64_of_frame_of_disjw st.disjw frS (by decide) inv.fnann,
+    rd64_of_frame_of_disjw st.disjw frS (by decide) inv.fannp,
+    rd64_of_frame_of_disjw st.disjw frS (by decide) inv.floc,
+    rd64_of_frame_of_disjw st.disjw frS (by decide) inv.fouts,
+    ?_, ?_, ?_, ?_, ?_, ?_,
+    fun x hx => inv.imm x (List.mem_cons_of_mem ins hx), hbrest⟩, frS,
+    hsh3.trans hsh2, by rw [hgen3 5 (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide)]; exact hs2r5⟩
+  · rw [hgen3 7 (by decide) (by decide) (by decide) (by decide) (by decide)
+      (by decide) (by decide) (by decide), hs2r7]; exact inv.r7
+  · rw [hgen3 13 (by decide) (by decide) (by decide) (by decide) (by decide)
+      (by decide) (by decide) (by decide), hs2r13]; exact inv.r13
+  · rw [hgen3 14 (by decide) (by decide) (by decide) (by decide) (by decide)
+      (by decide) (by decide) (by decide), hs2r14]; exact inv.r14
+  · have e1 := run_regs_length kt hrt
+    rw [e1, hlen2]; exact inv.len16
+  · cases hl : wd.ann.lookup (i + 1) <;> simp [hl]
+  · have h := inv.isum
+    simp only [List.length_cons] at h
+    omega
+  · exact AnnLayout_of_frame inv.lay (by
+      intro x k hx1 hx2
+      apply frS
+      cases st.disjp with
+      | inl h => exact Or.inr (by omega)
+      | inr h => exact Or.inl (by omega))
+  · exact StackRoom_of_wshape (hsh3.trans hsh2) (by rw [hs3r4, inv.r4]) inv.room
+  · intro q
+    show (s3.mem.rdN (aEff + 2 * q.code) 2) = some [q.eff.1, q.eff.2]
+    rw [frS (aEff + 2 * q.code) 2 (by
+      have hq : q.code ≤ 56 := by have h57 := Prim_code_lt q; omega
+      cases st.disjEff with
+      | inl h => exact Or.inl (by omega)
+      | inr h => exact Or.inr (by omega))]
+    exact inv.eff q
+  · intro n hn
+    obtain ⟨h1, h2⟩ := inv.words n hn
+    obtain ⟨hb1, hb2⟩ := st.wordsB n hn
+    refine ⟨?_, ?_⟩
+    · show (s3.mem.rdN (tbl + n * 64) 8).map leVal = some _
+      rw [frS _ _ (by
+        cases hb2 with
+        | inl h => exact Or.inr h
+        | inr h => exact Or.inl (by omega))]
+      exact h1
+    · show (s3.mem.rdN (tbl + n * 64 + 8) 8).map leVal = some _
+      rw [frS _ _ (by
+        cases hb2 with
+        | inl h => exact Or.inr (by omega)
+        | inr h => exact Or.inl (by omega))]
+      exact h2
+  · have hdisj := inv.disjC
+    rw [ecb] at hdisj
+    cases hdisj with
+    | inl h => exact Or.inl (by omega)
+    | inr h => exact Or.inr (by omega)
+  · have hcb := inv.cbound
+    rw [ecb] at hcb
+    omega
+
+theorem none_finish_nilB {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
+    {pr : Prog} {wd : Word} {w p sp tbl : Nat} (st : WalkStatic pr wd w p sp tbl)
+    {ins : Instr} {i c len : Nat} {cur hm : Height}
+    {s s1 s2 : X86Int.St} {k1 k2 : Nat}
+    (inv : WalkInv pr wd w p sp tbl s [ins] i c cur hm)
+    (hs : hstep pr wd hm ins = some none)
+    (hlen : ins.enc.length = len)
+    (hr1 : run im k1 (Out.ok s) = Out.ok s1) (hk1 : k1 ≤ 80 + 20 * (wd.ann.length + 1))
+    (hr2 : run im k2 (Out.ok s1) = Out.ok s2) (hk2 : k2 ≤ 40 + 20 * (wd.ann.length + 1))
+    (hrip2 : s2.rip = aNoneTail)
+    (hpost : HPost s s2 hm (c + len) sp) :
+    ∃ m s4, m ≤ 196 + 60 * (wd.ann.length + 1) ∧ run im m (Out.ok s) = Out.ok s4 ∧ s4.rip = aWordDone ∧
+      s4.reg 1 = some (i + 1) ∧ s4.reg 6 = some (c + len) ∧
+      s4.reg 7 = some w ∧ s4.reg 4 = some sp ∧
+      (∀ x m, x + m ≤ sp - 32 ∨ sp ≤ x → s4.mem.rdN x m = s.mem.rdN x m) ∧
+      wshape s4.mem = wshape s.mem ∧ s4.reg 5 = s.reg 5 ∧ s4.reg 13 = s.reg 13 ∧
+      s4.reg 14 = s.reg 14 := by
+  obtain ⟨hs2r8, hs2r9, hs2r6, hs2r4, hs2r1, hs2r7, hs2r13, hs2r14, hfr2, hsh2,
+    hlen2, hs2r5⟩ := hpost
+  have hs0 : hstep pr wd ((wd.ann.lookup i).getD cur) ins = some none := by
+    rw [← inv.hlink]; exact hs
+  have hhead := hBnd_head inv.hb
+  have hge : ((wd.ann.lookup i).getD cur) = hm := inv.hlink.symm
+  rw [hge] at hhead
+  have hisum : wd.code.length ≤ i + 1 := by
+    have h := inv.isum
+    simp only [List.length_cons, List.length_nil] at h
+    omega
+  have hiW : i + 1 < W := by
+    have h := inv.isum
+    have hcl := st.clenW
+    simp only [List.length_cons, List.length_nil] at h
+    omega
+  have annls : ANNLSpecB im aANNL aL32 := ANNL_tripleB cfg.annl cfg.l32 (by decide)
+  have nones : NoneSpecB im aNoneTail aWalk aL32 aANNL :=
+    None_tripleB cfg.none cfg.l32 annls (by decide)
+  have hs2r7v : s2.reg 7 = some w := by rw [hs2r7]; exact inv.r7
+  have hs2r1v : s2.reg 1 = some i := by rw [hs2r1]; exact inv.r1
+  have hlen16 : 16 ≤ s2.regs.length := by rw [hlen2]; exact inv.len16
+  have lay2 : AnnLayout s2 wd.ann p := AnnLayout_of_frame inv.lay (by
+    intro x k hx1 hx2
+    apply hfr2
+    cases st.disjp with
+    | inl h => exact Or.inr (by omega)
+    | inr h => exact Or.inl (by omega))
+  have room2 : StackRoom s2 4 :=
+    StackRoom_of_wshape hsh2 (by rw [hs2r4, inv.r4]) inv.room
+  obtain ⟨kt, s3, hkt, hrt, hrip3, hs3r1, hs3r8, hs3r9, hs3r6, hs3r4, hgen3, hfr3, hsh3⟩ :=
+    nones wd hm hm (c + len) i w p sp hiW st.clenW (Or.inl ⟨hisum, rfl⟩)
+      st.p0 st.w56 st.pann (by have h1 := hhead.1; omega) (by have h2 := hhead.2; omega) st.sp32 st.spW st.disjw st.disjp
+      s2 hrip2 hs2r8 hs2r9 hs2r6 hs2r4 hs2r7v hs2r1v hlen16
+      (rd64_of_frame_of_disjw st.disjw hfr2 (by decide) inv.fannp)
+      (rd64_of_frame_of_disjw st.disjw hfr2 (by decide) inv.fnann)
+      (rd64_of_frame_of_disjw st.disjw hfr2 (by decide) inv.fnc)
+      lay2 room2
+  have frS : ∀ x m, x + m ≤ sp - 32 ∨ sp ≤ x → s3.mem.rdN x m = s.mem.rdN x m :=
+    fun x m hx => (hfr3 x m hx).trans (hfr2 x m hx)
+  have hs3r7v : s3.reg 7 = some w := by
+    rw [hgen3 7 (by decide) (by decide) (by decide) (by decide) (by decide)
+      (by decide) (by decide) (by decide), hs2r7]; exact inv.r7
+  have hlen163 : 16 ≤ s3.regs.length := by
+    have e1 := run_regs_length kt hrt
+    rw [e1, hlen2]; exact inv.len16
+  have hnotlt : ¬ i + 1 < wd.code.length := by omega
+  obtain ⟨k4, s4, hk4, hr4, hrip4, hr04, hr14, hr64, hr74, hr84, hr94, hr44, hg4, hm4⟩ :=
+    WalkDone_tripleB cfg.walk (by decide) hm (c + len) (i + 1) w sp wd.code.length
+      st.w56 hnotlt s3 hrip3 hs3r8 hs3r9 hs3r6 hs3r4 hs3r7v hs3r1 hlen163
+      (rd64_of_frame_of_disjw st.disjw frS (by decide) inv.fnc)
+  refine ⟨k1 + (k2 + (kt + k4)), s4, (by omega), by
+    rw [run_add im k1 (k2 + (kt + k4)), hr1, run_add im k2 (kt + k4), hr2,
+      run_add im kt k4, hrt, hr4], hrip4, hr14, hr64, hr74, hr44, ?_, ?_, ?_,
+    ?_, ?_⟩
+  · intro x m hx
+    rw [hm4]; exact frS x m hx
+  · rw [hm4]; exact hsh3.trans hsh2
+  · rw [hg4 5 (by decide), hgen3 5 (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide)]; exact hs2r5
+  · rw [hg4 13 (by decide), hgen3 13 (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide), hs2r13]
+  · rw [hg4 14 (by decide), hgen3 14 (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide), hs2r14]
+
+theorem fall_finish1B {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
+    {pr : Prog} {wd : Word} {w p sp tbl : Nat} (st : WalkStatic pr wd w p sp tbl)
+    {ins : Instr} {rest : List Instr} {i c len : Nat} {cur hm h' : Height}
+    {s s2 : X86Int.St} {kh : Nat}
+    (inv : WalkInv pr wd w p sp tbl s (ins :: rest) i c cur hm)
+    (hs : hstep pr wd hm ins = some (some h'))
+    (hann : wd.ann.lookup (i + 1) = none ∨ wd.ann.lookup (i + 1) = some h')
+    (hi1 : i + 1 < wd.code.length)
+    (hlen : ins.enc.length = len)
+    (hr : run im kh (Out.ok s) = Out.ok s2)
+    (hk : kh ≤ 80 + 20 * (wd.ann.length + 1))
+    (hrip2 : s2.rip = aFallTail)
+    (hpost : HPost s s2 h' (c + len) sp) :
+    ∃ k s3, k ≤ 156 + 60 * (wd.ann.length + 1) ∧ run im k (Out.ok s) = Out.ok s3 ∧
+      WalkInv pr wd w p sp tbl s3 rest (i + 1) (c + len) h' h' ∧
+      (∀ x m, x + m ≤ sp - 32 ∨ sp ≤ x → s3.mem.rdN x m = s.mem.rdN x m) ∧
+      wshape s3.mem = wshape s.mem ∧ s3.reg 5 = s.reg 5 :=
+  fall_finishB cfg st inv hs hann hi1 hlen hr hk (k2 := 0)
+    (hk2 := Nat.zero_le _) (s1 := s2) (run_zero im (Out.ok s2))
+    hrip2 hpost
+
+theorem none_finish_cons1B {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
+    {pr : Prog} {wd : Word} {w p sp tbl : Nat} (st : WalkStatic pr wd w p sp tbl)
+    {ins : Instr} {rest : List Instr} {i c len : Nat} {cur hm : Height}
+    {s s2 : X86Int.St} {kh : Nat}
+    (inv : WalkInv pr wd w p sp tbl s (ins :: rest) i c cur hm)
+    (hs : hstep pr wd hm ins = some none)
+    (hi1 : i + 1 < wd.code.length)
+    (hlen : ins.enc.length = len)
+    (hr : run im kh (Out.ok s) = Out.ok s2)
+    (hk : kh ≤ 80 + 20 * (wd.ann.length + 1))
+    (hrip2 : s2.rip = aNoneTail)
+    (hpost : HPost s s2 hm (c + len) sp) :
+    ∃ k s3, k ≤ 156 + 60 * (wd.ann.length + 1) ∧ run im k (Out.ok s) = Out.ok s3 ∧
+      WalkInv pr wd w p sp tbl s3 rest (i + 1) (c + len)
+        ((wd.ann.lookup (i + 1)).getD ⟨0, 0⟩)
+        ((wd.ann.lookup (i + 1)).getD ⟨0, 0⟩) ∧
+      (∀ x m, x + m ≤ sp - 32 ∨ sp ≤ x → s3.mem.rdN x m = s.mem.rdN x m) ∧
+      wshape s3.mem = wshape s.mem ∧ s3.reg 5 = s.reg 5 :=
+  none_finish_consB cfg st inv hs hi1 hlen hr hk (k2 := 0)
+    (hk2 := Nat.zero_le _) (s1 := s2) (run_zero im (Out.ok s2))
+    hrip2 hpost
+
+theorem none_finish_nil1B {im : Nat → Option (Ins × Nat)} (cfg : AllCode im)
+    {pr : Prog} {wd : Word} {w p sp tbl : Nat} (st : WalkStatic pr wd w p sp tbl)
+    {ins : Instr} {i c len : Nat} {cur hm : Height}
+    {s s2 : X86Int.St} {kh : Nat}
+    (inv : WalkInv pr wd w p sp tbl s [ins] i c cur hm)
+    (hs : hstep pr wd hm ins = some none)
+    (hlen : ins.enc.length = len)
+    (hr : run im kh (Out.ok s) = Out.ok s2)
+    (hk : kh ≤ 80 + 20 * (wd.ann.length + 1))
+    (hrip2 : s2.rip = aNoneTail)
+    (hpost : HPost s s2 hm (c + len) sp) :
+    ∃ k s4, k ≤ 196 + 60 * (wd.ann.length + 1) ∧ run im k (Out.ok s) = Out.ok s4 ∧ s4.rip = aWordDone ∧
+      s4.reg 1 = some (i + 1) ∧ s4.reg 6 = some (c + len) ∧
+      s4.reg 7 = some w ∧ s4.reg 4 = some sp ∧
+      (∀ x m, x + m ≤ sp - 32 ∨ sp ≤ x → s4.mem.rdN x m = s.mem.rdN x m) ∧
+      wshape s4.mem = wshape s.mem ∧ s4.reg 5 = s.reg 5 ∧ s4.reg 13 = s.reg 13 ∧
+      s4.reg 14 = s.reg 14 :=
+  none_finish_nilB cfg st inv hs hlen hr hk (k2 := 0)
+    (hk2 := Nat.zero_le _) (s1 := s2) (run_zero im (Out.ok s2)) hrip2
+    hpost
+
 end SporosX1
