@@ -37504,5 +37504,325 @@ theorem parser_words_loop_classify_nh : ∀ (n : Nat)
           (hs2fr i hi0 hi1 hi2 hi4 hi6 hi7 hi10).trans (hs1fr i),
         hs2len, hs2k.trans hs1k, by rw [hs2sh, hs1mem],
         noHitUpTo_add hs1nh hrun1 hs2nh⟩
+/-- `shapeBnd` transports across equal write shapes. -/
+theorem shapeBnd_of_wshape {m m' : Mem}
+    (h : wshape m' = wshape m) (hb : shapeBnd m) :
+    shapeBnd m' := by
+  intro p hp
+  obtain ⟨r, hr, hpr⟩ := List.mem_map.mp hp
+  apply hb
+  have h3 : (r.base, r.hi, r.rw) ∈ wshape m := by
+    rw [← h]
+    exact List.mem_map.mpr ⟨r, hr, rfl⟩
+  obtain ⟨r2, hr2, h2⟩ := List.mem_map.mp h3
+  apply List.mem_map.mpr
+  refine ⟨r2, hr2, ?_⟩
+  rw [← hpr]
+  simp only [Prod.mk.injEq] at h2 ⊢
+  exact ⟨h2.1, h2.2.1⟩
+
+/-- The per-word budget sum is bounded by the byte budget. -/
+theorem word_budget_sum_le : ∀ (wds : List Word),
+    (wds.map (fun wd => 91 + 37 * wd.code.length)).sum ≤
+      91 * wds.length + 37 * wordsBytes wds
+  | [] => by simp [wordsBytes]
+  | wd :: wds => by
+    have ih := word_budget_sum_le wds
+    have hcb := code_length_le_bytes wd.code
+    simp only [List.map_cons, List.sum_cons, List.length_cons,
+      wordsBytes]
+    omega
+
+/-- Bounded `NoHitUpTo` back classification: from the state
+after the scratch `mmap` (scratch at `r11`, table at `r14`),
+either exit 1, or the checker entry with the shape bound the
+checker invariant needs. -/
+theorem parser_back_classify_nh {A L sp1 T S c nw mn : Nat}
+    {s : X86Int.St}
+    (hrip : s.rip = base + 0x258) (hr4 : s.reg 4 = some sp1)
+    (hr14 : s.reg 14 = some T) (hr3 : s.reg 3 = some A)
+    (hr12 : s.reg 12 = some mn) (hr15 : s.reg 15 = some (A + L))
+    (hr11 : s.reg 11 = some S)
+    (hspW : sp1 + 56 < W) (hAW : A + 8 < W)
+    (hcur : rd64 s.mem sp1 = some c)
+    (hnwv : ∃ v, rd64 s.mem (A + 8) = some v ∧ v % 2 ^ 32 = nw)
+    (hpop : ∀ off : Nat, off ≤ 48 →
+      ∃ w, rd64 s.mem (sp1 + off) = some w)
+    (hlen16 : s.regs.length = 16) (hregs : RegsOk s)
+    (hbnd : shapeBnd s.mem)
+    (hstk : (∀ v, (wr64 s.mem (sp1 + 48) v).isSome) ∧
+      ∀ v, (wr64 s.mem (sp1 + 40) v).isSome)
+    (hBc : A ≤ c) (hce : c ≤ A + L) (heW : A + L < W)
+    (hpWn : T + 64 * nw < W) (hSW : S + (A + L - A) < W) (hnwW : nw < W)
+    (hmnW : T + 64 * mn < W)
+    (hT1 : T + 64 * nw ≤ c ∨ A + L ≤ T)
+    (hT2 : T + 64 * nw ≤ sp1 + 56 - 16 ∨ sp1 + 56 ≤ T)
+    (hT3 : S + (A + L - A) ≤ T ∨ T + 64 * nw ≤ S + (c - A))
+    (hSB : A + L ≤ sp1 + 56 - 16 ∨ sp1 + 56 ≤ c)
+    (hScrB : S + (A + L - A) ≤ c ∨ A + L ≤ S + (c - A))
+    (hScrStk : S + (A + L - A) ≤ sp1 + 56 - 16 ∨ sp1 + 56 ≤ S + (c - A))
+    (hwrE : ∀ (off v : Nat), off + 8 ≤ 64 * nw →
+      (wr64 s.mem (T + off) v).isSome)
+    (hwrS : ∀ a v, S + (c - A) ≤ a → a < S + (A + L - A) →
+      (s.mem.wr a v).isSome)
+    (hrdN : ∀ a l, c ≤ a → l ≤ A + L - a →
+      ∃ bs, s.mem.rdN a l = some bs ∧ ∀ b ∈ bs, b < 256) :
+    (∃ k, k ≤ 200 + 200 * L ∧
+      run stage1Im k (Out.ok s) = Out.exit 1 ∧ NoHitUpTo s k) ∨
+    (∃ N s', N ≤ 200 + 200 * L ∧
+      run stage1Im N (Out.ok s) = Out.ok s' ∧
+      s'.rip = base + 0x452 ∧ s'.reg 4 = some (sp1 + 56) ∧
+      s'.k = s.k ∧ s'.regs.length = 16 ∧ shapeBnd s'.mem ∧
+      NoHitUpTo s N) := by
+  obtain ⟨v, hnw, hvmod⟩ := hnwv
+  obtain ⟨w1, hp1⟩ := hpop 8 (by decide)
+  obtain ⟨w2, hp2⟩ := hpop 16 (by decide)
+  obtain ⟨w3, hp3⟩ := hpop 24 (by decide)
+  obtain ⟨w4, hp4⟩ := hpop 32 (by decide)
+  obtain ⟨w5, hp5⟩ := hpop 40 (by decide)
+  obtain ⟨w6, hp6⟩ := hpop 48 (by decide)
+  obtain ⟨s7, hrun7, hs7rip, hs7r6, hs7r7, hs7r13, hs7r4, -,
+      hs7mem, hs7fr, hs7len, hs7k, hs7nh⟩ :=
+    parser_setup_ok_nh hrip hr4 hr14 hr3 hspW hAW hcur hnw hp1
+      hp2 hp3 hp4 hp5 hp6 hlen16
+  have hs7r13' : s7.reg 13 = some nw := by rw [hs7r13, hvmod]
+  obtain ⟨s8, hrun8, hs8rip, hs8r1, hs8fr, hs8mem, hs8len, hs8k,
+      hs8nh⟩ :=
+    parser_words_init_nh hs7rip hs7r13' hs7len
+  have hrun78 : run stage1Im 12 (Out.ok s) = Out.ok s8 := by
+    rw [show (12 : Nat) = 11 + 1 by omega, run_add stage1Im 11 1,
+      hrun7, hrun8]
+  have hnh78 : NoHitUpTo s 12 := noHitUpTo_add hs7nh hrun7 hs8nh
+  have hs8mem' : s8.mem = s.mem := hs8mem.trans hs7mem
+  have hs8r : ∀ i v, i ≠ 0 → i ≠ 1 → i ≠ 4 → i ≠ 6 → i ≠ 7 →
+      i ≠ 13 → s.reg i = some v → s8.reg i = some v := by
+    intro i v hi0 hi1 hi4 hi6 hi7 hi13 hv
+    rw [hs8fr i hi1, hs7fr i hi0 hi4 hi6 hi7 hi13]
+    exact hv
+  have hs8r4 : s8.reg 4 = some (sp1 + 56) := by
+    rw [hs8fr 4 (by decide)]; exact hs7r4
+  have hs8r6 : s8.reg 6 = some c := by
+    rw [hs8fr 6 (by decide)]; exact hs7r6
+  have hs8r7 : s8.reg 7 = some T := by
+    rw [hs8fr 7 (by decide)]; exact hs7r7
+  have hs8r15 : s8.reg 15 = some (A + L) :=
+    hs8r 15 _ (by decide) (by decide) (by decide) (by decide)
+      (by decide) (by decide) hr15
+  have hs8r3 : s8.reg 3 = some A :=
+    hs8r 3 _ (by decide) (by decide) (by decide) (by decide)
+      (by decide) (by decide) hr3
+  have hs8r11 : s8.reg 11 = some S :=
+    hs8r 11 _ (by decide) (by decide) (by decide) (by decide)
+      (by decide) (by decide) hr11
+  have hs8room : StackRoom s8 2 := by
+    intro sp hsp i hi v
+    have hspEq : sp = sp1 + 56 := by
+      rw [hs8r4] at hsp
+      exact (Option.some.inj hsp).symm
+    subst hspEq
+    rw [hs8mem']
+    rcases (by omega : i = 0 ∨ i = 1) with rfl | rfl
+    · have e : (sp1 + 56 + W - 8 * (0 + 1)) % W = sp1 + 48 := by
+        rw [show sp1 + 56 + W - 8 * (0 + 1) = (sp1 + 48) + W by
+          omega, Nat.add_mod_right,
+          Nat.mod_eq_of_lt (by omega)]
+      rw [e]
+      exact hstk.1 v
+    · have e : (sp1 + 56 + W - 8 * (1 + 1)) % W = sp1 + 40 := by
+        rw [show sp1 + 56 + W - 8 * (1 + 1) = (sp1 + 40) + W by
+          omega, Nat.add_mod_right,
+          Nat.mod_eq_of_lt (by omega)]
+      rw [e]
+      exact hstk.2 v
+  -- exit-1 closer for back failures
+  have hexit : ∀ (z : X86Int.St) (kz : Nat),
+      run stage1Im kz (Out.ok s) = Out.ok z →
+      z.rip = aFail1 → wshape z.mem = wshape s.mem →
+      (z.reg 4 = some (sp1 + 56) ∨ z.reg 4 = some (sp1 + 48)) →
+      NoHitUpTo s kz → kz ≤ 195 + 200 * L →
+      ∃ k, k ≤ 200 + 200 * L ∧
+        run stage1Im k (Out.ok s) = Out.exit 1 ∧
+        NoHitUpTo s k := by
+    intro z kz hzrun hzrip hzsh hzr4 hznh hkz
+    have hzroom : StackRoom z 1 := by
+      intro sp hsp i hi v
+      have hi0 : i = 0 := by omega
+      subst hi0
+      have h1 : (s.mem.wrN ((sp + W - 8) % W) (bytes8 v)).isSome := by
+        rcases hzr4 with h4 | h4
+        · have hspEq : sp = sp1 + 56 := by
+            rw [h4] at hsp
+            exact (Option.some.inj hsp).symm
+          subst hspEq
+          have e : (sp1 + 56 + W - 8) % W = sp1 + 48 := by
+            rw [show sp1 + 56 + W - 8 = (sp1 + 48) + W by omega,
+              Nat.add_mod_right, Nat.mod_eq_of_lt (by omega)]
+          rw [e]
+          exact hstk.1 v
+        · have hspEq : sp = sp1 + 48 := by
+            rw [h4] at hsp
+            exact (Option.some.inj hsp).symm
+          subst hspEq
+          have e : (sp1 + 48 + W - 8) % W = sp1 + 40 := by
+            rw [show sp1 + 48 + W - 8 = (sp1 + 40) + W by omega,
+              Nat.add_mod_right, Nat.mod_eq_of_lt (by omega)]
+          rw [e]
+          exact hstk.2 v
+      have h2 := wrN_some_of_wshape _ s.mem z.mem hzsh _ h1
+      exact h2
+    rcases hzr4 with h4 | h4
+    · obtain ⟨h5, hnh5⟩ := exit1_of_fail1_bnd (by omega)
+        (by omega) z hzrip h4 (run_regs_ok hzrun hregs) hzroom
+      exact ⟨kz + 5, by omega,
+        by rw [run_add stage1Im kz 5, hzrun, h5],
+        noHitUpTo_add hznh hzrun hnh5⟩
+    · obtain ⟨h5, hnh5⟩ := exit1_of_fail1_bnd (by omega)
+        (by omega) z hzrip h4 (run_regs_ok hzrun hregs) hzroom
+      exact ⟨kz + 5, by omega,
+        by rw [run_add stage1Im kz 5, hzrun, h5],
+        noHitUpTo_add hznh hzrun hnh5⟩
+  rcases parser_words_loop_classify_nh nw hs8rip hs8r1 hs8r6
+      hs8r7 hs8r15 hs8r4 hs8r3 hs8r11 hBc hce heW hpWn hSW hnwW
+      hs8room (by omega) (by omega) hs8len hT1 hT2 hT3 hSB hScrB
+      hScrStk
+      (by rw [hs8mem']; exact hwrE)
+      (by rw [hs8mem']; exact hwrS)
+      (by
+        intro a l ha hl
+        obtain ⟨bs, hbs, hb⟩ := hrdN a l ha hl
+        exact ⟨bs, by rwa [hs8mem'], hb⟩) with hloop | hloopfail
+  · obtain ⟨wds, k9, s9, hk9, hwdslen, hrun9, hs9rip, hs9r1,
+        hs9r6, hs9r7, hs9r4, hs9fit, hs9layW, hs9tab, hs9b, hs9fr,
+        hs9len, hs9k, hs9sh, hs9room, hs9memfr, hs9nh⟩ := hloop
+    have hrun89 : run stage1Im (12 + k9) (Out.ok s) =
+        Out.ok s9 := by
+      rw [run_add stage1Im 12 k9, hrun78, hrun9]
+    have hnh89 : NoHitUpTo s (12 + k9) :=
+      noHitUpTo_add hnh78 hrun78 hs9nh
+    have hk9L : k9 ≤ 128 * L := by
+      have h1 := word_budget_sum_le wds
+      have h2 := wordsBytes_ge wds
+      omega
+    obtain ⟨s10, hrun10, hs10rip, hs10fr, hs10mem, hs10len,
+        hs10k, hs10nh⟩ :=
+      parser_words_head_zero_nh hs9rip hs9r1
+    have hrun810 : run stage1Im (12 + k9 + 3) (Out.ok s) =
+        Out.ok s10 := by
+      rw [show 12 + k9 + 3 = (12 + k9) + 3 by omega,
+        run_add stage1Im (12 + k9) 3, hrun89, hrun10]
+    have hnh810 : NoHitUpTo s (12 + k9 + 3) :=
+      noHitUpTo_add hnh89 hrun89 hs10nh
+    have hs10r : ∀ i v, s9.reg i = some v → s10.reg i = some v := by
+      intro i v hv
+      rw [hs10fr i]; exact hv
+    have hs10r6 : s10.reg 6 = some (c + wordsBytes wds) :=
+      hs10r 6 _ hs9r6
+    have hs10r15 : s10.reg 15 = some (A + L) :=
+      hs10r 15 _ (by
+        rw [hs9fr 15 (by decide) (by decide) (by decide)
+          (by decide) (by decide) (by decide) (by decide)]
+        exact hs8r15)
+    have hs10r12 : s10.reg 12 = some mn :=
+      hs10r 12 _ (by
+        rw [hs9fr 12 (by decide) (by decide) (by decide)
+          (by decide) (by decide) (by decide) (by decide)]
+        exact hs8r 12 _ (by decide) (by decide) (by decide)
+          (by decide) (by decide) (by decide) hr12)
+    have hs10r13 : s10.reg 13 = some nw :=
+      hs10r 13 _ (by
+        rw [hs9fr 13 (by decide) (by decide) (by decide)
+          (by decide) (by decide) (by decide) (by decide),
+          hs8fr 13 (by decide)]
+        exact hs7r13')
+    have hs10r14 : s10.reg 14 = some T :=
+      hs10r 14 _ (by
+        rw [hs9fr 14 (by decide) (by decide) (by decide)
+          (by decide) (by decide) (by decide) (by decide)]
+        exact hs8r 14 _ (by decide) (by decide) (by decide)
+          (by decide) (by decide) (by decide) hr14)
+    have hs10r4 : s10.reg 4 = some (sp1 + 56) := hs10r 4 _ hs9r4
+    have hs10len16 : s10.regs.length = 16 := by
+      rw [hs10len]; exact hs9len
+    have hs10sh : wshape s10.mem = wshape s.mem := by
+      rw [hs10mem, hs9sh, hs8mem']
+    have htrailExit : ∀ (z : X86Int.St) (kz : Nat),
+        run stage1Im kz (Out.ok s10) = Out.ok z →
+        z.rip = aFail1 → z.reg 4 = some (sp1 + 56) →
+        z.mem = s10.mem → NoHitUpTo s10 kz → kz ≤ 16 →
+        ∃ k, k ≤ 200 + 200 * L ∧
+          run stage1Im k (Out.ok s) = Out.exit 1 ∧
+          NoHitUpTo s k := by
+      intro z kz hzrun hzrip hzr4 hzmem hznh hkz
+      apply hexit z (12 + k9 + 3 + kz)
+      · rw [show 12 + k9 + 3 + kz = (12 + k9 + 3) + kz by omega,
+          run_add stage1Im (12 + k9 + 3) kz, hrun810, hzrun]
+      · exact hzrip
+      · rw [hzmem]; exact hs10sh
+      · exact Or.inl hzr4
+      · exact noHitUpTo_add hnh810 hrun810 hznh
+      · omega
+    by_cases hcurN : c + wordsBytes wds ≠ A + L
+    · obtain ⟨z, hzrun, hzrip, hzfr, hzmem, hzlen, hzk, hznh⟩ :=
+        parser_trailing_cursor_fail_nh hs10rip hs10r6 hs10r15
+          hcurN (by omega) heW
+      exact Or.inl (htrailExit z 3 hzrun hzrip
+        (by rw [hzfr 4]; exact hs10r4) hzmem hznh (by omega))
+    have hcurE : c + wordsBytes wds = A + L := by omega
+    by_cases hmnN : ¬ mn < nw
+    · obtain ⟨z, hzrun, hzrip, hzfr, hzmem, hzlen, hzk, hznh⟩ :=
+        parser_trailing_main_ge_nh hs10rip hs10r6 hs10r15
+          hs10r12 hs10r13 hcurE (by omega) heW (by omega)
+          hs10len16
+      exact Or.inl (htrailExit z 5 hzrun hzrip
+        (by rw [hzfr 4]; exact hs10r4) hzmem hznh (by omega))
+    have hmnlt : mn < nw := by omega
+    have hslot10 : rd64 s10.mem (T + 64 * mn) =
+        some wds[mn].ins := by
+      rw [hs10mem]
+      have hj : mn < wds.length := by omega
+      exact TabLay_ins_at hs9tab mn hj
+    by_cases hins : wds[mn].ins = 0
+    · obtain ⟨z, hzrun, hzrip, hzr0, hzfr, hzmem, hzlen, hzk,
+          hznh⟩ :=
+        parser_trailing_ok_nh hs10rip hs10r6 hs10r15 hs10r12
+          hs10r13 hs10r14 hcurE (by omega) heW hmnlt hmnW
+          (by rw [hslot10, hins]) hs10len16
+      refine Or.inr ⟨12 + k9 + 3 + 15, z, by omega, by
+        rw [show 12 + k9 + 3 + 15 = (12 + k9 + 3) + 15 by omega,
+          run_add stage1Im (12 + k9 + 3) 15, hrun810, hzrun],
+        hzrip,
+        by rw [hzfr 4 (by decide) (by decide)]; exact hs10r4,
+        by rw [hzk, hs10k, hs9k, hs8k, hs7k], hzlen,
+        shapeBnd_of_wshape (by rw [hzmem]; exact hs10sh) hbnd,
+        noHitUpTo_add hnh810 hrun810 hznh⟩
+    · obtain ⟨z, hzrun, hzrip, hzfr, hzmem, hzlen, hzk, hznh⟩ :=
+        parser_trailing_slot_fail_nh hs10rip hs10r6 hs10r15
+          hs10r12 hs10r13 hs10r14 hcurE (by omega) heW hmnlt
+          hmnW hslot10 hins hs10len16
+      exact Or.inl (htrailExit z 16 hzrun hzrip
+        (by rw [hzfr 4 (by decide) (by decide)]; exact hs10r4)
+        hzmem hznh (by omega))
+  · obtain ⟨wds, code', k9, s9, hwdslen, hwdsfit, hcodefit, hk9,
+        hrun9, hs9rip, hs9r4, hs9fr, hs9len, hs9k, hs9sh,
+        hs9nh⟩ := hloopfail
+    have hrun89 : run stage1Im (12 + k9) (Out.ok s) =
+        Out.ok s9 := by
+      rw [run_add stage1Im 12 k9, hrun78, hrun9]
+    have hk9L : k9 ≤ 128 * L + 128 := by
+      have h1 := word_budget_sum_le wds
+      have h2 := wordsBytes_ge wds
+      have h3 := code_length_le_bytes code'
+      omega
+    have hs9r4' : s9.reg 4 = some (sp1 + 56) ∨
+        s9.reg 4 = some (sp1 + 48) := by
+      rcases hs9r4 with h | h
+      · exact Or.inl h
+      · refine Or.inr ?_
+        have e : sp1 + 56 - 8 = sp1 + 48 := by omega
+        rwa [e] at h
+    exact Or.inl (hexit s9 (12 + k9) hrun89 hs9rip
+      (by rw [hs9sh, hs8mem']) hs9r4'
+      (noHitUpTo_add hnh78 hrun78 hs9nh) (by omega))
+
 
 end SporosX1
