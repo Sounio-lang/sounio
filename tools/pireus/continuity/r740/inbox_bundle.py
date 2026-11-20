@@ -94,6 +94,9 @@ def bundle(out, engine, proposals_dir):
         if "pack" in body:
             # Two vectors per 16-lane block; same operator, same parity reference.
             row["pack"] = body["pack"]
+        if "vector_load" in body:
+            # ld.global.v2.f64 staging under load=2; same operator, same parity reference.
+            row["vector_load"] = body["vector_load"]
         if decision != "ADMIT":
             row["reason"] = json.loads(stdout).get("reason")
         if decision == "ADMIT":

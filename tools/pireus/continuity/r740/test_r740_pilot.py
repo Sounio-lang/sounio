@@ -746,11 +746,15 @@ class Engines(unittest.TestCase):
             (src / "op-fixed-rolled.proposal.json").write_bytes(raw(dict(base, kind=2, phase=36077, unroll=4, sign_mode=1)))
             (src / "op-packed.proposal.json").write_bytes(raw(dict(base, kind=2, phase=36077, pack=1)))
             (src / "op-packed-bad.proposal.json").write_bytes(raw(dict(base, kind=2, phase=36077, pack=2)))
+            (src / "op-staged.proposal.json").write_bytes(raw(dict(base, kind=2, phase=36077, load=2, layout=1, pack=1, vector_load=1)))
+            (src / "op-staged-aos.proposal.json").write_bytes(raw(dict(base, kind=2, phase=36077, load=2, layout=0, pack=1, vector_load=1)))
             out = Path(directory) / "bundle"
             inbox_bundle.bundle(out, self.admission, src)
             summary = json.loads((out / "PROPOSALS.json").read_text())
             rows = {row["id"]: row for row in summary["proposals"]}
-            self.assertEqual(summary["admitted"], ["op-a", "op-b", "op-fixed", "op-packed"])
+            self.assertEqual(summary["admitted"], ["op-a", "op-b", "op-fixed", "op-packed", "op-staged"])
+            self.assertEqual(rows["op-staged"]["vector_load"], 1)
+            self.assertEqual(rows["op-staged-aos"]["reason"], "VECTOR_LOAD_LAYOUT")
             self.assertEqual(rows["op-packed"]["pack"], 1)
             self.assertNotIn("pack", rows["op-fixed"])
             self.assertEqual(rows["op-packed-bad"]["reason"], "PACK")
@@ -840,19 +844,25 @@ class Engines(unittest.TestCase):
         self.assertEqual(json.loads(mode.stdout)["reason"], "MODE")
         self.assertEqual(json.loads(self.emit("PTX").stdout)["reason"], "MODE")
 
-    def test_absent_or_zero_extensions_keep_the_b001_b002_b003_bytes(self):
+    def test_absent_or_zero_extensions_keep_the_b001_to_b004_bytes(self):
         frozen = json.loads((HERE / "frozen_inbox_outputs.json").read_text())["outputs"]
-        self.assertEqual(len(frozen), 40)
-        self.assertEqual(sum(1 for name in frozen if "-b003-" in name), 16)
+        self.assertEqual(len(frozen), 56)
+        for batch in ("b001", "b002", "b003", "b004"):
+            self.assertGreater(sum(1 for name in frozen if "-" + batch + "-" in name), 0, batch)
         context = HERE / "phase-a" / "context.json"
         zero = self.work / "zero.proposal.json"
+        optional = ("sign_mode", "pack", "vector_load")
         for name, modes in sorted(frozen.items()):
             body = json.loads((CONTINUITY / "inbox" / name).read_text())
-            self.assertNotIn("pack", body)
-            self.assertEqual("sign_mode" in body, "-b003-" in name)
-            explicit = [dict(body, pack=0)]
-            if "sign_mode" not in body:
-                explicit += [dict(body, sign_mode=0), dict(body, sign_mode=0, pack=0)]
+            self.assertIn(body["load"], (0, 1), name)
+            self.assertNotIn("vector_load", body)
+            if "-b003-" in name:
+                self.assertEqual(body["sign_mode"], 1)
+            elif "-b004-" not in name:
+                self.assertNotIn("sign_mode", body)
+            self.assertEqual("pack" in body, "-b004-" in name)
+            absent = [key for key in optional if key not in body]
+            explicit = [dict(body, **{key: 0}) for key in absent] + [dict(body, **{key: 0 for key in absent})]
             for mode, digest in modes.items():
                 argv = [str(self.admission), str(context), str(CONTINUITY / "inbox" / name)]
                 argv += [] if mode == "receipt" else [mode]
@@ -987,6 +997,86 @@ class Engines(unittest.TestCase):
         dropped = ptx.replace("    st.global.f64 [%rd6], %fd5;\n", "")
         self.assertNotEqual(dropped, ptx)
         self.assertGreater(mismatches(dropped.encode(), 36077, 0, 320), 0)
+
+    def test_staged_load_and_vector_load_admission(self):
+        for kind, phase in ((1, None), (2, 36076)):
+            for plan in (dict(layout=0, unroll=1), dict(layout=1, unroll=16, sign_mode=1, pack=1)):
+                staged = json.loads(self.emit(None, kind, phase, dict(plan, load=2)).stdout)
+                direct = json.loads(self.emit(None, kind, phase, dict(plan, load=0)).stdout)
+                self.assertEqual(staged["decision"], "ADMIT", staged)
+                self.assertEqual(staged["load"], 2)
+                self.assertNotIn("load", direct)
+                self.assertEqual(staged["plan_id"] - 262144, direct["plan_id"])
+                self.assertEqual(staged["tensor_sha256"], direct["tensor_sha256"])
+            vec = json.loads(self.emit(None, kind, phase, dict(load=2, layout=1, pack=1, vector_load=1)).stdout)
+            plain = json.loads(self.emit(None, kind, phase, dict(load=2, layout=1, pack=1)).stdout)
+            self.assertEqual((vec["vector_load"], vec["plan_id"] - 524288), (1, plain["plan_id"]))
+            self.assertNotIn("vector_load", plain)
+        for plan, reason in ((dict(load=3), "GRAMMAR"),
+                             (dict(load=2, layout=1, pack=1, vector_load=2), "VECTOR_LOAD"),
+                             (dict(load=1, layout=1, pack=1, vector_load=1), "VECTOR_LOAD_LOAD"),
+                             (dict(load=2, layout=0, pack=1, vector_load=1), "VECTOR_LOAD_LAYOUT"),
+                             (dict(load=2, layout=1, vector_load=1), "VECTOR_LOAD_PACK"),
+                             (dict(load=2, sign_mode=1, unroll=8), "SIGN_MODE_UNROLL")):
+            run = self.emit("ptx-sm86", 2, 35, plan)
+            self.assertEqual(run.returncode, 1)
+            self.assertEqual(json.loads(run.stdout)["reason"], reason, plan)
+            self.assertNotIn(b".target", run.stdout)
+        for plan, smem, gloads, v2 in ((dict(load=2, layout=0, unroll=4), b"pireus_sa[16]", 2, 0),
+                                       (dict(load=2, layout=1, pack=1, unroll=16), b"pireus_sa[32]", 4, 0),
+                                       (dict(load=2, layout=1, pack=1, vector_load=1, unroll=16), b"pireus_sa[32]", 4, 2)):
+            ptx = self.emit("ptx-sm75", 2, 35, plan).stdout
+            self.assertIn(b".maxntid 16,1,1\n", ptx)
+            self.assertIn(smem, ptx)
+            self.assertEqual(ptx.count(b"bar.sync 0;"), 1)
+            # The barrier sits after every shared store and before every shared load.
+            barrier = ptx.index(b"bar.sync 0;")
+            self.assertLess(ptx.rindex(b"st.shared.f64"), barrier)
+            self.assertGreater(ptx.index(b"ld.shared.f64"), barrier)
+            self.assertEqual(ptx.count(b"ld.global.f64"), gloads)
+            self.assertEqual(ptx.count(b"ld.global.v2.f64 {"), v2)
+            self.assertNotIn(b"shfl", ptx)
+            self.assertNotIn(b"fma", ptx)
+            self.assertNotIn(b".f32", ptx)
+
+    def test_staged_ptx_computes_the_operator_reference_bit_for_bit(self):
+        import operator_reference as ref
+        import ptx_sim
+        rows = ref.load_rows(HERE / "phase-a" / "numeric-fixtures.jsonl")
+        self.assertEqual(len(rows), 320)
+
+        def mismatches(ptx, phase, layout, count):
+            got = ptx_sim.run_rows(ptx.decode() if isinstance(ptx, bytes) else ptx, rows[:count], layout)
+            bad = 0
+            for v, row in enumerate(rows[:count]):
+                for k, word in enumerate(ref.outputs(phase, row)):
+                    other = got[v][k]
+                    if word != other and not (ref.is_nan(word & ptx_sim.M64) and ref.is_nan(other & ptx_sim.M64)):
+                        bad += 1
+            return bad
+
+        # 320 takes the ld.global.v2.f64 path; 319 the odd-n scalar path and the packed tail.
+        cases = ((1, None, dict(lane_stride=1, lane_offset=0, layout=0, unroll=1), 320),
+                 (2, 36077, dict(lane_stride=3, lane_offset=5, layout=1, unroll=16, sign_mode=1), 319),
+                 (2, 36076, dict(lane_stride=7, lane_offset=9, layout=0, unroll=4, pack=1), 319),
+                 (2, 33825, dict(lane_stride=15, lane_offset=13, layout=1, unroll=16, sign_mode=1, pack=1, vector_load=1), 320),
+                 (2, 33825, dict(lane_stride=15, lane_offset=13, layout=1, unroll=16, sign_mode=1, pack=1, vector_load=1), 319),
+                 (2, 1123, dict(lane_stride=11, lane_offset=2, layout=1, unroll=8, pack=1, vector_load=1), 320))
+        for kind, phase, plan, count in cases:
+            ptx = self.emit("ptx-sm86", kind, phase, dict(plan, load=2)).stdout
+            self.assertEqual(mismatches(ptx, phase or 0, plan["layout"], count), 0, (kind, phase, plan, count))
+        # Controls. A sign-bit flip must diverge. Swapping the two halves of the v2 load
+        # must diverge at even n and not at odd n, so both staging paths really ran.
+        ptx = self.emit("ptx-sm86", 2, 36077, dict(load=2, layout=1, pack=1, vector_load=1, unroll=2)).stdout.decode()
+        head, rest = ptx.split("pireus_signs[16] = {", 1)
+        words, tail = rest.split("}", 1)
+        words = words.split(",")
+        words[7] = str(int(words[7]) ^ 2)
+        self.assertGreater(mismatches(head + "pireus_signs[16] = {" + ",".join(words) + "}" + tail, 36077, 1, 320), 0)
+        swapped = ptx.replace("ld.global.v2.f64 {%fd1,%fd6}", "ld.global.v2.f64 {%fd6,%fd1}")
+        self.assertNotEqual(swapped, ptx)
+        self.assertGreater(mismatches(swapped, 36077, 1, 320), 0)
+        self.assertEqual(mismatches(swapped, 36077, 1, 319), 0)
 
     def test_per_architecture_rule_matches_the_spark_bootstrap(self):
         text = "".join(f"{i} {i % 2} {900000 + (i * 17) % 50} 1000000\n" for i in range(30))
