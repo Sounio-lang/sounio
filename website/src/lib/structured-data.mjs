@@ -101,7 +101,9 @@ export function techArticle({
   const modified = isoDateOrNothing(dateModified);
   if (modified) article.dateModified = modified;
   if (about) article.about = about;
-  if (author) article.author = author;
+  // Science and tutorial pages do not pass an author. Learn pages that do
+  // not name one use the same person. A supplied author wins.
+  article.author = author ?? SITE_AUTHOR;
   if (isPartOf) article.isPartOf = isPartOf;
   if (typeof proficiencyLevel === 'string' && proficiencyLevel.length > 0) {
     article.proficiencyLevel = proficiencyLevel;
@@ -109,6 +111,96 @@ export function techArticle({
   if (dependencies !== undefined) article.dependencies = dependencies;
   if (citation) article.citation = citation;
   return article;
+}
+
+/** Article author already used on learn pages. No honorific, no credential. */
+export const SITE_AUTHOR = {
+  '@type': 'Person',
+  name: 'Demetrios Chiuratto Agourakis',
+  url: 'https://www.souniolang.org/about/',
+  sameAs: ['https://orcid.org/0009-0001-8671-8878'],
+};
+
+/**
+ * JSON-LD author for a visible byline.
+ * A Person is emitted only for the site author, spelled exactly.
+ * The team byline, and any other byline, is an Organization whose name
+ * is the byline text, so the structured name stays the visible one.
+ */
+export function authorFromByline(byline) {
+  const name = String(byline ?? '').replace(/\s+/g, ' ').trim();
+  if (name === SITE_AUTHOR.name) return SITE_AUTHOR;
+  return {
+    '@type': 'Organization',
+    name,
+  };
+}
+
+/**
+ * Schema kind for pages that previously emitted no JSON-LD.
+ * `article` is TechArticle, `blog` is BlogPosting, `collection` is a hub,
+ * `crumbs` is BreadcrumbList only.
+ */
+export function pageSchemaKind(bare) {
+  if (
+    bare === '/science/'
+    || bare === '/tutorials/'
+    || bare === '/insights/'
+    || bare === '/releases/'
+    || bare === '/packages/'
+    || bare === '/showcases/'
+  ) {
+    return 'collection';
+  }
+  if (/^\/tutorials\/[^/]+\/$/.test(bare)) return 'collection';
+  if (/^\/science\/[^/]+\/$/.test(bare)) return 'article';
+  if (/^\/tutorials\/[^/]+\/[^/]+\/$/.test(bare)) return 'article';
+  if (/^\/insights\/[^/]+\/$/.test(bare)) return 'blog';
+  if (
+    bare === '/credits/'
+    || bare === '/dissertation/'
+    || bare === '/scientist/'
+    || /^\/packages\/[^/]+\/$/.test(bare)
+  ) {
+    return 'crumbs';
+  }
+  return null;
+}
+
+export function collectionPage({ name, description, url, inLanguage }) {
+  return {
+    '@context': 'https://schema.org',
+    '@type': 'CollectionPage',
+    name,
+    description,
+    url,
+    inLanguage,
+  };
+}
+
+export function blogPosting({
+  headline,
+  description,
+  url,
+  inLanguage,
+  datePublished,
+  dateModified,
+  author,
+}) {
+  const post = {
+    '@context': 'https://schema.org',
+    '@type': 'BlogPosting',
+    headline,
+    description,
+    inLanguage,
+    url,
+  };
+  if (author) post.author = author;
+  const published = isoDateOrNothing(datePublished);
+  if (published) post.datePublished = published;
+  const modified = isoDateOrNothing(dateModified);
+  if (modified) post.dateModified = modified;
+  return post;
 }
 
 export function breadcrumbList(crumbs, absolutize) {
@@ -143,6 +235,8 @@ export function buildPageSchemas({
   dependencies,
   citation,
   omitSoftwareApplication,
+  datePublished,
+  pageTitle,
 }) {
   const schemas = [];
   if (bare === '/' && !omitSoftwareApplication) schemas.push(softwareApplication({ description, siteOrigin }));
@@ -161,6 +255,35 @@ export function buildPageSchemas({
       dependencies,
       citation,
     }));
+  } else {
+    const kind = pageSchemaKind(bare);
+    const articleHeadline = headline || pageTitle || title;
+    if (kind === 'article') {
+      schemas.push(techArticle({
+        headline: articleHeadline,
+        description,
+        url: canonicalUrl,
+        inLanguage,
+        author,
+      }));
+    } else if (kind === 'blog') {
+      schemas.push(blogPosting({
+        headline: articleHeadline,
+        description,
+        url: canonicalUrl,
+        inLanguage,
+        datePublished,
+        dateModified: dateModified || datePublished,
+        author,
+      }));
+    } else if (kind === 'collection') {
+      schemas.push(collectionPage({
+        name: articleHeadline,
+        description,
+        url: canonicalUrl,
+        inLanguage,
+      }));
+    }
   }
   if (Array.isArray(breadcrumbs) && breadcrumbs.length > 0) {
     schemas.push(breadcrumbList(breadcrumbs, absolutize));

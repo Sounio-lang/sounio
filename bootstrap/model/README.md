@@ -13,7 +13,13 @@ no library beyond core, and the evidence that it says what the CPU does.
 | `formal/Bootstrap/Refine.lean`, `Loop.lean` | Refinement of machine states, `step_mono`, runs cut at a loop head, a decidable check for refinement. |
 | `formal/Bootstrap/SeedA.lean`, `SeedB.lean` | Each seed on every listing (`seedA_correct`, `seedB_correct`, and the refusals). |
 | `seed_proofs.sh` | Generates and checks the four whole-run theorems. |
-| `formal/Bootstrap/X86DiffModel.lean`, `x86diff_cpu.cpp`, `x86diff_gate.sh` | Instruction-level differential test of the model against the CPU. |
+| `formal/Bootstrap/X86DiffModel.lean`, `x86diff_cpu.cpp`, `x86diff_gate.sh` | Instruction-level differential test of `X86Min` against the CPU. |
+| `formal/Bootstrap/X86IntDiffModel.lean`, `x86diff_cpu.cpp`, `x86int_diff_gate.sh` | Instruction-level differential test of `X86Int` and `X86Dec` against the CPU. |
+| `formal/Bootstrap/TMRVoter.lean` | Canonical 38-byte machine-code TMR majority voter (`voterCode`) and physical 4-site fault-masking theorems over `X86Int`. |
+| `formal/Bootstrap/X86Bridge.lean` | Forward simulation from the partial `X86Min` seed model (`X86Min.step`, `X86Min.exec`) to concrete `X86Int.step`, `X86Int.run`, and `X86Int.prun`. |
+| `formal/Bootstrap/X86EnvDiffModel.lean`, `x86env_diff_cpu.cpp`, `x86env_diff_gate.sh` | Process-environment differential test of `X86Env.syscall` and `X86Env.initStack` against the Linux x86-64 kernel. |
+| `formal/Bootstrap/X86DecFuzzModel.lean`, `x86dec_fuzz_cpu.cpp`, `x86dec_fuzz_gate.sh` | Hamming-1/2 (`X86Dec.altsAt`) and byte-boundary differential fuzzer of `X86Dec.decode` and `X86Int.step` against the CPU. |
+| `formal/Bootstrap/TMRBoundCheck.lean`, `tmr_fault_inject.cpp`, `tmr_fault_gate.sh` | Physical 4-site machine-code fault injection of the 38-byte TMR voter against kernel-checked `TMRVoter` and `TMRExposure` bounds. |
 
 ## What the model says
 
