@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Separate r740 launcher. No Spark host-fence, lease, or check_pair.
 
-The process that submits work is srun. The sbatch text is rendered from the
-same fields so it can be reviewed; this module never executes sbatch.
+By default the process that submits work is srun, and the sbatch text is only
+rendered for review. `submit` is the opt-in non-blocking path for a caller that
+cannot hold an srun open (the pireus-agent MCP): it executes sbatch for one
+step, and `settle` records that job's terminal state from sacct.
 """
 import argparse
 import hashlib
@@ -12,12 +14,14 @@ import subprocess
 from pathlib import Path
 
 from gpu_device_key import marker_name
+from inbox_bundle import bundle as build_proposals_bundle
 from phase_a import bundle as build_phase_a_bundle
 from proposals import phase_a, phase_b
 from run_inputs import require_run_inputs, sha256_file, stage_verified_inputs
 
 HERE = Path(__file__).resolve().parent
 PARTITION = "gpu-orangefs"
+PARTITIONS = ("gpu-orangefs", "pireus-agent")
 NODE = "gpuorangefs-multi-r740-proxmox"
 DEFAULT_SCRATCH = "/scratch/pireus/r740"
 DEFAULT_MEM = "16G"
@@ -67,10 +71,25 @@ def new_run_name(clock, pid, entropy):
     return clock + "-" + str(pid) + "-" + entropy
 
 
-def remote_run(scratch, name):
+def parse_partition(partition):
+    if partition not in PARTITIONS:
+        raise ValueError("partition must be one of " + ", ".join(PARTITIONS))
+    return partition
+
+
+def runs_base(scratch, runs_root=None):
+    if runs_root is None:
+        return Path(scratch) / "runs"
+    base = Path(runs_root)
+    if not base.is_absolute() or ".." in base.parts:
+        raise ValueError("runs root must be an absolute path")
+    return base
+
+
+def remote_run(scratch, name, runs_root=None):
     if not name or "/" in name or name.startswith("."):
         raise ValueError("run name")
-    return str(Path(scratch) / "runs" / name)
+    return str(runs_base(scratch, runs_root) / name)
 
 
 def load_json(path):
@@ -140,7 +159,7 @@ def bash_script(remote, phase, sm, token):
 
 def srun_argv(step):
     argv = [
-        "srun", "-p", PARTITION, "-w", NODE,
+        "srun", "-p", step.get("partition", PARTITION), "-w", NODE,
         "--nodes=1", "--ntasks=1", "--ntasks-per-node=1", "-c8",
         "--gres=" + step["gres"], "--mem=" + step["mem"],
         "--propagate=NONE", "--kill-on-bad-exit=1",
@@ -161,7 +180,7 @@ def srun_argv(step):
 def sbatch_text(step):
     return "\n".join([
         "#!/bin/bash",
-        "#SBATCH -p " + PARTITION,
+        "#SBATCH -p " + step.get("partition", PARTITION),
         "#SBATCH -w " + NODE,
         "#SBATCH --nodes=1",
         "#SBATCH --ntasks=1",
@@ -180,16 +199,19 @@ def sbatch_text(step):
     ])
 
 
-def build_plan(scratch, name, mem=DEFAULT_MEM, minutes=DEFAULT_MINUTES, image_token_value="UNPINNED"):
+def build_plan(scratch, name, mem=DEFAULT_MEM, minutes=DEFAULT_MINUTES, image_token_value="UNPINNED",
+               partition=PARTITION, runs_root=None):
     mem = parse_mem(mem)
     minutes = parse_minutes(minutes)
-    remote = remote_run(scratch, name)
+    partition = parse_partition(partition)
+    remote = remote_run(scratch, name, runs_root)
     steps = []
     for phase in ("probe", "timing"):
         for gpu in GPUS:
             step = {
                 "name": phase + "-sm" + str(gpu["sm"]),
                 "phase": phase,
+                "partition": partition,
                 "gres": gpu["gres"],
                 "sm": gpu["sm"],
                 "arch": gpu["arch"],
@@ -205,7 +227,7 @@ def build_plan(scratch, name, mem=DEFAULT_MEM, minutes=DEFAULT_MINUTES, image_to
             steps.append(step)
     return {
         "schema": 1,
-        "partition": PARTITION,
+        "partition": partition,
         "node": NODE,
         "scratch": str(scratch),
         "remote_run": remote,
@@ -234,10 +256,12 @@ def stage_into(root):
     return bindir
 
 
-def allocate_run(scratch, name):
+def allocate_run(scratch, name, runs_root=None):
     if Path(scratch).is_symlink():
         raise ValueError("scratch root is a symlink")
-    path = Path(remote_run(scratch, name))
+    if runs_root is not None and Path(runs_root).is_symlink():
+        raise ValueError("runs root is a symlink")
+    path = Path(remote_run(scratch, name, runs_root))
     path.mkdir(parents=True, exist_ok=False)
     return path
 
@@ -267,12 +291,12 @@ def run_steps(root, steps, runner):
 STEPS = ("probe-sm86", "probe-sm75", "timing-sm86", "timing-sm75")
 
 
-def prepare_run(scratch, name, inputs):
+def prepare_run(scratch, name, inputs, runs_root=None):
     """Allocate a fresh run directory and stage both architectures. No srun."""
     inputs = Path(inputs)
     for arch in ("sm86", "sm75"):
         require_run_inputs(inputs / arch)
-    root = allocate_run(scratch, name)
+    root = allocate_run(scratch, name, runs_root)
     stage_into(root)
     for arch in ("sm86", "sm75"):
         (root / arch).mkdir()
@@ -280,6 +304,15 @@ def prepare_run(scratch, name, inputs):
     origin = HERE / "phase-a" / "ORIGIN.json"
     if origin.is_file():
         (root / "phase-a-origin.json").write_bytes(origin.read_bytes())
+    proposals = inputs / "PROPOSALS.json"
+    if proposals.is_file() and not proposals.is_symlink():
+        (root / "proposals-bundle.json").write_bytes(proposals.read_bytes())
+        receipts = inputs / "admission"
+        if receipts.is_dir():
+            (root / "admission").mkdir()
+            for item in sorted(receipts.iterdir()):
+                if item.is_file() and not item.is_symlink():
+                    (root / "admission" / item.name).write_bytes(item.read_bytes())
     return root
 
 
@@ -300,7 +333,7 @@ def assert_probe_succeeded(root, step_name):
 
 
 def run_step(scratch, name, step_name, runner, mem=DEFAULT_MEM, minutes=DEFAULT_MINUTES,
-             image_lock=None, rule_lock=None):
+             image_lock=None, rule_lock=None, partition=PARTITION, runs_root=None):
     """One srun against an already prepared run directory. The SIF is hashed first."""
     if step_name not in STEPS:
         raise ValueError("unknown step")
@@ -308,13 +341,100 @@ def run_step(scratch, name, step_name, runner, mem=DEFAULT_MEM, minutes=DEFAULT_
     rule_lock = rule_lock if rule_lock is not None else load_json(HERE / "arch_gain_rule.lock.json")
     assert_rule_frozen(rule_lock)
     token = verify_sif_before_submit(image_lock)
-    root = Path(remote_run(scratch, name))
+    root = Path(remote_run(scratch, name, runs_root))
     if not root.is_dir():
         raise RuntimeError("run directory is not prepared")
     assert_probe_succeeded(root, step_name)
-    plan = build_plan(scratch, name, mem, minutes, token)
+    plan = build_plan(scratch, name, mem, minutes, token, partition, runs_root)
     step = next(item for item in plan["steps"] if item["name"] == step_name)
     return run_steps(root, [step], runner)
+
+
+def sbatch_submit_text(step, root):
+    """The sbatch that `submit` executes. Same allocation as the srun argv, one step."""
+    srun_argv(step)
+    return "\n".join([
+        "#!/bin/bash",
+        "#SBATCH -p " + step["partition"],
+        "#SBATCH -w " + NODE,
+        "#SBATCH --nodes=1",
+        "#SBATCH --ntasks=1",
+        "#SBATCH --ntasks-per-node=1",
+        "#SBATCH -c 8",
+        "#SBATCH --gres=" + step["gres"],
+        "#SBATCH --mem=" + step["mem"],
+        "#SBATCH --propagate=NONE",
+        "#SBATCH --time=" + str(step["minutes"]),
+        "#SBATCH --job-name=" + step["job_name"],
+        "#SBATCH --no-requeue",
+        "#SBATCH --output=" + str(Path(root) / "logs" / (step["name"] + "-%j.out")),
+        step["script"].rstrip("\n"),
+        "",
+    ])
+
+
+def submit_step(scratch, name, step_name, sbatch, mem=DEFAULT_MEM, minutes=DEFAULT_MINUTES,
+                image_lock=None, rule_lock=None, partition=PARTITION, runs_root=None):
+    """One sbatch, without waiting. The stage is recorded as submitted and never resubmitted."""
+    if step_name not in STEPS:
+        raise ValueError("unknown step")
+    image_lock = image_lock if image_lock is not None else load_json(HERE / "r740-runtime-lock.json")
+    rule_lock = rule_lock if rule_lock is not None else load_json(HERE / "arch_gain_rule.lock.json")
+    assert_rule_frozen(rule_lock)
+    token = verify_sif_before_submit(image_lock)
+    root = Path(remote_run(scratch, name, runs_root))
+    if not root.is_dir():
+        raise RuntimeError("run directory is not prepared")
+    assert_probe_succeeded(root, step_name)
+    stages = root / "stages"
+    stages.mkdir(exist_ok=True)
+    for other in STEPS:
+        prior = stages / (other + ".json")
+        if prior.is_file() and json.loads(prior.read_text()).get("status") in ("started", "submitted"):
+            raise RuntimeError("stage " + other + " is still open; settle it first")
+    state = stages / (step_name + ".json")
+    if state.exists():
+        raise RuntimeError("refusing to resubmit stage " + step_name)
+    plan = build_plan(scratch, name, mem, minutes, token, partition, runs_root)
+    step = next(item for item in plan["steps"] if item["name"] == step_name)
+    (root / "logs").mkdir(exist_ok=True)
+    script = stages / (step_name + ".sbatch")
+    script.write_text(sbatch_submit_text(step, root))
+    state.write_text(json.dumps({"status": "started", "name": step_name}) + "\n")
+    job = sbatch(script)
+    if not isinstance(job, str) or not job.isdigit():
+        state.write_text(json.dumps({"status": "failed", "name": step_name, "sbatch": repr(job)}) + "\n")
+        raise RuntimeError("sbatch did not return a job id; not resubmitting " + step_name)
+    record = {"status": "submitted", "name": step_name, "job": job, "partition": step["partition"],
+              "mem": step["mem"], "minutes": step["minutes"], "gres": step["gres"]}
+    state.write_text(json.dumps(record) + "\n")
+    return record
+
+
+TERMINAL = ("COMPLETED", "FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY", "NODE_FAIL", "PREEMPTED",
+            "BOOT_FAIL", "DEADLINE")
+
+
+def settle_step(scratch, name, step_name, sacct, runs_root=None):
+    """Read the submitted job's terminal state. ok needs COMPLETED 0:0 and the step marker."""
+    root = Path(remote_run(scratch, name, runs_root))
+    state = root / "stages" / (step_name + ".json")
+    record = json.loads(state.read_text())
+    if record.get("status") != "submitted":
+        raise RuntimeError("stage " + step_name + " is not awaiting settlement")
+    job_state, exit_code = sacct(record["job"])
+    record["sacct_state"] = job_state
+    record["exit_code"] = exit_code
+    if job_state.split(" ")[0] not in TERMINAL:
+        return record
+    sm = int(step_name.rsplit("sm", 1)[1])
+    marker = root / marker_name(step_name.split("-", 1)[0], sm)
+    ok = job_state == "COMPLETED" and exit_code == "0:0" and marker.is_file()
+    record["status"] = "ok" if ok else "failed"
+    if ok:
+        record["returncode"] = 0
+    state.write_text(json.dumps(record) + "\n")
+    return record
 
 
 def execute(scratch, name, runner, mem=DEFAULT_MEM, minutes=DEFAULT_MINUTES,
@@ -358,9 +478,26 @@ def subprocess_runner(argv):
     return completed.returncode
 
 
+def sbatch_runner(script):
+    completed = subprocess.run(["sbatch", "--parsable", str(script)], capture_output=True, text=True, check=False)
+    if completed.returncode != 0:
+        raise RuntimeError("sbatch failed: " + completed.stderr.strip())
+    return completed.stdout.strip().split(";")[0]
+
+
+def sacct_reader(job):
+    completed = subprocess.run(["sacct", "-n", "-P", "-X", "-j", str(job), "-o", "State,ExitCode"],
+                               capture_output=True, text=True, check=True)
+    line = completed.stdout.strip().splitlines()
+    if not line:
+        return "UNKNOWN", ""
+    state, exit_code = line[0].split("|")
+    return state, exit_code
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("plan", "bundle", "prepare", "run"))
+    parser.add_argument("command", choices=("plan", "bundle", "prepare", "run", "submit", "settle"))
     parser.add_argument("--mem", default=DEFAULT_MEM)
     parser.add_argument("--minutes", type=int, default=DEFAULT_MINUTES)
     parser.add_argument("--scratch", default=DEFAULT_SCRATCH)
@@ -369,6 +506,10 @@ def main():
     parser.add_argument("--out", type=Path)
     parser.add_argument("--engine", type=Path)
     parser.add_argument("--step", choices=STEPS)
+    parser.add_argument("--partition", default=PARTITION, choices=PARTITIONS)
+    parser.add_argument("--runs-root", help="absolute run parent; default SCRATCH/runs")
+    parser.add_argument("--proposals-dir", type=Path,
+                        help="bundle these *.proposal.json through --engine instead of Phase A")
     args = parser.parse_args()
     lock = load_json(HERE / "r740-runtime-lock.json")
     rule = load_json(HERE / "arch_gain_rule.lock.json")
@@ -376,24 +517,39 @@ def main():
     if args.command == "bundle":
         if args.out is None:
             parser.error("bundle requires --out")
-        build_phase_a_bundle(args.out, args.engine)
-        print(json.dumps({"bundle": str(args.out), "engine": args.engine is not None}))
+        if args.proposals_dir is not None:
+            build_proposals_bundle(args.out, args.engine, args.proposals_dir)
+        else:
+            build_phase_a_bundle(args.out, args.engine)
+        print(json.dumps({"bundle": str(args.out), "engine": args.engine is not None,
+                          "proposals_dir": None if args.proposals_dir is None else str(args.proposals_dir)}))
         return
     if args.name is None:
         parser.error(args.command + " requires --name")
     if args.command == "prepare":
         if args.inputs is None:
             parser.error("prepare requires --inputs")
-        root = prepare_run(args.scratch, args.name, args.inputs)
+        root = prepare_run(args.scratch, args.name, args.inputs, args.runs_root)
         print(json.dumps({"prepared": str(root), "srun": False}))
         return
+    if args.command in ("submit", "settle") and not args.step:
+        parser.error(args.command + " requires --step")
+    if args.command == "submit":
+        print(json.dumps(submit_step(args.scratch, args.name, args.step, sbatch_runner, args.mem, args.minutes,
+                                     partition=args.partition, runs_root=args.runs_root)))
+        return
+    if args.command == "settle":
+        print(json.dumps(settle_step(args.scratch, args.name, args.step, sacct_reader, args.runs_root)))
+        return
     if args.command == "run" and args.step:
-        run_step(args.scratch, args.name, args.step, subprocess_runner, args.mem, args.minutes)
+        run_step(args.scratch, args.name, args.step, subprocess_runner, args.mem, args.minutes,
+                 partition=args.partition, runs_root=args.runs_root)
         return
     if args.command == "run":
         execute(args.scratch, args.name, subprocess_runner, args.mem, args.minutes, inputs=args.inputs)
         return
-    plan = build_plan(args.scratch, args.name, args.mem, args.minutes, image_token(lock))
+    plan = build_plan(args.scratch, args.name, args.mem, args.minutes, image_token(lock),
+                      args.partition, args.runs_root)
     plan["image_status"] = lock["status"]
     plan["will_submit"] = False
     print(json.dumps(plan, indent=2))

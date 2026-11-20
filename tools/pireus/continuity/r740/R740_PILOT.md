@@ -140,3 +140,13 @@ Phase B is 32 further deterministic plans, not a resubmit of Phase A. `cycle.py`
 They are disjoint from Phase A and use the same lane formula. Each round is a fresh run directory. A failed stage is not resubmitted inside it.
 
 Local materialization, on the submit host, is `admission.elf context proposal ptx-sm86` or `ptx-sm75`. `ptx` remains the sm_121 spelling used by `cycle.py materialize`. Parity stays `material_parity.sio`. Neither of those is an srun.
+
+## Agent path (pireus-agent)
+
+The pireus-agent MCP on r740-proxmox cannot hold an `srun` open, and it writes only under `/scratch/pireus/agent` and `/scratch/pireus/r740/runs-agent`. Three options cover that path. Their defaults keep every command above unchanged.
+
+- `--partition pireus-agent`. Only `gpu-orangefs` (the default) and `pireus-agent` are accepted. Memory is still capped at 64G.
+- `--runs-root /scratch/pireus/r740/runs-agent`. This must be an absolute path. The default is still `SCRATCH/runs`.
+- `bundle --proposals-dir DIR --engine admission.elf`. The engine first has to reproduce every vendored Phase A PTX. Then each `DIR/*.proposal.json` goes through admission against `phase-a/context.json`. The receipts land in `admission/` and the summary in `PROPOSALS.json`. Each ADMIT is materialized to sm_86 and sm_75. A REFUSE is dropped, and so is an ADMIT whose PTX equals a control or a Phase A plan. The controls stay the vendored Phase A bytes.
+
+`submit --step STEP` runs the same checks as `run --step`: the frozen rule, the SIF hash and the probe gate. It then executes one `sbatch --parsable` with the same allocation, minus the srun-only `--kill-on-bad-exit`. It records the stage as `submitted` with the job id and does not wait. While any stage is still open it refuses. `settle --step STEP` reads `sacct`. A stage becomes `ok` only on `COMPLETED` with `0:0` and the step marker present. Any other terminal state is `failed`, and the launcher never resubmits a failed stage. The agent cannot pause the LLM services, so its timings run with them up and are noisy. They do not replace a paused timing.

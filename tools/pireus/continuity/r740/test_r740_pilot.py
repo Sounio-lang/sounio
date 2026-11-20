@@ -694,6 +694,44 @@ class Engines(unittest.TestCase):
     def tearDownClass(cls):
         shutil.rmtree(cls.work, ignore_errors=True)
 
+    def test_proposals_dir_bundle_admits_materializes_and_drops(self):
+        import inbox_bundle
+        with tempfile.TemporaryDirectory() as directory:
+            src = Path(directory) / "inbox"
+            src.mkdir()
+            context_sha = sha(HERE / "phase-a" / "context.json")
+            base = json.loads((HERE / "phase-a" / "proposals" / "004.proposal.json").read_text())
+            self.assertEqual(base["context"], context_sha)
+            fresh = dict(base, lane_offset=1)
+            (src / "x-new.proposal.json").write_bytes(raw(fresh))
+            (src / "x-again.proposal.json").write_bytes(raw(base))
+            (src / "x-stale.proposal.json").write_bytes(raw(dict(fresh, context="0" * 64)))
+            out = Path(directory) / "bundle"
+            inbox_bundle.bundle(out, self.admission, src)
+            summary = json.loads((out / "PROPOSALS.json").read_text())
+            rows = {row["id"]: row for row in summary["proposals"]}
+            self.assertEqual(summary["admitted"], ["x-new"])
+            self.assertEqual(rows["x-stale"]["decision"], "REFUSE")
+            self.assertEqual(rows["x-again"]["decision"], "ADMIT")
+            self.assertEqual(rows["x-again"]["duplicate_of"], ["phase-a:004"])
+            self.assertEqual(summary["context_sha256"], context_sha)
+            self.assertEqual(summary["engine_sha256"], sha(self.admission))
+            for arch in ("sm86", "sm75"):
+                inputs = run_inputs.require_run_inputs(out / arch)
+                bench = inputs["benchmark_manifest"]
+                self.assertEqual([c["id"] for c in bench["controls"]], ["direct", "shuffle"])
+                self.assertEqual([c["id"] for c in bench["candidates"]], ["x-new"])
+                self.assertEqual((out / arch / "controls" / "direct.ptx").read_bytes(),
+                                 (HERE / "phase-a" / "ptx" / arch / "direct.ptx").read_bytes())
+                self.assertEqual(sha(out / arch / "x-new.ptx"), rows["x-new"]["ptx_sha256"][arch])
+            self.assertTrue((out / "admission" / "x-stale.receipt.json").is_file())
+            with self.assertRaises(ValueError):
+                inbox_bundle.bundle(Path(directory) / "none", None, src)
+            scratch = Path(directory) / "scratch"
+            root = launch.prepare_run(scratch, REVIEW_NAME, out, str(Path(directory) / "runs-agent"))
+            self.assertTrue((root / "proposals-bundle.json").is_file())
+            self.assertTrue((root / "admission" / "x-new.receipt.json").is_file())
+
     def context_and_proposal(self, kind=1, phase=None, plan=None):
         context = dict(schema=1, target=701202, dimension=16, precision=64, order=1, fma=0,
                        capabilities=55, lane_width=32, facts_state=1)
@@ -800,6 +838,91 @@ class Engines(unittest.TestCase):
         zero = self.work / "zero.tsv"
         zero.write_text(series(0))
         self.assertEqual(subprocess.run([str(self.arch), str(zero), str(zero)], capture_output=True).returncode, 2)
+
+
+class AgentPath(unittest.TestCase):
+    """--partition, --runs-root and the non-blocking submit/settle path. Defaults stay as before."""
+
+    def test_defaults_unchanged_and_options_are_allowlisted(self):
+        default = launch.build_plan(launch.DEFAULT_SCRATCH, REVIEW_NAME)
+        self.assertEqual(default["partition"], "gpu-orangefs")
+        self.assertEqual(default["remote_run"], launch.DEFAULT_SCRATCH + "/runs/" + REVIEW_NAME)
+        agent = launch.build_plan(launch.DEFAULT_SCRATCH, REVIEW_NAME, partition="pireus-agent",
+                                  runs_root="/scratch/pireus/r740/runs-agent")
+        self.assertEqual(agent["remote_run"], "/scratch/pireus/r740/runs-agent/" + REVIEW_NAME)
+        for step in agent["steps"]:
+            argv = step["argv"]
+            self.assertEqual(argv[argv.index("-p") + 1], "pireus-agent")
+            self.assertIn("/runs-agent/" + REVIEW_NAME, step["script"])
+            self.assertIn("#SBATCH -p pireus-agent", step["sbatch_review"])
+        for bad in ("all", "gpu-spark", "", "gpu-orangefs,all"):
+            with self.assertRaises(ValueError):
+                launch.build_plan(launch.DEFAULT_SCRATCH, REVIEW_NAME, partition=bad)
+        for bad in ("runs-agent", "/scratch/../etc"):
+            with self.assertRaises(ValueError):
+                launch.build_plan(launch.DEFAULT_SCRATCH, REVIEW_NAME, runs_root=bad)
+        with self.assertRaises(ValueError):
+            launch.build_plan(launch.DEFAULT_SCRATCH, REVIEW_NAME, mem="65G", partition="pireus-agent")
+
+    def test_submit_once_settle_then_timing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bundle = Path(directory) / "bundle"
+            phase_a.bundle(bundle)
+            image = declared_image(Path(directory) / "image.sif")
+            scratch = Path(directory) / "scratch"
+            runs = Path(directory) / "runs-agent"
+            root = launch.prepare_run(scratch, REVIEW_NAME, bundle, str(runs))
+            self.assertEqual(root, runs / REVIEW_NAME)
+            self.assertFalse((scratch / "runs").exists())
+            scripts = []
+
+            def sbatch(path):
+                scripts.append(Path(path).read_text())
+                return str(100 + len(scripts))
+
+            kw = dict(image_lock=image, partition="pireus-agent", runs_root=str(runs))
+            with self.assertRaises(RuntimeError) as caught:
+                launch.submit_step(scratch, REVIEW_NAME, "timing-sm86", sbatch, **kw)
+            self.assertIn("successful probe", str(caught.exception))
+            record = launch.submit_step(scratch, REVIEW_NAME, "probe-sm86", sbatch, **kw)
+            self.assertEqual(record["status"], "submitted")
+            self.assertEqual(record["job"], "101")
+            text = scripts[0]
+            self.assertIn("#SBATCH -p pireus-agent", text)
+            self.assertIn("#SBATCH --gres=gpu:a5000:1", text)
+            self.assertIn("#SBATCH --mem=16G", text)
+            self.assertIn("#SBATCH --no-requeue", text)
+            self.assertIn("#SBATCH --output=" + str(root / "logs" / "probe-sm86-%j.out"), text)
+            self.assertIn(image["derived_sif_sha256"], text)
+            self.assertNotIn("--kill-on-bad-exit", text)
+            self.assertEqual(text.count("--gres="), 1)
+            with self.assertRaises(RuntimeError) as caught:
+                launch.submit_step(scratch, REVIEW_NAME, "probe-sm75", sbatch, **kw)
+            self.assertIn("still open", str(caught.exception))
+            running = launch.settle_step(scratch, REVIEW_NAME, "probe-sm86", lambda job: ("RUNNING", "0:0"), str(runs))
+            self.assertEqual(running["status"], "submitted")
+            with self.assertRaises(RuntimeError):
+                launch.submit_step(scratch, REVIEW_NAME, "timing-sm86", sbatch, **kw)
+            marker = root / "markers" / "probe-sm86.json"
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text("{}\n")
+            done = launch.settle_step(scratch, REVIEW_NAME, "probe-sm86", lambda job: ("COMPLETED", "0:0"), str(runs))
+            self.assertEqual(done["status"], "ok")
+            with self.assertRaises(RuntimeError):
+                launch.settle_step(scratch, REVIEW_NAME, "probe-sm86", lambda job: ("COMPLETED", "0:0"), str(runs))
+            with self.assertRaises(RuntimeError) as caught:
+                launch.submit_step(scratch, REVIEW_NAME, "probe-sm86", sbatch, **kw)
+            self.assertIn("refusing to resubmit", str(caught.exception))
+            launch.submit_step(scratch, REVIEW_NAME, "timing-sm86", sbatch, **kw)
+            self.assertEqual(len(scripts), 2)
+            launch.settle_step(scratch, REVIEW_NAME, "timing-sm86", lambda job: ("COMPLETED", "0:0"), str(runs))
+            self.assertEqual(json.loads((root / "stages" / "timing-sm86.json").read_text())["status"], "failed")
+            launch.submit_step(scratch, REVIEW_NAME, "probe-sm75", sbatch, **kw)
+            failed = launch.settle_step(scratch, REVIEW_NAME, "probe-sm75", lambda job: ("FAILED", "1:0"), str(runs))
+            self.assertEqual(failed["status"], "failed")
+            with self.assertRaises(RuntimeError):
+                launch.submit_step(scratch, REVIEW_NAME, "timing-sm75", sbatch, **kw)
+            self.assertEqual(len(scripts), 3)
 
 
 class SparkUntouched(unittest.TestCase):
