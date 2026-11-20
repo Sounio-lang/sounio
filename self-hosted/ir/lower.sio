@@ -13097,6 +13097,11 @@ fn lower_name_is_tuple_destructure_temp(n: Name) -> bool {
 // 0 everywhere else, so every other path keeps the copy.
 var LOWER_PLACE_MOVE_OK: i64 = 0
 
+// Set by the assignment lowering around its emit_place_aggregate_value_copy call: an assignment must copy a struct place
+// source even when the struct has no fixed-array field (the `let` path skips those for code size; its alias is the residual
+// SIO-278 documents, but a stored alias of a scalar-only struct is a silent wrong value once either side is written).
+var LOWER_PLACE_FORCE_COPY: i64 = 0
+
 // Conservative "does `name` appear as an identifier anywhere in this expression":
 // every child field of the node is visited, and running out of depth answers
 // true. A miss here would drop an observable copy, so when in doubt it says yes.
@@ -20571,7 +20576,7 @@ impl Lowerer {
                 // that has none, keeps the pre-SIO-278 shared handle --
                 // the residual the size cap forces, never worse than the
                 // behaviour this replaces.
-                if self.struct_layout_has_array_field(st) {
+                if self.struct_layout_has_array_field(st) || LOWER_PLACE_FORCE_COPY == 1 {
                     return self.emit_place_struct_value_copy(reg, st, slot_count)
                 }
                 return (self, reg)
@@ -38713,6 +38718,36 @@ impl Lowerer {
             }
             _ => {}
         }
+        // An un-annotated array literal of struct values (`var a = [mk(1.0), mk(2.0)]`, `[S { .. }, ..]`, `[S { .. }; N]`) records its element
+        // type like the annotated form: without it `a[i].f` resolved no field type, a float field read as an integer and
+        // `println(a[1].x)` printed the IEEE bits (silent wrong value).
+        let ty_absent = match s.ty {
+            Some(_) => false,
+            None => true,
+        }
+        if ty_absent {
+            match s.expr {
+                Some(lit_e) => {
+                    if (*lit_e).kind == ExprKind::ExprArrayLit && lo.lookup_local_struct_type(s.name).len <= 0 {
+                        var lit_st = ir_empty_name()
+                        match (*lit_e).left {
+                            Some(rep_e) => {
+                                if (*rep_e).kind == ExprKind::ExprCall {
+                                    lit_st = lo.expr_call_return_struct_name_ref(&(*rep_e))
+                                } else if (*rep_e).kind == ExprKind::ExprStructLit {
+                                    lit_st = ir_path_first_name((*rep_e).path)
+                                }
+                            }
+                            None => { lit_st = lo.expr_first_arg_struct_name_ref(&(*lit_e)) }
+                        }
+                        if lit_st.len > 0 && !ir_name_is_box(lit_st) && lower_struct_layout_index_of(&(*lo.struct_layouts), lit_st) >= 0 {
+                            lo = lo.bind_local_struct_type(s.name, lit_st, true)
+                        }
+                    }
+                }
+                None => {}
+            }
+        }
         match s.expr {
             Some(expr_box) => {
                 if (*expr_box).kind == ExprKind::ExprStructLit {
@@ -39341,6 +39376,19 @@ impl Lowerer {
                             lo = agg_pair.0
                             rhs = agg_pair.1
                         }
+                    } else if (*rhs_agg).kind == ExprKind::ExprFieldAccess
+                        || (*rhs_agg).kind == ExprKind::ExprIndex
+                        || ((*rhs_agg).kind == ExprKind::ExprUnary && (*rhs_agg).un_op == UnaryOp::OpDeref) {
+                        // `(*w).ts = (*w).tsa` / `x = *p` / `x = o.f` stored the SOURCE
+                        // handle, so the two places aliased and a later write through
+                        // one showed through the other (silent wrong value, no size
+                        // threshold). Value-copy like the `let` path (SIO-278);
+                        // non-aggregate places keep the word.
+                        LOWER_PLACE_FORCE_COPY = 1
+                        let place_agg_pair = lo.emit_place_aggregate_value_copy(&(*rhs_agg), rhs)
+                        LOWER_PLACE_FORCE_COPY = 0
+                        lo = place_agg_pair.0
+                        rhs = place_agg_pair.1
                     }
                 }
                 _ => {}
@@ -39672,6 +39720,27 @@ impl Lowerer {
                                     None => {}
                                 }
                             }
+                            var inplace_st = ir_empty_name()
+                            var inplace_slots: i64 = 0
+                            if !is_box_t && raw_store_idx < 0 {
+                                match (*target_expr).left {
+                                    Some(ip_op) => {
+                                        if (*ip_op).kind == ExprKind::ExprIdent && lo.lookup_local_is_ref((*ip_op).name)
+                                            && !lo.lookup_local_is_raw_ptr((*ip_op).name)
+                                            && !lo.lookup_local_struct_type_is_array_elem((*ip_op).name) {
+                                            let ipt0 = lo.lookup_local_struct_type((*ip_op).name)
+                                            if ipt0.len > 0 && !ir_name_is_box(ipt0) && !ir_name_eq_lit(ipt0, "Knowledge") {
+                                                let ips = lo.struct_layout_slot_count(ipt0)
+                                                if ips > 0 {
+                                                    inplace_st = ipt0
+                                                    inplace_slots = ips
+                                                }
+                                            }
+                                        }
+                                    }
+                                    None => {}
+                                }
+                            }
                             let ptr_pair = lo.lower_opt_expr_ref(&(*target_expr).left)
                             lo = ptr_pair.0
                             let ptr_reg = ptr_pair.1
@@ -39679,6 +39748,22 @@ impl Lowerer {
                                 lo = lo.emit_object_to_raw_struct(ptr_reg, &(*target_expr), raw_store_type, raw_store_idx, rhs)
                             } else if is_box_t {
                                 lo = lo.emit(ir_field_set(ptr_reg, 0, rhs, ir_empty_name()))
+                            } else if inplace_st.len > 0 {
+                                // `*d = v` with `d: &!S` (S a struct): write v's slots INTO the object d refers to. The store below
+                                // rebinds the handle in the slot `d` points at; for `&!x` of a local that slot is the local's own,
+                                // but for `&!o.f` it is a temporary holding o.f's handle, so the new value was lost (silent wrong
+                                // value). v is a fresh copy (see the RHS copy above), so sharing its nested handles is safe.
+                                let old_pair = lo.lower_expr_ref(&(*target_expr))
+                                lo = old_pair.0
+                                var ipi: i64 = 0
+                                while ipi < inplace_slots && ipi < 128 {
+                                    let ipname = lo.struct_layout_field_name_at(inplace_st, ipi)
+                                    let ipt = lo.fresh_reg()
+                                    lo = ipt.0
+                                    lo = lo.emit(ir_field_get(ipt.1, rhs, ipi, ipname))
+                                    lo = lo.emit(ir_field_set(old_pair.1, ipi, ipt.1, ipname))
+                                    ipi = ipi + 1
+                                }
                             } else {
                                 // SIO-557 R2: `*p = v` through *mut i8/*mut u8 is a
                                 // byte store — the default word store zeroes the
