@@ -6,9 +6,9 @@ import Footer from '../components/common/Footer.astro';
 import { CustomCursor } from '../components/common/CustomCursor';
 import { ClientRouter } from 'astro:transitions';
 import { getLocaleFromUrl, getLocalizedPath, isLocaleFullyLocalized, loadTranslations, ogLocaleTag, shouldShowLocaleTranslationNotice, type Locale } from '../lib/i18n';
-import { absoluteUrl, barePath, canonicalPathname, hreflangLinks, htmlLang, localeFromPath } from '../lib/seo-locales.mjs';
-import { englishSearchFor } from '../lib/search-appearance.mjs';
-import { buildPageSchemas, jsonForScript } from '../lib/structured-data.mjs';
+import { absoluteUrl, barePath, canonicalPathname, hreflangLinks, htmlLang, isIndexableUrl, localeFromPath } from '../lib/seo-locales.mjs';
+import { searchCopyFor } from '../lib/search-appearance.mjs';
+import { buildPageSchemas, jsonForScript, pageSchemaKind } from '../lib/structured-data.mjs';
 import surface from '../data/publicSurface.json';
 
 interface Crumb {
@@ -22,6 +22,7 @@ interface Props {
   image?: string;
   noIndex?: boolean;
   localizedAlternates?: boolean;
+  alternateLocales?: Locale[];
   removeTopPadding?: boolean;
   schema?: any;
   breadcrumbs?: Crumb[];
@@ -34,16 +35,19 @@ interface Props {
   articleDependencies?: unknown[];
   articleCitation?: Record<string, unknown>;
   omitSoftwareApplication?: boolean;
+  datePublished?: string;
 }
 
-const { title, description, image, noIndex = false, localizedAlternates = true, removeTopPadding = false, schema = null, breadcrumbs = [], dateModified, articleHeadline, articleAbout, articleAuthor, articleIsPartOf, articleProficiencyLevel, articleDependencies, articleCitation, omitSoftwareApplication = false } = Astro.props;
+const { title, description, image, noIndex = false, localizedAlternates = true, alternateLocales, removeTopPadding = false, schema = null, breadcrumbs = [], dateModified, articleHeadline, articleAbout, articleAuthor, articleIsPartOf, articleProficiencyLevel, articleDependencies, articleCitation, omitSoftwareApplication = false, datePublished } = Astro.props;
 const locale = getLocaleFromUrl(Astro.url);
 const canonicalPath = canonicalPathname(Astro.url.pathname);
 const canonicalURL = absoluteUrl(canonicalPath);
-const alternates: { hreflang: string; href: string }[] = hreflangLinks(Astro.url.pathname);
+const translatedHere = isIndexableUrl(Astro.url.pathname);
+const alternates: { hreflang: string; href: string }[] = noIndex || !translatedHere ? [] : hreflangLinks(Astro.url.pathname);
 const t = await loadTranslations(locale);
 const pagePath = barePath(Astro.url.pathname);
-const searchCopy = englishSearchFor(pagePath, locale);
+const searchCopy = searchCopyFor(pagePath, locale);
+const robots = noIndex ? 'noindex, nofollow' : translatedHere ? '' : 'noindex, follow';
 
 const siteTitle = 'Sounio';
 const fullTitle = searchCopy?.title
@@ -53,15 +57,58 @@ const fullTitle = searchCopy?.title
     : (t.seo_default_title || 'Sounio — Epistemic Computing');
 const metaDescription = searchCopy?.description || description || t.seo_default_description || 'A self-hosted programming language for epistemic computing: native uncertainty quantification, physical units and declared effects, compiled to Linux x86-64.';
 const extraSchemas = schema == null ? [] : Array.isArray(schema) ? schema : [schema];
+
+function stripSiteName(value: string): string {
+  const suffix = ' — Sounio';
+  const prefix = 'Sounio — ';
+  if (value.endsWith(suffix)) return value.slice(0, -suffix.length);
+  if (value.startsWith(prefix)) return value.slice(prefix.length);
+  return value;
+}
+
+function synthesizedCrumbs(): Crumb[] {
+  const home = { name: t.breadcrumb_home || 'Home', href: getLocalizedPath('/', locale) };
+  const current = { name: stripSiteName(title), href: Astro.url.pathname };
+  const to = (name: string, href: string): Crumb => ({ name, href: getLocalizedPath(href, locale) });
+  const tutorialsLabel = locale === 'el' ? 'Μαθήματα Sounio' : 'Tutorials';
+  if (pagePath.startsWith('/science/') && pagePath !== '/science/') {
+    return [home, to(t.nav_science, '/science/'), current];
+  }
+  if (/^\/tutorials\/[^/]+\/[^/]+\/$/.test(pagePath)) {
+    const series = pagePath.split('/')[2];
+    const seriesName = series === 'getting-started'
+      ? t.tutorial_series_getting_started
+      : series === 'drug-dosing'
+        ? t.tutorial_series_drug_dosing
+        : series;
+    return [home, to(tutorialsLabel, '/tutorials/'), to(seriesName, `/tutorials/${series}/`), current];
+  }
+  if (/^\/tutorials\/[^/]+\/$/.test(pagePath)) {
+    return [home, to(tutorialsLabel, '/tutorials/'), current];
+  }
+  if (pagePath.startsWith('/insights/') && pagePath !== '/insights/') {
+    return [home, to(t.nav_insights, '/insights/'), current];
+  }
+  if (pagePath.startsWith('/packages/') && pagePath !== '/packages/') {
+    return [home, to(t.nav_packages, '/packages/'), current];
+  }
+  return [home, current];
+}
+
+const schemaKind = pageSchemaKind(pagePath);
+const pageCrumbs = breadcrumbs.length > 0 ? breadcrumbs : (schemaKind ? synthesizedCrumbs() : breadcrumbs);
+
 const structuredData = buildPageSchemas({
   bare: pagePath,
   title: fullTitle,
+  pageTitle: title,
   description: metaDescription,
   canonicalUrl: canonicalURL,
   inLanguage: htmlLang(localeFromPath(canonicalPath) as Locale),
   siteOrigin: (Astro.site?.toString() || 'https://www.souniolang.org'),
-  breadcrumbs,
+  breadcrumbs: pageCrumbs,
   dateModified,
+  datePublished,
   extra: extraSchemas,
   absolutize: (href: string) => absoluteUrl(href),
   headline: articleHeadline,
@@ -106,7 +153,7 @@ const englishUrl = getLocalizedPath(Astro.url.pathname, 'en');
     <meta name="description" content={metaDescription} />
     <meta name="generator" content={Astro.generator} />
     <meta name="theme-color" content="#0B1E3A" />
-    {noIndex && <meta name="robots" content="noindex, nofollow" />}
+    {robots && <meta name="robots" content={robots} />}
 
     <link rel="canonical" href={canonicalURL} />
     <link rel="icon" href="/favicon.ico" sizes="any" />
@@ -130,7 +177,7 @@ const englishUrl = getLocalizedPath(Astro.url.pathname, 'en');
     <meta name="twitter:image" content={new URL(ogImage, Astro.site)} />
 
     <!-- Alternate language links: only self-canonical translations, plus x-default. -->
-    {!noIndex && alternates.map((alt) => (
+    {alternates.map((alt) => (
       <link rel="alternate" hreflang={alt.hreflang} href={alt.href} />
     ))}
 
@@ -193,7 +240,7 @@ const englishUrl = getLocalizedPath(Astro.url.pathname, 'en');
     <CustomCursor client:media="(hover: hover) and (pointer: fine)" />
     <a href="#main-content" class="skip-link">{surface[locale].chrome.skip}</a>
 
-    <Header locale={locale} localizedAlternates={localizedAlternates} />
+    <Header locale={locale} localizedAlternates={localizedAlternates} alternateLocales={alternateLocales} />
 
     {showLocaleNotice && (
       <div class="locale-notice" role="status" aria-live="polite">
@@ -209,6 +256,6 @@ const englishUrl = getLocalizedPath(Astro.url.pathname, 'en');
       <slot />
     </main>
 
-    <Footer locale={locale} localizedAlternates={localizedAlternates} />
+    <Footer locale={locale} localizedAlternates={localizedAlternates} alternateLocales={alternateLocales} />
   </body>
 </html>
