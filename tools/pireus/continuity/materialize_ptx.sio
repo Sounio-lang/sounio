@@ -93,6 +93,16 @@ fn emit_sign_table(phase: i64, sign_mode: i64) with IO, Mut, Panic, Div {
 }
 
 fn emit_lowering_body(sm: i64, stride: i64, offset: i64, load: i64, layout: i64, unroll: i64, phase: i64, sign_mode: i64, pack: i64, vector_load: i64) with IO, Mut, Panic, Div {
+    emit_lowering_body_threads(sm, 16, stride, offset, load, layout, unroll, phase, sign_mode, pack, vector_load)
+}
+
+// threads is 16 for every historical body (gpu_probe.py's launch, unchanged bytes).
+// 32, 64 and 128 select the r740-only wide body; admission refuses anything else.
+fn emit_lowering_body_threads(sm: i64, threads: i64, stride: i64, offset: i64, load: i64, layout: i64, unroll: i64, phase: i64, sign_mode: i64, pack: i64, vector_load: i64) with IO, Mut, Panic, Div {
+    if threads != 16 {
+        emit_wide_body(sm, threads, stride, offset, load, layout, unroll, phase, sign_mode)
+        return
+    }
     if load == 2 {
         emit_staged_body(sm, stride, offset, layout, unroll, phase, sign_mode, pack, vector_load)
         return
@@ -339,6 +349,82 @@ fn emit_staged_body(sm: i64, stride: i64, offset: i64, layout: i64, unroll: i64,
     print("DONE:\n    ret;\n}\n")
 }
 
+// block_threads = 32, 64 or 128: r740-only launch (r740_wide_launch.py), never gpu_probe.py.
+// A block holds G = threads/16 groups of 16 lanes; group g of block c computes vector
+// c*G + g, so block_threads=32 is the full-warp two-vector pack. The vector count n is
+// the fourth parameter pn (grid is ceil(n/G), so %nctaid.x is no longer n). A group past
+// the end computes vector n-1 again and does not store, so no thread leaves before
+// bar.sync and every branch stays uniform. Per vector the load, multiply, sign and add
+// sequence is the 16-thread one: only the lane-to-thread placement changes.
+// load=1 shuffles within each 16-lane segment (c = 0x101f, full membermask).
+fn emit_wide_body(sm: i64, threads: i64, stride: i64, offset: i64, load: i64, layout: i64, unroll: i64, phase: i64, sign_mode: i64) with IO, Mut, Panic, Div {
+    emit_ptx_header(sm)
+    emit_sign_table(phase, sign_mode)
+    let groups = threads / 16
+    print("};\n// block_threads="); print_int(threads); print(": "); print_int(groups); print(" vectors per block, one per 16-lane group; r740 launch only.\n")
+    if load == 2 {
+        print(".shared .align 16 .f64 pireus_sa["); print_int(threads); print("];\n.shared .align 16 .f64 pireus_sb["); print_int(threads); print("];\n")
+    }
+    print(".visible .entry pireus_candidate(.param .u64 pa, .param .u64 pb, .param .u64 pc, .param .u32 pn)\n.maxntid ")
+    print_int(threads); print(",1,1\n{\n")
+    print("    .reg .b32 %r<32>;\n    .reg .b64 %rd<16>;\n    .reg .f64 %fd<8>;\n    .reg .pred %p<4>;\n")
+    print("    ld.param.u64 %rd0, [pa];\n    ld.param.u64 %rd1, [pb];\n    ld.param.u64 %rd2, [pc];\n    ld.param.u32 %r2, [pn];\n")
+    print("    mov.u32 %r0, %tid.x;\n    mov.u32 %r1, %ctaid.x;\n")
+    print("    setp.gt.u32 %p0, %r2, 16777216;\n    @%p0 bra DONE;\n")
+    print("    shr.u32 %r23, %r0, 4;\n    and.b32 %r0, %r0, 15;\n")
+    print("    mad.lo.u32 %r24, %r1, "); print_int(groups); print(", %r23;\n    setp.lt.u32 %p3, %r24, %r2;\n")
+    print("    sub.u32 %r16, %r2, 1;\n    min.u32 %r1, %r24, %r16;\n")
+    print("    mad.lo.u32 %r3, %r0, "); print_int(stride); print(", "); print_int(offset); print(";\n    and.b32 %r3, %r3, 15;\n")
+    var inverse: i64 = 1
+    while (inverse * stride) % 16 != 1 { inverse = inverse + 2 }
+    if load == 1 {
+        address_index(layout, "%r3")
+        print("    mul.wide.u32 %rd3, %r7, 8;\n    add.u64 %rd3, %rd1, %rd3;\n    ld.global.f64 %fd2, [%rd3];\n")
+        print("    mov.b64 {%r11,%r12}, %fd2;\n")
+    }
+    if load == 2 {
+        address_index(layout, "%r3")
+        print("    mul.wide.u32 %rd3, %r7, 8;\n    add.u64 %rd6, %rd0, %rd3;\n    ld.global.f64 %fd1, [%rd6];\n")
+        print("    add.u64 %rd7, %rd1, %rd3;\n    ld.global.f64 %fd2, [%rd7];\n")
+        print("    mov.u64 %rd8, pireus_sa;\n    mov.u64 %rd9, pireus_sb;\n    mul.wide.u32 %rd13, %r23, 128;\n")
+        print("    add.u64 %rd8, %rd8, %rd13;\n    add.u64 %rd9, %rd9, %rd13;\n    mul.wide.u32 %rd10, %r3, 8;\n")
+        print("    add.u64 %rd11, %rd8, %rd10;\n    st.shared.f64 [%rd11], %fd1;\n    add.u64 %rd12, %rd9, %rd10;\n    st.shared.f64 [%rd12], %fd2;\n")
+        print("    bar.sync 0;\n")
+    }
+    if sign_mode == 1 {
+        print("    mov.u64 %rd4, pireus_lane_signs;\n    mul.wide.u32 %rd5, %r3, 4;\n    add.u64 %rd4, %rd4, %rd5;\n    ld.const.u32 %r14, [%rd4];\n")
+    }
+    print("    mov.f64 %fd0, 0d0000000000000000;\n    mov.u32 %r4, 0;\nLOOP:\n")
+    var u: i64 = 0
+    while u < unroll {
+        print("    add.u32 %r5, %r4, "); print_int(u); print(";\n    xor.b32 %r6, %r3, %r5;\n")
+        if load == 2 {
+            print("    mul.wide.u32 %rd10, %r6, 8;\n    add.u64 %rd11, %rd8, %rd10;\n    ld.shared.f64 %fd1, [%rd11];\n")
+            print("    mul.wide.u32 %rd10, %r5, 8;\n    add.u64 %rd12, %rd9, %rd10;\n    ld.shared.f64 %fd2, [%rd12];\n")
+        } else {
+            address_index(layout, "%r6")
+            print("    mul.wide.u32 %rd3, %r7, 8;\n    add.u64 %rd3, %rd0, %rd3;\n    ld.global.f64 %fd1, [%rd3];\n")
+            if load == 0 {
+                address_index(layout, "%r5")
+                print("    mul.wide.u32 %rd3, %r7, 8;\n    add.u64 %rd3, %rd1, %rd3;\n    ld.global.f64 %fd2, [%rd3];\n")
+            } else {
+                print("    sub.u32 %r8, %r5, "); print_int(offset); print(";\n")
+                print("    mul.lo.u32 %r8, %r8, "); print_int(inverse); print(";\n    and.b32 %r8, %r8, 15;\n")
+                print("    shfl.sync.idx.b32 %r9, %r11, %r8, 4127, -1;\n    shfl.sync.idx.b32 %r10, %r12, %r8, 4127, -1;\n")
+                print("    mov.b64 %fd2, {%r9,%r10};\n")
+            }
+        }
+        print("    mul.rn.f64 %fd3, %fd1, %fd2;\n")
+        emit_signed_accumulate(u, sign_mode, 0)
+        u = u + 1
+    }
+    if unroll < 16 {
+        print("    add.u32 %r4, %r4, "); print_int(unroll); print(";\n    setp.lt.u32 %p2, %r4, 16;\n    @%p2 bra LOOP;\n")
+    }
+    address_index(layout, "%r3")
+    print("    mul.wide.u32 %rd3, %r7, 8;\n    add.u64 %rd3, %rd2, %rd3;\n    @%p3 st.global.f64 [%rd3], %fd0;\nDONE:\n    ret;\n}\n")
+}
+
 pub fn emit_lowering_ptx(stride: i64, offset: i64, load: i64, layout: i64, unroll: i64, phase: i64, sign_mode: i64, pack: i64, vector_load: i64) with IO, Mut, Panic, Div {
     emit_lowering_body(121, stride, offset, load, layout, unroll, phase, sign_mode, pack, vector_load)
 }
@@ -349,4 +435,13 @@ pub fn emit_lowering_ptx_sm(sm: i64, stride: i64, offset: i64, load: i64, layout
         return
     }
     emit_lowering_body(sm, stride, offset, load, layout, unroll, phase, sign_mode, pack, vector_load)
+}
+
+// r740 only: sm_86 or sm_75, threads 32/64/128 (admission has refused the rest).
+pub fn emit_lowering_ptx_wide(sm: i64, threads: i64, stride: i64, offset: i64, load: i64, layout: i64, unroll: i64, phase: i64, sign_mode: i64) with IO, Mut, Panic, Div {
+    if sm != 86 && sm != 75 {
+        print("UNSUPPORTED_SM\n")
+        return
+    }
+    emit_lowering_body_threads(sm, threads, stride, offset, load, layout, unroll, phase, sign_mode, 0, 0)
 }

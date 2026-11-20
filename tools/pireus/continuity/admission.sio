@@ -2,11 +2,11 @@
 // Protocol v1 is a bounded JSON object: ASCII keys, nonnegative integer values,
 // and one lowercase SHA256 context string. Unknown/duplicate keys are refused.
 use algebra::cayley_dickson::cd_sigma
-use materialize_ptx::{emit_lowering_ptx, emit_lowering_ptx_sm}
+use materialize_ptx::{emit_lowering_ptx, emit_lowering_ptx_sm, emit_lowering_ptx_wide}
 use crypto::sha256::{sha256_init, sha256_update, sha256_finalize, SHA256Digest}
 
 struct Document {
-    values: [i64; 20],
+    values: [i64; 21],
     seen: i64,
     context: [i64; 64],
     valid: bool,
@@ -36,6 +36,9 @@ fn key_name(i: i64) -> string {
     if i == 18 { return "pack" }
     // Optional, both kinds. 1 = ld.global.v2.f64 staging (load=2, SoA, pack=1 only).
     if i == 19 { return "vector_load" }
+    // Optional, both kinds. 0, 16 (or absent) = gpu_probe.py's 16-thread block;
+    // 32, 64, 128 = the r740-only wide launch (r740_wide_launch.py), never a Spark path.
+    if i == 20 { return "block_threads" }
     "UNKNOWN"
 }
 fn whitespace(c: i64) -> bool { c == 32 || c == 9 || c == 10 || c == 13 }
@@ -45,13 +48,13 @@ fn skip(s: string, p: i64, n: i64) -> i64 with Mut {
     x
 }
 fn parse(s: string, n: i64) -> Document with Mut, Panic, Div {
-    var d = Document { values: [0; 20], seen: 0, context: [0; 64], valid: false }
+    var d = Document { values: [0; 21], seen: 0, context: [0; 64], valid: false }
     if n <= 0 || n > 4096 || str_len(s) != n { return d }
     var p = skip(s, 0, n)
     if p >= n || str_char_at(s, p) != 123 { return d }
     p = p + 1
     var count: i64 = 0
-    while count < 20 {
+    while count < 21 {
         p = skip(s, p, n)
         if p >= n || str_char_at(s, p) != 34 { return d }
         p = p + 1
@@ -64,7 +67,7 @@ fn parse(s: string, n: i64) -> Document with Mut, Panic, Div {
         if p >= n { return d }
         var key: i64 = -1
         var k: i64 = 0
-        while k < 20 {
+        while k < 21 {
             let name = key_name(k)
             if str_len(name) == p - start {
                 var same = true
@@ -219,9 +222,9 @@ fn main() -> i32 with IO, Mut, Panic, Div {
     // 65087 = fields 0..5 and 9..15 (kind=1). 130623 adds field 16 (kind=2).
     // Fields 6,7,8 stay context-only under both masks.
     if !p.valid { return refuse("PROPOSAL_FORMAT") }
-    // Bits 17 (131072) sign_mode, 18 (262144) pack and 19 (524288) vector_load are
-    // optional keys; absent means 0 and keeps the frozen bytes.
-    let core = p.seen & (0 - 1 - 131072 - 262144 - 524288)
+    // Bits 17 (131072) sign_mode, 18 (262144) pack, 19 (524288) vector_load and
+    // 20 (1048576) block_threads are optional keys; absent means 0 and keeps the frozen bytes.
+    let core = p.seen & (0 - 1 - 131072 - 262144 - 524288 - 1048576)
     if core != 65087 && core != 130623 { return refuse("PROPOSAL_FORMAT") }
     if !hash_matches(hash_text(cs, cn), &p) { return refuse("SNAPSHOT") }
     if c.values[0] != 1 || p.values[0] != 1 { return refuse("SCHEMA") }
@@ -264,6 +267,18 @@ fn main() -> i32 with IO, Mut, Panic, Div {
     if vector_load == 1 && load != 2 { return refuse("VECTOR_LOAD_LOAD") }
     if vector_load == 1 && layout != 1 { return refuse("VECTOR_LOAD_LAYOUT") }
     if vector_load == 1 && pack != 1 { return refuse("VECTOR_LOAD_PACK") }
+    // block_threads: 0 or 16 is the historical 16-thread block and changes nothing.
+    // 32, 64 and 128 put threads/16 vectors in one block (32 is the full-warp pack) and
+    // exist only for the r740 launch, so the sm_121 Spark mode refuses them, and the
+    // 16-lane pack and its v2 load are refused there (the wide block replaces them).
+    let block_threads = p.values[20]
+    var wide: i64 = 0
+    if block_threads == 32 { wide = 1 }
+    if block_threads == 64 { wide = 2 }
+    if block_threads == 128 { wide = 3 }
+    if wide == 0 && block_threads != 0 && block_threads != 16 { return refuse("BLOCK_THREADS") }
+    if wide > 0 && pack != 0 { return refuse("BLOCK_THREADS_PACK") }
+    if wide > 0 && materialize && sm == 121 { return refuse("BLOCK_THREADS_TARGET") }
     var required: i64 = 39
     if load == 1 { required = required | 16 }
     if (c.values[6] & required) != required { return refuse("CAPABILITY") }
@@ -320,8 +335,11 @@ fn main() -> i32 with IO, Mut, Panic, Div {
     if materialize {
         // emit_lowering_ptx modulates the signs with the phase twist.
         // For kind=1 twist is 0 (pure Cayley-Dickson); for kind=2 twist is the operator phase.
-        if sm == 121 { emit_lowering_ptx(stride, offset, load, layout, unroll, twist, sign_mode, pack, vector_load) }
-        else { emit_lowering_ptx_sm(sm, stride, offset, load, layout, unroll, twist, sign_mode, pack, vector_load) }
+        if wide > 0 { emit_lowering_ptx_wide(sm, block_threads, stride, offset, load, layout, unroll, twist, sign_mode) }
+        else {
+            if sm == 121 { emit_lowering_ptx(stride, offset, load, layout, unroll, twist, sign_mode, pack, vector_load) }
+            else { emit_lowering_ptx_sm(sm, stride, offset, load, layout, unroll, twist, sign_mode, pack, vector_load) }
+        }
         return 0
     }
     // sign_mode=0, pack=0 and load<2 keep every historical plan_id; each extension adds
@@ -332,7 +350,7 @@ fn main() -> i32 with IO, Mut, Panic, Div {
         load_digit = 0
         staged = 1
     }
-    let plan_id = (((stride * 16 + offset) * 2 + load_digit) * 2 + layout) * 32 + unroll + sign_mode * 65536 + pack * 131072 + staged * 262144 + vector_load * 524288
+    let plan_id = (((stride * 16 + offset) * 2 + load_digit) * 2 + layout) * 32 + unroll + sign_mode * 65536 + pack * 131072 + staged * 262144 + vector_load * 524288 + wide * 1048576
     if kind == 2 {
         print("{\"schema\":1,\"authority\":\"Sounio\",\"decision\":\"ADMIT\",\"kind\":\"operator\",\"phase_code\":")
         print_int(phase)
@@ -342,6 +360,7 @@ fn main() -> i32 with IO, Mut, Panic, Div {
         if pack == 1 { print(",\"pack\":1") }
         if load == 2 { print(",\"load\":2") }
         if vector_load == 1 { print(",\"vector_load\":1") }
+        if wide > 0 { print(",\"block_threads\":"); print_int(block_threads) }
         print(",\"tensor_components\":4096,\"tensor_encoding\":\"cd16-abk-offset1-v1\",\"tensor_sha256\":\"")
         print_digest(sha256_finalize(state))
         print("\",\"context_sha256\":\""); print_digest(hash_text(cs, cn))
@@ -359,6 +378,7 @@ fn main() -> i32 with IO, Mut, Panic, Div {
     if pack == 1 { print(",\"pack\":1") }
     if load == 2 { print(",\"load\":2") }
     if vector_load == 1 { print(",\"vector_load\":1") }
+    if wide > 0 { print(",\"block_threads\":"); print_int(block_threads) }
     print(",\"tensor_components\":4096,\"tensor_encoding\":\"cd16-abk-offset1-v1\",\"tensor_sha256\":\"")
     print_digest(sha256_finalize(state))
     print("\",\"context_sha256\":\""); print_digest(hash_text(cs, cn))

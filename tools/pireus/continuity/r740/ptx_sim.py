@@ -2,7 +2,9 @@
 """Host interpreter for the PIREUS lowering PTX, used only by the tests.
 
 It runs the exact text materialize_ptx.sio emits: grid = vector count and 16
-threads per block in lockstep, as gpu_probe.py launches it, with binary64
+threads per block in lockstep, as gpu_probe.py launches it (or, for a
+`.maxntid 32/64/128` body, grid = ceil(n / (threads/16)) with n in the fourth
+parameter pn, as r740_wide_launch.py launches it), with binary64
 round-to-nearest on the host (Python floats are IEEE binary64 and never fuse). It knows only the instructions that emitter
 writes and refuses anything else, so a new opcode in the emitter fails the test
 instead of being skipped. It is not a GPU: it shows the PTX text computes the
@@ -12,6 +14,7 @@ import re
 import struct
 
 GLOBAL = {"pa": 1, "pb": 2, "pc": 3}
+THREADS = (16, 32, 64, 128)
 CONST_BASE = 8
 SHARED_BASE = 16
 M32 = 0xFFFFFFFF
@@ -32,6 +35,8 @@ class Kernel:
         self.shared = {}
         self.code = []
         self.labels = {}
+        self.threads = None
+        self.params = None
         body = False
         for raw in text.splitlines():
             line = raw.split("//")[0].strip()
@@ -41,7 +46,15 @@ class Kernel:
             if m:
                 self.consts[m.group(1)] = (CONST_BASE + len(self.consts), [int(x) for x in m.group(2).split(",")])
                 continue
-            m = re.match(r"\.shared \.align 16 \.f64 (\w+)\[(16|32)\];$", line)
+            m = re.match(r"\.visible \.entry pireus_candidate\((.*)\)$", line)
+            if m:
+                self.params = m.group(1)
+                continue
+            m = re.match(r"\.maxntid (\d+),1,1$", line)
+            if m:
+                self.threads = int(m.group(1))
+                continue
+            m = re.match(r"\.shared \.align 16 \.f64 (\w+)\[(16|32|64|128)\];$", line)
             if m:
                 self.shared[m.group(1)] = (SHARED_BASE + len(self.shared), int(m.group(2)))
                 continue
@@ -63,18 +76,25 @@ class Kernel:
             args = [a.strip() for a in re.split(r",(?![^{]*\})", rest)] if rest else []
             self.code.append((guard, op, args))
         self.const_tables = {base: words for base, words in self.consts.values()}
+        # The two launch contracts: gpu_probe.py's (16 threads, three pointers) and the
+        # r740 wide one (32/64/128 threads, three pointers and the vector count).
+        narrow = ".param .u64 pa, .param .u64 pb, .param .u64 pc"
+        assert self.threads in THREADS, self.threads
+        assert self.params == (narrow if self.threads == 16 else narrow + ", .param .u32 pn"), self.params
 
     def run(self, a, b_in, vectors):
         # A finite sentinel, so an output the kernel never stores cannot pass as a result.
         c = [0x5A5A5A5A5A5A5A5A] * (16 * vectors)
         mem = {1: a, 2: b_in, 3: c}
-        for block in range(vectors):
+        threads = self.threads
+        grid = vectors if threads == 16 else -(-vectors // (threads // 16))
+        for block in range(grid):
             # Shared memory is per block and starts as a finite sentinel, like the output.
             for base, size in self.shared.values():
                 mem[base] = [0x5A5A5A5A5A5A5A5A] * size
-            regs = [dict() for _ in range(16)]
-            for t in range(16):
-                regs[t].update({"%tid.x": t, "%ctaid.x": block, "%nctaid.x": vectors})
+            regs = [dict() for _ in range(threads)]
+            for t in range(threads):
+                regs[t].update({"%tid.x": t, "%ctaid.x": block, "%nctaid.x": grid, "pn": vectors})
             pc = 0
             while True:
                 guard, op, args = self.code[pc]
@@ -93,12 +113,28 @@ class Kernel:
                     assert guard is None and args == ["0"], args
                     continue
                 if op == "shfl.sync.idx.b32":
-                    assert args[3] == "15" and args[4] == "65535", args
+                    # 16 threads: one half warp, clamp 15, mask 0xffff. Wider blocks: full
+                    # warps, 16-lane segments (c = 0x101f), mask 0xffffffff.
+                    if threads == 16:
+                        assert args[3] == "15" and args[4] == "65535", args
+                    else:
+                        assert args[3] == "4127" and args[4] == "-1", args
+                    assert guard is None
+                    control = int(args[3])
+                    clamp, seg = control & 31, (control >> 8) & 31
                     src = [r[args[1]] for r in regs]
-                    for r in regs:
-                        if self._pred(r, guard):
-                            lane = self._val(r, args[2]) & 31
-                            r[args[0]] = src[lane] if lane < 16 else src[regs.index(r)]
+                    out = []
+                    for t, r in enumerate(regs):
+                        warp, lane = t - t % 32, t % 32
+                        low = lane & seg
+                        high = low | (clamp & ~seg)
+                        j = low | (self._val(r, args[2]) & ~seg & 31)
+                        if j > high:
+                            j = lane
+                        assert warp + j < len(regs), "shuffle from a missing thread"
+                        out.append(src[warp + j])
+                    for r, value in zip(regs, out):
+                        r[args[0]] = value
                     continue
                 for r in regs:
                     if self._pred(r, guard):
@@ -129,6 +165,9 @@ class Kernel:
         v = lambda i: self._val(r, a[i])
         if op == "ld.param.u64":
             r[a[0]] = GLOBAL[a[1].strip("[]")] << 40
+        elif op == "ld.param.u32":
+            assert a[1] == "[pn]", a
+            r[a[0]] = r["pn"]
         elif op in ("mov.u32", "mov.u64", "mov.f64"):
             r[a[0]] = v(1)
         elif op == "setp.gt.u32":
@@ -167,6 +206,7 @@ class Kernel:
             r[a[0]] = mem[addr >> 40][(addr & ((1 << 40) - 1)) // 8]
         elif op == "st.global.f64":
             addr = self._addr(r, a[0])
+            assert addr % 8 == 0
             mem[addr >> 40][(addr & ((1 << 40) - 1)) // 8] = r[a[1]]
         elif op == "ld.global.v2.f64":
             addr = self._addr(r, a[1])
