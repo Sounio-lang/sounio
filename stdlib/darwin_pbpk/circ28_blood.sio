@@ -1,0 +1,409 @@
+// stdlib/darwin_pbpk/circ28_blood.sio — saturable erythrocyte binding on the circ28 kernel
+//
+// circ28 is linear: every vascular state is a whole-blood concentration and
+// plasma = blood / bp with one constant blood-to-plasma ratio bp. A drug that
+// binds a finite number of sites in the erythrocytes has a concentration
+// dependent bp. This file is an engine: it carries no literature parameter
+// values; Hct, Bmax and Kd are supplied by the caller.
+//
+// Binding relation (C_p total plasma concentration, Hct haematocrit, Bmax per
+// litre of ERYTHROCYTES, Kd in units of C_p):
+//
+//   C_blood = (1 - Hct) C_p + Hct Bmax C_p / (Kd + C_p)
+//
+// Inverse. Put a = 1 - Hct and multiply by (Kd + C_p):
+//   a C_p (Kd + C_p) + Hct Bmax C_p = C_b (Kd + C_p)
+//   a C_p^2 + (a Kd + Hct Bmax - C_b) C_p - C_b Kd = 0.
+// The product of the roots is -C_b Kd / a < 0 for C_b > 0, so there is exactly
+// one positive root, with b = a Kd + Hct Bmax - C_b and disc = b^2 + 4 a C_b Kd:
+//   C_p = (-b + sqrt(disc)) / (2 a)         (b <= 0: no cancellation)
+//   C_p = 2 C_b Kd / (b + sqrt(disc))       (b > 0: the same root, rationalised)
+// The second form avoids the cancellation of -b + sqrt(disc) when b is large
+// and positive (small C_b, or Kd very large, i.e. linear binding).
+//
+//   bp(C_b) = C_b / C_p(C_b), strictly decreasing in C_b, with
+//     C_b -> 0 : bp -> (1 - Hct) + Hct Bmax / Kd
+//     C_b -> inf: bp -> (1 - Hct)
+//   bp at C_b <= 0 is defined as the first limit.
+//
+// Stepping. The kernel keeps ONE bp per factorisation. Before each step this
+// wrapper sets p.bp from the current blood concentrations and refactors in
+// place (circ28_prepare; skipped when bp is bit-identical to the factored one).
+//
+// Which concentration defines the effective bp. Chosen: the blood-volume
+// weighted mean of all 15 blood states, C_w = sum_k V_k x_k / sum_k V_k, that
+// is (mass in blood) / (blood volume), and bp_eff = bp(C_w) (the binding
+// function of the mean, not the mean of the binding function).
+//   - Mass is the conserved quantity of the kernel (sum V x), and C_w is the
+//     one summary of the 15 states that follows from it: it is a blood-mass
+//     average, it is smooth in time, and it moves toward the plasma-referenced
+//     steady state where every blood state is equal.
+//   - It is exact when all blood states are equal (steady state with a
+//     clearance acting on the venous plasma only) and when binding is linear
+//     (bp constant), whichever summary is used.
+//   - The venous pool alone (1.19 L of 5.3 L) carries the whole dose during an
+//     intravenous input and is ~100 times the other beds in the first
+//     circulation times, so bp(C_ven) would be far too low for the body; the
+//     arterial pool has the same defect after the lung, and is blind to the
+//     liver, which sees a lower concentration than the artery whenever hepatic
+//     extraction is high.
+//   - A flow- or ps-weighted mean would favour the bed that dominates one term
+//     (exchange or hepatic delivery) and misrepresent the others; there is no
+//     weight that is right for all of them, so the mass weight, whose meaning
+//     is exact, is used and the error is MEASURED (diagnostic below).
+// What one global bp cannot represent. Distribution makes the 15 blood
+// concentrations differ (venous >> arterial >> peripheral after a bolus; liver
+// vascular below arterial under hepatic extraction), so the true bp_i = bp(C_i)
+// differ between beds, and bp(C) is convex, so bp(C_w) differs from the mean of
+// bp_i. The kernel divides the local blood concentration by the same bp in the
+// exchange of every organ, the venous plasma clearance, the renal clearance and
+// the hepatic delivery: each of those terms carries the error of its own bed.
+// The cell-bound amount is also taken to equilibrate instantly with plasma
+// (slow erythrocyte efflux is not modelled).
+//
+// Schemes (mode). The coupling bp <-> state is a feedback with gain equal to
+// the elasticity e = d ln bp / d ln C_b = 1 - 1/eta, eta = d ln C_b / d ln C_p
+// in (0,1]. Blood and tissue exchange in minutes (ps/(bp V) ~ 10^3-10^4 /h), so
+// within a step the blood concentration follows bp at once, and any scheme
+// that fixes bp from START-of-step information iterates x -> bp(x) with slope e:
+// it is unstable when |e| > 1 (when most of the blood drug is bound, eta < 1/2).
+// MEASURED (test and report): at steady state with C_b = 48, C_p = 20, e = -2.2,
+// modes 0, 1 and 2 all settle on a period-2 cycle with nonsense states
+// (negative arterial concentration) at dt = 0.1 and 0.02 h. They are kept for
+// small-nonlinearity use and order studies; mode 3 is the default.
+//   0 "extrapolate": C_mid = max(0, C_n + (C_n - C_{n-1})/2) from the last two
+//        evaluations (as in circ28_ddi.sio, applied to the concentration, which
+//        is more nearly linear in time than bp); the first step uses C_n.
+//        Second order while stable.
+//   1 "lag": C_mid = C_n, first order, unstable for |e| > 1.
+//   2 "predictor-corrector": a trial step with bp(C_n) gives C_{n+1}^trial; the
+//        state is restored and the real step uses bp(mean(C_n, C_{n+1}^trial)).
+//        One fixed-point sweep: second order, same stability limit.
+//   3 "implicit midpoint" (default): the root of
+//          g(bp) = bp( (C_n + C_{n+1}(bp)) / 2 ) - bp = 0,
+//        where C_{n+1}(bp) is the blood-mean concentration after a trial step
+//        with that bp (state restored after every trial). C_{n+1} increases with
+//        bp and bp(C) decreases with C, so g is strictly decreasing, has exactly
+//        one root, and it lies in [1 - Hct, bp_low]; it is found by a bracketed
+//        secant (bisection fallback) to |g| <= 1e-11 bp. Unconditionally stable
+//        in the coupling, second order (trapezoid in C), at the cost of a few
+//        trial steps and refactorisations per step (one near steady state).
+// Mass balance. Mass is tracked in blood concentrations x, and the conserved
+// quantity is sum V_k x_k, with V_k independent of bp. bp enters only the rates
+// (exchange, plasma and renal clearance), and circ28_prepare builds the matrix
+// and the elimination coefficients k_ren, k_pla of one step from the same bp, so
+// in every step the mass removed from the state equals the mass booked to the
+// elimination channels exactly (to rounding), however bp differs from step to
+// step. In mode 2 the trial step is undone completely (state and tallies).
+//
+// The caller owns the Circ28Sys (Madaros handle table): create it once with
+// circ28_sys_zero() and pass it to every step. Do not change b.dt after the
+// first step.
+
+use darwin_pbpk::circ28::*
+use math::pure::{sqrt}
+
+// ---------------------------------------------------------------- relation
+
+// Whole-blood concentration from total plasma concentration.
+pub fn blood28_blood_from_plasma(hct: f64, bmax: f64, kd: f64, cp: f64) -> f64 with Div {
+    return (1.0 - hct) * cp + hct * bmax * cp / (kd + cp)
+}
+
+// Total plasma concentration from whole-blood concentration (positive root).
+pub fn blood28_plasma_from_blood(hct: f64, bmax: f64, kd: f64, cb: f64) -> f64 with Mut, Div, Panic {
+    if !(cb > 0.0) { return 0.0 }
+    let a = 1.0 - hct
+    let b = a * kd + hct * bmax - cb
+    let disc = b * b + 4.0 * a * cb * kd
+    let r = sqrt(disc)
+    if b > 0.0 { return 2.0 * cb * kd / (b + r) }
+    return (r - b) / (2.0 * a)
+}
+
+// bp -> (1 - Hct) + Hct Bmax / Kd as C -> 0.
+pub fn blood28_bp_low(hct: f64, bmax: f64, kd: f64) -> f64 with Div {
+    return (1.0 - hct) + hct * bmax / kd
+}
+
+// bp -> (1 - Hct) as C -> infinity.
+pub fn blood28_bp_high(hct: f64) -> f64 {
+    return 1.0 - hct
+}
+
+// Blood-to-plasma ratio at whole-blood concentration cb.
+pub fn blood28_bp(hct: f64, bmax: f64, kd: f64, cb: f64) -> f64 with Mut, Div, Panic {
+    if !(cb > 0.0) { return blood28_bp_low(hct, bmax, kd) }
+    return cb / blood28_plasma_from_blood(hct, bmax, kd, cb)
+}
+
+// ------------------------------------------------------------- diagnostics
+
+// Blood-volume weighted mean of the 15 blood states (ven, art, 13 vascular).
+pub fn blood28_mean_conc(s: &Circ28State, p: Circ28Params) -> f64 with Mut, Div {
+    var m = 0.0
+    var v = 0.0
+    var k: i32 = 0
+    while k < 15 {
+        var idx = k
+        if k >= 2 { idx = circ28_iv(k - 1) }
+        let w = circ28_state_volume(p, idx)
+        m = m + w * (*s).x[idx]
+        v = v + w
+        k = k + 1
+    }
+    return m / v
+}
+
+// Largest relative discrepancy |bp(C_i) - bp_used| / bp_used over the 15 blood
+// states: how wrong the single bp is for the worst bed.
+pub fn blood28_bp_discrepancy(
+    s: &Circ28State,
+    p: Circ28Params,
+    hct: f64,
+    bmax: f64,
+    kd: f64,
+    bp_used: f64
+) -> f64 with Mut, Div, Panic {
+    var worst = 0.0
+    var k: i32 = 0
+    while k < 15 {
+        var idx = k
+        if k >= 2 { idx = circ28_iv(k - 1) }
+        let bi = blood28_bp(hct, bmax, kd, (*s).x[idx])
+        var d = (bi - bp_used) / bp_used
+        if d < 0.0 { d = 0.0 - d }
+        if d > worst { worst = d }
+        k = k + 1
+    }
+    return worst
+}
+
+// --------------------------------------------------------------- the engine
+
+pub struct Blood28 {
+    pub hct: f64,
+    pub bmax: f64,
+    pub kd: f64,
+    pub dt: f64,
+    pub mode: i32,             // see the header: 3 is the default
+    pub t: f64,
+    pub p: Circ28Params,       // p.bp holds the bp the system is factored with
+    pub s: Circ28State,
+    pub el: Circ28Elim,
+    pub s_save: Circ28State,   // scratch for mode 2
+    pub el_save: Circ28Elim,
+    pub c_prev: f64,           // C_w at the previous step
+    pub hist: i32,
+    pub prepared: i32,
+    pub bp_used: f64,          // bp of the last step
+    pub bp_min: f64,           // extremes of bp_used since the start
+    pub bp_max: f64,
+    pub disc_last: f64,        // diagnostic at the start of the last step
+    pub disc_max: f64,
+    pub nfact: i32,            // refactorisations
+    pub ntrial: i32,           // trial steps of mode 3
+}
+
+pub fn blood28_new(p: Circ28Params, hct: f64, bmax: f64, kd: f64, dt: f64) -> Blood28 with Mut, Div {
+    return Blood28 {
+        hct: hct,
+        bmax: bmax,
+        kd: kd,
+        dt: dt,
+        mode: 3,
+        t: 0.0,
+        p: p,
+        s: circ28_state_zero(),
+        el: circ28_elim_zero(),
+        s_save: circ28_state_zero(),
+        el_save: circ28_elim_zero(),
+        c_prev: 0.0,
+        hist: 0,
+        prepared: 0,
+        bp_used: blood28_bp_low(hct, bmax, kd),
+        bp_min: 1.0e300,
+        bp_max: 0.0,
+        disc_last: 0.0,
+        disc_max: 0.0,
+        nfact: 0,
+        ntrial: 0,
+    }
+}
+
+// 0 extrapolate, 1 lag, 2 predictor-corrector, 3 implicit midpoint (default).
+pub fn blood28_set_mode(b: &!Blood28, mode: i32) with Mut {
+    (*b).mode = mode
+}
+
+// Writes state entry k (0..27); resets the extrapolation history.
+pub fn blood28_set_x(b: &!Blood28, k: i32, v: f64) with Mut {
+    (*b).s.x[k] = v
+    (*b).hist = 0
+}
+
+pub fn blood28_get_x(b: &Blood28, k: i32) -> f64 { return (*b).s.x[k] }
+pub fn blood28_time(b: &Blood28) -> f64 { return (*b).t }
+pub fn blood28_bp_current(b: &Blood28) -> f64 { return (*b).bp_used }
+pub fn blood28_bp_min(b: &Blood28) -> f64 { return (*b).bp_min }
+pub fn blood28_bp_max(b: &Blood28) -> f64 { return (*b).bp_max }
+pub fn blood28_disc_last(b: &Blood28) -> f64 { return (*b).disc_last }
+pub fn blood28_disc_max(b: &Blood28) -> f64 { return (*b).disc_max }
+pub fn blood28_refactorisations(b: &Blood28) -> i32 { return (*b).nfact }
+pub fn blood28_trials(b: &Blood28) -> i32 { return (*b).ntrial }
+
+// Effective whole-blood concentration of the current state (C_w).
+pub fn blood28_effective_conc(b: &Blood28) -> f64 with Mut, Div {
+    return blood28_mean_conc(&(*b).s, (*b).p)
+}
+
+// bp the single-bp approximation would use now (mode-independent: bp(C_w)).
+pub fn blood28_effective_bp(b: &Blood28) -> f64 with Mut, Div, Panic {
+    return blood28_bp(
+        (*b).hct, (*b).bmax, (*b).kd,
+        blood28_mean_conc(&(*b).s, (*b).p)
+    )
+}
+
+// Venous plasma concentration from the venous blood state with ITS OWN bp
+// (not the bp of the step, which is a global effective value).
+pub fn blood28_plasma_venous(b: &Blood28) -> f64 with Mut, Div, Panic {
+    return blood28_plasma_from_blood((*b).hct, (*b).bmax, (*b).kd, (*b).s.x[0])
+}
+
+// Mass eliminated by all channels (mg).
+pub fn blood28_eliminated(b: &Blood28) -> f64 {
+    return (*b).el.hepatic + (*b).el.formed + (*b).el.renal + (*b).el.plasma + (*b).el.gut
+}
+
+// Mass still in the body (mg).
+pub fn blood28_remaining(b: &Blood28) -> f64 with Mut {
+    return circ28_total_mass(&(*b).s, (*b).p)
+}
+
+// Area under the venous blood curve (mg.h/L).
+pub fn blood28_auc_blood(b: &Blood28) -> f64 { return (*b).el.auc_ven }
+
+// Sets p.bp = bp and refactors in place unless it is bit-identical.
+fn blood28_set_bp(b: &!Blood28, bp: f64, sys: &!Circ28Sys) with Mut, Div {
+    if (*b).prepared == 1 {
+        if bp == (*b).p.bp { return }
+    }
+    (*b).p.bp = bp
+    circ28_prepare((*b).p, (*b).dt, sys)
+    (*b).prepared = 1
+    (*b).nfact = (*b).nfact + 1
+}
+
+fn blood28_save(b: &!Blood28) with Mut {
+    var k: i32 = 0
+    while k < 28 {
+        (*b).s_save.x[k] = (*b).s.x[k]
+        k = k + 1
+    }
+    (*b).el_save.hepatic = (*b).el.hepatic
+    (*b).el_save.formed = (*b).el.formed
+    (*b).el_save.renal = (*b).el.renal
+    (*b).el_save.plasma = (*b).el.plasma
+    (*b).el_save.gut = (*b).el.gut
+    (*b).el_save.auc_ven = (*b).el.auc_ven
+    (*b).el_save.auc_art = (*b).el.auc_art
+}
+
+fn blood28_restore(b: &!Blood28) with Mut {
+    var k: i32 = 0
+    while k < 28 {
+        (*b).s.x[k] = (*b).s_save.x[k]
+        k = k + 1
+    }
+    (*b).el.hepatic = (*b).el_save.hepatic
+    (*b).el.formed = (*b).el_save.formed
+    (*b).el.renal = (*b).el_save.renal
+    (*b).el.plasma = (*b).el_save.plasma
+    (*b).el.gut = (*b).el_save.gut
+    (*b).el.auc_ven = (*b).el_save.auc_ven
+    (*b).el.auc_art = (*b).el_save.auc_art
+}
+
+// g(bp) of mode 3 for a trial step from the saved state; leaves the state
+// restored. cn is C_w at the start of the step.
+fn blood28_trial(b: &!Blood28, sys: &!Circ28Sys, cn: f64, bp: f64, iv_rate: f64, oral_rate: f64) -> f64 with Mut, Div, Panic {
+    blood28_set_bp(b, bp, sys)
+    circ28_step(&!(*b).s, (*b).p, sys, iv_rate, oral_rate, &!(*b).el)
+    let c1 = blood28_mean_conc(&(*b).s, (*b).p)
+    blood28_restore(b)
+    (*b).ntrial = (*b).ntrial + 1
+    return blood28_bp((*b).hct, (*b).bmax, (*b).kd, 0.5 * (cn + c1)) - bp
+}
+
+// Root of g (mode 3). Expects the state saved with blood28_save.
+fn blood28_solve_bp(b: &!Blood28, sys: &!Circ28Sys, cn: f64, iv_rate: f64, oral_rate: f64) -> f64 with Mut, Div, Panic {
+    var lo = blood28_bp_high((*b).hct)
+    var hi = blood28_bp_low((*b).hct, (*b).bmax, (*b).kd)
+    var x = blood28_bp((*b).hct, (*b).bmax, (*b).kd, cn)
+    var gx = blood28_trial(b, sys, cn, x, iv_rate, oral_rate)
+    var xp = x
+    var gp = gx
+    var it: i32 = 0
+    while it < 80 {
+        var ag = gx
+        if ag < 0.0 { ag = 0.0 - ag }
+        if ag <= 1.0e-11 * x { return x }
+        if gx > 0.0 { lo = x } else { hi = x }
+        var xn = x + 0.5 * gx
+        if it > 0 {
+            let den = gx - gp
+            if den != 0.0 { xn = x - gx * (x - xp) / den }
+        }
+        if !(xn > lo) { xn = 0.5 * (lo + hi) }
+        if !(xn < hi) { xn = 0.5 * (lo + hi) }
+        xp = x
+        gp = gx
+        x = xn
+        gx = blood28_trial(b, sys, cn, x, iv_rate, oral_rate)
+        it = it + 1
+    }
+    return x
+}
+
+// Advances by b.dt. iv_rate (mg/h) enters the venous pool and oral_rate (mg/h)
+// gut tissue, both constant over the step.
+pub fn blood28_step(b: &!Blood28, sys: &!Circ28Sys, iv_rate: f64, oral_rate: f64) with Mut, Div, Panic {
+    let cn = blood28_mean_conc(&(*b).s, (*b).p)
+    let hct = (*b).hct
+    let bmax = (*b).bmax
+    let kd = (*b).kd
+    var c_use = cn
+    if (*b).mode == 0 {
+        if (*b).hist == 1 {
+            c_use = cn + 0.5 * (cn - (*b).c_prev)
+            if c_use < 0.0 { c_use = 0.0 }
+        }
+    }
+    if (*b).mode == 2 {
+        // trial step with bp(C_n), then undo it
+        blood28_save(b)
+        blood28_set_bp(b, blood28_bp(hct, bmax, kd, cn), sys)
+        circ28_step(&!(*b).s, (*b).p, sys, iv_rate, oral_rate, &!(*b).el)
+        let c1 = blood28_mean_conc(&(*b).s, (*b).p)
+        blood28_restore(b)
+        c_use = 0.5 * (cn + c1)
+    }
+    var bp = blood28_bp(hct, bmax, kd, c_use)
+    if (*b).mode == 3 {
+        blood28_save(b)
+        bp = blood28_solve_bp(b, sys, cn, iv_rate, oral_rate)
+    }
+    // diagnostic at the start of the step, against the bp actually used
+    let dsc = blood28_bp_discrepancy(&(*b).s, (*b).p, hct, bmax, kd, bp)
+    (*b).disc_last = dsc
+    if dsc > (*b).disc_max { (*b).disc_max = dsc }
+    blood28_set_bp(b, bp, sys)
+    circ28_step(&!(*b).s, (*b).p, sys, iv_rate, oral_rate, &!(*b).el)
+    (*b).bp_used = bp
+    if bp < (*b).bp_min { (*b).bp_min = bp }
+    if bp > (*b).bp_max { (*b).bp_max = bp }
+    (*b).c_prev = cn
+    (*b).hist = 1
+    (*b).t = (*b).t + (*b).dt
+}

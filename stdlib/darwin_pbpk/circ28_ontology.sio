@@ -1,0 +1,465 @@
+// stdlib/darwin_pbpk/circ28_ontology.sio
+//
+// Drug - enzyme - transporter knowledge base for the circ28 drug layer, closed
+// with the WIDE EL+ reasoner of stdlib/ontology/elplus.sio (elplus_wide_*:
+// 256 concepts, 16 roles, 32 chains). The pharmacokinetic interaction pairs
+// (perpetrator raises / lowers the exposure of victim) are DERIVED from stated
+// axioms through role chains; no pair is written down. One closure holds both
+// directions.
+//
+// Every stated axiom has a source that was opened when the axiom was written
+// (FDA table of substrates, inhibitors and inducers; DailyMed prescribing
+// information; PubMed). The axiom list with URL / PMID and the supporting
+// phrase is docs/evidence/CIRC28_ONTOLOGY_AXIOM_SOURCES.md (axiom numbers A1..
+// and P1.. below are the numbers of that file).
+//
+// Claims made: the closure follows the stated axioms (elplus.sio, formal/
+// OntologyELPlusClosureComplete.lean). Claims not made: no magnitude (no AUC
+// ratio), no dose, no time course, no completeness (only major routes that were
+// sourced are stated; minor pathways, weak inhibitors and interactions among the
+// perpetrators are left out), no clinical advice. A derived pair is a POTENTIAL
+// pharmacokinetic interaction of the class the FDA labels warn about; the
+// quantitative lane is stdlib/darwin_pbpk/ddi/.
+//
+// ---------------------------------------------------------------------------
+// Encoding (EL+ has no inverse roles, so the direction is fixed like this)
+//
+//   route  <= exists clears.Victim          "the enzyme / transporter is a major
+//                                            route of elimination of the victim"
+//   perp   <= exists inhibits_strong.route  (strong index inhibitor, FDA)
+//   perp   <= exists inhibits_moderate.route
+//   perp   <= exists induces_strong.route
+//   perp   <= exists induces_moderate.route
+//   victim <= ProteolyticallyCleared | RenallyCleared    (non-enzymatic routes,
+//                                            stated as drug classes)
+//
+//   inhibits_strong   o clears  <=  raises
+//   inhibits_moderate o clears  <=  raises
+//   induces_strong    o clears  <=  lowers
+//   induces_moderate  o clears  <=  lowers
+//
+// so the derived edge (raises, perp, victim) points from the perpetrator to the
+// victim and the route is the middle of the chain. The reasoner only creates a
+// derived edge when `exists raises.victim` is interned, so all 15 victims get a
+// raises and a lowers existential (also the four that no route reaches: their
+// empty answer is the reasoner's, not a missing slot).
+//
+// Budget (wide limits 256 concepts / 16 roles / 32 chains):
+//   concepts 83: 0..22 drugs (study 0..14, perpetrators 15..22), 23 CYP3A4,
+//     24 CYP2D6, 25 CYP1A2, 26 CYP2C19, 27 UGT1A4, 28 P-gp, 29 Proteolytically-
+//     Cleared, 30 RenallyCleared, 31 top, then existentials: 32..42 clears.victim
+//     (11), 43..47 inhibits_strong.route (5), 48 inhibits_moderate.CYP3A4,
+//     49..51 induces_strong.route (3), 52 induces_moderate.CYP1A2,
+//     53..67 raises.victim (15), 68..82 lowers.victim (15).
+//   roles 7: 0 clears, 1 inhibits_strong, 2 inhibits_moderate, 3 induces_strong,
+//     4 induces_moderate, 5 raises, 6 lowers.
+//   chains 4. Not stated: drug / inhibitor classes, a derived strength, CYP2C9.
+//
+// Compiler rules this module follows (committed Madaros prebuilt): all state is a
+// LOCAL array owned by the caller (the role cube `r`, 1048576 cells) or by one
+// function (S, pack, chains) and passed down; no module-level mutable array, no
+// named constant used as an array stride (literals), every status of the wide
+// entry points is checked. circ28_onto_init* return the number of fixpoint
+// rounds (>= 1) or a NEGATIVE refusal code:
+//   -1 elplus_wide_role_closure, -2 elplus_wide_seed, -3 elplus_wide_set_concept,
+//   -4 elplus_wide_set_exid, -5 elplus_wide_set_chain,
+//   -100 - s  elplus_wide_fixpoint_packed refused with status -s (s = 1..8).
+//
+// Public ids. Drugs 1..23 (study drugs 1..15 in the order of the task, then the
+// perpetrators 16..23). Enzymes for the DDI engine: 1 CYP3A4, 2 CYP2D6,
+// 3 CYP1A2, 4 CYP2C19, 5 CYP2C9, 6 UGT, 7 other. P-gp is "7 other".
+//
+// Usage: var r: [bool; 1048576] = [false; 1048576]
+//        let rounds = circ28_onto_init(&! r)       (> 0 or refused)
+//        circ28_onto_raises(&r, perp_id, victim_id)
+
+use ontology::elplus::{
+    elplus_wide_role_closure, elplus_wide_seed, elplus_wide_set_concept,
+    elplus_wide_set_exid, elplus_wide_set_chain, elplus_wide_fixpoint_packed,
+    elplus_wide_edge
+}
+
+// ---- public ids: drugs -----------------------------------------------------
+pub const CIRC28_DRUG_SIROLIMUS: i32 = 1
+pub const CIRC28_DRUG_EVEROLIMUS: i32 = 2
+pub const CIRC28_DRUG_TACROLIMUS: i32 = 3
+pub const CIRC28_DRUG_SEMAGLUTIDE: i32 = 4
+pub const CIRC28_DRUG_TIRZEPATIDE: i32 = 5
+pub const CIRC28_DRUG_VENLAFAXINE: i32 = 6
+pub const CIRC28_DRUG_HALOPERIDOL: i32 = 7
+pub const CIRC28_DRUG_MIDAZOLAM: i32 = 8
+pub const CIRC28_DRUG_OLANZAPINE: i32 = 9
+pub const CIRC28_DRUG_CLOZAPINE: i32 = 10
+pub const CIRC28_DRUG_QUETIAPINE: i32 = 11
+pub const CIRC28_DRUG_RISPERIDONE: i32 = 12
+pub const CIRC28_DRUG_ARIPIPRAZOLE: i32 = 13
+pub const CIRC28_DRUG_LITHIUM: i32 = 14
+pub const CIRC28_DRUG_VANCOMYCIN: i32 = 15
+pub const CIRC28_DRUG_KETOCONAZOLE: i32 = 16
+pub const CIRC28_DRUG_ITRACONAZOLE: i32 = 17
+pub const CIRC28_DRUG_RIFAMPICIN: i32 = 18
+pub const CIRC28_DRUG_FLUVOXAMINE: i32 = 19
+pub const CIRC28_DRUG_PAROXETINE: i32 = 20
+pub const CIRC28_DRUG_FLUOXETINE: i32 = 21
+pub const CIRC28_DRUG_CARBAMAZEPINE: i32 = 22
+pub const CIRC28_DRUG_CLARITHROMYCIN: i32 = 23
+pub const CIRC28_N_STUDY: i32 = 15
+pub const CIRC28_N_DRUGS: i32 = 23
+
+// ---- public ids: enzymes (as in the DDI engine) -----------------------------
+pub const CIRC28_ENZ_CYP3A4: i32 = 1
+pub const CIRC28_ENZ_CYP2D6: i32 = 2
+pub const CIRC28_ENZ_CYP1A2: i32 = 3
+pub const CIRC28_ENZ_CYP2C19: i32 = 4
+pub const CIRC28_ENZ_CYP2C9: i32 = 5
+pub const CIRC28_ENZ_UGT: i32 = 6
+pub const CIRC28_ENZ_OTHER: i32 = 7
+
+// ---- routes (concepts 23..30), index = concept - 23 --------------------------
+pub const CIRC28_RT_CYP3A4: i32 = 0
+pub const CIRC28_RT_CYP2D6: i32 = 1
+pub const CIRC28_RT_CYP1A2: i32 = 2
+pub const CIRC28_RT_CYP2C19: i32 = 3
+pub const CIRC28_RT_UGT1A4: i32 = 4
+pub const CIRC28_RT_PGP: i32 = 5
+pub const CIRC28_RT_RENAL: i32 = 6
+pub const CIRC28_RT_PROTEOLYSIS: i32 = 7
+
+// ---- axiom kinds (= role index of the asserted edge) --------------------------
+pub const CIRC28_AX_CLEARS: i32 = 0
+pub const CIRC28_AX_INH_STRONG: i32 = 1
+pub const CIRC28_AX_INH_MODERATE: i32 = 2
+pub const CIRC28_AX_IND_STRONG: i32 = 3
+pub const CIRC28_AX_IND_MODERATE: i32 = 4
+
+// ---- derived directions ------------------------------------------------------
+pub const CIRC28_DIR_RAISES: i32 = 1
+pub const CIRC28_DIR_LOWERS: i32 = 2
+
+// ---- sizes ---------------------------------------------------------------------
+pub const CIRC28_ONTO_NC: i64 = 83
+pub const CIRC28_ONTO_NR: i64 = 7
+pub const CIRC28_ONTO_NCHAIN: i64 = 4
+pub const CIRC28_ONTO_NAXIOMS: i64 = 37
+
+// Interned existential id of (role, filler), or -1 when that existential is not
+// in the universe. Fillers are concept indices (route concepts 23..28, victims
+// 0..14).
+fn circ28_ex_idx(role: i64, filler: i64) -> i64 {
+    let none: i64 = 0 - 1
+    if role == 0 {
+        if filler == 0 { return 32 }
+        if filler == 1 { return 33 }
+        if filler == 2 { return 34 }
+        if filler == 5 { return 35 }
+        if filler == 6 { return 36 }
+        if filler == 7 { return 37 }
+        if filler == 8 { return 38 }
+        if filler == 9 { return 39 }
+        if filler == 10 { return 40 }
+        if filler == 11 { return 41 }
+        if filler == 12 { return 42 }
+        return none
+    }
+    if role == 1 {
+        if filler == 23 { return 43 }
+        if filler == 24 { return 44 }
+        if filler == 25 { return 45 }
+        if filler == 26 { return 46 }
+        if filler == 28 { return 47 }
+        return none
+    }
+    if role == 2 {
+        if filler == 23 { return 48 }
+        return none
+    }
+    if role == 3 {
+        if filler == 23 { return 49 }
+        if filler == 26 { return 50 }
+        if filler == 28 { return 51 }
+        return none
+    }
+    if role == 4 {
+        if filler == 25 { return 52 }
+        return none
+    }
+    if role == 5 {
+        if filler >= 0 && filler < 15 { return 53 + filler }
+        return none
+    }
+    if role == 6 {
+        if filler >= 0 && filler < 15 { return 68 + filler }
+        return none
+    }
+    none
+}
+
+// Append one axiom (kind, route, drug id) to the table; returns the new count.
+fn circ28_ax_add(ak: &![i64; 64], ar: &![i64; 64], ad: &![i64; 64], n: i64, kind: i64, rt: i64, drug: i64) -> i64 with Mut, Div, Panic {
+    ak[n] = kind
+    ar[n] = rt
+    ad[n] = drug
+    n + 1
+}
+
+// The stated axioms. kind 0 route clears drug (route 0 CYP3A4, 1 CYP2D6, 2 CYP1A2,
+// 3 CYP2C19, 4 UGT1A4, 5 P-gp, 6 renal, 7 proteolysis); kind 1 / 2 strong /
+// moderate inhibitor, kind 3 / 4 strong / moderate inducer of the route.
+// Numbers in the comments are the entries of the evidence file.
+fn circ28_ax_table(ak: &![i64; 64], ar: &![i64; 64], ad: &![i64; 64]) -> i64 with Mut, Div, Panic {
+    var n: i64 = 0
+    n = circ28_ax_add(ak, ar, ad, n, 0, 0, 1)    // A1  CYP3A4 clears sirolimus
+    n = circ28_ax_add(ak, ar, ad, n, 0, 5, 1)    // A2  P-gp clears sirolimus
+    n = circ28_ax_add(ak, ar, ad, n, 0, 0, 2)    // A3  CYP3A4 clears everolimus
+    n = circ28_ax_add(ak, ar, ad, n, 0, 5, 2)    // A4  P-gp clears everolimus
+    n = circ28_ax_add(ak, ar, ad, n, 0, 0, 3)    // A5  CYP3A4 clears tacrolimus
+    n = circ28_ax_add(ak, ar, ad, n, 0, 7, 4)    // A6  semaglutide proteolytically cleared
+    n = circ28_ax_add(ak, ar, ad, n, 0, 7, 5)    // A7  tirzepatide proteolytically cleared
+    n = circ28_ax_add(ak, ar, ad, n, 0, 1, 6)    // A8  CYP2D6 clears venlafaxine
+    n = circ28_ax_add(ak, ar, ad, n, 0, 0, 7)    // A9  CYP3A4 clears haloperidol
+    n = circ28_ax_add(ak, ar, ad, n, 0, 0, 8)    // A10 CYP3A4 clears midazolam
+    n = circ28_ax_add(ak, ar, ad, n, 0, 2, 9)    // A11 CYP1A2 clears olanzapine
+    n = circ28_ax_add(ak, ar, ad, n, 0, 4, 9)    // A12 UGT1A4 clears olanzapine
+    n = circ28_ax_add(ak, ar, ad, n, 0, 2, 10)   // A13 CYP1A2 clears clozapine
+    n = circ28_ax_add(ak, ar, ad, n, 0, 0, 10)   // A14 CYP3A4 clears clozapine
+    n = circ28_ax_add(ak, ar, ad, n, 0, 1, 10)   // A15 CYP2D6 clears clozapine
+    n = circ28_ax_add(ak, ar, ad, n, 0, 0, 11)   // A16 CYP3A4 clears quetiapine
+    n = circ28_ax_add(ak, ar, ad, n, 0, 1, 12)   // A17 CYP2D6 clears risperidone
+    n = circ28_ax_add(ak, ar, ad, n, 0, 0, 13)   // A18 CYP3A4 clears aripiprazole
+    n = circ28_ax_add(ak, ar, ad, n, 0, 1, 13)   // A19 CYP2D6 clears aripiprazole
+    n = circ28_ax_add(ak, ar, ad, n, 0, 6, 14)   // A20 lithium renally cleared
+    n = circ28_ax_add(ak, ar, ad, n, 0, 6, 15)   // A21 vancomycin renally cleared
+    n = circ28_ax_add(ak, ar, ad, n, 1, 0, 16)   // P1  ketoconazole strong CYP3A4
+    n = circ28_ax_add(ak, ar, ad, n, 1, 5, 16)   // P2  ketoconazole strong P-gp
+    n = circ28_ax_add(ak, ar, ad, n, 1, 0, 17)   // P3  itraconazole strong CYP3A
+    n = circ28_ax_add(ak, ar, ad, n, 1, 0, 23)   // P4  clarithromycin strong CYP3A
+    n = circ28_ax_add(ak, ar, ad, n, 1, 2, 19)   // P5  fluvoxamine strong CYP1A2
+    n = circ28_ax_add(ak, ar, ad, n, 1, 3, 19)   // P6  fluvoxamine strong CYP2C19
+    n = circ28_ax_add(ak, ar, ad, n, 2, 0, 19)   // P7  fluvoxamine moderate CYP3A
+    n = circ28_ax_add(ak, ar, ad, n, 1, 1, 20)   // P8  paroxetine strong CYP2D6
+    n = circ28_ax_add(ak, ar, ad, n, 1, 1, 21)   // P9  fluoxetine strong CYP2D6
+    n = circ28_ax_add(ak, ar, ad, n, 1, 3, 21)   // P10 fluoxetine strong CYP2C19
+    n = circ28_ax_add(ak, ar, ad, n, 3, 0, 18)   // P11 rifampicin strong inducer CYP3A
+    n = circ28_ax_add(ak, ar, ad, n, 3, 3, 18)   // P12 rifampicin strong inducer CYP2C19
+    n = circ28_ax_add(ak, ar, ad, n, 3, 5, 18)   // P13 rifampicin inducer P-gp
+    n = circ28_ax_add(ak, ar, ad, n, 4, 2, 18)   // P14 rifampicin moderate inducer CYP1A2
+    n = circ28_ax_add(ak, ar, ad, n, 3, 0, 22)   // P15 carbamazepine strong inducer CYP3A
+    n = circ28_ax_add(ak, ar, ad, n, 4, 2, 22)   // P16 carbamazepine inducer CYP1A2
+    n
+}
+
+// Number of axioms stated after omitting (omit_kind, omit_route, omit_drug).
+pub fn circ28_onto_stated(omit_kind: i32, omit_route: i32, omit_drug: i32) -> i32 with Mut, Div, Panic {
+    var ak: [i64; 64] = [0; 64]
+    var ar: [i64; 64] = [0; 64]
+    var ad: [i64; 64] = [0; 64]
+    let n = circ28_ax_table(&!ak, &!ar, &!ad)
+    var stated: i64 = 0
+    var i: i64 = 0
+    while i < n {
+        if !(ak[i] == (omit_kind as i64) && ar[i] == (omit_route as i64) && ad[i] == (omit_drug as i64)) { stated = stated + 1 }
+        i = i + 1
+    }
+    stated as i32
+}
+
+// Build and close the TBox into the caller's role cube `r` (cleared here)
+// without the stated axiom (omit_kind, omit_route, omit_drug); (-1, -1, -1)
+// omits nothing. Returns fixpoint rounds (>= 1) or a negative refusal code
+// (see the header). Everything but `r` is local to this call.
+pub fn circ28_onto_init_without(r: &![bool; 1048576], omit_kind: i32, omit_route: i32, omit_drug: i32) -> i32 with Mut, Div, Panic {
+    var s: [bool; 65536] = [false; 65536]
+    var pack: [i64; 4864] = [0; 4864]
+    var chains: [i64; 96] = [0; 96]
+    var rclos: [bool; 256] = [false; 256]
+    var dims: [i64; 4] = [0; 4]
+    var ak: [i64; 64] = [0; 64]
+    var ar: [i64; 64] = [0; 64]
+    var ad: [i64; 64] = [0; 64]
+    let ok = omit_kind as i64
+    let orr = omit_route as i64
+    let od = omit_drug as i64
+    var i: i64 = 0
+    while i < 1048576 { r[i] = false  i = i + 1 }
+    // exid: -1 everywhere
+    i = 0
+    while i < 4096 { pack[768 + i] = 0 - 1  i = i + 1 }
+    // concepts: atoms and top
+    i = 0
+    while i < 31 {
+        if elplus_wide_set_concept(&!pack, i, 0, i, 0) != 0 { return 0 - 3 }
+        i = i + 1
+    }
+    if elplus_wide_set_concept(&!pack, 31, 1, 0, 0) != 0 { return 0 - 3 }
+    // existentials 32..82
+    var role: i64 = 0
+    while role < 7 {
+        var f: i64 = 0
+        while f < 32 {
+            let e = circ28_ex_idx(role, f)
+            if e >= 0 {
+                if elplus_wide_set_concept(&!pack, e, 3, role, f) != 0 { return 0 - 3 }
+                if elplus_wide_set_exid(&!pack, role, f, e) != 0 { return 0 - 4 }
+            }
+            f = f + 1
+        }
+        role = role + 1
+    }
+    // role hierarchy: none, reflexive closure only
+    if elplus_wide_role_closure(&!rclos, 7) != 0 { return 0 - 1 }
+    // chains: strong / moderate o clears <= raises (inhibition) or lowers (induction)
+    if elplus_wide_set_chain(&!chains, 0, 1, 0, 5) != 0 { return 0 - 5 }
+    if elplus_wide_set_chain(&!chains, 1, 2, 0, 5) != 0 { return 0 - 5 }
+    if elplus_wide_set_chain(&!chains, 2, 3, 0, 6) != 0 { return 0 - 5 }
+    if elplus_wide_set_chain(&!chains, 3, 4, 0, 6) != 0 { return 0 - 5 }
+    if elplus_wide_seed(&!s, 83, 31) != 0 { return 0 - 2 }
+    let n = circ28_ax_table(&!ak, &!ar, &!ad)
+    i = 0
+    while i < n {
+        let skip = ak[i] == ok && ar[i] == orr && ad[i] == od
+        if !skip {
+            let k = ak[i]
+            if k == 0 {
+                if ar[i] == 6 {
+                    s[(ad[i] - 1) * 256 + 30] = true
+                } else {
+                    if ar[i] == 7 {
+                        s[(ad[i] - 1) * 256 + 29] = true
+                    } else {
+                        // route <= exists clears.victim
+                        let e = circ28_ex_idx(0, ad[i] - 1)
+                        s[(23 + ar[i]) * 256 + e] = true
+                    }
+                }
+            } else {
+                // perpetrator <= exists inhibits_*/induces_*.route (kind = role)
+                let e = circ28_ex_idx(k, 23 + ar[i])
+                s[(ad[i] - 1) * 256 + e] = true
+            }
+        }
+        i = i + 1
+    }
+    dims[0] = 4
+    dims[1] = 83
+    dims[2] = 32
+    dims[3] = 7
+    let rounds = elplus_wide_fixpoint_packed(&!s, r, &pack, &rclos, &chains, &dims)
+    if rounds < 0 { return (0 - 100 + rounds) as i32 }
+    rounds as i32
+}
+
+// Build and close the TBox with every axiom; see circ28_onto_init_without.
+pub fn circ28_onto_init(r: &![bool; 1048576]) -> i32 with Mut, Div, Panic {
+    circ28_onto_init_without(r, 0 - 1, 0 - 1, 0 - 1)
+}
+
+fn circ28_valid_perp(p: i32) -> bool { p >= 16 && p <= 23 }
+fn circ28_valid_victim(v: i32) -> bool { v >= 1 && v <= 15 }
+
+// Derived: perpetrator raises the exposure of victim (inhibition of a route of
+// the victim, strong or moderate).
+pub fn circ28_onto_raises(r: &[bool; 1048576], perp_id: i32, victim_id: i32) -> bool with Div, Panic {
+    if !circ28_valid_perp(perp_id) || !circ28_valid_victim(victim_id) { return false }
+    elplus_wide_edge(r, 5, (perp_id - 1) as i64, (victim_id - 1) as i64)
+}
+
+// Derived: perpetrator lowers the exposure of victim (induction of a route).
+pub fn circ28_onto_lowers(r: &[bool; 1048576], perp_id: i32, victim_id: i32) -> bool with Div, Panic {
+    if !circ28_valid_perp(perp_id) || !circ28_valid_victim(victim_id) { return false }
+    elplus_wide_edge(r, 6, (perp_id - 1) as i64, (victim_id - 1) as i64)
+}
+
+// Edge perpetrator -> route (0..5) of strength class `strong` (true: strong
+// role, false: moderate role) in direction inhibit (true) or induce (false).
+fn circ28_acts_on(r: &[bool; 1048576], perp_id: i32, rt: i64, strong: bool, inhibit: bool) -> bool with Div, Panic {
+    let p = (perp_id - 1) as i64
+    let c = 23 + rt
+    var role: i64 = 2
+    if inhibit {
+        if strong { role = 1 }
+    } else {
+        role = 4
+        if strong { role = 3 }
+    }
+    elplus_wide_edge(r, role, p, c)
+}
+
+fn circ28_route_enzyme(rt: i64) -> i32 {
+    if rt == 0 { return 1 }
+    if rt == 1 { return 2 }
+    if rt == 2 { return 3 }
+    if rt == 3 { return 4 }
+    if rt == 4 { return 6 }
+    7
+}
+
+// Is route rt (0 CYP3A4, 1 CYP2D6, 2 CYP1A2, 3 CYP2C19, 4 UGT1A4, 5 P-gp) the
+// middle of a derived chain perpetrator -> victim in the direction `raises`
+// (true) or `lowers` (false)?
+pub fn circ28_onto_via_route(r: &[bool; 1048576], perp_id: i32, victim_id: i32, rt: i32, raises: bool) -> bool with Div, Panic {
+    if !circ28_valid_perp(perp_id) || !circ28_valid_victim(victim_id) { return false }
+    if rt < 0 || rt > 5 { return false }
+    let rr = rt as i64
+    let v = (victim_id - 1) as i64
+    if !elplus_wide_edge(r, 0, 23 + rr, v) { return false }
+    circ28_acts_on(r, perp_id, rr, true, raises) || circ28_acts_on(r, perp_id, rr, false, raises)
+}
+
+// Enzyme id (1..7) through which the derived interaction perpetrator -> victim
+// goes; 0 when no interaction is derived. When several routes qualify the one
+// with the STRONGEST perpetrator edge wins (strong before moderate); ties go to
+// the lowest route index, i.e. the order CYP3A4, CYP2D6, CYP1A2, CYP2C19,
+// UGT1A4, P-gp. P-gp reports enzyme id 7 (other). The route is found by joining
+// the closed perpetrator -> route and route -> victim edges, the two links of
+// the chain that produced the derived edge.
+pub fn circ28_onto_shared_enzyme(r: &[bool; 1048576], perp_id: i32, victim_id: i32) -> i32 with Div, Panic {
+    if !circ28_valid_perp(perp_id) || !circ28_valid_victim(victim_id) { return 0 }
+    let up = circ28_onto_raises(r, perp_id, victim_id)
+    let down = circ28_onto_lowers(r, perp_id, victim_id)
+    if !up && !down { return 0 }
+    var pass: i64 = 0
+    while pass < 2 {
+        var rt: i64 = 0
+        while rt < 6 {
+            if circ28_onto_via_route(r, perp_id, victim_id, rt as i32, up) {
+                if circ28_acts_on(r, perp_id, rt, pass == 0, up) { return circ28_route_enzyme(rt) }
+            }
+            rt = rt + 1
+        }
+        pass = pass + 1
+    }
+    0
+}
+
+// Fill `out` with the derived tuples (perpetrator id, victim id, enzyme id,
+// direction 1 raises / 2 lowers) as consecutive groups of four i32, perpetrators
+// 16..23 in order, victims 1..15 in order, raises before lowers. Returns the
+// number of tuples (at most 240 exist; 256 fit).
+pub fn circ28_onto_fill_pairs(r: &[bool; 1048576], out: &![i32; 1024]) -> i32 with Mut, Div, Panic {
+    var n: i32 = 0
+    var p: i32 = 16
+    while p <= 23 {
+        var v: i32 = 1
+        while v <= 15 {
+            if circ28_onto_raises(r, p, v) {
+                let b = (n * 4) as i64
+                out[b] = p
+                out[b + 1] = v
+                out[b + 2] = circ28_onto_shared_enzyme(r, p, v)
+                out[b + 3] = 1
+                n = n + 1
+            }
+            if circ28_onto_lowers(r, p, v) {
+                let b = (n * 4) as i64
+                out[b] = p
+                out[b + 1] = v
+                out[b + 2] = circ28_onto_shared_enzyme(r, p, v)
+                out[b + 3] = 2
+                n = n + 1
+            }
+            v = v + 1
+        }
+        p = p + 1
+    }
+    n
+}

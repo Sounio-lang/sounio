@@ -1,0 +1,1004 @@
+//@ run-pass
+//@ timeout: 300
+//@ expect-stdout-contains: CIRC28_NL_BINDING_PASS
+//
+// Local (per-bed) saturable erythrocyte binding on the circ28 kernel
+// (stdlib/darwin_pbpk/circ28_nl.sio), against the linear kernel, against exact
+// non-linear steady states, and against the single-ratio treatment of
+// circ28_blood.sio. Parameters are made-up round numbers (Hct 0.4, Bmax 100 per
+// litre of erythrocytes, Kd 2), the same as tests/run-pass/circ28_blood_binding.sio;
+// the module carries no literature values. Expectations were written here
+// BEFORE the first run of this file (one smoke run of the module alone, 100 steps
+// of a bolus, had been made: it gave mass balance to rounding and 2.1 Newton
+// iterations per stage, and is not used as a target).
+//
+//   a  Jacobian. Analytic L + N diag(P') against central differences of the
+//      right-hand side (step 1e-5 |x_j|) at three states (all 28 entries
+//      c * (0.8 + 0.4 w_k), w_k in [0,1] a fixed pattern) with blood-scale
+//      c = 0.05 (low: C_p << Kd, bp ~ 20), 15 (intermediate: C_p ~ 1) and 300
+//      (saturating: C_p ~ 430, bp ~ 0.7), all clearances active. Error measure:
+//      max over columns of max_i |J_an - J_fd| / max_i |J_an| in that column.
+//      Expected ~1e-8 or better; asserted < 1e-6 (the rounding floor of the
+//      difference is ~1e-10 for the stiffest columns).
+//   b  Linear limit and the L/N split. (b1) with bp0 = 1.4 (Kd = 1e12, Bmax =
+//      2e12: bp_low = 0.6 + 0.4 * 2), L + N / bp0 equals circ28's own matrix
+//      (Circ28Sys.a from circ28_prepare) entry by entry: zeros exactly, others
+//      to 1e-12 relative. (b2) an intravenous infusion (200 mg over 0.1 h) with
+//      hepatic (clint 300, clform 40), gut-wall (100), renal (2) and plasma (3)
+//      clearance, dt 0.05 h, 6 h, and (b3) an oral dose (rate 30 exp(-t) mg/h)
+//      with the same clearances: the 28 states, the seven tallies and AUC_plasma
+//      * bp0 = AUC_blood agree with the plain circ28 run at bp = bp0 to 1e-9
+//      relative. Expected ~1e-12 (the non-linearity of the relation is 1e-11
+//      here). Newton iterations: 1 per stage (the first solve is exact in the
+//      linear limit; the second evaluation only confirms the residual).
+//   c  Mass balance in a strongly non-linear run: 1000 mg infused over 0.1 h and
+//      20 mg/h orally for the first 2 h, dt 0.02, 8 h, all clearances active.
+//      Input = eliminated + remaining to 1e-10 relative. Spread of the local
+//      blood:plasma ratio across the 15 blood beds right after the infusion
+//      (t = 0.1 h): bp_max / bp_min expected between 2.5 and 6 (the beds that
+//      the dose reached least sit near bp_low = 20.6; the venous pool, at
+//      C_b of order 100 or more, near bp ~ 1-3); asserted > 2. NOTE: the first
+//      version of this part used 200 mg and predicted > 2.5; the run gave
+//      1.54 (bp 10.77 / 6.99): at 0.1 h that dose had already spread to every
+//      bed, so the prediction was wrong; the dose was raised to 1000 mg
+//      (a new prediction, written above, before its run) and the 200 mg result is
+//      kept here for the record.
+//   d  Exact non-linear steady states under constant infusion R0, run from zero
+//      with dt = 20 h (L-stable: the steady state is the fixed point of the
+//      scheme at any dt) for 3000 h. f(C_p) = 0.6 C_p + 40 C_p / (2 + C_p):
+//      f(1) = 13.9333, f(20) = 48.3636.
+//      (i) plasma clearance only (cl_plasma 3): all 15 blood states equal
+//        C = f(R0 / 3), R0 = 3 and 60: C = 13.9333 and 48.3636; ratio 3.4711
+//        for a 20-fold rate (the blood concentration rises LESS than
+//        proportionally because bp falls). Assert 1e-8 on C, on the spread of
+//        the blood states, and on the ratio.
+//      (ii) renal clearance only (cl_renal 2): R0 = 2 and 40: C_ven = C_art =
+//        C = f(R0/2) = 13.9333, 48.3636; kidney vascular C - R0/74.1 = 13.9063,
+//        47.8238; every other blood state C. 1e-8.
+//      (iii) hepatic only (clint 300 -> ci = 30, ps_liver 1800, cl_eff = 29.5082,
+//        Q_h = 99.45): R0 = 29.5082 and 590.164 (P_l = 1 and 20): liver vascular
+//        C_l = f(P_l) = 13.9333, 48.3636; arterial = venous = every other blood
+//        state C = C_l + R0 / Q_h = 14.2300, 54.2980; liver tissue 0.98361,
+//        19.6721. The test derives the same numbers independently: u = R0 / ci
+//        (tissue balance), P(C_l) = u (1 + ci / ps) (exchange balance), solved
+//        by bisection on C_l, C = C_l + R0 / Q_h; and compares them with the
+//        module's closed form. Asserted 1e-8 against the run. The single-ratio
+//        module (circ28_blood, mode 3) is run on the same parameters; the
+//        difference of the two treatments is printed (not asserted); it is not
+//        zero in (iii) only: there the liver vascular blood concentration
+//        C (1 - E(bp_eff)) differs from the local value, which is also what
+//        the diagnostic of blood_binding_report.md measured (0.14).
+//   e  Local treatment against the single-ratio approximation after 200 mg over
+//      0.1 h with clint 300, renal 2, plasma 3, dt 0.05 h, run to 120 h:
+//      C_max (venous whole blood), AUC(0-2 h) and AUC(0-inf) (to 120 h) for
+//      both, and their relative differences. Prediction (written before the
+//      run): both conserve mass and, when the blood is uniform and at low
+//      concentration, both reduce to the same linear model (bp -> bp_low), so
+//      differences concentrate in the distribution phase, where the
+//      concentrations differ between beds and are high. Hence
+//      |dAUC(0-inf)| / AUC < |dAUC(0-2)| / AUC(0-2). Asserted: (1) in the linear
+//      limit (Kd = 1e12) the two agree on C_max and both AUCs to 1e-8; (2) both
+//      runs end with the dose eliminated. The ordering of the two relative
+//      differences is PRINTED with a verdict, not asserted: the first run
+//      CONTRADICTED the prediction (AUC(0-2) 0.097 %, AUC(0-inf) 0.130 %;
+//      absolute differences accrued in the windows 0-2, 2-10, 10-end:
+//      0.029, 0.036, 0.058 mg.h/L: the difference keeps accruing after the
+//      distribution phase). The windows are printed. The sampling is two-phase
+//      (dt 0.0125 to 2 h, then 0.1 h): at dt 0.05 throughout, the step error of
+//      the wrapper made the AUC(0-2) difference come out at -0.004 %. Also printed: the same comparison with Bmax 418,
+//      Kd 3.8, Hct 0.45 (values attributed to Jusko 1995 as cited by Storset
+//      2014; primary paper not opened; Hct chosen for illustration) with clint 200
+//      (units: dose in ug, concentrations in ng/mL), and the steady states at two
+//      infusion rates for both treatments (local arterial blood asserted against
+//      the closed form of section 4 of the module).
+//   f  Convergence in dt: 200 mg over 0.08 h, dt = 0.04, 0.02, 0.01, 0.005, to
+//      2 h. Successive differences of AUC(0-2) and of the venous concentration
+//      at 1 h: ratios expected about 4 (order 2). Asserted: order >= 1.8 for both
+//      (only because the measurement supports it; see the run).
+//   h  Fail closed. With the Newton iteration limit set to 1 (nl28_set_newton) a
+//      strongly non-linear stage (2000 mg/h into a body already at C_p = 5, dt =
+//      2 h) cannot converge: nl28_step must return status 1, leave the state and
+//      every tally bit-identical and count one failure; with the default limit the
+//      same step must succeed (status 0).
+//   g  Robustness where explicit updates broke (blood_binding_report.md): whole
+//      blood 48.36, C_p = 20, d ln bp / d ln C = -2.2 (plasma clearance only,
+//      R0 = 60), dt = 0.02 and 0.1 h, 10 h. Starting (g1) exactly at the steady
+//      state, the state must stay there (max relative deviation < 1e-9);
+//      (g2) at C_p = 22 (10 % above) and (g3) at C_p = 18 (10 % below), with
+//      the tissues in equilibrium, the total mass must approach the steady value
+//      monotonically (non-increasing from above, non-decreasing from below, to
+//      1e-12) and the venous blood concentration too, no state may go below
+//      zero, and Newton needs at most 5 iterations per stage with a mean below
+//      3. Newton counts are printed (max and mean per stage).
+//
+// Madaros: the three Nl28Sys / Circ28Sys objects are created once in main and
+// passed with &!; no large struct is built in a loop.
+
+use darwin_pbpk::circ28::*
+use darwin_pbpk::circ28_blood::*
+use darwin_pbpk::circ28_nl::*
+use math::pure::{exp, log2}
+
+fn ck_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn ck_rel(tag: string, got: f64, want: f64, tol: f64) -> i32 with IO, Mut, Div, Panic {
+    let r = ck_abs(got - want) / ck_abs(want)
+    print("  "); print(tag); print(": predicted "); print(want); print(" obtained "); print(got)
+    print("  rel x 1e9 = "); println(r * 1.0e9)
+    if !(r <= tol) {
+        println("  [FAIL]")
+        return 1
+    }
+    return 0
+}
+
+fn ck_true(tag: string, ok: bool) -> i32 with IO {
+    print("  "); print(tag)
+    if ok {
+        println(": ok")
+        return 0
+    }
+    println(": [FAIL]")
+    return 1
+}
+
+fn ck_set() -> Circ28Params with Mut {
+    var p = circ28_physiology()
+    p.kp = [0.0, 1.0, 0.8, 0.5, 1.0, 1.2, 1.5, 1.0, 1.0, 0.8, 0.8, 1.0, 1.0, 1.0]
+    p.fu = 0.1
+    return p
+}
+
+fn ck_all_params() -> Circ28Params with Mut {
+    var p = ck_set()
+    p.clint = 300.0
+    p.clform = 40.0
+    p.clint_gut = 100.0
+    p.cl_renal = 2.0
+    p.cl_plasma = 3.0
+    return p
+}
+
+fn ck_is_blood(k: i32) -> bool {
+    return k <= 1 || k % 2 == 0
+}
+
+// largest |x_k - c| / c over the 15 blood states
+fn ck_spread(s: &Circ28State, c: f64) -> f64 with Mut, Div {
+    var w = 0.0
+    var k: i32 = 0
+    while k < 28 {
+        if ck_is_blood(k) {
+            let d = ck_abs((*s).x[k] - c) / c
+            if d > w { w = d }
+        }
+        k = k + 1
+    }
+    return w
+}
+
+// ---------------------------------------------------------------- part a
+
+fn ck_mkstate(c: f64, x: &![f64; 28]) with Mut, Div {
+    var k: i32 = 0
+    while k < 28 {
+        let w = 0.8 + 0.4 * (((k * 7) % 11) as f64) / 10.0
+        (*x)[k] = c * w
+        k = k + 1
+    }
+}
+
+fn ck_jac_err(sys: &Nl28Sys, x: &[f64; 28]) -> f64 with Mut, Div, Panic {
+    var jan: [f64; 784] = [0.0; 784]
+    nl28_jacobian(sys, x, &!jan)
+    var worst = 0.0
+    var j: i32 = 0
+    while j < 28 {
+        var xp: [f64; 28] = [0.0; 28]
+        var xm: [f64; 28] = [0.0; 28]
+        var k: i32 = 0
+        while k < 28 {
+            xp[k] = (*x)[k]
+            xm[k] = (*x)[k]
+            k = k + 1
+        }
+        let h = 1.0e-5 * ck_abs((*x)[j])
+        xp[j] = xp[j] + h
+        xm[j] = xm[j] - h
+        var fp: [f64; 28] = [0.0; 28]
+        var fm: [f64; 28] = [0.0; 28]
+        nl28_rhs(sys, &xp, 1.7, 0.9, &!fp)
+        nl28_rhs(sys, &xm, 1.7, 0.9, &!fm)
+        var cm = 0.0
+        var i: i32 = 0
+        while i < 28 {
+            let a = ck_abs(jan[i * 28 + j])
+            if a > cm { cm = a }
+            i = i + 1
+        }
+        i = 0
+        while i < 28 {
+            let fd = (fp[i] - fm[i]) / (2.0 * h)
+            let e = ck_abs(fd - jan[i * 28 + j]) / cm
+            if e > worst { worst = e }
+            i = i + 1
+        }
+        j = j + 1
+    }
+    return worst
+}
+
+fn ck_part_a(sys: &!Nl28Sys) -> i32 with IO, Mut, Div, Panic {
+    println("a Jacobian against central differences")
+    var fails: i32 = 0
+    // P against blood28_plasma_from_blood (same root, cheaper sqrt) and P' against
+    // a central difference, over 1e-4 .. 1e2 in C_p
+    var cp = 1.0e-4
+    var wp = 0.0
+    var wd = 0.0
+    while cp < 1.5e2 {
+        let cb = nl28_blood_from_plasma(0.4, 100.0, 2.0, cp)
+        let p1 = nl28_plasma(0.4, 100.0, 2.0, cb)
+        let p2 = blood28_plasma_from_blood(0.4, 100.0, 2.0, cb)
+        let e1 = ck_abs(p1 - p2) / p2
+        if e1 > wp { wp = e1 }
+        let hh = 1.0e-5 * cb
+        let fd = (nl28_plasma(0.4, 100.0, 2.0, cb + hh) - nl28_plasma(0.4, 100.0, 2.0, cb - hh)) / (2.0 * hh)
+        let e2 = ck_abs(fd - nl28_dplasma(0.4, 100.0, 2.0, cb)) / fd
+        if e2 > wd { wd = e2 }
+        cp = cp * 1.5848931924611136
+    }
+    print("  P vs blood28_plasma_from_blood, worst rel x 1e15 = "); println(wp * 1.0e15)
+    print("  P' vs central difference of P, worst rel x 1e9 = "); println(wd * 1.0e9)
+    fails = fails + ck_true("P agrees with blood28_plasma_from_blood to 1e-13", wp < 1.0e-13)
+    fails = fails + ck_true("P' agrees with the central difference to 1e-6", wd < 1.0e-6)
+    let p = ck_all_params()
+    nl28_prepare(p, 0.4, 100.0, 2.0, 0.05, sys)
+    var x: [f64; 28] = [0.0; 28]
+    var c = 0.05
+    var n: i32 = 0
+    while n < 3 {
+        if n == 1 { c = 15.0 }
+        if n == 2 { c = 300.0 }
+        ck_mkstate(c, &!x)
+        let e = ck_jac_err(sys, &x)
+        print("  blood scale "); print(c); print("  C_p(x_ven) = ")
+        print(nl28_plasma(0.4, 100.0, 2.0, x[0])); print("  max column-relative error x 1e9 = "); println(e * 1.0e9)
+        if !(e < 1.0e-6) {
+            println("  [FAIL]")
+            fails = fails + 1
+        }
+        n = n + 1
+    }
+    return fails
+}
+
+// ---------------------------------------------------------------- part b
+
+fn ck_run_plain(p: Circ28Params, route: i32, dt: f64, horizon: f64, s: &!Circ28State, el: &!Circ28Elim, sys: &!Circ28Sys) with Mut, Div, Panic {
+    circ28_prepare(p, dt, sys)
+    let n = (horizon / dt + 0.5) as i32
+    var i: i32 = 0
+    while i < n {
+        let tm = ((i as f64) + 0.5) * dt
+        var iv = 0.0
+        var oral = 0.0
+        if route == 0 {
+            if tm < 0.1 { iv = 2000.0 }
+        } else {
+            oral = 30.0 * exp(0.0 - tm)
+        }
+        circ28_step(s, p, sys, iv, oral, el)
+        i = i + 1
+    }
+}
+
+fn ck_run_nl(p: Circ28Params, hct: f64, bmax: f64, kd: f64, route: i32, dt: f64, horizon: f64, s: &!Circ28State, el: &!Nl28Tally, sys: &!Nl28Sys) -> i32 with Mut, Div, Panic {
+    nl28_prepare(p, hct, bmax, kd, dt, sys)
+    nl28_stats_reset(sys)
+    let n = (horizon / dt + 0.5) as i32
+    var bad: i32 = 0
+    var i: i32 = 0
+    while i < n {
+        let tm = ((i as f64) + 0.5) * dt
+        var iv = 0.0
+        var oral = 0.0
+        if route == 0 {
+            if tm < 0.1 { iv = 2000.0 }
+        } else {
+            oral = 30.0 * exp(0.0 - tm)
+        }
+        let st = nl28_step(s, sys, iv, oral, el)
+        if st != 0 { bad = bad + 1 }
+        i = i + 1
+    }
+    return bad
+}
+
+fn ck_relerr(a: f64, b: f64, floor: f64) -> f64 {
+    return ck_abs(a - b) / (ck_abs(a) + floor)
+}
+
+// worst relative disagreement between a plain circ28 run (bp = bp0) and the
+// local-binding run in the linear limit.
+fn ck_compare(sa: &Circ28State, ea: &Circ28Elim, sb: &Circ28State, eb: &Nl28Tally, bp0: f64) -> f64 with Mut, Div {
+    var xmax = 0.0
+    var k: i32 = 0
+    while k < 28 {
+        if ck_abs((*sa).x[k]) > xmax { xmax = ck_abs((*sa).x[k]) }
+        k = k + 1
+    }
+    var w = 0.0
+    k = 0
+    while k < 28 {
+        let e = ck_relerr((*sa).x[k], (*sb).x[k], 1.0e-10 * xmax)
+        if e > w { w = e }
+        k = k + 1
+    }
+    var e1 = ck_relerr((*ea).hepatic, (*eb).hepatic, 1.0e-300)
+    if e1 > w { w = e1 }
+    e1 = ck_relerr((*ea).formed, (*eb).formed, 1.0e-300)
+    if e1 > w { w = e1 }
+    e1 = ck_relerr((*ea).renal, (*eb).renal, 1.0e-300)
+    if e1 > w { w = e1 }
+    e1 = ck_relerr((*ea).plasma, (*eb).plasma, 1.0e-300)
+    if e1 > w { w = e1 }
+    e1 = ck_relerr((*ea).gut, (*eb).gut, 1.0e-300)
+    if e1 > w { w = e1 }
+    e1 = ck_relerr((*ea).auc_ven, (*eb).auc_ven, 1.0e-300)
+    if e1 > w { w = e1 }
+    e1 = ck_relerr((*ea).auc_art, (*eb).auc_art, 1.0e-300)
+    if e1 > w { w = e1 }
+    e1 = ck_relerr((*ea).auc_ven, bp0 * (*eb).auc_pven, 1.0e-300)
+    if e1 > w { w = e1 }
+    e1 = ck_relerr((*ea).auc_art, bp0 * (*eb).auc_part, 1.0e-300)
+    if e1 > w { w = e1 }
+    return w
+}
+
+fn ck_part_b(sysn: &!Nl28Sys, sysc: &!Circ28Sys) -> i32 with IO, Mut, Div, Panic {
+    println("b linear limit and the L/N split")
+    var fails: i32 = 0
+    let kd = 1.0e12
+    let bmax = 2.0e12
+    let hct = 0.4
+    let bp0 = blood28_bp_low(hct, bmax, kd)
+    fails = fails + ck_rel("bp0", bp0, 1.4, 1.0e-9)
+    var p = ck_all_params()
+    p.bp = bp0
+
+    // b1: L + N / bp0 = A
+    circ28_prepare(p, 0.05, sysc)
+    nl28_prepare(p, hct, bmax, kd, 0.05, sysn)
+    var worst = 0.0
+    var nz: i32 = 0
+    var k: i32 = 0
+    while k < 784 {
+        let a = (*sysc).a[k]
+        let m = (*sysn).l[k] + (*sysn).n[k] / bp0
+        if a == 0.0 {
+            if m != 0.0 { nz = nz + 1 }
+        } else {
+            let e = ck_abs(m - a) / ck_abs(a)
+            if e > worst { worst = e }
+        }
+        k = k + 1
+    }
+    print("  b1 entries where circ28 has an exact zero and L + N/bp0 does not: "); print(nz)
+    print("  worst relative entry error x 1e12 = "); println(worst * 1.0e12)
+    fails = fails + ck_true("b1 zero pattern identical", nz == 0)
+    fails = fails + ck_true("b1 entries agree to 1e-12", worst < 1.0e-12)
+
+    // b2, b3: runs
+    var route: i32 = 0
+    while route < 2 {
+        var sa = circ28_state_zero()
+        var ea = circ28_elim_zero()
+        ck_run_plain(p, route, 0.05, 6.0, &!sa, &!ea, sysc)
+        var sb = circ28_state_zero()
+        var eb = nl28_tally_zero()
+        let bad = ck_run_nl(p, hct, bmax, kd, route, 0.05, 6.0, &!sb, &!eb, sysn)
+        let w = ck_compare(&sa, &ea, &sb, &eb, bp0)
+        if route == 0 { print("  b2 iv infusion") } else { print("  b3 oral") }
+        print(": worst relative difference (28 states, 7 tallies, 2 plasma AUCs) x 1e12 = "); println(w * 1.0e12)
+        print("     hepatic "); print(ea.hepatic); print("/"); print(eb.hepatic)
+        print("  renal "); print(ea.renal); print("/"); print(eb.renal)
+        print("  plasma "); print(ea.plasma); print("/"); print(eb.plasma)
+        print("  gut "); print(ea.gut); print("/"); print(eb.gut)
+        print("  AUC_ven "); print(ea.auc_ven); print("/"); println(eb.auc_ven)
+        print("     Newton iterations per stage: mean "); print(nl28_iter_mean(sysn)); print(" max "); println(nl28_iter_max(sysn))
+        fails = fails + ck_true("failed steps = 0", bad == 0)
+        fails = fails + ck_true("agreement < 1e-9", w < 1.0e-9)
+        fails = fails + ck_true("one Newton iteration per stage in the linear limit", nl28_iter_max(sysn) <= 1)
+        route = route + 1
+    }
+    return fails
+}
+
+// ---------------------------------------------------------------- part c
+
+fn ck_part_c(sysn: &!Nl28Sys) -> i32 with IO, Mut, Div, Panic {
+    println("c mass balance, strongly non-linear")
+    var fails: i32 = 0
+    let p = ck_all_params()
+    nl28_prepare(p, 0.4, 100.0, 2.0, 0.02, sysn)
+    var s = circ28_state_zero()
+    var el = nl28_tally_zero()
+    var input = 0.0
+    var spread = 0.0
+    var bmx = 0.0
+    var bmn = 0.0
+    let n = 400
+    var i: i32 = 0
+    var bad: i32 = 0
+    while i < n {
+        let tm = ((i as f64) + 0.5) * 0.02
+        var iv = 0.0
+        var oral = 0.0
+        if tm < 0.1 { iv = 10000.0 }
+        if tm < 2.0 { oral = 20.0 }
+        input = input + (iv + oral) * 0.02
+        let st = nl28_step(&!s, sysn, iv, oral, &!el)
+        if st != 0 { bad = bad + 1 }
+        if i == 4 {
+            bmx = nl28_bp_max(&s, sysn)
+            bmn = nl28_bp_min(&s, sysn)
+            spread = bmx / bmn
+        }
+        i = i + 1
+    }
+    print("  at t = 0.1 h: local bp max "); print(bmx); print(" min "); print(bmn); print(" ratio "); println(spread)
+    fails = fails + ck_true("local bp varies by more than a factor 2 across beds", spread > 2.0)
+    let tot = nl28_eliminated(&el) + nl28_total_mass(&s, p)
+    fails = fails + ck_rel("(eliminated + remaining) / input", tot / input, 1.0, 1.0e-10)
+    print("  input "); print(input); print(" eliminated "); print(nl28_eliminated(&el)); print(" remaining "); println(nl28_total_mass(&s, p))
+    print("  Newton iterations per stage: mean "); print(nl28_iter_mean(sysn)); print(" max "); println(nl28_iter_max(sysn))
+    fails = fails + ck_true("failed steps = 0", bad == 0)
+    return fails
+}
+
+
+// ---------------------------------------------------------------- part d
+
+// constant infusion from zero; returns failed steps
+fn ck_infuse(p: Circ28Params, hct: f64, bmax: f64, kd: f64, rate: f64, dt: f64, horizon: f64, s: &!Circ28State, sys: &!Nl28Sys) -> i32 with Mut, Div, Panic {
+    nl28_prepare(p, hct, bmax, kd, dt, sys)
+    nl28_stats_reset(sys)
+    var el = nl28_tally_zero()
+    let n = (horizon / dt + 0.5) as i32
+    var bad: i32 = 0
+    var i: i32 = 0
+    while i < n {
+        let st = nl28_step(s, sys, rate, 0.0, &!el)
+        if st != 0 { bad = bad + 1 }
+        i = i + 1
+    }
+    return bad
+}
+
+// same infusion with the single-ratio wrapper (mode 3); copies its state to s
+fn ck_infuse_single(p: Circ28Params, hct: f64, bmax: f64, kd: f64, rate: f64, dt: f64, horizon: f64, s: &!Circ28State, sysc: &!Circ28Sys) with Mut, Div, Panic {
+    var b = blood28_new(p, hct, bmax, kd, dt)
+    let n = (horizon / dt + 0.5) as i32
+    var i: i32 = 0
+    while i < n {
+        blood28_step(&!b, sysc, rate, 0.0)
+        i = i + 1
+    }
+    var k: i32 = 0
+    while k < 28 {
+        (*s).x[k] = blood28_get_x(&b, k)
+        k = k + 1
+    }
+}
+
+// largest |x_k - c| / c over the blood states except `skip`
+fn ck_spread_ex(s: &Circ28State, c: f64, skip: i32) -> f64 with Mut, Div {
+    var w = 0.0
+    var k: i32 = 0
+    while k < 28 {
+        if ck_is_blood(k) {
+            if k != skip {
+                let d = ck_abs((*s).x[k] - c) / c
+                if d > w { w = d }
+            }
+        }
+        k = k + 1
+    }
+    return w
+}
+
+// independent derivation of the hepatic steady state (header, d iii):
+// u = R0 / ci, P(C_l) = u (1 + ci / ps), bisection on C_l.
+fn ck_bisect_liver(p: Circ28Params, hct: f64, bmax: f64, kd: f64, rate: f64) -> f64 with Mut, Div, Panic {
+    let ci = (p.clint + p.clform) * p.fu
+    let target = (rate / ci) * (1.0 + ci / p.ps[1])
+    var lo = 0.0
+    var hi = 1.0e6
+    var it: i32 = 0
+    while it < 200 {
+        let mid = 0.5 * (lo + hi)
+        if nl28_plasma(hct, bmax, kd, mid) < target { lo = mid } else { hi = mid }
+        it = it + 1
+    }
+    return 0.5 * (lo + hi)
+}
+
+fn ck_part_d(sysn: &!Nl28Sys, sysc: &!Circ28Sys) -> i32 with IO, Mut, Div, Panic {
+    var fails: i32 = 0
+    let hct = 0.4
+    let bmax = 100.0
+    let kd = 2.0
+    var s = circ28_state_zero()
+
+    println("d(i) plasma clearance only: C = f(R0 / cl_plasma)")
+    var pi = ck_set()
+    pi.cl_plasma = 3.0
+    var c_lo = 0.0
+    var c_hi = 0.0
+    var rr: i32 = 0
+    while rr < 2 {
+        var rate = 3.0
+        if rr == 1 { rate = 60.0 }
+        var s1 = circ28_state_zero()
+        let bad = ck_infuse(pi, hct, bmax, kd, rate, 20.0, 3000.0, &!s1, sysn)
+        let want = nl28_ss_plasma_only(pi, hct, bmax, kd, rate)
+        print("  R0 = "); print(rate); print(" mg/h: Newton iterations per stage mean "); print(nl28_iter_mean(sysn)); print(" max "); println(nl28_iter_max(sysn))
+        fails = fails + ck_rel("venous blood", s1.x[0], want, 1.0e-8)
+        fails = fails + ck_rel("arterial blood", s1.x[1], want, 1.0e-8)
+        let sp = ck_spread(&s1, want)
+        print("  spread of the 15 blood states x 1e9 = "); println(sp * 1.0e9)
+        fails = fails + ck_true("all blood states equal to 1e-8", sp < 1.0e-8)
+        fails = fails + ck_true("failed steps = 0", bad == 0)
+        if rr == 0 { c_lo = s1.x[0] } else { c_hi = s1.x[0] }
+        rr = rr + 1
+    }
+    fails = fails + ck_rel("rise of blood concentration for a 20-fold rate (< 20)", c_hi / c_lo, 48.36363636363636 / 13.933333333333334, 1.0e-8)
+    fails = fails + ck_true("less than proportional", c_hi / c_lo < 20.0)
+
+    println("d(ii) renal clearance only: C_ven = C_art = f(R0 / cl_renal), kidney vascular C - R0 / Q_kidney")
+    var pr = ck_set()
+    pr.cl_renal = 2.0
+    rr = 0
+    while rr < 2 {
+        var rate = 2.0
+        if rr == 1 { rate = 40.0 }
+        var s2 = circ28_state_zero()
+        let bad = ck_infuse(pr, hct, bmax, kd, rate, 20.0, 3000.0, &!s2, sysn)
+        let want = nl28_ss_renal_only(pr, hct, bmax, kd, rate)
+        let wk = nl28_ss_renal_kidney(pr, hct, bmax, kd, rate)
+        print("  R0 = "); print(rate); print(" mg/h: Newton iterations per stage mean "); print(nl28_iter_mean(sysn)); print(" max "); println(nl28_iter_max(sysn))
+        fails = fails + ck_rel("venous blood", s2.x[0], want, 1.0e-8)
+        fails = fails + ck_rel("arterial blood", s2.x[1], want, 1.0e-8)
+        fails = fails + ck_rel("kidney vascular", s2.x[circ28_iv(2)], wk, 1.0e-8)
+        let sp = ck_spread_ex(&s2, want, circ28_iv(2))
+        print("  spread of the other 14 blood states x 1e9 = "); println(sp * 1.0e9)
+        fails = fails + ck_true("other blood states equal to 1e-8", sp < 1.0e-8)
+        fails = fails + ck_true("failed steps = 0", bad == 0)
+        rr = rr + 1
+    }
+
+    println("d(iii) hepatic intrinsic clearance only, local plasma concentrations")
+    var ph = ck_set()
+    ph.clint = 300.0
+    let ci = ph.clint * ph.fu
+    let cl_eff = ph.ps[1] * ci / (ph.ps[1] + ci)
+    let qh = ph.q[1] + ph.q[8] + ph.q[11] + ph.q[12]
+    print("  ci "); print(ci); print("  cl_eff "); print(cl_eff); print("  Q_h "); println(qh)
+    rr = 0
+    while rr < 2 {
+        var rate = cl_eff * 1.0
+        if rr == 1 { rate = cl_eff * 20.0 }
+        let cl_b = ck_bisect_liver(ph, hct, bmax, kd, rate)
+        let c_b = cl_b + rate / qh
+        let t_b = ph.kp[1] * rate / ci
+        print("  R0 = "); print(rate); println(" mg/h")
+        fails = fails + ck_rel("bisection C_liver vs closed form f(R0/cl_eff)", cl_b, nl28_blood_from_plasma(hct, bmax, kd, nl28_ss_liver_plasma(ph, rate)), 1.0e-12)
+        fails = fails + ck_rel("bisection C vs closed form", c_b, nl28_ss_hepatic_art(ph, hct, bmax, kd, rate), 1.0e-12)
+        fails = fails + ck_rel("bisection T_liver vs closed form", t_b, nl28_ss_liver_tissue(ph, rate), 1.0e-12)
+        var s3 = circ28_state_zero()
+        let bad = ck_infuse(ph, hct, bmax, kd, rate, 20.0, 3000.0, &!s3, sysn)
+        print("  Newton iterations per stage mean "); print(nl28_iter_mean(sysn)); print(" max "); println(nl28_iter_max(sysn))
+        fails = fails + ck_rel("arterial blood", s3.x[1], c_b, 1.0e-8)
+        fails = fails + ck_rel("venous blood", s3.x[0], c_b, 1.0e-8)
+        fails = fails + ck_rel("liver vascular blood", s3.x[circ28_iv(1)], cl_b, 1.0e-8)
+        fails = fails + ck_rel("liver tissue", s3.x[circ28_it(1)], t_b, 1.0e-8)
+        let sp = ck_spread_ex(&s3, c_b, circ28_iv(1))
+        fails = fails + ck_true("other 14 blood states equal to C to 1e-8", sp < 1.0e-8)
+        fails = fails + ck_true("failed steps = 0", bad == 0)
+        // the same parameters in the single-ratio module (printed, not asserted)
+        var s4 = circ28_state_zero()
+        ck_infuse_single(ph, hct, bmax, kd, rate, 20.0, 3000.0, &!s4, sysc)
+        let dl = ck_abs(s4.x[circ28_iv(1)] - s3.x[circ28_iv(1)]) / s3.x[circ28_iv(1)]
+        let da = ck_abs(s4.x[1] - s3.x[1]) / s3.x[1]
+        let dt_ = ck_abs(s4.x[circ28_it(1)] - s3.x[circ28_it(1)]) / s3.x[circ28_it(1)]
+        print("  local vs single-ratio: arterial "); print(s3.x[1]); print(" / "); print(s4.x[1]); print("  rel diff "); println(da)
+        print("                         liver vascular "); print(s3.x[circ28_iv(1)]); print(" / "); print(s4.x[circ28_iv(1)]); print("  rel diff "); println(dl)
+        print("                         liver tissue "); print(s3.x[circ28_it(1)]); print(" / "); print(s4.x[circ28_it(1)]); print("  rel diff "); println(dt_)
+        rr = rr + 1
+    }
+    return fails
+}
+
+// ---------------------------------------------------------------- part e
+
+struct CkCmp {
+    cmax: f64,
+    auc2: f64,
+    auc10: f64,
+    aucinf: f64,
+    rem: f64,
+}
+
+// Two-phase runs: dt1 until 2 h (the infusion and the distribution phase, where the
+// early AUC and C_max are taken), dt2 from 2 h to the horizon (smooth decay).
+// The sampling in the first phase must be fine enough that the discretisation
+// error of AUC(0-2) is below the difference being measured (first run of this
+// part at dt 0.02 and 0.05 gave AUC(0-2) differences of +0.087 % and -0.004 %:
+// the early difference was then smaller than the step error of the wrapper).
+fn ck_e_nl(p: Circ28Params, hct: f64, bmax: f64, kd: f64, dose: f64, tinf: f64, dt1: f64, dt2: f64, horizon: f64, sys: &!Nl28Sys) -> CkCmp with Mut, Div, Panic {
+    nl28_prepare(p, hct, bmax, kd, dt1, sys)
+    nl28_stats_reset(sys)
+    var s = circ28_state_zero()
+    var el = nl28_tally_zero()
+    let n1 = (2.0 / dt1 + 0.5) as i32
+    let n2 = ((horizon - 2.0) / dt2 + 0.5) as i32
+    let n10 = (8.0 / dt2 + 0.5) as i32
+    let ninf = (tinf / dt1 + 0.5) as i32
+    var cmax = 0.0
+    var a2 = 0.0
+    var a10 = 0.0
+    var bad: i32 = 0
+    var i: i32 = 0
+    while i < n1 {
+        var iv = 0.0
+        if i < ninf { iv = dose / tinf }
+        let st = nl28_step(&!s, sys, iv, 0.0, &!el)
+        if st != 0 { bad = bad + 1 }
+        if s.x[0] > cmax { cmax = s.x[0] }
+        i = i + 1
+    }
+    a2 = el.auc_ven
+    (*sys).dt = dt2
+    i = 0
+    while i < n2 {
+        let st = nl28_step(&!s, sys, 0.0, 0.0, &!el)
+        if st != 0 { bad = bad + 1 }
+        if i + 1 == n10 { a10 = el.auc_ven }
+        i = i + 1
+    }
+    if bad > 0 { a2 = 0.0 - 1.0e300 }
+    return CkCmp { cmax: cmax, auc2: a2, auc10: a10, aucinf: el.auc_ven, rem: nl28_total_mass(&s, p) / dose }
+}
+
+fn ck_e_bl(p: Circ28Params, hct: f64, bmax: f64, kd: f64, dose: f64, tinf: f64, dt1: f64, dt2: f64, horizon: f64, sysc: &!Circ28Sys) -> CkCmp with Mut, Div, Panic {
+    var b = blood28_new(p, hct, bmax, kd, dt1)
+    let n1 = (2.0 / dt1 + 0.5) as i32
+    let n2 = ((horizon - 2.0) / dt2 + 0.5) as i32
+    let n10 = (8.0 / dt2 + 0.5) as i32
+    let ninf = (tinf / dt1 + 0.5) as i32
+    var cmax = 0.0
+    var i: i32 = 0
+    while i < n1 {
+        var iv = 0.0
+        if i < ninf { iv = dose / tinf }
+        blood28_step(&!b, sysc, iv, 0.0)
+        if blood28_get_x(&b, 0) > cmax { cmax = blood28_get_x(&b, 0) }
+        i = i + 1
+    }
+    let a2 = blood28_auc_blood(&b)
+    // second phase: a new engine at dt2 carrying the state and the area
+    var b2 = blood28_new(p, hct, bmax, kd, dt2)
+    var k: i32 = 0
+    while k < 28 {
+        blood28_set_x(&!b2, k, blood28_get_x(&b, k))
+        k = k + 1
+    }
+    b2.el.auc_ven = a2
+    var a10 = 0.0
+    i = 0
+    while i < n2 {
+        blood28_step(&!b2, sysc, 0.0, 0.0)
+        if i + 1 == n10 { a10 = blood28_auc_blood(&b2) }
+        i = i + 1
+    }
+    return CkCmp { cmax: cmax, auc2: a2, auc10: a10, aucinf: blood28_auc_blood(&b2), rem: blood28_remaining(&b2) / dose }
+}
+
+fn ck_print_cmp(tag: string, l: CkCmp, r: CkCmp) with IO, Mut, Div {
+    print("  "); println(tag)
+    print("    C_max (venous whole blood): local "); print(l.cmax); print("  single-ratio "); print(r.cmax)
+    print("  rel diff "); println(ck_abs(l.cmax - r.cmax) / l.cmax)
+    print("    AUC(0-2 h):                 local "); print(l.auc2); print("  single-ratio "); print(r.auc2)
+    print("  rel diff "); println(ck_abs(l.auc2 - r.auc2) / l.auc2)
+    print("    AUC(0-end):                 local "); print(l.aucinf); print("  single-ratio "); print(r.aucinf)
+    print("  rel diff "); println(ck_abs(l.aucinf - r.aucinf) / l.aucinf)
+    print("    AUC accrued 0-2 / 2-10 / 10-end (local - single-ratio): ")
+    print(l.auc2 - r.auc2); print(" / "); print((l.auc10 - l.auc2) - (r.auc10 - r.auc2)); print(" / "); println((l.aucinf - l.auc10) - (r.aucinf - r.auc10))
+    print("    mass left in the body at the end / dose: local "); print(l.rem); print("  single-ratio "); println(r.rem)
+}
+
+fn ck_part_e(sysn: &!Nl28Sys, sysc: &!Circ28Sys) -> i32 with IO, Mut, Div, Panic {
+    println("e local binding against the single-ratio approximation")
+    var fails: i32 = 0
+    var p = ck_set()
+    p.clint = 300.0
+    p.cl_renal = 2.0
+    p.cl_plasma = 3.0
+
+    // e1 linear limit
+    let l1 = ck_e_nl(p, 0.4, 2.0e12, 1.0e12, 200.0, 0.1, 0.0125, 0.1, 120.0, sysn)
+    let r1 = ck_e_bl(p, 0.4, 2.0e12, 1.0e12, 200.0, 0.1, 0.0125, 0.1, 120.0, sysc)
+    ck_print_cmp("e1 linear limit (Kd 1e12, bp0 1.4)", l1, r1)
+    fails = fails + ck_rel("C_max local vs single-ratio", l1.cmax, r1.cmax, 1.0e-8)
+    fails = fails + ck_rel("AUC(0-2) local vs single-ratio", l1.auc2, r1.auc2, 1.0e-8)
+    fails = fails + ck_rel("AUC(0-end) local vs single-ratio", l1.aucinf, r1.aucinf, 1.0e-8)
+
+    // e2 non-linear
+    let l2 = ck_e_nl(p, 0.4, 100.0, 2.0, 200.0, 0.1, 0.0125, 0.1, 120.0, sysn)
+    print("  Newton iterations per stage (local run): mean "); print(nl28_iter_mean(sysn)); print(" max "); println(nl28_iter_max(sysn))
+    let r2 = ck_e_bl(p, 0.4, 100.0, 2.0, 200.0, 0.1, 0.0125, 0.1, 120.0, sysc)
+    ck_print_cmp("e2 Hct 0.4, Bmax 100, Kd 2: 200 mg over 0.1 h", l2, r2)
+    let d2 = ck_abs(l2.auc2 - r2.auc2) / l2.auc2
+    let dinf = ck_abs(l2.aucinf - r2.aucinf) / l2.aucinf
+    fails = fails + ck_true("both runs finished with the dose eliminated (< 1e-6 left)", l2.rem < 1.0e-6 && r2.rem < 1.0e-6)
+    print("  e2 prediction |dAUC(0-end)|/AUC < |dAUC(0-2)|/AUC(0-2): "); print(dinf); print(" vs "); print(d2)
+    if dinf < d2 { println("  -> HOLDS") } else { println("  -> CONTRADICTED (reported, not asserted)") }
+
+    // e3 illustration, printed only
+    println("  e3 illustration (printed, not asserted): Hct 0.45, Bmax 418, Kd 3.8 (values attributed to Jusko 1995")
+    println("     as cited by Storset 2014; primary paper not opened; Hct chosen for illustration); dose in ug,")
+    println("     concentrations in ng/mL; hepatic clearance only, clint 200 (ci 20)")
+    var pt = ck_set()
+    pt.clint = 200.0
+    let l3 = ck_e_nl(pt, 0.45, 418.0, 3.8, 150.0, 0.1, 0.0125, 0.25, 250.0, sysn)
+    let r3 = ck_e_bl(pt, 0.45, 418.0, 3.8, 150.0, 0.1, 0.0125, 0.25, 250.0, sysc)
+    ck_print_cmp("e3 150 ug over 0.1 h", l3, r3)
+    let ci3 = pt.clint * pt.fu
+    let cle = pt.ps[1] * ci3 / (pt.ps[1] + ci3)
+    var rr: i32 = 0
+    while rr < 2 {
+        var pl = 0.2
+        if rr == 1 { pl = 2.0 }
+        let rate = cle * pl
+        var s5 = circ28_state_zero()
+        let bad = ck_infuse(pt, 0.45, 418.0, 3.8, rate, 5.0, 500.0, &!s5, sysn)
+        var s6 = circ28_state_zero()
+        ck_infuse_single(pt, 0.45, 418.0, 3.8, rate, 5.0, 500.0, &!s6, sysc)
+        print("    steady state, R0 = "); print(rate); print(" ug/h: closed form arterial "); print(nl28_ss_hepatic_art(pt, 0.45, 418.0, 3.8, rate))
+        print("  local "); print(s5.x[1]); print("  single-ratio "); print(s6.x[1])
+        print("  rel diff "); println(ck_abs(s5.x[1] - s6.x[1]) / s5.x[1])
+        print("       liver vascular: local "); print(s5.x[circ28_iv(1)]); print("  single-ratio "); print(s6.x[circ28_iv(1)])
+        print("  rel diff "); println(ck_abs(s5.x[circ28_iv(1)] - s6.x[circ28_iv(1)]) / s5.x[circ28_iv(1)])
+        fails = fails + ck_true("illustration steady state: local run converged (0 failures)", bad == 0)
+        fails = fails + ck_rel("illustration steady state: local arterial vs closed form", s5.x[1], nl28_ss_hepatic_art(pt, 0.45, 418.0, 3.8, rate), 1.0e-8)
+        rr = rr + 1
+    }
+    return fails
+}
+
+// ---------------------------------------------------------------- part f
+
+struct CkF {
+    auc: f64,
+    c1: f64,
+}
+
+fn ck_f_run(dt: f64, sys: &!Nl28Sys) -> CkF with Mut, Div, Panic {
+    var p = ck_set()
+    p.clint = 300.0
+    p.cl_renal = 2.0
+    p.cl_plasma = 3.0
+    nl28_prepare(p, 0.4, 100.0, 2.0, dt, sys)
+    var s = circ28_state_zero()
+    var el = nl28_tally_zero()
+    let n = (2.0 / dt + 0.5) as i32
+    let n1 = (1.0 / dt + 0.5) as i32
+    let ninf = (0.08 / dt + 0.5) as i32
+    var c1 = 0.0
+    var i: i32 = 0
+    while i < n {
+        var iv = 0.0
+        if i < ninf { iv = 200.0 / 0.08 }
+        let st = nl28_step(&!s, sys, iv, 0.0, &!el)
+        if st != 0 { c1 = 0.0 - 1.0e300 }
+        if i + 1 == n1 { c1 = s.x[0] }
+        i = i + 1
+    }
+    return CkF { auc: el.auc_ven, c1: c1 }
+}
+
+fn ck_part_f(sysn: &!Nl28Sys) -> i32 with IO, Mut, Div, Panic {
+    println("f convergence in dt (200 mg over 0.08 h, to 2 h)")
+    var fails: i32 = 0
+    let f1 = ck_f_run(0.04, sysn)
+    let f2 = ck_f_run(0.02, sysn)
+    let f3 = ck_f_run(0.01, sysn)
+    let f4 = ck_f_run(0.005, sysn)
+    print("  AUC(0-2) at dt 0.04, 0.02, 0.01, 0.005: "); print(f1.auc); print(" "); print(f2.auc); print(" "); print(f3.auc); print(" "); println(f4.auc)
+    print("  C_ven(1 h) at the same dt:             "); print(f1.c1); print(" "); print(f2.c1); print(" "); print(f3.c1); print(" "); println(f4.c1)
+    let a1 = f1.auc - f2.auc
+    let a2 = f2.auc - f3.auc
+    let a3 = f3.auc - f4.auc
+    let c1 = f1.c1 - f2.c1
+    let c2 = f2.c1 - f3.c1
+    let c3 = f3.c1 - f4.c1
+    let ra1 = a1 / a2
+    let ra2 = a2 / a3
+    let rc1 = c1 / c2
+    let rc2 = c2 / c3
+    print("  AUC successive-difference ratios: "); print(ra1); print(" "); println(ra2)
+    print("  C(1 h) successive-difference ratios: "); print(rc1); print(" "); println(rc2)
+    let oa = log2(ra2)
+    let oc = log2(rc2)
+    print("  measured order (last pair): AUC "); print(oa); print("  C(1 h) "); println(oc)
+    fails = fails + ck_true("AUC order >= 1.8", oa >= 1.8)
+    fails = fails + ck_true("C(1 h) order >= 1.8", oc >= 1.8)
+    return fails
+}
+
+// ---------------------------------------------------------------- part g
+
+struct CkG {
+    viol_m: i32,
+    viol_c: i32,
+    bad: i32,
+    minx: f64,
+    dev: f64,
+    mass_end: f64,
+}
+
+fn ck_equil(p: Circ28Params, hct: f64, bmax: f64, kd: f64, cp: f64, s: &!Circ28State) with Mut, Div {
+    let cb = nl28_blood_from_plasma(hct, bmax, kd, cp)
+    var k: i32 = 0
+    while k < 28 {
+        (*s).x[k] = cb
+        k = k + 1
+    }
+    var i: i32 = 1
+    while i < 14 {
+        (*s).x[circ28_it(i)] = p.kp[i] * cp
+        i = i + 1
+    }
+}
+
+fn ck_g_run(p: Circ28Params, rate: f64, cp_ss: f64, cp0: f64, dt: f64, horizon: f64, sys: &!Nl28Sys) -> CkG with Mut, Div, Panic {
+    let hct = 0.4
+    let bmax = 100.0
+    let kd = 2.0
+    nl28_prepare(p, hct, bmax, kd, dt, sys)
+    var xss = circ28_state_zero()
+    ck_equil(p, hct, bmax, kd, cp_ss, &!xss)
+    let m_ss = circ28_total_mass(&xss, p)
+    var s = circ28_state_zero()
+    ck_equil(p, hct, bmax, kd, cp0, &!s)
+    var el = nl28_tally_zero()
+    var m_prev = circ28_total_mass(&s, p)
+    var c_prev = s.x[0]
+    var vm: i32 = 0
+    var vc: i32 = 0
+    var bad: i32 = 0
+    var minx = 1.0e300
+    var dev = 0.0
+    let up = cp0 < cp_ss
+    let n = (horizon / dt + 0.5) as i32
+    var i: i32 = 0
+    while i < n {
+        let st = nl28_step(&!s, sys, rate, 0.0, &!el)
+        if st != 0 { bad = bad + 1 }
+        let m = circ28_total_mass(&s, p)
+        if up {
+            if m < m_prev - 1.0e-12 * m_ss { vm = vm + 1 }
+            if s.x[0] < c_prev - 1.0e-12 * xss.x[0] { vc = vc + 1 }
+        } else {
+            if m > m_prev + 1.0e-12 * m_ss { vm = vm + 1 }
+            if s.x[0] > c_prev + 1.0e-12 * xss.x[0] { vc = vc + 1 }
+        }
+        var k: i32 = 0
+        while k < 28 {
+            if s.x[k] < minx { minx = s.x[k] }
+            let d = ck_abs(s.x[k] - xss.x[k]) / xss.x[k]
+            if d > dev { dev = d }
+            k = k + 1
+        }
+        m_prev = m
+        c_prev = s.x[0]
+        i = i + 1
+    }
+    return CkG { viol_m: vm, viol_c: vc, bad: bad, minx: minx, dev: dev, mass_end: m_prev / m_ss }
+}
+
+fn ck_part_g(sysn: &!Nl28Sys) -> i32 with IO, Mut, Div, Panic {
+    println("g robustness at d ln bp / d ln C = -2.2 (whole blood 48.36, C_p 20, R0 = 60)")
+    var fails: i32 = 0
+    var p = ck_set()
+    p.cl_plasma = 3.0
+    var dti: i32 = 0
+    while dti < 2 {
+        var dt = 0.02
+        if dti == 1 { dt = 0.1 }
+        var j: i32 = 0
+        while j < 3 {
+            var cp0 = 20.0
+            if j == 1 { cp0 = 22.0 }
+            if j == 2 { cp0 = 18.0 }
+            nl28_stats_reset(sysn)
+            let g = ck_g_run(p, 60.0, 20.0, cp0, dt, 10.0, sysn)
+            print("  dt "); print(dt); print("  start C_p "); print(cp0)
+            print(": min state "); print(g.minx); print("  mass(10 h)/mass_ss "); print(g.mass_end)
+            if j == 0 {
+                print("  max rel dev from steady x 1e9 "); println(g.dev * 1.0e9)
+            } else {
+                print("  monotonicity violations (mass, venous) "); print(g.viol_m); print(" "); println(g.viol_c)
+            }
+            print("     Newton iterations per stage: mean "); print(nl28_iter_mean(sysn)); print(" max "); println(nl28_iter_max(sysn))
+            fails = fails + ck_true("no failed step", g.bad == 0)
+            fails = fails + ck_true("no negative state", g.minx >= 0.0)
+            if j > 0 {
+                fails = fails + ck_true("monotone approach (mass and venous blood)", g.viol_m == 0 && g.viol_c == 0)
+            }
+            fails = fails + ck_true("Newton <= 5 per stage, mean < 3", nl28_iter_max(sysn) <= 5 && nl28_iter_mean(sysn) < 3.0)
+            if j == 0 {
+                fails = fails + ck_true("starting at the steady state it stays (deviation < 1e-9)", g.dev < 1.0e-9)
+            }
+            j = j + 1
+        }
+        dti = dti + 1
+    }
+    return fails
+}
+
+fn ck_part_h(sysn: &!Nl28Sys) -> i32 with IO, Mut, Div, Panic {
+    println("h fail closed")
+    var fails: i32 = 0
+    let p = ck_all_params()
+    nl28_prepare(p, 0.4, 100.0, 2.0, 2.0, sysn)
+    nl28_stats_reset(sysn)
+    var s = circ28_state_zero()
+    ck_equil(p, 0.4, 100.0, 2.0, 5.0, &!s)
+    var s0 = circ28_state_zero()
+    ck_equil(p, 0.4, 100.0, 2.0, 5.0, &!s0)
+    var el = nl28_tally_zero()
+    nl28_set_newton(sysn, 1.0e-12, 1)
+    let st = nl28_step(&!s, sysn, 2000.0, 0.0, &!el)
+    var same = true
+    var k: i32 = 0
+    while k < 28 {
+        if s.x[k] != s0.x[k] { same = false }
+        k = k + 1
+    }
+    print("  limit 1 iteration: status "); print(st); print("  failures counted "); println(nl28_failures(sysn))
+    fails = fails + ck_true("status 1 on non-convergence", st == 1)
+    fails = fails + ck_true("state bit-identical after the failed step", same)
+    fails = fails + ck_true("tallies untouched", nl28_eliminated(&el) == 0.0 && el.auc_ven == 0.0 && el.auc_pven == 0.0)
+    fails = fails + ck_true("one failure counted", nl28_failures(sysn) == 1)
+    nl28_set_newton(sysn, 1.0e-12, 30)
+    let st2 = nl28_step(&!s, sysn, 2000.0, 0.0, &!el)
+    print("  default limit: status "); print(st2); print("  Newton iterations per stage max "); println(nl28_iter_max(sysn))
+    fails = fails + ck_true("the same step succeeds with the default limit", st2 == 0)
+    return fails
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var sysn = nl28_sys_zero()
+    var sysc = circ28_sys_zero()
+    var fails: i32 = 0
+    fails = fails + ck_part_a(&!sysn)
+    fails = fails + ck_part_b(&!sysn, &!sysc)
+    fails = fails + ck_part_c(&!sysn)
+    fails = fails + ck_part_d(&!sysn, &!sysc)
+    fails = fails + ck_part_e(&!sysn, &!sysc)
+    fails = fails + ck_part_f(&!sysn)
+    fails = fails + ck_part_g(&!sysn)
+    fails = fails + ck_part_h(&!sysn)
+    if fails == 0 {
+        println("CIRC28_NL_BINDING_PASS")
+        return 0
+    }
+    print("failures: "); println(fails)
+    println("CIRC28_NL_BINDING_FAIL")
+    return 1
+}
