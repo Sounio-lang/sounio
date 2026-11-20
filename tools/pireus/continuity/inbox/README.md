@@ -212,3 +212,44 @@ O par lido precisa estar alinhado em 16 bytes, e isso vale quando o número de v
 | b005-16 | 32800 | C7b (7, 210) | 7 | 15 | 1 | 2 | 0 | 0 | 0 | nova |
 
 **Expectativa honesta.** O staging troca 32 cargas globais por lane (ou 17 cargas e 32 shuffles, com `load=1`) por 2 cargas globais, 2 stores compartilhados, uma barreira e 32 cargas compartilhadas. Com 16 vetores de 16 coeficientes num bloco de 16 threads, as cargas globais já se coalescem bem e quase sempre batem no L1/L2, porque cada coeficiente é lido 16 vezes pelo mesmo bloco. Então a memória compartilhada pode tirar latência do laço. Por outro lado, ela soma a barreira e reduz um pouco a ocupação. Um ganho de 5% sobre o direct, nas duas GPUs e com ci95 positivo, continua improvável.
+
+## Lote b006 (2026-11-20), kind=2 com lançamento próprio do r740 (32+ threads por bloco)
+
+Demetrios autorizou em 20/11 às 20:01 BRT: "Pode dar ao r740 um lançamento próprio com 32 ou mais threads por bloco, sem tocar no gpu_probe.py dos Sparks". O `gpu_probe.py` continua byte a byte igual ao de bae639fe (d9a01f4c…), e nenhum caminho de lançamento, fence ou manifest dos Sparks mudou.
+
+**block_threads.** É uma chave opcional no bit 20 da máscara (1048576). Ausente, 0 ou 16 é o bloco histórico de 16 threads e não muda nenhum byte. 32, 64 e 128 colocam `block_threads/16` vetores num bloco, um por grupo de 16 lanes; com 32, é o pack de 32 lanes (warp inteiro) que antes dependia do `gpu_probe.py`. O corpo largo declara `.maxntid T,1,1` e um quarto parâmetro `pn` com o número de vetores, porque a grade passa a ser `ceil(n / (T/16))` e `%nctaid.x` deixa de ser n. Um grupo além do fim calcula de novo o vetor n-1 e não grava, então nenhuma thread sai antes do `bar.sync` e todo desvio é uniforme. Com `load=1`, o shuffle fica dentro de cada segmento de 16 lanes (`c = 0x101f`, máscara completa). Por vetor, a sequência de carga, multiplicação, sinal e soma é a mesma do corpo de 16 threads: só muda onde a lane mora. Não há FMA nem f32.
+
+Recusas novas: `BLOCK_THREADS` (valor fora de 0/16/32/64/128), `BLOCK_THREADS_PACK` (pack=1 com bloco largo; o bloco largo substitui o pack de 16 lanes, e o `vector_load` continua exigindo pack) e `BLOCK_THREADS_TARGET` (o modo `ptx` de sm_121, dos Sparks, não emite corpo largo). O `plan_id` soma 1048576 × (1, 2, 3) para 32, 64 e 128, e o recibo ganha `"block_threads":T`.
+
+**Lançamento.** `r740/r740_wide_launch.py`, só do r740, lê o tamanho do bloco no `.maxntid` do PTX e exige que bata com o `block_threads` do manifest. Com 16, chama o `Driver.launch` do `gpu_probe.py` sem mudança. Com 32/64/128, chama `cuLaunchKernel(f, ceil(n/G),1,1, T,1,1, 0, stream, {pa,pb,pc,pn})`. O `r740_observe.py` passa a lançar só por esse módulo, que entra no `bin/` do run.
+
+**Prova antes da GPU.**
+- Bytes congelados: Phase A (8 propostas + 2 controles) e b001–b005 (72 propostas), 4 modos cada, 328 saídas idênticas ao motor de bae639fe; com `block_threads` explícito em 0 e 16, mais 492 variantes idênticas. `frozen_inbox_outputs.json` ganha `outputs_b005`.
+- `ptx_sim.py` interpreta blocos de 32/64/128 threads, o parâmetro `pn` e o shuffle segmentado. Zero divergências contra `operator_reference.py` em 72 combinações (32/64/128 × load 0/1/2 × layout × sign_mode) com 320 e 319 vetores, e nos 16 PTX sm_86 do lote.
+- Controles que precisam divergir: bit de sinal trocado, grupos dividindo a mesma fatia de memória compartilhada, fator de vetores por bloco errado e índice de shuffle deslocado; um shuffle sem segmento é recusado pelo simulador.
+- `ptxas` 12.9 aceitou 108 PTX largos de teste e os 32 PTX do lote em sm_86 e sm_75.
+
+**O lote.** Os três melhores do b005 rodam a 16 threads e ao lado das variantes largas, no mesmo run, para a comparação ficar dentro do run.
+
+| arquivo | phase | stride | offset | layout | unroll | load | sign_mode | pack | block_threads | origem |
+|---|---|---|---|---|---|---|---|---|---|---|
+| b006-01 | 36077 | 1 | 15 | 0 | 16 | 2 | 0 | 1 | 16 | = b005-06 |
+| b006-02 | 36077 | 1 | 15 | 0 | 16 | 2 | 0 | 0 | 16 | = b005-01 (b005-06 sem pack) |
+| b006-03 | 36077 | 1 | 15 | 0 | 16 | 2 | 0 | 0 | 32 | b005-06 largo |
+| b006-04 | 36077 | 1 | 15 | 0 | 16 | 2 | 0 | 0 | 64 | b005-06 largo |
+| b006-05 | 36077 | 1 | 15 | 0 | 16 | 2 | 0 | 0 | 128 | b005-06 largo |
+| b006-06 | 33825 | 13 | 9 | 1 | 16 | 2 | 0 | 1 | 16 | = b005-07 |
+| b006-07 | 33825 | 13 | 9 | 1 | 16 | 2 | 0 | 0 | 32 | b005-07 largo |
+| b006-08 | 33825 | 13 | 9 | 1 | 16 | 2 | 0 | 0 | 64 | b005-07 largo |
+| b006-09 | 33825 | 13 | 9 | 1 | 16 | 2 | 0 | 0 | 128 | b005-07 largo |
+| b006-10 | 36007 | 9 | 10 | 0 | 1 | 2 | 0 | 0 | 16 | = b005-13 |
+| b006-11 | 36007 | 9 | 10 | 0 | 1 | 2 | 0 | 0 | 32 | b005-13 largo |
+| b006-12 | 36007 | 9 | 10 | 0 | 1 | 2 | 0 | 0 | 64 | b005-13 largo |
+| b006-13 | 36007 | 9 | 10 | 0 | 1 | 2 | 0 | 0 | 128 | b005-13 largo |
+| b006-14 | 33825 | 13 | 9 | 1 | 16 | 0 | 0 | 0 | 64 | b005-07 largo com load=0 |
+| b006-15 | 36007 | 9 | 10 | 0 | 1 | 1 | 0 | 0 | 64 | b005-13 largo com load=1 |
+| b006-16 | 36076 | 11 | 3 | 1 | 16 | 2 | 1 | 0 | 64 | b005-02 largo com sign_mode=1 |
+
+Famílias: C3 (3, 114) em 01–05 e 10–13 e 15; C7b (7, 210) em 06–09 e 14; C7a (7, 114) em 16.
+
+**Expectativa honesta.** Os dados de b003–b005 apontam latência com meio warp por bloco como o limite. Blocos de 32+ threads enchem o warp e aumentam os warps residentes, o que deve ajudar, sobretudo no sm75. Os controles direct e shuffle continuam sendo os corpos de 16 threads da Phase A, então um ganho aqui mede bloco largo contra o lançamento histórico. Passar de 5% com ci95 positivo nas duas GPUs continua incerto.
