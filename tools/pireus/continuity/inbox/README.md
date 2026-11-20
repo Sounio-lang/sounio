@@ -161,3 +161,54 @@ Há dois controles, e os dois precisam divergir: um bit trocado na tabela de sin
 | b004-16 | 1057 | C7b (7, 210) | 15 | 5 | 0 | 1 | 2 | 0 | nova |
 
 **Expectativa honesta.** Com pack, metade dos blocos sai sem trabalhar, e a outra metade tem duas cadeias independentes de 16 termos por lane, que o `ptxas` pode intercalar para esconder a latência das cargas. O número de warps residentes cai à metade, e o sinal por termo é dividido entre os dois vetores. Se o kernel for limitado por latência e não por ocupação, pack pode ajudar. Se for limitado pelo número de warps em voo, deve perder. Um ganho de 5% sobre o direct, nas duas GPUs e com ci95 positivo, ainda seria surpresa.
+
+## Lote b005 (2026-11-20), kind=2 com load=2
+
+Este é o primeiro lote da extensão 3 da gramática: staging em memória compartilhada (`load=2`) e cargas vetoriais `ld.global.v2.f64` (`vector_load=1`). A geometria de lançamento não muda: grade igual ao número de vetores, 16 threads por bloco, `cuLaunchKernel` do `gpu_probe.py` intacto e `.maxntid 16,1,1`.
+
+**load=2.** A lane k carrega uma vez o coeficiente k de `a` e de `b` (dos dois vetores, com `pack=1`) e grava em `.shared`. Um único `bar.sync 0` publica os valores para o bloco. Depois disso, cada termo lê `a[k^j]` e `b[j]` da memória compartilhada. Só muda a origem dos operandos: a sequência de multiplicação, sinal e soma de cada vetor é a mesma, então o resultado é bit a bit igual. Não há FMA nem f32.
+
+As saídas antecipadas ficam antes da barreira e valem para o bloco inteiro. `load=2` funciona com os dois layouts, com qualquer `unroll`, com `sign_mode` e com `pack`. Valores acima de 2 continuam recusados com `GRAMMAR`. O `plan_id` reserva o bit 262144 para `load=2`, que não entra no dígito de load, e o recibo ganha `"load":2`.
+
+**vector_load.** É uma chave separada, opcional, no bit 19 da máscara (524288). No SoA, o coeficiente k dos vetores 2c e 2c+1 fica em endereços adjacentes, então um `ld.global.v2.f64` lê os dois. Por isso a chave exige três coisas:
+- `load=2`, senão `VECTOR_LOAD_LOAD`;
+- `layout=1`, senão `VECTOR_LOAD_LAYOUT`;
+- `pack=1`, senão `VECTOR_LOAD_PACK`.
+
+Valores acima de 1 são recusados com `VECTOR_LOAD`.
+
+O par lido precisa estar alinhado em 16 bytes, e isso vale quando o número de vetores n é par (320 na sonda e 16384 no timing). Com n ímpar, o kernel desvia uniformemente para o staging escalar. O `plan_id` soma 524288, e o recibo ganha `"vector_load":1`.
+
+**Prova antes da GPU.**
+- Bytes congelados: os PTX e recibos da Phase A e de b001 a b004 continuam idênticos. Isso vale para a proposta como foi enviada e para cada chave opcional ausente posta explicitamente em 0. `frozen_inbox_outputs.json` agora tem 56 propostas.
+- Paridade no `ptx_sim.py`, que agora interpreta `.shared`, `ld.shared`/`st.shared`, `bar.sync` e `ld.global.v2.f64` (e recusa v2 desalinhado). Os casos rodam 320 e 319 vetores e cobrem kind=1 e fases kind=2, com e sem `pack`, `sign_mode` e `vector_load`. O resultado é zero divergências contra `operator_reference.py`.
+- Controles: um bit de sinal trocado precisa divergir. Trocar as duas metades do v2 precisa divergir com n=320 e não com n=319, o que prova que os dois caminhos de staging de fato rodaram.
+- A simulação em lockstep não consegue provar que a barreira é necessária. Por isso o teste exige um `bar.sync` depois de todo `st.shared` e antes de todo `ld.shared`.
+- `ptxas` (12.9, com `.version` rebaixada só para a checagem) aceitou os 32 PTX do lote em sm_86 e sm_75.
+
+**O lote.**
+- b005-01..03 repetem b002-01, -06 e -11. b005-04 e -05 repetem b003-01 e -03. b005-06 e -07 repetem b004-05 e -07. b005-09 repete b004-03. Em todos esses, só o `load` muda: 0 ou 1 vira 2.
+- b005-08 e -10 são b005-07 e -09 com `vector_load=1`: só essa chave muda.
+- b005-11 é b004-02 com `load=2` e `vector_load=1`.
+- b005-12..16 são cinco representantes canônicos novos, sorteados com a semente 20261120005: 2 em (3, 114), 2 em (7, 114) e 1 em (7, 210).
+
+| arquivo | phase | família | stride | offset | layout | unroll | sign_mode | pack | vector_load | origem |
+|---|---|---|---|---|---|---|---|---|---|---|
+| b005-01 | 36077 | C3 (3, 114) | 1 | 15 | 0 | 16 | 0 | 0 | 0 | par de b002-01 |
+| b005-02 | 36076 | C7a (7, 114) | 11 | 3 | 1 | 16 | 0 | 0 | 0 | par de b002-06 |
+| b005-03 | 33825 | C7b (7, 210) | 13 | 9 | 1 | 16 | 0 | 0 | 0 | par de b002-11 |
+| b005-04 | 36077 | C3 (3, 114) | 1 | 15 | 0 | 16 | 1 | 0 | 0 | par de b003-01 |
+| b005-05 | 33825 | C7b (7, 210) | 13 | 9 | 1 | 16 | 1 | 0 | 0 | par de b003-03 |
+| b005-06 | 36077 | C3 (3, 114) | 1 | 15 | 0 | 16 | 0 | 1 | 0 | par de b004-05 |
+| b005-07 | 33825 | C7b (7, 210) | 13 | 9 | 1 | 16 | 0 | 1 | 0 | par de b004-07 |
+| b005-08 | 33825 | C7b (7, 210) | 13 | 9 | 1 | 16 | 0 | 1 | 1 | par de b004-07 (+vector_load) |
+| b005-09 | 33825 | C7b (7, 210) | 13 | 9 | 1 | 16 | 1 | 1 | 0 | par de b004-03 |
+| b005-10 | 33825 | C7b (7, 210) | 13 | 9 | 1 | 16 | 1 | 1 | 1 | par de b004-03 (+vector_load) |
+| b005-11 | 36076 | C7a (7, 114) | 11 | 3 | 1 | 16 | 1 | 1 | 1 | par de b004-02 (+vector_load) |
+| b005-12 | 36071 | C3 (3, 114) | 5 | 1 | 1 | 16 | 1 | 1 | 1 | nova |
+| b005-13 | 36007 | C3 (3, 114) | 9 | 10 | 0 | 1 | 0 | 0 | 0 | nova |
+| b005-14 | 3183 | C7a (7, 114) | 13 | 4 | 1 | 4 | 0 | 1 | 1 | nova |
+| b005-15 | 33004 | C7a (7, 114) | 3 | 14 | 0 | 16 | 1 | 1 | 0 | nova |
+| b005-16 | 32800 | C7b (7, 210) | 7 | 15 | 1 | 2 | 0 | 0 | 0 | nova |
+
+**Expectativa honesta.** O staging troca 32 cargas globais por lane (ou 17 cargas e 32 shuffles, com `load=1`) por 2 cargas globais, 2 stores compartilhados, uma barreira e 32 cargas compartilhadas. Com 16 vetores de 16 coeficientes num bloco de 16 threads, as cargas globais já se coalescem bem e quase sempre batem no L1/L2, porque cada coeficiente é lido 16 vezes pelo mesmo bloco. Então a memória compartilhada pode tirar latência do laço. Por outro lado, ela soma a barreira e reduz um pouco a ocupação. Um ganho de 5% sobre o direct, nas duas GPUs e com ci95 positivo, continua improvável.
