@@ -20,6 +20,8 @@ no library beyond core, and the evidence that it says what the CPU does.
 | `formal/Bootstrap/X86EnvDiffModel.lean`, `x86env_diff_cpu.cpp`, `x86env_diff_gate.sh` | Process-environment differential test of `X86Env.syscall` and `X86Env.initStack` against the Linux x86-64 kernel. |
 | `formal/Bootstrap/X86DecFuzzModel.lean`, `x86dec_fuzz_cpu.cpp`, `x86dec_fuzz_gate.sh` | Hamming-1/2 (`X86Dec.altsAt`) and byte-boundary differential fuzzer of `X86Dec.decode` and `X86Int.step` against the CPU. |
 | `formal/Bootstrap/TMRBoundCheck.lean`, `tmr_fault_inject.cpp`, `tmr_fault_gate.sh` | Physical 4-site machine-code fault injection of the 38-byte TMR voter against kernel-checked `TMRVoter` and `TMRExposure` bounds. |
+| `formal/Bootstrap/AArch64Min.lean`, `FormatsC.lean`, `SeedC.lean`, `RunAArch64.lean` (`aarch64run`) | Minimal AArch64 model and the root C seed loader `seed-c` (`bootstrap/roots/c`): `seedC_correct`, `seedC_refuses` over every listing in format C. |
+| `AArch64DiffModel.lean` (`aarch64-diff`), `aarch64_diff_cpu.cpp`, `aarch64_jit_exec.cpp`, `aarch64_diff_gate.sh`, `root_c_seed_gate.sh` | AArch64 differential against Apple Silicon (`MAP_JIT`), and the root C seed gate: cross-assembly by seed-a and seed-b on Linux x86-64, native runs on Apple Silicon. |
 
 ## What the model says
 
