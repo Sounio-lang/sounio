@@ -91,6 +91,9 @@ def bundle(out, engine, proposals_dir):
         if "sign_mode" in body:
             # Same operator, different lowering; the parity reference does not change.
             row["sign_mode"] = body["sign_mode"]
+        if "pack" in body:
+            # Two vectors per 16-lane block; same operator, same parity reference.
+            row["pack"] = body["pack"]
         if decision != "ADMIT":
             row["reason"] = json.loads(stdout).get("reason")
         if decision == "ADMIT":

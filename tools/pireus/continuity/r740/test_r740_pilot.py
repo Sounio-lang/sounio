@@ -744,11 +744,16 @@ class Engines(unittest.TestCase):
             (src / "op-nophase.proposal.json").write_bytes(raw(dict(base, kind=2)))
             (src / "op-fixed.proposal.json").write_bytes(raw(dict(base, kind=2, phase=36077, unroll=16, sign_mode=1)))
             (src / "op-fixed-rolled.proposal.json").write_bytes(raw(dict(base, kind=2, phase=36077, unroll=4, sign_mode=1)))
+            (src / "op-packed.proposal.json").write_bytes(raw(dict(base, kind=2, phase=36077, pack=1)))
+            (src / "op-packed-bad.proposal.json").write_bytes(raw(dict(base, kind=2, phase=36077, pack=2)))
             out = Path(directory) / "bundle"
             inbox_bundle.bundle(out, self.admission, src)
             summary = json.loads((out / "PROPOSALS.json").read_text())
             rows = {row["id"]: row for row in summary["proposals"]}
-            self.assertEqual(summary["admitted"], ["op-a", "op-b", "op-fixed"])
+            self.assertEqual(summary["admitted"], ["op-a", "op-b", "op-fixed", "op-packed"])
+            self.assertEqual(rows["op-packed"]["pack"], 1)
+            self.assertNotIn("pack", rows["op-fixed"])
+            self.assertEqual(rows["op-packed-bad"]["reason"], "PACK")
             self.assertEqual(rows["op-fixed"]["sign_mode"], 1)
             self.assertNotIn("sign_mode", rows["op-a"])
             self.assertEqual(rows["op-fixed-rolled"]["reason"], "SIGN_MODE_UNROLL")
@@ -835,24 +840,31 @@ class Engines(unittest.TestCase):
         self.assertEqual(json.loads(mode.stdout)["reason"], "MODE")
         self.assertEqual(json.loads(self.emit("PTX").stdout)["reason"], "MODE")
 
-    def test_sign_mode_absent_or_zero_keeps_the_b001_b002_bytes(self):
+    def test_absent_or_zero_extensions_keep_the_b001_b002_b003_bytes(self):
         frozen = json.loads((HERE / "frozen_inbox_outputs.json").read_text())["outputs"]
-        self.assertEqual(len(frozen), 24)
+        self.assertEqual(len(frozen), 40)
+        self.assertEqual(sum(1 for name in frozen if "-b003-" in name), 16)
         context = HERE / "phase-a" / "context.json"
+        zero = self.work / "zero.proposal.json"
         for name, modes in sorted(frozen.items()):
             body = json.loads((CONTINUITY / "inbox" / name).read_text())
-            self.assertNotIn("sign_mode", body)
-            zero = self.work / "zero.proposal.json"
-            zero.write_bytes(raw(dict(body, sign_mode=0)))
+            self.assertNotIn("pack", body)
+            self.assertEqual("sign_mode" in body, "-b003-" in name)
+            explicit = [dict(body, pack=0)]
+            if "sign_mode" not in body:
+                explicit += [dict(body, sign_mode=0), dict(body, sign_mode=0, pack=0)]
             for mode, digest in modes.items():
                 argv = [str(self.admission), str(context), str(CONTINUITY / "inbox" / name)]
                 argv += [] if mode == "receipt" else [mode]
                 self.assertEqual(hashlib.sha256(subprocess.run(argv, capture_output=True, timeout=30).stdout).hexdigest(),
                                  digest, (name, mode))
-                if mode != "receipt":
-                    explicit = subprocess.run([str(self.admission), str(context), str(zero), mode],
-                                              capture_output=True, timeout=30)
-                    self.assertEqual(hashlib.sha256(explicit.stdout).hexdigest(), digest, (name, mode, "sign_mode=0"))
+                if mode == "receipt":
+                    continue
+                for variant in explicit:
+                    zero.write_bytes(raw(variant))
+                    got = subprocess.run([str(self.admission), str(context), str(zero), mode],
+                                         capture_output=True, timeout=30)
+                    self.assertEqual(hashlib.sha256(got.stdout).hexdigest(), digest, (name, mode, variant))
 
     def test_sign_mode_is_admitted_only_fully_unrolled(self):
         full = dict(unroll=16, sign_mode=1)
@@ -912,6 +924,69 @@ class Engines(unittest.TestCase):
         words[3] = str(int(words[3]) ^ 1)
         broken = (head + "pireus_lane_signs[16] = {" + ",".join(words) + "}" + tail).encode()
         self.assertGreater(mismatches(broken, 36077, 0), 0)
+
+    def test_pack_is_admitted_with_any_plan_and_refused_above_one(self):
+        for kind, phase in ((1, None), (2, 33825)):
+            for plan in (dict(unroll=1), dict(unroll=16, sign_mode=1)):
+                receipt = json.loads(self.emit(None, kind, phase, dict(plan, pack=1)).stdout)
+                plain = json.loads(self.emit(None, kind, phase, plan).stdout)
+                self.assertEqual(receipt["decision"], "ADMIT", receipt)
+                self.assertEqual(receipt["pack"], 1)
+                self.assertNotIn("pack", plain)
+                self.assertEqual(receipt["plan_id"] - 131072, plain["plan_id"])
+                self.assertEqual(receipt["tensor_sha256"], plain["tensor_sha256"])
+                self.assertEqual(receipt.get("sign_mode"), plain.get("sign_mode"))
+        for plan, reason in ((dict(pack=2), "PACK"), (dict(pack=1, unroll=4, sign_mode=1), "SIGN_MODE_UNROLL")):
+            run = self.emit("ptx-sm86", 2, 35, plan)
+            self.assertEqual(run.returncode, 1)
+            self.assertEqual(json.loads(run.stdout)["reason"], reason, plan)
+            self.assertNotIn(b".target", run.stdout)
+        ptx = self.emit("ptx-sm75", 2, 35, dict(pack=1, load=1, layout=1, unroll=16)).stdout
+        # The launch is gpu_probe.py's: grid = vectors, 16 threads. pack keeps that contract.
+        self.assertIn(b".maxntid 16,1,1\n", ptx)
+        self.assertIn(b"shl.b32 %r1, %r1, 1;", ptx)
+        self.assertIn(b"min.u32 %r15, %r15, %r16;", ptx)
+        self.assertEqual(ptx.count(b"st.global.f64"), 2)
+        self.assertEqual(ptx.count(b"shfl.sync.idx.b32"), 64)
+        self.assertEqual(ptx.count(b"ld.const.u32"), 16)
+        self.assertNotIn(b"fma", ptx)
+
+    def test_pack_ptx_computes_the_operator_reference_bit_for_bit(self):
+        import operator_reference as ref
+        import ptx_sim
+        rows = ref.load_rows(HERE / "phase-a" / "numeric-fixtures.jsonl")
+        self.assertEqual(len(rows), 320)
+
+        def mismatches(ptx, phase, layout, count):
+            got = ptx_sim.run_rows(ptx.decode(), rows[:count], layout)
+            bad = 0
+            for v, row in enumerate(rows[:count]):
+                for k, word in enumerate(ref.outputs(phase, row)):
+                    other = got[v][k]
+                    if word != other and not (ref.is_nan(word & ptx_sim.M64) and ref.is_nan(other & ptx_sim.M64)):
+                        bad += 1
+            return bad
+
+        # 319 exercises the odd tail: the last block computes its one vector twice.
+        cases = ((1, None, dict(lane_stride=1, lane_offset=0, load=1, layout=0, unroll=2), 320),
+                 (2, 36077, dict(lane_stride=3, lane_offset=5, load=0, layout=1, unroll=16, sign_mode=1), 320),
+                 (2, 36076, dict(lane_stride=7, lane_offset=9, load=1, layout=1, unroll=4), 319),
+                 (2, 33825, dict(lane_stride=15, lane_offset=13, load=1, layout=0, unroll=16, sign_mode=1), 319),
+                 (2, 1123, dict(lane_stride=11, lane_offset=2, load=0, layout=0, unroll=8), 320))
+        for kind, phase, plan, count in cases:
+            ptx = self.emit("ptx-sm86", kind, phase, dict(plan, pack=1)).stdout
+            self.assertEqual(mismatches(ptx, phase or 0, plan["layout"], count), 0, (kind, phase, plan, count))
+        # Controls: a one-bit sign flip, and a packed kernel that drops vector B's store.
+        ptx = self.emit("ptx-sm86", 2, 36077, dict(unroll=16, pack=1)).stdout.decode()
+        head, rest = ptx.split("pireus_signs[16] = {", 1)
+        words, tail = rest.split("}", 1)
+        words = words.split(",")
+        words[5] = str(int(words[5]) ^ 8)
+        broken = (head + "pireus_signs[16] = {" + ",".join(words) + "}" + tail).encode()
+        self.assertGreater(mismatches(broken, 36077, 0, 320), 0)
+        dropped = ptx.replace("    st.global.f64 [%rd6], %fd5;\n", "")
+        self.assertNotEqual(dropped, ptx)
+        self.assertGreater(mismatches(dropped.encode(), 36077, 0, 320), 0)
 
     def test_per_architecture_rule_matches_the_spark_bootstrap(self):
         text = "".join(f"{i} {i % 2} {900000 + (i * 17) % 50} 1000000\n" for i in range(30))
