@@ -380,6 +380,8 @@ theorem step_mono (im : Img) {a b : St} (h : StLe r o a b) (hg : r = [] ∨ read
         · exact StepLe.inl h1
         · exact StepLe.inl (h.with_rip _)
     | jmp rel => exact StepLe.inl (h.with_rip _)
+    | jmpReg r =>
+      exact StepLe.okOf _ (SLe_bind (h.reg r) fun v => SLe.some (h.with_rip _))
     | ldRsp8 d =>
       apply StepLe.okOf
       refine SLe_bind (h.reg 4) fun sp => SLe_bind (h.byte sp) fun v => wr_le h1 _ _ _

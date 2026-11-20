@@ -60,6 +60,7 @@ def insStr : Ins → String
   | .syscall => "Ins.syscall"
   | .jcc cc r => s!"Ins.jcc {cc} {r}"
   | .jmp r => s!"Ins.jmp {r}"
+  | .jmpReg r => s!"Ins.jmpReg {r}"
   | .ldRsp8 d => s!"Ins.ldRsp8 {d}"
   | .stRsp8 s => s!"Ins.stRsp8 {s}"
 
