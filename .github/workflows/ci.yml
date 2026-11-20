@@ -1627,6 +1627,10 @@ jobs:
         env:
           SOUNIO_MADAROS_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
         run: bash scripts/ci/madaros_method_ref_receiver_gate.sh
+      - name: ADR-016 meet refuses at run time with a diagnostic
+        env:
+          SOUNIO_MADAROS_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+        run: bash scripts/ci/epistemic_meet_refusal_gate.sh
       - name: Seq<f64> element reads classify as float
         env:
           SOUNIO_MADAROS_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
@@ -1693,6 +1697,18 @@ jobs:
         env:
           MADAROS_RAW_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
         run: bash scripts/ci/madaros_builtin_name_shadow_gate.sh
+      # A user or stdlib `fn sqrt` / exp / log / sin / cos / pow is not the
+      # builtin of modules that did not import it. Reuses the ELF built above.
+      - name: Float builtins are not captured by an unimported same-named function
+        env:
+          MADAROS_RAW_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+        run: bash scripts/ci/madaros_builtin_math_shadow_gate.sh
+      # A bare call to a pub fn of a module the caller never imported is
+      # refused (E-NOT-IMPORTED). Reuses the ELF built above.
+      - name: Calls resolve through the caller's own use items
+        env:
+          MADAROS_RAW_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+        run: bash scripts/ci/madaros_import_hygiene_gate.sh
       # Copilot review (PR #2515), comment 4113458034: check_items_verdict_
       # boot4_with_module_map stamped current_module_id per item but left
       # current_module (used by pub(in path)'s ast_path_is_prefix check)
@@ -3028,7 +3044,28 @@ jobs:
           bash bootstrap/model/gen_seed_data.sh /tmp/SeedData.fresh.lean
           cmp /tmp/SeedData.fresh.lean formal/Bootstrap/SeedData.lean
           cd formal
-          lake build Bootstrap
+          lake build Bootstrap x86run
+      # The two Sporos interpreters must agree: the Lean reference (`sporos`,
+      # correct by the DAG simulation theorems) and the C++23 one
+      # (`bootstrap/model/sporos_fast.cpp`, trusted only through this check).
+      # Exit status, output and error are compared byte for byte on the
+      # example programs and on 500 random checker-valid programs.
+      - name: Sporos differential (C++ interpreter against the Lean reference)
+        run: bash bootstrap/model/sporos_diff.sh 500
+      # Instruction-level CPU differential for `X86Int` and `X86Dec` (the
+      # stage-1 model): 200,000 random instructions across all 45 decoded forms
+      # executed natively on the runner CPU and compared against `X86Int.step`.
+      - name: Bootstrap X86Int CPU differential
+        run: bash bootstrap/model/x86int_diff_gate.sh 200000 1
+      # Kernel-checked process environment differential (`X86Env`, `syscall`, `initStack`).
+      - name: Bootstrap X86Env Linux syscall differential
+        run: bash bootstrap/model/x86env_diff_gate.sh 2000 1
+      # Hamming-1/2 (`X86Dec.altsAt`) and byte-boundary differential fuzz against CPU.
+      - name: Bootstrap X86Dec Hamming and byte fuzzer
+        run: bash bootstrap/model/x86dec_fuzz_gate.sh 5000 100000 1
+      # Physical 4-site fault injection of the canonical 38-byte machine-code TMR voter.
+      - name: Bootstrap TMR machine-code voter fault injection
+        run: bash bootstrap/model/tmr_fault_gate.sh 20000 1
       - name: Build all default-target proof modules
         run: |
           cd formal/lean4

@@ -34,7 +34,7 @@ lean_lib Sounio where
              `TrustSemiring,
              `EpistemicSafety,
              `EpistemicStat,
-             `EpistemicJoint]
+             `EpistemicJoint, `EpistemicCorr]
 
 -- Minimal x86-64 model of the bootstrap seed loaders (bootstrap/roots).
 -- Not a default target: CI builds it by name.
@@ -53,7 +53,16 @@ lean_lib Bootstrap where
     .one `Bootstrap.Refine,
     .one `Bootstrap.SeedData,
     .one `Bootstrap.Seeds,
+    .one `Bootstrap.SporosX1,
+    .one `Bootstrap.SporosX1Comp,
+    .one `Bootstrap.SporosX1Image,
     .one `Bootstrap.TMR,
+    .one `Bootstrap.X86Dec,
+    .one `Bootstrap.TMRExposure,
+    .one `Bootstrap.TMRVoter,
+    .one `Bootstrap.X86Bridge,
+    .one `Bootstrap.TMRX86,
+    .one `Bootstrap.TMRWord,
     .one `Bootstrap.X86Env,
     .one `Bootstrap.X86Int,
     .one `Bootstrap.X86Min,
@@ -63,3 +72,26 @@ lean_lib Bootstrap where
 -- bootstrap/model/seed_proofs.sh and the nightly job, not on every pull request.
 lean_lib BootstrapSeeds where
   roots := #[`Bootstrap.SeedA, `Bootstrap.SeedB]
+
+-- The Sporos reference interpreter as a program (`sporos PROGRAM.spb < in > out`)
+-- and the writer of the example programs (`sporos-examples DIR`).
+lean_exe sporos where
+  root := `Sporos.Main
+
+lean_exe «sporos-examples» where
+  root := `Sporos.Examples
+
+lean_exe x86run where
+  root := `Bootstrap.RunHex
+
+lean_exe «x86int-diff» where
+  root := `Bootstrap.X86IntDiffModel
+
+lean_exe «x86env-diff» where
+  root := `Bootstrap.X86EnvDiffModel
+
+lean_exe «x86dec-fuzz» where
+  root := `Bootstrap.X86DecFuzzModel
+
+lean_exe «tmr-bound-check» where
+  root := `Bootstrap.TMRBoundCheck
