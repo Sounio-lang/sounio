@@ -2752,6 +2752,17 @@ fn fo_ref_alias_base(name: Name) -> i64 with Mut, Panic, Div {
     0 - 1
 }
 
+// A helper paste (fo_inline_call_variance_paste_rows) notes aliases for its
+// own parameters; it truncates the table back on exit so no callee name
+// outlives the paste.
+fn fo_ref_alias_count() -> i64 with Mut, Panic, Div {
+    FO_REF_ALIAS_COUNT
+}
+
+fn fo_ref_alias_truncate(n: i64) with Mut, Panic, Div {
+    if n >= 0 && n < FO_REF_ALIAS_COUNT { FO_REF_ALIAS_COUNT = n }
+}
+
 fn fo_field_sens_reset() with Mut {
     FO_FIELD_SENS_COUNT = 0
     FO_ARRAY_COUNT = 0
@@ -29164,6 +29175,17 @@ impl Lowerer {
         // late lookups below would read the fresh, untyped, non-ref binding.
         var sarg_types: [Name; 16] = [ir_empty_name(); 16]
         var sarg_refs: [bool; 16] = [false; 16]
+        // `&x` / `&!x` of an OWNED struct local into a `&S` / `&!S` parameter.
+        // The callee dereferences an address (the slot that holds x), so the
+        // parameter is bound below to that address as a reference, with its
+        // field variance aliased to x as `let r = &x` does. Bound to the
+        // register of x itself, `(*d).kn[i]` indexed the object handle of x as
+        // a raw pointer: a `main` calling `circ28_drug_value(&rec, i)` read
+        // address 3 + 8 i and died with SIGSEGV before printing anything.
+        var sarg_addr: [bool; 16] = [false; 16]
+        var sarg_base: [i64; 16] = [0 - 1; 16]
+        var sarg_prev_alias: [i64; 16] = [0 - 1; 16]
+        var sarg_pnames: [Name; 16] = [ir_empty_name(); 16]
         var sk = args
         var spa = &fd.params
         var si: i64 = 0
@@ -29171,12 +29193,16 @@ impl Lowerer {
             match *sk {
                 Some(al) => {
                     var sty_struct = false
+                    var sty_ref = false
+                    var sty_ptr = false
                     var seeking0 = true
                     while seeking0 {
                         match *spa {
                             Some(pl) => {
                                 if !(*pl).head.is_self {
                                     sty_struct = fo_inline_param_is_struct(&(*pl).head.ty)
+                                    sty_ref = lower_type_expr_is_ref_like(&(*pl).head.ty)
+                                    sty_ptr = lower_type_expr_is_pointer_like(&(*pl).head.ty)
                                     seeking0 = false
                                 }
                                 spa = &(*pl).tail
@@ -29191,6 +29217,17 @@ impl Lowerer {
                         sargs[si as usize] = an
                         sarg_types[si as usize] = lo.lookup_local_struct_type(an)
                         sarg_refs[si as usize] = lo.lookup_local_is_ref(an)
+                        let arg_is_addr = (*al).head.kind == ExprKind::ExprUnary
+                            && ((*al).head.un_op == UnaryOp::OpRef || (*al).head.un_op == UnaryOp::OpRefMut)
+                        if arg_is_addr && !sarg_refs[si as usize] {
+                            if sty_ref {
+                                sarg_addr[si as usize] = true
+                            } else if sty_ptr {
+                                // A raw pointer / Box parameter fed `&x`: no binding
+                                // here matches what the callee reads. No paste.
+                                return (lo, 0 - 1)
+                            }
+                        }
                     } else if !lower_expr_relower_safe_ref(&(*al).head) {
                         return (lo, 0 - 1)
                     }
@@ -29256,7 +29293,22 @@ impl Lowerer {
                             None => { seeking = false }
                         }
                     }
-                    if sargs[i as usize].len > 0 {
+                    if sargs[i as usize].len > 0 && sarg_addr[i as usize] {
+                        // `&x` into a reference parameter: the address, exactly
+                        // what the call itself passes.
+                        sarg_base[i as usize] = lo.lookup_local(sargs[i as usize])
+                        let ap = lo.lower_expr_ref(&(*al).head)
+                        lo = ap.0
+                        vals[i as usize] = ap.1
+                        pf = false
+                        if ap.1 < 0 {
+                            lo.error_count = fo_err_snap.error_count
+                            lo.had_error = fo_err_snap.had_error
+                            fo_inline_error_restore_globals(fo_err_snap)
+                            (*lo.current_func).instr_count = fo_err_snap.instrs
+                            return (lo.fo_clear_expr_sens().so_clear_expr_hess(), 0 - 1)
+                        }
+                    } else if sargs[i as usize].len > 0 {
                         // A struct argument: bound by name below, nothing to emit.
                         vals[i as usize] = lo.lookup_local(sargs[i as usize])
                         pf = false
@@ -29407,6 +29459,7 @@ impl Lowerer {
         let saved_hess_base = so_rows_save(&(*lo.big).so_bind_hess, saved_bind_count)
         let saved_locals = (*lo.locals).count
         lo.scope_depth = lo.scope_depth + 1
+        let alias_snap = fo_ref_alias_count()
         FO_INLINE_STACK[FO_INLINE_DEPTH as usize] = id
         FO_INLINE_DEPTH = FO_INLINE_DEPTH + 1
         FO_INLINE_COUNT = FO_INLINE_COUNT + 1
@@ -29432,8 +29485,13 @@ impl Lowerer {
                         let an2_ref = sarg_refs[i as usize]
                         lo = lo.bind_local(sname, vals[i as usize], false)
                         lo = lo.bind_local_struct_type(sname, an2_type, false)
-                        if an2_ref {
+                        if an2_ref || sarg_addr[i as usize] {
                             lo = lo.bind_local_ref(sname)
+                        }
+                        if sarg_addr[i as usize] {
+                            sarg_pnames[i as usize] = sname
+                            sarg_prev_alias[i as usize] = fo_ref_alias_base(sname)
+                            fo_ref_alias_note(sname, sarg_base[i as usize])
                         }
                         lo = lo.fo_clear_expr_sens().fo_bind_local_sens(sname)
                         if lo.so_enabled { lo = lo.so_set_local_hess_row(sname, [0 - 1; 2080]) }
@@ -29638,6 +29696,14 @@ impl Lowerer {
         lo.fo_bind = saved_bind_box
         lo.fo_bind_count = saved_bind_count
         lo = lo.so_rows_restore(saved_hess_base, saved_bind_count)
+        fo_ref_alias_truncate(alias_snap)
+        var ra: i64 = 0
+        while ra < 16 {
+            if sarg_addr[ra as usize] && sarg_prev_alias[ra as usize] >= 0 {
+                fo_ref_alias_note(sarg_pnames[ra as usize], sarg_prev_alias[ra as usize])
+            }
+            ra = ra + 1
+        }
         if fo_inline_error_grew(lo.error_count, lo.had_error, fo_err_snap) || !ok || result < 0 {
             lo.error_count = fo_err_snap.error_count
             lo.had_error = fo_err_snap.had_error
