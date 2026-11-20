@@ -3392,6 +3392,7 @@ pub fn lower_use_modules_collect(items: &Option<Box<ItemList>>, module_id: i64) 
     // here too so callee_path_module_stripped_name always sees a complete
     // set before any call site is resolved.
     lower_impl_methods_collect(items)
+    lower_kn_alias_collect(items)
     var current = items
     while true {
         match *current {
@@ -12835,6 +12836,7 @@ fn lower_opt_type_named_name(opt: &Option<Box<TypeExpr>>) -> Name with Mut, Pani
     match *opt {
         Some(te) => {
             if (*te).kind == TypeExprKind::TypeNamed {
+                if lower_type_expr_kn_alias_payload(&(*te)) >= 0 { return make_name("Knowledge") }
                 return ir_path_first_name((*te).path)
             }
             ir_empty_name()
@@ -13704,7 +13706,7 @@ fn lower_lookup_box_inner_layout(locals: Box<LowerLocalStack>, scope_depth: i64,
 // (the layout's f64 default then applies, as before).
 fn lower_type_expr_knowledge_value_float(ty: &TypeExpr) -> i64 with Mut, Panic, Div {
     if (*ty).kind != TypeExprKind::TypeKnowledge {
-        return 0 - 1
+        return lower_type_expr_kn_alias_payload(ty)
     }
     match (*ty).knowledge_info {
         Some(ki) => {
@@ -13723,7 +13725,7 @@ fn lower_type_expr_knowledge_value_float(ty: &TypeExpr) -> i64 with Mut, Panic, 
 fn lower_opt_type_knowledge_value_float(opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
     match *opt {
         Some(ty) => {
-            if (*ty).kind != TypeExprKind::TypeKnowledge { return 0 - 1 }
+            if (*ty).kind != TypeExprKind::TypeKnowledge && lower_type_expr_kn_alias_payload(&(*ty)) < 0 { return 0 - 1 }
             let payload = lower_type_expr_knowledge_value_float(&(*ty))
             if payload >= 0 { payload } else { 2 }
         }
@@ -13798,6 +13800,73 @@ fn lower_ident_expr_for_name(name: Name, span: Span) -> Expr {
     }
 }
 
+// RC-B: `type Alias = Knowledge[f64]` (and aliases of aliases). The lowerer has
+// no type-alias resolution, so a parameter, return type or annotation spelled
+// with the alias was a TypeNamed and every Knowledge classifier that matches
+// `kind == TypeKnowledge` missed it (`println` of such a call result was refused
+// as an unresolved scalar kind, and arithmetic on it lost its Knowledge layout).
+// Registered here, per name hash, with the payload flag the literal type gives
+// (lower_type_expr_knowledge_value_float: 1 float, 0 integer, 2 unsupported).
+var LOWER_KN_ALIAS_HASH: [i64; 128] = [0; 128]
+var LOWER_KN_ALIAS_PAYLOAD: [i64; 128] = [0; 128]
+var LOWER_KN_ALIAS_COUNT: i64 = 0
+
+fn lower_kn_alias_lookup(n: Name) -> i64 with Mut, Panic, Div {
+    let h = fo_name_hash(n)
+    var i: i64 = 0
+    while i < LOWER_KN_ALIAS_COUNT {
+        if LOWER_KN_ALIAS_HASH[i as usize] == h { return LOWER_KN_ALIAS_PAYLOAD[i as usize] }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// Payload flag when `ty` is a Knowledge alias reference, else -1.
+fn lower_type_expr_kn_alias_payload(ty: &TypeExpr) -> i64 with Mut, Panic, Div {
+    if (*ty).kind != TypeExprKind::TypeNamed { return 0 - 1 }
+    lower_kn_alias_lookup(ir_path_first_name((*ty).path))
+}
+
+fn lower_kn_alias_note(item_name: Name, target: &Option<Box<TypeExpr>>) with Mut, Panic, Div {
+    match *target {
+        Some(t) => {
+            var payload: i64 = 0 - 1
+            if (*t).kind == TypeExprKind::TypeKnowledge {
+                payload = lower_type_expr_knowledge_value_float(&(*t))
+            } else {
+                payload = lower_type_expr_kn_alias_payload(&(*t))
+            }
+            if payload < 0 { return }
+            if lower_kn_alias_lookup(item_name) >= 0 { return }
+            if LOWER_KN_ALIAS_COUNT >= 128 { return }
+            LOWER_KN_ALIAS_HASH[LOWER_KN_ALIAS_COUNT as usize] = fo_name_hash(item_name)
+            LOWER_KN_ALIAS_PAYLOAD[LOWER_KN_ALIAS_COUNT as usize] = payload
+            LOWER_KN_ALIAS_COUNT = LOWER_KN_ALIAS_COUNT + 1
+        }
+        None => {}
+    }
+}
+
+fn lower_kn_alias_collect(items: &Option<Box<ItemList>>) with Mut, Panic, Div {
+    var pass: i64 = 0
+    while pass < 2 {
+        var cur = items
+        var more = true
+        while more {
+            match *cur {
+                Some(list) => {
+                    if (*list).head.kind == ItemKind::ItemTypeAlias {
+                        lower_kn_alias_note((*list).head.name, &(*list).head.type_alias_ty)
+                    }
+                    cur = &(*list).tail
+                }
+                None => { more = false }
+            }
+        }
+        pass = pass + 1
+    }
+}
+
 fn lower_param_struct_type_name(ty: &TypeExpr) -> Name with Mut, Panic, Div {
     // Knowledge<T> is TypeKnowledge, not TypeNamed. Without this stamp the
     // parameter binder records an empty struct type, lookup_local_variance_reg
@@ -13806,6 +13875,9 @@ fn lower_param_struct_type_name(ty: &TypeExpr) -> Name with Mut, Panic, Div {
     // then emits the constant 0.0. The variance is already in slot 1 of the
     // object measure() built; the ident path loads it once the local is tagged.
     if (*ty).kind == TypeExprKind::TypeKnowledge {
+        return make_name("Knowledge")
+    }
+    if lower_type_expr_kn_alias_payload(ty) >= 0 {
         return make_name("Knowledge")
     }
     if (*ty).kind == TypeExprKind::TypeNamed {
@@ -27284,7 +27356,7 @@ impl Lowerer {
                         nf64 = nf64 + 1
                     } else if fo_inline_param_is_struct(&(*pl).head.ty) {
                         nf64 = nf64 + 1
-                    } else if (*pl).head.ty.kind == TypeExprKind::TypeKnowledge {
+                    } else if (*pl).head.ty.kind == TypeExprKind::TypeKnowledge || lower_type_expr_kn_alias_payload(&(*pl).head.ty) >= 0 {
                         nf64 = nf64 + 1
                     } else if !(lower_type_expr_is_integer(&(*pl).head.ty) || lower_type_expr_is_bool(&(*pl).head.ty)) {
                         return lo
@@ -29245,7 +29317,7 @@ impl Lowerer {
                                     pa = &(*pl).tail
                                 } else {
                                     pf = lower_type_expr_is_f64(&(*pl).head.ty)
-                                    if (*pl).head.ty.kind == TypeExprKind::TypeKnowledge {
+                                    if (*pl).head.ty.kind == TypeExprKind::TypeKnowledge || lower_type_expr_kn_alias_payload(&(*pl).head.ty) >= 0 {
                                         pf = true
                                         kn_param = true
                                     }
@@ -30579,6 +30651,15 @@ impl Lowerer {
             if ir_name_eq_lit((*e).name, "value") {
                 match (*e).left {
                     Some(base_expr) => {
+                        // RC-B: `(a * b).value` over Knowledge names reads the variance the
+                        // Knowledge arm stored for the product.
+                        if (*base_expr).kind == ExprKind::ExprBinary && self.expr_is_knowledge_ident_tree_ref(&(*base_expr)) {
+                            let kb = self.lower_expr_ref(&(*base_expr))
+                            let kv = kb.0.lookup_variance_for_base_reg(kb.1)
+                            if kv >= 0 {
+                                return (kb.0.so_clear_expr_hess().fo_seed_from_variance(kv, 0 - 1), kv)
+                            }
+                        }
                         if (*base_expr).kind == ExprKind::ExprIdent {
                             let base_reg = inl_let.0.lookup_local((*base_expr).name)
                             if base_reg >= 0 {
@@ -38619,7 +38700,7 @@ impl Lowerer {
         // Annotation TypeKnowledge[T] → bind local as Knowledge for FO GUM field/variance paths
         match s.ty {
             Some(ann_ty) => {
-                if (*ann_ty).kind == TypeExprKind::TypeKnowledge {
+                if (*ann_ty).kind == TypeExprKind::TypeKnowledge || lower_type_expr_kn_alias_payload(&(*ann_ty)) >= 0 {
                     lo = lo.bind_local_struct_type(s.name, make_name("Knowledge"), false)
                     // #2504: Knowledge<T>.value follows T. The synthetic layout says
                     // f64; for Knowledge<i64> that bit-cast the stored i64 42 into a
@@ -38650,6 +38731,12 @@ impl Lowerer {
                                 // without claiming the historical return was necessarily Knowledge.
                                 lowerer_bind_kn_value_float_mut(&! lo, s.name, -2)
                             }
+                        }
+                        // RC-B: `let d = a - b` over two Knowledge<f64> operands is itself a
+                        // Knowledge handle, so later operators and field reads classify it.
+                        if (*rhs).kind == ExprKind::ExprBinary && lo.expr_is_knowledge_operand_ref(&(*rhs)) {
+                            lo = lo.bind_local_struct_type(s.name, make_name("Knowledge"), false)
+                            lowerer_bind_kn_value_float_mut(&! lo, s.name, 1)
                         }
                     }
                     None => {}
@@ -42057,6 +42144,194 @@ impl Lowerer {
         self.emit_f64_const(0.0)
     }
 
+    // Knowledge<f64> (x) Knowledge<f64> support (RC-B). The checker admits only
+    // operands that are a bound name, a call, or a nested binary of those
+    // (checker_knowledge_binary_lowerable); this recognises the same shapes.
+    fn expr_is_knowledge_operand_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        if (*e).kind == ExprKind::ExprIdent {
+            if ir_name_eq_lit(self.lookup_local_struct_type((*e).name), "Knowledge") { return true }
+            return ir_name_eq_lit(self.global_struct_type_name((*e).name), "Knowledge")
+        }
+        if (*e).kind == ExprKind::ExprCall {
+            match (*e).left {
+                Some(callee) => {
+                    if (*callee).kind == ExprKind::ExprIdent {
+                        if name_eq_lit((*callee).name, "measure") || name_eq_lit((*callee).name, "Knowledge") { return true }
+                    }
+                }
+                None => {}
+            }
+            if self.expr_call_return_knowledge_value_float_ref(e) >= 0 { return true }
+            return ir_name_eq_lit(self.expr_call_return_struct_name_ref(e), "Knowledge")
+        }
+        if (*e).kind == ExprKind::ExprBinary {
+            if (*e).bin_op != BinaryOp::OpAdd && (*e).bin_op != BinaryOp::OpSub
+                && (*e).bin_op != BinaryOp::OpMul && (*e).bin_op != BinaryOp::OpDiv { return false }
+            return self.opt_expr_is_knowledge_operand_ref(&(*e).left) && self.opt_expr_is_knowledge_operand_ref(&(*e).right)
+        }
+        false
+    }
+
+    // Knowledge operand tree whose leaves are all bound names (no call), so it
+    // can be lowered a second time for its variance without re-running effects.
+    fn expr_is_knowledge_ident_tree_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        if (*e).kind == ExprKind::ExprIdent { return self.expr_is_knowledge_operand_ref(e) }
+        if (*e).kind == ExprKind::ExprBinary {
+            if !self.expr_is_knowledge_operand_ref(e) { return false }
+            match (*e).left {
+                Some(l) => {
+                    match (*e).right {
+                        Some(r) => { return self.expr_is_knowledge_ident_tree_ref(&(*l)) && self.expr_is_knowledge_ident_tree_ref(&(*r)) }
+                        None => {}
+                    }
+                }
+                None => {}
+            }
+        }
+        false
+    }
+
+    fn opt_expr_is_knowledge_operand_ref(self, opt: &Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc {
+        match *opt {
+            Some(b) => self.expr_is_knowledge_operand_ref(&(*b)),
+            None => false,
+        }
+    }
+
+    // Load float field `idx` of Knowledge handle `obj`.
+    fn kn_fget(self, obj: i64, idx: i64, fname: Name) -> (Lowerer, i64) with Mut, Panic, Div, IO {
+        let p = self.fresh_reg()
+        var lo = p.0
+        lo = lo.emit(ir_field_get(p.1, obj, idx, fname))
+        lo = lo.emit(ir_mark_float_reg(p.1))
+        (lo, p.1)
+    }
+
+    fn kn_fop(self, a: i64, op: BinaryOp, b: i64) -> (Lowerer, i64) with Mut, Panic, Div, IO {
+        let p = self.fresh_reg()
+        var lo = p.0
+        lo = lo.emit(ir_binop_typed(p.1, a, op, b, true, true))
+        lo = lo.emit(ir_mark_float_reg(p.1))
+        (lo, p.1)
+    }
+
+    // Knowledge (op) Knowledge for + - * /. Operands are independent sources
+    // (E230 refuses every pair the checker cannot prove disjoint), so the
+    // first-order GUM propagation needs no covariance term:
+    //   + , -   var = va + vb
+    //   *       var = b^2 va + a^2 vb
+    //   /       var = va / b^2 + a^2 vb / b^4
+    // confidence = min(ca, cb) (formal/KnowledgeArithmeticSoundness.lean,
+    // spec semantic_types.tex T-Knowledge-Binary). The result is a fresh
+    // channel: its variance register seeds a new first-order source.
+    fn lower_knowledge_binary_arith(self, op: BinaryOp, lhs: i64, rhs: i64, dst: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let a_p = lo.kn_fget(lhs, 0, make_name("value"))
+        lo = a_p.0
+        let b_p = lo.kn_fget(rhs, 0, make_name("value"))
+        lo = b_p.0
+        let va_p = lo.kn_fget(lhs, 1, make_name("variance"))
+        lo = va_p.0
+        let vb_p = lo.kn_fget(rhs, 1, make_name("variance"))
+        lo = vb_p.0
+        let ca_p = lo.kn_fget(lhs, 2, make_name("confidence"))
+        lo = ca_p.0
+        let cb_p = lo.kn_fget(rhs, 2, make_name("confidence"))
+        lo = cb_p.0
+        let a = a_p.1
+        let b = b_p.1
+        let va = va_p.1
+        let vb = vb_p.1
+        let rv = lo.kn_fop(a, op, b)
+        lo = rv.0
+        var var_reg = 0 - 1
+        if op == BinaryOp::OpAdd || op == BinaryOp::OpSub {
+            let s = lo.kn_fop(va, BinaryOp::OpAdd, vb)
+            lo = s.0
+            var_reg = s.1
+        } else if op == BinaryOp::OpMul {
+            let b2 = lo.kn_fop(b, BinaryOp::OpMul, b)
+            lo = b2.0
+            let t1 = lo.kn_fop(b2.1, BinaryOp::OpMul, va)
+            lo = t1.0
+            let a2 = lo.kn_fop(a, BinaryOp::OpMul, a)
+            lo = a2.0
+            let t2 = lo.kn_fop(a2.1, BinaryOp::OpMul, vb)
+            lo = t2.0
+            let s = lo.kn_fop(t1.1, BinaryOp::OpAdd, t2.1)
+            lo = s.0
+            var_reg = s.1
+        } else {
+            let q = lo.kn_fop(a, BinaryOp::OpDiv, b)
+            lo = q.0
+            let q2 = lo.kn_fop(q.1, BinaryOp::OpMul, q.1)
+            lo = q2.0
+            let t = lo.kn_fop(q2.1, BinaryOp::OpMul, vb)
+            lo = t.0
+            let num = lo.kn_fop(va, BinaryOp::OpAdd, t.1)
+            lo = num.0
+            let b2 = lo.kn_fop(b, BinaryOp::OpMul, b)
+            lo = b2.0
+            let s = lo.kn_fop(num.1, BinaryOp::OpDiv, b2.1)
+            lo = s.0
+            var_reg = s.1
+        }
+        // confidence = min(ca, cb)
+        let cm_p = lo.fresh_reg()
+        lo = cm_p.0
+        let cm = cm_p.1
+        lo = lo.emit(ir_copy(cm, ca_p.1))
+        lo = lo.emit(ir_mark_float_reg(cm))
+        let lt_p = lo.fresh_reg()
+        lo = lt_p.0
+        lo = lo.emit(ir_binop_typed(lt_p.1, cb_p.1, BinaryOp::OpLt, ca_p.1, true, true))
+        let end_p = lo.fresh_label()
+        lo = end_p.0
+        lo = lo.emit(ir_branch_false(lt_p.1, end_p.1))
+        lo = lo.emit(ir_copy(cm, cb_p.1))
+        lo = lo.emit(ir_label(end_p.1))
+
+        lo = lo.emit(ir_alloc(dst, 0))
+        lo = lo.emit(ir_field_set(dst, 0, rv.1, make_name("value")))
+        lo = lo.emit(ir_field_set(dst, 1, var_reg, make_name("variance")))
+        lo = lo.emit(ir_field_set(dst, 2, cm, make_name("confidence")))
+        lo = lo.bind_variance_for_base_reg(dst, var_reg)
+        lo.pending_variance_reg = var_reg
+        lo = lo.fo_seed_from_variance(var_reg, 0 - 1)
+        var k: i64 = 0
+        while k < FO_MAX_CH {
+            lo.fo_pending_sens[k as usize] = lo.fo_expr_sens[k as usize]
+            k = k + 1
+        }
+        (lo, dst)
+    }
+
+    // print/println of a Knowledge<f64> operand renders its nominal value
+    // (print_f64 of field 0). The spec fixes no display form for Knowledge;
+    // the previous behaviour was a hard refusal (unresolved scalar kind), and
+    // lean_single printed the handle address. Variance and confidence stay
+    // reachable as `.variance` / `.confidence`.
+    fn lower_print_knowledge_value(self, arg: &Expr, newline: bool) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let hp = self.lower_expr_ref(arg)
+        var lo = hp.0
+        let vp = lo.kn_fget(hp.1, 0, make_name("value"))
+        lo = vp.0
+        let fid = lowerer_find_or_add_fn_id_mut(&! lo, make_name("print_f64"))
+        let dp = lo.fresh_reg()
+        lo = dp.0
+        lo = lo.emit(ir_call(dp.1, fid, make_name("print_f64"), Some(Box::new(ir_reg_list_single(vp.1))), 1))
+        if newline {
+            let cid = lowerer_find_or_add_fn_id_mut(&! lo, make_name("print_char"))
+            let nl = lo.fresh_reg()
+            lo = nl.0
+            lo = lo.emit(ir_load_imm(nl.1, 10))
+            let nd = lo.fresh_reg()
+            lo = nd.0
+            lo = lo.emit(ir_call(nd.1, cid, make_name("print_char"), Some(Box::new(ir_reg_list_single(nl.1))), 1))
+        }
+        (lo, dp.1)
+    }
+
     fn lower_measure_call_ref(self, _span: Span, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         if FO_FN_OBSERVES { FO_CONTAINER_KNOWLEDGE_SEEN = true }
         fo_require_uncertainty_tracking()
@@ -44080,6 +44355,21 @@ impl Lowerer {
             let lo_call_k = lo_dst_k.emit(ir_call(dst_k, fn_id_k, launch_name, args_k, pair_args_k.count))
             return (lo_call_k, dst_k)
         }
+        if name_eq_lit(callee_name, "print") || name_eq_lit(callee_name, "println") {
+            match e.args {
+                Some(kn_print_args) => {
+                    var kn_print_single = false
+                    match (*kn_print_args).tail {
+                        Some(_) => {}
+                        None => { kn_print_single = true }
+                    }
+                    if kn_print_single && self.expr_is_knowledge_operand_ref(&(*kn_print_args).head) {
+                        return self.lower_print_knowledge_value(&(*kn_print_args).head, name_eq_lit(callee_name, "println"))
+                    }
+                }
+                None => {}
+            }
+        }
         if name_eq_lit(callee_name, "print") || name_eq_lit(callee_name, "print_int") || name_eq_lit(callee_name, "print_char") {
             let print_wide_bits = match e.args {
                 Some(print_args) => self.expr_wide_bits_ref(&(*print_args).head),
@@ -45490,7 +45780,7 @@ impl Lowerer {
         // epsilon_combine_independent for the checker's static result type.
         if e.bin_op == BinaryOp::OpAdd {
             var same_slot = false
-            var different_slots = false
+            var different_slots = false // superseded by lower_knowledge_binary_arith (min confidence)
             match e.left {
                 Some(lbox) => {
                     match e.right {
@@ -45511,63 +45801,6 @@ impl Lowerer {
                     }
                 }
                 None => {}
-            }
-            if different_slots {
-                let v1pair = lo3.fresh_reg()
-                var lo_d1 = v1pair.0
-                let v1_reg = v1pair.1
-                lo_d1 = lo_d1.emit(ir_field_get(v1_reg, lhs, 0, make_name("value")))
-                lo_d1 = lo_d1.emit(ir_mark_float_reg(v1_reg))
-
-                let v2pair = lo_d1.fresh_reg()
-                var lo_d2 = v2pair.0
-                let v2_reg = v2pair.1
-                lo_d2 = lo_d2.emit(ir_field_get(v2_reg, rhs, 0, make_name("value")))
-                lo_d2 = lo_d2.emit(ir_mark_float_reg(v2_reg))
-
-                let var1pair = lo_d2.fresh_reg()
-                var lo_d3 = var1pair.0
-                let var1_reg = var1pair.1
-                lo_d3 = lo_d3.emit(ir_field_get(var1_reg, lhs, 1, make_name("variance")))
-                lo_d3 = lo_d3.emit(ir_mark_float_reg(var1_reg))
-
-                let var2pair = lo_d3.fresh_reg()
-                var lo_d4 = var2pair.0
-                let var2_reg = var2pair.1
-                lo_d4 = lo_d4.emit(ir_field_get(var2_reg, rhs, 1, make_name("variance")))
-                lo_d4 = lo_d4.emit(ir_mark_float_reg(var2_reg))
-
-                let conf1pair = lo_d4.fresh_reg()
-                var lo_d5 = conf1pair.0
-                let conf1_reg = conf1pair.1
-                lo_d5 = lo_d5.emit(ir_field_get(conf1_reg, lhs, 2, make_name("confidence")))
-                lo_d5 = lo_d5.emit(ir_mark_float_reg(conf1_reg))
-
-                let rvpair = lo_d5.fresh_reg()
-                var lo_d6 = rvpair.0
-                let result_value_reg = rvpair.1
-                lo_d6 = lo_d6.emit(ir_binop_typed(result_value_reg, v1_reg, BinaryOp::OpAdd, v2_reg, true, true))
-                lo_d6 = lo_d6.emit(ir_mark_float_reg(result_value_reg))
-
-                let rvarpair = lo_d6.fresh_reg()
-                var lo_d7 = rvarpair.0
-                let result_variance_reg = rvarpair.1
-                lo_d7 = lo_d7.emit(ir_binop_typed(result_variance_reg, var1_reg, BinaryOp::OpAdd, var2_reg, true, true))
-                lo_d7 = lo_d7.emit(ir_mark_float_reg(result_variance_reg))
-
-                lo_d7 = lo_d7.emit(ir_alloc(dst, 0))
-                lo_d7 = lo_d7.emit(ir_field_set(dst, 0, result_value_reg, make_name("value")))
-                lo_d7 = lo_d7.emit(ir_field_set(dst, 1, result_variance_reg, make_name("variance")))
-                var lo_d8 = lo_d7.emit(ir_field_set(dst, 2, conf1_reg, make_name("confidence")))
-                lo_d8 = lo_d8.bind_variance_for_base_reg(dst, result_variance_reg)
-                lo_d8.pending_variance_reg = result_variance_reg
-                lo_d8 = lo_d8.fo_seed_from_variance(result_variance_reg, 0 - 1)
-                var dk: i64 = 0
-                while dk < FO_MAX_CH {
-                    lo_d8.fo_pending_sens[dk as usize] = lo_d8.fo_expr_sens[dk as usize]
-                    dk = dk + 1
-                }
-                return (lo_d8, dst)
             }
             if same_slot {
                 let vpair = lo3.fresh_reg()
@@ -45618,6 +45851,23 @@ impl Lowerer {
                     mk = mk + 1
                 }
                 return (lo_k7, dst)
+            }
+        }
+        if e.bin_op == BinaryOp::OpAdd || e.bin_op == BinaryOp::OpSub || e.bin_op == BinaryOp::OpMul || e.bin_op == BinaryOp::OpDiv {
+            let hid = lowerer_find_hyper_expr_id_for_span_ref(&lo3, e.span)
+            var kk_tagged = false
+            var kk_other = false
+            if hid >= 0 && hid < (*lo3.module).epistemic.hyper_expr_count {
+                if (*lo3.module).epistemic.hyper_exprs[hid as usize].op_kind == 21 { kk_tagged = true } else { kk_other = true }
+            }
+            if !kk_other && lo3.opt_expr_is_knowledge_operand_ref(&e.left) && lo3.opt_expr_is_knowledge_operand_ref(&e.right) {
+                return lo3.lower_knowledge_binary_arith(e.bin_op, lhs, rhs, dst)
+            }
+            if kk_tagged {
+                print("error: Madaros cannot classify the operands of a Knowledge arithmetic expression (the checker admitted it as Knowledge<f64> (x) Knowledge<f64>); bind each operand to a local first, e.g. `let a: Knowledge<f64> = ...` (fail-closed; the handles would otherwise lower as scalars)\n")
+                var lo_kk_refuse = lo3
+                lowerer_mark_hard_error(&! lo_kk_refuse)
+                return (lo_kk_refuse, dst)
             }
         }
         // String equality: `s == t` / `s != t` route to the str_eq builtin (content
