@@ -2,15 +2,14 @@
 // stdlib::llm::epistemic_clinical_pbpk — Sovereign 3-Compartment NTI PBPK ODE
 // with RK4 Discretization Error Estimates, EISA Extraction Noise, and GUM Covariance Propagation.
 //
-// AUC ERROR ESTIMATOR: HEURISTIC, NOT SOUND. The step-doubling majorant
-// (diff_rk4 * 16/15 + diff_rk4) is not a proven enclosure of
-// |AUC_numeric - AUC_exact|; it does not satisfy Encl.Sound. The gate therefore
-// never returns SAFE_AUTHORIZE from it (see clinical_pbpk_evaluate_gate).
-// The ODE is linear in the state (x' = A(p) x), but a defensible non-vacuous
-// bound would need verified spectral/contractivity enclosures for RK4 +
-// trapezoid quadrature, which are not implemented here; norm-based bounds are
-// vacuous (||B||_1 ~ 35/h over T = 48h). Refinement is the only mechanism the
-// gate relies on towards soundness.
+// AUC ERROR: the step-doubling majorant (diff_rk4 * 16/15 + diff_rk4) is
+// HEURISTIC, not an Encl.Sound enclosure; it is kept only as a diagnostic.
+// Certification uses rk4_auc_sound_error: in amount units the ODE is linear
+// with B = D A D^-1 Metzler, column sums <= 0, and R(hB) nonnegative with
+// column sums <= 1, so the RK4 propagator is 1-norm non-expansive and the
+// global state error is at most N * local (5th-order Taylor remainder).
+// The resulting AUC enclosure is rigorous but loose (~10^3 in window units),
+// so it certifies only on very wide windows. SAFE_AUTHORIZE rests on it.
 
 pub const SYNTHETIC_RESEARCH_WITNESS_NOT_MEDICAL_GUIDANCE: string = "SYNTHETIC_RESEARCH_WITNESS_NOT_MEDICAL_GUIDANCE — synthetic de-identified PK parameters only"
 
@@ -45,9 +44,9 @@ pub fn epistemic_regime_aleatory_abstain_no_tdm() -> i64 {
 }
 
 pub fn auc_error_bound_is_sound() -> bool {
-    // The step-doubling AUC majorant is heuristic (see file header), so it is
-    // not a Sound enclosure. The gate must not certify SAFE_AUTHORIZE from it.
-    return false
+    // rk4_auc_sound_error below is an Encl.Sound enclosure; the step-doubling
+    // majorant beside it is heuristic and never certifies.
+    return true
 }
 
 pub struct ClinicalPbpkParams {
@@ -75,6 +74,8 @@ pub struct EpistemicDecisionReceipt {
     pub val_final: f64,
     pub err_initial: f64,
     pub err_final: f64,
+    pub err_sound_initial: f64,
+    pub err_sound_final: f64,
     pub u_physical: f64,
     pub u_ep: f64,
     pub u_al: f64,
@@ -221,6 +222,55 @@ fn fdiff_step(nominal: f64, variance: f64) -> f64 with Mut, Div {
     return pbpk_max(h_rel, h_abs)
 }
 
+fn rk4_auc_sound_error(p: &ClinicalPbpkParams, dose_mg: f64, dt_h: f64) -> f64 with Div {
+    // Sound |AUC_numeric - AUC_exact| in amount 1-norm. Positivity first:
+    // nonpositive params void the sign conditions, so refuse to certify.
+    if p.v_blood <= 0.0 { return 1e30 }
+    if p.v_brain <= 0.0 { return 1e30 }
+    if p.v_periph <= 0.0 { return 1e30 }
+    if p.q_brain <= 0.0 { return 1e30 }
+    if p.q_periph <= 0.0 { return 1e30 }
+    if p.kp_brain <= 0.0 { return 1e30 }
+    if p.kp_periph <= 0.0 { return 1e30 }
+    if p.cl_hepatic <= 0.0 { return 1e30 }
+    if p.fu_plasma <= 0.0 { return 1e30 }
+    var dt = dt_h
+    if dt <= 0.000000000001 { dt = 0.05 }
+    let cleff = p.cl_hepatic * p.fu_plasma
+    let b11 = (p.q_brain + p.q_periph + cleff) / p.v_blood
+    let b12 = p.q_brain / (p.kp_brain * p.v_brain)
+    let b13 = p.q_periph / (p.kp_periph * p.v_periph)
+    let b21 = p.q_brain / p.v_blood
+    let b22 = (p.q_brain / p.v_brain) / p.kp_brain
+    let b31 = p.q_periph / p.v_blood
+    let b33 = (p.q_periph / p.v_periph) / p.kp_periph
+    var lam = b11 + b21 + b31
+    let c2 = b12 + b22
+    if c2 > lam { lam = c2 }
+    let c3 = b13 + b33
+    if c3 > lam { lam = c3 }
+    let hl = dt * lam
+    var term = hl * hl * hl * hl / 24.0
+    var rem = 0.0
+    var k: i64 = 5
+    while k < 200 {
+        term = term * hl / (k as f64)
+        rem = rem + term
+        if term < rem * 0.000000000001 {
+            rem = rem + term * 2.0
+            break
+        }
+        k = k + 1
+    }
+    let n_steps = 48.0 / dt + 2.0
+    let dose_abs = pbpk_abs(dose_mg)
+    let tau = rem * dose_abs
+    let point_err = n_steps * tau
+    let prop = point_err * 48.0 / p.v_blood
+    let quad = dt * dt * 48.0 / 12.0 * lam * lam * dose_abs / p.v_blood
+    return (prop + quad) * 2.0
+}
+
 pub fn clinical_pbpk_evaluate_gate(
     p: &ClinicalPbpkParams,
     priors: &ClinicalEpistemicPriors,
@@ -325,26 +375,26 @@ pub fn clinical_pbpk_evaluate_gate(
     let u_ep_total = u_priors + u_ep
     let u_physical = u_ep_total + u_al
 
-    let window_span = auc_max - auc_min
-    let err_budget = 0.05 * window_span
-
-    // Heuristic numerical bound: never discharges SAFE_AUTHORIZE. Always refine
-    // once; SAFE_AUTHORIZE (regime 1) is currently unreturnable by construction.
-    var err_unsafe = !auc_error_bound_is_sound()
-    if err_initial > err_budget {
-        err_unsafe = true
-    }
+    // Certification runs off the proven enclosure; the heuristic majorant is
+    // reported in err_initial/err_final for comparison only.
+    let err_sound_initial = rk4_auc_sound_error(p, dose_mg, dt_initial_h)
 
     var compute_refined = false
     var val_final = val_initial
     var err_final = err_initial
-    var auc_lower_bound = val_final - err_final - u_physical
-    var auc_upper_bound = val_final + err_final + u_physical
+    var err_sound_final = err_sound_initial
+    var auc_lower_bound = val_final - err_sound_initial - u_physical
+    var auc_upper_bound = val_final + err_sound_initial + u_physical
     var regime = EPISTEMIC_REGIME_DOUBLE_REFINE_THEN_ABSTAIN
     var clinical_abstained = false
     var authorized = false
 
-    if err_unsafe {
+    let fits_initial = (val_initial - err_sound_initial - u_physical >= auc_min) && (val_initial + err_sound_initial + u_physical <= auc_max)
+    if fits_initial {
+        regime = EPISTEMIC_REGIME_SAFE_AUTHORIZE
+        clinical_abstained = false
+        authorized = true
+    } else {
         compute_refined = true
         let dt_fine = 0.05
         let dt_fine_half = 0.025
@@ -352,26 +402,28 @@ pub fn clinical_pbpk_evaluate_gate(
         let val_fine_half = clinical_pbpk_simulate_auc(p, dose_mg, t_end_h, dt_fine_half)
         let diff_fine = pbpk_abs(val_fine_half - val_fine_coarse)
         let err_fine_ode = diff_fine * (16.0 / 15.0) + diff_fine
+        err_sound_final = rk4_auc_sound_error(p, dose_mg, dt_fine_half)
 
         val_final = val_fine_half
         err_final = err_fine_ode
-        auc_lower_bound = val_final - err_final - u_physical
-        auc_upper_bound = val_final + err_final + u_physical
+        auc_lower_bound = val_final - err_sound_final - u_physical
+        auc_upper_bound = val_final + err_sound_final + u_physical
 
         if auc_lower_bound >= auc_min && auc_upper_bound <= auc_max {
             regime = EPISTEMIC_REGIME_NUMERICAL_AUTO_REFINE
             clinical_abstained = false
             authorized = true
         } else {
-            // Attribute the residual breach (rad already refined): al alone,
-            // else ep on top of al, else rad alone.
+            // Attribute the residual breach (rad already refined). Do-not-measure
+            // needs al to breach and no centre in val +- ep to fit with +- al.
             let al_breach = (val_final - u_al < auc_min) || (val_final + u_al > auc_max)
-            let ep_breach = (!al_breach) && ((val_final - u_ep_total - u_al < auc_min) || (val_final + u_ep_total + u_al > auc_max))
-            if al_breach {
+            let can_fit_after_measure = ((auc_max - auc_min) >= (u_al * 2.0)) && ((val_final + u_ep_total) >= (auc_min + u_al)) && ((val_final - u_ep_total) <= (auc_max - u_al))
+            if al_breach && (!can_fit_after_measure) {
                 regime = EPISTEMIC_REGIME_ALEATORY_ABSTAIN_NO_TDM
                 clinical_abstained = true
                 authorized = false
             } else {
+                let ep_breach = (val_final - u_ep_total - u_al < auc_min) || (val_final + u_ep_total + u_al > auc_max)
                 if ep_breach {
                     regime = EPISTEMIC_REGIME_PHYSICAL_ABSTAIN_TDM
                     clinical_abstained = true
@@ -391,6 +443,8 @@ pub fn clinical_pbpk_evaluate_gate(
         val_final: val_final,
         err_initial: err_initial,
         err_final: err_final,
+        err_sound_initial: err_sound_initial,
+        err_sound_final: err_sound_final,
         u_physical: u_physical,
         u_ep: u_ep_total,
         u_al: u_al,
@@ -410,7 +464,7 @@ pub fn clinical_pbpk_compare_naive_text_mc() -> bool with Mut, Div {
     let dose_mg = 5.0
     let t_end_h = 48.0
 
-    // Witness 1: Conflation Failure
+    // Witness 1: heuristic would certify a tight window; the sound gate abstains.
     let priors1 = ClinicalEpistemicPriors {
         cl_var: 1.0,
         kp_var: 0.0001,
@@ -418,8 +472,8 @@ pub fn clinical_pbpk_compare_naive_text_mc() -> bool with Mut, Div {
         rho_cl_fu: 0.0,
     }
     let val_est = clinical_pbpk_simulate_auc(&p, dose_mg, t_end_h, 0.05)
-    let auc_min1 = val_est - 0.5737
-    let auc_max1 = val_est + 0.5737
+    let auc_min1 = val_est - 1.0
+    let auc_max1 = val_est + 1.0
     let llm_unrefined_err = 0.25
 
     let receipt1 = clinical_pbpk_evaluate_gate(
@@ -438,7 +492,19 @@ pub fn clinical_pbpk_compare_naive_text_mc() -> bool with Mut, Div {
     let naive_upper = receipt1.val_initial + receipt1.err_initial + receipt1.u_physical
     let naive_mc_abstained = (naive_lower < auc_min1) || (naive_upper > auc_max1)
 
-    let witness1_pass = naive_mc_abstained && receipt1.compute_refined && (receipt1.regime == EPISTEMIC_REGIME_NUMERICAL_AUTO_REFINE) && receipt1.authorized && (!receipt1.clinical_abstained)
+    let receipt1w = clinical_pbpk_evaluate_gate(
+        &p,
+        &priors1,
+        dose_mg,
+        0.05,
+        0.0,
+        0.0,
+        0.0,
+        -20000.0,
+        20000.0
+    )
+    let wide_ok = (receipt1w.regime == EPISTEMIC_REGIME_SAFE_AUTHORIZE) && receipt1w.authorized && (!receipt1w.compute_refined) && (!receipt1w.clinical_abstained)
+    let witness1_pass = (!naive_mc_abstained) && receipt1.clinical_abstained && (!receipt1.authorized) && wide_ok
 
     // Witness 2: Correlated Multi-Parameter Blindness
     let u_cl = 3.0

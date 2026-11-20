@@ -115,8 +115,8 @@ fn test_global_soundness_and_cone_refinement() -> bool with Alloc, Mut, Div, Pan
 
 // ----------------------------------------------------------------------------
 // Test 2 (7C All Orthogonal (val, err, ep, al) PBPK Regimes + Anti-Text-MC)
-// The AUC majorant is heuristic, so SAFE_AUTHORIZE is unreturnable; every case
-// refines, then attributes the residual breach to al, ep, or rad alone.
+// Certification runs off the proven (loose) enclosure: SAFE on very wide
+// windows, refine-authorize on mid windows, abstain attribution otherwise.
 // ----------------------------------------------------------------------------
 fn abs_test(x: f64) -> f64 {
     if x < 0.0 { 0.0 - x } else { x }
@@ -132,11 +132,11 @@ fn test_epistemic_pbpk_regimes_and_witness() -> bool with Mut, Div {
     }
     let dose_mg = 5.0
 
-    // Heuristic estimator is honestly tagged: never Sound.
-    let tag_ok = !auc_error_bound_is_sound()
+    // Proven bound is honestly flagged as available.
+    let tag_ok = auc_error_bound_is_sound()
 
-    // Regime 2 (ex-SAFE case): wide window, no ep/al. Heuristic bound forces
-    // refinement; SAFE_AUTHORIZE must not appear. Refined fit authorizes.
+    // Regime 1: Safe Authorize — very wide window admits the sound (loose)
+    // initial enclosure, so no refinement is needed.
     let r1 = clinical_pbpk_evaluate_gate(
         &p,
         &priors,
@@ -145,12 +145,13 @@ fn test_epistemic_pbpk_regimes_and_witness() -> bool with Mut, Div {
         0.0,
         0.0,
         0.0,
-        2.0,
-        7.0
+        -20000.0,
+        20000.0
     )
-    let r1_ok = (r1.regime == 2) && (r1.regime != 1) && r1.compute_refined && (!r1.clinical_abstained) && r1.authorized
+    let r1_ok = (r1.regime == 1) && (!r1.compute_refined) && (!r1.clinical_abstained) && r1.authorized
 
-    // Regime 2: Numerical Auto Refine (compute_refined=true, clinical_abstained=false, authorized=true, err_final < err_initial)
+    // Regime 2: Numerical Auto Refine — initial sound bound too wide, the
+    // refined (dt 0.025) one fits. Heuristic err_final < err_initial.
     let r2 = clinical_pbpk_evaluate_gate(
         &p,
         &priors,
@@ -159,10 +160,10 @@ fn test_epistemic_pbpk_regimes_and_witness() -> bool with Mut, Div {
         0.50,
         0.0,
         0.0,
-        3.0,
-        6.0
+        -1500.0,
+        1500.0
     )
-    let r2_ok = (r2.regime == 2) && r2.compute_refined && (!r2.clinical_abstained) && r2.authorized && (r2.err_final < r2.err_initial)
+    let r2_ok = (r2.regime == 2) && r2.compute_refined && (!r2.clinical_abstained) && r2.authorized && (r2.err_final < r2.err_initial) && (r2.err_sound_final > 100.0) && (r2.err_sound_final < r2.err_sound_initial)
 
     // Regime 3: Physical Abstain TDM. ep (priors + u_ep) breaches [3, 5] while
     // al alone (u_al = 0) fits, so measuring again is the requested action.
@@ -235,12 +236,54 @@ fn test_epistemic_pbpk_regimes_and_witness() -> bool with Mut, Div {
     )
     let r5b_ok = (r5b.regime == 3) && (r5b.regime != 5)
 
+    // Al crosses alone but measurement can still help (centre in val +- ep can
+    // fit with +- al): TDM, not do-not-measure. Cut ep below the fit point
+    // and the same breach becomes do-not-measure.
+    let r6 = clinical_pbpk_evaluate_gate(
+        &p,
+        &small_priors,
+        dose_mg,
+        0.05,
+        0.0,
+        1.0,
+        1.5,
+        -10.0,
+        5.0
+    )
+    let r6_ok = (r6.regime == 3) && (r6.regime != 5)
+    let r6b = clinical_pbpk_evaluate_gate(
+        &p,
+        &small_priors,
+        dose_mg,
+        0.05,
+        0.0,
+        0.1,
+        1.5,
+        -10.0,
+        5.0
+    )
+    let r6b_ok = (r6b.regime == 5) && (r6b.regime != 3)
+
+    // Neither ep nor al crosses alone, both together do: TDM.
+    let r7 = clinical_pbpk_evaluate_gate(
+        &p,
+        &small_priors,
+        dose_mg,
+        0.05,
+        0.0,
+        0.5,
+        0.8,
+        3.0,
+        5.0
+    )
+    let r7_ok = (r7.regime == 3) && r7.clinical_abstained && (!r7.authorized)
+
     // SYNTHETIC_RESEARCH_WITNESS_NOT_MEDICAL_GUIDANCE guard: kept verbatim in
     // stdlib/llm/epistemic_clinical_pbpk.sio (const + header comment); not
     // asserted here because the ARM64 backend cannot lower str_eq.
     let witness_pass = clinical_pbpk_compare_naive_text_mc()
 
-    tag_ok && r1_ok && r2_ok && r3_ok && r4_ok && r5_ok && r5b_ok && witness_pass
+    tag_ok && r1_ok && r2_ok && r3_ok && r4_ok && r5_ok && r5b_ok && r6_ok && r6b_ok && r7_ok && witness_pass
 }
 
 // ----------------------------------------------------------------------------
