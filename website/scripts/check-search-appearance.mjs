@@ -91,7 +91,7 @@ function collectAlternateNames(value, found) {
 
 const FORMER_NAME_NOTE = 'Sounio (formerly Demetrios). Sounio was previously released as Demetrios, the former name of this language.';
 const FORMER_NAME_NOTE_PT = 'Sounio (anteriormente Demetrios). O Sounio foi lançado anteriormente como Demetrios, o nome anterior desta linguagem.';
-const RESEARCH_STATUS = 'Status: research language (pre-1.0). APIs may change; not recommended for production use.';
+const RESEARCH_STATUS = 'Status: Sounio 3.0 (pre-release). APIs may change; not recommended for production use.';
 const COMPILER_VERSION = /v0\.80|v0\.99|v0\.100|v1\.0/;
 const RESERVED_SCHEMA_IDS = new Set([
   'https://www.souniolang.org/about/#demetrios',
@@ -554,6 +554,7 @@ for await (const file of walk(dist)) {
     if (article) {
       const isSelfHostedPage = bare === '/learn/compiler/self-hosted/';
       const isEffectsPage = bare === '/learn/effects/';
+      const isEffectCheckerPage = bare === '/learn/compiler/effect-system/';
       const isUncertaintyPage = bare === '/learn/epistemic/uncertainty/';
       const headline = isSelfHostedPage
         ? SELF_HOSTED_PAGE.h1
@@ -572,6 +573,10 @@ for await (const file of walk(dist)) {
         }
       } else if (isUncertaintyPage) {
         if (article.dateModified !== UNCERTAINTY_EN.dateModified) {
+          errors.push(`${route}: dateModified is ${JSON.stringify(article.dateModified)}`);
+        }
+      } else if (isEffectCheckerPage) {
+        if (article.dateModified !== expected.dateModified) {
           errors.push(`${route}: dateModified is ${JSON.stringify(article.dateModified)}`);
         }
       } else if ('dateModified' in article) {
