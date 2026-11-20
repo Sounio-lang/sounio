@@ -54,21 +54,41 @@ fn emit_ptx_header(sm: i64) with IO {
     print("UNSUPPORTED_SM\n")
 }
 
-fn emit_lowering_body(sm: i64, stride: i64, offset: i64, load: i64, layout: i64, unroll: i64, phase: i64) with IO, Mut, Panic, Div {
+fn emit_lowering_body(sm: i64, stride: i64, offset: i64, load: i64, layout: i64, unroll: i64, phase: i64, sign_mode: i64) with IO, Mut, Panic, Div {
     emit_ptx_header(sm)
-    print("// PIREUS material probe: f64 mul, sign mul, add; ascending j; no FMA.\n")
-    print(".const .align 4 .u32 pireus_signs[16] = {")
-    var j: i64 = 0
-    while j < 16 {
-        var mask: i64 = 0
+    if sign_mode == 1 {
+        // Entry k holds bit j set when sigma(k^j, j) < 0: one word per output lane,
+        // read once. Each term then adds or subtracts the product; a + (-p) and
+        // a - p are the same IEEE operation, so the bits match the sign multiply.
+        print("// PIREUS material probe: f64 mul, per-lane fixed add/sub; ascending j; no FMA.\n")
+        print(".const .align 4 .u32 pireus_lane_signs[16] = {")
         var k: i64 = 0
         while k < 16 {
-            if ptx_sigma_phase(phase, (k ^ j) as i64, j as i64) < 0 { mask = mask | (1 << k) }
+            var mask: i64 = 0
+            var j: i64 = 0
+            while j < 16 {
+                if ptx_sigma_phase(phase, (k ^ j) as i64, j as i64) < 0 { mask = mask | (1 << j) }
+                j = j + 1
+            }
+            if k > 0 { print(",") }
+            print_int(mask)
             k = k + 1
         }
-        if j > 0 { print(",") }
-        print_int(mask)
-        j = j + 1
+    } else {
+        print("// PIREUS material probe: f64 mul, sign mul, add; ascending j; no FMA.\n")
+        print(".const .align 4 .u32 pireus_signs[16] = {")
+        var j: i64 = 0
+        while j < 16 {
+            var mask: i64 = 0
+            var k: i64 = 0
+            while k < 16 {
+                if ptx_sigma_phase(phase, (k ^ j) as i64, j as i64) < 0 { mask = mask | (1 << k) }
+                k = k + 1
+            }
+            if j > 0 { print(",") }
+            print_int(mask)
+            j = j + 1
+        }
     }
     print("};\n.visible .entry pireus_candidate(.param .u64 pa, .param .u64 pb, .param .u64 pc)\n.maxntid 16,1,1\n{\n")
     print("    .reg .b32 %r<32>;\n    .reg .b64 %rd<16>;\n    .reg .f64 %fd<8>;\n    .reg .pred %p<4>;\n")
@@ -82,6 +102,9 @@ fn emit_lowering_body(sm: i64, stride: i64, offset: i64, load: i64, layout: i64,
         address_index(layout, "%r3")
         print("    mul.wide.u32 %rd3, %r7, 8;\n    add.u64 %rd3, %rd1, %rd3;\n    ld.global.f64 %fd2, [%rd3];\n")
         print("    mov.b64 {%r11,%r12}, %fd2;\n")
+    }
+    if sign_mode == 1 {
+        print("    mov.u64 %rd4, pireus_lane_signs;\n    mul.wide.u32 %rd5, %r3, 4;\n    add.u64 %rd4, %rd4, %rd5;\n    ld.const.u32 %r14, [%rd4];\n")
     }
     print("    mov.f64 %fd0, 0d0000000000000000;\n    mov.u32 %r4, 0;\nLOOP:\n")
     var u: i64 = 0
@@ -99,10 +122,16 @@ fn emit_lowering_body(sm: i64, stride: i64, offset: i64, load: i64, layout: i64,
             print("    mov.b64 %fd2, {%r9,%r10};\n")
         }
         print("    mul.rn.f64 %fd3, %fd1, %fd2;\n")
-        print("    mov.u64 %rd4, pireus_signs;\n    mul.wide.u32 %rd5, %r5, 4;\n    add.u64 %rd4, %rd4, %rd5;\n    ld.const.u32 %r13, [%rd4];\n")
-        print("    shr.u32 %r13, %r13, %r3;\n    and.b32 %r13, %r13, 1;\n    setp.ne.u32 %p1, %r13, 0;\n")
-        print("    selp.f64 %fd4, 0dBFF0000000000000, 0d3FF0000000000000, %p1;\n")
-        print("    mul.rn.f64 %fd3, %fd3, %fd4;\n    add.rn.f64 %fd0, %fd0, %fd3;\n")
+        if sign_mode == 1 {
+            // unroll is 16 here, so the loop runs once with %r4 = 0 and j = u.
+            print("    and.b32 %r13, %r14, "); print_int(1 << u); print(";\n    setp.ne.u32 %p1, %r13, 0;\n")
+            print("    @%p1 sub.rn.f64 %fd0, %fd0, %fd3;\n    @!%p1 add.rn.f64 %fd0, %fd0, %fd3;\n")
+        } else {
+            print("    mov.u64 %rd4, pireus_signs;\n    mul.wide.u32 %rd5, %r5, 4;\n    add.u64 %rd4, %rd4, %rd5;\n    ld.const.u32 %r13, [%rd4];\n")
+            print("    shr.u32 %r13, %r13, %r3;\n    and.b32 %r13, %r13, 1;\n    setp.ne.u32 %p1, %r13, 0;\n")
+            print("    selp.f64 %fd4, 0dBFF0000000000000, 0d3FF0000000000000, %p1;\n")
+            print("    mul.rn.f64 %fd3, %fd3, %fd4;\n    add.rn.f64 %fd0, %fd0, %fd3;\n")
+        }
         u = u + 1
     }
     if unroll < 16 {
@@ -112,14 +141,14 @@ fn emit_lowering_body(sm: i64, stride: i64, offset: i64, load: i64, layout: i64,
     print("    mul.wide.u32 %rd3, %r7, 8;\n    add.u64 %rd3, %rd2, %rd3;\n    st.global.f64 [%rd3], %fd0;\nDONE:\n    ret;\n}\n")
 }
 
-pub fn emit_lowering_ptx(stride: i64, offset: i64, load: i64, layout: i64, unroll: i64, phase: i64) with IO, Mut, Panic, Div {
-    emit_lowering_body(121, stride, offset, load, layout, unroll, phase)
+pub fn emit_lowering_ptx(stride: i64, offset: i64, load: i64, layout: i64, unroll: i64, phase: i64, sign_mode: i64) with IO, Mut, Panic, Div {
+    emit_lowering_body(121, stride, offset, load, layout, unroll, phase, sign_mode)
 }
 
-pub fn emit_lowering_ptx_sm(sm: i64, stride: i64, offset: i64, load: i64, layout: i64, unroll: i64, phase: i64) with IO, Mut, Panic, Div {
+pub fn emit_lowering_ptx_sm(sm: i64, stride: i64, offset: i64, load: i64, layout: i64, unroll: i64, phase: i64, sign_mode: i64) with IO, Mut, Panic, Div {
     if sm != 121 && sm != 86 && sm != 75 {
         print("UNSUPPORTED_SM\n")
         return
     }
-    emit_lowering_body(sm, stride, offset, load, layout, unroll, phase)
+    emit_lowering_body(sm, stride, offset, load, layout, unroll, phase, sign_mode)
 }

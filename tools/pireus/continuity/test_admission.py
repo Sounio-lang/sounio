@@ -43,9 +43,17 @@ def main():
    ("kind2-without-phase","KIND_MASK",dict(kind=2)),
    ("kind1-with-phase","KIND_MASK",dict(phase=0)),
    ("phase-out-of-range","PHASE_RANGE",dict(kind=2,phase=65536)),
+   ("sign-mode-range","SIGN_MODE",dict(unroll=16,sign_mode=2)),
+   ("sign-mode-partial-unroll","SIGN_MODE_UNROLL",dict(unroll=8,sign_mode=1)),
+   ("sign-mode-rolled","SIGN_MODE_UNROLL",dict(sign_mode=1)),
    ("result-injection","PROPOSAL_FORMAT",dict(expected=1)),
    ("authority-injection","PROPOSAL_FORMAT",dict(claim_ready=1))]:
     check(label,reason,changes)
+  # sign_mode=1 is a lowering of the same algebra: same tensor, its own plan id.
+  fixed=check("sign-mode-fixed-add-sub",changes=dict(unroll=16,sign_mode=1))
+  rolled=check("sign-mode-zero",changes=dict(unroll=16,sign_mode=0))
+  assert fixed["sign_mode"]==1 and "sign_mode" not in rolled,(fixed,rolled)
+  assert fixed["tensor_sha256"]==first["tensor_sha256"] and fixed["plan_id"]==rolled["plan_id"]+65536,(fixed,rolled)
   check("unknown-facts","UNKNOWN_OR_CONTRADICTORY_FACTS",context_changes=dict(facts_state=0))
   check("contradictory-facts","UNKNOWN_OR_CONTRADICTORY_FACTS",context_changes=dict(facts_state=2))
   check("missing-shuffle","CAPABILITY",context_changes=dict(capabilities=39))

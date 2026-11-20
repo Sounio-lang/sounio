@@ -30,6 +30,8 @@ fn key_name(i: i64) -> string {
     if i == 15 { return "context" }
     // kind=2 only. The bilinear phase code naming the proposed operator.
     if i == 16 { return "phase" }
+    // Optional, both kinds. 0 (or absent) = sign table, 1 = per-lane fixed add/sub.
+    if i == 17 { return "sign_mode" }
     "UNKNOWN"
 }
 fn whitespace(c: i64) -> bool { c == 32 || c == 9 || c == 10 || c == 13 }
@@ -45,7 +47,7 @@ fn parse(s: string, n: i64) -> Document with Mut, Panic, Div {
     if p >= n || str_char_at(s, p) != 123 { return d }
     p = p + 1
     var count: i64 = 0
-    while count < 17 {
+    while count < 18 {
         p = skip(s, p, n)
         if p >= n || str_char_at(s, p) != 34 { return d }
         p = p + 1
@@ -58,7 +60,7 @@ fn parse(s: string, n: i64) -> Document with Mut, Panic, Div {
         if p >= n { return d }
         var key: i64 = -1
         var k: i64 = 0
-        while k < 17 {
+        while k < 18 {
             let name = key_name(k)
             if str_len(name) == p - start {
                 var same = true
@@ -213,7 +215,9 @@ fn main() -> i32 with IO, Mut, Panic, Div {
     // 65087 = fields 0..5 and 9..15 (kind=1). 130623 adds field 16 (kind=2).
     // Fields 6,7,8 stay context-only under both masks.
     if !p.valid { return refuse("PROPOSAL_FORMAT") }
-    if p.seen != 65087 && p.seen != 130623 { return refuse("PROPOSAL_FORMAT") }
+    // Bit 17 (131072) is the optional sign_mode key; absent means 0 and keeps the frozen bytes.
+    let core = p.seen & (0 - 1 - 131072)
+    if core != 65087 && core != 130623 { return refuse("PROPOSAL_FORMAT") }
     if !hash_matches(hash_text(cs, cn), &p) { return refuse("SNAPSHOT") }
     if c.values[0] != 1 || p.values[0] != 1 { return refuse("SCHEMA") }
     if c.values[1] != 701202 || p.values[1] != c.values[1] { return refuse("TARGET") }
@@ -227,8 +231,8 @@ fn main() -> i32 with IO, Mut, Panic, Div {
     let kind = p.values[9]
     if kind != 1 && kind != 2 { return refuse("KIND") }
     // The phase key is present exactly when kind is 2, and never otherwise.
-    if kind == 1 && p.seen != 65087 { return refuse("KIND_MASK") }
-    if kind == 2 && p.seen != 130623 { return refuse("KIND_MASK") }
+    if kind == 1 && core != 65087 { return refuse("KIND_MASK") }
+    if kind == 2 && core != 130623 { return refuse("KIND_MASK") }
     let phase = p.values[16]
     if kind == 2 && (phase < 0 || phase > 65535) { return refuse("PHASE_RANGE") }
     let stride = p.values[10]
@@ -239,6 +243,10 @@ fn main() -> i32 with IO, Mut, Panic, Div {
     if stride < 1 || stride > 15 || stride % 2 != 1 || offset > 15 { return refuse("LANE_MAP") }
     if load > 1 || layout > 1 { return refuse("GRAMMAR") }
     if unroll != 1 && unroll != 2 && unroll != 4 && unroll != 8 && unroll != 16 { return refuse("UNROLL") }
+    // sign_mode=1 needs j known at compile time, so only the fully unrolled loop admits it.
+    let sign_mode = p.values[17]
+    if sign_mode > 1 { return refuse("SIGN_MODE") }
+    if sign_mode == 1 && unroll != 16 { return refuse("SIGN_MODE_UNROLL") }
     var required: i64 = 39
     if load == 1 { required = required | 16 }
     if (c.values[6] & required) != required { return refuse("CAPABILITY") }
@@ -295,16 +303,18 @@ fn main() -> i32 with IO, Mut, Panic, Div {
     if materialize {
         // emit_lowering_ptx modulates the signs with the phase twist.
         // For kind=1 twist is 0 (pure Cayley-Dickson); for kind=2 twist is the operator phase.
-        if sm == 121 { emit_lowering_ptx(stride, offset, load, layout, unroll, twist) }
-        else { emit_lowering_ptx_sm(sm, stride, offset, load, layout, unroll, twist) }
+        if sm == 121 { emit_lowering_ptx(stride, offset, load, layout, unroll, twist, sign_mode) }
+        else { emit_lowering_ptx_sm(sm, stride, offset, load, layout, unroll, twist, sign_mode) }
         return 0
     }
-    let plan_id = (((stride * 16 + offset) * 2 + load) * 2 + layout) * 32 + unroll
+    // sign_mode=0 keeps every historical plan_id; sign_mode=1 lifts it above 65535.
+    let plan_id = (((stride * 16 + offset) * 2 + load) * 2 + layout) * 32 + unroll + sign_mode * 65536
     if kind == 2 {
         print("{\"schema\":1,\"authority\":\"Sounio\",\"decision\":\"ADMIT\",\"kind\":\"operator\",\"phase_code\":")
         print_int(phase)
         print(",\"plan_id\":")
         print_int(plan_id)
+        if sign_mode == 1 { print(",\"sign_mode\":1") }
         print(",\"tensor_components\":4096,\"tensor_encoding\":\"cd16-abk-offset1-v1\",\"tensor_sha256\":\"")
         print_digest(sha256_finalize(state))
         print("\",\"context_sha256\":\""); print_digest(hash_text(cs, cn))
@@ -318,6 +328,7 @@ fn main() -> i32 with IO, Mut, Panic, Div {
     }
     print("{\"schema\":1,\"authority\":\"Sounio\",\"decision\":\"ADMIT\",\"kind\":\"lowering\",\"plan_id\":")
     print_int(plan_id)
+    if sign_mode == 1 { print(",\"sign_mode\":1") }
     print(",\"tensor_components\":4096,\"tensor_encoding\":\"cd16-abk-offset1-v1\",\"tensor_sha256\":\"")
     print_digest(sha256_finalize(state))
     print("\",\"context_sha256\":\""); print_digest(hash_text(cs, cn))
