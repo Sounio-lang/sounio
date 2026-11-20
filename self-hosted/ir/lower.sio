@@ -1836,13 +1836,121 @@ fn lower_name_in_closure_params(params: &Option<Box<ClosureParamList>>, name: Na
 struct LowerLoopLabels {
     break_labels: [i64; 256],
     continue_labels: [i64; 256],
+    // `break v`: the register a `loop` expression yields (-1 for a `loop` none
+    // of whose breaks carries a value, and for `while`/`for`), and the scalar
+    // kind of its break values (expr_result_scalar_kind_ref; 0 until a break
+    // with a value is lowered).
+    result_regs: [i64; 256],
+    result_kinds: [i64; 256],
 }
 
 fn empty_lower_loop_labels() -> LowerLoopLabels {
     LowerLoopLabels {
         break_labels: [IR_INVALID_LABEL; 256],
         continue_labels: [IR_INVALID_LABEL; 256],
+        result_regs: [0 - 1; 256],
+        result_kinds: [0; 256],
     }
+}
+
+// The register and scalar kind of the `loop` expression lowered last. The let
+// that binds it reads them (lower_let_stmt_type_metadata_ref): the value's kind
+// is known where each `break v` is lowered, with the loop body's locals in
+// scope, not from the `loop` expression outside it.
+var LOWER_LOOP_VALUE_REG: i64 = 0 - 1
+var LOWER_LOOP_VALUE_KIND: i64 = 0
+
+// Does a `break v` in this expression exit the loop being lowered? A nested
+// `loop`, `while`, `for` or closure body has breaks of its own; a `while`
+// condition and a `for` iterable still belong to the enclosing loop.
+fn lower_expr_has_own_break_value(e: &Expr, depth: i64) -> bool with Mut, Panic, Div {
+    if depth > 256 { return false }
+    let k = (*e).kind
+    if k == ExprKind::ExprBreak {
+        match (*e).left {
+            Some(_) => { return true }
+            None => { return false }
+        }
+    }
+    if k == ExprKind::ExprClosure || k == ExprKind::ExprLoop { return false }
+    if k == ExprKind::ExprWhile || k == ExprKind::ExprForIn {
+        match (*e).left {
+            Some(x) => { return lower_expr_has_own_break_value(&(*x), depth + 1) }
+            None => { return false }
+        }
+    }
+    match (*e).left {
+        Some(x) => { if lower_expr_has_own_break_value(&(*x), depth + 1) { return true } }
+        None => {}
+    }
+    match (*e).right {
+        Some(x) => { if lower_expr_has_own_break_value(&(*x), depth + 1) { return true } }
+        None => {}
+    }
+    match (*e).else_expr {
+        Some(x) => { if lower_expr_has_own_break_value(&(*x), depth + 1) { return true } }
+        None => {}
+    }
+    match (*e).block {
+        Some(b) => { if lower_stmts_have_own_break_value(&(*b).stmts, depth + 1) { return true } }
+        None => {}
+    }
+    var args = &(*e).args
+    while true {
+        match *args {
+            Some(a) => {
+                if lower_expr_has_own_break_value(&(*a).head, depth + 1) { return true }
+                args = &(*a).tail
+            }
+            None => break
+        }
+    }
+    var arms = &(*e).arms
+    while true {
+        match *arms {
+            Some(al) => {
+                match (*al).head.guard {
+                    Some(g) => { if lower_expr_has_own_break_value(&(*g), depth + 1) { return true } }
+                    None => {}
+                }
+                if lower_expr_has_own_break_value(&(*al).head.body, depth + 1) { return true }
+                arms = &(*al).tail
+            }
+            None => break
+        }
+    }
+    var fields = &(*e).fields
+    while true {
+        match *fields {
+            Some(fl) => {
+                if lower_expr_has_own_break_value(&(*fl).head.value, depth + 1) { return true }
+                fields = &(*fl).tail
+            }
+            None => break
+        }
+    }
+    false
+}
+
+fn lower_stmts_have_own_break_value(opt: &Option<Box<StmtList>>, depth: i64) -> bool with Mut, Panic, Div {
+    var cur = opt
+    while true {
+        match *cur {
+            Some(sl) => {
+                match (*sl).head.expr {
+                    Some(x) => { if lower_expr_has_own_break_value(&(*x), depth + 1) { return true } }
+                    None => {}
+                }
+                match (*sl).head.target {
+                    Some(x) => { if lower_expr_has_own_break_value(&(*x), depth + 1) { return true } }
+                    None => {}
+                }
+                cur = &(*sl).tail
+            }
+            None => break
+        }
+    }
+    false
 }
 
 let LOWER_GLOBAL_ELEM_F64: i64 = 2
@@ -31488,11 +31596,43 @@ impl Lowerer {
             var ll_box = lo.loop_labels
             (*ll_box).continue_labels[lo.loop_depth as usize] = continue_label
             (*ll_box).break_labels[lo.loop_depth as usize] = break_label
+            (*ll_box).result_regs[lo.loop_depth as usize] = 0 - 1
+            (*ll_box).result_kinds[lo.loop_depth as usize] = 0
             lo.loop_depth = lo.loop_depth + 1
             lo
         } else {
             lo.report_error_at(9175)
         }
+    }
+
+    // After push_loop_labels: the innermost loop yields `res` (a `loop` with a
+    // `break v`).
+    fn set_loop_result_reg(self, res: i64) -> Lowerer with Mut, Panic {
+        if self.loop_depth > 0 {
+            var ll_box = self.loop_labels
+            (*ll_box).result_regs[(self.loop_depth - 1) as usize] = res
+        }
+        self
+    }
+
+    fn current_loop_result_reg(self) -> i64 with Panic {
+        if self.loop_depth <= 0 { return 0 - 1 }
+        (*self.loop_labels).result_regs[(self.loop_depth - 1) as usize]
+    }
+
+    fn current_loop_result_kind(self) -> i64 with Panic {
+        if self.loop_depth <= 0 { return 0 }
+        (*self.loop_labels).result_kinds[(self.loop_depth - 1) as usize]
+    }
+
+    fn note_loop_result_kind(self, k: i64) -> Lowerer with Mut, Panic {
+        if self.loop_depth > 0 && k != 0 {
+            var ll_box = self.loop_labels
+            if (*ll_box).result_kinds[(self.loop_depth - 1) as usize] == 0 {
+                (*ll_box).result_kinds[(self.loop_depth - 1) as usize] = k
+            }
+        }
+        self
     }
 
     fn pop_loop_labels(self) -> Lowerer with Mut {
@@ -32176,8 +32316,17 @@ impl Lowerer {
         if gkind == LOWER_GLOBAL_SCALAR_I64 {
             return 1
         }
+        // BSS_INIT_STRING_MAGIC is itself a scalar global whose initialiser word
+        // is the magic, and a lowerer started from the accumulated module has no
+        // type-table entry for it (gkind 0). The word alone then reads as a string
+        // global, so `slot.prof_counter_id == BSS_INIT_STRING_MAGIC` in this very
+        // function lowered to str_eq(int, int) once the merged program was large
+        // enough to reach that path: gen2 SIGSEGV in str_eq on any global use.
+        // The parse-time side table is the witness lower_apply_global_var_init
+        // used to write the magic, so require it too.
         if gkind == LOWER_GLOBAL_SCALAR_STRING
-            || ir_fn_get(&(*self.module), fn_id as usize).prof_counter_id == BSS_INIT_STRING_MAGIC {
+            || (ir_fn_get(&(*self.module), fn_id as usize).prof_counter_id == BSS_INIT_STRING_MAGIC
+                && ast_global_str_init_present(name) == 1) {
             return 3
         }
         0
@@ -38490,6 +38639,10 @@ impl Lowerer {
                         // Positively classified computed scalar locals retain their
                         // integer kind for a later println(local).
                         lo = lo.bind_local_scalar_kind(s.name, 1)
+                    } else if (*expr_box_sk).kind == ExprKind::ExprLoop && reg >= 0 && reg == LOWER_LOOP_VALUE_REG
+                        && (LOWER_LOOP_VALUE_KIND == 1 || LOWER_LOOP_VALUE_KIND == 2 || LOWER_LOOP_VALUE_KIND == 3) {
+                        // `let r = loop { .. break v .. }`: the kind the breaks recorded.
+                        lo = lo.bind_local_scalar_kind(s.name, LOWER_LOOP_VALUE_KIND)
                     } else if (*expr_box_sk).kind == ExprKind::ExprHandle || (*expr_box_sk).kind == ExprKind::ExprPerform || (*expr_box_sk).kind == ExprKind::ExprResume {
                         // SIO-417 v1: handler answers / op results are i64 words.
                         lo = lo.bind_local_scalar_kind(s.name, 1)
@@ -48853,12 +49006,28 @@ impl Lowerer {
         let rgn_pair = lo.loop_rgn_begin()
         lo = rgn_pair.0
         let rec = rgn_pair.1
+        // `let r = loop { .. break v .. }`: every `break v` copies v into `res`
+        // and jumps to the exit, as each arm of an `if` copies into its merge
+        // register. Without this the value was lowered and dropped, and the
+        // loop yielded `()`.
+        var res: i64 = 0 - 1
+        var has_value = false
+        match e.block {
+            Some(vb) => { has_value = lower_stmts_have_own_break_value(&(*vb).stmts, 0) }
+            None => {}
+        }
+        if has_value {
+            let pair_res = lo.fresh_reg()
+            lo = pair_res.0
+            res = pair_res.1
+        }
         lo = lo.emit(ir_label(l_top))
         if rec >= 0 {
             lo = lo.push_loop_labels(LOWER_LOOP_REC_ITER[rec as usize], LOWER_LOOP_REC_BRK[rec as usize])
         } else {
             lo = lo.push_loop_labels(l_top, l_end)
         }
+        lo = lo.set_loop_result_reg(res)
         let loop_block_opt: Option<Box<Block>> = e.block
         match loop_block_opt {
             Some(blk) => {
@@ -48867,12 +49036,21 @@ impl Lowerer {
             }
             None => {}
         }
+        let res_kind = lo.current_loop_result_kind()
         lo = lo.pop_loop_labels()
         if rec >= 0 { lo = lo.loop_rgn_end_iter(rec) }
         lo = lo.emit(ir_jump(l_top))
         if rec >= 0 { lo = lo.loop_rgn_end_break(rec) }
         lo = lo.emit(ir_label(l_end))
-        lo.emit_unit()
+        if !has_value {
+            return lo.emit_unit()
+        }
+        if res_kind == 2 {
+            lo = lo.emit(ir_mark_float_reg(res))
+        }
+        LOWER_LOOP_VALUE_REG = res
+        LOWER_LOOP_VALUE_KIND = res_kind
+        (lo, res)
     }
 
     fn lower_for_in_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
@@ -49497,6 +49675,27 @@ impl Lowerer {
         let pair = self.lower_opt_expr_ref(&e.left)
         var lo = pair.0
         let reg = pair.1
+        match e.left {
+            Some(v) => {
+                let res = lo.current_loop_result_reg()
+                if res >= 0 {
+                    // The value's kind is read here, inside the loop body, where its
+                    // locals are still bound.
+                    let vk = lo.expr_result_scalar_kind_ref(&(*v))
+                    if vk == 5 {
+                        // A wide-float handle needs its width bound on the result
+                        // local; refuse rather than yield an unwidthed handle.
+                        lo = lo.report_error_at(15094)
+                    }
+                    lo = lo.note_loop_result_kind(vk)
+                    lo = lo.emit(ir_copy(res, reg))
+                } else {
+                    // The checker refuses `break v` outside `loop` (E302).
+                    lo = lo.report_error_at(15093)
+                }
+            }
+            None => {}
+        }
         let target = lo.current_break_label()
         if target >= 0 {
             lo = lo.emit(ir_jump(target))
