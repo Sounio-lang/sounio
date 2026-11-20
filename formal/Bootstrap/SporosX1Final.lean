@@ -1,13 +1,13 @@
 /-
-TARGET STATEMENT ONLY — NOT REGISTERED IN `formal/lakefile.lean`.
+SPOROS STAGE-1 FINAL TARGETS — REGISTERED IN `formal/lakefile.lean`.
 
-This file states the stage-1 theorem that the composition in
-`Bootstrap.SporosX1Comp` and the real-image instantiation in
-`Bootstrap.SporosX1Image` are aimed at.  The proofs are `sorry` on
-purpose: the point of the file is to make the remaining subgoals
-(parse/decode, refusal branches, termination accounting) reviewable
-before more proof work is invested in them.  Do not import this file
-from a registered module until the sorries are gone.
+This file states and closes the stage-1 correctness theorems aimed at by
+`Bootstrap.SporosX1Comp`, `Bootstrap.SporosX1Image`, `Bootstrap.SporosX1FinalRefuse`,
+`Bootstrap.SporosX1FinalChkRefuse`, `Bootstrap.SporosX1FinalWalkRefuse`, and
+`Bootstrap.SporosX1FinalCompose`: existence of a non-refusing oracle under
+`Room` (`stage1_oracle_exists_target`), biconditional accept/refuse and totality
+within `stage1Bound f` (`stage1_final_target`), and oracle memory-refusal exit 2
+(`stage1_final_exit2_target`).
 
 ORACLE EXISTENCE: `OracleAdmits` and `¬ HitsNomem` are whole-run
 hypotheses of the main targets, which are correct as they stand
@@ -19,7 +19,7 @@ and the main statements are unchanged.  What that lemma still
 needs is the loader-prefix invariant at the four `mmap`/`mremap`
 sites.
 -/
-import Bootstrap.SporosX1FinalRefuse
+import Bootstrap.SporosX1FinalCompose
 
 open X86Env X86Int X86Dec Sporos
 
@@ -106,7 +106,7 @@ theorem stage1_final_target
        run stage1Im k
           (Out.ok (stage1Init f path argv0 stdin oracle top)) =
           Out.exit 1)) := by
-  sorry
+  exact stage1_final_target_proof f path argv0 stdin oracle top hinit horacle hnomem
 
 /-- FINAL TARGET, memory-refusal case: if the run reaches a memory
 syscall whose next oracle choice is a refusal, then within the same
