@@ -112,3 +112,52 @@ A admissão recusa `sign_mode>1` com `SIGN_MODE` e `sign_mode=1` sem `unroll=16`
 | b003-16 | 33 | C7b (7, 210) | 15 | 2 | 0 | 0 | nova |
 
 **Expectativa honesta.** Depois das cargas, cada termo tinha 11 instruções (mul, quatro para achar e ler a palavra da tabela, shr, and, setp, selp, mul por ±1 e add). Agora tem 5 (mul, and, setp e as duas predicadas, das quais só uma executa por lane), sem acesso à memória constante dentro do laço. As cargas de `a` e de `b` (ou o shuffle) continuam iguais, e com 320 vetores o kernel provavelmente é dominado por latência e lançamento, não por aritmética. Os pares b003-01..03 contra b002-01, -06 e -11 dizem se a extensão move o tempo. Um ganho de 5% sobre o direct, nas duas GPUs e com ci95 positivo, continua sendo improvável.
+
+## Lote b004 (2026-11-20), kind=2 com pack=1
+
+Este é o primeiro lote da extensão 2 da gramática, `pack`. As 16 propostas são kind=2 com `pack=1`. Seis delas também usam `sign_mode=1`, sempre com `unroll=16`.
+
+**Que forma de pack este kernel admite.** O lançamento não é do PTX. Quem lança é o `gpu_probe.py`, com grade igual ao número de vetores e blocos de 16 threads (`cuLaunchKernel(f, n,1,1, 16,1,1, ...)`). Esse arquivo é da Spark e tem o hash travado em `UNCHANGED`. Um bloco de 32 threads com máscara de shuffle de 32 bits exigiria mudar a geometria do lançamento, então isso ficou fora deste lote.
+
+A forma mínima correta dentro do kernel é esta: o bloco c calcula os vetores 2c (A) e min(2c+1, n-1) (B), e os blocos com 2c >= n saem na hora.
+- Cada lane k faz os termos dos dois vetores intercalados, em j crescente. Cada vetor tem seu próprio acumulador e a mesma ordem de operações do kernel sem pack.
+- O sinal de (k, j) não depende do vetor. Por isso a busca na tabela (ou o predicado do `sign_mode`) é feita uma vez por par de termos.
+- Com `load=1`, cada lane guarda o `b` dos dois vetores e o shuffle dobra, sempre dentro dos mesmos 16 lanes (máscara 65535).
+- Com n ímpar, o último bloco calcula o mesmo vetor duas vezes e grava bits iguais.
+- `.maxntid 16,1,1` não muda.
+
+**Admissão.** A chave é opcional, no bit 18 da máscara (262144). Ausente ou 0, nada muda: os PTX e recibos da Phase A, b001, b002 e b003 saem idênticos. `frozen_inbox_outputs.json` agora inclui o b003, e o teste também confere as variantes explícitas `pack=0` e `sign_mode=0`.
+
+`pack>1` é recusado com `PACK`. Não existe outra combinação inválida: `pack` funciona com qualquer `unroll`, `load` e `layout`. O `sign_mode=1` continua exigindo `unroll=16` (`SIGN_MODE_UNROLL`). O recibo ganha `"pack":1`, e o `plan_id` soma 131072. O tensor não muda.
+
+**Paridade antes da GPU.** `test_pack_ptx_computes_the_operator_reference_bit_for_bit` roda o PTX com pack pelo `ptx_sim.py` sobre as 320 fixtures. Os casos cobrem kind=1 e quatro fases, os dois loads, os dois layouts, unroll de 2 a 16 e o `sign_mode`. Dois casos usam 319 vetores, para exercitar a cauda ímpar. O resultado é zero divergências contra `operator_reference.py`.
+
+Há dois controles, e os dois precisam divergir: um bit trocado na tabela de sinais e a remoção do store do vetor B. O simulador agora começa a saída com um sentinela finito, para que uma saída nunca gravada não passe por resultado. Todos os PTX do lote também passaram pelo `ptxas` para sm_86 e sm_75.
+
+**O lote.**
+- b004-01..04 repetem b003-01, -02, -03 e -14 com `pack=1`: `sign_mode=1` nos dois.
+- b004-05..07 repetem b002-01, -06 e -11 com `pack=1`: `sign_mode` ausente nos dois.
+- Com o b002 e o b003, os três operadores b002-01, -06 e -11 ficam num fatorial 2x2 (`sign_mode` × `pack`), com o mesmo plano de lane.
+- b004-08 e -09 repetem os melhores do b002 contra direct (b002-07 no sm86 e b002-09 no sm75), com `unroll` 1 e 2.
+- b004-10..16 são sete representantes canônicos novos: 2 em (3, 114), 3 em (7, 114) e 2 em (7, 210). Foram sorteados com a semente 20261120004, e os pares (load, layout) alternam.
+
+| arquivo | phase | família | stride | offset | load | layout | unroll | sign_mode | origem |
+|---|---|---|---|---|---|---|---|---|---|
+| b004-01 | 36077 | C3 (3, 114) | 1 | 15 | 0 | 0 | 16 | 1 | par de b003-01 |
+| b004-02 | 36076 | C7a (7, 114) | 11 | 3 | 1 | 1 | 16 | 1 | par de b003-02 |
+| b004-03 | 33825 | C7b (7, 210) | 13 | 9 | 0 | 1 | 16 | 1 | par de b003-03 |
+| b004-04 | 33824 | C7b (7, 210) | 9 | 2 | 0 | 1 | 16 | 1 | par de b003-14 |
+| b004-05 | 36077 | C3 (3, 114) | 1 | 15 | 0 | 0 | 16 | 0 | par de b002-01 |
+| b004-06 | 36076 | C7a (7, 114) | 11 | 3 | 1 | 1 | 16 | 0 | par de b002-06 |
+| b004-07 | 33825 | C7b (7, 210) | 13 | 9 | 0 | 1 | 16 | 0 | par de b002-11 |
+| b004-08 | 67 | C7a (7, 114) | 7 | 10 | 0 | 1 | 1 | 0 | par de b002-07 |
+| b004-09 | 1160 | C7a (7, 114) | 15 | 14 | 0 | 0 | 2 | 0 | par de b002-09 |
+| b004-10 | 32931 | C3 (3, 114) | 3 | 0 | 0 | 0 | 16 | 1 | nova |
+| b004-11 | 36075 | C3 (3, 114) | 15 | 6 | 1 | 0 | 1 | 0 | nova |
+| b004-12 | 2190 | C7a (7, 114) | 7 | 6 | 0 | 1 | 16 | 1 | nova |
+| b004-13 | 2113 | C7a (7, 114) | 3 | 1 | 1 | 1 | 4 | 0 | nova |
+| b004-14 | 34018 | C7a (7, 114) | 9 | 1 | 0 | 0 | 16 | 1 | nova |
+| b004-15 | 32768 | C7b (7, 210) | 11 | 12 | 1 | 0 | 8 | 0 | nova |
+| b004-16 | 1057 | C7b (7, 210) | 15 | 5 | 0 | 1 | 2 | 0 | nova |
+
+**Expectativa honesta.** Com pack, metade dos blocos sai sem trabalhar, e a outra metade tem duas cadeias independentes de 16 termos por lane, que o `ptxas` pode intercalar para esconder a latência das cargas. O número de warps residentes cai à metade, e o sinal por termo é dividido entre os dois vetores. Se o kernel for limitado por latência e não por ocupação, pack pode ajudar. Se for limitado pelo número de warps em voo, deve perder. Um ganho de 5% sobre o direct, nas duas GPUs e com ci95 positivo, ainda seria surpresa.
