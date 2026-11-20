@@ -6,7 +6,7 @@ use materialize_ptx::{emit_lowering_ptx, emit_lowering_ptx_sm}
 use crypto::sha256::{sha256_init, sha256_update, sha256_finalize, SHA256Digest}
 
 struct Document {
-    values: [i64; 18],
+    values: [i64; 19],
     seen: i64,
     context: [i64; 64],
     valid: bool,
@@ -32,6 +32,8 @@ fn key_name(i: i64) -> string {
     if i == 16 { return "phase" }
     // Optional, both kinds. 0 (or absent) = sign table, 1 = per-lane fixed add/sub.
     if i == 17 { return "sign_mode" }
+    // Optional, both kinds. 0 (or absent) = one vector per block, 1 = two vectors per block.
+    if i == 18 { return "pack" }
     "UNKNOWN"
 }
 fn whitespace(c: i64) -> bool { c == 32 || c == 9 || c == 10 || c == 13 }
@@ -41,13 +43,13 @@ fn skip(s: string, p: i64, n: i64) -> i64 with Mut {
     x
 }
 fn parse(s: string, n: i64) -> Document with Mut, Panic, Div {
-    var d = Document { values: [0; 18], seen: 0, context: [0; 64], valid: false }
+    var d = Document { values: [0; 19], seen: 0, context: [0; 64], valid: false }
     if n <= 0 || n > 4096 || str_len(s) != n { return d }
     var p = skip(s, 0, n)
     if p >= n || str_char_at(s, p) != 123 { return d }
     p = p + 1
     var count: i64 = 0
-    while count < 18 {
+    while count < 19 {
         p = skip(s, p, n)
         if p >= n || str_char_at(s, p) != 34 { return d }
         p = p + 1
@@ -60,7 +62,7 @@ fn parse(s: string, n: i64) -> Document with Mut, Panic, Div {
         if p >= n { return d }
         var key: i64 = -1
         var k: i64 = 0
-        while k < 18 {
+        while k < 19 {
             let name = key_name(k)
             if str_len(name) == p - start {
                 var same = true
@@ -215,8 +217,9 @@ fn main() -> i32 with IO, Mut, Panic, Div {
     // 65087 = fields 0..5 and 9..15 (kind=1). 130623 adds field 16 (kind=2).
     // Fields 6,7,8 stay context-only under both masks.
     if !p.valid { return refuse("PROPOSAL_FORMAT") }
-    // Bit 17 (131072) is the optional sign_mode key; absent means 0 and keeps the frozen bytes.
-    let core = p.seen & (0 - 1 - 131072)
+    // Bit 17 (131072) is the optional sign_mode key and bit 18 (262144) the optional
+    // pack key; absent means 0 and keeps the frozen bytes.
+    let core = p.seen & (0 - 1 - 131072 - 262144)
     if core != 65087 && core != 130623 { return refuse("PROPOSAL_FORMAT") }
     if !hash_matches(hash_text(cs, cn), &p) { return refuse("SNAPSHOT") }
     if c.values[0] != 1 || p.values[0] != 1 { return refuse("SCHEMA") }
@@ -247,6 +250,10 @@ fn main() -> i32 with IO, Mut, Panic, Div {
     let sign_mode = p.values[17]
     if sign_mode > 1 { return refuse("SIGN_MODE") }
     if sign_mode == 1 && unroll != 16 { return refuse("SIGN_MODE_UNROLL") }
+    // pack=1: each 16-thread block computes vectors 2c and 2c+1 (the launch is fixed
+    // at 16 threads by gpu_probe.py, so the pair shares the lanes, not a wider block).
+    let pack = p.values[18]
+    if pack > 1 { return refuse("PACK") }
     var required: i64 = 39
     if load == 1 { required = required | 16 }
     if (c.values[6] & required) != required { return refuse("CAPABILITY") }
@@ -303,18 +310,19 @@ fn main() -> i32 with IO, Mut, Panic, Div {
     if materialize {
         // emit_lowering_ptx modulates the signs with the phase twist.
         // For kind=1 twist is 0 (pure Cayley-Dickson); for kind=2 twist is the operator phase.
-        if sm == 121 { emit_lowering_ptx(stride, offset, load, layout, unroll, twist, sign_mode) }
-        else { emit_lowering_ptx_sm(sm, stride, offset, load, layout, unroll, twist, sign_mode) }
+        if sm == 121 { emit_lowering_ptx(stride, offset, load, layout, unroll, twist, sign_mode, pack) }
+        else { emit_lowering_ptx_sm(sm, stride, offset, load, layout, unroll, twist, sign_mode, pack) }
         return 0
     }
-    // sign_mode=0 keeps every historical plan_id; sign_mode=1 lifts it above 65535.
-    let plan_id = (((stride * 16 + offset) * 2 + load) * 2 + layout) * 32 + unroll + sign_mode * 65536
+    // sign_mode=0 and pack=0 keep every historical plan_id; each extension adds its own bit.
+    let plan_id = (((stride * 16 + offset) * 2 + load) * 2 + layout) * 32 + unroll + sign_mode * 65536 + pack * 131072
     if kind == 2 {
         print("{\"schema\":1,\"authority\":\"Sounio\",\"decision\":\"ADMIT\",\"kind\":\"operator\",\"phase_code\":")
         print_int(phase)
         print(",\"plan_id\":")
         print_int(plan_id)
         if sign_mode == 1 { print(",\"sign_mode\":1") }
+        if pack == 1 { print(",\"pack\":1") }
         print(",\"tensor_components\":4096,\"tensor_encoding\":\"cd16-abk-offset1-v1\",\"tensor_sha256\":\"")
         print_digest(sha256_finalize(state))
         print("\",\"context_sha256\":\""); print_digest(hash_text(cs, cn))
@@ -329,6 +337,7 @@ fn main() -> i32 with IO, Mut, Panic, Div {
     print("{\"schema\":1,\"authority\":\"Sounio\",\"decision\":\"ADMIT\",\"kind\":\"lowering\",\"plan_id\":")
     print_int(plan_id)
     if sign_mode == 1 { print(",\"sign_mode\":1") }
+    if pack == 1 { print(",\"pack\":1") }
     print(",\"tensor_components\":4096,\"tensor_encoding\":\"cd16-abk-offset1-v1\",\"tensor_sha256\":\"")
     print_digest(sha256_finalize(state))
     print("\",\"context_sha256\":\""); print_digest(hash_text(cs, cn))

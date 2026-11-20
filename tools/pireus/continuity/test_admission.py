@@ -46,6 +46,8 @@ def main():
    ("sign-mode-range","SIGN_MODE",dict(unroll=16,sign_mode=2)),
    ("sign-mode-partial-unroll","SIGN_MODE_UNROLL",dict(unroll=8,sign_mode=1)),
    ("sign-mode-rolled","SIGN_MODE_UNROLL",dict(sign_mode=1)),
+   ("pack-range","PACK",dict(pack=2)),
+   ("pack-with-rolled-sign-mode","SIGN_MODE_UNROLL",dict(pack=1,sign_mode=1)),
    ("result-injection","PROPOSAL_FORMAT",dict(expected=1)),
    ("authority-injection","PROPOSAL_FORMAT",dict(claim_ready=1))]:
     check(label,reason,changes)
@@ -54,6 +56,12 @@ def main():
   rolled=check("sign-mode-zero",changes=dict(unroll=16,sign_mode=0))
   assert fixed["sign_mode"]==1 and "sign_mode" not in rolled,(fixed,rolled)
   assert fixed["tensor_sha256"]==first["tensor_sha256"] and fixed["plan_id"]==rolled["plan_id"]+65536,(fixed,rolled)
+  # pack=1 is a schedule of the same algebra: same tensor, its own plan id.
+  packed=check("pack-two-vectors",changes=dict(pack=1))
+  assert packed["pack"]==1 and "pack" not in first,(packed,first)
+  assert packed["tensor_sha256"]==first["tensor_sha256"] and packed["plan_id"]==first["plan_id"]+131072,(packed,first)
+  both=check("pack-and-sign-mode",changes=dict(unroll=16,sign_mode=1,pack=1))
+  assert both["plan_id"]==fixed["plan_id"]+131072 and both["sign_mode"]==1 and both["pack"]==1,(both,fixed)
   check("unknown-facts","UNKNOWN_OR_CONTRADICTORY_FACTS",context_changes=dict(facts_state=0))
   check("contradictory-facts","UNKNOWN_OR_CONTRADICTORY_FACTS",context_changes=dict(facts_state=2))
   check("missing-shuffle","CAPABILITY",context_changes=dict(capabilities=39))

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Host interpreter for the PIREUS lowering PTX, used only by the tests.
 
-It runs the exact text materialize_ptx.sio emits, one block of 16 threads per
-vector in lockstep, with binary64 round-to-nearest on the host (Python floats
-are IEEE binary64 and never fuse). It knows only the instructions that emitter
+It runs the exact text materialize_ptx.sio emits: grid = vector count and 16
+threads per block in lockstep, as gpu_probe.py launches it, with binary64
+round-to-nearest on the host (Python floats are IEEE binary64 and never fuse). It knows only the instructions that emitter
 writes and refuses anything else, so a new opcode in the emitter fails the test
 instead of being skipped. It is not a GPU: it shows the PTX text computes the
 reference, and the probe on real hardware is still the material evidence.
@@ -59,7 +59,8 @@ class Kernel:
         self.const_tables = {base: words for base, words in self.consts.values()}
 
     def run(self, a, b_in, vectors):
-        c = [0] * (16 * vectors)
+        # A finite sentinel, so an output the kernel never stores cannot pass as a result.
+        c = [0x5A5A5A5A5A5A5A5A] * (16 * vectors)
         mem = {1: a, 2: b_in, 3: c}
         for block in range(vectors):
             regs = [dict() for _ in range(16)]
@@ -116,6 +117,12 @@ class Kernel:
             r[a[0]] = v(1)
         elif op == "setp.gt.u32":
             r[a[0]] = v(1) > v(2)
+        elif op == "setp.ge.u32":
+            r[a[0]] = v(1) >= v(2)
+        elif op == "min.u32":
+            r[a[0]] = min(v(1), v(2))
+        elif op == "shl.b32":
+            r[a[0]] = (v(1) << v(2)) & M32 if v(2) < 32 else 0
         elif op == "setp.lt.u32":
             r[a[0]] = v(1) < v(2)
         elif op == "setp.ne.u32":
