@@ -37824,5 +37824,732 @@ theorem parser_back_classify_nh {A L sp1 T S c nw mn : Nat}
       (by rw [hs9sh, hs8mem']) hs9r4'
       (noHitUpTo_add hnh78 hrun78 hs9nh) (by omega))
 
+/-- A run that has exited stays exited. -/
+theorem run_exit_absorb {c : Nat} (n : Nat) :
+    run stage1Im n (Out.exit c) = Out.exit c := by
+  cases n <;> rfl
+
+/-- No nomem hit anywhere when a prefix segment is hit-free
+and the suffix state never hits. -/
+theorem not_hitsNomem_of_segment {s s' : X86Int.St} {k : Nat}
+    (hrun : run stage1Im k (Out.ok s) = Out.ok s')
+    (hnh : NoHitUpTo s k) (h' : ¬ HitsNomem s') :
+    ¬ HitsNomem s := by
+  rintro ⟨j, t, hj, hat, hhead⟩
+  by_cases hjk : j ≤ k
+  · exact hnh j t hjk hj hat hhead
+  · apply h'
+    refine ⟨j - k, t, ?_, hat, hhead⟩
+    have e : j = k + (j - k) := by omega
+    rw [e, run_add, hrun] at hj
+    exact hj
+
+/-- No nomem hit anywhere when a hit-free prefix exits. -/
+theorem not_hitsNomem_of_exit {s : X86Int.St} {k c : Nat}
+    (hrun : run stage1Im k (Out.ok s) = Out.exit c)
+    (hnh : NoHitUpTo s k) :
+    ¬ HitsNomem s := by
+  rintro ⟨j, t, hj, hat, hhead⟩
+  by_cases hjk : j ≤ k
+  · exact hnh j t hjk hj hat hhead
+  · have e : j = k + (j - k) := by omega
+    rw [e, run_add, hrun, run_exit_absorb] at hj
+    simp at hj
+
+/-- At a legal `mmap` syscall state whose oracle head is an
+`.at` placement, the placement facts for that memory. -/
+theorem place_facts_of_legal_at {s : X86Int.St} {a2 A : Nat}
+    {rest : List Choice}
+    (hleg : OracleLegalAt s) (hmem : AtMemSyscall s)
+    (hr0 : s.reg 0 = some 9) (hr7 : s.reg 7 = some 0)
+    (hr6 : s.reg 6 = some a2) (hr2 : s.reg 2 = some 3)
+    (hr10 : s.reg 10 = some 34) (hr8 : s.reg 8 = some (W - 1))
+    (hr9 : s.reg 9 = some 0) (ha2 : a2 ≠ 0)
+    (hor : s.k.oracle = .at A :: rest) :
+    A % page = 0 ∧ 0 < A ∧ A + X86Env.pages a2 ≤ 2 ^ 47 ∧
+      s.mem.free A (X86Env.pages a2) = true := by
+  obtain ⟨rax, k', m', hsc⟩ :=
+    legal_mmap_ret hleg hmem hr0 hr7 hr6 hr2 hr10 hr8 hr9
+  have hnext : (Kern.next s.k).1 = some (.at A) := by
+    simp [Kern.next, hor]
+  have hne : X86Env.place s.mem (Kern.next s.k).1
+      (X86Env.pages a2) ≠ none := by
+    intro hp
+    rw [syscall9_none_of_place_none ha2 hp] at hsc
+    simp at hsc
+  rw [hnext] at hne
+  rcases place_at_cases (m := s.mem) (a := A)
+      (n := X86Env.pages a2) with h | h
+  · exact absurd h hne
+  · exact place_at_facts h
+
+set_option maxRecDepth 16384 in
+/-- The exit-2 composition: under an admitted oracle, a
+nomem hit forces exit 2 within a linear bound. -/
+theorem stage1_exit2_compose {f path argv0 stdin : List Nat}
+    {oracle : List Choice} {top : Nat}
+    (hinit : Stage1InitOk f path argv0 top)
+    (hadm : OracleAdmits
+      (stage1Init f path argv0 stdin oracle top))
+    (hhit : HitsNomem
+      (stage1Init f path argv0 stdin oracle top)) :
+    ∃ k, k ≤ 2000 + 2000 * f.length ∧
+      run stage1Im k
+        (Out.ok (stage1Init f path argv0 stdin oracle top)) =
+        Out.exit 2 := by
+  have hinit0 := hinit
+  obtain ⟨hfB, -, -, hpath0, -, hpathlen, -, htop47, hleInit,
+    hstkhi⟩ := hinit
+  have hc := stage1_parserCode
+  have hW : W = 2 ^ 64 := rfl
+  rcases loader_init_any hinit0 hadm with hex | hld
+  · obtain ⟨k, hk, hrun⟩ := hex
+    exact ⟨k, by omega, hrun⟩
+  · obtain ⟨kL, A', cap', c2, buf', s1, hkL, hrunL, hs1rip, hs1r3,
+        hs1r12, hs1r13, hs1r14, hs1r4, hs1r0, hs1r10, hs1r8,
+        hs1r9, hs1mem, hc2b, hc2hi0, hc2rw, hbufb, hbufhi, hbufrw,
+        htake, hdisj1, hdisj2, hApage, hApos, hAbound, hcappage,
+        hcapge, hs1fds, hs1len, hs1regs, hs1nh⟩ := hld
+    -- stack geometry
+    have hsp0eq : (X86Env.initStack top [argv0, path]).2 =
+        c2.base + 4096 := by
+      have h1 := initStack_sp top argv0 path
+      rw [← hc2b] at h1
+      have hsr : X86Env.stackRoom = 4096 := rfl
+      rw [hsr] at h1
+      exact h1
+    have hdatalen : 8192 ≤
+        (X86Env.initStack top [argv0, path]).1.data.length := by
+      rw [initStack_data_length]
+      have hp : 4096 ≤ X86Env.pages
+          (56 + ((argv0.length + 1) + (path.length + 1)) + 1) := by
+        unfold X86Env.pages X86Env.page
+        have h1 : 1 ≤ (56 + ((argv0.length + 1) +
+            (path.length + 1)) + 1 + 4095) / 4096 :=
+          Nat.div_pos (by omega) (by decide)
+        omega
+      have hsr : X86Env.stackRoom = 4096 := rfl
+      omega
+    have hc2hi : c2.hi = c2.base +
+        (X86Env.initStack top [argv0, path]).1.data.length := by
+      have e : (X86Env.initStack top [argv0, path]).1.hi =
+          (X86Env.initStack top [argv0, path]).1.base +
+            (X86Env.initStack top [argv0, path]).1.data.length :=
+        rfl
+      rw [hc2hi0, e, ← hc2b]
+    have hc2top : c2.hi = top := by rw [hc2hi0]; exact hstkhi
+    have hdisjInit : base + stage1Code.length ≤ c2.base := by
+      have h := hleInit
+      rw [phVaddr_eq, phMemsz_eq, ← hc2b] at h
+      exact h
+    have hspW : (X86Env.initStack top [argv0, path]).2 + 24 < W := by
+      omega
+    have hroom1 : StackRoom s1 10 :=
+      stackRoom_of_c2 hs1mem hs1r4 hc2rw hdisjInit (by omega)
+        (by omega) (by omega)
+    -- the file bytes in the loaded buffer
+    have hcaplen : buf'.data.length = cap' := by
+      have h := hbufhi
+      unfold X86Env.Region.hi at h
+      omega
+    have hLcap : f.length ≤ cap' := by
+      have h1 : (buf'.data.take f.length).length = f.length := by
+        rw [htake]
+      rw [List.length_take, hcaplen] at h1
+      omega
+    have hdisj1' :
+        (⟨base, stage1Code, false⟩ : Region).hi ≤ A' ∨
+          A' + cap' ≤ (⟨base, stage1Code, false⟩ : Region).base :=
+      hdisj1
+    have hrdNfile : s1.mem.rdN A' f.length = some f := by
+      rw [hs1mem]
+      have h := rdN_third_take hdisj1 hdisj2 hbufb
+        (by omega : f.length ≤ buf'.data.length) hLcap
+      rwa [htake] at h
+    have hwin : ∃ bs, s1.mem.rdN A' 20 = some bs := by
+      rw [hs1mem]
+      exact ⟨buf'.data.take 20,
+        rdN_third_take hdisj1 hdisj2 hbufb (by omega) (by omega)⟩
+    have hrd : ∀ a, A' + 16 ≤ a → a + 4 ≤ A' + f.length →
+        ∃ d, rd32 s1.mem a = some d := by
+      intro a ha hb
+      have hs := rdN_slice hrdNfile (o := a - A') (k := 4)
+        (by omega)
+      rw [show A' + (a - A') = a by omega] at hs
+      exact ⟨leVal ((f.drop (a - A')).take 4), by
+        show (s1.mem.rdN a 4).map leVal = _
+        rw [hs]
+        rfl⟩
+    have hAe : A' + f.length < W := by omega
+    rcases parser_front_classify_nh hs1rip hs1r3 hs1r13 hAe hwin
+        hrd hs1len hs1r4 (by omega) hspW hs1regs
+        (stackRoom_mono hroom1 (by decide)) with hfexit | hfprog
+    · -- exit 1 in the front: no hit can exist
+      obtain ⟨kF, hkF, hrunF, hnhF⟩ := hfexit
+      exfalso
+      exact not_hitsNomem_of_segment hrunL hs1nh
+        (not_hitsNomem_of_exit hrunF hnhF) hhit
+    · obtain ⟨bs, ds, c, kF, s4, hkF, h20, hL16, hmagic, hdslen,
+          hseq, hcL, hguard, hrunF, hs4rip, hs4r12, hs4r10, hnw0,
+          hs4r1, hs4r6, hs4r15, hs4r3, hs4r13, hs4r4, hs4fr,
+          hs4mem, hs4len, hs4k, hs4nh⟩ := hfprog
+      have hrunLF : run stage1Im (kL + kF)
+          (Out.ok (stage1Init f path argv0 stdin oracle top)) =
+          Out.ok s4 := by
+        rw [run_add, hrunL, hrunF]
+      have hnhLF :
+          NoHitUpTo (stage1Init f path argv0 stdin oracle top)
+            (kL + kF) :=
+        noHitUpTo_add hs1nh hrunL hs4nh
+      have hnw32 : (leVal ((bs.drop 8).take 4) % 2 ^ 32) < 2 ^ 32 := Nat.mod_lt _ (by decide)
+      have hs4regs : RegsOk s4 := run_regs_ok hrunF hs1regs
+      have hs4room : StackRoom s4 2 :=
+        StackRoom_of_mem hs4mem (by rw [hs4r4, hs1r4])
+          (stackRoom_mono hroom1 (by decide))
+      have hs4r7 : ∃ v, s4.reg 7 = some v :=
+        hs4regs 7 (by decide) (by decide)
+      have hs4r9 : ∃ v, s4.reg 9 = some v :=
+        hs4regs 9 (by decide) (by decide)
+      -- the first parser mmap syscall state
+      obtain ⟨m2a, t1, hrunt1, ht1rip, ht1r0, ht1r7, ht1r6, ht1r2,
+          ht1r10, ht1r8, ht1r9, ht1mem, ht1sh, ht1k, ht1len⟩ :=
+        parser_mmap1_to_syscall hs4rip hs4r6 hs4r10 hs4r4 hs4r7
+          hs4r9 hs4room (by omega) hspW hnw32 hnw0 hs4len
+      have hrunt1tot : run stage1Im (kL + kF + 16)
+          (Out.ok (stage1Init f path argv0 stdin oracle top)) =
+          Out.ok t1 := by
+        rw [show kL + kF + 16 = (kL + kF) + 16 by omega, run_add,
+          hrunLF, hrunt1]
+      have ht1leg : OracleLegalAt t1 :=
+        hadm _ _ hrunt1tot
+      have ht1memsys : AtMemSyscall t1 :=
+        ⟨by rw [ht1rip]; exact hc.p21e, Or.inl ht1r0⟩
+      rcases head_cases_of_legal_mmap ht1leg ht1memsys ht1r0
+          ht1r7 ht1r6 ht1r2 ht1r10 ht1r8 ht1r9
+          (by omega) with hat1 | hnomem1
+      · obtain ⟨T, rest, hor1⟩ := hat1
+        have hs4head : s4.k.oracle.head? = some (.at T) := by
+          rw [← ht1k, hor1]
+          rfl
+        obtain ⟨hTpage, hTpos, hTbound, hTfree⟩ :=
+          place_facts_of_legal_at ht1leg ht1memsys ht1r0 ht1r7
+            ht1r6 ht1r2 ht1r10 ht1r8 ht1r9 (by omega) hor1
+        have hTfree4 : s4.mem.free T (X86Env.pages (64 * (leVal ((bs.drop 8).take 4) % 2 ^ 32))) =
+            true := by
+          rw [ht1mem] at hTfree
+          rwa [free_of_wshape ht1sh] at hTfree
+        obtain ⟨s5, m2, hrun5, hs5rip, hs5r14, hs5r4, hs5mem,
+            hm2fr, hslot5, hs5fr, hs5len, hs5k, hm2sh, hs5nh⟩ :=
+          parser_mmap1_ok_nh hs4rip hs4r6 hs4r10 hs4r4 hs4r7
+            hs4r9 hs4room (by omega) hspW hnw32 hnw0 hs4head
+            hTpage hTpos hTbound hTfree4 hs4len
+        have hrunLF5 : run stage1Im (kL + kF + 20)
+            (Out.ok (stage1Init f path argv0 stdin oracle top)) =
+            Out.ok s5 := by
+          rw [show kL + kF + 20 = (kL + kF) + 20 by omega,
+            run_add, hrunLF, hrun5]
+        have hnhLF5 :
+            NoHitUpTo (stage1Init f path argv0 stdin oracle top)
+              (kL + kF + 20) :=
+          noHitUpTo_add hnhLF hrunLF hs5nh
+        -- (continues in part 2)
+        have hs5r : ∀ i v, i ≠ 0 → i ≠ 1 → i ≠ 2 → i ≠ 4 → i ≠ 6 →
+            i ≠ 7 → i ≠ 8 → i ≠ 9 → i ≠ 10 → i ≠ 11 → i ≠ 14 →
+            s4.reg i = some v → s5.reg i = some v := by
+          intro i v h0 h1 h2 h4 h6 h7 h8 h9 h10 h11 h14 hv
+          rw [hs5fr i h0 h1 h2 h4 h6 h7 h8 h9 h10 h11 h14]
+          exact hv
+        have hs5r13 : s5.reg 13 = some f.length :=
+          hs5r 13 _ (by decide) (by decide) (by decide) (by decide)
+            (by decide) (by decide) (by decide) (by decide)
+            (by decide) (by decide) (by decide) hs4r13
+        have hs5r3 : s5.reg 3 = some A' :=
+          hs5r 3 _ (by decide) (by decide) (by decide) (by decide)
+            (by decide) (by decide) (by decide) (by decide)
+            (by decide) (by decide) (by decide) hs4r3
+        have hs5r12 : s5.reg 12 = some (leVal ((bs.drop 4).take 4) % 2 ^ 32) :=
+          hs5r 12 _ (by decide) (by decide) (by decide) (by decide)
+            (by decide) (by decide) (by decide) (by decide)
+            (by decide) (by decide) (by decide) hs4r12
+        have hs5r15 : s5.reg 15 = some (A' + f.length) :=
+          hs5r 15 _ (by decide) (by decide) (by decide) (by decide)
+            (by decide) (by decide) (by decide) (by decide)
+            (by decide) (by decide) (by decide) hs4r15
+        have hs5regs : RegsOk s5 :=
+          run_regs_ok hrun5 hs4regs
+        have hs5r7 : ∃ v, s5.reg 7 = some v :=
+          hs5regs 7 (by decide) (by decide)
+        have hs5r9 : ∃ v, s5.reg 9 = some v :=
+          hs5regs 9 (by decide) (by decide)
+        have happ : ∀ (m : Mem) (r : Region),
+            wshape (m ++ [r]) =
+              wshape m ++ [(r.base, r.hi, r.rw)] := by
+          intro m r
+          simp [wshape]
+        have hsh5 : wshape s5.mem =
+            wshape ([⟨base, stage1Code, false⟩, c2, buf'] ++
+              [⟨T, List.replicate (X86Env.pages (64 * (leVal ((bs.drop 8).take 4) % 2 ^ 32))) 0,
+                true⟩]) := by
+          rw [hs5mem, happ, hm2sh, hs4mem, hs1mem]
+          simp [wshape]
+        have hs5room : StackRoom s5 1 :=
+          stackRoom_of_wshape_c2 hsh5 hs5r4 hc2rw hdisjInit
+            (by omega) (by omega) (by omega)
+        obtain ⟨m1a, t2, hrunt2, ht2rip, ht2r0, ht2r7, ht2r6,
+            ht2r2, ht2r10, ht2r8, ht2r9, ht2r4, ht2mem, ht2sh,
+            ht2k, ht2len⟩ :=
+          parser_mmap2_to_syscall hs5rip hs5r13 hs5r4 hs5r7
+            hs5r9 hs5room (by omega) (by omega) (by omega) hs5len
+        have hrunt2tot : run stage1Im (kL + kF + 20 + 8)
+            (Out.ok (stage1Init f path argv0 stdin oracle
+              top)) = Out.ok t2 := by
+          rw [show kL + kF + 20 + 8 = (kL + kF + 20) + 8 by omega,
+            run_add, hrunLF5, hrunt2]
+        have ht2leg : OracleLegalAt t2 := hadm _ _ hrunt2tot
+        have ht2memsys : AtMemSyscall t2 :=
+          ⟨by rw [ht2rip]; exact hc.p249, Or.inl ht2r0⟩
+        rcases head_cases_of_legal_mmap ht2leg ht2memsys ht2r0
+            ht2r7 ht2r6 ht2r2 ht2r10 ht2r8 ht2r9
+            (by omega) with hat2 | hnomem2
+        · obtain ⟨S, rest2, hor2⟩ := hat2
+          have hs5head : s5.k.oracle.head? = some (.at S) := by
+            rw [← ht2k, hor2]
+            rfl
+          obtain ⟨hSpage, hSpos, hSbound, hSfree⟩ :=
+            place_facts_of_legal_at ht2leg ht2memsys ht2r0 ht2r7
+              ht2r6 ht2r2 ht2r10 ht2r8 ht2r9 (by omega) hor2
+          have hSfree5 : s5.mem.free S
+              (X86Env.pages f.length) = true := by
+            rw [ht2mem] at hSfree
+            rwa [free_of_wshape ht2sh] at hSfree
+          obtain ⟨s6, m1, hrun6, hs6rip, hs6r11, hs6r4, hs6mem,
+              hm1fr, hs6fr, hs6len, hs6k, hm1sh, hs6nh⟩ :=
+            parser_mmap2_ok_nh hs5rip hs5r13 hs5r4 hs5r7 hs5r9
+              hs5room (by omega) (by omega) (by omega) hs5head
+              hSpage hSpos hSbound hSfree5 hs5len
+          have hrunLF6 : run stage1Im (kL + kF + 20 + 12)
+              (Out.ok (stage1Init f path argv0 stdin oracle
+                top)) = Out.ok s6 := by
+            rw [show kL + kF + 20 + 12 = (kL + kF + 20) + 12 by
+              omega, run_add, hrunLF5, hrun6]
+          have hnhLF6 :
+              NoHitUpTo (stage1Init f path argv0 stdin oracle
+                top) (kL + kF + 20 + 12) :=
+            noHitUpTo_add hnhLF5 hrunLF5 hs6nh
+          -- (continues in part 3)
+          -- geometry after the second mmap
+          have hsh6 : wshape s6.mem =
+              wshape ([⟨base, stage1Code, false⟩, c2, buf'] ++
+                [⟨T, List.replicate (X86Env.pages (64 * (leVal ((bs.drop 8).take 4) % 2 ^ 32))) 0,
+                  true⟩,
+                 ⟨S, List.replicate (X86Env.pages f.length) 0,
+                  true⟩]) := by
+            rw [hs6mem, happ, hm1sh, hs5mem, happ, hm2sh, hs4mem,
+              hs1mem]
+            simp [wshape, List.append_assoc]
+          have hrdNfile6 : s6.mem.rdN A' f.length = some f := by
+            have hdisjF : A' + f.length ≤
+                (X86Env.initStack top [argv0, path]).2 + 24 - 16 ∨
+                (X86Env.initStack top [argv0, path]).2 + 24 ≤
+                  A' := by
+              rcases hdisj2 with h | h
+              · exact Or.inr (by omega)
+              · exact Or.inl (by omega)
+            have hm2rd : m2.rdN A' f.length = some f := by
+              rw [hm2fr A' f.length hdisjF]
+              rw [hs4mem]
+              exact hrdNfile
+            have hm1rd : m1.rdN A' f.length = some f := by
+              have hdisjF1 : A' + f.length ≤
+                  ((X86Env.initStack top [argv0, path]).2 + 24 -
+                    8) - 8 ∨
+                  (X86Env.initStack top [argv0, path]).2 + 24 -
+                    8 ≤ A' := by omega
+              rw [hm1fr A' f.length hdisjF1, hs5mem]
+              exact rdN_append_left hm2rd
+            rw [hs6mem]
+            exact rdN_append_left hm1rd
+          have h206 : s6.mem.rdN A' 20 = some bs := by
+            have hdisj20 : A' + 20 ≤
+                (X86Env.initStack top [argv0, path]).2 + 24 - 16 ∨
+                (X86Env.initStack top [argv0, path]).2 + 24 ≤
+                  A' := by
+              rcases hdisj2 with h | h
+              · exact Or.inr (by omega)
+              · exact Or.inl (by omega)
+            have hm2rd : m2.rdN A' 20 = some bs := by
+              rw [hm2fr A' 20 hdisj20, hs4mem]
+              exact h20
+            have hm1rd : m1.rdN A' 20 = some bs := by
+              have hdisj201 : A' + 20 ≤
+                  ((X86Env.initStack top [argv0, path]).2 + 24 -
+                    8) - 8 ∨
+                  (X86Env.initStack top [argv0, path]).2 + 24 -
+                    8 ≤ A' := by omega
+              rw [hm1fr A' 20 hdisj201, hs5mem]
+              exact rdN_append_left hm2rd
+            rw [hs6mem]
+            exact rdN_append_left hm1rd
+          have hsplevel : (X86Env.initStack top [argv0, path]).2 +
+              24 - 8 = c2.base + 4112 := by omega
+          have hcur6 : rd64 s6.mem
+              ((X86Env.initStack top [argv0, path]).2 + 24 - 8) =
+              some c := by
+            obtain ⟨bs8, hbs8, hle8⟩ : ∃ bs, s5.mem.rdN
+                ((X86Env.initStack top [argv0, path]).2 + 24 - 8)
+                8 = some bs ∧ leVal bs = c % W := by
+              have h2 := hslot5
+              unfold rd64 at h2
+              exact Option.map_eq_some_iff.mp h2
+            have h8 : s6.mem.rdN
+                ((X86Env.initStack top [argv0, path]).2 + 24 - 8)
+                8 = some bs8 := by
+              rw [hs6mem]
+              apply rdN_append_left
+              rw [hm1fr _ _ (Or.inr (Nat.le_refl _))]
+              exact hbs8
+            unfold rd64
+            rw [h8]
+            simp only [Option.map_some, hle8]
+            rw [Nat.mod_eq_of_lt (show c < W by omega)]
+          have hnwv6 : ∃ v, rd64 s6.mem (A' + 8) = some v ∧
+              v % 2 ^ 32 = (leVal ((bs.drop 8).take 4) % 2 ^ 32) := by
+            have hs := rdN_slice h206 (o := 8) (k := 8)
+              (by decide)
+            have hbslen : bs.length = 20 := rdN_length h20
+            have hlen8 : ((bs.drop 8).take 8).length = 8 := by
+              simp [List.length_take, List.length_drop, hbslen]
+            refine ⟨leVal ((bs.drop 8).take 8), ?_, ?_⟩
+            · show (s6.mem.rdN (A' + 8) 8).map leVal =
+                some (leVal ((bs.drop 8).take 8))
+              simp [hs]
+            · have h1 := leVal_first4_mod hlen8
+              rw [h1]
+              have htake : ((bs.drop 8).take 8).take 4 =
+                  (bs.drop 8).take 4 := by
+                rw [List.take_take]
+                rfl
+              rw [htake]
+          have hrdstk6 : ∀ a : Nat, c2.base ≤ a → a < c2.hi →
+              (s6.mem.rd a).isSome := by
+            intro a h1 h2
+            apply rd_isSome_of_find
+            have href : ∃ ii r,
+                Mem.find ([⟨base, stage1Code, false⟩, c2, buf'] ++
+                  [⟨T, List.replicate (X86Env.pages (64 * (leVal ((bs.drop 8).take 4) % 2 ^ 32))) 0,
+                    true⟩,
+                   ⟨S, List.replicate (X86Env.pages f.length) 0,
+                    true⟩]) a 0 = some (ii, r) ∧ r.rw = true :=
+              ⟨1, c2, find_append_left _ _ a 0
+                (find_c2_of_three hdisjInit h1 h2), hc2rw⟩
+            obtain ⟨ii, r, hf, -⟩ := find_rw_of_wshape hsh6 href
+            exact ⟨ii, r, hf⟩
+          have hpop6 : ∀ off : Nat, off ≤ 48 →
+              ∃ w, rd64 s6.mem
+                ((X86Env.initStack top [argv0, path]).2 + 24 - 8 +
+                  off) = some w := by
+            intro off hoff
+            refine rd64_some_of_forall_rd (fun j hj => ?_)
+            apply hrdstk6 <;> omega
+          have hwstk6 : ∀ a : Nat, c2.base ≤ a → a + 8 ≤ c2.hi →
+              ∀ v, (wr64 s6.mem a v).isSome := by
+            intro a h1 h2 v
+            apply wr64_isSome_of_forall_wr
+            intro j hj u
+            have href : ∃ ii r,
+                Mem.find ([⟨base, stage1Code, false⟩, c2, buf'] ++
+                  [⟨T, List.replicate (X86Env.pages (64 * (leVal ((bs.drop 8).take 4) % 2 ^ 32))) 0,
+                    true⟩,
+                   ⟨S, List.replicate (X86Env.pages f.length) 0,
+                    true⟩]) (a + j) 0 = some (ii, r) ∧
+                  r.rw = true :=
+              ⟨1, c2, find_append_left _ _ _ 0
+                (find_c2_of_three hdisjInit (by omega)
+                  (by omega)), hc2rw⟩
+            obtain ⟨ii, r, hf, hrw⟩ := find_rw_of_wshape hsh6 href
+            exact wr_isSome_iff.mpr ⟨ii, r, hf, hrw⟩
+          have hstk6 : (∀ v, (wr64 s6.mem
+                ((X86Env.initStack top [argv0, path]).2 + 24 - 8 +
+                  48) v).isSome) ∧
+              ∀ v, (wr64 s6.mem
+                ((X86Env.initStack top [argv0, path]).2 + 24 - 8 +
+                  40) v).isSome := by
+            constructor <;> intro v
+            · exact hwstk6 _ (by omega) (by omega) v
+            · exact hwstk6 _ (by omega) (by omega) v
+          have hfreeT : ∀ r ∈ ([⟨base, stage1Code, false⟩, c2,
+                buf'] : Mem),
+              T + X86Env.pages (64 * (leVal ((bs.drop 8).take 4) % 2 ^ 32)) ≤ r.base ∨ r.hi ≤ T := by
+            have hf : Mem.free [⟨base, stage1Code, false⟩, c2,
+                  buf'] T (X86Env.pages (64 * (leVal ((bs.drop 8).take 4) % 2 ^ 32))) = true := by
+              have h := hTfree4
+              rwa [hs4mem, hs1mem] at h
+            intro r hr
+            have h := List.all_eq_true.mp hf r hr
+            simp only [Bool.or_eq_true, decide_eq_true_eq] at h
+            exact h
+          have hfreeS : ∀ r ∈ ([⟨base, stage1Code, false⟩, c2,
+                buf'] ++
+                [⟨T, List.replicate (X86Env.pages (64 * (leVal ((bs.drop 8).take 4) % 2 ^ 32))) 0,
+                  true⟩] : Mem),
+              S + X86Env.pages f.length ≤ r.base ∨ r.hi ≤ S := by
+            have hf : Mem.free ([⟨base, stage1Code, false⟩, c2,
+                  buf'] ++
+                  [⟨T, List.replicate (X86Env.pages (64 * (leVal ((bs.drop 8).take 4) % 2 ^ 32))) 0,
+                    true⟩]) S (X86Env.pages f.length) = true := by
+              have h := hSfree5
+              rwa [free_of_wshape hsh5] at h
+            intro r hr
+            have h := List.all_eq_true.mp hf r hr
+            simp only [Bool.or_eq_true, decide_eq_true_eq] at h
+            exact h
+          have hpgnw : 64 * (leVal ((bs.drop 8).take 4) % 2 ^ 32) ≤ X86Env.pages (64 * (leVal ((bs.drop 8).take 4) % 2 ^ 32)) :=
+            pages_ge _
+          have hpgL : f.length ≤ X86Env.pages f.length :=
+            pages_ge _
+          have hnonmemT : ∀ a, T ≤ a →
+              a < T + X86Env.pages (64 * (leVal ((bs.drop 8).take 4) % 2 ^ 32)) →
+              ∀ r ∈ ([⟨base, stage1Code, false⟩, c2, buf'] : Mem),
+                ¬ (r.base ≤ a ∧ a < r.hi) := by
+            intro a ha1 ha2 r hr hmem
+            rcases hfreeT r hr with h | h <;> omega
+          have hwrE6 : ∀ (off v : Nat), off + 8 ≤ 64 * (leVal ((bs.drop 8).take 4) % 2 ^ 32) →
+              (wr64 s6.mem (T + off) v).isSome := by
+            intro off v hoff
+            apply wr64_isSome_of_forall_wr
+            intro j hj u
+            have hwsh6mid : wshape s6.mem =
+                wshape (([⟨base, stage1Code, false⟩, c2, buf'] ++
+                  [⟨T, List.replicate (X86Env.pages (64 * (leVal ((bs.drop 8).take 4) % 2 ^ 32))) 0,
+                    true⟩]) ++
+                  [⟨S, List.replicate (X86Env.pages f.length) 0,
+                    true⟩]) := by
+              rw [hsh6]
+              congr 1
+            have htabhi : (⟨T, List.replicate
+                  (X86Env.pages (64 * (leVal ((bs.drop 8).take 4) % 2 ^ 32))) 0, true⟩ : Region).hi =
+                T + X86Env.pages (64 * (leVal ((bs.drop 8).take 4) % 2 ^ 32)) := by
+              simp [X86Env.Region.hi]
+            have hmem : (⟨T, List.replicate
+                    (X86Env.pages (64 * (leVal ((bs.drop 8).take 4) % 2 ^ 32))) 0, true⟩ :
+                  Region).base ≤ T + off + j ∧
+                  T + off + j < (⟨T, List.replicate
+                    (X86Env.pages (64 * (leVal ((bs.drop 8).take 4) % 2 ^ 32))) 0, true⟩ :
+                    Region).hi := by
+              refine ⟨by show T ≤ T + off + j; omega, ?_⟩
+              rw [htabhi]
+              omega
+            exact wr_isSome_of_wshape_append_left hwsh6mid
+              ⟨0 + ([⟨base, stage1Code, false⟩, c2, buf'] :
+                  Mem).length,
+                ⟨T, List.replicate (X86Env.pages (64 * (leVal ((bs.drop 8).take 4) % 2 ^ 32))) 0,
+                  true⟩,
+                find_append_last _ 0
+                  (hnonmemT _ (by omega) (by omega)) hmem, rfl⟩
+          have hwrS6 : ∀ a v, S + (c - A') ≤ a →
+              a < S + (A' + f.length - A') →
+              (s6.mem.wr a v).isSome := by
+            intro a u ha1 ha2
+            have hwsh6mid : wshape s6.mem =
+                wshape (([⟨base, stage1Code, false⟩, c2, buf'] ++
+                  [⟨T, List.replicate (X86Env.pages (64 * (leVal ((bs.drop 8).take 4) % 2 ^ 32))) 0,
+                    true⟩]) ++
+                  [⟨S, List.replicate (X86Env.pages f.length) 0,
+                    true⟩]) := by
+              rw [hsh6]
+              congr 1
+            have hscrhi : (⟨S, List.replicate
+                  (X86Env.pages f.length) 0, true⟩ : Region).hi =
+                S + X86Env.pages f.length := by
+              simp [X86Env.Region.hi]
+            apply wr_isSome_of_wshape_append_last hwsh6mid _ _ rfl
+            · intro r hr
+              rcases List.mem_append.mp hr with hr | hr
+              · intro hmem
+                rcases hfreeS r (List.mem_append_left _ hr) with
+                  h | h <;> omega
+              · simp only [List.mem_singleton] at hr
+                rw [hr]
+                intro hmem
+                have htabhi : (⟨T, List.replicate
+                      (X86Env.pages (64 * (leVal ((bs.drop 8).take 4) % 2 ^ 32))) 0, true⟩ :
+                    Region).hi = T + X86Env.pages (64 * (leVal ((bs.drop 8).take 4) % 2 ^ 32)) := by
+                  simp [X86Env.Region.hi]
+                have hfr := hfreeS _
+                  (List.mem_append_right _
+                    (List.mem_singleton_self _))
+                rw [htabhi] at hmem
+                rcases hfr with h | h
+                · omega
+                · simp only [X86Env.Region.hi,
+                    List.length_replicate] at h
+                  omega
+            · refine ⟨by show S ≤ a; omega, ?_⟩
+              rw [hscrhi]
+              omega
+          have hAc : A' ≤ c := by
+            have h := DataSeq.le hseq
+            omega
+          have hrdN6 : ∀ a l, c ≤ a → l ≤ A' + f.length - a →
+              ∃ bs, s6.mem.rdN a l = some bs ∧
+                ∀ b ∈ bs, b < 256 := by
+            intro a l ha hl
+            by_cases hl0 : l = 0
+            · subst hl0
+              exact ⟨[], rfl,
+                fun b hb => (List.not_mem_nil hb).elim⟩
+            have hs := rdN_slice hrdNfile6 (o := a - A')
+              (k := l) (by omega)
+            refine ⟨(f.drop (a - A')).take l, ?_, ?_⟩
+            · rwa [show A' + (a - A') = a by omega] at hs
+            · intro b hb
+              exact hfB b
+                (List.mem_of_mem_drop (List.mem_of_mem_take hb))
+          have hmn32 : (leVal ((bs.drop 4).take 4) % 2 ^ 32) < 2 ^ 32 := Nat.mod_lt _ (by decide)
+          have h47W : 2 ^ 47 < W := by rw [hW]; decide
+          have hbndref : shapeBnd
+              ([⟨base, stage1Code, false⟩, c2, buf'] ++
+                [⟨T, List.replicate (X86Env.pages (64 * (leVal ((bs.drop 8).take 4) % 2 ^ 32))) 0,
+                  true⟩,
+                 ⟨S, List.replicate (X86Env.pages f.length) 0,
+                  true⟩]) := by
+            intro p hp
+            obtain ⟨r, hr, hpr⟩ := List.mem_map.mp hp
+            have hp2 : p.2 = X86Env.Region.hi r := by
+              rw [← hpr]
+            have hr2 : r = ⟨base, stage1Code, false⟩ ∨ r = c2 ∨
+                r = buf' ∨
+                r = ⟨T, List.replicate
+                  (X86Env.pages
+                    (64 * (leVal ((bs.drop 8).take 4) % 2 ^ 32)))
+                  0, true⟩ ∨
+                r = ⟨S, List.replicate (X86Env.pages f.length) 0,
+                  true⟩ := by
+              simpa using hr
+            rw [hp2]
+            rcases hr2 with h | h | h | h | h <;> rw [h]
+            · show base + stage1Code.length ≤ 2 ^ 48
+              have hlen : stage1Code.length ≤ 2 ^ 48 := by
+                have hh := stage1Code_length
+                omega
+              unfold base
+              omega
+            · rw [hc2top]
+              omega
+            · rw [hbufhi]
+              omega
+            · simp only [X86Env.Region.hi, List.length_replicate]
+              omega
+            · simp only [X86Env.Region.hi, List.length_replicate]
+              omega
+          have hbnd6 : shapeBnd s6.mem :=
+            shapeBnd_of_wshape hsh6 hbndref
+          have hs6r : ∀ i v, i ≠ 0 → i ≠ 1 → i ≠ 2 → i ≠ 4 →
+              i ≠ 6 → i ≠ 7 → i ≠ 8 → i ≠ 9 → i ≠ 10 → i ≠ 11 →
+              s5.reg i = some v → s6.reg i = some v := by
+            intro i v h0 h1 h2 h4 h6 h7 h8 h9 h10 h11 hv
+            rw [hs6fr i h0 h1 h2 h4 h6 h7 h8 h9 h10 h11]
+            exact hv
+          have hs6r14 : s6.reg 14 = some T :=
+            hs6r 14 _ (by decide) (by decide) (by decide)
+              (by decide) (by decide) (by decide) (by decide)
+              (by decide) (by decide) (by decide) hs5r14
+          have hs6r3 : s6.reg 3 = some A' :=
+            hs6r 3 _ (by decide) (by decide) (by decide)
+              (by decide) (by decide) (by decide) (by decide)
+              (by decide) (by decide) (by decide) hs5r3
+          have hs6r12 : s6.reg 12 = some (leVal ((bs.drop 4).take 4) % 2 ^ 32) :=
+            hs6r 12 _ (by decide) (by decide) (by decide)
+              (by decide) (by decide) (by decide) (by decide)
+              (by decide) (by decide) (by decide) hs5r12
+          have hs6r15 : s6.reg 15 = some (A' + f.length) :=
+            hs6r 15 _ (by decide) (by decide) (by decide)
+              (by decide) (by decide) (by decide) (by decide)
+              (by decide) (by decide) (by decide) hs5r15
+          have hs6regs : RegsOk s6 :=
+            run_regs_ok hrun6 hs5regs
+          rcases parser_back_classify_nh hs6rip hs6r4 hs6r14
+              hs6r3 hs6r12 hs6r15 hs6r11 (by omega) (by omega)
+              hcur6 hnwv6 hpop6 hs6len hs6regs hbnd6 hstk6 hAc
+              hcL hAe (by omega) (by omega) (by omega)
+              (by omega)
+              (by
+                rcases hfreeT buf' (by simp) with h | h
+                · exact Or.inl (by
+                    have hb : buf'.base = A' := hbufb
+                    omega)
+                · exact Or.inr (by
+                    have hb : buf'.hi = A' + cap' := hbufhi
+                    omega))
+              (by
+                rcases hfreeT c2 (by simp) with h | h
+                · exact Or.inl (by omega)
+                · exact Or.inr (by omega))
+              (by
+                have h := hfreeS _
+                  (List.mem_append_right _
+                    (List.mem_singleton_self _))
+                simp only [X86Env.Region.hi,
+                  List.length_replicate] at h
+                rcases h with h | h
+                · exact Or.inl (by omega)
+                · exact Or.inr (by omega))
+              (by
+                rcases hdisj2 with h | h
+                · exact Or.inr (by omega)
+                · exact Or.inl (by omega))
+              (by
+                rcases hfreeS buf' (by
+                  apply List.mem_append_left
+                  simp) with h | h
+                · exact Or.inl (by omega)
+                · exact Or.inr (by
+                    have hb : buf'.hi = A' + cap' := hbufhi
+                    omega))
+              (by
+                rcases hfreeS c2 (by
+                  apply List.mem_append_left
+                  simp) with h | h
+                · exact Or.inl (by omega)
+                · exact Or.inr (by omega))
+              hwrE6 hwrS6 hrdN6 with hbexit | hbprog
+          · obtain ⟨kB, hkB, hrunB, hnhB⟩ := hbexit
+            exfalso
+            apply not_hitsNomem_of_segment hrunL hs1nh _ hhit
+            apply not_hitsNomem_of_segment hrunF hs4nh _
+            apply not_hitsNomem_of_segment hrun5 hs5nh _
+            apply not_hitsNomem_of_segment hrun6 hs6nh _
+            exact not_hitsNomem_of_exit hrunB hnhB
+          · obtain ⟨NB, s7, hNB, hrunB, hs7rip, hs7r4, hs7k,
+                hs7len, hs7bnd, hnhB⟩ := hbprog
+            exfalso
+            apply not_hitsNomem_of_segment hrunL hs1nh _ hhit
+            apply not_hitsNomem_of_segment hrunF hs4nh _
+            apply not_hitsNomem_of_segment hrun5 hs5nh _
+            apply not_hitsNomem_of_segment hrun6 hs6nh _
+            apply not_hitsNomem_of_segment hrunB hnhB _
+            exact not_hitsNomem_of_chkP (sp0 :=
+                (X86Env.initStack top [argv0, path]).2 + 24 - 8 +
+                  56) (by omega)
+              (Or.inl (chkMain_entry hs7rip hs7r4 hs7bnd
+                (by omega)))
+        · have hs5head : s5.k.oracle.head? = some .nomem := by
+            rw [← ht2k]
+            exact hnomem2
+          have h6 := parser_mmap2_nomem_exit2_bnd hs5rip hs5r13
+            hs5r4 hs5r7 hs5r9 hs5room (by omega) (by omega)
+            (by omega) hs5head hs5len hs5regs
+          exact ⟨kL + kF + 20 + 17, by omega, by
+            rw [show kL + kF + 20 + 17 = (kL + kF + 20) + 17 by
+              omega, run_add, hrunLF5, h6]⟩
+      · have hs4head : s4.k.oracle.head? = some .nomem := by
+          rw [← ht1k]
+          exact hnomem1
+        have h5 := parser_mmap1_nomem_exit2_bnd hs4rip hs4r6
+          hs4r10 hs4r4 hs4r7 hs4r9 hs4room (by omega) hspW hnw32
+          hnw0 hs4head hs4len hs4regs
+        exact ⟨kL + kF + 25, by omega, by
+          rw [show kL + kF + 25 = (kL + kF) + 25 by omega,
+            run_add, hrunLF, h5]⟩
 
 end SporosX1
