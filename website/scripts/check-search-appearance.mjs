@@ -533,6 +533,7 @@ for await (const file of walk(dist)) {
     if (article) {
       const isSelfHostedPage = bare === '/learn/compiler/self-hosted/';
       const isEffectsPage = bare === '/learn/effects/';
+      const isEffectCheckerPage = bare === '/learn/compiler/effect-system/';
       const isUncertaintyPage = bare === '/learn/epistemic/uncertainty/';
       const headline = isSelfHostedPage
         ? SELF_HOSTED_PAGE.h1
@@ -551,6 +552,10 @@ for await (const file of walk(dist)) {
         }
       } else if (isUncertaintyPage) {
         if (article.dateModified !== UNCERTAINTY_EN.dateModified) {
+          errors.push(`${route}: dateModified is ${JSON.stringify(article.dateModified)}`);
+        }
+      } else if (isEffectCheckerPage) {
+        if (article.dateModified !== expected.dateModified) {
           errors.push(`${route}: dateModified is ${JSON.stringify(article.dateModified)}`);
         }
       } else if ('dateModified' in article) {
