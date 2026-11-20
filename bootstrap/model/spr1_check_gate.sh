@@ -12,7 +12,10 @@
 #
 # Steps:
 #   1. `bootstrap/roots/a/seed-a < bootstrap/model/spr1_check.hex` is
-#      byte-identical to bootstrap/model/spr1_check.
+#      byte-identical to bootstrap/model/spr1_check; bootstrap/model/
+#      spr1_check_gen.cpp, built with -Wall -Wextra -Werror and run twice,
+#      reproduces spr1_check, spr1_check.hex and
+#      formal/Bootstrap/SporosCheckBinData.lean byte for byte.
 #   2. The four examples, written three ways (the Lean oracle's `gen`, the
 #      `sporos-examples` executable, the C++ fuzzer) and compared byte for
 #      byte, exit 0; the fixed vectors are judged by the oracle as named and
@@ -90,6 +93,17 @@ else
   "$work/seed-a" < "$hex" > "$work/rebuilt" || fail "seed-a refused $hex"
   cmp "$work/rebuilt" "$src_bin" || fail "seed-a < spr1_check.hex differs from spr1_check"
   say "step 1 ok: seed-a < spr1_check.hex == spr1_check ($(wc -c < "$src_bin" | tr -d ' ') bytes)"
+  gen="$work/spr1_check_gen"
+  "$cxx" -std=c++23 -O2 -Wall -Wextra -Werror -o "$gen" "$root/bootstrap/model/spr1_check_gen.cpp"
+  for k in 1 2; do
+    mkdir "$work/gen$k"
+    "$gen" "$work/gen$k" > /dev/null || fail "spr1_check_gen failed (run $k)"
+    cmp "$work/gen$k/spr1_check" "$src_bin" || fail "spr1_check_gen run $k: spr1_check differs from the committed binary"
+    cmp "$work/gen$k/spr1_check.hex" "$hex" || fail "spr1_check_gen run $k: spr1_check.hex differs from the committed listing"
+    cmp "$work/gen$k/SporosCheckBinData.lean" "$root/formal/Bootstrap/SporosCheckBinData.lean" \
+      || fail "spr1_check_gen run $k: SporosCheckBinData.lean differs from the committed one"
+  done
+  say "step 1 ok: spr1_check_gen.cpp, run twice, reproduces spr1_check, spr1_check.hex and SporosCheckBinData.lean byte for byte"
 fi
 
 "$fuzz" syms "$hex" "$bin" > "$work/syms.txt"
