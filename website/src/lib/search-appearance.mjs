@@ -23,7 +23,7 @@ export const ENGLISH_SEARCH = {
   '/learn/getting-started/': {
     title: 'Sounio getting started: Linux prebuilt or macOS build',
     description:
-      'Clone Sounio, then check and run a .sio program. Linux x86-64 uses the committed prebuilt; macOS ARM64 builds the compiler from source.',
+      'Open the Sounio demo Codespace, or clone and run hello.sio. Linux x86-64 uses the committed prebuilt; macOS ARM64 builds from source.',
   },
   '/learn/epistemic/': {
     title: 'Uncertainty propagation types in the Sounio language',

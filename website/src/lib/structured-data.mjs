@@ -153,6 +153,7 @@ export function pageSchemaKind(bare) {
     return 'collection';
   }
   if (/^\/tutorials\/[^/]+\/$/.test(bare)) return 'collection';
+  if (bare === '/install/') return 'article';
   if (/^\/science\/[^/]+\/$/.test(bare)) return 'article';
   if (/^\/tutorials\/[^/]+\/[^/]+\/$/.test(bare)) return 'article';
   if (/^\/insights\/[^/]+\/$/.test(bare)) return 'blog';
