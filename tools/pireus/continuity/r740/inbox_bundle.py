@@ -2,7 +2,10 @@
 
 Each proposal passes through the native Sounio admission executable against the
 frozen Phase A context. ADMIT proposals are materialized to sm_86 and sm_75 PTX
-by the same executable; REFUSE proposals are recorded and dropped. The two
+by the same executable; REFUSE proposals are recorded and dropped. kind=1 and
+kind=2 go through the same path; a kind=2 row also records its phase, because
+its bit-exact reference is that operator's (operator_reference.py), not the
+Cayley-Dickson fixture output. The two
 controls stay the vendored Phase A bytes, and the engine must first reproduce
 every vendored Phase A PTX (phase_a.check_engine). Nothing here calls Slurm.
 """
@@ -79,7 +82,14 @@ def bundle(out, engine, proposals_dir):
         decision, stdout, stderr, rc = admit(engine, context, path)
         (receipts_dir / (name + ".receipt.json")).write_bytes(stdout)
         (receipts_dir / (name + ".admission.stderr")).write_bytes(stderr)
-        row = {"id": name, "proposal_sha256": _sha(payload), "decision": decision, "returncode": rc}
+        body = json.loads(payload)
+        row = {"id": name, "proposal_sha256": _sha(payload), "decision": decision, "returncode": rc,
+               "kind": body.get("kind")}
+        if body.get("kind") == 2:
+            # kind=2 is a different operator; its parity reference is operator_reference.py at this phase.
+            row["phase"] = body.get("phase")
+        if decision != "ADMIT":
+            row["reason"] = json.loads(stdout).get("reason")
         if decision == "ADMIT":
             ptx = {arch: materialize(engine, context, path, mode) for arch, mode in ARCHES}
             row["ptx_sha256"] = {arch: _sha(data) for arch, data in ptx.items()}
@@ -89,8 +99,7 @@ def bundle(out, engine, proposals_dir):
             else:
                 for arch, _ in ARCHES:
                     seen[arch][row["ptx_sha256"][arch]] = name
-                layout = json.loads(payload)["layout"]
-                admitted.append((name, layout, ptx))
+                admitted.append((name, body["layout"], ptx))
         ledger.append(row)
     if not admitted:
         raise RuntimeError("no admitted, materially new proposal to measure")

@@ -38,3 +38,37 @@ Os 32 planos da Phase B em `r740/proposals.py` já cobrem essa vizinhança. Ent�
 Pré-checagem do proponente (DECLARADO, não é recibo): compilei `admission.sio` deste branch (head `19551eb5`) com `./bin/souc` na máquina do Grok Bot (elf sha256 `db3fe1ff63bab1876ee3133008a06c9df9f950c54efdcf1d1219996dffb15be9`). Esse binário reproduz byte a byte o PTX vendorizado de `000`, `004`, direct e shuffle em sm86 e sm75. Com ele, os 8 deram ADMIT, e os PTX sm86 e sm75 dos 8 são distintos entre si e dos PTX da Phase A. O recibo que vale é o que a sessão de validação gravar em `receipts/`.
 
 Expectativa honesta: a regra pede +50000 ppm (5%) contra direct. Nenhum plano load=0/layout=0 da Phase A passou do ruído contra direct, então a chance a priori de um GAIN neste lote é baixa. O lote serve para fechar a vizinhança do `004` antes de abrir o espaço de busca (kind=2 ou uma gramática nova).
+
+
+## Lote b002 (2026-11-20), kind=2
+
+O lote tem 16 propostas kind=2, ou seja, operadores novos e não lowerings. Elas usam o mesmo `context` e a mesma serialização `encoded()` do `cycle.py`. Cada uma acrescenta só a chave `phase`.
+
+**O que é um operador por `phase`.** A gramática está em `admission.sio` e no `OPERATOR_PROMPT` do `cycle.py`: `e_i * e_j = cd_sigma(i,j) * (-1)^(i^T B j) e_(i XOR j)`, onde B é uma matriz 4x4 sobre F2 e `phase` é o inteiro de 16 bits em que o bit `4*i+j` é `B[i][j]`. A admissão reconstrói o tensor inteiro e aceita qualquer `phase` de 0 a 65535. A novidade fica com `NOT_CLASSIFIED`, porque quem decide isso é o atlas `eisa_h.pireus_operator_atlas.v1`. Duas fases que diferem por uma matriz alternada (simétrica, com diagonal zero) dão o mesmo operador a menos de um reescalonamento de sinais da base. Por isso só importam `diag(B)` e `B+B^T`, que somam 1024 classes. O representante canônico usado aqui é o triangular superior.
+
+**Como o lote cobre o espaço.** Sem o atlas, separei as 1024 classes por três invariantes que dá para recalcular a partir da tabela de sinais: quantos `e_i` com i > 0 têm quadrado negativo, quantos pares (i,j) não comutam e quantos triplos não associam. O terceiro deu 1848 em todas as classes: a torção bilinear não mexe na associatividade. Os dois primeiros separam 7 famílias. O sedênion (`phase=0`) é (15, 210). Os códigos que já apareceram no repositório (1128, 2, 8, 74, 198, 1129, 4, 16) caem só em (5, 90), (9, 90) e (11, 114). Ninguém tinha usado ainda (3, 114), (7, 114) e (7, 210). O lote põe 13 das 16 propostas nessas três famílias novas e só uma em cada família antiga, sempre com um representante diferente dos códigos já usados. Dentro de cada família, os representantes foram escolhidos por máxima distância de Hamming entre os códigos, começando pelo de maior peso.
+
+Os planos de lane também foram para os extremos e para combinações que nunca rodaram. Cada `lane_stride` ímpar de 1 a 15 aparece duas vezes. `lane_offset` é uma permutação de 0 a 15, e os offsets de 4 a 15 nunca tinham sido medidos. Cada par (load, layout) aparece 4 vezes, incluindo shuffle+SoA. Unroll 16 aparece 4 vezes, e 1, 2, 4 e 8 aparecem 3 vezes cada.
+
+| arquivo | phase | família (quadrados negativos, pares que não comutam) | stride | offset | load | layout | unroll |
+|---|---|---|---|---|---|---|---|
+| b002-01 | 36077 | C3 (3, 114) | 1 | 15 | 0 | 0 | 16 |
+| b002-02 | 35 | C3 (3, 114) | 15 | 0 | 1 | 1 | 1 |
+| b002-03 | 35840 | C3 (3, 114) | 3 | 8 | 0 | 1 | 8 |
+| b002-04 | 1029 | C3 (3, 114) | 13 | 7 | 1 | 0 | 2 |
+| b002-05 | 1120 | C3 (3, 114) | 5 | 12 | 0 | 0 | 4 |
+| b002-06 | 36076 | C7a (7, 114) | 11 | 3 | 1 | 1 | 16 |
+| b002-07 | 67 | C7a (7, 114) | 7 | 10 | 0 | 1 | 1 |
+| b002-08 | 36 | C7a (7, 114) | 9 | 5 | 1 | 0 | 8 |
+| b002-09 | 1160 | C7a (7, 114) | 15 | 14 | 0 | 0 | 2 |
+| b002-10 | 2223 | C7a (7, 114) | 1 | 1 | 1 | 1 | 4 |
+| b002-11 | 33825 | C7b (7, 210) | 13 | 9 | 0 | 1 | 16 |
+| b002-12 | 1 | C7b (7, 210) | 3 | 6 | 1 | 0 | 1 |
+| b002-13 | 32 | C7b (7, 210) | 11 | 13 | 0 | 0 | 8 |
+| b002-14 | 36079 | C5 (5, 90) | 5 | 2 | 1 | 1 | 2 |
+| b002-15 | 36046 | C9 (9, 90) | 9 | 11 | 0 | 1 | 4 |
+| b002-16 | 35015 | C11 (11, 114) | 7 | 4 | 1 | 0 | 16 |
+
+**Paridade.** Um operador kind=2 não calcula o produto de sedênions, então o `reference.hex` da sonda, que vem das saídas Cayley-Dickson das fixtures, não é a referência dele. A referência bit a bit de cada candidato sai de `r740/operator_reference.py` com a fase do candidato, sobre as mesmas 320 entradas. A aritmética é a de `numeric_fixtures.sio` e do PTX: produto, sinal, soma ascendente, sem FMA. O script se recusa a gerar qualquer coisa se a fase 0 não reproduzir as `output_bits` da Sounio palavra por palavra. A decisão de paridade continua com `material_parity.sio`.
+
+**Expectativa honesta.** O PTX de um kind=2 é instrução por instrução o mesmo de um kind=1 com o mesmo plano de lane. Só a tabela constante `pireus_signs[16]` muda. A fase escolhe qual álgebra se calcula, não quanto ela custa. Então qualquer diferença de tempo vem do plano de lane, e os extremos de plano já perderam ou empataram nos lotes kind=1. Este lote mede, pela primeira vez no r740, operadores de famílias nunca alcançadas, com paridade bit a bit de cada um. Um ganho de 5% sobre o direct seria surpresa.

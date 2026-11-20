@@ -732,6 +732,31 @@ class Engines(unittest.TestCase):
             self.assertTrue((root / "proposals-bundle.json").is_file())
             self.assertTrue((root / "admission" / "x-new.receipt.json").is_file())
 
+    def test_proposals_dir_bundle_takes_kind2_operators(self):
+        import inbox_bundle
+        with tempfile.TemporaryDirectory() as directory:
+            src = Path(directory) / "inbox"
+            src.mkdir()
+            base = json.loads((HERE / "phase-a" / "proposals" / "004.proposal.json").read_text())
+            (src / "op-a.proposal.json").write_bytes(raw(dict(base, kind=2, phase=35)))
+            (src / "op-b.proposal.json").write_bytes(raw(dict(base, kind=2, phase=36077)))
+            (src / "op-bad.proposal.json").write_bytes(raw(dict(base, kind=2, phase=65536)))
+            (src / "op-nophase.proposal.json").write_bytes(raw(dict(base, kind=2)))
+            out = Path(directory) / "bundle"
+            inbox_bundle.bundle(out, self.admission, src)
+            summary = json.loads((out / "PROPOSALS.json").read_text())
+            rows = {row["id"]: row for row in summary["proposals"]}
+            self.assertEqual(summary["admitted"], ["op-a", "op-b"])
+            self.assertEqual((rows["op-a"]["kind"], rows["op-a"]["phase"]), (2, 35))
+            self.assertEqual(rows["op-bad"]["reason"], "PHASE_RANGE")
+            self.assertEqual(rows["op-nophase"]["reason"], "KIND_MASK")
+            for arch in ("sm86", "sm75"):
+                lowering = (HERE / "phase-a" / "ptx" / arch / "004.ptx").read_bytes()
+                twisted = (out / arch / "op-a.ptx").read_bytes()
+                self.assertNotEqual(twisted, lowering)
+                strip = lambda text: [line for line in text.splitlines() if b"pireus_signs[16]" not in line]
+                self.assertEqual(strip(twisted), strip(lowering))
+
     def context_and_proposal(self, kind=1, phase=None, plan=None):
         context = dict(schema=1, target=701202, dimension=16, precision=64, order=1, fma=0,
                        capabilities=55, lane_width=32, facts_state=1)
@@ -923,6 +948,23 @@ class AgentPath(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 launch.submit_step(scratch, REVIEW_NAME, "timing-sm75", sbatch, **kw)
             self.assertEqual(len(scripts), 3)
+
+
+class OperatorReference(unittest.TestCase):
+    def test_phase0_is_the_sounio_fixture_and_a_twist_is_not(self):
+        import operator_reference as ref
+        fixtures = HERE / "phase-a" / "numeric-fixtures.jsonl"
+        rows = ref.load_rows(fixtures)
+        self.assertTrue(ref.self_check(rows))
+        expected = ref.frame([row["output_bits"] for row in rows])
+        self.assertEqual(ref.reference(0, fixtures), expected)
+        twisted = ref.reference(1128, fixtures)
+        self.assertNotEqual(twisted, expected)
+        self.assertEqual(len(twisted), len(expected))
+        self.assertEqual(ref.sigma_phase(1128, 3, 5), -ref.cd_sigma(3, 5) if ref.bilinear(1128, 3, 5) else ref.cd_sigma(3, 5))
+        for bad in (-1, 65536):
+            with self.assertRaises(ValueError):
+                ref.reference(bad, fixtures)
 
 
 class SparkUntouched(unittest.TestCase):
