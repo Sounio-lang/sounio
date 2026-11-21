@@ -246,6 +246,73 @@ five native engine hashes and all cycle source dependencies. A stage records
 its launch intent before submission. Recovery may adopt an observed completed
 paired job, but never silently submits an interrupted request again.
 
+## Operator atlas (eisa_h.pireus_operator_atlas.v1)
+
+`stdlib/hardware/pireus/operator_atlas.sio` classifies a kind=2 operator's
+16x16 sign table under GL(4,F2) x input swap x sign gauge. Canonical forms come
+from the unchanged V13 canonicalizer, reached through the new public accessor
+`pireus_operator_orbit_canonical_view`; no frozen V13 function, counter or
+digest changed, and the lean_single V13 replay still matches its frozen
+transcript. The references are the 62 frozen V13 classes (30 baseline + 32
+admitted, re-derived from `operator_orbit_canonicalization.first.v13`; the
+first 30 hash to its baseline `class_digest`) plus the three V1 GL4 corpus
+members (untwisted XOR, Cayley-Dickson-16, diagonal bicharacter). The V13
+classes do not contain the sedenion, so without the corpus phase 0 would read
+as N2.
+
+Ladder: N0 = bit-identical to a reference table; N1 = different table, same
+canonical class as a reference; N2 = none of the 65 reference classes. N2 is
+bounded relative quotient separation only. `scientific_novelty`,
+`historical_novelty` and `claim_ready` stay false; H needs founder promotion.
+
+Receipt contract v2: kind=2 validate receipts carry `"schema":2` and replace
+`"novelty":"NOT_CLASSIFIED"` with the atlas block (`novelty`, `novelty_scope`,
+`atlas_class`, `atlas_origin`, `canonical_table`, `canonical_matrix/swap/gauge`,
+`atlas_v13_semantics_sha256`, `atlas_class_digest`, `scientific_novelty`,
+`historical_novelty`). kind=1 receipts and every PTX mode are byte-identical.
+The frozen r740 receipt digests are unchanged: the tests map a schema-2
+receipt back to v1 by restoring only that block and require the old digest.
+Gate: `scripts/ci/pireus_operator_atlas_gate.sh`.
+
+### b002-b006 classification (CPU, 2026-11-20)
+
+All 80 kind=2 proposals in inbox batches b002-b006 were reclassified through
+`admission.sio` on CPU (no GPU, no Slurm). Every one is ADMIT and N2; their 41
+distinct phase codes fall into 16 canonical classes. Over the whole 1024-code
+bilinear twist space (upper-triangular B; transpose and alternating parts are
+gauge-equivalent) there are exactly 32 canonical classes: the sedenion (phase 0,
+N0, class 63) and 31 N2 classes, with 84/42/28/21/7/1 codes each. The batches
+cover 16 of those 31. Here N2 means only "outside the 65 reference classes" of
+a deliberately small atlas, not a scientific or historical claim. The fourth
+column below counts codes per class in that 1024-code space.
+
+| batch | kind=2 | N0 | N1 | N2 |
+|---|---|---|---|---|
+| b002 | 16 | 0 | 0 | 16 |
+| b003 | 16 | 0 | 0 | 16 |
+| b004 | 16 | 0 | 0 | 16 |
+| b005 | 16 | 0 | 0 | 16 |
+| b006 | 16 | 0 | 0 | 16 |
+
+| class | proposals | phase codes | upper-triangular orbit size | canonical table |
+|---|---|---|---|---|
+| K1 | 24 | 32931, 32939, 34029, 35947, 36007, 36071, 36075, 36077 | 21 | `c00000009660500084cc6688f08e14aa4080a4a434c2d686266ee00e700eb00e` |
+| K2 | 19 | 32800, 33792, 33824, 33825 | 7 | `c00000003ccaf00af02e00ee2466d86602fefefed6b626761a52d692e6982698` |
+| K3 | 11 | 33004, 33930, 34018, 35983, 36076 | 84 | `c000000096605000743c9678007ee45abf805ba4cbc22986299eeffe7ffebffe` |
+| K4 | 5 | 1, 32, 33, 1056, 1057 | 7 | `c00000003ccaf00af02e00ee2466d866fdfe01fe29b6d976e55229921998d998` |
+| K5 | 4 | 35, 1029, 1120, 1123 | 7 | `c00000009660500084cc6688f08e14aa26e6c2c252a4b0e0400886681668d668` |
+| K6 | 3 | 36, 67 | 28 | `c000000096605000743c9678007ee45ad9e63dc2ada44fe04ff889981998d998` |
+| K7 | 3 | 1160, 2081 | 42 | `c00000009660500084cc6688f08e14aa83bc6798f7fe15bae5522332b3327332` |
+| K8 | 2 | 35840, 35849 | 7 | `c00000009660500084cc6688f08e14aa7cbc989808feeaba1a52dc324c328c32` |
+| K9 | 2 | 2113, 2223 | 84 | `c000000096605000743c9678007ee45a4080a4a434c2d686d69e10fe80fe40fe` |
+| K10 | 1 | 36079 | 28 | `c000000096605000743c9678007ee45ab0705454c4322676266ee00e700eb00e` |
+| K11 | 1 | 36046 | 84 | `c000000096605000743c9678007ee45a2916cd325d54bf10bf087968e9682968` |
+| K12 | 1 | 35015 | 21 | `c00000005aac9cccb8f05ab4007ee45a26e6c2c29e687c2c7c34ba54e6982698` |
+| K13 | 1 | 32774 | 21 | `c00000009660500084cc6688f08e14aad9e63dc2ada44fe0bf087968e9682968` |
+| K14 | 1 | 2190 | 21 | `c00000009660500084cc6688f08e14aabf805ba4cbc22986d96e1f0e8f0e4f0e` |
+| K15 | 1 | 32768 | 1 | `c00000003ccafaaa125af01eccb22896e5da01fe3b32d97615a2d3c2e9682968` |
+| K16 | 1 | 3183 | 21 | `c00000005aac966c66b89678d496289602fefefeb0d040108cc440041668d668` |
+
 ## R740 pilot
 
 `r740/R740_PILOT.md` is the plan for `gpuorangefs-multi-r740-proxmox` (RTX A5000, sm_86, and Quadro RTX 8000, sm_75). It is a separate launcher: no Spark host fence, no `pireus-spark-pair` lease, no `check_pair`. The Spark files named in that plan are unchanged. The gain rule is per architecture, with the same 50000 ppm median and positive bootstrap bound, and its hash was frozen before any r740 timing file existed. The amd64 SIF digest is the one Infra Sounio declared; the launcher hashes the file before srun and refuses on a mismatch. That file has not been re-hashed in this tree.
