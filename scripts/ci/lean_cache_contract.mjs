@@ -23,7 +23,7 @@ function check(w) {
  for(const input of ['formal/**','!formal/**/.lake/**','scripts/ci/*lean*.sh','scripts/ci/epistemic_measure_correspondence_gate.sh','.github/workflows/ci.yml']) assert(key?.includes("'"+input+"'"),'missing key input: '+input);
  assert(key.includes('runner.os')&&key.includes('runner.arch'),'platform identity required');
  const baseline=job.slice(0,a)+job.slice(b);
- assert.equal(crypto.createHash('sha256').update(baseline).digest('hex'),'f01cee3820c58d14fc3917ee5c44e92ef3ae5a8674a97e5a1277e944030256f1','mandatory proof gates, builds, conditions, or audit commands changed');
+ assert.equal(crypto.createHash('sha256').update(baseline).digest('hex'),'24a59bdac191f7783423cc7e348b7c83dd4a10ab34577b1c9042c9aed321687a','mandatory proof gates, builds, conditions, or audit commands changed');
  const fast=w.slice(w.indexOf('  fast-checks:\n'),w.indexOf('\n  contracts-core:'));
  assert(fast.includes('run: node scripts/ci/lean_cache_contract.mjs "$GITHUB_WORKSPACE" --selftest'),'contract must run in Fast Checks');
 }
@@ -45,6 +45,9 @@ if(process.argv.includes('--selftest')) {
   s=>s.replace('run: bash bootstrap/model/x86dec_fuzz_gate.sh 5000 100000 1','run: echo skipped'),
   s=>s.replace('run: bash bootstrap/model/tmr_fault_gate.sh 20000 1','run: echo skipped'),
   s=>s.replace('run: bash bootstrap/model/spr1_check_gate.sh 2000 0','run: echo skipped'),
+  s=>s.replace('run: bash bootstrap/model/x86uni_diff_gate.sh','run: echo skipped'),
+  s=>s.replace('run: bash bootstrap/model/root_c_seed_gate.sh','run: echo skipped'),
+  s=>s.replace('run: bash bootstrap/model/tmr_burst_straddle_gate.sh 3400 20000 1','run: echo skipped'),
  ];
  for(const mutate of mutations) { const bad=mutate(w);assert.notEqual(bad,w,'mutation missed target');assert.throws(()=>check(bad),'unsafe mutation accepted'); }
  console.log('PASS: negative controls reject stale keys, omitted builds/audits and conditional proof skips');

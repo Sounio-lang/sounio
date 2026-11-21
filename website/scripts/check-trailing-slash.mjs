@@ -48,6 +48,8 @@ const ACCEPTANCE = [
   ['/zh-hk/docs/', 308, '/zh-hk/learn/'],
   ['/ja/docs/', 308, '/ja/learn/'],
   ['/es/docs/', 308, '/es/learn/'],
+  ['/es/docs/effects', 308, '/learn/effects/'],
+  ['/es/docs/effects/', 308, '/learn/effects/'],
   ['/showcases/climate', 308, '/science/climate/'],
   ['/showcases/climate/', 308, '/science/climate/'],
   ['/showcases/scientific-computing', 308, '/science/scientific-computing/'],
