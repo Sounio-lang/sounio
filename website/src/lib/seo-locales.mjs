@@ -1,12 +1,12 @@
 /**
  * Canonical URLs and hreflang clusters for souniolang.org.
  *
- * A non-English URL is an indexable translation only when its main document
- * is not the English source. Those URLs self-canonicalize and join the
- * hreflang cluster. Localized URLs whose main body is the English fallback
- * canonicalize to the English URL and stay out of every hreflang set and
- * out of the sitemap (hreflang pointing at a URL that canonicalizes
- * elsewhere is invalid).
+ * Every locale URL self-canonicalizes to its own trailing-slash URL on
+ * https://www.souniolang.org. A non-English URL joins the hreflang cluster
+ * and the sitemap only when its main document is a translation of the
+ * current English page. Anything else is noindex (BaseLayout) and stays
+ * out of every hreflang set. Pointing hreflang at a URL that is not that
+ * translation is what let a stale Chinese stub outrank the English page.
  *
  * hreflang and <html lang> use one BCP 47 tag per URL prefix, the same tags
  * the sitemap already published: pt-BR, zh-CN, zh-HK. URL prefixes stay short
@@ -122,6 +122,47 @@ function localesForEntry(byLocale) {
   return ['en', ...translated];
 }
 
+/**
+ * Identifiers the current English page actually talks about: code spans,
+ * E0xx diagnostics, and camelCase or snake_case names. A locale file whose
+ * prose merely differs can still be an older page (the effect-system stubs
+ * are titled "Effect System" and share none of the checker names).
+ */
+function documentAnchors(body) {
+  const found = new Set();
+  for (const match of body.matchAll(/`([^`]{3,80})`/g)) found.add(match[1]);
+  for (const match of body.matchAll(/\bE\d{3}\b/g)) found.add(match[0]);
+  for (const match of body.matchAll(/\b[A-Za-z_][A-Za-z0-9_]{5,}\b/g)) {
+    const word = match[0];
+    if ((/[A-Z]/.test(word) && /[a-z]/.test(word)) || word.includes('_')) found.add(word);
+  }
+  return found;
+}
+
+function sameDocument(english, localized) {
+  const anchors = documentAnchors(english);
+  if (anchors.size < 20) return true;
+  let shared = 0;
+  for (const token of documentAnchors(localized)) {
+    if (anchors.has(token)) shared += 1;
+  }
+  return shared > 2;
+}
+
+/**
+ * `compiler/effect-system` and `effects` were rewritten in English. The
+ * locale files are the previous short pages, so a prose inequality is not
+ * a translation. Other documents keep the prose test.
+ */
+const SAME_DOCUMENT_SLUGS = new Set(['compiler/effect-system', 'effects']);
+
+function localesForDoc(slug, byLocale) {
+  const locales = localesForEntry(byLocale);
+  if (!SAME_DOCUMENT_SLUGS.has(slug) || !byLocale || !byLocale.has('en')) return locales;
+  const english = byLocale.get('en');
+  return locales.filter((locale) => locale === 'en' || sameDocument(english, byLocale.get(locale)));
+}
+
 function localesWithAny(collection) {
   const found = new Set(['en']);
   for (const byLocale of collection.values()) {
@@ -176,6 +217,10 @@ const tutorialHubLocales = localesWithAny(tutorials);
  *   English article. `/about/vision/` and `/about/roadmap/` stay English.
  * - `/releases/` carries a distinct notes array for every locale, including
  *   `zh-hk`, in src/pages/releases/index.astro.
+ * - `/learn/epistemic/expanded-uncertainty/` has an English page and a
+ *   Japanese article. hreflang is only en, ja, and x-default (English).
+ *   `/pt/learn/epistemic/expanded-uncertainty/` is a stub of the English
+ *   article: self-canonical, not indexable, not an hreflang target.
  */
 const EXPLICIT_SHELLS = {
   '/': homeLocales,
@@ -188,6 +233,7 @@ const EXPLICIT_SHELLS = {
   '/scientist/': scientistLocales,
   '/honesty/': ['en', 'pt'],
   '/about/': ['en', 'pt'],
+  '/learn/epistemic/expanded-uncertainty/': ['en', 'ja'],
 };
 
 const REDIRECT_EXACT = new Set([
@@ -235,7 +281,7 @@ export function isRedirectPath(pathname) {
 
 function contentLocales(bare) {
   const learn = /^\/learn\/(.+)\/$/.exec(bare);
-  if (learn) return docs.has(learn[1]) ? localesForEntry(docs.get(learn[1])) : null;
+  if (learn) return docs.has(learn[1]) ? localesForDoc(learn[1], docs.get(learn[1])) : null;
   const science = /^\/science\/([^/]+)\/$/.exec(bare);
   if (science) return showcases.has(science[1]) ? localesForEntry(showcases.get(science[1])) : null;
   const insight = /^\/insights\/([^/]+)\/$/.exec(bare);
@@ -248,7 +294,7 @@ function contentLocales(bare) {
   return null;
 }
 
-/** Locales whose URL for this path self-canonicalizes. Always includes `en` for a real page. */
+/** Locales whose URL for this path is an indexable translation. Always includes `en` for a real page. */
 export function indexableLocales(pathname) {
   const bare = barePath(pathname);
   if (isRedirectPath(bare)) return ['en'];
@@ -260,12 +306,14 @@ export function indexableLocales(pathname) {
   return ['en'];
 }
 
+/** The URL's own path, with a trailing slash. Canonicals do not cross locales. */
 export function canonicalPathname(pathname) {
-  const bare = barePath(pathname);
-  const locale = localeFromPath(pathname);
-  const allowed = indexableLocales(bare);
-  const target = allowed.includes(locale) ? locale : 'en';
-  return localizedPath(bare, target);
+  return localizedPath(barePath(pathname), localeFromPath(pathname));
+}
+
+export function isIndexableUrl(pathname) {
+  if (isRedirectPath(pathname)) return false;
+  return indexableLocales(pathname).includes(localeFromPath(pathname));
 }
 
 /**
@@ -287,10 +335,7 @@ export function hreflangLinks(pathname) {
 
 /** Sitemap <loc> values: self-canonical, not a redirect. */
 export function isIndexableSitemapUrl(urlString) {
-  const { pathname } = new URL(urlString);
-  if (isRedirectPath(pathname)) return false;
-  const locale = localeFromPath(pathname);
-  return indexableLocales(pathname).includes(locale);
+  return isIndexableUrl(new URL(urlString).pathname);
 }
 
 export function sitemapLinks(urlString) {

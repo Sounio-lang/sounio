@@ -69,6 +69,9 @@ lean_lib Bootstrap where
     .one `Bootstrap.AArch64Min,
     .one `Bootstrap.FormatsC,
     .one `Bootstrap.SeedC,
+    .one `Bootstrap.TMRMemExposure,
+    .one `Bootstrap.TMRBurst,
+    .one `Bootstrap.TMRBurstCheck,
     .submodules `Sporos]
 
 -- The two seeds on every listing (about 20 minutes of kernel time, the two in parallel); built by
@@ -104,3 +107,5 @@ lean_exe aarch64run where
 
 lean_exe «aarch64-diff» where
   root := `Bootstrap.AArch64DiffModel
+lean_exe «tmr-burst-check» where
+  root := `Bootstrap.TMRBurstCheck
