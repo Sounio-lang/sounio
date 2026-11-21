@@ -24,6 +24,7 @@ sys.path.insert(0, str(HERE))
 import claude_proposer as cp  # noqa: E402
 
 SENTINEL = "sk-ant-TEST-SENTINEL-0123456789-must-never-appear"
+WORKSPACE = "wrkspc_TEST0000000000000000"  # placeholder, not a real workspace
 CONTEXT = b'{"schema":1,"target":701202,"dimension":16,"precision":64,"order":1,"fma":0,"capabilities":55,"lane_width":32,"facts_state":1}\n'
 # TEST STUB, not an authority: admits any JSON object with an integer phase,
 # reports a fake class per phase. The integration test uses the real engine.
@@ -60,6 +61,7 @@ class FakeAnthropicModule(types.ModuleType):
         self.__version__ = "fake-0"
         self.seen_keys = []
         self.bodies = []
+        self.headers = []
         module = self
 
         class Raw:
@@ -79,8 +81,9 @@ class FakeAnthropicModule(types.ModuleType):
                 return Raw(raw)
 
         class Anthropic:
-            def __init__(self, api_key, max_retries, timeout):
+            def __init__(self, api_key, max_retries, timeout, default_headers=None):
                 module.seen_keys.append(api_key)
+                module.headers.append(default_headers)
                 self.messages = Messages()
 
         self.Anthropic = Anthropic
@@ -93,8 +96,10 @@ class ProposerTests(unittest.TestCase):
         self.context = executable(self.dir, "context.sh", "#!/bin/sh\nprintf '%s'\n" % CONTEXT.decode().strip())
         self.engine = executable(self.dir, "stub_admission.py", STUB_ADMISSION)
         os.environ.pop("ANTHROPIC_API_KEY", None)
+        os.environ.pop("ANTHROPIC_WORKSPACE_ID", None)
 
     def tearDown(self):
+        os.environ.pop("ANTHROPIC_WORKSPACE_ID", None)
         sys.modules.pop("anthropic", None)
         os.environ.pop("ANTHROPIC_API_KEY", None)
         self.tmp.cleanup()
@@ -279,6 +284,46 @@ class ProposerTests(unittest.TestCase):
         ledger = [json.loads(x) for x in (self.dir / "run/ledger.jsonl").read_text().splitlines()]
         self.assertEqual({x["request_id"] for x in ledger if x["event"] == "CALL"}, {"req_fake"})
         self.assertEqual({x["transport"] for x in ledger if x["event"] == "CALL"}, {"anthropic-python-sdk"})
+
+    def test_without_workspace_nothing_changes(self):
+        fake = FakeAnthropicModule()
+        sys.modules["anthropic"] = fake
+        os.environ["ANTHROPIC_API_KEY"] = SENTINEL
+        code, _, _ = self.run_cli("--mode", "real", "--confirm-spend")
+        self.assertEqual(code, 0)
+        self.assertEqual(set(map(repr, fake.headers)), {"None"})
+        manifest = json.loads((self.dir / "run/manifest.json").read_text())
+        self.assertNotIn("anthropic_workspace_id", manifest)
+        ledger = (self.dir / "run/ledger.jsonl").read_text()
+        self.assertNotIn("anthropic_workspace_id", ledger)
+
+    def check_workspace_run(self, run, *extra):
+        fake = FakeAnthropicModule()
+        sys.modules["anthropic"] = fake
+        os.environ["ANTHROPIC_API_KEY"] = SENTINEL
+        code, out, err = self.run_cli("--mode", "real", "--confirm-spend", *extra, run=run)
+        self.assertEqual(code, 0)
+        self.assertEqual(fake.headers, [{"anthropic-workspace-id": WORKSPACE}])
+        root = self.dir / run
+        manifest = json.loads((root / "manifest.json").read_text())
+        self.assertEqual(manifest["anthropic_workspace_id"], WORKSPACE)
+        calls = [json.loads(x) for x in (root / "ledger.jsonl").read_text().splitlines()]
+        self.assertTrue(calls)
+        self.assertEqual({x["anthropic_workspace_id"] for x in calls}, {WORKSPACE})
+        for path in root.rglob("*.request.json"):
+            data = path.read_bytes().lower()
+            self.assertNotIn(b"authorization", data)
+            self.assertNotIn(b"x-api-key", data)
+            self.assertNotIn(b"anthropic-workspace-id", data)
+        self.assertNotIn(SENTINEL.encode(), all_bytes(root))
+        self.assertNotIn(SENTINEL, out + err)
+
+    def test_workspace_header_from_flag(self):
+        self.check_workspace_run("w1", "--workspace-id", WORKSPACE)
+
+    def test_workspace_header_from_environment(self):
+        os.environ["ANTHROPIC_WORKSPACE_ID"] = WORKSPACE
+        self.check_workspace_run("w2")
 
     def test_key_in_error_message_is_redacted(self):
         sys.modules["anthropic"] = FakeAnthropicModule(fail_with_key=True)

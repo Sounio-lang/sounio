@@ -365,6 +365,12 @@ round, 3 rounds with the arm order rotated each round, and the same contracts.
   only. It is passed to the SDK client and nowhere else. Every artifact is
   checked for it before it is written, and errors are redacted.
 - SDK: `claude/requirements.txt` pins `anthropic==2.12.0`.
+- Workspace: a key not scoped to a workspace is refused by the API (400)
+  unless each request carries `anthropic-workspace-id`. Pass it with
+  `--workspace-id` or env `ANTHROPIC_WORKSPACE_ID` (the ID is not a secret and
+  is not hard-coded). It goes in the SDK client's default headers, not in
+  `request.json`, and is recorded as `anthropic_workspace_id` in the manifest
+  and in each ledger call. When it is not given, nothing changes.
 - Tests: `claude/test_claude_proposer.py` (CI step "PIREUS Claude proposer
   condition"), with no network and no key.
 

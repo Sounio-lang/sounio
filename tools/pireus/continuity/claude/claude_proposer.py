@@ -244,6 +244,7 @@ class MockTransport:
     synthetic (bytes/4 in, fixed out) so budget arithmetic is exercised."""
     name = "mock"
     sdk_version = None
+    workspace_id = None
 
     def __init__(self, output_tokens=900):
         self.output_tokens = output_tokens
@@ -270,10 +271,15 @@ class AnthropicTransport:
     body is persisted byte for byte; only the request-id header is kept."""
     name = "anthropic-python-sdk"
 
-    def __init__(self, key, timeout=600):
+    def __init__(self, key, workspace_id=None, timeout=600):
         import anthropic  # imported only in --mode real
         self.sdk_version = getattr(anthropic, "__version__", "unknown")
-        self._client = anthropic.Anthropic(api_key=key, max_retries=0, timeout=timeout)
+        self.workspace_id = workspace_id
+        # A key not scoped to a workspace needs this header on every request.
+        # The header is set on the client only; request.json stores the body.
+        headers = {"anthropic-workspace-id": workspace_id} if workspace_id else None
+        self._client = anthropic.Anthropic(api_key=key, max_retries=0, timeout=timeout,
+                                           default_headers=headers)
 
     def send(self, body):
         # output_config goes through extra_body so an SDK release without a
@@ -343,6 +349,7 @@ def generate_cell(run, manifest, transport, cell, context, secret, prices):
             run.append("ledger.jsonl", dict(
                 event="CALL", cell=base_dir, index=index, transport=transport.name,
                 sdk_version=transport.sdk_version,
+                **({"anthropic_workspace_id": transport.workspace_id} if transport.workspace_id else {}),
                 model_requested=body["model"], model_returned=value.get("model"),
                 request_sha256=digest(request_bytes), response_sha256=digest(raw),
                 request_id=meta.get("request_id"), stop_reason=value.get("stop_reason"),
@@ -469,7 +476,9 @@ def build_manifest(args, context, engine, prices, price_source):
         admission_source_sha256=digest((HERE.parent / "admission.sio").read_bytes()),
         atlas_source_sha256=digest((HERE.parents[3] / "stdlib/hardware/pireus/operator_atlas.sio").read_bytes()),
         proposer_source_sha256=digest(Path(__file__).read_bytes()),
-        mode=args.mode, novelty_oracle="Sounio only", scientific_novelty=False, claim_ready=False)
+        mode=args.mode, novelty_oracle="Sounio only", scientific_novelty=False, claim_ready=False,
+        # Only present when given, so manifests without a workspace are unchanged.
+        **({"anthropic_workspace_id": args.workspace_id} if args.workspace_id else {}))
 
 
 def make_transport(args, secret):
@@ -479,7 +488,7 @@ def make_transport(args, secret):
         raise SystemExit("--mode real needs --confirm-spend")
     if not secret:
         raise SystemExit("ANTHROPIC_API_KEY is not set")
-    return AnthropicTransport(secret)
+    return AnthropicTransport(secret, args.workspace_id)
 
 
 def main(argv=None):
@@ -499,6 +508,8 @@ def main(argv=None):
     ap.add_argument("--rounds", type=int, choices=[1, 2, 3], default=3)
     ap.add_argument("--per-arm", type=int, choices=[8, 32], default=32)
     ap.add_argument("--confirm-spend", action="store_true")
+    ap.add_argument("--workspace-id", default=os.environ.get("ANTHROPIC_WORKSPACE_ID") or None,
+                    help="sent as the anthropic-workspace-id header (default: env ANTHROPIC_WORKSPACE_ID)")
     args = ap.parse_args(argv)
     secret = os.environ.get("ANTHROPIC_API_KEY") if args.mode == "real" else None
     prices, price_source = prices_for(args)
