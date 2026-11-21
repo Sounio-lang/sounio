@@ -23,7 +23,7 @@ function check(w) {
  for(const input of ['formal/**','!formal/**/.lake/**','scripts/ci/*lean*.sh','scripts/ci/epistemic_measure_correspondence_gate.sh','.github/workflows/ci.yml']) assert(key?.includes("'"+input+"'"),'missing key input: '+input);
  assert(key.includes('runner.os')&&key.includes('runner.arch'),'platform identity required');
  const baseline=job.slice(0,a)+job.slice(b);
- assert.equal(crypto.createHash('sha256').update(baseline).digest('hex'),'a12107d6fe97574f54f6f7a623457dcefa6011489d2e830ed45b6ad47e8860ac','mandatory proof gates, builds, conditions, or audit commands changed');
+ assert.equal(crypto.createHash('sha256').update(baseline).digest('hex'),'f9cb644a9ba964e6b6eabbad600539b40ff6a5c6da6daa13f2dea2a3558f6195','mandatory proof gates, builds, conditions, or audit commands changed');
  const fast=w.slice(w.indexOf('  fast-checks:\n'),w.indexOf('\n  contracts-core:'));
  assert(fast.includes('run: node scripts/ci/lean_cache_contract.mjs "$GITHUB_WORKSPACE" --selftest'),'contract must run in Fast Checks');
 }

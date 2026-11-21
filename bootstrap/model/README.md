@@ -20,6 +20,7 @@ no library beyond core, and the evidence that it says what the CPU does.
 | `formal/Bootstrap/X86EnvDiffModel.lean`, `x86env_diff_cpu.cpp`, `x86env_diff_gate.sh` | Process-environment differential test of `X86Env.syscall` and `X86Env.initStack` against the Linux x86-64 kernel. |
 | `formal/Bootstrap/X86DecFuzzModel.lean`, `x86dec_fuzz_cpu.cpp`, `x86dec_fuzz_gate.sh` | Hamming-1/2 (`X86Dec.altsAt`) and byte-boundary differential fuzzer of `X86Dec.decode` and `X86Int.step` against the CPU. |
 | `formal/Bootstrap/TMRBoundCheck.lean`, `tmr_fault_inject.cpp`, `tmr_fault_gate.sh` | Physical 4-site machine-code fault injection of the 38-byte TMR voter against kernel-checked `TMRVoter` and `TMRExposure` bounds. |
+| `formal/Bootstrap/TMRMemExposure.lean` | Decision 50 exposure kernel in machine code over three page-disjoint memory arenas: majority repair, refusal on a three-way split, single-arena-fault SDC certificate, and the physical bound `3·r.mem²·Σexposure + ops·fuel·r.total` under `X86Int` faults. |
 
 ## What the model says
 
