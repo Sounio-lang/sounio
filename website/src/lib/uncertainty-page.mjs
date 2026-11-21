@@ -28,7 +28,7 @@ const SHARED = {
   isPartOf: IS_PART_OF,
   proficiencyLevel: 'Intermediate',
   dependencies: [],
-  dateModified: '2026-11-06',
+  dateModified: '2026-11-20',
   citation: CITATION,
 };
 
@@ -82,6 +82,7 @@ export const UNCERTAINTY_EN = {
 
 export const UNCERTAINTY_PT = {
   ...SHARED,
+  dateModified: '2026-11-06',
   documentTitle: 'Computação científica com propagação de incerteza | Sounio',
   description:
     'Bibliotecas ou uma linguagem de pesquisa tipada: Measurements.jl, uncertainties do Python e Knowledge<T> no Sounio propagam a incerteza do GUM.',
