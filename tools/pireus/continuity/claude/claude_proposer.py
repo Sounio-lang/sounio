@@ -34,8 +34,12 @@ CONDITION_FAMILY_V2 = "claude-api-proposer.v2"
 # v3 = v2 + open prompt: the full kind=2 admission grammar, a reasoning
 # budget, and a reply envelope carrying a hypothesis next to the proposal.
 CONDITION_FAMILY_V3 = "claude-api-proposer.v3"
+# v4 = v3 envelope and history, minus the 1024/32 census and phase anchors,
+# plus a lowering-variation ask and a local B-vs-phase refusal.
+CONDITION_FAMILY_V4 = "claude-api-proposer.v4"
 HISTORY_MODES = ("none", "proposals", "proposals+classes")
-PROMPT_MODES = ("json-only", "open")
+PROMPT_MODES = ("json-only", "open", "open-v4")
+OPEN_PROMPT_MODES = ("open", "open-v4")
 DEFAULT_HISTORY = "proposals+classes"
 ARMS = ("deterministic-search", "claude-no-ontology", "claude-ontology")
 CLAUDE_ARMS = ARMS[1:]
@@ -151,6 +155,72 @@ ENVELOPE_POLICY = (
     "other members go to NNN.rationale.json and are never read by the judge. "
     "Any other reply is passed to Sounio unchanged (it is refused) and the "
     "ledger records envelope_valid=false. No repair.")
+# v4 prompt. Same kind=2 grammar as OPEN_PROMPT (checked against admission.sio
+# by the tests). It does not state the 1024-code / 32-class census, and it
+# does not give the phase examples (1, 64, 32768) that became anchors in v3.
+# Nothing here loosens admission.
+OPEN_V4_PROMPT = (
+    "You are proposing a new algebraic operator for the Pireus research cycle. "
+    "Think it through; you have a reasoning budget. A native Sounio program "
+    "admits or refuses your proposal, rebuilds the operator itself and "
+    "classifies it; it never reads your explanation, and you cannot claim a result.\n"
+    "THE OPERATOR. A product on 16 basis elements e_0..e_15 graded by XOR: "
+    "e_i * e_j = sigma(i,j) e_(i XOR j). sigma(i,j) = cd(i,j) * (-1)^(i^T B j), "
+    "where cd is the Cayley-Dickson sedenion sign table and B is a 4x4 matrix over "
+    "F2 acting on the 4-bit labels i, j (bit b of a label is coordinate b). The "
+    "operator itself is B; B is written as the integer `phase` (0..65535) whose bit "
+    "4*r + c is B[r][c]. Choose B, then set `phase` to exactly that bit packing; "
+    "if you also return B in the envelope, it must match `phase` bit for bit. "
+    "Do not pick a phase for the look of its digits or hex pattern "
+    "(0x1234, 0x5555, 12345 and similar typographic constants are not a hypothesis); "
+    "reason about the bilinear form B.\n"
+    "EQUIVALENCE used by the classifier: change of basis by GL(4,F2) acting on "
+    "the labels, swap of the two inputs, and sign gauge e_i -> +-e_i. Adding to B a "
+    "symmetric matrix with zero diagonal gives a gauge-equivalent operator, so the "
+    "upper triangle of B including the diagonal determines the class. Invariants "
+    "such as the number of basis elements squaring to -1, commuting pairs and "
+    "associativity defects can distinguish operators; they are not a result you may claim.\n"
+    "THE PROPOSAL OBJECT the admission accepts for kind=2 must contain exactly these "
+    "keys, with the immutable values unchanged: schema=1, target=701202, dimension=16, "
+    "precision=64, order=1, fma=0, kind=2, context=<the immutable context sha256 "
+    "given with this request>, phase (an integer 0..65535 encoding B as above), and "
+    "the lowering keys. Lowering keys change how the operator is computed on a GPU, "
+    "not which operator it is: "
+    "lane_stride, an odd integer 1..15, is the stride of the thread-to-lane map; "
+    "lane_offset, an integer 0..15, is the offset of that map; "
+    "load 0 reads operands directly, 1 uses a warp shuffle, 2 stages them through "
+    "shared memory; "
+    "layout 0 is array-of-structures, 1 is structure-of-arrays; "
+    "unroll is 1, 2, 4, 8 or 16; "
+    "sign_mode 0 or 1 (1 = per-lane fixed add/sub, legal only with unroll 16); "
+    "pack 0 or 1 (1 packs two vectors per 16-thread block); "
+    "vector_load 0 or 1 (1 is legal only with load 2, layout 1 and pack 1). "
+    "Values are non-negative integers; unknown or duplicate keys are refused, "
+    "as are expected results, tensors, hashes or claims.\n"
+    "Unvaried lowering (do not copy a finished object; fill the keys yourself) "
+    "is lane_stride=1, lane_offset=0, load=1, layout=0, unroll=1, and the optional "
+    "keys sign_mode, pack and vector_load omitted or 0. Every proposal must set at "
+    "least one lowering key to a different legal value, and the hypothesis must "
+    "say which key changed and why. Combine only values the grammar accepts: "
+    "lane_stride must be odd (lane_stride 2 is refused as LANE_MAP); "
+    "sign_mode 1 with unroll 8 is refused as SIGN_MODE_UNROLL; vector_load 1 with "
+    "load 1 is refused as VECTOR_LOAD_LOAD; an extra key such as \"expected\" is "
+    "refused as PROPOSAL_FORMAT; phase 65536 is refused as PHASE_RANGE.\n"
+    "REPLY with exactly one JSON object and nothing else (no prose or code fence "
+    "outside it): {\"hypothesis\": what operator and lowering you are aiming at and "
+    "why they should differ from those already seen (a few sentences), "
+    "\"B\": your 4x4 matrix as a list of 4 rows of 0/1, "
+    "\"proposal\": the proposal object}. Only `proposal` goes to admission; "
+    "`hypothesis` and `B` are recorded, never judged. If `B` does not match "
+    "`proposal.phase`, the proposal is refused without admission. ")
+B_PHASE_MISMATCH_POLICY = (
+    "v4: if the reply envelope parses and contains B, and b_to_phase(B) is not "
+    "equal to proposal.phase, the proposer records B_PHASE_MISMATCH in the ledger, "
+    "writes NNN.local-refusal.json (authority claude-api-proposer.v4, not Sounio) "
+    "and does not call the admission executable for that proposal. The proposal "
+    "bytes are still hashed into the batch. No extra API call is made to replace it. "
+    "It counts as a refusal in the report. A reply without a parsed envelope, or "
+    "an envelope without B, is not this check: it follows the v3 envelope policy.")
 
 DEDUP_POLICY = (
     "Within one arm and round, a proposal equal to an earlier one (identical "
@@ -338,11 +408,20 @@ def history_lines(run, manifest, engine, base_dir, index):
         except Exception:
             phase = "unparseable"
         line = "phase=%s" % (phase,)
+        if manifest.get("prompt_mode") == "open-v4":
+            lowering = lowering_summary(data)
+            if lowering:
+                line += " " + lowering
         if mode == "proposals+classes":
-            value = preview(run, engine, rel)
-            table = value.get("canonical_table")
-            line += " " + ("class-" + digest(table.encode())[:12] if table
-                           else "%s:%s" % (value.get("decision"), value.get("reason")))
+            local_rel = rel.replace(".proposal.json", ".local-refusal.json")
+            if (run.root / local_rel).exists():
+                reason = json.loads((run.root / local_rel).read_text()).get("reason")
+                line += " REFUSE:%s" % reason
+            else:
+                value = preview(run, engine, rel)
+                table = value.get("canonical_table")
+                line += " " + ("class-" + digest(table.encode())[:12] if table
+                               else "%s:%s" % (value.get("decision"), value.get("reason")))
         lines.append(line)
     return lines
 
@@ -392,17 +471,56 @@ def b_to_phase(rows):
     return code
 
 
+LOWERING_KEYS = ("lane_stride", "lane_offset", "load", "layout", "unroll",
+                 "sign_mode", "pack", "vector_load")
+UNVARIED_LOWERING = dict(lane_stride=1, lane_offset=0, load=1, layout=0, unroll=1)
+
+
+def lowering_summary(data):
+    try:
+        value = json.loads(data)
+    except Exception:
+        return ""
+    if not isinstance(value, dict):
+        return ""
+    return " ".join("%s=%s" % (k, value[k]) for k in LOWERING_KEYS if k in value)
+
+
+def template_from_request_text(text):
+    """Rebuild the kind=2 template from a request prompt (v1–v3 Template, or v4 sha)."""
+    if "Template: " in text:
+        return json.loads(text.rsplit("Template: ", 1)[1])
+    marker = "Immutable context sha256: "
+    if marker in text:
+        sha = text.rsplit(marker, 1)[1].strip().split()[0].strip(".,;")
+        if len(sha) == 64 and all(c in "0123456789abcdef" for c in sha):
+            return template(sha)
+    raise ValueError("request text has no template or context sha256")
+
+
 def request_body(manifest, context, arm, rnd, index, feedback, history=None):
     base = template(digest(context))
     if arm == "claude-ontology":
         facts = ONTOLOGY_LEGEND + " Context: " + context.decode().strip()
     else:
         facts = "Ontology facts: withheld in this condition."
-    head = OPEN_PROMPT if manifest.get("prompt_mode") == "open" else PROMPT
+    mode = manifest.get("prompt_mode") or "json-only"
+    if mode == "open-v4":
+        head = OPEN_V4_PROMPT
+        tail = ("This is proposal %d of round %d. Immutable context sha256: %s."
+                % (index, rnd, digest(context)))
+    elif mode == "open":
+        head = OPEN_PROMPT
+        tail = "This is proposal %d of round %d. Template: %s" % (
+            index, rnd, json.dumps(base, sort_keys=True))
+    else:
+        head = PROMPT
+        tail = "This is proposal %d of round %d. Template: %s" % (
+            index, rnd, json.dumps(base, sort_keys=True))
     text = (head + facts + " " +
             (FEEDBACK_HEAD + " | ".join(feedback) + " " if feedback else "") +
             (HISTORY_HEAD + " | ".join(history) + ". " + DISTINCT_ASK if history else "") +
-            "This is proposal %d of round %d. Template: %s" % (index, rnd, json.dumps(base, sort_keys=True)))
+            tail)
     body = dict(model=manifest["model"], max_tokens=manifest["max_tokens"],
                 messages=[dict(role="user", content=text)])
     if manifest["effort"]:
@@ -434,17 +552,18 @@ class MockTransport:
     def send(self, body):
         self.calls += 1
         prompt = body["messages"][0]["content"]
-        base = json.loads(prompt.rsplit("Template: ", 1)[1])
+        base = template_from_request_text(prompt)
         h = int(digest(prompt.encode())[:8], 16)
         if h % 11 == 0:
             text = "```json\n" + json.dumps(base | dict(phase=h % 65536)) + "\n```"
         else:
             text = json.dumps(base | dict(phase=h % 65536, lane_stride=1 + 2 * (h % 8)))
-        if OPEN_PROMPT in prompt and h % 11 != 0:
+        if (OPEN_PROMPT in prompt or OPEN_V4_PROMPT in prompt) and h % 11 != 0:
             phase = h % 65536
             rows = [[(phase >> (4 * r + c)) & 1 for c in range(4)] for r in range(4)]
+            proposal = base | dict(phase=phase, lane_stride=1 + 2 * (h % 8))
             text = json.dumps(dict(hypothesis="mock hypothesis %d" % (h % 97), B=rows,
-                                   proposal=base | dict(phase=phase, lane_stride=1 + 2 * (h % 8))))
+                                   proposal=proposal))
         raw = dict(id="msg_mock_%08x" % h, type="message", role="assistant", model=body["model"],
                    content=[dict(type="text", text=text)], stop_reason="end_turn",
                    usage=dict(input_tokens=len(prompt.encode()) // 4,
@@ -547,16 +666,17 @@ def generate_cell(run, manifest, transport, cell, context, secret, prices, engin
                 request_id=meta.get("request_id"), stop_reason=value.get("stop_reason"),
                 input_tokens=usage.get("input_tokens"), output_tokens=usage.get("output_tokens"),
                 **({"thinking_tokens": (usage.get("output_tokens_details") or {}).get("thinking_tokens")}
-                   if manifest.get("prompt_mode") == "open" else {}),
+                   if manifest.get("prompt_mode") in OPEN_PROMPT_MODES else {}),
                 cache_creation_input_tokens=usage.get("cache_creation_input_tokens"),
                 cache_read_input_tokens=usage.get("cache_read_input_tokens"),
                 cost_usd=round(cost, 6), cumulative_usd=round(spent, 6),
                 seconds=round(time.time() - started, 3)))
         text, _ = response_text((run.root / response_rel).read_bytes())
-        if manifest.get("prompt_mode") == "open":
+        if manifest.get("prompt_mode") in OPEN_PROMPT_MODES:
             proposal_bytes, rationale = split_envelope(text or "")
             row = dict(event="ENVELOPE", cell=base_dir, index=index, envelope_valid=rationale is not None,
                        proposal_sha256=digest(proposal_bytes), cost_usd=0.0)
+            mismatch = False
             if rationale is not None:
                 rationale_bytes = encoded(rationale)
                 run.write(stem + ".rationale.json", rationale_bytes)
@@ -567,12 +687,17 @@ def generate_cell(run, manifest, transport, cell, context, secret, prices, engin
                     stated = None
                 row.update(rationale_sha256=digest(rationale_bytes),
                            b_matches_phase=b_to_phase(rationale.get("B")) == stated if "B" in rationale else None)
+                if (manifest.get("prompt_mode") == "open-v4" and "B" in rationale
+                        and row["b_matches_phase"] is not True):
+                    mismatch = True
             if not any(x.get("event") == "ENVELOPE" and x["cell"] == base_dir and x["index"] == index
                        for x in run.rows("ledger.jsonl")):
                 run.append("ledger.jsonl", row)
             run.write(proposal_rel, proposal_bytes)
             run.event("generate", proposal_rel)
-            if dedup:
+            if mismatch:
+                record_b_phase_mismatch(run, base_dir, index, proposal_bytes)
+            elif dedup:
                 record_duplicate(run, base_dir, index)
             continue
         # No repair, fence stripping or JSON normalisation: Sounio judges the text.
@@ -590,6 +715,20 @@ def generate_cell(run, manifest, transport, cell, context, secret, prices, engin
     run.event("batch", base_dir + "/batch.json")
 
 
+def record_b_phase_mismatch(run, base_dir, index, proposal_bytes):
+    rel = "%s/%03d.local-refusal.json" % (base_dir, index)
+    receipt = dict(schema=1, authority="claude-api-proposer.v4", decision="REFUSE",
+                   reason="B_PHASE_MISMATCH", scientific_novelty=False, claim_ready=False)
+    if not (run.root / rel).exists():
+        run.write(rel, encoded(receipt))
+        run.event("local-refusal", rel)
+    if not any(x.get("event") == "B_PHASE_MISMATCH" and x["cell"] == base_dir and x["index"] == index
+               for x in run.rows("ledger.jsonl")):
+        run.append("ledger.jsonl", dict(
+            event="B_PHASE_MISMATCH", cell=base_dir, index=index,
+            proposal_sha256=digest(proposal_bytes), cost_usd=0.0))
+
+
 def admit_cell(run, manifest, engine, cell):
     base_dir = cell_dir(cell)
     batch = json.loads((run.root / base_dir / "batch.json").read_text())
@@ -600,7 +739,8 @@ def admit_cell(run, manifest, engine, cell):
         if digest(proposal.read_bytes()) != entry["sha256"]:
             raise ValueError("proposal changed after its batch hash: " + entry["proposal"])
         receipt_rel = entry["proposal"].replace(".proposal.json", ".receipt.json")
-        if (run.root / receipt_rel).exists():
+        local_rel = entry["proposal"].replace(".proposal.json", ".local-refusal.json")
+        if (run.root / receipt_rel).exists() or (run.root / local_rel).exists():
             continue
         result = subprocess.run([str(engine), str(run.root / "context.json"), str(proposal)],
                                 capture_output=True, timeout=120)
@@ -624,6 +764,10 @@ def summarize(run, manifest):
     for cell in cells(manifest["rounds"]):
         base_dir = cell_dir(cell)
         receipts = [json.loads(p.read_text()) for p in sorted((run.root / base_dir).glob("*.receipt.json"))]
+        local_refusals = [json.loads(p.read_text())
+                          for p in sorted((run.root / base_dir).glob("*.local-refusal.json"))]
+        mismatch_idx = sorted({x["index"] for x in ledger
+                               if x.get("event") == "B_PHASE_MISMATCH" and x["cell"] == base_dir})
         admitted = [r for r in receipts if r.get("decision") == "ADMIT"]
         classes = {r["canonical_table"] for r in admitted if r.get("canonical_table")}
         new = classes - per_arm_classes[cell["arm"]]
@@ -632,21 +776,26 @@ def summarize(run, manifest):
         for r in receipts:
             if r.get("decision") != "ADMIT":
                 reasons[r.get("reason")] = reasons.get(r.get("reason"), 0) + 1
+        for r in local_refusals:
+            reasons[r.get("reason")] = reasons.get(r.get("reason"), 0) + 1
         calls = [x for x in ledger if x.get("event") == "CALL" and x["cell"] == base_dir]
-        duplicates = sorted({x["index"] for x in ledger if x.get("event") == "DUPLICATE" and x["cell"] == base_dir})
+        duplicates = sorted({x["index"] for x in ledger if x.get("event") == "DUPLICATE" and x["cell"] == base_dir}
+                            - set(mismatch_idx))
         if duplicates:
             reasons["DUPLICATE"] = len(duplicates)
         unique = [json.loads((run.root / ("%s/%03d.receipt.json" % (base_dir, i))).read_text())
                   for i in range(manifest["per_arm"])
-                  if i not in duplicates and (run.root / ("%s/%03d.receipt.json" % (base_dir, i))).exists()]
+                  if i not in duplicates and i not in mismatch_idx
+                  and (run.root / ("%s/%03d.receipt.json" % (base_dir, i))).exists()]
         batch = run.root / base_dir / "batch.json"
         out["cells"].append(dict(
             cell=base_dir, arm=cell["arm"], round=cell["round"],
             batch_sha256=json.loads(batch.read_text())["batch_sha256"] if batch.exists() else None,
-            validated=len(receipts), admitted=len(admitted), refused=reasons,
+            validated=len(receipts) + len(local_refusals), admitted=len(admitted), refused=reasons,
             novelty={lvl: sum(1 for r in admitted if r.get("novelty") == lvl) for lvl in ("N0", "N1", "N2")},
             canonical_classes=len(classes), new_classes_for_arm=len(new),
             duplicates=duplicates,
+            b_phase_mismatch=mismatch_idx,
             admitted_after_dedup=sum(1 for r in unique if r.get("decision") == "ADMIT"),
             calls=len(calls), input_tokens=sum(x["input_tokens"] or 0 for x in calls),
             output_tokens=sum(x["output_tokens"] or 0 for x in calls),
@@ -663,7 +812,8 @@ def estimate(manifest, context, prices):
     calls, worst, expected, tokens_in = 0, 0.0, 0.0, 0
     feedback_guess = ["r0 phase=65535 ADMIT - N2 class-0123456789ab"] * manifest["per_arm"]
     history_on = manifest.get("history_mode", "none") != "none"
-    out_tokens = EXPECTED_OUTPUT_TOKENS_OPEN if manifest.get("prompt_mode") == "open" else EXPECTED_OUTPUT_TOKENS
+    out_tokens = (EXPECTED_OUTPUT_TOKENS_OPEN if manifest.get("prompt_mode") in OPEN_PROMPT_MODES
+                  else EXPECTED_OUTPUT_TOKENS)
     for cell in cells(manifest["rounds"]):
         if cell["arm"] not in CLAUDE_ARMS:
             continue
@@ -704,6 +854,15 @@ def build_manifest(args, context, engine, prices, price_source):
         family = CONDITION_FAMILY_V3
         history.update(prompt_mode="open", open_prompt_sha256=digest(OPEN_PROMPT.encode()),
                        envelope_policy=ENVELOPE_POLICY, envelope_policy_sha256=digest(ENVELOPE_POLICY.encode()),
+                       thinking="adaptive (model default, display omitted); thinking tokens are billed as output",
+                       admission_grammar_source_sha256=digest((HERE.parent / "admission.sio").read_bytes()))
+    elif args.prompt == "open-v4":
+        family = CONDITION_FAMILY_V4
+        history.update(prompt_mode="open-v4",
+                       open_v4_prompt_sha256=digest(OPEN_V4_PROMPT.encode()),
+                       envelope_policy=ENVELOPE_POLICY, envelope_policy_sha256=digest(ENVELOPE_POLICY.encode()),
+                       b_phase_mismatch_policy=B_PHASE_MISMATCH_POLICY,
+                       b_phase_mismatch_policy_sha256=digest(B_PHASE_MISMATCH_POLICY.encode()),
                        thinking="adaptive (model default, display omitted); thinking tokens are billed as output",
                        admission_grammar_source_sha256=digest((HERE.parent / "admission.sio").read_bytes()))
     return dict(
@@ -759,18 +918,18 @@ def main(argv=None):
     ap.add_argument("--per-arm", type=int, choices=[8, 32], default=32)
     ap.add_argument("--confirm-spend", action="store_true")
     ap.add_argument("--prompt", choices=PROMPT_MODES, default="json-only",
-                    help="open = v3: full admission grammar, reasoning budget, hypothesis envelope")
+                    help="open = v3; open-v4 = lowering variation + local B-vs-phase check, no census/phase anchors")
     ap.add_argument("--history", choices=HISTORY_MODES, default=DEFAULT_HISTORY,
                     help="intra-round history of the arm's own proposals (none = v1 behaviour)")
     ap.add_argument("--workspace-id", default=os.environ.get("ANTHROPIC_WORKSPACE_ID") or None,
                     help="sent as the anthropic-workspace-id header (default: env ANTHROPIC_WORKSPACE_ID)")
     args = ap.parse_args(argv)
-    if args.prompt == "open" and args.history == "none":
-        ap.error("--prompt open (v3) keeps the v2 intra-round history; it needs --history other than none")
+    if args.prompt in OPEN_PROMPT_MODES and args.history == "none":
+        ap.error("--prompt %s keeps the v2 intra-round history; it needs --history other than none" % args.prompt)
     if args.effort is None:
-        args.effort = OPEN_EFFORT if args.prompt == "open" else DEFAULT_EFFORT
+        args.effort = OPEN_EFFORT if args.prompt in OPEN_PROMPT_MODES else DEFAULT_EFFORT
     if args.max_tokens is None:
-        args.max_tokens = OPEN_MAX_TOKENS if args.prompt == "open" else DEFAULT_MAX_TOKENS
+        args.max_tokens = OPEN_MAX_TOKENS if args.prompt in OPEN_PROMPT_MODES else DEFAULT_MAX_TOKENS
     secret = os.environ.get("ANTHROPIC_API_KEY") if args.mode == "real" else None
     prices, price_source = prices_for(args)
     if args.command == "report":

@@ -423,6 +423,32 @@ round, 3 rounds with the arm order rotated each round, and the same contracts.
   (4,000 output tokens/call assumed, thinking included), worst case US$8.1
   (every call at 16,000), under the US$20 cap. A full v3 run (192 calls) has a
   worst case above US$20; BUDGET_STOP ends it at the cap.
+- v4, `claude-api-proposer.v4:<model>`, is opt-in (`--prompt open-v4`; keeps the
+  v2 history and dedup, refuses `--history none`). It keeps the v3 envelope,
+  reasoning defaults (effort `high`, max_tokens 16000) and the same form in
+  both Claude arms. Changes, all on the proposer side (admission.sio
+  unchanged):
+  - prompt (`OPEN_V4_PROMPT`, hash in the manifest): still states the kind=2
+    grammar and what each lowering key does, and requires every proposal to
+    set at least one lowering key away from the unvaried defaults
+    (lane_stride=1, lane_offset=0, load=1, layout=0, unroll=1, optional
+    sign_mode/pack/vector_load omitted or 0). It does not include a fully
+    filled JSON template, the 1024-code / 32-class census, or the phase
+    examples (1, 64, 32768) that became anchors in the v3 smoke. Intra-round
+    history still carries Sounio class tags, and also the lowering keys of
+    earlier proposals of the same arm. The context sha256 is given as an
+    immutable value, not as a copyable object.
+  - local consistency: if the envelope contains `B` and `b_to_phase(B)` is
+    not `proposal.phase`, the proposer records `B_PHASE_MISMATCH` in the
+    ledger, writes `NNN.local-refusal.json` (authority
+    `claude-api-proposer.v4`, not Sounio), does not call admission, and does
+    not make a replacement API call. The proposal remains in the batch hash.
+    The check is not applied when the envelope is missing or has no `B`.
+  Old flags give old bytes: `--history none` (v1), the default (v2) and
+  `--prompt open` (v3) keep their frozen request digests.
+  v4 smoke estimate is produced by `estimate --prompt open-v4 --per-arm 8
+  --rounds 3 --budget-usd 20`; worst case stays under the US$20 cap for this
+  geometry (48 calls, max_tokens 16000).
 - Tests: `claude/test_claude_proposer.py` (CI step "PIREUS Claude proposer
   condition"), with no network and no key.
 

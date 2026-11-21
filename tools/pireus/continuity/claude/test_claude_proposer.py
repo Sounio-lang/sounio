@@ -453,11 +453,22 @@ class ProposerTests(unittest.TestCase):
                 hist = ["phase=1 class-0123456789ab", "phase=2 REFUSE:LANE_MAP"] if h != "none" else None
                 got.append(cp.digest(cp.encoded(cp.request_body(m, ctx, arm, 1, 2, ["fb one", "fb two"], hist))))
         self.assertEqual(got, frozen)
+        # v3 request bytes produced by 98e42133 (--prompt open, proposals+classes).
+        v3 = ["4e90efd8fe6362c6a74f828a8343c2ae9181d3b91234a4aaebbcf99422c0a03b",
+              "81e44e97a1b1737c459410e2cbe459318945ae39764021f0228671c2697b184e"]
+        got = []
+        m = dict(model="claude-sonnet-5-5", max_tokens=16000, effort="high", temperature=None,
+                 history_mode="proposals+classes", prompt_mode="open")
+        hist = ["phase=1 class-0123456789ab", "phase=2 REFUSE:LANE_MAP"]
+        for arm in ("claude-no-ontology", "claude-ontology"):
+            got.append(cp.digest(cp.encoded(cp.request_body(m, ctx, arm, 1, 2, ["fb one", "fb two"], hist))))
+        self.assertEqual(got, v3)
 
     def test_old_flags_keep_old_defaults(self):
         for flags, family, effort, tokens in ((("--history", "none"), "v1", "medium", 8192),
                                               ((), "v2", "medium", 8192),
-                                              (("--prompt", "open"), "v3", "high", 16000)):
+                                              (("--prompt", "open"), "v3", "high", 16000),
+                                              (("--prompt", "open-v4"), "v4", "high", 16000)):
             code, _, _ = self.run_cli(*flags, "--rounds", "1", command="estimate")
             self.assertEqual(code, 0)
             code, out, _ = self.run_cli(*flags, "--rounds", "1", "--per-arm", "8", run="r-" + family)
@@ -465,12 +476,16 @@ class ProposerTests(unittest.TestCase):
             manifest = json.loads((self.dir / ("r-" + family) / "manifest.json").read_text())
             self.assertEqual(manifest["condition_id"], "claude-api-proposer.%s:claude-sonnet-5-5" % family)
             self.assertEqual((manifest["effort"], manifest["max_tokens"]), (effort, tokens))
-            self.assertEqual("prompt_mode" in manifest, family == "v3")
+            self.assertEqual("prompt_mode" in manifest, family in ("v3", "v4"))
+            if family == "v4":
+                self.assertEqual(manifest["prompt_mode"], "open-v4")
+                self.assertEqual(manifest["condition_id"], "claude-api-proposer.v4:claude-sonnet-5-5")
 
     def test_open_prompt_requires_history(self):
-        code, _, err = self.run_cli("--prompt", "open", "--history", "none")
-        self.assertNotEqual(code, 0)
-        self.assertIn("history", err)
+        for flag in ("open", "open-v4"):
+            code, _, err = self.run_cli("--prompt", flag, "--history", "none")
+            self.assertNotEqual(code, 0)
+            self.assertIn("history", err)
 
     def test_open_prompt_same_form_both_arms_and_envelope(self):
         sys.modules["anthropic"] = FakeAnthropicModule()
@@ -527,6 +542,108 @@ class ProposerTests(unittest.TestCase):
         self.assertEqual(cp.b_to_phase([[0] * 4, [0, 0, 1, 0], [0] * 4, [0] * 4]), 64)
         self.assertIsNone(cp.b_to_phase([[2, 0, 0, 0]] * 4))
         self.assertIsNone(cp.b_to_phase([[True, 0, 0, 0]] + [[0] * 4] * 3))
+
+    def test_open_v4_prompt_omits_census_and_phase_anchors(self):
+        # v3 keeps the census and the examples; v4 must not replay them as anchors.
+        self.assertIn("1024", cp.OPEN_PROMPT)
+        self.assertIn("32 classes", cp.OPEN_PROMPT)
+        self.assertIn("phase 1", cp.OPEN_PROMPT)
+        self.assertIn("phase 64", cp.OPEN_PROMPT)
+        self.assertIn("32768", cp.OPEN_PROMPT)
+        for forbidden in ("1024", "32 classes", "phase 1", "phase 64", "32768"):
+            self.assertNotIn(forbidden, cp.OPEN_V4_PROMPT)
+        self.assertIn("at least one lowering key", cp.OPEN_V4_PROMPT)
+        for key in ("lane_stride", "lane_offset", "load", "layout", "unroll",
+                    "sign_mode", "pack", "vector_load"):
+            self.assertIn(key, cp.OPEN_V4_PROMPT)
+
+    def test_open_v4_request_has_no_filled_template_and_same_form_both_arms(self):
+        code, _, _ = self.run_cli("--prompt", "open-v4", "--rounds", "1")
+        self.assertEqual(code, 0)
+        root = self.dir / "run"
+        manifest = json.loads((root / "manifest.json").read_text())
+        self.assertEqual(manifest["condition_id"], "claude-api-proposer.v4:claude-sonnet-5-5")
+        self.assertEqual(manifest["prompt_mode"], "open-v4")
+        self.assertEqual(manifest["open_v4_prompt_sha256"], cp.digest(cp.OPEN_V4_PROMPT.encode()))
+        self.assertEqual(manifest["b_phase_mismatch_policy_sha256"],
+                         cp.digest(cp.B_PHASE_MISMATCH_POLICY.encode()))
+        no = json.loads((root / "round-0/claude-no-ontology/003.request.json").read_text())
+        yes = json.loads((root / "round-0/claude-ontology/003.request.json").read_text())
+        self.assertEqual((no["model"], no["max_tokens"], no["output_config"]),
+                         (yes["model"], yes["max_tokens"], yes["output_config"]))
+        a, b = no["messages"][0]["content"], yes["messages"][0]["content"]
+        ctx = hashlib.sha256((root / "context.json").read_bytes()).hexdigest()
+        filled = json.dumps(cp.template(ctx), sort_keys=True)
+        for text in (a, b):
+            self.assertTrue(text.startswith(cp.OPEN_V4_PROMPT))
+            self.assertNotIn(cp.PROMPT, text)
+            self.assertNotIn("Template: ", text)
+            self.assertNotIn(filled, text)
+            self.assertIn("Immutable context sha256: " + ctx, text)
+            self.assertIn(cp.HISTORY_HEAD, text)
+        self.assertIn("Ontology facts: withheld", a)
+        self.assertIn(cp.ONTOLOGY_LEGEND, b)
+        self.assertNotIn(cp.ONTOLOGY_LEGEND, a)
+
+    def test_open_v4_history_includes_lowering_keys(self):
+        code, _, _ = self.run_cli("--prompt", "open-v4", "--rounds", "1")
+        self.assertEqual(code, 0)
+        path = self.dir / "run/round-0/claude-no-ontology/003.request.json"
+        text = json.loads(path.read_text())["messages"][0]["content"]
+        self.assertIn(cp.HISTORY_HEAD, text)
+        self.assertRegex(text, r"phase=\d+ .*(lane_stride|load|layout)=")
+
+    def test_b_phase_mismatch_is_local_refusal_without_replacement_call(self):
+        class Mismatch(cp.MockTransport):
+            def send(self, body):
+                self.calls += 1
+                prompt = body["messages"][0]["content"]
+                base = cp.template_from_request_text(prompt)
+                rows = [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]  # phase 33825
+                text = json.dumps(dict(
+                    hypothesis="identity B, deliberately wrong phase",
+                    B=rows,
+                    proposal=base | dict(phase=33793, load=2, layout=1, pack=1,
+                                         vector_load=1, unroll=16, sign_mode=1)))
+                raw = dict(id="msg_mis", type="message", role="assistant", model=body["model"],
+                           content=[dict(type="text", text=text)], stop_reason="end_turn",
+                           usage=dict(input_tokens=100, output_tokens=200))
+                return cp.encoded(raw), dict(request_id="mis-%d" % self.calls)
+
+        original = cp.MockTransport
+        cp.MockTransport = Mismatch
+        try:
+            code, out, _ = self.run_cli("--prompt", "open-v4", "--rounds", "1")
+        finally:
+            cp.MockTransport = original
+        self.assertEqual(code, 0)
+        root = self.dir / "run"
+        ledger = [json.loads(x) for x in (root / "ledger.jsonl").read_text().splitlines()]
+        calls = [x for x in ledger if x.get("event") == "CALL"]
+        mismatches = [x for x in ledger if x.get("event") == "B_PHASE_MISMATCH"]
+        self.assertEqual(len(calls), 16)
+        self.assertEqual(len(mismatches), 16)
+        self.assertFalse(list((root / "round-0/claude-no-ontology").glob("*.receipt.json")))
+        self.assertFalse(list((root / "round-0/claude-ontology").glob("*.receipt.json")))
+        locals_ = list(root.rglob("*.local-refusal.json"))
+        self.assertEqual(len(locals_), 16)
+        for path in locals_:
+            rec = json.loads(path.read_text())
+            self.assertEqual(rec["authority"], "claude-api-proposer.v4")
+            self.assertEqual(rec["decision"], "REFUSE")
+            self.assertEqual(rec["reason"], "B_PHASE_MISMATCH")
+            self.assertIs(rec["scientific_novelty"], False)
+            self.assertIs(rec["claim_ready"], False)
+        self.assertEqual(len(list((root / "round-0/deterministic-search").glob("*.receipt.json"))), 8)
+        later = json.loads((root / "round-0/claude-no-ontology/003.request.json").read_text())
+        self.assertIn("REFUSE:B_PHASE_MISMATCH", later["messages"][0]["content"])
+        report = json.loads(out)
+        claude = [c for c in report["cells"] if c["arm"] != "deterministic-search"]
+        self.assertTrue(claude)
+        for cell in claude:
+            self.assertEqual(cell["admitted"], 0)
+            self.assertEqual(cell["refused"].get("B_PHASE_MISMATCH"), 8)
+            self.assertEqual(cell["calls"], 8)
 
     def test_key_in_error_message_is_redacted(self):
         sys.modules["anthropic"] = FakeAnthropicModule(fail_with_key=True)
@@ -612,6 +729,7 @@ class OpenPromptExamplesAgainstRealAdmission(unittest.TestCase):
                 if reason:
                     self.assertEqual(receipt["reason"], reason)
                     self.assertIn("(%s)" % reason, cp.OPEN_PROMPT)
+                    self.assertIn(reason, cp.OPEN_V4_PROMPT)
                 elif change.get("phase") is None:
                     self.assertEqual(receipt["novelty"], "N0")
 
