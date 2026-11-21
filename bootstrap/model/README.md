@@ -13,7 +13,17 @@ no library beyond core, and the evidence that it says what the CPU does.
 | `formal/Bootstrap/Refine.lean`, `Loop.lean` | Refinement of machine states, `step_mono`, runs cut at a loop head, a decidable check for refinement. |
 | `formal/Bootstrap/SeedA.lean`, `SeedB.lean` | Each seed on every listing (`seedA_correct`, `seedB_correct`, and the refusals). |
 | `seed_proofs.sh` | Generates and checks the four whole-run theorems. |
-| `formal/Bootstrap/X86DiffModel.lean`, `x86diff_cpu.cpp`, `x86diff_gate.sh` | Instruction-level differential test of the model against the CPU. |
+| `formal/Bootstrap/X86DiffModel.lean`, `x86diff_cpu.cpp`, `x86diff_gate.sh` | Instruction-level differential test of `X86Min` against the CPU. |
+| `formal/Bootstrap/X86IntDiffModel.lean`, `x86diff_cpu.cpp`, `x86int_diff_gate.sh` | Instruction-level differential test of `X86Int` and `X86Dec` against the CPU. |
+| `formal/Bootstrap/TMRVoter.lean` | Canonical 38-byte machine-code TMR majority voter (`voterCode`) and physical 4-site fault-masking theorems over `X86Int`. |
+| `formal/Bootstrap/X86Bridge.lean` | Forward simulation from the partial `X86Min` seed model (`X86Min.step`, `X86Min.exec`) to concrete `X86Int.step`, `X86Int.run`, and `X86Int.prun`. |
+| `formal/Bootstrap/X86EnvDiffModel.lean`, `x86env_diff_cpu.cpp`, `x86env_diff_gate.sh` | Process-environment differential test of `X86Env.syscall` and `X86Env.initStack` against the Linux x86-64 kernel. |
+| `formal/Bootstrap/X86DecFuzzModel.lean`, `x86dec_fuzz_cpu.cpp`, `x86dec_fuzz_gate.sh` | Hamming-1/2 (`X86Dec.altsAt`) and byte-boundary differential fuzzer of `X86Dec.decode` and `X86Int.step` against the CPU. |
+| `formal/Bootstrap/TMRBoundCheck.lean`, `tmr_fault_inject.cpp`, `tmr_fault_gate.sh` | Physical 4-site machine-code fault injection of the 38-byte TMR voter against kernel-checked `TMRVoter` and `TMRExposure` bounds. |
+| `formal/Bootstrap/AArch64Min.lean`, `FormatsC.lean`, `SeedC.lean`, `RunAArch64.lean` (`aarch64run`) | Minimal AArch64 model and the root C seed loader `seed-c` (`bootstrap/roots/c`): `seedC_correct`, `seedC_refuses` over every listing in format C. |
+| `AArch64DiffModel.lean` (`aarch64-diff`), `aarch64_diff_cpu.cpp`, `aarch64_jit_exec.cpp`, `aarch64_diff_gate.sh`, `root_c_seed_gate.sh` | AArch64 differential against Apple Silicon (`MAP_JIT`), and the root C seed gate: cross-assembly by seed-a and seed-b on Linux x86-64, native runs on Apple Silicon. |
+| `formal/Bootstrap/TMRMemExposure.lean` | Decision 50 exposure kernel in machine code over three page-disjoint memory arenas: majority repair, refusal on a three-way split, single-arena-fault SDC certificate, and the physical bound `3·r.mem²·Σexposure + ops·fuel·r.total` under `X86Int` faults. |
+| `formal/Bootstrap/TMRBurst.lean`, `TMRBurstCheck.lean`, `tmr_burst_straddle_cpu.cpp`, `tmr_burst_straddle_gate.sh` | 64-byte cache-line burst fault model: a single burst touches at most one of three arenas separated by 64 bytes or more, so it never corrupts the vote; three bursts keep the `3·q_burst²` bound. The gate checks this and guard-page instruction straddles against the CPU, with packed-arena and straddle negative controls. |
 
 ## What the model says
 

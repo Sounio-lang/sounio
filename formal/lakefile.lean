@@ -53,12 +53,25 @@ lean_lib Bootstrap where
     .one `Bootstrap.Refine,
     .one `Bootstrap.SeedData,
     .one `Bootstrap.Seeds,
+    .one `Bootstrap.SporosX1,
+    .one `Bootstrap.SporosX1Comp,
+    .one `Bootstrap.SporosX1Image,
     .one `Bootstrap.TMR,
     .one `Bootstrap.X86Dec,
     .one `Bootstrap.TMRExposure,
+    .one `Bootstrap.TMRVoter,
+    .one `Bootstrap.X86Bridge,
+    .one `Bootstrap.TMRX86,
+    .one `Bootstrap.TMRWord,
     .one `Bootstrap.X86Env,
     .one `Bootstrap.X86Int,
     .one `Bootstrap.X86Min,
+    .one `Bootstrap.AArch64Min,
+    .one `Bootstrap.FormatsC,
+    .one `Bootstrap.SeedC,
+    .one `Bootstrap.TMRMemExposure,
+    .one `Bootstrap.TMRBurst,
+    .one `Bootstrap.TMRBurstCheck,
     .submodules `Sporos]
 
 -- The two seeds on every listing (about 20 minutes of kernel time, the two in parallel); built by
@@ -76,3 +89,23 @@ lean_exe «sporos-examples» where
 
 lean_exe x86run where
   root := `Bootstrap.RunHex
+
+lean_exe «x86int-diff» where
+  root := `Bootstrap.X86IntDiffModel
+
+lean_exe «x86env-diff» where
+  root := `Bootstrap.X86EnvDiffModel
+
+lean_exe «x86dec-fuzz» where
+  root := `Bootstrap.X86DecFuzzModel
+
+lean_exe «tmr-bound-check» where
+  root := `Bootstrap.TMRBoundCheck
+
+lean_exe aarch64run where
+  root := `Bootstrap.RunAArch64
+
+lean_exe «aarch64-diff» where
+  root := `Bootstrap.AArch64DiffModel
+lean_exe «tmr-burst-check» where
+  root := `Bootstrap.TMRBurstCheck
