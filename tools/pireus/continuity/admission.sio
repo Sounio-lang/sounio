@@ -4,6 +4,12 @@
 use algebra::cayley_dickson::cd_sigma
 use materialize_ptx::{emit_lowering_ptx, emit_lowering_ptx_sm, emit_lowering_ptx_wide}
 use crypto::sha256::{sha256_init, sha256_update, sha256_finalize, SHA256Digest}
+use hardware::pireus::operator_atlas::{
+    PireusOperatorAtlasClassification,
+    pireus_operator_atlas_phase_signs,
+    pireus_operator_atlas_classify,
+    pireus_operator_atlas_frozen_digest,
+}
 
 struct Document {
     values: [i64; 21],
@@ -180,6 +186,27 @@ fn bilinear(code: i64, x: i64, y: i64) -> i64 with Mut {
 }
 // Structure coefficient of the operator the proposal names.
 // Phase code 0 returns cd_sigma unchanged, so kind=1 is unaffected.
+// Eight hex digits of one 32-bit atlas word, most significant first.
+fn print_word_hex(value: i64) with IO, Mut, Panic {
+    var shift: i64 = 28
+    while shift >= 0 {
+        print_char(hex_char((value >> shift) & 15) as i32)
+        shift = shift - 4
+    }
+}
+fn print_words_hex(words: &[i64; 8]) with IO, Mut, Panic {
+    var w: i64 = 0
+    while w < 8 {
+        print_word_hex(words[w])
+        w = w + 1
+    }
+}
+fn atlas_origin_name(origin: i64) -> string {
+    if origin == 1 { return "V13_BASELINE" }
+    if origin == 2 { return "V13_ADMITTED" }
+    if origin == 3 { return "V1_CORPUS" }
+    "NONE"
+}
 fn sigma_phase(code: i64, a: i64, b: i64) -> i64 with Mut, Panic, Div {
     let base = cd_sigma(a as i32, b as i32, 4) as i64
     if bilinear(code, a, b) == 1 { return 0 - base }
@@ -199,7 +226,7 @@ fn refuse(reason: string) -> i32 with IO {
     print(reason); print("\"}\n")
     1
 }
-fn main() -> i32 with IO, Mut, Panic, Div {
+fn main() -> i32 with IO, Mut, Panic, Div, Epistemic {
     if arg_count() != 2 && arg_count() != 3 { return refuse("ARGUMENTS") }
     var materialize = false
     var sm: i64 = 121
@@ -352,7 +379,27 @@ fn main() -> i32 with IO, Mut, Panic, Div {
     }
     let plan_id = (((stride * 16 + offset) * 2 + load_digit) * 2 + layout) * 32 + unroll + sign_mode * 65536 + pack * 131072 + staged * 262144 + vector_load * 524288 + wide * 1048576
     if kind == 2 {
-        print("{\"schema\":1,\"authority\":\"Sounio\",\"decision\":\"ADMIT\",\"kind\":\"operator\",\"phase_code\":")
+        // Receipt contract v2 (schema 2): kind=2 receipts carry the
+        // eisa_h.pireus_operator_atlas.v1 classification. The sign table is
+        // rebuilt from this engine's own sigma_phase and must equal the
+        // atlas's reading of the same phase code before anything is classified.
+        var signs: [i64; 256] = [0; 256]
+        var cell: i64 = 0
+        while cell < 256 {
+            let left = cell / 16
+            let right = cell - left * 16
+            if sigma_phase(phase, left, right) < 0 { signs[cell as usize] = 1 }
+            cell = cell + 1
+        }
+        let atlas_signs = pireus_operator_atlas_phase_signs(phase)
+        cell = 0
+        while cell < 256 {
+            if atlas_signs[cell as usize] != signs[cell as usize] { return refuse("ATLAS_TABLE") }
+            cell = cell + 1
+        }
+        let atlas = pireus_operator_atlas_classify(&signs)
+        if !atlas.valid { return refuse("ATLAS") }
+        print("{\"schema\":2,\"authority\":\"Sounio\",\"decision\":\"ADMIT\",\"kind\":\"operator\",\"phase_code\":")
         print_int(phase)
         print(",\"plan_id\":")
         print_int(plan_id)
@@ -365,9 +412,21 @@ fn main() -> i32 with IO, Mut, Panic, Div {
         print_digest(sha256_finalize(state))
         print("\",\"context_sha256\":\""); print_digest(hash_text(cs, cn))
         print("\",\"proposal_sha256\":\""); print_digest(hash_text(ps, pn))
-        // This engine establishes well-definedness only. Novelty needs the
-        // GL(4,2) atlas and is decided by eisa_h.pireus_operator_atlas.v1.
-        print("\",\"novelty\":\"NOT_CLASSIFIED\"")
+        // Novelty is relative to the 65 atlas references under GL(4,F2) x
+        // input swap x sign gauge only. N2 is bounded quotient separation;
+        // scientific/historical novelty and claim readiness stay false here.
+        print("\",\"novelty\":\"N"); print_int(atlas.level)
+        print("\",\"novelty_scope\":\"GL4_F2_X_INPUT_SWAP_X_SIGN_GAUGE_VS_V13_62_AND_V1_CORPUS_3\"")
+        print(",\"atlas_class\":"); print_int(atlas.class_id)
+        print(",\"atlas_origin\":\""); print(atlas_origin_name(atlas.origin))
+        print("\",\"canonical_table\":\""); print_words_hex(&atlas.words)
+        print("\",\"canonical_matrix\":"); print_int(atlas.matrix)
+        print(",\"canonical_swap\":"); print_int(atlas.swap)
+        print(",\"canonical_gauge\":"); print_int(atlas.gauge)
+        let atlas_digest = pireus_operator_atlas_frozen_digest()
+        print(",\"atlas_v13_semantics_sha256\":\"0a4b2c35fde7724ea687055f1d8a5628353ed35147b90ad909a7e9fd528f9f7c\"")
+        print(",\"atlas_class_digest\":\""); print_words_hex(&atlas_digest)
+        print("\",\"scientific_novelty\":false,\"historical_novelty\":false")
         print(",\"classifier\":\"eisa_h.pireus_operator_atlas.v1\"")
         print(",\"fp_parity\":\"UNMEASURED\",\"claim_ready\":false,\"formal_v13_v14\":\"OPEN\"}\n")
         return 0

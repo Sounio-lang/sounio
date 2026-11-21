@@ -102,10 +102,13 @@ def main():
   base=check("operator-phase-0",changes=dict(kind=2,phase=0))
   assert base["kind"]=="operator" and base["phase_code"]==0,base
   assert base["tensor_sha256"]==first["tensor_sha256"],(base,first)
-  # Well-definedness is all this engine establishes. Novelty belongs to the
-  # GL(4,2) atlas and must stay undischarged in the receipt.
-  assert base["novelty"]=="NOT_CLASSIFIED",base
+  # Receipt contract v2: kind=2 receipts carry the eisa_h.pireus_operator_atlas.v1
+  # classification (GL(4,2) x swap x sign gauge, V13 62 + V1 corpus 3). Phase 0 is
+  # the corpus sedenion itself (N0, class 63); nothing here is a scientific claim.
+  assert base["schema"]==2 and first["schema"]==1 and "novelty" not in first,(base,first)
   assert base["classifier"]=="eisa_h.pireus_operator_atlas.v1",base
+  assert (base["novelty"],base["atlas_class"],base["atlas_origin"])==("N0",63,"V1_CORPUS"),base
+  assert base["scientific_novelty"] is False and base["historical_novelty"] is False and base["claim_ready"] is False,base
   # Distinct phases name distinct operators: the phase code determines the
   # tensor, so a collision would mean the receipt does not identify what was
   # admitted. These eight codes land in six distinct GL(4,2) affine classes,
@@ -114,6 +117,7 @@ def main():
   for phase in (1128,2,8,74,198,1129,4,16):
    receipt=check("operator-phase-%d"%phase,changes=dict(kind=2,phase=phase))
    assert receipt["phase_code"]==phase,receipt
+   assert receipt["novelty"] in ("N0","N1","N2") and receipt["claim_ready"] is False,receipt
    assert receipt["tensor_sha256"] not in seen,(phase,seen[receipt["tensor_sha256"]],receipt)
    seen[receipt["tensor_sha256"]]=phase
   assert len(seen)==9,seen

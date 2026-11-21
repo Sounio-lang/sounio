@@ -672,6 +672,23 @@ class PhaseABundle(unittest.TestCase):
             self.assertEqual(run_inputs.data_root(root, 86), root / "sm86")
             self.assertEqual(run_inputs.data_root(root / "flat", 86).name, "flat")
 
+def receipt_v1(stdout):
+    """Receipt contract v2 adds the atlas block to kind=2 receipts only.
+
+    The frozen digests were taken under contract v1. A schema-2 receipt maps
+    back to v1 by restoring schema 1 and the v1 novelty/classifier pair; every
+    other byte must be unchanged, so the frozen digest still binds the rest.
+    """
+    text = stdout.decode()
+    if not text.startswith('{"schema":2,'):
+        return stdout
+    receipt = json.loads(text)
+    assert receipt["kind"] == "operator" and receipt["novelty"] in ("N0", "N1", "N2"), receipt
+    assert receipt["claim_ready"] is False and receipt["scientific_novelty"] is False, receipt
+    head, tail = text.index(',"novelty":'), text.index(',"fp_parity"')
+    return ('{"schema":1,' + text[len('{"schema":2,'):head] +
+            ',"novelty":"NOT_CLASSIFIED","classifier":"eisa_h.pireus_operator_atlas.v1"' + text[tail:]).encode()
+
 class Engines(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -881,7 +898,8 @@ class Engines(unittest.TestCase):
             for mode, digest in modes.items():
                 argv = [str(self.admission), str(context), str(CONTINUITY / "inbox" / name)]
                 argv += [] if mode == "receipt" else [mode]
-                self.assertEqual(hashlib.sha256(subprocess.run(argv, capture_output=True, timeout=30).stdout).hexdigest(),
+                out = subprocess.run(argv, capture_output=True, timeout=30).stdout
+                self.assertEqual(hashlib.sha256(receipt_v1(out) if mode == "receipt" else out).hexdigest(),
                                  digest, (name, mode))
                 if mode == "receipt":
                     continue
@@ -1106,7 +1124,8 @@ class Engines(unittest.TestCase):
             for mode, digest in modes.items():
                 argv = [str(self.admission), str(context), str(CONTINUITY / "inbox" / name)]
                 argv += [] if mode == "receipt" else [mode]
-                self.assertEqual(hashlib.sha256(subprocess.run(argv, capture_output=True, timeout=30).stdout).hexdigest(),
+                out = subprocess.run(argv, capture_output=True, timeout=30).stdout
+                self.assertEqual(hashlib.sha256(receipt_v1(out) if mode == "receipt" else out).hexdigest(),
                                  digest, (name, mode))
                 for threads in (0, 16):
                     variant.write_bytes(raw(dict(body, block_threads=threads)))
