@@ -55,10 +55,6 @@ lean_lib Bootstrap where
     .one `Bootstrap.Seeds,
     .one `Bootstrap.SporosX1,
     .one `Bootstrap.SporosX1Comp,
-    .one `Bootstrap.SporosX1FinalDefs,
-    .one `Bootstrap.SporosX1FinalLoader,
-    .one `Bootstrap.SporosX1FinalParser,
-    .one `Bootstrap.SporosX1FinalRefuse,
     .one `Bootstrap.SporosX1Image,
     .one `Bootstrap.TMR,
     .one `Bootstrap.X86Dec,
@@ -76,6 +72,17 @@ lean_lib Bootstrap where
 -- bootstrap/model/seed_proofs.sh and the nightly job, not on every pull request.
 lean_lib BootstrapSeeds where
   roots := #[`Bootstrap.SeedA, `Bootstrap.SeedB]
+
+-- The stage-1 checker proofs over the real image (SporosX1Final*: loader, parser,
+-- refusals and the three final targets). They change only with the stage-1
+-- proof work and take tens of minutes and several GB to build, so they are not
+-- built on every pull request: bootstrap/model/stage1_proofs.sh builds them,
+-- counts the remaining `sorry` and audits the axioms of the proved targets. Run it
+-- on any pull request that changes them or what they import (X86Int, X86Dec, X86Env, Sporos).
+lean_lib BootstrapSporosStage1 where
+  roots := #[`Bootstrap.SporosX1FinalDefs, `Bootstrap.SporosX1FinalLoader,
+             `Bootstrap.SporosX1FinalParser, `Bootstrap.SporosX1FinalRefuse,
+             `Bootstrap.SporosX1Final]
 
 -- The Sporos reference interpreter as a program (`sporos PROGRAM.spb < in > out`)
 -- and the writer of the example programs (`sporos-examples DIR`).

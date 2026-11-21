@@ -1,5 +1,6 @@
 /-
-TARGET STATEMENT ONLY — NOT REGISTERED IN `formal/lakefile.lean`.
+TARGET STATEMENTS — registered only in the `BootstrapSporosStage1` library, which no
+CI job builds; `bootstrap/model/stage1_proofs.sh` builds and audits it.
 
 This file states the stage-1 theorem that the composition in
 `Bootstrap.SporosX1Comp` and the real-image instantiation in
