@@ -14,7 +14,6 @@ import EpistemicSafety
 import EpistemicStat
 import EpistemicJoint
 import Bootstrap.SporosX1Comp
-import Bootstrap.SporosX1Final
 
 -- EL+ saturation: complete and sound w.r.t. the derivation calculus `Der`.
 #print axioms Sounio.OntologyELPlus.subBPlusC_iff
@@ -69,7 +68,7 @@ import Bootstrap.SporosX1Final
 #print axioms Epi.Joint.resolve_refuses_both
 
 -- Sporos stage-1 checker (Root A decisions 31/34): accept direction from check_start.
+-- (`stage1_oracle_exists_target`, `stage1_final_target`, and `stage1_final_exit2_target`
+-- in `BootstrapSporosStage1` are built -j1 and axiom-checked by
+-- `bootstrap/model/sporos_stage1_proofs.sh`, matching `BootstrapSeeds`.)
 #print axioms SporosX1.checker_accepts_from_start
-#print axioms SporosX1.stage1_oracle_exists_target
-#print axioms SporosX1.stage1_final_target
-#print axioms SporosX1.stage1_final_exit2_target
