@@ -21,6 +21,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <sys/stat.h>
 
 /* ================================================================
  * LIMITS
@@ -47,6 +48,34 @@
 static int GLOBAL_DATA_SIZE = 16; /* extended by scan_globals */
 
 /* ================================================================
+ * REFUSAL (fail closed, ADR-004)
+ * ================================================================
+ * stage0 used to drop whatever it could not handle: bytes past MAX_CODE,
+ * functions past MAX_FUNCS, unknown tokens, unknown identifiers (compiled
+ * as 0), calls to unknown functions (compiled as `call +0`), match arms
+ * with variant or literal patterns (all compiled as taken), stores to any
+ * struct field (written to field 0), and global initializers. It then
+ * wrote the binary and exited 0, so a program outside its subset came out
+ * as a silently wrong ELF. Each of those paths now stops here instead:
+ * exit 2, nothing written. The output file is only opened at the very end
+ * (write_elf), so exiting before that leaves no partial binary. */
+#include <stdarg.h>
+static int g_cur_line = 0; /* line of the item being compiled, for messages */
+static void refuse(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    fprintf(stderr, "stage0: refused: ");
+    vfprintf(stderr, fmt, ap);
+    fprintf(stderr, "\n");
+    va_end(ap);
+    exit(2);
+}
+/* About to fill slot `index` of a table of `limit` entries. */
+static void cap(const char *what, long index, long limit) {
+    if (index >= limit) refuse("capacity exceeded: %s (limit %ld)", what, limit);
+}
+
+/* ================================================================
  * NAME (fixed-size identifier)
  * ================================================================ */
 typedef struct { char buf[MAX_NAME]; int len; } Name;
@@ -54,7 +83,7 @@ typedef struct { char buf[MAX_NAME]; int len; } Name;
 static Name name_from(const char *s) {
     Name n = {0};
     n.len = (int)strlen(s);
-    if (n.len > MAX_NAME-1) n.len = MAX_NAME-1;
+    if (n.len > MAX_NAME-1) refuse("name longer than %d characters: %.40s...", MAX_NAME-1, s);
     memcpy(n.buf, s, n.len);
     return n;
 }
@@ -225,6 +254,7 @@ static void lex_all(void) {
         if (is_alpha(c)) {
             char buf[MAX_NAME]; int len = 0;
             while (is_alnum(ch()) && len < MAX_NAME-1) { buf[len++] = (char)ch(); adv(); }
+            if (is_alnum(ch())) refuse("identifier longer than %d characters at line %d", MAX_NAME-1, g_line);
             buf[len] = 0;
             t.kind = classify_keyword(buf, len);
             t.name.len = len; memcpy(t.name.buf, buf, len);
@@ -297,14 +327,15 @@ static void lex_all(void) {
             if (peek(1)=='=') { t.kind=TK_GE; adv(); adv(); goto emit; }
             t.kind=TK_GT; adv(); goto emit;
         }
-        /* skip unknown */
-        adv(); continue;
+        refuse("unknown character 0x%02x at line %d col %d", c & 0xFF, g_line, g_col);
         emit:
-        if (g_token_count < MAX_TOKENS) g_tokens[g_token_count++] = t;
+        cap("tokens", g_token_count, MAX_TOKENS);
+        g_tokens[g_token_count++] = t;
     }
     /* EOF token */
     Token eof = {0}; eof.kind = TK_EOF; eof.line = g_line; eof.col = g_col;
-    if (g_token_count < MAX_TOKENS) g_tokens[g_token_count++] = eof;
+    cap("tokens", g_token_count, MAX_TOKENS);
+    g_tokens[g_token_count++] = eof;
 }
 
 /* ================================================================
@@ -480,7 +511,7 @@ static void skip_type(void) {
         if (tk()!=TK_RPAREN) { skip_type(); while (eat(TK_COMMA)) skip_type(); }
         expect(TK_RPAREN); return;
     }
-    next(); /* skip unknown */
+    refuse("type syntax not supported (token %d) at line %d col %d", tk(), cur()->line, cur()->col);
 }
 
 static void skip_effects(void) {
@@ -759,8 +790,7 @@ static Expr *parse_primary(void) {
         return e;
     }
 
-    /* fallback: skip token */
-    next();
+    refuse("expression syntax not supported (token %d) at line %d col %d", tk(), cur()->line, cur()->col);
     return e;
 }
 
@@ -878,13 +908,8 @@ static FnDef *parse_fn(void) {
     if (tk() == TK_LBRACE) {
         f->body = parse_block();
     } else {
-        fprintf(stderr, "stage0: SKIP fn %.*s (no brace at line %d, tk=%d)\n",
-                f->name.len, f->name.buf, cur()->line, tk());
-        /* Skip to next top-level item */
-        while (tk() != TK_LBRACE && tk() != TK_FN && tk() != TK_STRUCT &&
-               tk() != TK_ENUM && tk() != TK_IMPL && tk() != TK_EOF) next();
-        if (tk() == TK_LBRACE) skip_balanced_braces();
-        f->body = NEW(Block);
+        refuse("fn %.*s: signature not supported (no body brace at line %d, token %d)",
+               f->name.len, f->name.buf, cur()->line, tk());
     }
     return f;
 }
@@ -979,9 +1004,31 @@ static void scan_globals(void) {
                         eat(TK_RBRACKET); /* eat ] */
                         is_arr = 1;
                     }
-                    /* Skip remaining type tokens and initializer */
                 }
-                if (g_global_count < MAX_GLOBALS) {
+                /* A global starts as zero bytes; an initializer would be
+                 * dropped. Accept only none, `= 0`, `= false` or `= [0; N]`. */
+#define S0_ITEM_START(k) ((k)==TK_EOF || (k)==TK_FN || (k)==TK_VAR || (k)==TK_STRUCT || (k)==TK_ENUM || \
+                          (k)==TK_IMPL || (k)==TK_PUB || (k)==TK_USE || (k)==TK_MODULE || (k)==TK_TYPE || \
+                          (k)==TK_LET || (k)==TK_CONST || (k)==TK_SEMICOLON)
+                while (tk() != TK_ASSIGN && !S0_ITEM_START(tk())) next(); /* rest of the type */
+                if (tk() == TK_ASSIGN) {
+                    int iline = cur()->line;
+                    next();
+                    bool zero = (tk() == TK_INT && cur()->int_val == 0) || tk() == TK_BOOL_FALSE;
+                    if (zero) next();
+                    else if (tk() == TK_LBRACKET) {          /* [0; N] */
+                        next();
+                        if (tk() == TK_INT && cur()->int_val == 0) {
+                            next();
+                            if (eat(TK_SEMICOLON) && tk() == TK_INT) { next(); zero = eat(TK_RBRACKET); }
+                        }
+                    }
+                    if (!zero || !S0_ITEM_START(tk()))
+                        refuse("global %.*s at line %d: only a zero initializer is supported",
+                               gname.len, gname.buf, iline);
+                }
+                cap("globals", g_global_count, MAX_GLOBALS);
+                {
                     g_global_names[g_global_count] = gname;
                     g_global_offsets[g_global_count] = data_off;
                     if (is_arr) {
@@ -1044,14 +1091,23 @@ static Item *parse_program(void) {
                 if (tk()==TK_FN) {
                     Method *m = NEW(Method); m->fn = parse_fn();
                     *mtail = m; mtail = &m->next;
-                } else { next(); }
+                } else { refuse("impl %.*s: item not supported (token %d) at line %d",
+                                item->im->type_name.len, item->im->type_name.buf, tk(), cur()->line); }
             }
             expect(TK_RBRACE);
         }
         else if (tk()==TK_MODULE) { item->kind = ITEM_MODULE; next(); while (tk()!=TK_EOF && tk()!=TK_FN && tk()!=TK_STRUCT && tk()!=TK_ENUM && tk()!=TK_IMPL && tk()!=TK_USE && tk()!=TK_PUB && tk()!=TK_TYPE) next(); continue; }
         else if (tk()==TK_USE) { item->kind = ITEM_USE; next(); while (tk()!=TK_EOF && tk()!=TK_FN && tk()!=TK_STRUCT && tk()!=TK_ENUM && tk()!=TK_IMPL && tk()!=TK_USE && tk()!=TK_PUB && tk()!=TK_TYPE) next(); continue; }
         else if (tk()==TK_TYPE) { item->kind = ITEM_TYPE; while (tk()!=TK_LBRACE && tk()!=TK_EOF) next(); if (tk()==TK_LBRACE) { int depth=1; next(); while(depth>0&&tk()!=TK_EOF){if(tk()==TK_LBRACE)depth++;if(tk()==TK_RBRACE)depth--;next();} } continue; }
-        else { next(); continue; }
+        else if (tk()==TK_VAR) {
+            /* globals are collected by scan_globals; skip the declaration */
+            next();
+            while (tk()!=TK_EOF && tk()!=TK_FN && tk()!=TK_STRUCT && tk()!=TK_ENUM && tk()!=TK_IMPL &&
+                   tk()!=TK_USE && tk()!=TK_PUB && tk()!=TK_TYPE && tk()!=TK_VAR && tk()!=TK_MODULE) next();
+            continue;
+        }
+        else if (tk()==TK_SEMICOLON) { next(); continue; }
+        else { refuse("top-level item not supported (token %d) at line %d", tk(), cur()->line); }
         *tail = item; tail = &item->next;
     }
     return head;
@@ -1063,7 +1119,15 @@ static Item *parse_program(void) {
 static uint8_t g_code[MAX_CODE];
 static int g_code_len;
 
-static void emit(uint8_t b) { if (g_code_len < MAX_CODE) g_code[g_code_len++] = b; }
+/* Call sites: each `E8 <fn index lo> <hi> CA FE` placeholder is recorded
+ * here and patched at the end. The patcher used to find them by scanning
+ * the whole code for that byte pattern, so an immediate or displacement
+ * that happened to contain it was rewritten, and a placeholder whose index
+ * was out of range was left as a call to a bogus target. */
+#define MAX_CALL_SITES (1024*1024)
+static int g_call_sites[MAX_CALL_SITES];
+static int g_call_site_count = 0;
+static void emit(uint8_t b) { cap("code bytes", g_code_len, MAX_CODE); g_code[g_code_len++] = b; }
 static void emit32(int32_t v) { emit(v&0xFF); emit((v>>8)&0xFF); emit((v>>16)&0xFF); emit((v>>24)&0xFF); }
 static void emit64(int64_t v) { for(int i=0;i<8;i++) emit((v>>(i*8))&0xFF); }
 
@@ -1087,13 +1151,16 @@ static void emit_sub_rsp(int32_t n) {
 }
 
 /* store rax to [rbp + disp32] */
+#define S0_FRAME_SLOTS 2048 /* compile_function reserves (params + 2048 + 2) slots */
 static void emit_store_rax(int vreg) {
+    cap("stack slots in one function", vreg, S0_FRAME_SLOTS);
     int32_t disp = -(vreg+1)*8;
     emit(0x48); emit(0x89); emit(0x85); emit32(disp);
 }
 
 /* load [rbp + disp32] to rax */
 static void emit_load_rax(int vreg) {
+    cap("stack slots in one function", vreg, S0_FRAME_SLOTS);
     int32_t disp = -(vreg+1)*8;
     emit(0x48); emit(0x8B); emit(0x85); emit32(disp);
 }
@@ -1451,6 +1518,43 @@ static int is_byte_index(Expr *base, Expr *index, Locals *loc) {
     return 0;
 }
 
+/* Index of field e->name in the struct that e->left denotes, or -1. The
+ * struct comes from the type of an identifier receiver; otherwise every
+ * struct with a field of that name must have it at the same position. */
+static int field_index_of(Expr *e, Locals *loc) {
+    int field_idx = -1;
+    int struct_idx = -1;
+    if (e->left && e->left->kind == EX_IDENT) {
+        for (int i = loc->count-1; i >= 0; i--) {
+            if (name_eq(loc->names[i], e->left->name) && loc->types[i] >= 10) {
+                struct_idx = loc->types[i] - 10;
+                break;
+            }
+        }
+    }
+    if (struct_idx >= 0) {
+        int base = g_struct_field_base[struct_idx];
+        for (int i = 0; i < g_struct_field_count[struct_idx]; i++) {
+            if (name_eq(g_struct_field_names[base + i], e->name)) { field_idx = i; break; }
+        }
+    }
+    if (field_idx < 0) {
+        for (int si = 0; si < g_struct_count; si++) {
+            int base = g_struct_field_base[si];
+            for (int fi = 0; fi < g_struct_field_count[si]; fi++) {
+                if (name_eq(g_struct_field_names[base + fi], e->name)) {
+                    if (field_idx >= 0 && field_idx != fi)
+                        refuse("field %.*s: receiver type unknown and the field sits at different positions in different structs",
+                               e->name.len, e->name.buf);
+                    field_idx = fi;
+                    break;
+                }
+            }
+        }
+    }
+    return field_idx;
+}
+
 /* Loop context for break */
 static int g_loop_top[16];
 static int g_break_patches[16][MAX_BREAKS];
@@ -1548,8 +1652,10 @@ static void compile_expr(Expr *e, Locals *loc) {
             return;
           }
         }
-        /* might be a function name or enum variant — emit 0 */
-        emit_mov_rax_imm64(0);
+        /* Not a local or a global: a function name, an enum variant or a
+         * constant. All of them used to compile as 0. */
+        refuse("identifier %.*s is not a local or a global (function values, enum variants and constants are not supported)",
+               e->name.len, e->name.buf);
         break;
     }
     case EX_BINARY: {
@@ -1633,7 +1739,8 @@ static void compile_expr(Expr *e, Locals *loc) {
         int fn_idx = find_fn(e->name);
         /* Evaluate args */
         int arg_slots[MAX_CALL_ARGS]; int argc = 0;
-        for (ExprList *a = e->args; a && argc < MAX_CALL_ARGS; a = a->next) {
+        for (ExprList *a = e->args; a; a = a->next) {
+            cap("call arguments", argc, MAX_CALL_ARGS);
             compile_expr(a->expr, loc);
             int slot = loc->next_slot++;
             emit_store_rax(slot);
@@ -1654,11 +1761,12 @@ static void compile_expr(Expr *e, Locals *loc) {
         }
         /* call rel32 with CAFE magic */
         if (fn_idx >= 0) {
+            cap("call sites", g_call_site_count, MAX_CALL_SITES);
+            g_call_sites[g_call_site_count++] = g_code_len;
             emit(0xE8); emit(fn_idx & 0xFF); emit((fn_idx >> 8) & 0xFF);
             emit(0xCA); emit(0xFE);
         } else {
-            /* unknown function — emit nop call */
-            emit(0xE8); emit32(0);
+            refuse("call to unknown function %.*s", e->name.len, e->name.buf);
         }
         /* Clean up stack args */
         if (argc > 6) {
@@ -1678,7 +1786,8 @@ static void compile_expr(Expr *e, Locals *loc) {
         /* Evaluate args */
         int arg_slots[MAX_CALL_ARGS]; int argc = 0;
         arg_slots[argc++] = recv_slot;
-        for (ExprList *a = e->args; a && argc < MAX_CALL_ARGS; a = a->next) {
+        for (ExprList *a = e->args; a; a = a->next) {
+            cap("call arguments", argc, MAX_CALL_ARGS);
             compile_expr(a->expr, loc);
             int slot = loc->next_slot++;
             emit_store_rax(slot);
@@ -1698,9 +1807,11 @@ static void compile_expr(Expr *e, Locals *loc) {
             }
         }
         if (fn_idx >= 0) {
+            cap("call sites", g_call_site_count, MAX_CALL_SITES);
+            g_call_sites[g_call_site_count++] = g_code_len;
             emit(0xE8); emit(fn_idx & 0xFF); emit((fn_idx >> 8) & 0xFF);
             emit(0xCA); emit(0xFE);
-        } else { emit(0xE8); emit32(0); }
+        } else { refuse("call to unknown method %.*s", e->name.len, e->name.buf); }
         if (argc > 6) { emit(0x48); emit(0x81); emit(0xC4); emit32((argc-6)*8); }
         loc->next_slot -= argc;
         break;
@@ -1708,37 +1819,7 @@ static void compile_expr(Expr *e, Locals *loc) {
     case EX_FIELD: {
         compile_expr(e->left, loc);
         /* rax = address of struct on stack; load field at offset */
-        /* Find struct type from left expr to get field index */
-        int field_idx = -1;
-        /* Try to find the struct type from the left expression's variable */
-        int struct_idx = -1;
-        if (e->left && e->left->kind == EX_IDENT) {
-            for (int i = loc->count-1; i >= 0; i--) {
-                if (name_eq(loc->names[i], e->left->name) && loc->types[i] >= 10) {
-                    struct_idx = loc->types[i] - 10;
-                    break;
-                }
-            }
-        }
-        if (struct_idx >= 0) {
-            int base = g_struct_field_base[struct_idx];
-            for (int i = 0; i < g_struct_field_count[struct_idx]; i++) {
-                if (name_eq(g_struct_field_names[base + i], e->name)) {
-                    field_idx = i; break;
-                }
-            }
-        }
-        if (field_idx < 0) {
-            /* Fallback: search all structs for this field name */
-            for (int si = 0; si < g_struct_count && field_idx < 0; si++) {
-                int base = g_struct_field_base[si];
-                for (int fi = 0; fi < g_struct_field_count[si]; fi++) {
-                    if (name_eq(g_struct_field_names[base + fi], e->name)) {
-                        field_idx = fi; break;
-                    }
-                }
-            }
-        }
+        int field_idx = field_index_of(e, loc);
         if (field_idx >= 0) {
             /* rax = base address of struct; field at [rax - 8*field_idx] */
             /* Actually struct fields are stored at increasing negative offsets from base */
@@ -1757,8 +1838,7 @@ static void compile_expr(Expr *e, Locals *loc) {
                 emit(0x48); emit(0x8B); emit(0x80); emit32(off);
             }
         } else {
-            /* Unknown field — load [rax] as fallback */
-            emit(0x48); emit(0x8B); emit(0x00);
+            refuse("unknown field %.*s", e->name.len, e->name.buf);
         }
         break;
     }
@@ -1794,6 +1874,7 @@ static void compile_expr(Expr *e, Locals *loc) {
         break;
     }
     case EX_WHILE: {
+        cap("loop nesting depth", g_loop_depth + 1, 16);
         g_loop_depth++;
         g_loop_top[g_loop_depth] = g_code_len;
         g_break_count[g_loop_depth] = 0;
@@ -1817,6 +1898,7 @@ static void compile_expr(Expr *e, Locals *loc) {
     case EX_BREAK:
         if (g_loop_depth >= 0) {
             emit(0xE9); /* JMP rel32 */
+            cap("breaks in one loop", g_break_count[g_loop_depth], MAX_BREAKS);
             g_break_patches[g_loop_depth][g_break_count[g_loop_depth]++] = g_code_len;
             emit32(0);
         }
@@ -1834,13 +1916,14 @@ static void compile_expr(Expr *e, Locals *loc) {
         compile_expr(e->left, loc);
         int scrut_slot = loc->next_slot++;
         emit_store_rax(scrut_slot);
-        static int end_patches[MAX_MATCH_ARMS]; int ep_count = 0;
+        int end_patches[MAX_MATCH_ARMS]; int ep_count = 0; /* not static: matches nest */
         for (MatchArm *arm = e->arms; arm; arm = arm->next) {
             if (arm->pat_kind == 0) {
                 /* wildcard — always matches */
                 compile_expr(arm->body, loc);
             } else if (arm->pat_kind == 1) {
                 /* binding — bind scrutinee to name */
+                cap("locals in one function", loc->count, MAX_LOCALS);
                 loc->names[loc->count] = arm->pat_name;
                 loc->slots[loc->count] = scrut_slot;
                 loc->types[loc->count] = 0;
@@ -1848,13 +1931,13 @@ static void compile_expr(Expr *e, Locals *loc) {
                 compile_expr(arm->body, loc);
                 loc->count--;
             } else {
-                /* enum variant or int literal — compare and branch */
-                emit_load_rax(scrut_slot);
-                /* For now, just fall through (TODO: proper enum tag comparison) */
-                compile_expr(arm->body, loc);
+                /* Variant and literal patterns were compiled as always
+                 * taken, so the first such arm ran for every value. */
+                refuse("match on a variant or literal pattern is not supported");
             }
             if (arm->next) {
-                emit(0xE9); end_patches[ep_count] = g_code_len; emit32(0); ep_count++;
+                emit(0xE9); cap("match arms", ep_count, MAX_MATCH_ARMS);
+                end_patches[ep_count] = g_code_len; emit32(0); ep_count++;
             }
         }
         for (int i = 0; i < ep_count; i++)
@@ -1922,9 +2005,16 @@ static void compile_expr(Expr *e, Locals *loc) {
         }
         break;
     case EX_REF:
+        /* A struct or array local already holds an address, so `&x` is its
+         * value. For anything else the value is not an address. */
+        if (!(e->left && e->left->kind == EX_IDENT)) refuse("& of a non-identifier is not supported");
+        {
+            int ok = 0;
+            for (int i = loc->count-1; i >= 0; i--)
+                if (name_eq(loc->names[i], e->left->name)) { ok = loc->types[i] >= 2; break; }
+            if (!ok) refuse("& of %.*s: only struct and array locals are supported", e->left->name.len, e->left->name.buf);
+        }
         compile_expr(e->left, loc);
-        /* For simple ident refs, compute address */
-        /* This is a simplification */
         break;
     case EX_DEREF:
         compile_expr(e->left, loc);
@@ -1932,7 +2022,7 @@ static void compile_expr(Expr *e, Locals *loc) {
         emit(0x48); emit(0x8B); emit(0x00);
         break;
     default:
-        emit_mov_rax_imm64(0);
+        refuse("expression kind %d is not supported", e->kind);
         break;
     }
 }
@@ -1946,6 +2036,7 @@ static void compile_block(Block *b, Locals *loc) {
             compile_expr(s->expr, loc);
             int slot = loc->next_slot++;
             emit_store_rax(slot);
+            cap("locals in one function", loc->count, MAX_LOCALS);
             loc->names[loc->count] = s->name;
             loc->slots[loc->count] = slot;
             /* Detect type from RHS expression or type annotation */
@@ -1987,6 +2078,8 @@ static void compile_block(Block *b, Locals *loc) {
                         /* Store to data section via RIP-relative */
                         emit(0x48); emit(0x89); emit(0x05); /* mov [rip+disp32], rax */
                         emit32(g_global_offsets[gi] - (g_code_len + 4));
+                    } else {
+                        refuse("assignment to unknown variable %.*s", s->expr->name.len, s->expr->name.buf);
                     }
                 }
             } else if (s->expr && s->expr->kind == EX_INDEX && s->right) {
@@ -2028,8 +2121,11 @@ static void compile_block(Block *b, Locals *loc) {
                 emit_load_rax(base_slot);
                 emit(0x48); emit(0x89); emit(0xC1); /* mov rcx, rax (base addr) */
                 emit(0x58); /* pop rax (value) */
-                /* For now: store at [rcx] (field 0) — TODO: compute field offset */
-                emit(0x48); emit(0x89); emit(0x01); /* mov [rcx], rax */
+                /* field i of a struct at address A lives at A - 8*i (see
+                 * EX_FIELD); this store used to land on field 0 always. */
+                int fidx = field_index_of(s->expr, loc);
+                if (fidx < 0) refuse("assignment to unknown field %.*s", s->expr->name.len, s->expr->name.buf);
+                emit(0x48); emit(0x89); emit(0x81); emit32(-fidx * 8); /* mov [rcx + disp32], rax */
                 loc->next_slot -= 1;
             } else if (s->right) {
                 compile_expr(s->right, loc);
@@ -2175,11 +2271,11 @@ static void write_elf(const char *path) {
     FILE *f = fopen(path, "wb");
     if (!f) { fprintf(stderr, "stage0: cannot open %s\n", path); exit(1); }
     fwrite(out, 1, (size_t)fsz, f);
+    /* chmod +x through the open descriptor, not the path, so it applies to
+     * the file just written. */
+    fchmod(fileno(f), 0755);
     fclose(f);
     free(out);
-    /* chmod +x */
-    char cmd[512]; snprintf(cmd, sizeof(cmd), "chmod +x %s", path);
-    (void)system(cmd);
 
     fprintf(stderr, "stage0: ok written=%s size=%lld entry=0x%llx\n", path, (long long)fsz, (long long)entry_va);
 }
@@ -2194,6 +2290,7 @@ int main(int argc, char **argv) {
     FILE *f = fopen(argv[1], "r");
     if (!f) { fprintf(stderr, "stage0: cannot open %s\n", argv[1]); return 1; }
     g_src_len = (int)fread(g_src, 1, MAX_SOURCE-1, f);
+    if (!feof(f)) refuse("capacity exceeded: source bytes (limit %d)", MAX_SOURCE-1);
     fclose(f);
     fprintf(stderr, "stage0: source=%s (%d bytes)\n", argv[1], g_src_len);
 
@@ -2252,8 +2349,10 @@ int main(int argc, char **argv) {
                                     }
                                     if (mf) {
                                         /* Append a newline separator */
-                                        if (g_src_len < MAX_SOURCE-1) g_src[g_src_len++] = '\n';
+                                        cap("source bytes", g_src_len + 1, MAX_SOURCE-1);
+                                        g_src[g_src_len++] = '\n';
                                         int nr = (int)fread(&g_src[g_src_len], 1, (size_t)(MAX_SOURCE - g_src_len - 1), mf);
+                                        if (!feof(mf)) refuse("capacity exceeded: source bytes with import %s (limit %d)", modpath, MAX_SOURCE-1);
                                         fclose(mf);
                                         g_src_len += nr;
                                         g_src[g_src_len] = 0;
@@ -2289,13 +2388,17 @@ int main(int argc, char **argv) {
     /* Phase 0: Collect structs */
     int total_fields = 0;
     for (Item *it = program; it; it = it->next) {
-        if (it->kind == ITEM_STRUCT && it->st && g_struct_count < MAX_STRUCTS) {
+        if (it->kind == ITEM_STRUCT && it->st) {
+            cap("structs", g_struct_count, MAX_STRUCTS);
+            if (find_struct(it->st->name) >= 0)
+                refuse("struct %.*s defined twice", it->st->name.len, it->st->name.buf);
             int si = g_struct_count++;
             g_struct_names[si] = it->st->name;
             g_struct_field_base[si] = total_fields;
             int fc = 0;
             for (FieldDef *fd = it->st->fields; fd; fd = fd->next) {
-                if (total_fields < MAX_FIELDS) {
+                cap("struct fields", total_fields, MAX_FIELDS);
+                {
                     g_struct_field_names[total_fields] = fd->name;
                     g_struct_field_is_byte[total_fields] = fd->is_byte_array;
                     total_fields++;
@@ -2379,7 +2482,10 @@ int main(int argc, char **argv) {
 
     /* Collect user functions */
     for (Item *it = program; it; it = it->next) {
-        if (it->kind == ITEM_FN && it->fn && g_fn_count < MAX_FUNCS) {
+        if (it->kind == ITEM_FN && it->fn) {
+            cap("functions", g_fn_count, MAX_FUNCS);
+            if (find_fn(it->fn->name) >= 0)
+                refuse("function %.*s defined twice (calls would bind to the first)", it->fn->name.len, it->fn->name.buf);
             g_fn_names[g_fn_count] = it->fn->name;
             g_fn_ret_type[g_fn_count] = name_is(it->fn->return_type, "f64") ? 1 : 0;
             if (name_is(it->fn->name, "main")) g_main_fn_idx = g_fn_count;
@@ -2387,7 +2493,11 @@ int main(int argc, char **argv) {
         }
         if (it->kind == ITEM_IMPL && it->im) {
             for (Method *m = it->im->methods; m; m = m->next) {
-                if (m->fn && g_fn_count < MAX_FUNCS) {
+                if (m->fn) {
+                    cap("functions", g_fn_count, MAX_FUNCS);
+                    if (find_fn(m->fn->name) >= 0)
+                        refuse("method %.*s::%.*s has the name of another function or method (calls bind by bare name)",
+                               it->im->type_name.len, it->im->type_name.buf, m->fn->name.len, m->fn->name.buf);
                     g_fn_names[g_fn_count] = m->fn->name;
                     g_fn_ret_type[g_fn_count] = 0;
                     g_fn_count++;
@@ -2772,18 +2882,20 @@ int main(int argc, char **argv) {
     }
 
     /* Patch calls */
-    for (int i = 0; i < g_code_len - 4; i++) {
-        if (g_code[i] == 0xE8 && g_code[i+3] == 0xCA && g_code[i+4] == 0xFE) {
-            int target_idx = (g_code[i+1] & 0xFF) | ((g_code[i+2] & 0xFF) << 8);
-            if (target_idx >= 0 && target_idx < g_fn_count) {
-                int target_off = g_fn_offsets[target_idx];
-                int32_t disp = target_off - (i + 5);
-                patch32(i+1, disp);
-            }
-        }
+    for (int c = 0; c < g_call_site_count; c++) {
+        int i = g_call_sites[c];
+        int target_idx = (g_code[i+1] & 0xFF) | ((g_code[i+2] & 0xFF) << 8);
+        if (g_code[i] != 0xE8 || g_code[i+3] != 0xCA || g_code[i+4] != 0xFE || target_idx >= g_fn_count)
+            refuse("internal: call site at %d does not hold a valid placeholder", i);
+        int32_t disp = g_fn_offsets[target_idx] - (i + 5);
+        patch32(i+1, disp);
     }
 
     fprintf(stderr, "stage0: total_code=%d\n", g_code_len);
+
+    /* expect() reports a syntax error and carries on so that more than one
+     * can be shown; the binary must still not be written. */
+    if (g_error_count > 0) refuse("%d syntax error(s), see above", g_error_count);
 
     /* Write ELF */
     write_elf(argv[2]);

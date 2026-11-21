@@ -1,0 +1,410 @@
+// stdlib/molecular/langmuir.sio -- the Langmuir constant of a light guest in one
+// cage beyond the classical one-site picture: the quantised centre of mass by
+// Feynman-Kac paths, the quantised pair and triple terms of a multiply occupied
+// cage, and the orientational average of a charged (quadrupolar) guest in the
+// electrostatic field of a proton-disordered host.
+//
+// WHY THIS EXISTS. molecular::host_guest corrects the guest for its light mass
+// with the quadratic Feynman-Hibbs term and treats it as one neutral site. Two
+// questions follow that FH cannot answer about itself: how far FH is from the
+// exact quantum result, and how much the water charges, arranged differently in
+// every cage by proton disorder, move the constant of a guest with a quadrupole.
+// For H2 in structure II the answers (examples/molecular/H2_SII_GCMC.md, and the
+// project record of the measurements) are: quantisation lowers C by 4-11 % and
+// the pair term R_2 by 13-25 %, and FH is within 0.4 % and 0.8 % of the exact
+// values; the charges raise C by about 1 % with a cage-to-cage spread of 0.4 %.
+// This module is what those numbers were computed with.
+//
+// WHAT IS CHECKED, AND AGAINST WHAT: tests/stdlib/molecular/test_langmuir_oracle.sio
+// against stdlib/molecular/oracles/langmuir_oracle.cpp, which runs the same
+// algorithms on the same random stream (to 1e-9), and against large independent
+// runs with another generator and another sampler (predictions written before:
+// stdlib/molecular/oracles/langmuir_predictions.txt).
+//
+// METHODS.
+//   Quantum centre of mass. For a guest whose potential w depends only on its
+//   centre, the free-rotor partition function cancels between hydrate and gas,
+//   and C_q / C_cl = < exp(-(1/P) sum_k w(x_k)/T) / exp(-w(x_0)/T) > with x_0
+//   drawn from exp(-w/T) in the cage and x_1..x_{P-1} a free closed Brownian
+//   bridge of total variance lambda^2 = hbar^2 / (m k_B T) per coordinate
+//   (Levy construction). The primitive action converges as 1/P^2.
+//   Pair and triple terms. R_n = Z_n / Z_1^n with every guest a path; the pair
+//   factor is exp(-(1/P) sum_k u(x_i,k, x_j,k) / T). Exchange is neglected: the
+//   thermal wavelength of H2 (<= 0.9 A above 200 K) is far below its core.
+//   Charged guest. Three sites on the axis (+q at +-d/2, -2q at the centre) in
+//   the Ewald potential of molecular::ewald; the orientational average at each
+//   point is classical. The LJ weight carries the FH correction as in host_guest.
+//
+// UNITS. Angstrom, kelvin (energies as E / k_B), except the electrostatic energy
+// of the charged guest, which is in kJ/mol as molecular::ewald returns it.
+//
+// RANDOMNESS. molecular::lj's mol_uniform (xorshift128+), seeded with mol_seed;
+// normals by Box-Muller, one pair of uniforms per normal.
+
+module molecular::langmuir
+
+use math::pure::{exp, sqrt, ln, cos, sin, floor}
+use molecular::lj::{mol_uniform}
+use molecular::host_guest::{hg_field_cells, hg_cage_of, hg_pair_r2}
+use molecular::ewald::{ew_phi, ew_coulomb_kj}
+
+// Beads per path: paths are stored x0 y0 z0 x1 ... in a caller-owned [f64; 768].
+pub fn lg_bead_max() -> i64 { 256 }
+
+// lambda^2 = hbar^2 / (m k_B T) in A^2 for a mass in amu. The quadratic FH
+// coefficient of molecular::host_guest is lambda^2 / 24.
+pub fn lg_lambda2(t: f64, mass_amu: f64) -> f64 with Div {
+    let hbar = 1.054571817e-34
+    let kb = 1.380649e-23
+    let amu = 1.66053906660e-27
+    hbar * hbar / (mass_amu * amu * kb * t) * 1.0e20
+}
+
+// Standard normal by Box-Muller (cosine branch), two uniforms per call.
+pub fn lg_normal() -> f64 with Mut, Div, Panic {
+    var u1 = mol_uniform()
+    if u1 < 1.0e-300 { u1 = 1.0e-300 }
+    let u2 = mol_uniform()
+    sqrt(0.0 - 2.0 * ln(u1)) * cos(6.283185307179586 * u2)
+}
+
+fn lg_wrap(x: f64, l: f64) -> f64 with Div { x - l * floor(x / l) }
+
+fn lg_min_image(d: f64, l: f64) -> f64 {
+    let h = 0.5 * l
+    if d > h { return d - l }
+    if d < 0.0 - h { return d + l }
+    d
+}
+
+// Guest-host field (K) at any point: wrapped into the home cell, then
+// molecular::host_guest's cell-list field. lam = 0 gives the bare potential.
+pub fn lg_field(host: &[f64; 12288], l: f64, x: f64, y: f64, z: f64,
+                eps: f64, sig: f64, lam: f64, cut: f64, rho: f64) -> f64 with Mut, Div, Panic {
+    let r = hg_field_cells(host, l, lg_wrap(x, l), lg_wrap(y, l), lg_wrap(z, l), eps, sig, 1.0, lam, cut, rho)
+    r.0
+}
+
+// Gauss-Legendre nodes and weights on [-1, 1] (n <= 64), by Newton on P_n.
+pub fn lg_gauss_legendre(n: i64, x: &![f64; 64], w: &![f64; 64]) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < n {
+        var z = cos(3.14159265358979323846 * ((i as f64) + 0.75) / ((n as f64) + 0.5))
+        var pp = 1.0
+        var it: i64 = 0
+        var done = 0
+        while it < 100 && done == 0 {
+            var p1 = 1.0
+            var p2 = 0.0
+            var j: i64 = 0
+            while j < n {
+                let p3 = p2
+                p2 = p1
+                p1 = ((2.0 * (j as f64) + 1.0) * z * p2 - (j as f64) * p3) / ((j as f64) + 1.0)
+                j = j + 1
+            }
+            pp = (n as f64) * (z * p1 - p2) / (z * z - 1.0)
+            let z1 = z
+            z = z1 - p1 / pp
+            let dz = if z > z1 { z - z1 } else { z1 - z }
+            if dz < 1.0e-15 { done = 1 }
+            it = it + 1
+        }
+        x[i as usize] = z
+        w[i as usize] = 2.0 / ((1.0 - z * z) * pp * pp)
+        i = i + 1
+    }
+}
+
+// Direction i of n on the Fibonacci sphere.
+pub fn lg_fib(i: i64, n: i64) -> (f64, f64, f64) with Mut, Div, Panic {
+    let z = 1.0 - (2.0 * (i as f64) + 1.0) / (n as f64)
+    let r = sqrt(1.0 - z * z)
+    let ph = (i as f64) * 3.14159265358979323846 * (3.0 - sqrt(5.0))
+    (r * cos(ph), r * sin(ph), z)
+}
+
+// ============================================================================
+// SAMPLING THE CAGE
+// ============================================================================
+
+// Lower bound of the field on a grid over the sphere of radius rmax around the
+// centre of cage `cage`, restricted to the points whose nearest cage it is,
+// minus 50 K (the grid spacing cannot hide a deeper well than that).
+pub fn lg_envelope(host: &[f64; 12288], cen: &[f64; 192], nc: i64, cage: i64, l: f64, rmax: f64, ng: i64,
+                   eps: f64, sig: f64, lam: f64, cut: f64, rho: f64) -> f64 with Mut, Div, Panic {
+    let cx = cen[(3 * cage) as usize]
+    let cy = cen[(3 * cage + 1) as usize]
+    let cz = cen[(3 * cage + 2) as usize]
+    var wmin = 1.0e300
+    var i: i64 = 0
+    while i <= ng {
+        var j: i64 = 0
+        while j <= ng {
+            var k: i64 = 0
+            while k <= ng {
+                let dx = rmax * (2.0 * (i as f64) / (ng as f64) - 1.0)
+                let dy = rmax * (2.0 * (j as f64) / (ng as f64) - 1.0)
+                let dz = rmax * (2.0 * (k as f64) / (ng as f64) - 1.0)
+                if dx * dx + dy * dy + dz * dz <= rmax * rmax {
+                    if hg_cage_of(cen, nc, l, cx + dx, cy + dy, cz + dz) == cage {
+                        let w = lg_field(host, l, cx + dx, cy + dy, cz + dz, eps, sig, lam, cut, rho)
+                        if w < wmin { wmin = w }
+                    }
+                }
+                k = k + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    wmin - 50.0
+}
+
+// One point from exp(-w/T) in cage `cage`, by rejection under exp(-env/T):
+// uniform in the sphere of radius rmax, kept if the cage is the nearest one.
+// Returns (x, y, z, w).
+pub fn lg_draw(host: &[f64; 12288], cen: &[f64; 192], nc: i64, cage: i64, l: f64, rmax: f64, env: f64,
+               eps: f64, sig: f64, lam: f64, cut: f64, rho: f64, t: f64) -> (f64, f64, f64, f64) with Mut, Div, Panic {
+    let cx = cen[(3 * cage) as usize]
+    let cy = cen[(3 * cage + 1) as usize]
+    let cz = cen[(3 * cage + 2) as usize]
+    var tries: i64 = 0
+    while tries < 100000000 {
+        let dx = rmax * (2.0 * mol_uniform() - 1.0)
+        let dy = rmax * (2.0 * mol_uniform() - 1.0)
+        let dz = rmax * (2.0 * mol_uniform() - 1.0)
+        tries = tries + 1
+        if dx * dx + dy * dy + dz * dz <= rmax * rmax {
+            let x = cx + dx
+            let y = cy + dy
+            let z = cz + dz
+            if hg_cage_of(cen, nc, l, x, y, z) == cage {
+                let w = lg_field(host, l, x, y, z, eps, sig, lam, cut, rho)
+                if mol_uniform() < exp(0.0 - (w - env) / t) { return (x, y, z, w) }
+            }
+        }
+    }
+    (cx, cy, cz, 1.0e300)
+}
+
+// Closed free path of p beads from (x0, y0, z0), total variance lam2 per
+// coordinate (Levy construction: each bead is drawn given the previous one and
+// the fixed endpoint).
+pub fn lg_bridge(path: &![f64; 768], p: i64, x0: f64, y0: f64, z0: f64, lam2: f64) with Mut, Div, Panic {
+    path[0] = x0
+    path[1] = y0
+    path[2] = z0
+    var x = x0
+    var y = y0
+    var z = z0
+    var k: i64 = 1
+    while k < p {
+        let left = (p - k + 1) as f64
+        let sd = sqrt(lam2 / (p as f64) * (left - 1.0) / left)
+        x = x + (x0 - x) / left + sd * lg_normal()
+        y = y + (y0 - y) / left + sd * lg_normal()
+        z = z + (z0 - z) / left + sd * lg_normal()
+        path[(3 * k) as usize] = x
+        path[(3 * k + 1) as usize] = y
+        path[(3 * k + 2) as usize] = z
+        k = k + 1
+    }
+}
+
+// Mean bare field (K) over the p beads of a path.
+pub fn lg_path_w(host: &[f64; 12288], path: &[f64; 768], p: i64, l: f64,
+                 eps: f64, sig: f64, cut: f64, rho: f64) -> f64 with Mut, Div, Panic {
+    var s = 0.0
+    var k: i64 = 0
+    while k < p {
+        s = s + lg_field(host, l, path[(3 * k) as usize], path[(3 * k + 1) as usize], path[(3 * k + 2) as usize], eps, sig, 0.0, cut, rho)
+        k = k + 1
+    }
+    s / (p as f64)
+}
+
+fn lg_batch_stats(v: &[f64; 64], nb: i64) -> (f64, f64) with Mut, Div, Panic {
+    var m = 0.0
+    var i: i64 = 0
+    while i < nb {
+        m = m + v[i as usize]
+        i = i + 1
+    }
+    m = m / (nb as f64)
+    var s = 0.0
+    i = 0
+    while i < nb {
+        s = s + (v[i as usize] - m) * (v[i as usize] - m)
+        i = i + 1
+    }
+    (m, sqrt(s / ((nb - 1) as f64) / (nb as f64)))
+}
+
+// ============================================================================
+// QUANTUM CENTRE OF MASS
+// ============================================================================
+
+// C_q / C_cl for one guest in cage `cage` (bare potential; env from lg_envelope
+// with lam = 0): n0 draws of x0, m bridges each, p beads, nb batches (<= 64).
+// Returns (ratio, standard error of the ratio).
+pub fn lg_quantum_ratio(host: &[f64; 12288], cen: &[f64; 192], nc: i64, cage: i64, l: f64, rmax: f64, env: f64,
+                        eps: f64, sig: f64, cut: f64, rho: f64, t: f64, lam2: f64,
+                        p: i64, n0: i64, m: i64, nb: i64) -> (f64, f64) with Mut, Div, Panic {
+    var bat: [f64; 64] = [0.0; 64]
+    var path: [f64; 768] = [0.0; 768]
+    let per = n0 / nb
+    var b: i64 = 0
+    while b < nb {
+        var acc = 0.0
+        var i: i64 = 0
+        while i < per {
+            let d = lg_draw(host, cen, nc, cage, l, rmax, env, eps, sig, 0.0, cut, rho, t)
+            var r = 0.0
+            var j: i64 = 0
+            while j < m {
+                lg_bridge(&!path, p, d.0, d.1, d.2, lam2)
+                let wb = lg_path_w(host, &path, p, l, eps, sig, cut, rho)
+                r = r + exp(0.0 - (wb - d.3) / t)
+                j = j + 1
+            }
+            acc = acc + r / (m as f64)
+            i = i + 1
+        }
+        bat[b as usize] = acc / (per as f64)
+        b = b + 1
+    }
+    lg_batch_stats(&bat, nb)
+}
+
+// ============================================================================
+// QUANTUM PAIR AND TRIPLE TERMS
+// ============================================================================
+
+fn lg_pair_path_u(pa: &[f64; 768], pb: &[f64; 768], p: i64, l: f64, eps_h: f64, sig_h: f64, rc2: f64) -> f64 with Mut, Div, Panic {
+    var s = 0.0
+    var k: i64 = 0
+    while k < p {
+        let dx = lg_min_image(pa[(3 * k) as usize] - pb[(3 * k) as usize], l)
+        let dy = lg_min_image(pa[(3 * k + 1) as usize] - pb[(3 * k + 1) as usize], l)
+        let dz = lg_min_image(pa[(3 * k + 2) as usize] - pb[(3 * k + 2) as usize], l)
+        let r = hg_pair_r2(dx * dx + dy * dy + dz * dz, eps_h, sig_h, 0.0, rc2)
+        s = s + r.0
+        k = k + 1
+    }
+    s / (p as f64)
+}
+
+// R_2 and R_3 for guests in cage `cage`, every guest a path; the bare classical
+// R_2 from the same x0 draws. Three fresh paths per sample, nb batches (<= 64).
+// Returns (R2q, se, R3q, se, R2cl, se).
+pub fn lg_pair_ratios(host: &[f64; 12288], cen: &[f64; 192], nc: i64, cage: i64, l: f64, rmax: f64, env: f64,
+                      eps: f64, sig: f64, cut: f64, rho: f64, t: f64, lam2: f64, p: i64,
+                      eps_h: f64, sig_h: f64, rc: f64, nsamp: i64, nb: i64) -> (f64, f64, f64, f64, f64, f64) with Mut, Div, Panic {
+    var b2: [f64; 64] = [0.0; 64]
+    var b3: [f64; 64] = [0.0; 64]
+    var bc: [f64; 64] = [0.0; 64]
+    var pa: [f64; 768] = [0.0; 768]
+    var pb: [f64; 768] = [0.0; 768]
+    var pc: [f64; 768] = [0.0; 768]
+    let rc2 = rc * rc
+    let per = nsamp / nb
+    var b: i64 = 0
+    while b < nb {
+        var n2 = 0.0
+        var n3 = 0.0
+        var nw = 0.0
+        var cl = 0.0
+        var i: i64 = 0
+        while i < per {
+            let da = lg_draw(host, cen, nc, cage, l, rmax, env, eps, sig, 0.0, cut, rho, t)
+            lg_bridge(&!pa, p, da.0, da.1, da.2, lam2)
+            let wa = exp(0.0 - (lg_path_w(host, &pa, p, l, eps, sig, cut, rho) - da.3) / t)
+            let db = lg_draw(host, cen, nc, cage, l, rmax, env, eps, sig, 0.0, cut, rho, t)
+            lg_bridge(&!pb, p, db.0, db.1, db.2, lam2)
+            let wb = exp(0.0 - (lg_path_w(host, &pb, p, l, eps, sig, cut, rho) - db.3) / t)
+            let dc = lg_draw(host, cen, nc, cage, l, rmax, env, eps, sig, 0.0, cut, rho, t)
+            lg_bridge(&!pc, p, dc.0, dc.1, dc.2, lam2)
+            let wc = exp(0.0 - (lg_path_w(host, &pc, p, l, eps, sig, cut, rho) - dc.3) / t)
+            let uab = lg_pair_path_u(&pa, &pb, p, l, eps_h, sig_h, rc2)
+            let uac = lg_pair_path_u(&pa, &pc, p, l, eps_h, sig_h, rc2)
+            let ubc = lg_pair_path_u(&pb, &pc, p, l, eps_h, sig_h, rc2)
+            n2 = n2 + wa * wb * exp(0.0 - uab / t)
+            n3 = n3 + wa * wb * wc * exp(0.0 - (uab + uac + ubc) / t)
+            nw = nw + wa + wb + wc
+            let ex = lg_min_image(da.0 - db.0, l)
+            let ey = lg_min_image(da.1 - db.1, l)
+            let ez = lg_min_image(da.2 - db.2, l)
+            let u0 = hg_pair_r2(ex * ex + ey * ey + ez * ez, eps_h, sig_h, 0.0, rc2)
+            cl = cl + exp(0.0 - u0.0 / t)
+            i = i + 1
+        }
+        let fp = per as f64
+        let mw = nw / (3.0 * fp)
+        b2[b as usize] = n2 / fp / (mw * mw)
+        b3[b as usize] = n3 / fp / (mw * mw * mw)
+        bc[b as usize] = cl / fp
+        b = b + 1
+    }
+    let r2 = lg_batch_stats(&b2, nb)
+    let r3 = lg_batch_stats(&b3, nb)
+    let rc0 = lg_batch_stats(&bc, nb)
+    (r2.0, r2.1, r3.0, r3.1, rc0.0, rc0.1)
+}
+
+// ============================================================================
+// CHARGED GUEST IN A PROTON-DISORDERED HOST
+// ============================================================================
+
+// ln (C_charged / C_neutral) in cage `cage` for a guest with charges +q at
+// +-d/2 on its axis and -2q at its centre, in the Ewald potential set up by
+// molecular::ewald (ew_setup, ew_fixed_charges) for the host charges `sites`,
+// `q`. The LJ weight is exp(-w/T) with the FH coefficient lam; the
+// orientational average uses nori Fibonacci directions. Quadrature: nr
+// Gauss-Legendre radii on [0, rmax] times ndir Fibonacci directions, inside the
+// cage's nearest-centre domain.
+pub fn lg_charged_ln_ratio(host: &[f64; 12288], cen: &[f64; 192], nc: i64, cage: i64, l: f64, rmax: f64,
+                           nr: i64, ndir: i64, nori: i64, eps: f64, sig: f64, lam: f64, cut: f64, rho: f64, t: f64,
+                           sites: &[f64; 12288], q: &[f64; 4096], ns: i64, dh: f64, qh: f64) -> f64 with Mut, Div, Panic {
+    var gx: [f64; 64] = [0.0; 64]
+    var gw: [f64; 64] = [0.0; 64]
+    lg_gauss_legendre(nr, &!gx, &!gw)
+    let cx = cen[(3 * cage) as usize]
+    let cy = cen[(3 * cage + 1) as usize]
+    let cz = cen[(3 * cage + 2) as usize]
+    let kt = 0.00831446261815324 * t
+    let ke = ew_coulomb_kj()
+    let h = 0.5 * dh
+    var c0 = 0.0
+    var cq = 0.0
+    var i: i64 = 0
+    while i < nr {
+        let r = 0.5 * rmax * (gx[i as usize] + 1.0)
+        let wr = 0.5 * rmax * gw[i as usize] * r * r * 4.0 * 3.14159265358979323846 / (ndir as f64)
+        var d: i64 = 0
+        while d < ndir {
+            let u = lg_fib(d, ndir)
+            let x = cx + r * u.0
+            let y = cy + r * u.1
+            let z = cz + r * u.2
+            if hg_cage_of(cen, nc, l, x, y, z) == cage {
+                let wl = exp(0.0 - lg_field(host, l, x, y, z, eps, sig, lam, cut, rho) / t)
+                c0 = c0 + wr * wl
+                let p0 = ew_phi(sites, q, ns, x, y, z)
+                var s = 0.0
+                var o: i64 = 0
+                while o < nori {
+                    let n = lg_fib(o, nori)
+                    let e = ke * qh * (ew_phi(sites, q, ns, x + h * n.0, y + h * n.1, z + h * n.2)
+                        + ew_phi(sites, q, ns, x - h * n.0, y - h * n.1, z - h * n.2) - 2.0 * p0)
+                    s = s + exp(0.0 - e / kt)
+                    o = o + 1
+                }
+                cq = cq + wr * wl * s / (nori as f64)
+            }
+            d = d + 1
+        }
+        i = i + 1
+    }
+    ln(cq / c0)
+}

@@ -305,6 +305,32 @@ NEW_COUNT="$(wc -l < "$WORK/new.txt" | tr -d ' ')"
 if [[ "$NEW_COUNT" -gt 0 ]]; then
   echo "[madaros-corpus] $NEW_COUNT NEW failure(s) under Madaros:" >&2
   sed 's/^/    - /' "$WORK/new.txt" >&2
+  # Show WHY, for the first few. The list above names the program and the stage
+  # and nothing else; the compiler's own message was sent to /dev/null by
+  # run_one.sh. Without it a new failure cannot be told apart from a stale
+  # baseline without rebuilding the compiler by hand. Re-running costs one
+  # compile per new failure and happens only on a red run.
+  _shown=0
+  while read -r _name _stage; do
+    [[ "$_shown" -ge 10 ]] && { echo "    (diagnostics shown for the first 10 only)" >&2; break; }
+    _src=""
+    for _p in "${PROGRAMS[@]}"; do
+      if [[ "$(basename "$_p")" == "$_name" ]]; then _src="$_p"; break; fi
+    done
+    [[ -n "$_src" ]] || continue
+    _elf="$WORK/${_name%.sio}.elf"
+    echo "" >&2
+    echo "    ---- $_name ($_stage) ----" >&2
+    if [[ "$_stage" == "compile" ]]; then
+      "$MADAROS" compile "$_src" -o "$_elf" 2>&1 | tail -n 15 | cut -c1-300 | sed 's/^/    | /' >&2
+      echo "    | compiler exit status: ${PIPESTATUS[0]}" >&2
+    else
+      timeout 30 "$_elf" 2>&1 | tail -n 15 | cut -c1-300 | sed 's/^/    | /' >&2
+      echo "    | program exit status: ${PIPESTATUS[0]}" >&2
+      echo "    | expected marker: $(sed -n 's|^//@ expect-stdout:[[:space:]]*||p' "$_src" | head -1)" >&2
+    fi
+    _shown=$((_shown + 1))
+  done < "$WORK/new.txt"
   echo "" >&2
   echo "These pass on the baseline and fail on this change. CI's full-test-suite" >&2
   echo "runs lean_single and will not show this." >&2

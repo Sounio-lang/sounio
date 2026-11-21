@@ -1,0 +1,1 @@
+Public docs no longer state, without a cited check or the words "to our knowledge", that no other language has a listed Sounio feature. The chemistry examples page is one of those edits. What programs compile and print is unchanged.
