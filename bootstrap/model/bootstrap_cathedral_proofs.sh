@@ -91,19 +91,29 @@ verify_axiom_log() {
       in_axioms = 0
       acc = ""
     }
+    { sub(/\r$/, "") }
     /sorryAx/ {
       printf "forbidden sorryAx found: %s\n", $0 > "/dev/stderr"
       bad = 1
     }
     in_axioms {
-      if (/does not depend on any axioms/ || /depends on axioms: \[/) {
+      if (/^\047[^\047]+\047 does not depend on any axioms$/ || /^\047[^\047]+\047 depends on axioms: \[/) {
         printf "unclosed bracket in #print axioms output before: %s\n", $0 > "/dev/stderr"
         bad = 1
         in_axioms = 0
         acc = ""
       } else {
+        if (/\[/) {
+          printf "unexpected `[` inside wrapped #print axioms output: %s\n", $0 > "/dev/stderr"
+          bad = 1
+        }
         idx = index($0, "]")
         if (idx > 0) {
+          after = substr($0, idx + 1)
+          if (after !~ /^[[:space:]]*$/) {
+            printf "unexpected trailing content after `]` in #print axioms output: %s\n", $0 > "/dev/stderr"
+            bad = 1
+          }
           acc = acc " " substr($0, 1, idx - 1)
           check_axioms(acc)
           in_axioms = 0
@@ -114,18 +124,32 @@ verify_axiom_log() {
         next
       }
     }
-    /does not depend on any axioms/ {
+    /^\047[^\047]+\047 does not depend on any axioms$/ {
       got++
       next
     }
-    /depends on axioms: \[/ {
+    /^\047[^\047]+\047 depends on axioms: \[/ {
       got++
       s = $0
-      sub(/^.*depends on axioms: \[/, "", s)
+      sub(/^\047[^\047]+\047 depends on axioms: \[/, "", s)
       idx = index(s, "]")
       if (idx > 0) {
-        check_axioms(substr(s, 1, idx - 1))
+        after = substr(s, idx + 1)
+        if (after !~ /^[[:space:]]*$/) {
+          printf "unexpected trailing content after `]` in #print axioms output: %s\n", $0 > "/dev/stderr"
+          bad = 1
+        }
+        body = substr(s, 1, idx - 1)
+        if (index(body, "[") > 0) {
+          printf "unexpected `[` inside #print axioms output: %s\n", $0 > "/dev/stderr"
+          bad = 1
+        }
+        check_axioms(body)
       } else {
+        if (index(s, "[") > 0) {
+          printf "unexpected `[` inside #print axioms output: %s\n", $0 > "/dev/stderr"
+          bad = 1
+        }
         in_axioms = 1
         acc = s
       }
@@ -166,7 +190,7 @@ EOF
     fail "selftest failed to reject sorryAx"
   fi
 
-  # 3. Negative control: non-standard axiom (single-line and multi-line wrapped) must fail
+  # 3. Negative control: non-standard axiom (single-line, wrapped, unclosed, and spoofed phrase) must fail
   cat > "$w/custom.log" <<'EOF'
 'T1' depends on axioms: [propext, customUntrustedAxiom]
 EOF
@@ -188,6 +212,29 @@ EOF
 EOF
   if verify_axiom_log 1 "$w/unclosed.log" 2>/dev/null; then
     fail "selftest failed to reject unclosed bracket in #print axioms output"
+  fi
+
+  cat > "$w/spoof_single.log" <<'EOF'
+'parserControl' depends on axioms: [«does not depend on any axioms», propext]
+EOF
+  if verify_axiom_log 1 "$w/spoof_single.log" 2>/dev/null; then
+    fail "selftest failed to reject single-line guillemet-spoofed axiom"
+  fi
+
+  cat > "$w/spoof_wrapped.log" <<'EOF'
+'parserControl' depends on axioms: [«does not depend on any axioms»,
+  propext]
+EOF
+  if verify_axiom_log 1 "$w/spoof_wrapped.log" 2>/dev/null; then
+    fail "selftest failed to reject wrapped guillemet-spoofed axiom"
+  fi
+
+  cat > "$w/spoof_unclosed.log" <<'EOF'
+'parserControl' depends on axioms: [«does not depend on any axioms»,
+  propext
+EOF
+  if verify_axiom_log 1 "$w/spoof_unclosed.log" 2>/dev/null; then
+    fail "selftest failed to reject unclosed guillemet-spoofed axiom"
   fi
 
   # 4. Negative control: truncated output (count mismatch) must fail
@@ -212,7 +259,7 @@ EOF
 
   rm -rf "$w"
   trap - EXIT
-  echo "bootstrap_cathedral_proofs: selftest PASS (8 controls + source/lakefile hygiene)"
+  echo "bootstrap_cathedral_proofs: selftest PASS (11 controls + source/lakefile hygiene)"
 }
 
 if [ "$MODE" = "--selftest" ]; then
@@ -276,6 +323,10 @@ WANT="$(grep -c '^#print axioms ' "$WORK/CheckAxioms.lean")"
 
 cat "$WORK/axioms.log"
 verify_axiom_log "$WANT" "$WORK/axioms.log"
+for thm in $(sed -n 's/^#print axioms //p' "$WORK/CheckAxioms.lean"); do
+  grep -Eq "^'${thm}' (does not depend on any axioms$|depends on axioms: \[)" "$WORK/axioms.log" ||
+    fail "missing #print axioms line for $thm"
+done
 
 echo "bootstrap_cathedral_proofs: PASS ($WANT crown theorems verified <= {propext, Classical.choice, Quot.sound}, 0 sorryAx)"
 echo "BOOTSTRAP_CATHEDRAL_PROOFS_OK"
