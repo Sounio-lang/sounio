@@ -66,6 +66,9 @@ lean_lib Bootstrap where
     .one `Bootstrap.X86Env,
     .one `Bootstrap.X86Int,
     .one `Bootstrap.X86Min,
+    .one `Bootstrap.AArch64Min,
+    .one `Bootstrap.FormatsC,
+    .one `Bootstrap.SeedC,
     .submodules `Sporos]
 
 -- The two seeds on every listing (about 20 minutes of kernel time, the two in parallel); built by
@@ -95,3 +98,9 @@ lean_exe «x86dec-fuzz» where
 
 lean_exe «tmr-bound-check» where
   root := `Bootstrap.TMRBoundCheck
+
+lean_exe aarch64run where
+  root := `Bootstrap.RunAArch64
+
+lean_exe «aarch64-diff» where
+  root := `Bootstrap.AArch64DiffModel
