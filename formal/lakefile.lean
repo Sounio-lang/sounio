@@ -76,6 +76,22 @@ lean_lib Bootstrap where
 lean_lib BootstrapSeeds where
   roots := #[`Bootstrap.SeedA, `Bootstrap.SeedB]
 
+-- Sporos stage-1 final correctness proofs (loader + parser + checker accept/refuse
+-- biconditional, cubic step bound, and ENOMEM exit 2); SporosX1FinalRefuse peaks at
+-- ~8.4 GiB RSS (~26 min), exceeding the 7 GB / 35 min pull-request runner. Built and
+-- axiom-checked by bootstrap/model/sporos_stage1_proofs.sh (-j1), not on every PR.
+lean_lib BootstrapSporosStage1 where
+  roots := #[`Bootstrap.SporosX1Final]
+  globs := #[
+    .one `Bootstrap.SporosX1Final,
+    .one `Bootstrap.SporosX1FinalChkRefuse,
+    .one `Bootstrap.SporosX1FinalCompose,
+    .one `Bootstrap.SporosX1FinalDefs,
+    .one `Bootstrap.SporosX1FinalLoader,
+    .one `Bootstrap.SporosX1FinalParser,
+    .one `Bootstrap.SporosX1FinalRefuse,
+    .one `Bootstrap.SporosX1FinalWalkRefuse]
+
 -- End-to-end multi-ISA SOTA unification proofs; built by
 -- bootstrap/model/bootstrap_cathedral_proofs.sh, not on every pull request.
 lean_lib BootstrapCathedral where
