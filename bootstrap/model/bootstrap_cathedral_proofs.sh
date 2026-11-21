@@ -71,16 +71,48 @@ verify_axiom_log() {
   log_file="$2"
   [ -f "$log_file" ] || fail "missing axiom log: $log_file"
   awk -v want="$want" '
+    function check_axioms(s,   n, ax, i, a) {
+      n = split(s, ax, ",")
+      for (i = 1; i <= n; i++) {
+        a = ax[i]
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", a)
+        if (a != "" && !(a in allowed)) {
+          printf "forbidden non-standard axiom `%s`\n", a > "/dev/stderr"
+          bad = 1
+        }
+      }
+    }
     BEGIN {
       allowed["propext"] = 1
       allowed["Classical.choice"] = 1
       allowed["Quot.sound"] = 1
       got = 0
       bad = 0
+      in_axioms = 0
+      acc = ""
     }
     /sorryAx/ {
       printf "forbidden sorryAx found: %s\n", $0 > "/dev/stderr"
       bad = 1
+    }
+    in_axioms {
+      if (/does not depend on any axioms/ || /depends on axioms: \[/) {
+        printf "unclosed bracket in #print axioms output before: %s\n", $0 > "/dev/stderr"
+        bad = 1
+        in_axioms = 0
+        acc = ""
+      } else {
+        idx = index($0, "]")
+        if (idx > 0) {
+          acc = acc " " substr($0, 1, idx - 1)
+          check_axioms(acc)
+          in_axioms = 0
+          acc = ""
+        } else {
+          acc = acc " " $0
+        }
+        next
+      }
     }
     /does not depend on any axioms/ {
       got++
@@ -90,19 +122,20 @@ verify_axiom_log() {
       got++
       s = $0
       sub(/^.*depends on axioms: \[/, "", s)
-      sub(/\].*$/, "", s)
-      n = split(s, ax, ",")
-      for (i = 1; i <= n; i++) {
-        a = ax[i]
-        gsub(/^[[:space:]]+|[[:space:]]+$/, "", a)
-        if (a != "" && !(a in allowed)) {
-          printf "forbidden non-standard axiom `%s` in line: %s\n", a, $0 > "/dev/stderr"
-          bad = 1
-        }
+      idx = index(s, "]")
+      if (idx > 0) {
+        check_axioms(substr(s, 1, idx - 1))
+      } else {
+        in_axioms = 1
+        acc = s
       }
       next
     }
     END {
+      if (in_axioms) {
+        printf "unclosed bracket `[` in #print axioms output\n" > "/dev/stderr"
+        bad = 1
+      }
       if (got != want + 0) {
         printf "expected %d #print axioms outputs, got %d\n", want, got > "/dev/stderr"
         bad = 1
@@ -116,12 +149,14 @@ run_selftest() {
   w="$(mktemp -d)"
   trap 'rm -rf "$w"' EXIT
 
-  # 1. Positive control: empty axioms + standard constructive/classical core
+  # 1. Positive control: empty axioms + single-line + multi-line wrapped standard axioms
   cat > "$w/ok.log" <<'EOF'
 'T1' does not depend on any axioms
 'T2' depends on axioms: [propext, Classical.choice, Quot.sound]
+'T3' depends on axioms: [propext,
+  Classical.choice, Quot.sound]
 EOF
-  verify_axiom_log 2 "$w/ok.log" || fail "selftest positive control failed"
+  verify_axiom_log 3 "$w/ok.log" || fail "selftest positive control failed"
 
   # 2. Negative control: sorryAx must fail
   cat > "$w/sorry.log" <<'EOF'
@@ -131,12 +166,28 @@ EOF
     fail "selftest failed to reject sorryAx"
   fi
 
-  # 3. Negative control: non-standard axiom must fail
+  # 3. Negative control: non-standard axiom (single-line and multi-line wrapped) must fail
   cat > "$w/custom.log" <<'EOF'
 'T1' depends on axioms: [propext, customUntrustedAxiom]
 EOF
   if verify_axiom_log 1 "$w/custom.log" 2>/dev/null; then
     fail "selftest failed to reject non-standard axiom"
+  fi
+
+  cat > "$w/wrapped_custom.log" <<'EOF'
+'T1' depends on axioms: [propext,
+  customUntrustedAxiom]
+EOF
+  if verify_axiom_log 1 "$w/wrapped_custom.log" 2>/dev/null; then
+    fail "selftest failed to reject multi-line wrapped non-standard axiom"
+  fi
+
+  cat > "$w/unclosed.log" <<'EOF'
+'T1' depends on axioms: [propext,
+  Classical.choice
+EOF
+  if verify_axiom_log 1 "$w/unclosed.log" 2>/dev/null; then
+    fail "selftest failed to reject unclosed bracket in #print axioms output"
   fi
 
   # 4. Negative control: truncated output (count mismatch) must fail
@@ -161,7 +212,7 @@ EOF
 
   rm -rf "$w"
   trap - EXIT
-  echo "bootstrap_cathedral_proofs: selftest PASS (6 controls + source/lakefile hygiene)"
+  echo "bootstrap_cathedral_proofs: selftest PASS (8 controls + source/lakefile hygiene)"
 }
 
 if [ "$MODE" = "--selftest" ]; then
