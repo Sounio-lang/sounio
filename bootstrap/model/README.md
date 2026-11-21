@@ -13,7 +13,7 @@ no library beyond core, and the evidence that it says what the CPU does.
 | `formal/Bootstrap/Refine.lean`, `Loop.lean` | Refinement of machine states, `step_mono`, runs cut at a loop head, a decidable check for refinement. |
 | `formal/Bootstrap/SeedA.lean`, `SeedB.lean` | Each seed on every listing (`seedA_correct`, `seedB_correct`, and the refusals). |
 | `seed_proofs.sh` | Generates and checks the four whole-run theorems. |
-| `stage1_proofs.sh` | Builds the stage-1 checker proofs over the real image (`BootstrapSporosStage1`, `formal/Bootstrap/SporosX1Final*.lean`), which no CI job builds; checks the `sorry` count against `formal/AXIOM_INVENTORY.md` and that every proved final target rests only on `propext`, `Classical.choice` and `Quot.sound`. |
+| `sporos_stage1_proofs.sh` | Builds the stage-1 checker proofs over the real image (`BootstrapSporosStage1`, `formal/Bootstrap/SporosX1Final*.lean`) one module at a time (`-j 1`), which no CI job builds, and checks that the three final targets rest only on `propext`, `Classical.choice` and `Quot.sound`. |
 | `formal/Bootstrap/X86DiffModel.lean`, `x86diff_cpu.cpp`, `x86diff_gate.sh` | Instruction-level differential test of `X86Min` against the CPU. |
 | `formal/Bootstrap/X86IntDiffModel.lean`, `x86diff_cpu.cpp`, `x86int_diff_gate.sh` | Instruction-level differential test of `X86Int` and `X86Dec` against the CPU. |
 | `formal/Bootstrap/TMRVoter.lean` | Canonical 38-byte machine-code TMR majority voter (`voterCode`) and physical 4-site fault-masking theorems over `X86Int`. |

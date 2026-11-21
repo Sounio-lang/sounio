@@ -73,16 +73,21 @@ lean_lib Bootstrap where
 lean_lib BootstrapSeeds where
   roots := #[`Bootstrap.SeedA, `Bootstrap.SeedB]
 
--- The stage-1 checker proofs over the real image (SporosX1Final*: loader, parser,
--- refusals and the three final targets). They change only with the stage-1
--- proof work and take tens of minutes and several GB to build, so they are not
--- built on every pull request: bootstrap/model/stage1_proofs.sh builds them,
--- counts the remaining `sorry` and audits the axioms of the proved targets. Run it
--- on any pull request that changes them or what they import (X86Int, X86Dec, X86Env, Sporos).
+-- Sporos stage-1 final correctness proofs (loader + parser + checker accept/refuse
+-- biconditional, cubic step bound, and ENOMEM exit 2); SporosX1FinalRefuse peaks at
+-- ~8.4 GiB RSS (~26 min), exceeding the 7 GB / 35 min pull-request runner. Built and
+-- axiom-checked by bootstrap/model/sporos_stage1_proofs.sh (-j1), not on every PR.
 lean_lib BootstrapSporosStage1 where
-  roots := #[`Bootstrap.SporosX1FinalDefs, `Bootstrap.SporosX1FinalLoader,
-             `Bootstrap.SporosX1FinalParser, `Bootstrap.SporosX1FinalRefuse,
-             `Bootstrap.SporosX1Final]
+  roots := #[`Bootstrap.SporosX1Final]
+  globs := #[
+    .one `Bootstrap.SporosX1Final,
+    .one `Bootstrap.SporosX1FinalChkRefuse,
+    .one `Bootstrap.SporosX1FinalCompose,
+    .one `Bootstrap.SporosX1FinalDefs,
+    .one `Bootstrap.SporosX1FinalLoader,
+    .one `Bootstrap.SporosX1FinalParser,
+    .one `Bootstrap.SporosX1FinalRefuse,
+    .one `Bootstrap.SporosX1FinalWalkRefuse]
 
 -- The Sporos reference interpreter as a program (`sporos PROGRAM.spb < in > out`)
 -- and the writer of the example programs (`sporos-examples DIR`).
