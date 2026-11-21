@@ -76,6 +76,60 @@ lean_lib Bootstrap where
 lean_lib BootstrapSeeds where
   roots := #[`Bootstrap.SeedA, `Bootstrap.SeedB]
 
+-- End-to-end multi-ISA SOTA unification proofs; built by
+-- bootstrap/model/bootstrap_cathedral_proofs.sh, not on every pull request.
+lean_lib BootstrapCathedral where
+  roots := #[`Bootstrap.BootstrapCathedral]
+  globs := #[
+    .one `Bootstrap.SporosProvLen,
+    .one `Bootstrap.AArch64Env,
+    .one `Bootstrap.AArch64Phys,
+    .one `Bootstrap.TMRVoterArm64,
+    .one `Bootstrap.SporosCheckArm64Flat,
+    .one `Bootstrap.SporosCheckArm64BinData,
+    .one `Bootstrap.SporosCheckArm64BinCore,
+    .one `Bootstrap.SporosCheckArm64BinPass,
+    .one `Bootstrap.SporosCheckArm64BinWalk,
+    .one `Bootstrap.SporosCheckArm64BinWords,
+    .one `Bootstrap.SporosCheckArm64BinTail,
+    .one `Bootstrap.SporosCheckArm64BinInitEof,
+    .one `Bootstrap.SporosCheckArm64BinInit,
+    .one `Bootstrap.SporosCheckArm64BinFaultIso,
+    .one `Bootstrap.SporosCheckArm64BinFaultTail,
+    .one `Bootstrap.SporosCheckArm64BinFault,
+    .one `Bootstrap.SporosCheckArm64Bin,
+    .one `Bootstrap.X86Vm,
+    .one `Bootstrap.SporosVmBinData,
+    .one `Bootstrap.SporosVmCore,
+    .one `Bootstrap.SporosVmExec,
+    .one `Bootstrap.SporosVmSimBase,
+    .one `Bootstrap.SporosVmFault,
+    .one `Bootstrap.SporosVmReady,
+    .one `Bootstrap.SporosVmPrimBase,
+    .one `Bootstrap.SporosVmPrimMem,
+    .one `Bootstrap.SporosVmPrimIo,
+    .one `Bootstrap.SporosVmPrimBlock,
+    .one `Bootstrap.SporosVmPrimHeap,
+    .one `Bootstrap.SporosVmPrimTabBase,
+    .one `Bootstrap.SporosVmPrimTab1,
+    .one `Bootstrap.SporosVmPrimTab2,
+    .one `Bootstrap.SporosVmPrimTab3,
+    .one `Bootstrap.SporosVmPrimTab,
+    .one `Bootstrap.SporosVmPrimDispatch,
+    .one `Bootstrap.SporosVmOpsData1,
+    .one `Bootstrap.SporosVmOpsData2,
+    .one `Bootstrap.SporosVmOpsData3,
+    .one `Bootstrap.SporosVmOpsData,
+    .one `Bootstrap.SporosVmOpsCall1,
+    .one `Bootstrap.SporosVmOpsCall2,
+    .one `Bootstrap.SporosVmOpsCall,
+    .one `Bootstrap.SporosVmOpsJmp,
+    .one `Bootstrap.SporosVmOpsCtrl,
+    .one `Bootstrap.SporosVmSim,
+    .one `Bootstrap.SporosVmWitness,
+    .one `Bootstrap.SporosVmBin,
+    .one `Bootstrap.BootstrapCathedral]
+
 -- The Sporos reference interpreter as a program (`sporos PROGRAM.spb < in > out`)
 -- and the writer of the example programs (`sporos-examples DIR`).
 lean_exe sporos where
