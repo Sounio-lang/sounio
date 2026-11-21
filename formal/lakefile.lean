@@ -66,6 +66,9 @@ lean_lib Bootstrap where
     .one `Bootstrap.X86Env,
     .one `Bootstrap.X86Int,
     .one `Bootstrap.X86Min,
+    .one `Bootstrap.AArch64Min,
+    .one `Bootstrap.FormatsC,
+    .one `Bootstrap.SeedC,
     .one `Bootstrap.TMRMemExposure,
     .one `Bootstrap.TMRBurst,
     .one `Bootstrap.TMRBurstCheck,
@@ -99,5 +102,10 @@ lean_exe «x86dec-fuzz» where
 lean_exe «tmr-bound-check» where
   root := `Bootstrap.TMRBoundCheck
 
+lean_exe aarch64run where
+  root := `Bootstrap.RunAArch64
+
+lean_exe «aarch64-diff» where
+  root := `Bootstrap.AArch64DiffModel
 lean_exe «tmr-burst-check» where
   root := `Bootstrap.TMRBurstCheck
