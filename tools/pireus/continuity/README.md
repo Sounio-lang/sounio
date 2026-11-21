@@ -391,6 +391,38 @@ round, 3 rounds with the arm order rotated each round, and the same contracts.
   is not hard-coded). It goes in the SDK client's default headers, not in
   `request.json`, and is recorded as `anthropic_workspace_id` in the manifest
   and in each ledger call. When it is not given, nothing changes.
+- v3, `claude-api-proposer.v3:<model>`, is opt-in (`--prompt open`; keeps the
+  v2 history and dedup, refuses `--history none`). Why v1/v2 replies were a bare
+  phase number (~149 output tokens, `thinking_tokens: 0` in the real smoke):
+  the prompt asked for "exactly one JSON object and nothing else", gave a
+  template with every key filled, described the operator in one sentence, and
+  effort was `medium` with adaptive thinking, so the model copied the template,
+  changed `phase` and did not think. v3 changes only the proposer side:
+  - prompt (`OPEN_PROMPT`, hash in manifest): what the operator is (B over F2,
+    bit 4r+c of `phase`), the equivalence the classifier uses, every key and
+    range the kind=2 admission accepts with its meaning, admitted and refused
+    examples with their reasons (checked against the real executable by
+    `OpenPromptExamplesAgainstRealAdmission`), and a request for a hypothesis
+    instead of bit patterns. The kind=2 grammar only identifies the operator by
+    `phase`; lowering keys change how it runs, not its class. admission.sio is
+    unchanged.
+  - reasoning: effort `high` and max_tokens 16000 by default (both in the
+    manifest); thinking stays adaptive and its tokens are recorded per call
+    (`thinking_tokens` in the ledger).
+  - reply envelope `{"hypothesis", "B", "proposal"}` (`ENVELOPE_POLICY`, hash in
+    manifest): only `proposal`, as compact sorted-key JSON, goes to Sounio;
+    the rest is kept in `NNN.rationale.json` with its sha256 and a
+    `b_matches_phase` flag in an `ENVELOPE` ledger row, never read by the judge.
+    A malformed reply goes to Sounio unchanged and is refused (no repair).
+  - Both Claude arms get the same prompt form, model, effort and max_tokens; only
+    the ontology facts differ.
+  Old flags give old bytes: `--history none` (v1) and the default (v2) produce
+  request bodies equal to 04dbe129 (frozen digests in the tests) and identical
+  mock-run trees apart from `proposer_source_sha256`.
+  v3 smoke estimate (per-arm 8, rounds 3, 48 calls): expected about US$2.1
+  (4,000 output tokens/call assumed, thinking included), worst case US$8.1
+  (every call at 16,000), under the US$20 cap. A full v3 run (192 calls) has a
+  worst case above US$20; BUDGET_STOP ends it at the cap.
 - Tests: `claude/test_claude_proposer.py` (CI step "PIREUS Claude proposer
   condition"), with no network and no key.
 

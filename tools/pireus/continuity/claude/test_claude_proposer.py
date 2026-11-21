@@ -438,6 +438,96 @@ class ProposerTests(unittest.TestCase):
             self.assertEqual(path.read_bytes(), cp.encoded(expected))
             self.assertNotIn(cp.HISTORY_HEAD, path.read_text())
 
+    # --- v3: open prompt ----------------------------------------------------
+    def test_v1_v2_request_bytes_frozen(self):
+        # sha256 of request bodies produced by 04dbe129 (v1 = history none, v2 = proposals+classes).
+        frozen = ["8f4b36a90ea7476fd8d04c47067d02ed65d706da1307557e802ae31151751f97",
+                  "0fc9227b1be8d9a8cccf207913f7285164a125c783ae2ff85642fe8f3fa70675",
+                  "f69330f191b5e65cd5fd4eefa177520f0d59264c7ae89ebaa8641e82214d2c39",
+                  "9da37de96faa1e153ebd6002bb889ee978cf14a2489a290730595891bf59d489"]
+        ctx = b'{"facts_state":1,"x":"frozen"}\n'
+        got = []
+        for h in ("none", "proposals+classes"):
+            m = dict(model="claude-sonnet-5-5", max_tokens=8192, effort="medium", temperature=None, history_mode=h)
+            for arm in ("claude-no-ontology", "claude-ontology"):
+                hist = ["phase=1 class-0123456789ab", "phase=2 REFUSE:LANE_MAP"] if h != "none" else None
+                got.append(cp.digest(cp.encoded(cp.request_body(m, ctx, arm, 1, 2, ["fb one", "fb two"], hist))))
+        self.assertEqual(got, frozen)
+
+    def test_old_flags_keep_old_defaults(self):
+        for flags, family, effort, tokens in ((("--history", "none"), "v1", "medium", 8192),
+                                              ((), "v2", "medium", 8192),
+                                              (("--prompt", "open"), "v3", "high", 16000)):
+            code, _, _ = self.run_cli(*flags, "--rounds", "1", command="estimate")
+            self.assertEqual(code, 0)
+            code, out, _ = self.run_cli(*flags, "--rounds", "1", "--per-arm", "8", run="r-" + family)
+            self.assertEqual(code, 0)
+            manifest = json.loads((self.dir / ("r-" + family) / "manifest.json").read_text())
+            self.assertEqual(manifest["condition_id"], "claude-api-proposer.%s:claude-sonnet-5-5" % family)
+            self.assertEqual((manifest["effort"], manifest["max_tokens"]), (effort, tokens))
+            self.assertEqual("prompt_mode" in manifest, family == "v3")
+
+    def test_open_prompt_requires_history(self):
+        code, _, err = self.run_cli("--prompt", "open", "--history", "none")
+        self.assertNotEqual(code, 0)
+        self.assertIn("history", err)
+
+    def test_open_prompt_same_form_both_arms_and_envelope(self):
+        sys.modules["anthropic"] = FakeAnthropicModule()
+        os.environ["ANTHROPIC_API_KEY"] = SENTINEL
+        code, _, _ = self.run_cli("--prompt", "open", "--mode", "real", "--confirm-spend",
+                                  "--workspace-id", WORKSPACE)
+        self.assertEqual(code, 0)
+        root = self.dir / "run"
+        manifest = json.loads((root / "manifest.json").read_text())
+        self.assertEqual(manifest["open_prompt_sha256"], cp.digest(cp.OPEN_PROMPT.encode()))
+        self.assertEqual(manifest["envelope_policy_sha256"], cp.digest(cp.ENVELOPE_POLICY.encode()))
+        self.assertEqual(manifest["history_mode"], "proposals+classes")
+        no = json.loads((root / "round-1/claude-no-ontology/003.request.json").read_text())
+        yes = json.loads((root / "round-1/claude-ontology/003.request.json").read_text())
+        self.assertEqual((no["model"], no["max_tokens"], no["output_config"]),
+                         (yes["model"], yes["max_tokens"], yes["output_config"]))
+        a, b = no["messages"][0]["content"], yes["messages"][0]["content"]
+        for text in (a, b):
+            self.assertTrue(text.startswith(cp.OPEN_PROMPT))
+            self.assertIn(cp.HISTORY_HEAD, text)
+            self.assertNotIn(cp.PROMPT, text)
+        self.assertIn("Ontology facts: withheld", a)
+        self.assertIn(cp.ONTOLOGY_LEGEND, b)
+        self.assertNotIn(cp.ONTOLOGY_LEGEND, a)
+        ledger = [json.loads(x) for x in (root / "ledger.jsonl").read_text().splitlines()]
+        envelopes = [x for x in ledger if x.get("event") == "ENVELOPE"]
+        self.assertEqual(len(envelopes), 32)
+        for row in envelopes:
+            stem = "%s/%03d" % (row["cell"], row["index"])
+            proposal = (root / (stem + ".proposal.json")).read_bytes()
+            self.assertEqual(row["proposal_sha256"], cp.digest(proposal))
+            if row["envelope_valid"]:
+                rationale = (root / (stem + ".rationale.json")).read_bytes()
+                self.assertEqual(row["rationale_sha256"], cp.digest(rationale))
+                self.assertNotIn(b"hypothesis", proposal)
+                self.assertIn("hypothesis", json.loads(rationale))
+            else:
+                self.assertFalse((root / (stem + ".rationale.json")).exists())
+        for path in root.rglob("*.request.json"):
+            self.assertNotIn(WORKSPACE.encode(), path.read_bytes())
+        self.assertNotIn(SENTINEL.encode(), all_bytes(root))
+
+    def test_split_envelope(self):
+        good = '{"hypothesis":"h","B":[[1,0,0,0],[0,0,0,0],[0,0,0,0],[0,0,0,0]],"proposal":{"phase":1,"kind":2}}'
+        data, rationale = cp.split_envelope(good)
+        self.assertEqual(data, b'{"kind":2,"phase":1}\n')
+        self.assertEqual(rationale["hypothesis"], "h")
+        self.assertEqual(cp.b_to_phase(rationale["B"]), 1)
+        for bad in ('{"proposal":{"phase":1},"proposal":{"phase":2}}', '```json\n{"proposal":{}}\n```',
+                    '{"hypothesis":"h"}', '{"proposal":3}', "not json"):
+            data, rationale = cp.split_envelope(bad)
+            self.assertIsNone(rationale)
+            self.assertEqual(data, bad.encode())
+        self.assertEqual(cp.b_to_phase([[0] * 4, [0, 0, 1, 0], [0] * 4, [0] * 4]), 64)
+        self.assertIsNone(cp.b_to_phase([[2, 0, 0, 0]] * 4))
+        self.assertIsNone(cp.b_to_phase([[True, 0, 0, 0]] + [[0] * 4] * 3))
+
     def test_key_in_error_message_is_redacted(self):
         sys.modules["anthropic"] = FakeAnthropicModule(fail_with_key=True)
         os.environ["ANTHROPIC_API_KEY"] = SENTINEL
@@ -493,6 +583,37 @@ class RealEngineIntegration(unittest.TestCase):
             self.assertEqual(sum(c["validated"] for c in report["cells"]), 24)
             print("CLAUDE_PROPOSER_REAL_ENGINE", json.dumps(dict(
                 cells=[(c["cell"], c["admitted"], c["novelty"], c["canonical_classes"]) for c in report["cells"]])))
+
+
+class OpenPromptExamplesAgainstRealAdmission(unittest.TestCase):
+    """Every admitted/refused example stated in OPEN_PROMPT is checked against the real executable."""
+    def test_examples(self):
+        if not REAL:
+            self.skipTest("no real engines")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            context = subprocess.run([str(REAL["context"])], capture_output=True, check=True).stdout
+            (tmp / "context.json").write_bytes(context)
+            base = cp.template(cp.digest(context))
+            cases = [(dict(), "ADMIT", None), (dict(lane_stride=2), "REFUSE", "LANE_MAP"),
+                     (dict(sign_mode=1, unroll=8), "REFUSE", "SIGN_MODE_UNROLL"),
+                     (dict(vector_load=1, load=1), "REFUSE", "VECTOR_LOAD_LOAD"),
+                     (dict(expected=1), "REFUSE", "PROPOSAL_FORMAT"),
+                     (dict(phase=65536), "REFUSE", "PHASE_RANGE"),
+                     (dict(phase=64, lane_stride=15, lane_offset=7, load=2, layout=1, unroll=16,
+                           sign_mode=1, pack=1, vector_load=1), "ADMIT", None)]
+            for i, (change, decision, reason) in enumerate(cases):
+                path = tmp / ("%d.json" % i)
+                path.write_bytes(cp.encoded(base | change))
+                out = subprocess.run([str(REAL["engine"]), str(tmp / "context.json"), str(path)],
+                                     capture_output=True)
+                receipt = json.loads(out.stdout)
+                self.assertEqual(receipt["decision"], decision, (change, receipt))
+                if reason:
+                    self.assertEqual(receipt["reason"], reason)
+                    self.assertIn("(%s)" % reason, cp.OPEN_PROMPT)
+                elif change.get("phase") is None:
+                    self.assertEqual(receipt["novelty"], "N0")
 
 
 def build_real(args):

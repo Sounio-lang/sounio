@@ -31,7 +31,11 @@ HERE = Path(__file__).resolve().parent
 CONDITION_FAMILY = "claude-api-proposer.v1"
 # v2 = v1 + intra-round history of the arm's own proposals + declared dedup.
 CONDITION_FAMILY_V2 = "claude-api-proposer.v2"
+# v3 = v2 + open prompt: the full kind=2 admission grammar, a reasoning
+# budget, and a reply envelope carrying a hypothesis next to the proposal.
+CONDITION_FAMILY_V3 = "claude-api-proposer.v3"
 HISTORY_MODES = ("none", "proposals", "proposals+classes")
+PROMPT_MODES = ("json-only", "open")
 DEFAULT_HISTORY = "proposals+classes"
 ARMS = ("deterministic-search", "claude-no-ontology", "claude-ontology")
 CLAUDE_ARMS = ARMS[1:]
@@ -50,6 +54,10 @@ CACHE_READ_FACTOR = 1.0
 DEFAULT_BUDGET_USD = 20.0
 DEFAULT_MAX_TOKENS = 8192
 DEFAULT_EFFORT = "medium"
+# v3 defaults: room to think. Thinking counts toward max_tokens.
+OPEN_MAX_TOKENS = 16000
+OPEN_EFFORT = "high"
+EXPECTED_OUTPUT_TOKENS_OPEN = 4000
 # Assumptions for the pre-run estimate only; the ledger records real usage.
 EXPECTED_OUTPUT_TOKENS = 1500
 BYTES_PER_TOKEN_EXPECTED = 3.5
@@ -92,6 +100,58 @@ DISTINCT_ASK = (
     "Propose an operator distinct from every proposal listed above; a "
     "proposal whose class tag is already listed is the same operator up to "
     "the declared equivalence and adds nothing. ")
+# v3 prompt. Every rule below is a check in tools/pireus/continuity/admission.sio
+# (kind=2 path); the examples are verified against the real admission
+# executable by test_claude_proposer.py. Nothing here loosens admission.
+OPEN_PROMPT = (
+    "You are proposing a new algebraic operator for the Pireus research cycle. "
+    "Think it through; you have a reasoning budget. A native Sounio program "
+    "admits or refuses your proposal, rebuilds the operator itself and "
+    "classifies it; it never reads your explanation, and you cannot claim a result.\n"
+    "THE OPERATOR. A product on 16 basis elements e_0..e_15 graded by XOR: "
+    "e_i * e_j = sigma(i,j) e_(i XOR j). sigma(i,j) = cd(i,j) * (-1)^(i^T B j), "
+    "where cd is the Cayley-Dickson sedenion sign table and B is a 4x4 matrix over "
+    "F2 acting on the 4-bit labels i, j (bit b of a label is coordinate b). The "
+    "whole operator is B; B is written as the integer `phase` (0..65535) whose bit "
+    "4*r + c is B[r][c]. Examples: B with a single 1 at [0][0] is phase 1; at "
+    "[1][2] it is phase 64; at [3][3] it is phase 32768; phase 0 is the sedenion itself.\n"
+    "EQUIVALENCE used by the classifier: change of basis by GL(4,F2) acting on "
+    "the labels, swap of the two inputs, and sign gauge e_i -> +-e_i. Adding to B a "
+    "symmetric matrix with zero diagonal gives a gauge-equivalent operator, so only "
+    "the upper triangle of B including the diagonal (10 bits, 1024 codes) matters; "
+    "Sounio's classification of those 1024 codes yields 32 classes, one of them the "
+    "sedenion. Invariants such as the number of basis elements squaring to -1, "
+    "commuting pairs and associativity defects separate many classes. Choosing "
+    "bits for their visual pattern (0x1234, 0x5555, 12345) is not a hypothesis; "
+    "reason about B.\n"
+    "THE PROPOSAL OBJECT the admission accepts for kind=2: exactly the template "
+    "keys schema=1, target=701202, dimension=16, precision=64, order=1, fma=0, "
+    "kind=2, context=<the given sha256> (all unchanged), phase (0..65535), and "
+    "the lowering keys, which change how the operator is computed on a GPU, not "
+    "which operator it is: lane_stride odd 1..15; lane_offset 0..15; load 0 "
+    "(direct), 1 (warp shuffle) or 2 (staged through shared memory); layout 0 "
+    "(AoS) or 1 (SoA); unroll 1, 2, 4, 8 or 16. Optional: sign_mode 0 or 1 (1 = "
+    "per-lane fixed add/sub, only with unroll 16); pack 0 or 1 (two vectors per "
+    "16-thread block); vector_load 0 or 1 (1 only with load 2, layout 1 and pack "
+    "1). Values are non-negative integers; unknown or duplicate keys are refused, "
+    "as are expected results, tensors, hashes or claims.\n"
+    "Admitted example: the template with phase 0 (the sedenion, class N0). "
+    "Refused examples: lane_stride 2 (LANE_MAP); sign_mode 1 with unroll 8 "
+    "(SIGN_MODE_UNROLL); vector_load 1 with load 1 (VECTOR_LOAD_LOAD); an extra "
+    "key such as \"expected\" (PROPOSAL_FORMAT); phase 65536 (PHASE_RANGE).\n"
+    "REPLY with exactly one JSON object and nothing else (no prose or code fence "
+    "outside it): {\"hypothesis\": what operator you are aiming at and why it should "
+    "differ from those already seen (a few sentences), \"B\": your 4x4 matrix as "
+    "a list of 4 rows of 0/1, \"proposal\": the proposal object}. Only "
+    "`proposal` goes to admission; `hypothesis` and `B` are recorded, never judged. ")
+ENVELOPE_POLICY = (
+    "v3 reply envelope: the reply text must be one JSON object without duplicate "
+    "keys whose `proposal` member is an object. The proposal bytes handed to "
+    "Sounio are that member as compact sorted-key JSON plus a newline; the "
+    "other members go to NNN.rationale.json and are never read by the judge. "
+    "Any other reply is passed to Sounio unchanged (it is refused) and the "
+    "ledger records envelope_valid=false. No repair.")
+
 DEDUP_POLICY = (
     "Within one arm and round, a proposal equal to an earlier one (identical "
     "bytes, or the identical JSON object after sorted-key canonicalisation) is "
@@ -301,13 +361,45 @@ def record_duplicate(run, base_dir, index):
     return None
 
 
+def split_envelope(text):
+    """v3: returns (proposal_bytes, rationale_dict or None)."""
+    def strict(pairs):
+        keys = [k for k, _ in pairs]
+        if len(keys) != len(set(keys)):
+            raise ValueError("duplicate key")
+        return dict(pairs)
+    try:
+        value = json.loads(text, object_pairs_hook=strict)
+    except Exception:
+        return text.encode(), None
+    if not isinstance(value, dict) or not isinstance(value.get("proposal"), dict):
+        return text.encode(), None
+    rationale = {k: v for k, v in value.items() if k != "proposal"}
+    return encoded(value["proposal"]), rationale
+
+
+def b_to_phase(rows):
+    if not isinstance(rows, list) or len(rows) != 4:
+        return None
+    code = 0
+    for r, row in enumerate(rows):
+        if not isinstance(row, list) or len(row) != 4:
+            return None
+        for c, bit in enumerate(row):
+            if bit not in (0, 1) or isinstance(bit, bool):
+                return None
+            code |= bit << (4 * r + c)
+    return code
+
+
 def request_body(manifest, context, arm, rnd, index, feedback, history=None):
     base = template(digest(context))
     if arm == "claude-ontology":
         facts = ONTOLOGY_LEGEND + " Context: " + context.decode().strip()
     else:
         facts = "Ontology facts: withheld in this condition."
-    text = (PROMPT + facts + " " +
+    head = OPEN_PROMPT if manifest.get("prompt_mode") == "open" else PROMPT
+    text = (head + facts + " " +
             (FEEDBACK_HEAD + " | ".join(feedback) + " " if feedback else "") +
             (HISTORY_HEAD + " | ".join(history) + ". " + DISTINCT_ASK if history else "") +
             "This is proposal %d of round %d. Template: %s" % (index, rnd, json.dumps(base, sort_keys=True)))
@@ -348,6 +440,11 @@ class MockTransport:
             text = "```json\n" + json.dumps(base | dict(phase=h % 65536)) + "\n```"
         else:
             text = json.dumps(base | dict(phase=h % 65536, lane_stride=1 + 2 * (h % 8)))
+        if OPEN_PROMPT in prompt and h % 11 != 0:
+            phase = h % 65536
+            rows = [[(phase >> (4 * r + c)) & 1 for c in range(4)] for r in range(4)]
+            text = json.dumps(dict(hypothesis="mock hypothesis %d" % (h % 97), B=rows,
+                                   proposal=base | dict(phase=phase, lane_stride=1 + 2 * (h % 8))))
         raw = dict(id="msg_mock_%08x" % h, type="message", role="assistant", model=body["model"],
                    content=[dict(type="text", text=text)], stop_reason="end_turn",
                    usage=dict(input_tokens=len(prompt.encode()) // 4,
@@ -449,11 +546,35 @@ def generate_cell(run, manifest, transport, cell, context, secret, prices, engin
                 request_sha256=digest(request_bytes), response_sha256=digest(raw),
                 request_id=meta.get("request_id"), stop_reason=value.get("stop_reason"),
                 input_tokens=usage.get("input_tokens"), output_tokens=usage.get("output_tokens"),
+                **({"thinking_tokens": (usage.get("output_tokens_details") or {}).get("thinking_tokens")}
+                   if manifest.get("prompt_mode") == "open" else {}),
                 cache_creation_input_tokens=usage.get("cache_creation_input_tokens"),
                 cache_read_input_tokens=usage.get("cache_read_input_tokens"),
                 cost_usd=round(cost, 6), cumulative_usd=round(spent, 6),
                 seconds=round(time.time() - started, 3)))
         text, _ = response_text((run.root / response_rel).read_bytes())
+        if manifest.get("prompt_mode") == "open":
+            proposal_bytes, rationale = split_envelope(text or "")
+            row = dict(event="ENVELOPE", cell=base_dir, index=index, envelope_valid=rationale is not None,
+                       proposal_sha256=digest(proposal_bytes), cost_usd=0.0)
+            if rationale is not None:
+                rationale_bytes = encoded(rationale)
+                run.write(stem + ".rationale.json", rationale_bytes)
+                run.event("rationale", stem + ".rationale.json")
+                try:
+                    stated = json.loads(proposal_bytes).get("phase")
+                except Exception:
+                    stated = None
+                row.update(rationale_sha256=digest(rationale_bytes),
+                           b_matches_phase=b_to_phase(rationale.get("B")) == stated if "B" in rationale else None)
+            if not any(x.get("event") == "ENVELOPE" and x["cell"] == base_dir and x["index"] == index
+                       for x in run.rows("ledger.jsonl")):
+                run.append("ledger.jsonl", row)
+            run.write(proposal_rel, proposal_bytes)
+            run.event("generate", proposal_rel)
+            if dedup:
+                record_duplicate(run, base_dir, index)
+            continue
         # No repair, fence stripping or JSON normalisation: Sounio judges the text.
         run.write(proposal_rel, (text or "").encode())
         run.event("generate", proposal_rel)
@@ -542,6 +663,7 @@ def estimate(manifest, context, prices):
     calls, worst, expected, tokens_in = 0, 0.0, 0.0, 0
     feedback_guess = ["r0 phase=65535 ADMIT - N2 class-0123456789ab"] * manifest["per_arm"]
     history_on = manifest.get("history_mode", "none") != "none"
+    out_tokens = EXPECTED_OUTPUT_TOKENS_OPEN if manifest.get("prompt_mode") == "open" else EXPECTED_OUTPUT_TOKENS
     for cell in cells(manifest["rounds"]):
         if cell["arm"] not in CLAUDE_ARMS:
             continue
@@ -553,13 +675,13 @@ def estimate(manifest, context, prices):
             exp_in = int(size / BYTES_PER_TOKEN_EXPECTED) + 64
             calls += 1
             tokens_in += exp_in
-            expected += (exp_in * prices[0] + EXPECTED_OUTPUT_TOKENS * prices[1]) / 1e6
+            expected += (exp_in * prices[0] + out_tokens * prices[1]) / 1e6
             worst += worst_case_cost(body, prices)
     return dict(calls=calls, expected_input_tokens=tokens_in,
-                expected_output_tokens=calls * EXPECTED_OUTPUT_TOKENS,
+                expected_output_tokens=calls * out_tokens,
                 expected_usd=round(expected, 2), worst_case_usd=round(worst, 2),
                 assumptions=dict(bytes_per_token=BYTES_PER_TOKEN_EXPECTED,
-                                 output_tokens_per_call=EXPECTED_OUTPUT_TOKENS,
+                                 output_tokens_per_call=out_tokens,
                                  worst_case="request bytes as tokens + max_tokens output",
                                  feedback="full feedback of every earlier round of the arm",
                                  history="every earlier proposal of the arm and round" if history_on else "none"),
@@ -578,6 +700,12 @@ def build_manifest(args, context, engine, prices, price_source):
                        history_same_form_both_claude_arms=True)
         if args.history == "proposals+classes":
             history["intra_round_preview"] = PREVIEW_NOTE
+    if args.prompt == "open":
+        family = CONDITION_FAMILY_V3
+        history.update(prompt_mode="open", open_prompt_sha256=digest(OPEN_PROMPT.encode()),
+                       envelope_policy=ENVELOPE_POLICY, envelope_policy_sha256=digest(ENVELOPE_POLICY.encode()),
+                       thinking="adaptive (model default, display omitted); thinking tokens are billed as output",
+                       admission_grammar_source_sha256=digest((HERE.parent / "admission.sio").read_bytes()))
     return dict(
         schema=1, condition_id=family + ":" + args.model,
         condition_note="new declared proposer condition; NOT the PIREUS_CONTINUITY_PLAN Inkling pilot",
@@ -620,20 +748,29 @@ def main(argv=None):
     ap.add_argument("--context-engine", type=Path, help="research_context.sio executable")
     ap.add_argument("--mode", choices=["mock", "real"], default="mock")
     ap.add_argument("--model", default=DEFAULT_MODEL)
-    ap.add_argument("--effort", default=DEFAULT_EFFORT, choices=["low", "medium", "high", "xhigh", "max", ""])
+    ap.add_argument("--effort", default=None, choices=["low", "medium", "high", "xhigh", "max", ""],
+                    help="default medium (json-only) or high (open)")
     ap.add_argument("--temperature", type=float, default=None)
-    ap.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS)
+    ap.add_argument("--max-tokens", type=int, default=None, help="default 8192 (json-only) or 16000 (open)")
     ap.add_argument("--budget-usd", type=float, default=DEFAULT_BUDGET_USD)
     ap.add_argument("--price-input", type=float)
     ap.add_argument("--price-output", type=float)
     ap.add_argument("--rounds", type=int, choices=[1, 2, 3], default=3)
     ap.add_argument("--per-arm", type=int, choices=[8, 32], default=32)
     ap.add_argument("--confirm-spend", action="store_true")
+    ap.add_argument("--prompt", choices=PROMPT_MODES, default="json-only",
+                    help="open = v3: full admission grammar, reasoning budget, hypothesis envelope")
     ap.add_argument("--history", choices=HISTORY_MODES, default=DEFAULT_HISTORY,
                     help="intra-round history of the arm's own proposals (none = v1 behaviour)")
     ap.add_argument("--workspace-id", default=os.environ.get("ANTHROPIC_WORKSPACE_ID") or None,
                     help="sent as the anthropic-workspace-id header (default: env ANTHROPIC_WORKSPACE_ID)")
     args = ap.parse_args(argv)
+    if args.prompt == "open" and args.history == "none":
+        ap.error("--prompt open (v3) keeps the v2 intra-round history; it needs --history other than none")
+    if args.effort is None:
+        args.effort = OPEN_EFFORT if args.prompt == "open" else DEFAULT_EFFORT
+    if args.max_tokens is None:
+        args.max_tokens = OPEN_MAX_TOKENS if args.prompt == "open" else DEFAULT_MAX_TOKENS
     secret = os.environ.get("ANTHROPIC_API_KEY") if args.mode == "real" else None
     prices, price_source = prices_for(args)
     if args.command == "report":
