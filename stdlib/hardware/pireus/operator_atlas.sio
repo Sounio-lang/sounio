@@ -1,0 +1,488 @@
+//! eisa_h.pireus_operator_atlas.v1 -- the Sounio novelty classifier for Pireus
+//! kind=2 operator proposals.
+//!
+//! An operator is a 16x16 sign table over F2^4 graded by XOR:
+//! e_i * e_j = (-1)^signs[i*16+j] e_(i XOR j). The atlas is the frozen V13 class
+//! set (tools/pireus/operator_orbit_canonicalization.freeze.v13, semantics
+//! 0a4b2c35...): 30 baseline classes plus 32 admitted classes = 62, under
+//! GL(4,F2) x input swap x all 2048 basis-fixed sign gauges. Canonical forms
+//! come from the unchanged V13 canonicalizer (pireus_operator_orbit_canonical_view).
+//!
+//! The V13 classes were generated from cubic-forge children; none of them is
+//! the sedenion. Without a reference for the parent algebra, phase 0 (the
+//! sedenions themselves) would leave the atlas as "N2". The atlas therefore
+//! also carries the three members of the frozen V1 GL4 corpus
+//! (GARDEN_PIREUS_OPERATOR_GENESIS_GL4_V1.md, "Corpus and search objective"):
+//! untwisted XOR, live Cayley-Dickson-16 and the diagonal bicharacter
+//! (-1)^parity(i AND j), as reference classes 62, 63 and 64. Adding them can
+//! only move a proposal from N2 to N0/N1, never the other way.
+//!
+//! Ladder (relative to these 65 reference classes and this equivalence only):
+//!   N0  the table is bit-identical to a reference table (a V13 canonical
+//!       representative, or a corpus member's defining table);
+//!   N1  the table differs, but its canonical form is a reference class;
+//!   N2  the canonical form is none of the 65 reference classes (bounded
+//!       relative quotient separation, V10 sense). Not algebraic, material,
+//!       scientific or historical novelty, and never claim_ready.
+//! H (historical priority) needs prior-art review and founder promotion; this
+//! module has no way to emit it.
+
+use algebra::cayley_dickson::cd_sigma
+use hardware::pireus::operator_orbit_canonicalization::{
+    PireusPocCanonicalView,
+    pireus_operator_orbit_canonical_view,
+}
+use crypto::sha256::{
+    SHA256State,
+    sha256_init, sha256_update_be64, sha256_finalize, sha256_digest_byte,
+}
+
+pub const PIREUS_ATLAS_CLASSES: i64 = 62
+pub const PIREUS_ATLAS_CORPUS: i64 = 3
+pub const PIREUS_ATLAS_REFERENCES: i64 = 65
+pub const PIREUS_ATLAS_ORIGIN_V13_BASELINE: i64 = 1
+pub const PIREUS_ATLAS_ORIGIN_V13_ADMITTED: i64 = 2
+pub const PIREUS_ATLAS_ORIGIN_V1_CORPUS: i64 = 3
+pub const PIREUS_ATLAS_BASELINE_CLASSES: i64 = 30
+pub const PIREUS_ATLAS_WORDS: i64 = 8
+pub const PIREUS_ATLAS_CELLS: i64 = 256
+// The V13 class-digest framing (PIREUS_POC_SCHEMA), so the first 30 classes
+// hash to the class_digest in the frozen V13 baseline receipt.
+pub const PIREUS_ATLAS_V13_SCHEMA: i64 = 733000
+
+pub const PIREUS_ATLAS_N0: i64 = 0
+pub const PIREUS_ATLAS_N1: i64 = 1
+pub const PIREUS_ATLAS_N2: i64 = 2
+
+pub const PIREUS_ATLAS_OK: i64 = 0
+pub const PIREUS_ATLAS_ERR_DOMAIN: i64 = 1
+pub const PIREUS_ATLAS_ERR_CANONICALIZATION: i64 = 2
+pub const PIREUS_ATLAS_ERR_INTEGRITY: i64 = 3
+
+pub struct PireusOperatorAtlasDigest {
+    pub words: [i64; 8],
+}
+
+pub struct PireusOperatorAtlasClassification {
+    pub valid: bool,
+    pub error: i64,
+    pub level: i64,
+    pub class_id: i64,
+    pub origin: i64,
+    pub exact_representative: bool,
+    pub words: [i64; 8],
+    pub matrix: i64,
+    pub swap: i64,
+    pub gauge: i64,
+    pub action_views: i64,
+}
+
+// 62 classes x 8 packed words, cell c at bit (c mod 32) of word (c / 32).
+// Classes 0..29 are the first-seen canonical words of PIREUS_POC_BASELINE
+// classes 0..29 and classes 30..61 are PIREUS_POC_CANON_BITS admitted=0..31,
+// both read from the frozen V13 transcript operator_orbit_canonicalization.first.v13
+// (sha256 16af63f5...). test_operator_atlas.py re-derives this table from those bytes.
+fn pireus_atlas_class_words() -> [i64; 496] {
+    [
+        // class 0 (V13 baseline)
+        0xc0000000, 0x6660a000, 0x48cc3c78, 0xaa8ed85a, 0x8040fb04, 0x64621946, 0xe9922662, 0x49928002,
+        // class 1 (V13 baseline)
+        0xc0000000, 0x6660a000, 0x12963c78, 0xf0d4d85a, 0x8040a15e, 0x6462431c, 0xe9922662, 0x49928002,
+        // class 2 (V13 baseline)
+        0xc0000000, 0x6cc0a000, 0x96486688, 0x2e0ad20a, 0x6ec892c8, 0xda4a2a8a, 0x1cc2d002, 0xbcc27cc2,
+        // class 3 (V13 baseline)
+        0xc0000000, 0x6cc0a000, 0x6ce89c28, 0xd4aa28aa, 0xc4623862, 0x70e08020, 0x4cc88008, 0xecc82cc8,
+        // class 4 (V13 baseline)
+        0xc0000000, 0xcacca000, 0xb83ceecc, 0x2466d85a, 0x31322a2a, 0x432cf2f8, 0xcedc4334, 0x2a540d70,
+        // class 5 (V13 baseline)
+        0xc0000000, 0x6606a000, 0x964844cc, 0x245af0d8, 0xb38c4646, 0x2646d58a, 0xc21c2552, 0x43c2a28a,
+        // class 6 (V13 baseline)
+        0xc0000000, 0xf006a000, 0x5a848800, 0xe896aa14, 0xd5ea9768, 0x6168b3ec, 0xdffe8ff8, 0xe9682968,
+        // class 7 (V13 baseline)
+        0xc0000000, 0x6cc0a000, 0x96486688, 0x2e0ad20a, 0x075efb5e, 0xb3dc431c, 0x7554b994, 0xd5541554,
+        // class 8 (V13 baseline)
+        0xc0000000, 0x6660a000, 0x74f00044, 0x96b2e466, 0x70b00bf4, 0x9492e9b6, 0x255eeaae, 0x855e4cce,
+        // class 9 (V13 baseline)
+        0xc0000000, 0x6cc0a000, 0xc6423682, 0x7e008200, 0x075efb5e, 0xb3dc431c, 0x255ee99e, 0x855e455e,
+        // class 10 (V13 baseline)
+        0xc0000000, 0x6606a000, 0x5a848800, 0xe8963c14, 0x1926857a, 0xe57a7f20, 0xcdec4334, 0x25a4ad7a,
+        // class 11 (V13 baseline)
+        0xc0000000, 0x96605000, 0x743c9678, 0x007ee45a, 0x4f703232, 0xa254d976, 0xd96e8668, 0x16684f0e,
+        // class 12 (V13 baseline)
+        0xc0000000, 0x6606a000, 0x66b8b43c, 0xd4aa0028, 0x437cb6b6, 0xd6b6257a, 0xc21c2552, 0x43c2a28a,
+        // class 13 (V13 baseline)
+        0xc0000000, 0xf006a000, 0x5a848800, 0xe896aa14, 0xda1a9898, 0x6e98bc1c, 0xd00e8008, 0xe6982698,
+        // class 14 (V13 baseline)
+        0xa0000000, 0xb88e2cc6, 0xb8aa5036, 0xc6124ca8, 0x5a7e03e6, 0x2b163e3a, 0x76d09366, 0xcb5c5fae,
+        // class 15 (V13 baseline)
+        0xa0000000, 0x388e2cc6, 0xa8ae5076, 0x86b6cce0, 0x0a5e27e6, 0x2b16be72, 0x52c28366, 0xee5c4faa,
+        // class 16 (V13 baseline)
+        0xa0000000, 0x388e2cc6, 0xa8ae5076, 0x84b6cce0, 0x0a5ea7e6, 0x2b16be72, 0x52c28366, 0xee5c4faa,
+        // class 17 (V13 baseline)
+        0xa0000000, 0x388e3cc6, 0xa8ae5076, 0x84b6cce0, 0x0a5ea7e6, 0x2b36be72, 0x52c28366, 0xee5c4faa,
+        // class 18 (V13 baseline)
+        0xa0000000, 0x388e3cc6, 0xa8ae5076, 0x84b6cce0, 0x0a5ea7e6, 0x2b36be72, 0x52c28362, 0xee5c4faa,
+        // class 19 (V13 baseline)
+        0x80000000, 0x14c23a48, 0x906ef63e, 0xdaf4847a, 0x137a01fe, 0x3a7abdb2, 0xaac2f1d2, 0xdb9e4746,
+        // class 20 (V13 baseline)
+        0x80000000, 0x14c23a48, 0x906ef63e, 0xdaf4847a, 0x937a01fe, 0x3a7abdb2, 0xaac2f1d2, 0xdb9e4746,
+        // class 21 (V13 baseline)
+        0x80000000, 0x36642c82, 0x5836f01e, 0x44d2c866, 0x035655fe, 0x1f987776, 0xf1e29392, 0xe58e4b4a,
+        // class 22 (V13 baseline)
+        0x80000000, 0x36642c82, 0x5836f01e, 0x44d2c866, 0x035655fe, 0x1f987776, 0xf1629392, 0xe58e4b4a,
+        // class 23 (V13 baseline)
+        0x80000000, 0x14ea3e4c, 0xf02e603a, 0x58e6a47a, 0x966e21be, 0x3b5abdb6, 0xa3e2f5c6, 0x491e0746,
+        // class 24 (V13 baseline)
+        0x80000000, 0x14ea3e4c, 0xf02e603a, 0x58a6a47a, 0x966e21be, 0x3b5abdb6, 0xa3e2f5c6, 0x091e0746,
+        // class 25 (V13 baseline)
+        0x80000000, 0x14ea3e4c, 0xf02e601a, 0x58a6a47a, 0x966e21be, 0x3b5abdb6, 0xa3e2d5c6, 0x091e0746,
+        // class 26 (V13 baseline)
+        0x80000000, 0x14ea3e44, 0xf02e601a, 0x58a6a47a, 0x966e21be, 0x3b5ab5b6, 0xa3e2d5c6, 0x091e0746,
+        // class 27 (V13 baseline)
+        0x80000000, 0x14ea3e44, 0xf02e601a, 0x58a6a4fa, 0x966e23be, 0x3b5ab5b6, 0xa3e2d5c6, 0x091e0746,
+        // class 28 (V13 baseline)
+        0x80000000, 0x14ea3e44, 0xf03e601a, 0x58a6a4fa, 0x966e23be, 0x3b5ab5b6, 0xa3e2d5c6, 0x091e8746,
+        // class 29 (V13 baseline)
+        0x80000000, 0x14ee3e44, 0xf03e601a, 0x58a6a4fa, 0x966e23be, 0x3b5ab5b6, 0xb3e2d5c6, 0x091e8746,
+        // class 30 (V13 admitted 0)
+        0x20000000, 0xa06a5e86, 0xc85674be, 0x92eab294, 0x0d3e70d6, 0xa99a4de8, 0x7a6486aa, 0x27265bd2,
+        // class 31 (V13 admitted 1)
+        0xa0000000, 0xb88e2cc6, 0x74669cfa, 0x0ade8064, 0x5a7e03e6, 0x2b163e3a, 0xba1c5faa, 0x07909362,
+        // class 32 (V13 admitted 2)
+        0xa0000000, 0xee4e8c06, 0x74aa0a36, 0x5cd24668, 0x9b6611ba, 0x9f7a3612, 0x0c58615a, 0xf0507516,
+        // class 33 (V13 admitted 3)
+        0xa0000000, 0xb88e2cc6, 0xb8aa5036, 0xc6124ca8, 0x96b2cf2a, 0xe7daf2f6, 0xba1c5faa, 0x07909362,
+        // class 34 (V13 admitted 4)
+        0xa0000000, 0x18ea56a8, 0xdeb874da, 0x4e588866, 0x2bf651ae, 0xb99e0908, 0x55ee4602, 0x6f0e4a0e,
+        // class 35 (V13 admitted 5)
+        0x80000000, 0xa44adaa8, 0x0a7e7854, 0xdce830d2, 0xe7da817e, 0x4cc49d16, 0x0da225f6, 0x7822730a,
+        // class 36 (V13 admitted 6)
+        0xa0000000, 0xee8e8cc6, 0x74aa0a36, 0x5c1246a8, 0x9ba6117a, 0x9f7a3612, 0x0c98619a, 0xf0507516,
+        // class 37 (V13 admitted 7)
+        0xa0000000, 0xdaacb888, 0x121c0670, 0xdca24af6, 0xa3deee88, 0x3a3adf16, 0x37a4dac2, 0x8f962f48,
+        // class 38 (V13 admitted 8)
+        0x00000000, 0xc86a6c08, 0x62642298, 0xd67060de, 0x954e33ac, 0xea74254a, 0x9a943c72, 0x95565686,
+        // class 39 (V13 admitted 9)
+        0x00000000, 0x04aa6c08, 0xf4e2b41e, 0xc4bcbed6, 0x335c7afe, 0xeaba2584, 0xf20298e0, 0x8f1c4cfc,
+        // class 40 (V13 admitted 10)
+        0xa0000000, 0x38ceac86, 0xb8aa5036, 0x4652cce8, 0x5a7e03e6, 0xab56be7a, 0x76d09366, 0x4b1cdfee,
+        // class 41 (V13 admitted 11)
+        0xa0000000, 0x848ee6c6, 0x74aa0a36, 0x36122ca8, 0xf1a67b7a, 0x9f7a3612, 0x66980b9a, 0xf0507516,
+        // class 42 (V13 admitted 12)
+        0xa0000000, 0x3c8ea8c6, 0xb8aa5036, 0x4212c8a8, 0x5a7e03e6, 0xaf16ba3a, 0x76d09366, 0x4f5cdbae,
+        // class 43 (V13 admitted 13)
+        0xa0000000, 0x188e8cc6, 0xb8aa5036, 0x6612eca8, 0x5a7e03e6, 0x8b169e3a, 0x76d09366, 0x6b5cffae,
+        // class 44 (V13 admitted 14)
+        0xa0000000, 0x388eacc6, 0xb8aa5036, 0x4612cca8, 0x5a7e03e6, 0xab16be3a, 0x76d09366, 0x4b5cdfae,
+        // class 45 (V13 admitted 15)
+        0x00000000, 0x5aeeaa88, 0xaa7a6686, 0x5a9666f4, 0xc4022dfe, 0x265201ae, 0x738ad376, 0x0fda4e26,
+        // class 46 (V13 admitted 16)
+        0xa0000000, 0xb88e2cc6, 0x786a90f6, 0x06d28c68, 0x5a7e03e6, 0x2b163e3a, 0xb61053a6, 0x0b9c9f6e,
+        // class 47 (V13 admitted 17)
+        0x80000000, 0x748a3a48, 0x289e00da, 0x2c065caa, 0xf78e67d0, 0x551ccf56, 0x7d7ce354, 0xdd8af9b0,
+        // class 48 (V13 admitted 18)
+        0xa0000000, 0x18ea56a8, 0x5a3cf05e, 0xcadc0ce2, 0xaf72d52a, 0x3d1a8d8c, 0x55ee4602, 0x6f0e4a0e,
+        // class 49 (V13 admitted 19)
+        0x80000000, 0x748a3a48, 0x289e00da, 0x2c065caa, 0x6ee867d0, 0x551c5630, 0xe41ae354, 0xdd8a60d6,
+        // class 50 (V13 admitted 20)
+        0xa0000000, 0xb88e2cc6, 0x78aa9036, 0x06128ca8, 0x5a7e03e6, 0x2b163e3a, 0xb6d05366, 0x0b5c9fae,
+        // class 51 (V13 admitted 21)
+        0x80000000, 0x748a3a48, 0x4ef866bc, 0x4a603acc, 0x077e9720, 0xa5ec3fa6, 0xebea75c2, 0x4b1c6f26,
+        // class 52 (V13 admitted 22)
+        0x00000000, 0xc86a6c08, 0xbce0fc1c, 0x08f4be5a, 0x65bec35c, 0x1a84d5ba, 0xb4e01206, 0xbb2278f2,
+        // class 53 (V13 admitted 23)
+        0x00000000, 0xbeea6480, 0x98669a9a, 0x8e7c1c5a, 0x46444968, 0xff14e932, 0xab749486, 0x838619a8,
+        // class 54 (V13 admitted 24)
+        0xa0000000, 0xb88e2cc6, 0x38ead076, 0x4652cce8, 0x5a7e03e6, 0x2b163e3a, 0xf6901326, 0x4b1cdfee,
+        // class 55 (V13 admitted 25)
+        0x80000000, 0x144e9228, 0xf8365ef4, 0xc4588876, 0x154011ba, 0x018eccd8, 0xef7e7c6c, 0xf9925e4e,
+        // class 56 (V13 admitted 26)
+        0xa0000000, 0xb88e2cc6, 0x3caad436, 0x4212c8a8, 0x5a7e03e6, 0x2b163e3a, 0xf2d01766, 0x4f5cdbae,
+        // class 57 (V13 admitted 27)
+        0x80000000, 0xe82ad2e8, 0xdc225cbc, 0xb4e89058, 0x0b70ecfa, 0xb8848854, 0x66fe29bc, 0xe2765cda,
+        // class 58 (V13 admitted 28)
+        0xa0000000, 0xb88e2cc6, 0x38aad036, 0x4612cca8, 0x5a7e03e6, 0x2b163e3a, 0xf6d01366, 0x4b5cdfae,
+        // class 59 (V13 admitted 29)
+        0xa0000000, 0x1e6e28c6, 0x2674de1c, 0x983a5c8a, 0x52ee8ba2, 0x6c2a47d0, 0x74b89d32, 0xc2f455ea,
+        // class 60 (V13 admitted 30)
+        0xa0000000, 0x602c5684, 0x5836a05e, 0x983a5c8a, 0x6ed2b79e, 0x2e5405ae, 0x36c6df4c, 0xfec869d6,
+        // class 61 (V13 admitted 31)
+        0xa0000000, 0x1cea020c, 0xd86e4cfa, 0x76b202ee, 0xabb849de, 0xb4868366, 0x7d54d346, 0xe35e4f46
+    ]
+}
+
+pub fn pireus_operator_atlas_class_word(class_id: i64, word: i64) -> i64
+with Mut, Panic {
+    let table = pireus_atlas_class_words()
+    table[class_id * PIREUS_ATLAS_WORDS + word]
+}
+
+fn pireus_atlas_finish(state: SHA256State) -> PireusOperatorAtlasDigest
+with Mut, Panic, Div, Epistemic {
+    let digest = sha256_finalize(state)
+    var words: [i64; 8] = [0; 8]
+    var word: i64 = 0
+    while word < 8 {
+        var value: i64 = 0
+        var byte: i64 = 0
+        while byte < 4 {
+            value = (value << 8) |
+                sha256_digest_byte(&digest, (word * 4 + byte) as i32)
+            byte = byte + 1
+        }
+        words[word] = value
+        word = word + 1
+    }
+    PireusOperatorAtlasDigest { words: words }
+}
+
+// The V13 poc_digest_classes framing over the first `count` classes.
+pub fn pireus_operator_atlas_class_digest(count: i64) -> PireusOperatorAtlasDigest
+with Mut, Panic, Div, Epistemic {
+    let table = pireus_atlas_class_words()
+    var state = sha256_init()
+    sha256_update_be64(&! state, PIREUS_ATLAS_V13_SCHEMA)
+    sha256_update_be64(&! state, count)
+    var index: i64 = 0
+    while index < count * PIREUS_ATLAS_WORDS {
+        sha256_update_be64(&! state, table[index])
+        index = index + 1
+    }
+    pireus_atlas_finish(state)
+}
+
+// class_digest of PIREUS_POC_BASELINE_RECEIPT in the frozen V13 transcript.
+pub fn pireus_operator_atlas_frozen_baseline_digest() -> [i64; 8] {
+    [3438304597, 4027357389, 368534535, 3142349310,
+     789896255, 4232357747, 2728283006, 71599997]
+}
+
+// The same framing over all 62 classes, pinned when v1 was frozen.
+pub fn pireus_operator_atlas_frozen_digest() -> [i64; 8] {
+    [1561567782, 1492778267, 1548016378, 1655687043,
+     2603475094, 2660252682, 2876471779, 789442716]
+}
+
+fn pireus_atlas_digest_equal(left: &PireusOperatorAtlasDigest, right: &[i64; 8]) -> bool
+with Mut, Panic {
+    var word: i64 = 0
+    while word < 8 {
+        if left.words[word] != right[word] { return false }
+        word = word + 1
+    }
+    true
+}
+
+pub fn pireus_operator_atlas_intact() -> bool with Mut, Panic, Div, Epistemic {
+    let baseline = pireus_operator_atlas_class_digest(PIREUS_ATLAS_BASELINE_CLASSES)
+    let full = pireus_operator_atlas_class_digest(PIREUS_ATLAS_CLASSES)
+    let frozen_baseline = pireus_operator_atlas_frozen_baseline_digest()
+    let frozen_full = pireus_operator_atlas_frozen_digest()
+    let baseline_ok = pireus_atlas_digest_equal(&baseline, &frozen_baseline)
+    let full_ok = pireus_atlas_digest_equal(&full, &frozen_full)
+    baseline_ok && full_ok
+}
+
+fn pireus_atlas_bilinear(code: i64, x: i64, y: i64) -> i64 with Mut {
+    var s: i64 = 0
+    var i: i64 = 0
+    while i < 4 {
+        if ((x >> i) & 1) == 1 {
+            var j: i64 = 0
+            while j < 4 {
+                if ((y >> j) & 1) == 1 { s = s ^ ((code >> (i * 4 + j)) & 1) }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    s
+}
+
+// Sign bits of the admission kind=2 operator: cd_sigma twisted by i^T B j,
+// with B[i][j] at bit (4*i + j) of the phase code.
+pub fn pireus_operator_atlas_phase_signs(code: i64) -> [i64; 256]
+with Mut, Panic, Div {
+    var signs: [i64; 256] = [0; 256]
+    var left: i64 = 0
+    while left < 16 {
+        var right: i64 = 0
+        while right < 16 {
+            var bit: i64 = 0
+            if cd_sigma(left as i32, right as i32, 4) < 0 { bit = 1 }
+            signs[left * 16 + right] = bit ^ pireus_atlas_bilinear(code, left, right)
+            right = right + 1
+        }
+        left = left + 1
+    }
+    signs
+}
+
+pub fn pireus_operator_atlas_pack(signs: &[i64; 256]) -> [i64; 8]
+with Mut, Panic, Div {
+    var words: [i64; 8] = [0; 8]
+    var cell: i64 = 0
+    while cell < PIREUS_ATLAS_CELLS {
+        if signs[cell] != 0 {
+            let word = cell / 32
+            let bit = cell - word * 32
+            words[word] = words[word] | (1 << bit)
+        }
+        cell = cell + 1
+    }
+    words
+}
+
+
+fn pireus_atlas_parity(value: i64) -> i64 with Mut {
+    var x = value
+    var parity: i64 = 0
+    while x != 0 {
+        parity = parity ^ (x & 1)
+        x = x >> 1
+    }
+    parity
+}
+
+// Raw sign table of V1 corpus member 0 (untwisted XOR), 1 (Cayley-Dickson-16)
+// or 2 (diagonal bicharacter), from their definitions.
+pub fn pireus_operator_atlas_corpus_signs(member: i64) -> [i64; 256]
+with Mut, Panic, Div {
+    var signs: [i64; 256] = [0; 256]
+    var cell: i64 = 0
+    while cell < PIREUS_ATLAS_CELLS {
+        let left = cell / 16
+        let right = cell - left * 16
+        if member == 1 {
+            if cd_sigma(left as i32, right as i32, 4) < 0 { signs[cell] = 1 }
+        }
+        if member == 2 { signs[cell] = pireus_atlas_parity(left & right) }
+        cell = cell + 1
+    }
+    signs
+}
+
+// V13-canonical words of the three corpus members, pinned for v1.
+// test_operator_atlas recanonicalizes the definitions above and must equal these.
+fn pireus_atlas_corpus_words() -> [i64; 24] {
+    [
+        0, 0, 0, 0, 0, 0, 0, 0,
+        1789526016, 1556888774, 3091001374, 2398145650,
+        1132200446, 2131769138, 3016283074, 2400118180,
+        0, 0, 0, 0, 4278255360, 4278255360, 4278255360, 4278255360
+    ]
+}
+
+// Canonical words of reference class 0..64 (62 V13 classes, then the corpus).
+pub fn pireus_operator_atlas_reference_word(class_id: i64, word: i64) -> i64
+with Mut, Panic {
+    if class_id < PIREUS_ATLAS_CLASSES {
+        return pireus_operator_atlas_class_word(class_id, word)
+    }
+    let corpus = pireus_atlas_corpus_words()
+    corpus[(class_id - PIREUS_ATLAS_CLASSES) * PIREUS_ATLAS_WORDS + word]
+}
+
+pub fn pireus_operator_atlas_origin(class_id: i64) -> i64 {
+    if class_id < 0 { return 0 }
+    if class_id < PIREUS_ATLAS_BASELINE_CLASSES { return PIREUS_ATLAS_ORIGIN_V13_BASELINE }
+    if class_id < PIREUS_ATLAS_CLASSES { return PIREUS_ATLAS_ORIGIN_V13_ADMITTED }
+    PIREUS_ATLAS_ORIGIN_V1_CORPUS
+}
+
+pub fn pireus_operator_atlas_find(words: &[i64; 8]) -> i64 with Mut, Panic {
+    let table = pireus_atlas_class_words()
+    var class_id: i64 = 0
+    while class_id < PIREUS_ATLAS_CLASSES {
+        var equal = true
+        var word: i64 = 0
+        while word < PIREUS_ATLAS_WORDS {
+            if table[class_id * PIREUS_ATLAS_WORDS + word] != words[word] { equal = false }
+            word = word + 1
+        }
+        if equal { return class_id }
+        class_id = class_id + 1
+    }
+    let corpus = pireus_atlas_corpus_words()
+    var member: i64 = 0
+    while member < PIREUS_ATLAS_CORPUS {
+        var equal = true
+        var word: i64 = 0
+        while word < PIREUS_ATLAS_WORDS {
+            if corpus[member * PIREUS_ATLAS_WORDS + word] != words[word] { equal = false }
+            word = word + 1
+        }
+        if equal { return PIREUS_ATLAS_CLASSES + member }
+        member = member + 1
+    }
+    -1
+}
+
+fn pireus_atlas_refusal(error: i64) -> PireusOperatorAtlasClassification {
+    PireusOperatorAtlasClassification {
+        valid: false, error: error, level: -1, class_id: -1, origin: 0,
+        exact_representative: false, words: [0; 8],
+        matrix: 0, swap: 0, gauge: 0, action_views: 0,
+    }
+}
+
+// The atlas domain is the V13 one: bits only, axis cells (row 0 and column 0)
+// equal to the unit's +1, so only the 225 interior cells carry a phase.
+pub fn pireus_operator_atlas_in_domain(signs: &[i64; 256]) -> bool with Mut, Panic {
+    var cell: i64 = 0
+    while cell < PIREUS_ATLAS_CELLS {
+        if signs[cell] != 0 && signs[cell] != 1 { return false }
+        cell = cell + 1
+    }
+    var lane: i64 = 0
+    while lane < 16 {
+        if signs[lane] != 0 || signs[lane * 16] != 0 { return false }
+        lane = lane + 1
+    }
+    true
+}
+
+pub fn pireus_operator_atlas_classify(signs: &[i64; 256])
+-> PireusOperatorAtlasClassification with Mut, Panic, Div, Epistemic {
+    if !pireus_operator_atlas_intact() {
+        return pireus_atlas_refusal(PIREUS_ATLAS_ERR_INTEGRITY)
+    }
+    if !pireus_operator_atlas_in_domain(signs) {
+        return pireus_atlas_refusal(PIREUS_ATLAS_ERR_DOMAIN)
+    }
+    let view = pireus_operator_orbit_canonical_view(signs)
+    if !view.complete {
+        return pireus_atlas_refusal(PIREUS_ATLAS_ERR_CANONICALIZATION)
+    }
+    let class_id = pireus_operator_atlas_find(&view.words)
+    // N0: the table is bit-identical to the reference table itself: the
+    // canonical representative for a V13 class, the defining table for a
+    // corpus member.
+    var exact = false
+    if class_id >= 0 {
+        let raw = pireus_operator_atlas_pack(signs)
+        var reference = view.words
+        if class_id >= PIREUS_ATLAS_CLASSES {
+            let member_signs = pireus_operator_atlas_corpus_signs(class_id - PIREUS_ATLAS_CLASSES)
+            reference = pireus_operator_atlas_pack(&member_signs)
+        }
+        var same = true
+        var word: i64 = 0
+        while word < PIREUS_ATLAS_WORDS {
+            if raw[word] != reference[word] { same = false }
+            word = word + 1
+        }
+        exact = same
+    }
+    var level = PIREUS_ATLAS_N2
+    if class_id >= 0 {
+        level = if exact { PIREUS_ATLAS_N0 } else { PIREUS_ATLAS_N1 }
+    }
+    PireusOperatorAtlasClassification {
+        valid: true, error: PIREUS_ATLAS_OK, level: level, class_id: class_id,
+        origin: pireus_operator_atlas_origin(class_id),
+        exact_representative: exact, words: view.words,
+        matrix: view.matrix, swap: view.swap, gauge: view.gauge,
+        action_views: view.action_views,
+    }
+}

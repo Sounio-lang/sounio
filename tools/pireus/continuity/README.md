@@ -246,6 +246,204 @@ five native engine hashes and all cycle source dependencies. A stage records
 its launch intent before submission. Recovery may adopt an observed completed
 paired job, but never silently submits an interrupted request again.
 
+## Operator atlas (eisa_h.pireus_operator_atlas.v1)
+
+`stdlib/hardware/pireus/operator_atlas.sio` classifies a kind=2 operator's
+16x16 sign table under GL(4,F2) x input swap x sign gauge. Canonical forms come
+from the unchanged V13 canonicalizer, reached through the new public accessor
+`pireus_operator_orbit_canonical_view`; no frozen V13 function, counter or
+digest changed, and the lean_single V13 replay still matches its frozen
+transcript. The references are the 62 frozen V13 classes (30 baseline + 32
+admitted, re-derived from `operator_orbit_canonicalization.first.v13`; the
+first 30 hash to its baseline `class_digest`) plus the three V1 GL4 corpus
+members (untwisted XOR, Cayley-Dickson-16, diagonal bicharacter). The V13
+classes do not contain the sedenion, so without the corpus phase 0 would read
+as N2.
+
+Ladder: N0 = bit-identical to a reference table; N1 = different table, same
+canonical class as a reference; N2 = none of the 65 reference classes. N2 is
+bounded relative quotient separation only. `scientific_novelty`,
+`historical_novelty` and `claim_ready` stay false; H needs founder promotion.
+
+Receipt contract v2: kind=2 validate receipts carry `"schema":2` and replace
+`"novelty":"NOT_CLASSIFIED"` with the atlas block (`novelty`, `novelty_scope`,
+`atlas_class`, `atlas_origin`, `canonical_table`, `canonical_matrix/swap/gauge`,
+`atlas_v13_semantics_sha256`, `atlas_class_digest`, `scientific_novelty`,
+`historical_novelty`). kind=1 receipts and every PTX mode are byte-identical.
+The frozen r740 receipt digests are unchanged: the tests map a schema-2
+receipt back to v1 by restoring only that block and require the old digest.
+Gate: `scripts/ci/pireus_operator_atlas_gate.sh`.
+
+### b002-b006 classification (CPU, 2026-11-20)
+
+All 80 kind=2 proposals in inbox batches b002-b006 were reclassified through
+`admission.sio` on CPU (no GPU, no Slurm). Every one is ADMIT and N2; their 41
+distinct phase codes fall into 16 canonical classes. Over the whole 1024-code
+bilinear twist space (upper-triangular B; transpose and alternating parts are
+gauge-equivalent) there are exactly 32 canonical classes: the sedenion (phase 0,
+N0, class 63) and 31 N2 classes, with 84/42/28/21/7/1 codes each. The batches
+cover 16 of those 31. Here N2 means only "outside the 65 reference classes" of
+a deliberately small atlas, not a scientific or historical claim. The fourth
+column below counts codes per class in that 1024-code space.
+
+| batch | kind=2 | N0 | N1 | N2 |
+|---|---|---|---|---|
+| b002 | 16 | 0 | 0 | 16 |
+| b003 | 16 | 0 | 0 | 16 |
+| b004 | 16 | 0 | 0 | 16 |
+| b005 | 16 | 0 | 0 | 16 |
+| b006 | 16 | 0 | 0 | 16 |
+
+| class | proposals | phase codes | upper-triangular orbit size | canonical table |
+|---|---|---|---|---|
+| K1 | 24 | 32931, 32939, 34029, 35947, 36007, 36071, 36075, 36077 | 21 | `c00000009660500084cc6688f08e14aa4080a4a434c2d686266ee00e700eb00e` |
+| K2 | 19 | 32800, 33792, 33824, 33825 | 7 | `c00000003ccaf00af02e00ee2466d86602fefefed6b626761a52d692e6982698` |
+| K3 | 11 | 33004, 33930, 34018, 35983, 36076 | 84 | `c000000096605000743c9678007ee45abf805ba4cbc22986299eeffe7ffebffe` |
+| K4 | 5 | 1, 32, 33, 1056, 1057 | 7 | `c00000003ccaf00af02e00ee2466d866fdfe01fe29b6d976e55229921998d998` |
+| K5 | 4 | 35, 1029, 1120, 1123 | 7 | `c00000009660500084cc6688f08e14aa26e6c2c252a4b0e0400886681668d668` |
+| K6 | 3 | 36, 67 | 28 | `c000000096605000743c9678007ee45ad9e63dc2ada44fe04ff889981998d998` |
+| K7 | 3 | 1160, 2081 | 42 | `c00000009660500084cc6688f08e14aa83bc6798f7fe15bae5522332b3327332` |
+| K8 | 2 | 35840, 35849 | 7 | `c00000009660500084cc6688f08e14aa7cbc989808feeaba1a52dc324c328c32` |
+| K9 | 2 | 2113, 2223 | 84 | `c000000096605000743c9678007ee45a4080a4a434c2d686d69e10fe80fe40fe` |
+| K10 | 1 | 36079 | 28 | `c000000096605000743c9678007ee45ab0705454c4322676266ee00e700eb00e` |
+| K11 | 1 | 36046 | 84 | `c000000096605000743c9678007ee45a2916cd325d54bf10bf087968e9682968` |
+| K12 | 1 | 35015 | 21 | `c00000005aac9cccb8f05ab4007ee45a26e6c2c29e687c2c7c34ba54e6982698` |
+| K13 | 1 | 32774 | 21 | `c00000009660500084cc6688f08e14aad9e63dc2ada44fe0bf087968e9682968` |
+| K14 | 1 | 2190 | 21 | `c00000009660500084cc6688f08e14aabf805ba4cbc22986d96e1f0e8f0e4f0e` |
+| K15 | 1 | 32768 | 1 | `c00000003ccafaaa125af01eccb22896e5da01fe3b32d97615a2d3c2e9682968` |
+| K16 | 1 | 3183 | 21 | `c00000005aac966c66b89678d496289602fefefeb0d040108cc440041668d668` |
+
+## Claude API proposer: claude-api-proposer.v1 (new declared condition)
+
+`claude/claude_proposer.py` is a NEW proposer condition. It does not replace,
+redefine or count toward the Inkling pilot of
+`docs/roadmap/PIREUS_CONTINUITY_PLAN.md`; `cycle.py`, `pilot.py` and their
+`inkling-*` conditions are unchanged, and the Inkling pilot stays open. It
+follows the same design: three arms (`deterministic-search`,
+`claude-no-ontology`, `claude-ontology`), 32 kind=2 proposals per arm per
+round, 3 rounds with the arm order rotated each round, and the same contracts.
+
+- Context: `research_context.sio` output (TripleStore/SPARQL over the target
+  ontology). Only `claude-ontology` sees it, verbatim plus a fixed legend; the
+  other Claude arm gets "withheld". Both carry the same context hash.
+- Deterministic arm: the 1024 upper-triangular phase codes in a fixed order
+  (sorted by sha256 of the code), without repeats.
+- Feedback between rounds only, per arm: phase, decision, reason, N-level and
+  a class tag, taken from that arm's own Sounio receipts.
+- Each round is generated in full, then its `batch.json` (sha256 of every
+  proposal) is written, and only then admitted. A proposal changed after its
+  batch hash is refused.
+- Authority: the reply text is persisted unrepaired as the proposal; the
+  native admission executable (`admission.sio` + atlas) decides. The model is
+  never a novelty oracle. `scientific_novelty` and `claim_ready` stay false.
+- Model: default `claude-sonnet-5-5`, the Claude API id checked against
+  Anthropic's models overview on 2026-11-20. Both Claude arms use the same
+  frozen model. The condition id is `claude-api-proposer.v1:<model>`, so an
+  Opus run (`--model claude-opus-5-5`) is a separate declared condition in
+  its own run directory. A resumed run with any changed model, prompt,
+  engine or budget is refused.
+- Sampling: `claude-sonnet-5-5` rejects temperature/top_p/top_k with a 400
+  error, so no temperature is sent unless `--temperature` is given. The
+  Messages API has no seed; the round and proposal index are in the prompt.
+  Thinking is the model default (adaptive) with `output_config.effort`
+  (default `medium`) and `max_tokens` 8192, all recorded in the manifest.
+- Records: `manifest.json` freezes the model, effort, max_tokens, prompt
+  hashes, prices, the context and engine hashes, and the proposer source hash.
+  Each call stores its exact `NNN.request.json` and raw `NNN.response.json`,
+  and `ledger.jsonl` records their sha256, request-id, returned model, stop
+  reason, token counts, cost in USD and the running total.
+- Budget: hard cap, `--budget-usd`, default 20. Before each call the worst
+  case is reserved (request bytes as tokens plus max_tokens output, at
+  US$2/US$10 per MTok for Sonnet 5.5). The run stops with `BUDGET_STOP`
+  (exit 3) before the cap could be exceeded. An interrupted call whose
+  request was written but no response arrived is never re-issued
+  automatically.
+- Modes: `estimate` is a dry run (no transport, no key, no files),
+  `--mode mock` (the default) is deterministic and offline, and `--mode real`
+  needs `--confirm-spend` and `ANTHROPIC_API_KEY`.
+- Key: `ANTHROPIC_API_KEY` is read from the environment only, in real mode
+  only. It is passed to the SDK client and nowhere else. Every artifact is
+  checked for it before it is written, and errors are redacted.
+- SDK: `claude/requirements.txt` pins `anthropic==2.12.0`.
+- v2, `claude-api-proposer.v2:<model>`, is the default (`--history proposals+classes`).
+  The first real smoke (v1, 2026-11-21) showed almost no diversity: 16
+  identical-prompt calls gave phase 4660 thirteen times. In v2, each call of a
+  Claude arm lists that arm's earlier proposals in the same round (phase, plus
+  the class tag or refusal reason from the Sounio admission of each) and asks
+  for a distinct operator. Those admissions are kept as `NNN.preview.json`,
+  byte-identical to the later receipts. The batch hash is still written before
+  the official admission. This intra-round feedback is part of this condition
+  only (the plan's pilot has feedback between rounds only). The history has
+  the same form in both Claude arms; only the ontology facts differ. No
+  hardware metric enters it.
+- Dedup (v2): within one arm and round, a proposal equal to an earlier one
+  (same bytes, or the same JSON object after sorted-key canonicalisation) is
+  recorded as `DUPLICATE` in the ledger and counted as refused in the report
+  (`admitted_after_dedup`). It is still hashed and admitted, and no
+  replacement call is made, so calls per arm and round stay `per_arm`.
+  The same rule applies to every arm.
+- Temperature is still not sent (Sonnet 5.5 rejects it); `temperature: null`
+  is in the manifest. `--history none` reproduces v1 request bytes exactly
+  (checked against the 16 requests of the real v1 smoke).
+- Workspace: a key not scoped to a workspace is refused by the API (400)
+  unless each request carries `anthropic-workspace-id`. Pass it with
+  `--workspace-id` or env `ANTHROPIC_WORKSPACE_ID` (the ID is not a secret and
+  is not hard-coded). It goes in the SDK client's default headers, not in
+  `request.json`, and is recorded as `anthropic_workspace_id` in the manifest
+  and in each ledger call. When it is not given, nothing changes.
+- v3, `claude-api-proposer.v3:<model>`, is opt-in (`--prompt open`; keeps the
+  v2 history and dedup, refuses `--history none`). Why v1/v2 replies were a bare
+  phase number (~149 output tokens, `thinking_tokens: 0` in the real smoke):
+  the prompt asked for "exactly one JSON object and nothing else", gave a
+  template with every key filled, described the operator in one sentence, and
+  effort was `medium` with adaptive thinking, so the model copied the template,
+  changed `phase` and did not think. v3 changes only the proposer side:
+  - prompt (`OPEN_PROMPT`, hash in manifest): what the operator is (B over F2,
+    bit 4r+c of `phase`), the equivalence the classifier uses, every key and
+    range the kind=2 admission accepts with its meaning, admitted and refused
+    examples with their reasons (checked against the real executable by
+    `OpenPromptExamplesAgainstRealAdmission`), and a request for a hypothesis
+    instead of bit patterns. The kind=2 grammar only identifies the operator by
+    `phase`; lowering keys change how it runs, not its class. admission.sio is
+    unchanged.
+  - reasoning: effort `high` and max_tokens 16000 by default (both in the
+    manifest); thinking stays adaptive and its tokens are recorded per call
+    (`thinking_tokens` in the ledger).
+  - reply envelope `{"hypothesis", "B", "proposal"}` (`ENVELOPE_POLICY`, hash in
+    manifest): only `proposal`, as compact sorted-key JSON, goes to Sounio;
+    the rest is kept in `NNN.rationale.json` with its sha256 and a
+    `b_matches_phase` flag in an `ENVELOPE` ledger row, never read by the judge.
+    A malformed reply goes to Sounio unchanged and is refused (no repair).
+  - Both Claude arms get the same prompt form, model, effort and max_tokens; only
+    the ontology facts differ.
+  Old flags give old bytes: `--history none` (v1) and the default (v2) produce
+  request bodies equal to 04dbe129 (frozen digests in the tests) and identical
+  mock-run trees apart from `proposer_source_sha256`.
+  v3 smoke estimate (per-arm 8, rounds 3, 48 calls): expected about US$2.1
+  (4,000 output tokens/call assumed, thinking included), worst case US$8.1
+  (every call at 16,000), under the US$20 cap. A full v3 run (192 calls) has a
+  worst case above US$20; BUDGET_STOP ends it at the cap.
+- Tests: `claude/test_claude_proposer.py` (CI step "PIREUS Claude proposer
+  condition"), with no network and no key.
+
+Estimate for a full run (`estimate` with the defaults: 192 calls):
+
+| | value |
+|---|---|
+| expected input | about 200k tokens (request bytes / 3.5, feedback grows by round) |
+| expected output | 1,500 tokens/call, 288k tokens (thinking included) |
+| expected cost | about US$3.3 |
+| worst case | US$17.1 (every call at max_tokens 8192), under the US$20 cap |
+
+An offline mock full run (2026-11-20, real admission + atlas, synthetic
+usage) produced 288 receipts and 9 batch hashes: the mock's fenced replies
+were refused with PROPOSAL_FORMAT and every admitted operator was N2. Mock
+replies are not model behaviour, so this checks the plumbing only.
+
+## R740 pilot
+
+`r740/R740_PILOT.md` is the plan for `gpuorangefs-multi-r740-proxmox` (RTX A5000, sm_86, and Quadro RTX 8000, sm_75). It is a separate launcher: no Spark host fence, no `pireus-spark-pair` lease, no `check_pair`. The Spark files named in that plan are unchanged. The gain rule is per architecture, with the same 50000 ppm median and positive bootstrap bound, and its hash was frozen before any r740 timing file existed. The amd64 SIF digest is the one Infra Sounio declared; the launcher hashes the file before srun and refuses on a mismatch. That file has not been re-hashed in this tree.
+
 Use pilot.py prepare with --run, --engine, --context-engine, --fixture-engine,
 --parity-engine, --gain-engine and --evidence after committing the source. Run
 pilot.py run --run in remote tmux. pilot.py report --run reports partial state
