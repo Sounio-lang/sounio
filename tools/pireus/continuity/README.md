@@ -313,6 +313,75 @@ column below counts codes per class in that 1024-code space.
 | K15 | 1 | 32768 | 1 | `c00000003ccafaaa125af01eccb22896e5da01fe3b32d97615a2d3c2e9682968` |
 | K16 | 1 | 3183 | 21 | `c00000005aac966c66b89678d496289602fefefeb0d040108cc440041668d668` |
 
+## Claude API proposer: claude-api-proposer.v1 (new declared condition)
+
+`claude/claude_proposer.py` is a NEW proposer condition. It does not replace,
+redefine or count toward the Inkling pilot of
+`docs/roadmap/PIREUS_CONTINUITY_PLAN.md`; `cycle.py`, `pilot.py` and their
+`inkling-*` conditions are unchanged, and the Inkling pilot stays open. It
+follows the same design: three arms (`deterministic-search`,
+`claude-no-ontology`, `claude-ontology`), 32 kind=2 proposals per arm per
+round, 3 rounds with the arm order rotated each round, and the same contracts.
+
+- Context: `research_context.sio` output (TripleStore/SPARQL over the target
+  ontology). Only `claude-ontology` sees it, verbatim plus a fixed legend; the
+  other Claude arm gets "withheld". Both carry the same context hash.
+- Deterministic arm: the 1024 upper-triangular phase codes in a fixed order
+  (sorted by sha256 of the code), without repeats.
+- Feedback between rounds only, per arm: phase, decision, reason, N-level and
+  a class tag, taken from that arm's own Sounio receipts.
+- Each round is generated in full, then its `batch.json` (sha256 of every
+  proposal) is written, and only then admitted. A proposal changed after its
+  batch hash is refused.
+- Authority: the reply text is persisted unrepaired as the proposal; the
+  native admission executable (`admission.sio` + atlas) decides. The model is
+  never a novelty oracle. `scientific_novelty` and `claim_ready` stay false.
+- Model: default `claude-sonnet-5-5`, the Claude API id checked against
+  Anthropic's models overview on 2026-11-20. Both Claude arms use the same
+  frozen model. The condition id is `claude-api-proposer.v1:<model>`, so an
+  Opus run (`--model claude-opus-5-5`) is a separate declared condition in
+  its own run directory. A resumed run with any changed model, prompt,
+  engine or budget is refused.
+- Sampling: `claude-sonnet-5-5` rejects temperature/top_p/top_k with a 400
+  error, so no temperature is sent unless `--temperature` is given. The
+  Messages API has no seed; the round and proposal index are in the prompt.
+  Thinking is the model default (adaptive) with `output_config.effort`
+  (default `medium`) and `max_tokens` 8192, all recorded in the manifest.
+- Records: `manifest.json` freezes the model, effort, max_tokens, prompt
+  hashes, prices, the context and engine hashes, and the proposer source hash.
+  Each call stores its exact `NNN.request.json` and raw `NNN.response.json`,
+  and `ledger.jsonl` records their sha256, request-id, returned model, stop
+  reason, token counts, cost in USD and the running total.
+- Budget: hard cap, `--budget-usd`, default 20. Before each call the worst
+  case is reserved (request bytes as tokens plus max_tokens output, at
+  US$2/US$10 per MTok for Sonnet 5.5). The run stops with `BUDGET_STOP`
+  (exit 3) before the cap could be exceeded. An interrupted call whose
+  request was written but no response arrived is never re-issued
+  automatically.
+- Modes: `estimate` is a dry run (no transport, no key, no files),
+  `--mode mock` (the default) is deterministic and offline, and `--mode real`
+  needs `--confirm-spend` and `ANTHROPIC_API_KEY`.
+- Key: `ANTHROPIC_API_KEY` is read from the environment only, in real mode
+  only. It is passed to the SDK client and nowhere else. Every artifact is
+  checked for it before it is written, and errors are redacted.
+- SDK: `claude/requirements.txt` pins `anthropic==2.12.0`.
+- Tests: `claude/test_claude_proposer.py` (CI step "PIREUS Claude proposer
+  condition"), with no network and no key.
+
+Estimate for a full run (`estimate` with the defaults: 192 calls):
+
+| | value |
+|---|---|
+| expected input | about 200k tokens (request bytes / 3.5, feedback grows by round) |
+| expected output | 1,500 tokens/call, 288k tokens (thinking included) |
+| expected cost | about US$3.3 |
+| worst case | US$17.1 (every call at max_tokens 8192), under the US$20 cap |
+
+An offline mock full run (2026-11-20, real admission + atlas, synthetic
+usage) produced 288 receipts and 9 batch hashes: the mock's fenced replies
+were refused with PROPOSAL_FORMAT and every admitted operator was N2. Mock
+replies are not model behaviour, so this checks the plumbing only.
+
 ## R740 pilot
 
 `r740/R740_PILOT.md` is the plan for `gpuorangefs-multi-r740-proxmox` (RTX A5000, sm_86, and Quadro RTX 8000, sm_75). It is a separate launcher: no Spark host fence, no `pireus-spark-pair` lease, no `check_pair`. The Spark files named in that plan are unchanged. The gain rule is per architecture, with the same 50000 ppm median and positive bootstrap bound, and its hash was frozen before any r740 timing file existed. The amd64 SIF digest is the one Infra Sounio declared; the launcher hashes the file before srun and refuses on a mismatch. That file has not been re-hashed in this tree.
