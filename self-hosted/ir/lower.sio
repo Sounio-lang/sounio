@@ -10626,23 +10626,45 @@ fn lowerer_emit_deferred_global_inits_mut(lo: &! Lowerer) with Mut, Panic, Div, 
 // the same AST never matches. A miss (inline re-lowering of a callee body,
 // whose value path is a call) falls back to lowering the condition.
 var IFC_KEY: [i64; 4096] = [0; 4096]
+var IFC_KEY2: [i64; 4096] = [0; 4096]
 var IFC_REG: [i64; 4096] = [0; 4096]
 var IFC_EPOCH_OF: [i64; 4096] = [0; 4096]
 var IFC_N: i64 = 0
 var IFC_EPOCH: i64 = 0
 
-fn ifc_note(key: i64, reg: i64) with Mut {
+// The key is the if-expression's source position, never its address: a native
+// build passes a `&Expr` along some paths as a copy on the stack, so the same
+// node had a different address in the value path and in the variance walk, and
+// a lowerer built by Madaros (gen2) never found the register the seed-built
+// one (gen1) found -- gen2 and gen3 then differed from each other.
+fn ifc_key_a(e: &Expr) -> i64 {
+    ((*e).span.file_id as i64) * 1099511627776 + (*e).span.start
+}
+
+fn ifc_key_b(e: &Expr) -> i64 {
+    var cs = 0 - 1
+    match (*e).left {
+        Some(c) => { cs = (*c).span.start }
+        _ => {}
+    }
+    cs * 4294967296 + (*e).span.end
+}
+
+fn ifc_note(e: &Expr, reg: i64) with Mut {
     if IFC_N >= 4096 { return }
-    IFC_KEY[IFC_N as usize] = key
+    IFC_KEY[IFC_N as usize] = ifc_key_a(e)
+    IFC_KEY2[IFC_N as usize] = ifc_key_b(e)
     IFC_REG[IFC_N as usize] = reg
     IFC_EPOCH_OF[IFC_N as usize] = IFC_EPOCH
     IFC_N = IFC_N + 1
 }
 
-fn ifc_find(key: i64) -> i64 with Mut {
+fn ifc_find(e: &Expr) -> i64 with Mut {
+    let ka = ifc_key_a(e)
+    let kb = ifc_key_b(e)
     var i = IFC_N - 1
     while i >= 0 {
-        if IFC_KEY[i as usize] == key && IFC_EPOCH_OF[i as usize] == IFC_EPOCH { return IFC_REG[i as usize] }
+        if IFC_KEY[i as usize] == ka && IFC_KEY2[i as usize] == kb && IFC_EPOCH_OF[i as usize] == IFC_EPOCH { return IFC_REG[i as usize] }
         i = i - 1
     }
     0 - 1
@@ -29853,7 +29875,7 @@ impl Lowerer {
     fn lower_if_variance_runtime_ref_rows(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         // The value path already evaluated this condition (see IFC_KEY): branch
         // on that register instead of evaluating it, and its calls, again.
-        let seen_cond = if FO_INLINE_DEPTH == 0 { ifc_find((e as *mut Expr) as i64) } else { 0 - 1 }
+        let seen_cond = if FO_INLINE_DEPTH == 0 { ifc_find(e) } else { 0 - 1 }
         var lo = self
         var cond = seen_cond
         if seen_cond < 0 {
@@ -48584,7 +48606,7 @@ impl Lowerer {
             // Only the function's own value path: an inline re-lowering of a
             // callee body (FO_INLINE_DEPTH > 0; a recursive callee shares this
             // function's AST nodes) evaluates the condition on other operands.
-            if FO_INLINE_DEPTH == 0 { ifc_note((cur_if as *mut Expr) as i64, cond) }
+            if FO_INLINE_DEPTH == 0 { ifc_note(cur_if, cond) }
 
             let pair_l_else = lo.fresh_label()
             lo = pair_l_else.0

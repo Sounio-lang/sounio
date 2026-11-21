@@ -13,6 +13,10 @@
 #   a14_transitive_min                  lean_single gave a `use` item an empty
 #                                       IR slot in gen1 (preseed dispatch);
 #   algebra_decl_basic / effect_handler_basic  the same for `algebra` / `effect`.
+#   if_expr_condition_evaluated_once    the register-reuse key of an if used as a
+#                                       value was the `&Expr` address, a stack
+#                                       copy on Madaros, so gen2 lowered the
+#                                       condition twice and gen1 once;
 # The comparison is SOUNIO_NV2_IR_TRACE (every IR instruction of every function).
 #
 # Usage: madaros_gen1_gen2_ir_parity_gate.sh GEN1 GEN2
@@ -26,7 +30,7 @@ fail() { echo "[madaros-ir-parity] FAIL: $*" >&2; exit 1; }
 ulimit -s unlimited 2>/dev/null || ulimit -s 1048576 2>/dev/null || true
 export SOUNIO_STDLIB_PATH="$ROOT_DIR/stdlib"
 
-PROGRAMS=(gum_euler_ode gum_fo_across_call a14_transitive_min algebra_decl_basic effect_handler_basic)
+PROGRAMS=(gum_euler_ode gum_fo_across_call a14_transitive_min algebra_decl_basic effect_handler_basic if_expr_condition_evaluated_once)
 compared=0
 for p in "${PROGRAMS[@]}"; do
   src="$ROOT_DIR/tests/run-pass/$p.sio"
@@ -46,5 +50,5 @@ for p in "${PROGRAMS[@]}"; do
   fi
   compared=$((compared + 1))
 done
-[[ "$compared" -ge 5 ]] || fail "compared $compared programs, expected 5"
+[[ "$compared" -ge 6 ]] || fail "compared $compared programs, expected 6"
 echo "[madaros-ir-parity] PASS: gen1 and gen2 lower $compared programs to identical IR"
