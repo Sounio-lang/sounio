@@ -6990,7 +6990,9 @@ theorem parser_code_loop_classify : ∀ (n : Nat) {c e B S : Nat}
   induction n with
   | zero =>
     intro c e B S s hrip hr1 hr6 _ _ _ hce hcW _ _ _ _ _ _ _ hlen16
-    refine Or.inl ⟨[], 0, s, rfl, by simpa using hce, rfl, hrip, hr1, ?_, trivial,
+    refine Or.inl ⟨[], 0, s, rfl,
+      by rw [show codeBytes [] = 0 from rfl, Nat.add_zero]; exact hce,
+      rfl, hrip, hr1, ?_, trivial,
       trivial, fun x hx => (List.not_mem_nil hx).elim, ?_, hlen16, rfl, rfl, ?_⟩
     · show s.reg 6 = some (c + codeBytes [])
       rw [show codeBytes [] = 0 from rfl, Nat.add_zero]
@@ -19250,9 +19252,9 @@ theorem rdc_body_ok_nh {c e sp : Nat} {s : X86Int.St}
     rw [← h32]; exact hm1
   have e7 : X86Int.step stage1Im t6 =
       .ok { t6.set 4 (some ((sp + W - 8) % W)) with mem := m1, rip := aL32 } := by
-    have h := step_call (im := stage1Im) (s := t6) (m := m1)
+    rw [show aL32 = base + 0x26e from rfl]
+    exact step_call (im := stage1Im) (s := t6) (m := m1)
       (by rw [ht6rip]; exact hc.p28c) ht6r4 hm1'
-    simpa using h
   obtain ⟨t7, ht7⟩ : ∃ t : X86Int.St, t =
       { t6.set 4 (some ((sp + W - 8) % W)) with mem := m1, rip := aL32 } :=
     ⟨_, rfl⟩
@@ -20725,7 +20727,7 @@ theorem parser_header_b_nh {B L : Nat} {bs : List Nat} {s : X86Int.St}
       by_cases hj4 : j = 4
       · have ht : t = s1 := by
           subst hj4
-          simp only [Nat.add_sub_cancel_left] at hr'
+          rw [Nat.sub_self] at hr'
           rw [run_zero] at hr'
           simp only [Out.ok.injEq] at hr'
           exact hr'.symm
@@ -20746,7 +20748,7 @@ theorem parser_header_b_nh {B L : Nat} {bs : List Nat} {s : X86Int.St}
       by_cases hj8 : j = 8
       · have ht : t = s2 := by
           subst hj8
-          simp only [Nat.add_sub_cancel_left] at hr'
+          rw [Nat.sub_self] at hr'
           rw [run_zero] at hr'
           simp only [Out.ok.injEq] at hr'
           exact hr'.symm
@@ -29655,7 +29657,9 @@ theorem parser_words_loop_nh : ∀ (wds : List Word)
     · rw [hs3sh, hs2sh, hs1mem]
     · intro x k hd1 hd2 hd3
       rw [hs3memfr x k hd1 (by omega) (by omega),
-        hs2memfr x k hd1 (by omega) (by omega), hs1mem]theorem parser_back_nh {f path argv0 : List Nat} {top A : Nat}
+        hs2memfr x k hd1 (by omega) (by omega), hs1mem]
+
+theorem parser_back_nh {f path argv0 : List Nat} {top A : Nat}
     {pr : Prog} {s : X86Int.St} {c1 c2 buf' : Region} {cap' : Nat}
     {S T : Nat}
     (hdec : Sporos.decode f = some pr)
@@ -35160,7 +35164,8 @@ theorem parser_code_loop_classify_nh : ∀ (n : Nat)
   induction n with
   | zero =>
     intro c e B S s hrip hr1 hr6 _ _ _ hce hcW _ _ _ _ _ _ _ hlen16
-    refine Or.inl ⟨[], 0, s, by omega, rfl, by simpa using hce,
+    refine Or.inl ⟨[], 0, s, by omega, rfl,
+      by rw [show codeBytes [] = 0 from rfl, Nat.add_zero]; exact hce,
       rfl, hrip, hr1, ?_, trivial,
       trivial, fun x hx => (List.not_mem_nil hx).elim, ?_,
       hlen16, rfl, rfl, ?_, ?_⟩
@@ -35298,7 +35303,8 @@ theorem parser_code_loop_classify_nh : ∀ (n : Nat)
           noHitUpTo_add hs1nh hrun1 hs2nh⟩
     · obtain ⟨k, s', hk, hrun, hsrip, hsfr, hsmem, hslen, hsk,
           hnh⟩ := hfail
-      exact Or.inr ⟨[], k, s', by simp, by simpa using hce,
+      exact Or.inr ⟨[], k, s', by simp,
+        by rw [show codeBytes [] = 0 from rfl, Nat.add_zero]; exact hce,
         by simp; omega, hrun, hsrip, hsfr, hslen, hsk,
         congrArg wshape hsmem, hnh⟩
 

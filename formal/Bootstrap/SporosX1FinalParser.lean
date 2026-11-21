@@ -377,9 +377,9 @@ theorem rdc_body_ok {c e sp : Nat} {s : X86Int.St}
     rw [← h32]; exact hm1
   have e7 : X86Int.step stage1Im t6 =
       .ok { t6.set 4 (some ((sp + W - 8) % W)) with mem := m1, rip := aL32 } := by
-    have h := step_call (im := stage1Im) (s := t6) (m := m1)
+    rw [show aL32 = base + 0x26e from rfl]
+    exact step_call (im := stage1Im) (s := t6) (m := m1)
       (by rw [ht6rip]; exact hc.p28c) ht6r4 hm1'
-    simpa using h
   obtain ⟨t7, ht7⟩ : ∃ t : X86Int.St, t =
       { t6.set 4 (some ((sp + W - 8) % W)) with mem := m1, rip := aL32 } :=
     ⟨_, rfl⟩
