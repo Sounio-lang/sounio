@@ -29,6 +29,10 @@ import time
 
 HERE = Path(__file__).resolve().parent
 CONDITION_FAMILY = "claude-api-proposer.v1"
+# v2 = v1 + intra-round history of the arm's own proposals + declared dedup.
+CONDITION_FAMILY_V2 = "claude-api-proposer.v2"
+HISTORY_MODES = ("none", "proposals", "proposals+classes")
+DEFAULT_HISTORY = "proposals+classes"
 ARMS = ("deterministic-search", "claude-no-ontology", "claude-ontology")
 CLAUDE_ARMS = ARMS[1:]
 # Pinned Claude API id, verified 2026-11-20 against the Anthropic models
@@ -78,6 +82,31 @@ FEEDBACK_HEAD = (
     "(phase, decision, refusal reason, N-level, canonical class tag). "
     "A class tag already listed is the same operator up to the declared "
     "equivalence. ")
+
+
+HISTORY_HEAD = (
+    "Proposals already made in this round of this condition, in order "
+    "(phase; then the class tag or refusal reason from the Sounio admission "
+    "of that proposal, when shown): ")
+DISTINCT_ASK = (
+    "Propose an operator distinct from every proposal listed above; a "
+    "proposal whose class tag is already listed is the same operator up to "
+    "the declared equivalence and adds nothing. ")
+DEDUP_POLICY = (
+    "Within one arm and round, a proposal equal to an earlier one (identical "
+    "bytes, or the identical JSON object after sorted-key canonicalisation) is "
+    "recorded in the ledger as DUPLICATE and counted as refused in the report. "
+    "It is still hashed into the batch and admitted by Sounio, so nothing is "
+    "hidden. No extra call is made to replace it: the call budget per arm and "
+    "round stays per_arm. The same rule applies to every arm.")
+PREVIEW_NOTE = (
+    "proposals+classes: before each call of a Claude arm, every earlier "
+    "proposal of that arm and round is passed through the same Sounio "
+    "admission executable; its class tag or refusal reason enters the next "
+    "prompt and the receipt is kept as NNN.preview.json. The batch hash is "
+    "still written before the official admission. This is intra-round "
+    "feedback, which the Inkling plan's pilot does not have; it is part of "
+    "this declared condition only, identical in form for both Claude arms.")
 
 
 class BudgetExhausted(Exception):
@@ -213,7 +242,66 @@ def feedback_lines(run, arm, before_round):
     return lines
 
 
-def request_body(manifest, context, arm, rnd, index, feedback):
+def dedup_key(data):
+    try:
+        value = json.loads(data)
+        if isinstance(value, dict):
+            return digest(encoded(value))
+    except Exception:
+        pass
+    return digest(data)
+
+
+def preview(run, engine, proposal_rel):
+    """Sounio admission of an earlier proposal of the round, used only to
+    tell the model what it already proposed. Byte-identical to admission."""
+    rel = proposal_rel.replace(".proposal.json", ".preview.json")
+    if not (run.root / rel).exists():
+        result = subprocess.run([str(engine), str(run.root / "context.json"), str(run.root / proposal_rel)],
+                                capture_output=True, timeout=120)
+        value = json.loads(result.stdout)
+        if value.get("authority") != "Sounio" or result.returncode not in (0, 1):
+            raise ValueError("invalid preview result for " + proposal_rel)
+        run.write(rel, result.stdout)
+        run.event("preview", rel)
+    return json.loads((run.root / rel).read_text())
+
+
+def history_lines(run, manifest, engine, base_dir, index):
+    mode = manifest.get("history_mode", "none")
+    lines = []
+    for j in range(index):
+        rel = "%s/%03d.proposal.json" % (base_dir, j)
+        data = (run.root / rel).read_bytes()
+        try:
+            phase = json.loads(data).get("phase")
+        except Exception:
+            phase = "unparseable"
+        line = "phase=%s" % (phase,)
+        if mode == "proposals+classes":
+            value = preview(run, engine, rel)
+            table = value.get("canonical_table")
+            line += " " + ("class-" + digest(table.encode())[:12] if table
+                           else "%s:%s" % (value.get("decision"), value.get("reason")))
+        lines.append(line)
+    return lines
+
+
+def record_duplicate(run, base_dir, index):
+    rel = "%s/%03d.proposal.json" % (base_dir, index)
+    key = dedup_key((run.root / rel).read_bytes())
+    for j in range(index):
+        if dedup_key((run.root / ("%s/%03d.proposal.json" % (base_dir, j))).read_bytes()) == key:
+            if not any(x.get("event") == "DUPLICATE" and x["cell"] == base_dir and x["index"] == index
+                       for x in run.rows("ledger.jsonl")):
+                run.append("ledger.jsonl", dict(
+                    event="DUPLICATE", cell=base_dir, index=index, duplicate_of=j,
+                    proposal_sha256=digest((run.root / rel).read_bytes()), dedup_key=key, cost_usd=0.0))
+            return j
+    return None
+
+
+def request_body(manifest, context, arm, rnd, index, feedback, history=None):
     base = template(digest(context))
     if arm == "claude-ontology":
         facts = ONTOLOGY_LEGEND + " Context: " + context.decode().strip()
@@ -221,6 +309,7 @@ def request_body(manifest, context, arm, rnd, index, feedback):
         facts = "Ontology facts: withheld in this condition."
     text = (PROMPT + facts + " " +
             (FEEDBACK_HEAD + " | ".join(feedback) + " " if feedback else "") +
+            (HISTORY_HEAD + " | ".join(history) + ". " + DISTINCT_ASK if history else "") +
             "This is proposal %d of round %d. Template: %s" % (index, rnd, json.dumps(base, sort_keys=True)))
     body = dict(model=manifest["model"], max_tokens=manifest["max_tokens"],
                 messages=[dict(role="user", content=text)])
@@ -295,24 +384,30 @@ def redact(text, secret):
     return text.replace(secret, "<api-key-removed>") if secret else text
 
 
-def generate_cell(run, manifest, transport, cell, context, secret, prices):
+def generate_cell(run, manifest, transport, cell, context, secret, prices, engine=None):
     arm, rnd = cell["arm"], cell["round"]
     base_dir = cell_dir(cell)
     if (run.root / base_dir / "batch.json").exists():
         return
     feedback = feedback_lines(run, arm, rnd) if arm in CLAUDE_ARMS else []
     order = deterministic_order() if arm == "deterministic-search" else None
+    dedup = manifest.get("history_mode", "none") != "none"
     for index in range(manifest["per_arm"]):
         stem = "%s/%03d" % (base_dir, index)
         proposal_rel = stem + ".proposal.json"
         if (run.root / proposal_rel).exists():
+            if dedup:
+                record_duplicate(run, base_dir, index)
             continue
         if arm == "deterministic-search":
             code = order[rnd * manifest["per_arm"] + index]
             run.write(proposal_rel, encoded(template(digest(context)) | dict(phase=code)))
             run.event("generate", proposal_rel)
+            if dedup:
+                record_duplicate(run, base_dir, index)
             continue
-        body = request_body(manifest, context, arm, rnd, index, feedback)
+        history = history_lines(run, manifest, engine, base_dir, index) if dedup else None
+        body = request_body(manifest, context, arm, rnd, index, feedback, history)
         request_rel, response_rel = stem + ".request.json", stem + ".response.json"
         if (run.root / request_rel).exists() and not (run.root / response_rel).exists():
             raise RuntimeError("interrupted call: request retained without response; "
@@ -362,6 +457,8 @@ def generate_cell(run, manifest, transport, cell, context, secret, prices):
         # No repair, fence stripping or JSON normalisation: Sounio judges the text.
         run.write(proposal_rel, (text or "").encode())
         run.event("generate", proposal_rel)
+        if dedup:
+            record_duplicate(run, base_dir, index)
     entries = []
     for index in range(manifest["per_arm"]):
         rel = "%s/%03d.proposal.json" % (base_dir, index)
@@ -415,6 +512,12 @@ def summarize(run, manifest):
             if r.get("decision") != "ADMIT":
                 reasons[r.get("reason")] = reasons.get(r.get("reason"), 0) + 1
         calls = [x for x in ledger if x.get("event") == "CALL" and x["cell"] == base_dir]
+        duplicates = sorted({x["index"] for x in ledger if x.get("event") == "DUPLICATE" and x["cell"] == base_dir})
+        if duplicates:
+            reasons["DUPLICATE"] = len(duplicates)
+        unique = [json.loads((run.root / ("%s/%03d.receipt.json" % (base_dir, i))).read_text())
+                  for i in range(manifest["per_arm"])
+                  if i not in duplicates and (run.root / ("%s/%03d.receipt.json" % (base_dir, i))).exists()]
         batch = run.root / base_dir / "batch.json"
         out["cells"].append(dict(
             cell=base_dir, arm=cell["arm"], round=cell["round"],
@@ -422,6 +525,8 @@ def summarize(run, manifest):
             validated=len(receipts), admitted=len(admitted), refused=reasons,
             novelty={lvl: sum(1 for r in admitted if r.get("novelty") == lvl) for lvl in ("N0", "N1", "N2")},
             canonical_classes=len(classes), new_classes_for_arm=len(new),
+            duplicates=duplicates,
+            admitted_after_dedup=sum(1 for r in unique if r.get("decision") == "ADMIT"),
             calls=len(calls), input_tokens=sum(x["input_tokens"] or 0 for x in calls),
             output_tokens=sum(x["output_tokens"] or 0 for x in calls),
             cost_usd=round(sum(x["cost_usd"] for x in calls), 6)))
@@ -436,12 +541,14 @@ def summarize(run, manifest):
 def estimate(manifest, context, prices):
     calls, worst, expected, tokens_in = 0, 0.0, 0.0, 0
     feedback_guess = ["r0 phase=65535 ADMIT - N2 class-0123456789ab"] * manifest["per_arm"]
+    history_on = manifest.get("history_mode", "none") != "none"
     for cell in cells(manifest["rounds"]):
         if cell["arm"] not in CLAUDE_ARMS:
             continue
         fb = feedback_guess * cell["round"]
         for index in range(manifest["per_arm"]):
-            body = request_body(manifest, context, cell["arm"], cell["round"], index, fb)
+            history = ["phase=65535 class-0123456789ab"] * index if history_on else None
+            body = request_body(manifest, context, cell["arm"], cell["round"], index, fb, history)
             size = len(json.dumps(body).encode())
             exp_in = int(size / BYTES_PER_TOKEN_EXPECTED) + 64
             calls += 1
@@ -454,13 +561,25 @@ def estimate(manifest, context, prices):
                 assumptions=dict(bytes_per_token=BYTES_PER_TOKEN_EXPECTED,
                                  output_tokens_per_call=EXPECTED_OUTPUT_TOKENS,
                                  worst_case="request bytes as tokens + max_tokens output",
-                                 feedback="full feedback of every earlier round of the arm"),
+                                 feedback="full feedback of every earlier round of the arm",
+                                 history="every earlier proposal of the arm and round" if history_on else "none"),
                 prices_usd_per_mtok=dict(input=prices[0], output=prices[1]))
 
 
 def build_manifest(args, context, engine, prices, price_source):
+    history = {}
+    family = CONDITION_FAMILY
+    if args.history != "none":
+        family = CONDITION_FAMILY_V2
+        history = dict(history_mode=args.history,
+                       history_head_sha256=digest(HISTORY_HEAD.encode()),
+                       distinct_ask_sha256=digest(DISTINCT_ASK.encode()),
+                       dedup_policy=DEDUP_POLICY, dedup_policy_sha256=digest(DEDUP_POLICY.encode()),
+                       history_same_form_both_claude_arms=True)
+        if args.history == "proposals+classes":
+            history["intra_round_preview"] = PREVIEW_NOTE
     return dict(
-        schema=1, condition_id=CONDITION_FAMILY + ":" + args.model,
+        schema=1, condition_id=family + ":" + args.model,
         condition_note="new declared proposer condition; NOT the PIREUS_CONTINUITY_PLAN Inkling pilot",
         arms=list(ARMS), rounds=args.rounds, per_arm=args.per_arm, kind=2,
         model=args.model, same_model_for_both_claude_arms=True,
@@ -478,7 +597,9 @@ def build_manifest(args, context, engine, prices, price_source):
         proposer_source_sha256=digest(Path(__file__).read_bytes()),
         mode=args.mode, novelty_oracle="Sounio only", scientific_novelty=False, claim_ready=False,
         # Only present when given, so manifests without a workspace are unchanged.
-        **({"anthropic_workspace_id": args.workspace_id} if args.workspace_id else {}))
+        **({"anthropic_workspace_id": args.workspace_id} if args.workspace_id else {}),
+        # Absent with --history none, so that mode keeps the v1 manifest keys.
+        **history)
 
 
 def make_transport(args, secret):
@@ -508,6 +629,8 @@ def main(argv=None):
     ap.add_argument("--rounds", type=int, choices=[1, 2, 3], default=3)
     ap.add_argument("--per-arm", type=int, choices=[8, 32], default=32)
     ap.add_argument("--confirm-spend", action="store_true")
+    ap.add_argument("--history", choices=HISTORY_MODES, default=DEFAULT_HISTORY,
+                    help="intra-round history of the arm's own proposals (none = v1 behaviour)")
     ap.add_argument("--workspace-id", default=os.environ.get("ANTHROPIC_WORKSPACE_ID") or None,
                     help="sent as the anthropic-workspace-id header (default: env ANTHROPIC_WORKSPACE_ID)")
     args = ap.parse_args(argv)
@@ -544,7 +667,8 @@ def main(argv=None):
         for rnd in range(args.rounds):
             round_cells = [c for c in cells(args.rounds) if c["round"] == rnd]
             for cell in round_cells:   # generate the whole round, then admit it
-                generate_cell(run, manifest, transport, cell, context, secret, prices)
+                generate_cell(run, manifest, transport, cell, context, secret, prices,
+                              args.engine.resolve())
             for cell in round_cells:
                 admit_cell(run, manifest, args.engine.resolve(), cell)
     except BudgetExhausted as stop:

@@ -56,7 +56,7 @@ def all_bytes(root):
 class FakeAnthropicModule(types.ModuleType):
     """Stands in for the SDK. Records the key it was given (so the test can
     prove the key reached only the client) and answers like MockTransport."""
-    def __init__(self, fail_with_key=False):
+    def __init__(self, fail_with_key=False, constant=False):
         super().__init__("anthropic")
         self.__version__ = "fake-0"
         self.seen_keys = []
@@ -77,6 +77,13 @@ class FakeAnthropicModule(types.ModuleType):
                 module.bodies.append(body)
                 if fail_with_key:
                     raise ValueError("authentication failed for key " + module.seen_keys[-1])
+                if constant:
+                    base = json.loads(body["messages"][0]["content"].rsplit("Template: ", 1)[1])
+                    text = json.dumps(base | dict(phase=4660))
+                    raw = cp.encoded(dict(id="msg_c", type="message", role="assistant", model=body["model"],
+                                          content=[dict(type="text", text=text)], stop_reason="end_turn",
+                                          usage=dict(input_tokens=600, output_tokens=150)))
+                    return Raw(raw)
                 raw, _ = cp.MockTransport().send(body)
                 return Raw(raw)
 
@@ -122,7 +129,11 @@ class ProposerTests(unittest.TestCase):
         code, out, _ = self.run_cli()
         self.assertEqual(code, 0)
         manifest = json.loads((self.dir / "run/manifest.json").read_text())
-        self.assertEqual(manifest["condition_id"], "claude-api-proposer.v1:claude-sonnet-5-5")
+        self.assertEqual(manifest["condition_id"], "claude-api-proposer.v2:claude-sonnet-5-5")
+        self.assertEqual(manifest["history_mode"], "proposals+classes")
+        self.assertEqual(manifest["dedup_policy_sha256"], hashlib.sha256(cp.DEDUP_POLICY.encode()).hexdigest())
+        self.assertEqual(manifest["history_head_sha256"], hashlib.sha256(cp.HISTORY_HEAD.encode()).hexdigest())
+        self.assertIsNone(manifest["temperature"])
         self.assertIn("NOT the PIREUS_CONTINUITY_PLAN Inkling pilot", manifest["condition_note"])
         self.assertEqual(manifest["arms"], list(cp.ARMS))
         self.assertIs(manifest["scientific_novelty"], False)
@@ -166,7 +177,7 @@ class ProposerTests(unittest.TestCase):
         code, _, _ = self.run_cli("--model", "claude-opus-5-5", run="opus")
         self.assertEqual(code, 0)
         manifest = json.loads((self.dir / "opus/manifest.json").read_text())
-        self.assertEqual(manifest["condition_id"], "claude-api-proposer.v1:claude-opus-5-5")
+        self.assertEqual(manifest["condition_id"], "claude-api-proposer.v2:claude-opus-5-5")
         self.assertEqual(manifest["prices_usd_per_mtok"], [4.0, 20.0])
 
     def test_unknown_model_needs_declared_price(self):
@@ -324,6 +335,108 @@ class ProposerTests(unittest.TestCase):
     def test_workspace_header_from_environment(self):
         os.environ["ANTHROPIC_WORKSPACE_ID"] = WORKSPACE
         self.check_workspace_run("w2")
+
+    # --- intra-round history and dedup (v2) --------------------------------
+    def test_history_enters_prompt_with_sounio_class_tags(self):
+        self.run_cli("--rounds", "1")
+        root = self.dir / "run"
+        for arm in cp.CLAUDE_ARMS:
+            for i in range(8):
+                text = json.loads((root / ("round-0/%s/%03d.request.json" % (arm, i))).read_text())["messages"][0]["content"]
+                if i == 0:
+                    self.assertNotIn(cp.HISTORY_HEAD, text)
+                    continue
+                self.assertIn(cp.HISTORY_HEAD, text)
+                self.assertIn(cp.DISTINCT_ASK, text)
+                listed = text.split(cp.HISTORY_HEAD, 1)[1].split(". " + cp.DISTINCT_ASK, 1)[0].split(" | ")
+                self.assertEqual(len(listed), i)
+                for j, line in enumerate(listed):
+                    proposal = (root / ("round-0/%s/%03d.proposal.json" % (arm, j))).read_bytes()
+                    preview = json.loads((root / ("round-0/%s/%03d.preview.json" % (arm, j))).read_text())
+                    try:
+                        phase = json.loads(proposal).get("phase")
+                    except Exception:
+                        phase = "unparseable"
+                    tag = ("class-" + hashlib.sha256(preview["canonical_table"].encode()).hexdigest()[:12]
+                           if preview.get("canonical_table") else "%s:%s" % (preview["decision"], preview["reason"]))
+                    self.assertEqual(line, "phase=%s %s" % (phase, tag))
+                    for leak in ("tensor", "fp_parity", "gain", "ptx", "ns", "GiB"):
+                        self.assertNotIn(leak, line)
+            receipt = (root / ("round-0/%s/006.receipt.json" % arm)).read_bytes()
+            self.assertEqual(receipt, (root / ("round-0/%s/006.preview.json" % arm)).read_bytes())
+        self.assertFalse(list((root / "round-0/deterministic-search").glob("*.preview.json")))
+        journal = [json.loads(x) for x in (root / "journal.jsonl").read_text().splitlines()]
+        stages = [(x["stage"], x["artifact"]) for x in journal]
+        batch = stages.index(("batch", "round-0/claude-ontology/batch.json"))
+        first_admit = min(i for i, (st, a) in enumerate(stages) if st == "admit" and a.startswith("round-0/claude-ontology"))
+        self.assertLess(batch, first_admit)
+
+    def test_history_has_the_same_form_in_both_claude_arms(self):
+        manifest = dict(model="m", max_tokens=10, effort="", temperature=None)
+        history = ["phase=4660 class-0123456789ab", "phase=1 REFUSE:PROPOSAL_FORMAT"]
+        texts = {}
+        for arm in cp.CLAUDE_ARMS:
+            text = cp.request_body(manifest, CONTEXT, arm, 0, 2, [], history)["messages"][0]["content"]
+            facts = (cp.ONTOLOGY_LEGEND + " Context: " + CONTEXT.decode().strip()
+                     if arm == "claude-ontology" else "Ontology facts: withheld in this condition.")
+            self.assertEqual(text.count(facts), 1)
+            texts[arm] = text.replace(facts, "<FACTS>")
+        self.assertEqual(texts["claude-ontology"], texts["claude-no-ontology"])
+
+    def test_exact_duplicate_is_recorded_and_not_replaced(self):
+        fake = FakeAnthropicModule(constant=True)
+        sys.modules["anthropic"] = fake
+        os.environ["ANTHROPIC_API_KEY"] = SENTINEL
+        code, out, _ = self.run_cli("--mode", "real", "--confirm-spend", "--rounds", "1",
+                                    "--workspace-id", WORKSPACE)
+        self.assertEqual(code, 0)
+        root = self.dir / "run"
+        ledger = [json.loads(x) for x in (root / "ledger.jsonl").read_text().splitlines()]
+        report = {c["cell"]: c for c in json.loads(out)["cells"]}
+        for arm in cp.CLAUDE_ARMS:
+            cell = "round-0/" + arm
+            dups = [x for x in ledger if x["event"] == "DUPLICATE" and x["cell"] == cell]
+            self.assertEqual([x["index"] for x in dups], list(range(1, 8)))
+            self.assertEqual({x["duplicate_of"] for x in dups}, {0})
+            self.assertEqual(len([x for x in ledger if x["event"] == "CALL" and x["cell"] == cell]), 8)
+            self.assertEqual(report[cell]["refused"].get("DUPLICATE"), 7)
+            self.assertEqual(report[cell]["admitted_after_dedup"], 1)
+            self.assertEqual(report[cell]["validated"], 8)      # still admitted by Sounio
+        self.assertFalse([x for x in ledger if x["event"] == "DUPLICATE" and "deterministic" in x["cell"]])
+        for path in root.rglob("*.request.json"):
+            data = path.read_bytes()
+            self.assertNotIn(SENTINEL.encode(), data)
+            self.assertNotIn(WORKSPACE.encode(), data)
+            self.assertNotIn(b"authorization", data.lower())
+        self.assertNotIn(SENTINEL.encode(), all_bytes(root))
+        # Resume adds no second DUPLICATE row.
+        code, _, _ = self.run_cli("--mode", "real", "--confirm-spend", "--rounds", "1", "--workspace-id", WORKSPACE)
+        again = [json.loads(x) for x in (root / "ledger.jsonl").read_text().splitlines()]
+        self.assertEqual(len(again), len(ledger))
+
+    def test_dedup_key(self):
+        a = b'{"phase":5,"kind":2}'
+        self.assertEqual(cp.dedup_key(a), cp.dedup_key(b'{ "kind": 2, "phase": 5 }\n'))
+        self.assertNotEqual(cp.dedup_key(a), cp.dedup_key(b'{"phase":6,"kind":2}'))
+        self.assertEqual(cp.dedup_key(b"```x"), cp.dedup_key(b"```x"))
+        self.assertNotEqual(cp.dedup_key(b"```x"), cp.dedup_key(b"```y"))
+
+    def test_history_none_keeps_v1_behaviour(self):
+        code, _, _ = self.run_cli("--history", "none", "--rounds", "1")
+        self.assertEqual(code, 0)
+        root = self.dir / "run"
+        manifest = json.loads((root / "manifest.json").read_text())
+        self.assertEqual(manifest["condition_id"], "claude-api-proposer.v1:claude-sonnet-5-5")
+        for key in ("history_mode", "dedup_policy", "intra_round_preview"):
+            self.assertNotIn(key, manifest)
+        self.assertFalse(list(root.rglob("*.preview.json")))
+        self.assertNotIn("DUPLICATE", (root / "ledger.jsonl").read_text())
+        context = (root / "context.json").read_bytes()
+        for path in root.rglob("*.request.json"):
+            arm, index = path.parent.name, int(path.name[:3])
+            expected = cp.request_body(manifest, context, arm, 0, index, [])
+            self.assertEqual(path.read_bytes(), cp.encoded(expected))
+            self.assertNotIn(cp.HISTORY_HEAD, path.read_text())
 
     def test_key_in_error_message_is_redacted(self):
         sys.modules["anthropic"] = FakeAnthropicModule(fail_with_key=True)

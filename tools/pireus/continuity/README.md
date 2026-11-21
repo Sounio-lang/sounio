@@ -365,6 +365,26 @@ round, 3 rounds with the arm order rotated each round, and the same contracts.
   only. It is passed to the SDK client and nowhere else. Every artifact is
   checked for it before it is written, and errors are redacted.
 - SDK: `claude/requirements.txt` pins `anthropic==2.12.0`.
+- v2, `claude-api-proposer.v2:<model>`, is the default (`--history proposals+classes`).
+  The first real smoke (v1, 2026-11-21) showed almost no diversity: 16
+  identical-prompt calls gave phase 4660 thirteen times. In v2, each call of a
+  Claude arm lists that arm's earlier proposals in the same round (phase, plus
+  the class tag or refusal reason from the Sounio admission of each) and asks
+  for a distinct operator. Those admissions are kept as `NNN.preview.json`,
+  byte-identical to the later receipts. The batch hash is still written before
+  the official admission. This intra-round feedback is part of this condition
+  only (the plan's pilot has feedback between rounds only). The history has
+  the same form in both Claude arms; only the ontology facts differ. No
+  hardware metric enters it.
+- Dedup (v2): within one arm and round, a proposal equal to an earlier one
+  (same bytes, or the same JSON object after sorted-key canonicalisation) is
+  recorded as `DUPLICATE` in the ledger and counted as refused in the report
+  (`admitted_after_dedup`). It is still hashed and admitted, and no
+  replacement call is made, so calls per arm and round stay `per_arm`.
+  The same rule applies to every arm.
+- Temperature is still not sent (Sonnet 5.5 rejects it); `temperature: null`
+  is in the manifest. `--history none` reproduces v1 request bytes exactly
+  (checked against the 16 requests of the real v1 smoke).
 - Workspace: a key not scoped to a workspace is refused by the API (400)
   unless each request carries `anthropic-workspace-id`. Pass it with
   `--workspace-id` or env `ANTHROPIC_WORKSPACE_ID` (the ID is not a secret and
