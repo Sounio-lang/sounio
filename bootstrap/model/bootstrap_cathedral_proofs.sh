@@ -212,6 +212,9 @@ import Bootstrap.BootstrapCathedral
 #print axioms BootstrapCathedral.committed_binaries_identity_links
 #print axioms BootstrapCathedral.arm64_admit_to_x86vm_cathedral
 #print axioms BootstrapCathedral.cathedral_ground_witnesses
+#print axioms BootstrapCathedral.dual_isa_stage1_cathedral_iff
+#print axioms BootstrapCathedral.rootA_admit_to_x86vm_cathedral
+#print axioms BootstrapCathedral.stage1_cathedral_ground_witnesses
 EOF
 
 WANT="$(grep -c '^#print axioms ' "$WORK/CheckAxioms.lean")"
@@ -224,3 +227,4 @@ cat "$WORK/axioms.log"
 verify_axiom_log "$WANT" "$WORK/axioms.log"
 
 echo "bootstrap_cathedral_proofs: PASS ($WANT crown theorems verified <= {propext, Classical.choice, Quot.sound}, 0 sorryAx)"
+echo "BOOTSTRAP_CATHEDRAL_PROOFS_OK"
