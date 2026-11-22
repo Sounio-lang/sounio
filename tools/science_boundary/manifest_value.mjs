@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 // Wrapper project metadata only; uses the same boundary TOML parser.
-import fs from 'node:fs';
 import { load_toml, read_utf8, is_record, py_str, py_truth } from './core.mjs';
 const [file, key] = process.argv.slice(2);
 try {
