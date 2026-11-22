@@ -462,6 +462,16 @@ struct TgNode {
     next: Option<Box<TgNode> >,
 }
 var TG_HEAD: Option<Box<TgNode> > = None
+// Module whose items registered each base entry (LOWER_CURRENT_MODULE_ID at
+// tg_note time, -1 for a single-module compile). The clone of a helper is
+// lowered from the queue drain of whichever function called it, which is in
+// the CALLER's module; the helper's own `unit` declarations, `use` paths and
+// module-qualified calls are keyed by its defining module, so the drain
+// lowers the clone under this id. Without it a parameter typed by a unit
+// declared in the helper's module (`fn f(k: per_h)` in reprou::m) lowered as
+// an integer word inside the clone, and `(k * dt) as f64` read the double's
+// bits as an integer: 2.0 /h x 0.25 h gave 2^60 in an Epistemic caller.
+var TG_MODULE: [i64; 768] = [0 - 1; 768]
 var TG_COUNT: i64 = 0
 let TG_MAX: i64 = 512
 var TG_ID: [i64; 768] = [0; 768]
@@ -11281,7 +11291,11 @@ lower_rss_mark("before_block")
                                     tg_hit = true
                                     TG_ACTIVE = tgi
                                     TG_ACTIVE_ORD = tg_ord
+                                    // Lower the clone in its defining module (see TG_MODULE).
+                                    let tg_prev_module = LOWER_CURRENT_MODULE_ID
+                                    LOWER_CURRENT_MODULE_ID = TG_MODULE[tg_base_of(tgi) as usize]
                                     lowerer_lower_fn_item_mut(lo, tg_clone_name_idx(tgi, tg_ord), &(*tg_node).def)
+                                    LOWER_CURRENT_MODULE_ID = tg_prev_module
                                     TG_ACTIVE = 0 - 1
                                     TG_ACTIVE_ORD = 1
                                 } else {
@@ -12553,6 +12567,7 @@ fn tg_note(name: Name, fd: &FnDef, self_type: Name) with Mut, Panic, Div, Alloc 
     TG_PREFER[idx as usize] = if tg_stmts_nonstraight(&(*fd).body.stmts, 0) { 1 } else { 0 }
     TG_DRAW[idx as usize] = 0 - 1
     TG_CORRP[idx as usize] = 0 - 1
+    TG_MODULE[idx as usize] = LOWER_CURRENT_MODULE_ID
     TG_HEAD = Some(Box::new(TgNode { idx: idx, def: *fd, next: TG_HEAD }))
     TG_COUNT = idx + 1
 }
@@ -31170,6 +31185,19 @@ impl Lowerer {
         // Bare block expression (e.g. else-arm `{ a * b }`).
         if (*e).kind == ExprKind::ExprBlock {
             return self.lower_block_tail_variance_ref(&(*e).block)
+        }
+        // `x as f64` (or f32, or a unit such as `h`, which lowers to the same f64
+        // word): the value is unchanged, so are its variance, sensitivities and
+        // Hessian. Without this arm every cast fell to the "no variance" tail, and
+        // a quantity read back from a unit type (`(ka * dt) as f64`, the only way
+        // to leave a unit) lost its uncertainty: variance_of read 0 with no
+        // diagnostic, in main and in every tangent clone that returns such a cast.
+        // A cast to an integer keeps the old answer.
+        if (*e).kind == ExprKind::ExprCast && lower_cast_type_is_f64(&(*e).cast_type) {
+            match (*e).left {
+                Some(inner) => { return self.lower_expr_variance_ref(&(*inner)) }
+                None => {}
+            }
         }
         (self.fo_clear_expr_sens().so_clear_expr_hess(), -1)
     }
