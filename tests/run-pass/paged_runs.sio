@@ -1,0 +1,155 @@
+//@ run-pass
+//@ requires: madaros
+//
+// M2b runs parity: one mixed call (chunked prefills of different
+// lengths + decode rows) matches sequential single forwards row by
+// row, then mixed decode steps match. CPU always; GPU arm on ready.
+use llm::attn_gpu::llama_sample_greedy
+use llm::llama::{KvCache, kv_new, llama_forward, llama_forward_batch_runs, llama_forward_batch_runs_rt, llama_forward_rt, llama_load, paged_kv_new_batch}
+use hetero::runtime::{Runtime, rt_open}
+use tensor2::cpu_kernel::{CpuBuf, ck_alloc, ck_get, ck_set}
+
+fn cmp_rows(a: &CpuBuf, b: &CpuBuf, n: i64) -> bool with Mut, Panic {
+    var i: i64 = 0
+    while i < n {
+        if ck_get(a, i) != ck_get(b, i) { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn main() with IO, Mut, Panic, Div, Alloc {
+    var ok = true
+    var m = llama_load("tests/fixtures/tiny-random-Llama")
+    if !m.loaded { ok = false }
+    let vocab = m.cfg.vocab
+    // prompts: A 4 ids on slot 0, B 3 ids on slot 1 (ref, sequential)
+    var ida = ck_alloc(4)
+    ck_set(&!ida, 0, 1.0)
+    ck_set(&!ida, 1, 150.0)
+    ck_set(&!ida, 2, 2700.0)
+    ck_set(&!ida, 3, 13.0)
+    var idb = ck_alloc(3)
+    ck_set(&!idb, 0, 1.0)
+    ck_set(&!idb, 1, 500.0)
+    ck_set(&!idb, 2, 9000.0)
+    var kvs: [KvCache; 4] = [kv_new(&m, 64); 4]
+    kvs[0] = kv_new(&m, 64)
+    kvs[1] = kv_new(&m, 64)
+    kvs[2] = kv_new(&m, 64)
+    kvs[3] = kv_new(&m, 64)
+    var ra = ck_alloc(4)
+    var rb = ck_alloc(3)
+    var i: i64 = 0
+    while i < 4 {
+        var oa = ck_alloc(1)
+        ck_set(&!oa, 0, ck_get(&ida, i))
+        ra = llama_forward(&!m, &!kvs[0], &oa, 1)
+        if i < 3 {
+            var ob = ck_alloc(1)
+            ck_set(&!ob, 0, ck_get(&idb, i))
+            rb = llama_forward(&!m, &!kvs[1], &ob, 1)
+        }
+        i = i + 1
+    }
+    // paged side: ONE n=7 call, A k=0..3 then B k=0..2
+    var pkk = paged_kv_new_batch(&m, 16)
+    var pkv = paged_kv_new_batch(&m, 16)
+    var rslot: [i64; 16] = [0; 16]
+    var rpos: [i64; 16] = [0; 16]
+    var toks: [i64; 16] = [0; 16]
+    i = 0
+    while i < 4 {
+        rslot[i as usize] = 2
+        rpos[i as usize] = i
+        toks[i as usize] = ck_get(&ida, i) as i64
+        i = i + 1
+    }
+    i = 0
+    while i < 3 {
+        rslot[(4 + i) as usize] = 3
+        rpos[(4 + i) as usize] = i
+        toks[(4 + i) as usize] = ck_get(&idb, i) as i64
+        i = i + 1
+    }
+    let stacked = llama_forward_batch_runs(&!m, &!pkk, &!pkv, &rslot, &rpos, &toks, 7)
+    // rows 0..3 must equal A's sequential outputs; rows 4..6 B's.
+    // Re-run sequential singles capturing every step for comparison.
+    var k2: [KvCache; 4] = [kv_new(&m, 64); 4]
+    k2[0] = kv_new(&m, 64)
+    k2[1] = kv_new(&m, 64)
+    i = 0
+    while i < 7 {
+        var oo = ck_alloc(1)
+        var rr = ck_alloc(1)
+        if i < 4 {
+            ck_set(&!oo, 0, ck_get(&ida, i))
+            rr = llama_forward(&!m, &!k2[0], &oo, 1)
+        } else {
+            ck_set(&!oo, 0, ck_get(&idb, i - 4))
+            rr = llama_forward(&!m, &!k2[1], &oo, 1)
+        }
+        var row = ck_alloc(vocab)
+        var v: i64 = 0
+        while v < vocab {
+            ck_set(&!row, v, ck_get(&stacked, i * vocab + v))
+            v = v + 1
+        }
+        if !cmp_rows(&rr, &row, vocab) { ok = false }
+        i = i + 1
+    }
+    // mixed decode step: A k=4, B k=3 in one n=2 call
+    let ta = llama_sample_greedy(&ra)
+    let tb = llama_sample_greedy(&rb)
+    var oa = ck_alloc(1)
+    var ob = ck_alloc(1)
+    ck_set(&!oa, 0, ta as f64)
+    ck_set(&!ob, 0, tb as f64)
+    let na = llama_forward(&!m, &!kvs[0], &oa, 1)
+    let nb = llama_forward(&!m, &!kvs[1], &ob, 1)
+    rslot[0] = 2
+    rpos[0] = 4
+    rslot[1] = 3
+    rpos[1] = 3
+    var tk: [i64; 16] = [0; 16]
+    tk[0] = ta
+    tk[1] = tb
+    let mixed = llama_forward_batch_runs(&!m, &!pkk, &!pkv, &rslot, &rpos, &tk, 2)
+    var ma = ck_alloc(vocab)
+    var mb = ck_alloc(vocab)
+    var w: i64 = 0
+    while w < vocab {
+        ck_set(&!ma, w, ck_get(&mixed, w))
+        ck_set(&!mb, w, ck_get(&mixed, vocab + w))
+        w = w + 1
+    }
+    if !cmp_rows(&na, &ma, vocab) { ok = false }
+    if !cmp_rows(&nb, &mb, vocab) { ok = false }
+    if llama_sample_greedy(&na) != llama_sample_greedy(&ma) { ok = false }
+    if llama_sample_greedy(&nb) != llama_sample_greedy(&mb) { ok = false }
+    let rt = rt_open("stdlib/hetero/kernels/gemm_tiled_f32.ptx", "gemm_tiled_f32")
+    if rt.ready {
+        var gok = true
+        var gk = paged_kv_new_batch(&m, 16)
+        var gv = paged_kv_new_batch(&m, 16)
+        var gi: i64 = 0
+        while gi < 4 {
+            rslot[gi as usize] = 2
+            rpos[gi as usize] = gi
+            gi = gi + 1
+        }
+        gi = 0
+        while gi < 3 {
+            rslot[(4 + gi) as usize] = 3
+            rpos[(4 + gi) as usize] = gi
+            gi = gi + 1
+        }
+        var gr = llama_forward_batch_runs_rt(&!m, &!gk, &!gv, &rslot, &rpos, &toks, 7, &rt, true)
+        if !cmp_rows(&stacked, &gr, 7 * vocab) { gok = false }
+        if !gok { ok = false }
+    }
+    if ok { print("PAGEDRUNS PASS") } else { print("PAGEDRUNS FAIL") }
+    print("\n")
+    if !ok { exit(1) }
+    exit(0)
+}

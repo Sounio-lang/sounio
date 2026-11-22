@@ -803,7 +803,7 @@ Each checkpoint reports exact source commit and compiler identity. Full native/c
 - Do not rewrite `viz` wholesale; first establish whether the existing IR can carry the required semantics and identify precise gaps.
 - Add APIs only when their scientific contract and consumer are clear.
 - Prefer mathematically and perceptually faithful output over decorative effects.
-- Keep incomplete methods visible as incomplete; do not label a model or renderer production-ready without its evidence.
+- Keep incomplete methods visible as incomplete; do not label a model or renderer ready for production use without its evidence.
 
 ## P0 audit refinement
 

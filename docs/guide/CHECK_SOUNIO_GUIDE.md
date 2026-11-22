@@ -30,20 +30,10 @@ Sounio uses fixed-size arrays instead of Rust's `Vec`.
 - **Error**: `Vec<i32>`, `Vec::new()`
 - **Correct**: `[i32; 10]`, `[0; 10]`
 
-### 4. Unnecessary Semicolons ❌
-Sounio generally doesn't use semicolons (except in array literals).
-- **Error**: `let x = 10;`
-- **Allowed**: `[0; 10]` (array literal)
-- **Correct**: `let x = 10`
-
 ### 5. Missing Function Effects ⚠️
 Functions with certain operations need explicit effects.
 - **Warning**: Function with `&!` parameter but no `with Mut` effect
 - **Warning**: Function with division but no `with Div` effect
-
-### 6. Missing Return Statements ⚠️
-Sounio requires explicit return statements for non-void functions.
-- **Warning**: Function without `return` statement
 
 ### 7. Knowledge Type Patterns ℹ️
 Checks for proper usage of Sounio's epistemic types.

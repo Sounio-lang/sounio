@@ -46,7 +46,7 @@ This section described signed bundle/state bootstrap commands:
 > `scripts/omega/omega_prepare_policy_smoke.sh`,
 > `scripts/omega/omega_policy_status.sh`,
 > `scripts/bootstrap/omega_canonical_policy_sign.sh`,
-> `scripts/archive/diverse_double_compile_check.sh`) is dead for the same reason.
+> `diverse_double_compile_check.sh`, removed with `scripts/archive/`) is dead for the same reason.
 > The bootstrap chain that is actually exercised today is
 > `scripts/ci/bootstrap_chain_gate.sh`, which drives `bootstrap/stage0.c` ->
 > `bootstrap/boot1.sio` directly without any `souc` subcommand, alongside
@@ -210,62 +210,4 @@ Diverse Double-Compilation*. PhD dissertation, George Mason University.
 
 ### Guarantee
 
-Before any tagged release of Sounio, the following command **must exit 0**:
-
-```bash
-bash scripts/archive/diverse_double_compile_check.sh
-```
-
-This builds `souc` under two independent host toolchains:
-
-| Variant | Linker       | `CARGO_TARGET_DIR`  |
-|---------|--------------|---------------------|
-| GCC     | GCC 13.3.0   | `target/ddc-gcc/`   |
-| Clang   | Clang 18.1.3 | `target/ddc-clang/` |
-
-Both binaries are executed on the same minimal Sounio reference program:
-
-```sio
-fn main() with IO {
-    print("DDC-REF-PASS\n")
-    print_int(6 * 7)
-    print("\n")
-}
-```
-
-If their combined stdout+stderr outputs are byte-identical the script prints
-`DDC_CHECK_PASS` and exits 0. Any divergence causes an immediate `DDC_CHECK_FAIL`
-with a line-level diff and exit code 1.
-
-### Relationship to the bootstrap seed
-
-The bootstrap seed (`bootstrap/seeds/sounio-bootstrap-linux-x86_64.sio.bin`)
-is itself produced by `souc`. DDC provides an independent evidence trail that
-the `souc` binary used to generate the seed was not trojaned: if both the
-GCC-built and Clang-built `souc` produce identical seed artifacts, neither
-compiler could have silently modified the Sounio code.
-
-### Running the check
-
-```bash
-# Full check (two cargo builds, ~5–10 min):
-bash scripts/archive/diverse_double_compile_check.sh
-
-# Skip rebuild if binaries already exist:
-bash scripts/archive/diverse_double_compile_check.sh --skip-build
-
-# Use a custom reference program:
-bash scripts/archive/diverse_double_compile_check.sh --ref-program path/to/program.sio
-
-# Rust integration test (requires pre-built DDC binaries):
-cargo test -p souc --test ddc_check -- --include-ignored
-```
-
-### Environment
-
-| Variable             | Default           | Purpose                                   |
-|----------------------|-------------------|-------------------------------------------|
-| `GCC_TARGET_DIR`     | `target/ddc-gcc`  | Output dir for GCC-linked build           |
-| `CLANG_TARGET_DIR`   | `target/ddc-clang`| Output dir for Clang-linked build         |
-| `SOUNIO_STDLIB_PATH` | `./stdlib`        | Stdlib path passed to both binaries       |
-| `WORK_DIR`           | `/tmp/sounio-ddc` | Working directory for temp files and logs |
+`diverse_double_compile_check.sh` was the Cargo-era diverse double-compilation check: build `souc` with GCC and with Clang, then require byte-identical stdout on one reference program. The compiler no longer builds with Cargo, and the script left the tree with `scripts/archive/`. It is not a release gate. The bootstrap chain that runs today is `scripts/ci/bootstrap_chain_gate.sh`. Git history holds the old checker, including its `--skip-build` and `--ref-program` flags.

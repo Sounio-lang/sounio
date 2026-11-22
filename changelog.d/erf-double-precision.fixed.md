@@ -1,0 +1,1 @@
+`special::erf`: `erf` and `erfc` are accurate to 1 and 2 ulp (fdlibm s_erf.c). They were Abramowitz–Stegun 7.1.26, absolute error 1.5e-7, a floor inherited by every normal CDF, quantile and p-value in `stdlib/stats` (`tests/stdlib/special/erf_double_precision.sio`).

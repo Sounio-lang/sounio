@@ -1,0 +1,1 @@
+core::result: `IntResult` and `FloatResult` gain `is_ok`/`is_err`/`unwrap`/`unwrap_or`/`err` methods in `impl` blocks. Madaros has no UFCS, so `r.is_ok()` against the free-function aliases was E011 (`tests/stdlib/core/test_result_e2e.sio`).
