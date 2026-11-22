@@ -1,0 +1,60 @@
+name: Science Boundary Node
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/science-boundary-node.yml'
+      - 'tools/science_boundary/**'
+      - 'bin/madaros'
+      - 'website/package-lock.json'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  metadata-contract:
+    name: Python-free boundary metadata controls
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Verify vendored parser custody and run metadata controls
+        env:
+          TMPDIR: ${{ runner.temp }}/boundary-node
+        run: |
+          set -euo pipefail
+          mkdir -p "$TMPDIR"
+          sha256sum -c tools/science_boundary/vendor/FILES.sha256 | tee "$TMPDIR/vendor.log"
+          bash -n bin/madaros
+          node tools/science_boundary/core_test.mjs | tee "$TMPDIR/core.log"
+          node tools/science_boundary/closure_test.mjs | tee "$TMPDIR/closure.log"
+          node --test tools/science_boundary/policy_claims_test.mjs | tee "$TMPDIR/policy-claims.log"
+          node tools/science_boundary/attestor_test.mjs | tee "$TMPDIR/attestor.log"
+      - name: Collect only regular text receipts
+        if: always()
+        env:
+          CONTROL_INPUT: ${{ runner.temp }}/boundary-node
+          RECEIPT_OUTPUT: ${{ runner.temp }}/boundary-node-receipts
+        run: |
+          set -euo pipefail
+          mkdir -p "$RECEIPT_OUTPUT"
+          if [[ -d "$CONTROL_INPUT" ]]; then
+            while IFS= read -r -d "" receipt; do
+              relative="${receipt#"$CONTROL_INPUT"/}"
+              target="$RECEIPT_OUTPUT/$relative"
+              mkdir -p "$(dirname "$target")"
+              cp -- "$receipt" "$target"
+            done < <(find "$CONTROL_INPUT" -type f '(' -name '*.log' -o -name '*.json' -o -name '*.stdout' -o -name '*.stderr' -o -name '*.status' ')' -print0)
+          fi
+          [[ -n $(find "$RECEIPT_OUTPUT" -type f -print -quit) ]]
+      - name: Retain operational metadata receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: science-boundary-node-controls
+          path: ${{ runner.temp }}/boundary-node-receipts
+          if-no-files-found: error
