@@ -1,0 +1,571 @@
+//@ run-pass
+//@ timeout: 300
+//@ expect-stdout-contains: CIRC28_EXACT_PROPAGATOR_PASS
+//
+// Exact propagator of the closed-circulation kernel (circ28_exact_prepare,
+// circ28_exact_step, circ28_exact_step_src in stdlib/darwin_pbpk/circ28.sio)
+// against the SDIRK2 step it is meant to replace on fixed grids and against
+// identities that follow from the equations.
+//
+// Sets. H: circ28_physiology() with Kp 11-61, ps = 20 x flow, bp 0.935,
+// fu 0.0955, clint 1000 L/h: a haloperidol-LIKE set, synthetic, built to have
+// the large Kp and fast exchange that exposed the defect (no literature value
+// is claimed). K: the set of circ28_kernel_identities.sio (Kp 0.5-5, bp 0.8,
+// fu 0.1, default ps).
+//
+// PREDICTIONS, written before the first run of this file. Disclosure: a
+// scratch run made while writing the propagator had already shown (i) the
+// SDIRK2 venous value of E1 (-8.591), (ii) the exact venous value at 0.1 h
+// (2.464), (iii) the scalings of E8, (iv) a mass balance of a few 1e-15 and
+// (v) agreement of two states across step sizes to the 9 digits printed.
+// Rows E1, E8 and the bands of E2/E4 are therefore informed, not blind; the
+// scalings of E8 were also computed by hand before that run (9, 11, 16, 19
+// from q about 2e4 /h). E3, E5, E6, E7 and the E2/E4 magnitudes below 1e-9
+// are blind.
+//
+//   E1 positivity. H, 1 mg infused over the first 0.05 h step, 0.05 h steps.
+//      SDIRK2: venous plasma after the second step is NEGATIVE, in
+//      [-9.5, -7.7] ng/mL per mg. Exact: venous plasma at 0.1 h in
+//      [2.0, 3.0] ng/mL per mg; over 400 steps the smallest state is
+//      >= -1e-12 x the largest (predicted: strictly positive).
+//   E2 step-size independence. H, 1 mg over 1 h, state at 6 h with
+//      dt = 0.01, 0.05, 0.25, 1 h: every state, the venous AUC and the
+//      eliminated mass agree with the dt = 0.01 run to 1e-9 relative
+//      (predicted: below 1e-11).
+//   E3 SDIRK2 converges to the exact state with order 2. Same case, SDIRK2
+//      at dt = 0.004, 0.002, 0.001 h against the exact state (dt = 1 h),
+//      error = largest relative difference over the 28 states. Predicted:
+//      both ratios err(2h)/err(h) in [3.5, 4.5]; err(0.001) in [1e-9, 1e-5]
+//      and asserted <= 1e-4.
+//   E3b (added after the first run, which gave ratios 4.0006 and 4.0003:
+//      informed) Richardson extrapolation of the two finest SDIRK2 runs
+//      agrees with the exact state to 1e-10 (predicted about 1e-12): an
+//      independent integrator converging on the propagator's numbers.
+//   E4 mass balance. H with every route open (clform 100, clint_gut 200,
+//      cl_renal 2, cl_plasma 1 L/h), 1 mg intravenous and 2 mg oral over the
+//      first step: |state mass + tallies - 3| / 3 <= 1e-10 for dt = 0.01,
+//      0.05, 1 and 12 h (predicted: below 1e-12).
+//   E5 closed forms on a COARSE grid (dt = 12 h, 400 steps, K set, doses
+//      over the first step), tolerance 1e-9 (predicted: below 1e-11; SDIRK2
+//      in the kernel test holds them to 1e-6 with dt 0.05 h):
+//        plasma clearance  AUC_ven = Dose bp / cl_plasma
+//        renal clearance   AUC_ven = Dose bp / cl_renal
+//        hepatic           AUC_ven = Dose / (Q_h Eh); oral F = 1 - Eh
+//        gut wall          AUC_ven = Dose / (Q_gut Eg); oral F = Fg
+//        gut and liver     AUC_ven = Dose / CL_splanchnic; F = Fg (1 - Eh)
+//      The kernel test has no V_ss-by-first-moment row and none is added:
+//      the tallies hold no first moment.
+//   E6 semigroup and signs. H: E(0.05) E(0.05) = E(0.1) and
+//      E(6) E(6) = E(12), entrywise to 1e-11 of the largest entry
+//      (predicted: below 1e-13). Smallest entry of E, G, the tally rows,
+//      g_iv and g_oral >= 0 for dt = 0.05, 0.1, 6, 12 (predicted: > 0 for
+//      E and G, every state reaches every other).
+//   E7 source step. K with clint 500 and clint_gut 300: the same venous and
+//      gut-tissue rates through circ28_exact_step_src and circ28_exact_step
+//      give states equal to 1e-13 of the largest and AUC to 1e-12. Liver
+//      tissue source (K, clint 500; row T9 of the kernel test on the drug
+//      layer branch): AUC_ven = S F_src / (Q_h Eh),
+//      F_src = 1 / (1 + c/(Q_h bp) + c/ps_liver), c = clint fu, to 1e-9
+//      (predicted: below 1e-11), and eliminated + remaining = S to 1e-10.
+//   E8 cost. H: scalings 9, 11, 16, 19 at dt = 0.01, 0.05, 1, 12 h
+//      (asserted); theta <= 0.5. Run time of the compiled test under 5 s
+//      (measured outside, recorded below).
+//
+// OUTCOME (first run of this file, 2026-11-15; identical output on the three
+// compilers). Every prediction hit; nothing was changed in the propagator
+// after the first run except its cost (four rows of Q instead of 28).
+//   E1 hit: SDIRK2 -8.591; exact 2.464; smallest state 1.1e-4 mg/L, positive.
+//   E2 hit: 6.2e-14, 6.0e-14, 6.1e-14.
+//   E3 hit: errors 1.257e-7, 3.142e-8, 7.853e-9; ratios 4.0006, 4.0003.
+//   E3b hit: 7.7e-13.
+//   E4 hit: 3.0e-15, 2.2e-15, 3.0e-16, 3.0e-16.
+//   E5 hit: all eight residuals <= 1.2e-15.
+//   E6 hit: 6.8e-16 and 6.5e-16; smallest entry 2.4e-9 (dt 0.05), positive.
+//   E7 hit: 2.9e-15, 1.0e-15; liver source 8e-16, balance 1e-16.
+//   E8 hit: 9, 11, 16, 19. Compiled run time 1.5 s (committed Madaros),
+//      2.0 s (local build); lean_single 0.9 s including compilation.
+//
+// Compiler notes. The three big structs (Circ28Sys, two Circ28Exact) are
+// made once in main and passed by reference; runs return through an output
+// array, not a struct; no array is passed by value.
+
+use darwin_pbpk::circ28::*
+
+fn xp_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+// Passes when |got - want| / |want| <= tol; prints the residual in 1e-15.
+fn xp_rel(tag: string, got: f64, want: f64, tol: f64) -> i32 with IO, Mut, Div, Panic {
+    let r = xp_abs(got - want) / xp_abs(want)
+    print("  "); print(tag); print(": got "); print(got); print(" want "); print(want)
+    print("  rel x 1e15 = "); println(r * 1.0e15)
+    if !(r <= tol) {
+        println("  [FAIL]")
+        return 1
+    }
+    return 0
+}
+
+// Passes when lo <= v <= hi.
+fn xp_band(tag: string, v: f64, lo: f64, hi: f64) -> i32 with IO, Mut, Div, Panic {
+    print("  "); print(tag); print(": "); print(v); print("  band ["); print(lo); print(", "); print(hi); println("]")
+    if !(v >= lo && v <= hi) {
+        println("  [FAIL]")
+        return 1
+    }
+    return 0
+}
+
+// Passes when v <= hi; prints v in 1e-15.
+fn xp_small(tag: string, v: f64, hi: f64) -> i32 with IO, Mut, Div, Panic {
+    print("  "); print(tag); print(" x 1e15 = "); print(v * 1.0e15); print("  limit x 1e15 = "); println(hi * 1.0e15)
+    if !(v <= hi) {
+        println("  [FAIL]")
+        return 1
+    }
+    return 0
+}
+
+fn xp_set_h() -> Circ28Params with Mut {
+    var p = circ28_physiology()
+    p.kp = [0.0, 40.0, 35.0, 25.0, 30.0, 61.0, 20.0, 45.0, 35.0, 22.0, 11.0, 30.0, 30.0, 20.0]
+    var i: i32 = 1
+    while i < 14 {
+        p.ps[i] = 20.0 * p.q[i]
+        i = i + 1
+    }
+    p.ps[1] = 20.0 * circ28_q_hepatic(p)
+    p.bp = 0.935
+    p.fu = 0.0955
+    p.clint = 1000.0
+    return p
+}
+
+fn xp_set_k() -> Circ28Params with Mut {
+    var p = circ28_physiology()
+    p.kp = [0.0, 4.0, 3.0, 0.5, 2.0, 5.0, 1.5, 3.0, 2.5, 1.0, 0.8, 2.0, 1.8, 1.2]
+    p.bp = 0.8
+    p.fu = 0.1
+    return p
+}
+
+// out[0..27] state, [28] venous AUC, [29] eliminated mass, [30] mass in the
+// body, [31] smallest state seen, [32] largest state seen, [33] arterial AUC.
+fn xp_finish(s: &Circ28State, p: Circ28Params, el: &Circ28Elim, mn: f64, mx: f64, out: &![f64; 40]) with Mut {
+    var j: i32 = 0
+    while j < 28 {
+        (*out)[j] = (*s).x[j]
+        j = j + 1
+    }
+    (*out)[28] = (*el).auc_ven
+    (*out)[29] = (*el).hepatic + (*el).formed + (*el).renal + (*el).plasma + (*el).gut
+    (*out)[30] = circ28_total_mass(s, p)
+    (*out)[31] = mn
+    (*out)[32] = mx
+    (*out)[33] = (*el).auc_art
+}
+
+// Exact run: iv_rate for the first n_iv steps, oral_rate for the first n_or.
+fn xp_run_exact(p: Circ28Params, ex: &Circ28Exact, n_steps: i32, n_iv: i32, iv_rate: f64, n_or: i32, oral_rate: f64, out: &![f64; 40]) with Mut, Div {
+    var s = circ28_state_zero()
+    var el = circ28_elim_zero()
+    var mn = 1.0e300
+    var mx = 0.0
+    var n: i32 = 0
+    while n < n_steps {
+        var iv = 0.0
+        var orr = 0.0
+        if n < n_iv { iv = iv_rate }
+        if n < n_or { orr = oral_rate }
+        circ28_exact_step(&!s, ex, iv, orr, &!el)
+        var j: i32 = 0
+        while j < 28 {
+            if s.x[j] < mn { mn = s.x[j] }
+            if s.x[j] > mx { mx = s.x[j] }
+            j = j + 1
+        }
+        n = n + 1
+    }
+    xp_finish(&s, p, &el, mn, mx, out)
+}
+
+// SDIRK2 run with the same dosing.
+fn xp_run_sdirk(p: Circ28Params, sys: &Circ28Sys, n_steps: i32, n_iv: i32, iv_rate: f64, out: &![f64; 40]) with Mut, Div {
+    var s = circ28_state_zero()
+    var el = circ28_elim_zero()
+    var mn = 1.0e300
+    var mx = 0.0
+    var n: i32 = 0
+    while n < n_steps {
+        var iv = 0.0
+        if n < n_iv { iv = iv_rate }
+        circ28_step(&!s, p, sys, iv, 0.0, &!el)
+        var j: i32 = 0
+        while j < 28 {
+            if s.x[j] < mn { mn = s.x[j] }
+            if s.x[j] > mx { mx = s.x[j] }
+            j = j + 1
+        }
+        n = n + 1
+    }
+    xp_finish(&s, p, &el, mn, mx, out)
+}
+
+// Largest relative difference of the first n entries of a against b.
+fn xp_maxrel(a: &[f64; 40], b: &[f64; 40], n: i32) -> f64 with Mut, Div {
+    var m = 0.0
+    var j: i32 = 0
+    while j < n {
+        let r = xp_abs((*a)[j] - (*b)[j]) / xp_abs((*b)[j])
+        if r > m { m = r }
+        j = j + 1
+    }
+    return m
+}
+
+// max |E1 E1 - E2| over the largest entry of E2.
+fn xp_semigroup(e1: &Circ28Exact, e2: &Circ28Exact) -> f64 with Mut, Div {
+    var d = 0.0
+    var big = 0.0
+    var r: i32 = 0
+    while r < 28 {
+        var c: i32 = 0
+        while c < 28 {
+            var acc = 0.0
+            var k: i32 = 0
+            while k < 28 {
+                acc = acc + (*e1).e[r * 28 + k] * (*e1).e[k * 28 + c]
+                k = k + 1
+            }
+            let w = (*e2).e[r * 28 + c]
+            if xp_abs(acc - w) > d { d = xp_abs(acc - w) }
+            if w > big { big = w }
+            c = c + 1
+        }
+        r = r + 1
+    }
+    return d / big
+}
+
+// Smallest entry of e, g, ip, iq, g_iv, g_oral, recomputed here.
+fn xp_min_entry(ex: &Circ28Exact) -> f64 with Mut {
+    var m = 1.0e300
+    var k: i32 = 0
+    while k < 784 {
+        if (*ex).e[k] < m { m = (*ex).e[k] }
+        if (*ex).g[k] < m { m = (*ex).g[k] }
+        k = k + 1
+    }
+    k = 0
+    while k < 112 {
+        if (*ex).ip[k] < m { m = (*ex).ip[k] }
+        if (*ex).iq[k] < m { m = (*ex).iq[k] }
+        k = k + 1
+    }
+    k = 0
+    while k < 28 {
+        if (*ex).g_iv[k] < m { m = (*ex).g_iv[k] }
+        if (*ex).g_oral[k] < m { m = (*ex).g_oral[k] }
+        k = k + 1
+    }
+    return m
+}
+
+fn xp_e1(ex: &!Circ28Exact, sys: &!Circ28Sys) -> i32 with IO, Mut, Div, Panic {
+    println("E1 positivity")
+    var fails: i32 = 0
+    let p = xp_set_h()
+    var o: [f64; 40] = [0.0; 40]
+    circ28_prepare(p, 0.05, sys)
+    xp_run_sdirk(p, sys, 2, 1, 20.0, &!o)
+    fails = fails + xp_band("SDIRK2 venous plasma at 0.1 h (ng/mL per mg)", o[0] / p.bp * 1000.0, -9.5, -7.7)
+    circ28_exact_prepare(p, 0.05, ex)
+    xp_run_exact(p, ex, 2, 1, 20.0, 0, 0.0, &!o)
+    fails = fails + xp_band("exact venous plasma at 0.1 h (ng/mL per mg)", o[0] / p.bp * 1000.0, 2.0, 3.0)
+    xp_run_exact(p, ex, 400, 1, 20.0, 0, 0.0, &!o)
+    print("  exact, 400 steps: smallest state (mg/L) x 1e12 = "); print(o[31] * 1.0e12)
+    print("  largest = "); println(o[32])
+    if !(o[31] >= -1.0e-12 * o[32]) {
+        println("  [FAIL]")
+        fails = fails + 1
+    }
+    if o[31] > 0.0 { println("  smallest state strictly positive: yes") } else { println("  smallest state strictly positive: NO") }
+    return fails
+}
+
+// E2 and E3 share the reference; ref_out receives the dt = 1 h exact run.
+fn xp_e2(ex: &!Circ28Exact, ref_out: &![f64; 40]) -> i32 with IO, Mut, Div, Panic {
+    println("E2 step-size independence (1 mg over 1 h, t = 6 h)")
+    var fails: i32 = 0
+    let p = xp_set_h()
+    var o0: [f64; 40] = [0.0; 40]
+    var o: [f64; 40] = [0.0; 40]
+    circ28_exact_prepare(p, 0.01, ex)
+    xp_run_exact(p, ex, 600, 100, 1.0, 0, 0.0, &!o0)
+    circ28_exact_prepare(p, 0.05, ex)
+    xp_run_exact(p, ex, 120, 20, 1.0, 0, 0.0, &!o)
+    fails = fails + xp_small("dt 0.05 vs 0.01: max rel over states, AUC, eliminated", xp_maxrel(&o, &o0, 30), 1.0e-9)
+    circ28_exact_prepare(p, 0.25, ex)
+    xp_run_exact(p, ex, 24, 4, 1.0, 0, 0.0, &!o)
+    fails = fails + xp_small("dt 0.25 vs 0.01", xp_maxrel(&o, &o0, 30), 1.0e-9)
+    circ28_exact_prepare(p, 1.0, ex)
+    xp_run_exact(p, ex, 6, 1, 1.0, 0, 0.0, ref_out)
+    fails = fails + xp_small("dt 1 vs 0.01", xp_maxrel(ref_out, &o0, 30), 1.0e-9)
+    return fails
+}
+
+fn xp_e3(sys: &!Circ28Sys, ref_out: &[f64; 40]) -> i32 with IO, Mut, Div, Panic {
+    println("E3 SDIRK2 against the exact state (order)")
+    var fails: i32 = 0
+    let p = xp_set_h()
+    var o: [f64; 40] = [0.0; 40]
+    circ28_prepare(p, 0.004, sys)
+    xp_run_sdirk(p, sys, 1500, 250, 1.0, &!o)
+    let e4 = xp_maxrel(&o, ref_out, 28)
+    var oh: [f64; 40] = [0.0; 40]
+    circ28_prepare(p, 0.002, sys)
+    xp_run_sdirk(p, sys, 3000, 500, 1.0, &!oh)
+    let e2 = xp_maxrel(&oh, ref_out, 28)
+    circ28_prepare(p, 0.001, sys)
+    xp_run_sdirk(p, sys, 6000, 1000, 1.0, &!o)
+    let e1 = xp_maxrel(&o, ref_out, 28)
+    print("  max rel difference x 1e9: dt 0.004 "); print(e4 * 1.0e9); print("  dt 0.002 "); print(e2 * 1.0e9); print("  dt 0.001 "); println(e1 * 1.0e9)
+    fails = fails + xp_band("ratio err(0.004)/err(0.002)", e4 / e2, 3.5, 4.5)
+    fails = fails + xp_band("ratio err(0.002)/err(0.001)", e2 / e1, 3.5, 4.5)
+    fails = fails + xp_band("err(0.001)", e1, 0.0, 1.0e-4)
+    // Richardson: (4 x(0.001) - x(0.002)) / 3 removes the dt^2 term
+    var j: i32 = 0
+    while j < 28 {
+        oh[j] = (4.0 * o[j] - oh[j]) / 3.0
+        j = j + 1
+    }
+    fails = fails + xp_small("E3b Richardson-extrapolated SDIRK2 vs exact, max rel over states", xp_maxrel(&oh, ref_out, 28), 1.0e-10)
+    print("  SDIRK2 dt 0.001 AUC venous rel difference x 1e9 = "); println(xp_abs(o[28] - (*ref_out)[28]) / (*ref_out)[28] * 1.0e9)
+    return fails
+}
+
+fn xp_e4_one(p: Circ28Params, ex: &!Circ28Exact, dt: f64, n_steps: i32) -> i32 with IO, Mut, Div, Panic {
+    var o: [f64; 40] = [0.0; 40]
+    circ28_exact_prepare(p, dt, ex)
+    xp_run_exact(p, ex, n_steps, 1, 1.0 / dt, 1, 2.0 / dt, &!o)
+    print("  dt "); print(dt); print(" eliminated "); print(o[29]); print(" remaining "); println(o[30])
+    return xp_rel("eliminated + remaining (mg)", o[29] + o[30], 3.0, 1.0e-10)
+}
+
+fn xp_e4(ex: &!Circ28Exact) -> i32 with IO, Mut, Div, Panic {
+    println("E4 mass balance, every route open")
+    var fails: i32 = 0
+    var p = xp_set_h()
+    p.clform = 100.0
+    p.clint_gut = 200.0
+    p.cl_renal = 2.0
+    p.cl_plasma = 1.0
+    fails = fails + xp_e4_one(p, ex, 0.01, 500)
+    fails = fails + xp_e4_one(p, ex, 0.05, 500)
+    fails = fails + xp_e4_one(p, ex, 1.0, 100)
+    fails = fails + xp_e4_one(p, ex, 12.0, 20)
+    return fails
+}
+
+// AUC venous per mg after an intravenous (route 0) or oral (route 1) dose of
+// 10 mg over the first 12 h step, 400 steps.
+fn xp_auc(p: Circ28Params, ex: &Circ28Exact, route: i32) -> f64 with Mut, Div {
+    var o: [f64; 40] = [0.0; 40]
+    if route == 0 {
+        xp_run_exact(p, ex, 400, 1, 10.0 / 12.0, 0, 0.0, &!o)
+    } else {
+        xp_run_exact(p, ex, 400, 0, 0.0, 1, 10.0 / 12.0, &!o)
+    }
+    return o[28] / 10.0
+}
+
+fn xp_e5(ex: &!Circ28Exact) -> i32 with IO, Mut, Div, Panic {
+    println("E5 closed forms, dt = 12 h")
+    var fails: i32 = 0
+    var p2 = xp_set_k()
+    p2.cl_plasma = 2.0
+    circ28_exact_prepare(p2, 12.0, ex)
+    fails = fails + xp_rel("plasma clearance: AUC per mg", xp_auc(p2, ex, 0), p2.bp / 2.0, 1.0e-9)
+
+    var p5 = xp_set_k()
+    p5.cl_renal = 5.0
+    circ28_exact_prepare(p5, 12.0, ex)
+    fails = fails + xp_rel("renal clearance: AUC per mg", xp_auc(p5, ex, 0), p5.bp / 5.0, 1.0e-9)
+
+    var p3 = xp_set_k()
+    p3.clint = 500.0
+    let e3 = circ28_hepatic_extraction(p3)
+    circ28_exact_prepare(p3, 12.0, ex)
+    let a3i = xp_auc(p3, ex, 0)
+    let a3o = xp_auc(p3, ex, 1)
+    fails = fails + xp_rel("hepatic: AUC iv per mg", a3i, 1.0 / (circ28_q_hepatic(p3) * e3), 1.0e-9)
+    fails = fails + xp_rel("hepatic: F = 1 - Eh", a3o / a3i, 1.0 - e3, 1.0e-9)
+
+    var p8 = xp_set_k()
+    p8.clint_gut = 300.0
+    let fg = circ28_gut_availability(p8)
+    let eg = circ28_gut_extraction(p8)
+    circ28_exact_prepare(p8, 12.0, ex)
+    let a8i = xp_auc(p8, ex, 0)
+    let a8o = xp_auc(p8, ex, 1)
+    fails = fails + xp_rel("gut wall: AUC iv per mg", a8i, 1.0 / (p8.q[8] * eg), 1.0e-9)
+    fails = fails + xp_rel("gut wall: F = Fg", a8o / a8i, fg, 1.0e-9)
+
+    p8.clint = 500.0
+    let eh8 = circ28_hepatic_extraction(p8)
+    circ28_exact_prepare(p8, 12.0, ex)
+    let a9i = xp_auc(p8, ex, 0)
+    let a9o = xp_auc(p8, ex, 1)
+    fails = fails + xp_rel("gut and liver: AUC iv per mg", a9i, 1.0 / circ28_splanchnic_clearance(p8), 1.0e-9)
+    fails = fails + xp_rel("gut and liver: F = Fg (1 - Eh)", a9o / a9i, fg * (1.0 - eh8), 1.0e-9)
+    return fails
+}
+
+fn xp_e6_pair(p: Circ28Params, ex: &!Circ28Exact, ex2: &!Circ28Exact, dt: f64) -> i32 with IO, Mut, Div, Panic {
+    var fails: i32 = 0
+    circ28_exact_prepare(p, dt, ex)
+    circ28_exact_prepare(p, 2.0 * dt, ex2)
+    print("  dt "); println(dt)
+    fails = fails + xp_small("E(dt) E(dt) - E(2 dt), over the largest entry", xp_semigroup(ex, ex2), 1.0e-11)
+    let m1 = xp_min_entry(ex)
+    let m2 = xp_min_entry(ex2)
+    print("  smallest entry x 1e15 at dt: "); print(m1 * 1.0e15); print("  at 2 dt: "); print(m2 * 1.0e15)
+    if m1 > 0.0 && m2 > 0.0 { println("  strictly positive: yes") } else { println("  strictly positive: NO (an exact zero)") }
+    if !(m1 >= 0.0 && m2 >= 0.0) {
+        println("  [FAIL] negative entry")
+        fails = fails + 1
+    }
+    if !((*ex).min_entry == m1 && (*ex2).min_entry == m2) {
+        println("  [FAIL] min_entry field differs from the recomputed minimum")
+        fails = fails + 1
+    }
+    if !((*ex).metzler == 1 && (*ex2).metzler == 1) {
+        println("  [FAIL] metzler flag")
+        fails = fails + 1
+    }
+    return fails
+}
+
+fn xp_e6(ex: &!Circ28Exact, ex2: &!Circ28Exact) -> i32 with IO, Mut, Div, Panic {
+    println("E6 semigroup and signs")
+    var fails: i32 = 0
+    let p = xp_set_h()
+    fails = fails + xp_e6_pair(p, ex, ex2, 0.05)
+    fails = fails + xp_e6_pair(p, ex, ex2, 6.0)
+    // the precondition is reported, not assumed
+    var pbad = xp_set_h()
+    pbad.cl_renal = 100.0
+    circ28_exact_prepare(pbad, 0.05, ex)
+    print("  cl_renal / bp above the renal flow: metzler flag = "); println((*ex).metzler)
+    if (*ex).metzler != 0 {
+        println("  [FAIL]")
+        fails = fails + 1
+    }
+    return fails
+}
+
+fn xp_e7(ex: &!Circ28Exact) -> i32 with IO, Mut, Div, Panic {
+    println("E7 source step")
+    var fails: i32 = 0
+    var p9 = xp_set_k()
+    p9.clint = 500.0
+    p9.clint_gut = 300.0
+    circ28_exact_prepare(p9, 0.05, ex)
+    var sa = circ28_state_zero()
+    var sb = circ28_state_zero()
+    var ea = circ28_elim_zero()
+    var eb = circ28_elim_zero()
+    var src: [f64; 28] = [0.0; 28]
+    var n: i32 = 0
+    while n < 400 {
+        var iv = 0.0
+        var orr = 0.0
+        if n < 10 { iv = 7.0 }
+        if n < 40 { orr = 3.0 }
+        src[0] = iv
+        src[17] = orr
+        circ28_exact_step(&!sa, ex, iv, orr, &!ea)
+        circ28_exact_step_src(&!sb, p9, ex, &src, &!eb)
+        n = n + 1
+    }
+    var d = 0.0
+    var big = 0.0
+    var j: i32 = 0
+    while j < 28 {
+        if xp_abs(sa.x[j] - sb.x[j]) > d { d = xp_abs(sa.x[j] - sb.x[j]) }
+        if sa.x[j] > big { big = sa.x[j] }
+        j = j + 1
+    }
+    fails = fails + xp_small("step vs step_src: max state difference over the largest state", d / big, 1.0e-13)
+    fails = fails + xp_rel("AUC venous step_src vs step", eb.auc_ven, ea.auc_ven, 1.0e-12)
+    fails = fails + xp_rel("eliminated step_src vs step", eb.hepatic + eb.gut, ea.hepatic + ea.gut, 1.0e-12)
+
+    var p9b = xp_set_k()
+    p9b.clint = 500.0
+    circ28_exact_prepare(p9b, 12.0, ex)
+    var sc = circ28_state_zero()
+    var ec = circ28_elim_zero()
+    var src2: [f64; 28] = [0.0; 28]
+    var input = 0.0
+    n = 0
+    while n < 400 {
+        src2[3] = 0.0
+        if n < 2 { src2[3] = 10.0 }
+        input = input + src2[3] * 12.0
+        circ28_exact_step_src(&!sc, p9b, ex, &src2, &!ec)
+        n = n + 1
+    }
+    let c9 = p9b.clint * p9b.fu
+    let fsrc = 1.0 / (1.0 + c9 / (circ28_q_hepatic(p9b) * p9b.bp) + c9 / p9b.ps[1])
+    let eh9 = circ28_hepatic_extraction(p9b)
+    fails = fails + xp_rel("liver source: eliminated + remaining (mg)", ec.hepatic + circ28_total_mass(&sc, p9b), input, 1.0e-10)
+    fails = fails + xp_rel("liver source: AUC venous (mg.h/L)", ec.auc_ven, input * fsrc / (circ28_q_hepatic(p9b) * eh9), 1.0e-9)
+    return fails
+}
+
+fn xp_e8_one(p: Circ28Params, ex: &!Circ28Exact, dt: f64, want: i32) -> i32 with IO, Mut, Div, Panic {
+    circ28_exact_prepare(p, dt, ex)
+    print("  dt "); print(dt); print(": scalings "); print((*ex).squarings); print("  theta "); print((*ex).theta); print("  q_max (1/h) "); println((*ex).q_max)
+    if (*ex).squarings != want || !((*ex).theta <= 0.5) {
+        println("  [FAIL]")
+        return 1
+    }
+    return 0
+}
+
+fn xp_e8(ex: &!Circ28Exact) -> i32 with IO, Mut, Div, Panic {
+    println("E8 cost")
+    var fails: i32 = 0
+    let p = xp_set_h()
+    fails = fails + xp_e8_one(p, ex, 0.01, 9)
+    fails = fails + xp_e8_one(p, ex, 0.05, 11)
+    fails = fails + xp_e8_one(p, ex, 1.0, 16)
+    fails = fails + xp_e8_one(p, ex, 12.0, 19)
+    return fails
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var fails: i32 = 0
+    var sys = circ28_sys_zero()
+    var ex = circ28_exact_zero()
+    var ex2 = circ28_exact_zero()
+    var ref_out: [f64; 40] = [0.0; 40]
+
+    fails = fails + xp_e1(&!ex, &!sys)
+    fails = fails + xp_e2(&!ex, &!ref_out)
+    fails = fails + xp_e3(&!sys, &ref_out)
+    fails = fails + xp_e4(&!ex)
+    fails = fails + xp_e5(&!ex)
+    fails = fails + xp_e6(&!ex, &!ex2)
+    fails = fails + xp_e7(&!ex)
+    fails = fails + xp_e8(&!ex)
+
+    if fails == 0 {
+        println("CIRC28_EXACT_PROPAGATOR_PASS")
+        return 0
+    }
+    println("CIRC28_EXACT_PROPAGATOR_FAIL")
+    return 1
+}

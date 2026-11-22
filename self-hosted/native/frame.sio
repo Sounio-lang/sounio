@@ -7,7 +7,7 @@
 module native::frame
 
 use native::encode::*
-use native::reloc::{RelocationTable, reloc_table_new, patch_u32_le, ExternRelocTable, extern_reloc_table_new}
+use native::reloc::{RelocationTable, reloc_table_new, patch_u32_le, ExternRelocTable, extern_reloc_table_new, add_data_section_reloc}
 use native::elf::{StringTable, string_table_new, SymbolData, symbol_data_new, ELF_STRTAB_OVERFLOW}
 use native::runtime_context::{runtime_context_global_slot_size}
 use native::target_policy::{native_target_policy_x86_allocatable_mask_for_reg}
@@ -219,6 +219,13 @@ pub var NC_V2_LABEL_PATCH_OFFSETS: [i64; 65536] = [0; 65536]
 pub var NC_V2_LABEL_PATCH_IDS: [i64; 65536] = [0; 65536]
 pub var NC_V2_LABEL_PATCH_COUNT: i64 = 0
 pub var NC_V2_NEXT_CMP_LABEL: i64 = 210
+// SIO-207: per-function signed-overflow trap. Set by nc_emit_overflow_guard
+// on first use in a function; the fn-end stub (exit 1) is emitted only when
+// set. Reset per function in nc_v2_reset_label_state. The label id is the
+// last slot of the capacity: per-function IR labels are bounded by
+// IR_MAX_INSTRS (see nc_v2_label_capacity), far below it.
+pub var NC_V2_OVERFLOW_GUARD_USED: i64 = 0
+pub fn nc_v2_overflow_trap_label() -> i64 { 65535 }
 // Which function tripped the capacity FIRST, so the rc=22 message can name it.
 // NativeCompiler.label_overflow is only checked after the whole per-function loop
 // has run, by which point the identity is gone, and nc_define_label /
@@ -280,10 +287,18 @@ pub fn nc_v2_label_capacity() -> i64 { 65536 }
 // so they live off-stack here (BSS, demand-paged). flat_reloc_count stays a scalar
 // in NativeCompiler and indexes these. Accessed INLINE only (never a returning
 // helper — that miscompiles under the seed).
-pub var NC_FLAT_RELOC_OFFSETS: [i64; 2097152] = [0; 2097152]
-pub var NC_FLAT_RELOC_KIND_CODES: [i64; 2097152] = [0; 2097152]
-pub var NC_FLAT_RELOC_IS_FUNCTIONS: [i64; 2097152] = [0; 2097152]
-pub var NC_FLAT_RELOC_TARGET_INDICES: [i64; 2097152] = [0; 2097152]
+// 2,097,152 -> 2,621,440 (#2966). gen1 compiling main.sio on a98f002e4
+// (proof 40879158756) passed the 192 MiB code tier and stopped at
+// relocs_needed=2,111,673 against this table (rc=20). The packed-byte tag
+// dispatch adds call and RIP sites; 2,621,440 leaves 509,767 entries, the
+// same ~24% headroom as the 192 MiB code tier over its measured 162,617,633
+// bytes. Four i64 arrays: 64 MiB to 80 MiB of BSS, FileSiz 0, not on the
+// stack and not in the ELF image, so the load-base window below
+// BSS_BASE_LINUX is unchanged. Overflow stays fail-closed (rc=20).
+pub var NC_FLAT_RELOC_OFFSETS: [i64; 2621440] = [0; 2621440]
+pub var NC_FLAT_RELOC_KIND_CODES: [i64; 2621440] = [0; 2621440]
+pub var NC_FLAT_RELOC_IS_FUNCTIONS: [i64; 2621440] = [0; 2621440]
+pub var NC_FLAT_RELOC_TARGET_INDICES: [i64; 2621440] = [0; 2621440]
 
 // Single source of truth for the NC_FLAT_RELOC_* bound. The four DECLARATIONS
 // above must stay literals (Sounio array sizes are not expressions); every bound
@@ -292,7 +307,7 @@ pub var NC_FLAT_RELOC_TARGET_INDICES: [i64; 2097152] = [0; 2097152]
 // NativeCompiler.reloc_overflow and compile_native_v2_preview_to_file returns
 // rc=20 (distinct from the code-buffer rc=19). Pinned by
 // scripts/ci/native_capacity_tiers_gate.sh.
-pub fn nc_flat_reloc_capacity() -> i64 { 2097152 }
+pub fn nc_flat_reloc_capacity() -> i64 { 2621440 }
 
 // A relocation whose kind_code apply_relocations_into does not know (anything
 // but 1 call, 2 rodata, 3 data, 4 fn-address) used to fall through the kind
@@ -608,6 +623,21 @@ pub var NC_ALLOC_FAIL_DEC_N: i64 = 0
 pub var NC_ALLOC_FAIL_DEC_LAST_OFF: i64 = 0
 pub var NC_ALLOC_FAIL_DEC_LAST_LEN: i64 = 0
 pub var NC_ALLOC_FAIL_ARENA_PREFIX_OFF: i64 = -1
+// ADR-031 R1 overflow messages: one rodata string per kind (i64 + - * neg,
+// u64 + - *), interned on first use; reset in compiler_new(). The patch table
+// holds the current function's guards until its stubs are emitted.
+pub let NC_OVF_KIND_COUNT: i64 = 13
+pub var NC_OVF_MSG_OFF: [i64; 16] = [-1; 16]
+pub var NC_OVF_MSG_LEN: [i64; 16] = [0; 16]
+pub let NC_OVF_PATCH_CAP: i64 = 262144
+pub var NC_OVF_PATCH_POS: [i64; 262144] = [0; 262144]
+pub var NC_OVF_PATCH_KIND: [i64; 262144] = [0; 262144]
+pub var NC_OVF_PATCH_SITE: [i64; 262144] = [0; 262144]
+pub var NC_OVF_STUB_OFF: [i64; 262144] = [0; 262144]
+// Source site (IrInstr.src_site) of the instruction whose guard is emitted
+// next; consumed (and cleared) by nc_record_overflow_site.
+pub var NC_CUR_SRC_SITE: i64 = 0
+pub var NC_OVF_PATCH_N: i64 = 0
 pub var NC_ALLOC_FAIL_ARENA_PREFIX_LEN: i64 = 0
 pub var NC_ALLOC_FAIL_HANDLES_PREFIX_OFF: i64 = -1
 pub var NC_ALLOC_FAIL_HANDLES_PREFIX_LEN: i64 = 0
@@ -792,6 +822,9 @@ pub fn compiler_new() -> NativeCompiler with Mut {
     NC_ALLOC_FAIL_DEC_LAST_OFF = 0
     NC_ALLOC_FAIL_DEC_LAST_LEN = 0
     NC_ALLOC_FAIL_ARENA_PREFIX_OFF = -1
+    var ovk: i64 = 0
+    while ovk < 16 { NC_OVF_MSG_OFF[ovk as usize] = -1; NC_OVF_MSG_LEN[ovk as usize] = 0; ovk = ovk + 1 }
+    NC_OVF_PATCH_N = 0
     NC_ALLOC_FAIL_ARENA_PREFIX_LEN = 0
     NC_ALLOC_FAIL_HANDLES_PREFIX_OFF = -1
     NC_ALLOC_FAIL_HANDLES_PREFIX_LEN = 0
@@ -985,7 +1018,11 @@ fn label_patch_is_rel32_branch(nc: &NativeCompiler, patch_off: i64) -> bool with
     if patch_off >= 2 && patch_off + 4 <= (*nc).code.len
         && NC_BIG_CODE[(patch_off - 2) as usize] == (0x0f as i8) {
         let op = NC_BIG_CODE[(patch_off - 1) as usize]
-        return op == (0x84 as i8) || op == (0x85 as i8)
+        // 0x80 = jo (SIO-207 signed overflow guard); 0x82 = jc (ADR-031 R1
+        // unsigned overflow guard); 0x84 jz, 0x85 jnz. A rel32 branch whose
+        // opcode is missing here keeps displacement 0, i.e. falls through:
+        // the guard would silently never fire.
+        return op == (0x80 as i8) || op == (0x82 as i8) || op == (0x84 as i8) || op == (0x85 as i8)
     }
     false
 }

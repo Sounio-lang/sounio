@@ -156,7 +156,6 @@ See [`VALIDATION_REPORT.md`](../../benchmarks/stdlib_validation/VALIDATION_REPOR
 | Module | Description |
 |--------|-------------|
 | [`blas_ffi`](./blas_ffi.sio) | **BLAS/LAPACK FFI bindings** |
-| [`blas_fallback`](./blas_fallback.sio) | Pure-Sounio BLAS implementations |
 | [`epistemic_matrix`](./epistemic_matrix.sio) | Matrix with per-element uncertainty |
 | [`epistemic_tensor`](./epistemic_tensor.sio) | Tensor with uncertainty propagation |
 | [`matrix`](./matrix.sio) | Standard matrix operations |

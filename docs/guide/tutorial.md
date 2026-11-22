@@ -236,6 +236,40 @@ fn main() -> i32 with IO {
 > user-facing module); `Epistemic` itself carries only `val`, `variance`, and
 > `confidence`.
 
+### Combining Sources: `meet`, `contest`, `retract` (Madaros)
+
+Two measurements of the same quantity are fused with `meet`, which weighs them by
+generalised least squares over their GUM covariance. Sources that share a component
+(the same calibrant, the same force-field parameters) are correlated through the
+channels they share, and `meet` uses that covariance; it is never assumed away.
+
+```sio
+fn main() -> i32 with IO, Mut, Div, Panic, Epistemic {
+    let k0 = measure(10.0, uncertainty: 0.3)
+    let k1 = measure(10.4, uncertainty: 0.4)
+    let a = k0.value
+    let b = k1.value
+    let m = meet(a, b)                 // 10.144, variance 0.0576
+    print_f64(m)
+    print_f64(variance_of(m))
+    print_f64(en_of(a, b))             // 0.4: E_n at k = 2
+    return 0
+}
+```
+
+`meet` refuses at run time, printing the sources and the statistic, when two
+sources are inconsistent (`E_n > 1` at `k = 2`; declare another limit with
+`consistency: 2.0`) or when a GLS weight is negative (strongly correlated sources:
+the fusion would fall outside them). `meet_birge(...)` instead expands the result by
+the Birge ratio. `birge_of(...)` and `neff_of(...)` (effective number of independent
+sources, `1ᵀR⁻¹1`) return the statistics.
+
+Sources that disagree are carried, not combined: `let c = contest(a, b, d)` has type
+`Contest<f64>` and is never used as a value. The statistics accept it
+(`birge_of(c)`), and `retract(c, d, because: "...")` is the only way out; `meet(c)`
+fuses what is left. Semantics: [ADR-016](../decisions/adr-016-epistemic-merge-and-provenance-trust.md);
+proofs: `formal/EpistemicCorr.lean`.
+
 ---
 
 ## 4. Effect System

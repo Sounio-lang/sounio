@@ -1,0 +1,335 @@
+// stdlib/darwin_pbpk/scenarios/lithium_mipd.sio — lithium steady state,
+// 12-h trough with uncertainty, and model-informed precision dosing (MIPD)
+// from one measured trough. Scenario library (no main).
+//
+// Builds on scenarios/lithium_oral.sio (single 300 mg dose, PBPK28 profile,
+// purely renal sink) and closes its declared limitation "no steady-state
+// trough". Three layers:
+//
+//   1. Repeated oral dosing on the PBPK28 kernel with the clamp-free,
+//      L-stable TR-BDF2 step (theta_pbpk28.sio) and an exact input: each
+//      step receives the mass the gut actually absorbed over it,
+//      (A(t+dt) − A(t))/dt, so the ledger identity
+//          body + eliminated − administered = 0
+//      holds to rounding and is checked by the caller.
+//
+//   2. Uncertainty to the dose. The trough is a monotone (decreasing)
+//      function of renal clearance, so a prediction interval on CL maps to
+//      an EXACT interval on the trough by evaluating the model at the CL
+//      quantiles — no linearisation. The first-order GUM uncertainty
+//      (central difference in ln CL) is reported next to it, so the reader
+//      sees how far the linear answer is from the exact one.
+//
+//   3. Bayesian update (MAP + Laplace) of the patient's own ln CL from one
+//      measured trough, with a log-normal prior and a proportional
+//      (log-additive) residual. The posterior gives the patient's predicted
+//      trough interval at any dose; PBPK28 with a renal sink is linear in
+//      dose, so trough(D) = (D/D0)·trough(D0) at the same CL, and the dose
+//      search costs no extra simulation.
+//
+// Units: the model runs in mg Li+ and mg/L; mEq/L = (mg/L)/6.94.
+// 300 mg Li2CO3 = 56.4 mg Li+ (drugs/lithium.sio).
+//
+// Parameters and their status (confidence rubric of drugs/lithium.sio):
+//   CL_pop = 1.3 L/h        card value (calibrated, Amdisen 1977)
+//   omega_CL = 0.25         between-subject SD of ln CL. Methaneethorn 2018
+//                           (Eur J Drug Metab Pharmacokinet 43:25-34,
+//                           DOI 10.1007/s13318-017-0421-2): 12.7-25.1 % across
+//                           7 NLME models; the upper end is used. Measured.
+//   sigma = 0.15            proportional residual (assay + intra-individual),
+//                           ASSUMED (confidence <= 0.40), not sourced.
+//   target 0.6-1.0 mEq/L    standard maintenance trough band (card header).
+//
+// Declared limitations: linear renal clearance (Jin 2022, Front Pharmacol
+// 13:913935, reports dose-dependent apparent CL; not modelled); CL is the
+// only random parameter (Vd/Kp fixed at the card values); no GFR covariate;
+// adherence and sampling-time errors are not modelled. Parity-grade model,
+// no clinical-validity claim (ADR009). This is a decision-support
+// demonstration, not a dosing tool.
+
+use darwin_pbpk::core::pbpk28_params::*
+use darwin_pbpk::theta_pbpk28::*
+use darwin_pbpk::scenarios::lithium_oral::*
+use math::pure::{exp, ln, sqrt}
+
+// ─── Constants ──────────────────────────────────────────────────────────────
+pub fn lim_mg_per_meq() -> f64 { return 6.94 }
+pub fn lim_cl_pop() -> f64 { return 1.3 }
+pub fn lim_omega_cl() -> f64 { return 0.25 }
+pub fn lim_sigma_prop() -> f64 { return 0.15 }
+pub fn lim_target_lo_meq() -> f64 { return 0.6 }
+pub fn lim_target_hi_meq() -> f64 { return 1.0 }
+pub fn lim_z95() -> f64 { return 1.959963984540054 }
+
+// Li2CO3 (mg) → elemental Li+ (mg), same ratio as the card (300 → 56.4).
+pub fn lim_li_from_carbonate(mg_carbonate: f64) -> f64 with Div {
+    return mg_carbonate * 56.4 / 300.0
+}
+
+// ─── Regimen ────────────────────────────────────────────────────────────────
+pub struct LiRegimen {
+    pub dose_carbonate_mg: f64,   // per administration
+    pub tau_h: f64,               // dosing interval
+    pub n_doses: i32,             // doses given; trough read tau after the last
+}
+
+// Cumulative mass absorbed into blood by time t (mg Li+), all doses on board.
+// One dose at t_k: F·D·(1 − exp(−ka·(t − t_k − tlag))) for t > t_k + tlag.
+pub fn lim_cum_absorbed(reg: LiRegimen, t: f64) -> f64 with Mut, Div {
+    let d = lim_li_from_carbonate(reg.dose_carbonate_mg)
+    var total = 0.0
+    var k = 0
+    while k < reg.n_doses {
+        let te = t - (k as f64) * reg.tau_h - li_tlag()
+        if te > 0.0 {
+            total = total + li_f() * d * (1.0 - exp(0.0 - li_ka() * te))
+        }
+        k = k + 1
+    }
+    return total
+}
+
+// ─── One simulation ─────────────────────────────────────────────────────────
+pub struct LiRun {
+    pub trough_mg_l: f64,     // blood C at n_doses·tau (just before the next dose)
+    pub prev_trough_mg_l: f64,// same, one interval earlier (steady-state check)
+    pub peak_mg_l: f64,       // max blood C over the last interval
+    pub cavg_mg_l: f64,       // AUC over the last interval / tau
+    pub administered: f64,    // mg Li+ booked into blood
+    pub residual_mg: f64,     // ledger identity residual (mg)
+    pub neg_mass: f64,        // booked negative mass (mg)
+    pub steps: i32,
+}
+
+pub fn lim_simulate(reg: LiRegimen, cl: f64, dt: f64) -> LiRun with Mut, Div {
+    var p = li_pbpk28_params()
+    p.cl_central = cl
+    var s = pbpk28_state_zero()
+    var led = pbpk28_ledger_zero()
+
+    let t_end = (reg.n_doses as f64) * reg.tau_h
+    let t_last = t_end - reg.tau_h
+    let t_prev = t_last
+    var t = 0.0
+    var peak = 0.0
+    var prev = 0.0
+    var auc_at_last = 0.0
+    var a0 = 0.0
+    var got_prev = false
+    while t + 0.5 * dt < t_end {
+        if !got_prev && t + 0.5 * dt >= t_prev {
+            prev = s.cv[0]
+            auc_at_last = led.auc[0]
+            got_prev = true
+        }
+        let a1 = lim_cum_absorbed(reg, t + dt)
+        let rel = (a1 - a0) / dt
+        pbpk28_trbdf2_step_mut(&!s, p, rel, dt, &!led)
+        a0 = a1
+        t = t + dt
+        if got_prev && s.cv[0] > peak { peak = s.cv[0] }
+    }
+    let auc_last = led.auc[0] - auc_at_last
+    return LiRun {
+        trough_mg_l: s.cv[0],
+        prev_trough_mg_l: prev,
+        peak_mg_l: peak,
+        cavg_mg_l: auc_last / reg.tau_h,
+        administered: led.administered,
+        residual_mg: pbpk28_ledger_residual(led, s, p, 0.0),
+        neg_mass: led.neg_mass,
+        steps: led.steps,
+    }
+}
+
+// Trough in mEq/L at clearance cl.
+pub fn lim_trough_meq(reg: LiRegimen, cl: f64, dt: f64) -> f64 with Mut, Div {
+    let r = lim_simulate(reg, cl, dt)
+    return r.trough_mg_l / lim_mg_per_meq()
+}
+
+// ─── Standard normal CDF ────────────────────────────────────────────────────
+// Φ(x) = 1 − ½·erfc(x/√2); erfc by the Chebyshev fit of Numerical Recipes
+// §6.2 (erfcc), fractional error < 1.2e-7 everywhere.
+fn lim_erfc(x: f64) -> f64 with Mut, Div {
+    let z = if x < 0.0 { 0.0 - x } else { x }
+    let t = 1.0 / (1.0 + 0.5 * z)
+    let poly = 0.0 - z * z - 1.26551223 + t * (1.00002368 + t * (0.37409196 + t * (0.09678418
+        + t * (0.0 - 0.18628806 + t * (0.27886807 + t * (0.0 - 1.13520398 + t * (1.48851587
+        + t * (0.0 - 0.82215223 + t * 0.17087277))))))))
+    let ans = t * exp(poly)
+    if x >= 0.0 { return ans }
+    return 2.0 - ans
+}
+
+pub fn lim_norm_cdf(x: f64) -> f64 with Mut, Div {
+    return 0.5 * lim_erfc(0.0 - x * 0.7071067811865476)
+}
+
+// ─── Uncertainty on a predicted trough ──────────────────────────────────────
+// ln CL ~ N(mu, sd²). Median, exact 95 % interval (monotone map), and the
+// first-order GUM standard uncertainty of the trough.
+pub struct LiPrediction {
+    pub median_meq: f64,
+    pub lo95_meq: f64,
+    pub hi95_meq: f64,
+    pub gum_u_meq: f64,       // |∂C/∂lnCL|·sd, central difference
+    pub dlnc_dlncl: f64,      // elasticity ∂lnC/∂lnCL (≈ −1 for a renal drug)
+}
+
+pub fn lim_predict(reg: LiRegimen, mu_ln_cl: f64, sd_ln_cl: f64, dt: f64) -> LiPrediction with Mut, Div, Panic {
+    let z = lim_z95()
+    let c_med = lim_trough_meq(reg, exp(mu_ln_cl), dt)
+    // Higher CL → lower trough: the upper trough bound comes from the lower CL quantile.
+    let c_hi = lim_trough_meq(reg, exp(mu_ln_cl - z * sd_ln_cl), dt)
+    let c_lo = lim_trough_meq(reg, exp(mu_ln_cl + z * sd_ln_cl), dt)
+    let h = 0.01
+    let c_p = lim_trough_meq(reg, exp(mu_ln_cl + h), dt)
+    let c_m = lim_trough_meq(reg, exp(mu_ln_cl - h), dt)
+    let dc = (c_p - c_m) / (2.0 * h)
+    let el = (ln(c_p) - ln(c_m)) / (2.0 * h)
+    let u = if dc < 0.0 { (0.0 - dc) * sd_ln_cl } else { dc * sd_ln_cl }
+    return LiPrediction {
+        median_meq: c_med,
+        lo95_meq: c_lo,
+        hi95_meq: c_hi,
+        gum_u_meq: u,
+        dlnc_dlncl: el,
+    }
+}
+
+// ─── Bayesian update from one measured trough ───────────────────────────────
+// Prior: η = ln(CL/CL_pop) ~ N(0, ω²). Likelihood: ln y_obs ~ N(ln f(η), σ²),
+// f(η) = trough at CL_pop·e^η under the regimen the patient is on.
+// MAP by Gauss–Newton on J(η) = η²/ω² + (ln y − ln f(η))²/σ², with
+// g = ∂ln f/∂η by central difference; Laplace posterior SD
+// s = (1/ω² + g²/σ²)^(−1/2).
+pub struct LiPosterior {
+    pub eta_map: f64,
+    pub cl_map: f64,
+    pub sd_eta: f64,
+    pub fitted_meq: f64,      // f(η_MAP)
+    pub iterations: i32,
+    pub last_step: f64,       // |Δη| of the final iteration
+}
+
+pub fn lim_update(reg: LiRegimen, y_obs_meq: f64, dt: f64) -> LiPosterior with Mut, Div, Panic {
+    let w = lim_omega_cl()
+    let sg = lim_sigma_prop()
+    let ln_y = ln(y_obs_meq)
+    let cl0 = lim_cl_pop()
+    let h = 0.01
+    var eta = 0.0
+    var g = -1.0
+    var it = 0
+    var step = 1.0
+    while it < 12 && (step > 1.0e-6 || it < 2) {
+        let lf = ln(lim_trough_meq(reg, cl0 * exp(eta), dt))
+        let lfp = ln(lim_trough_meq(reg, cl0 * exp(eta + h), dt))
+        let lfm = ln(lim_trough_meq(reg, cl0 * exp(eta - h), dt))
+        g = (lfp - lfm) / (2.0 * h)
+        let r = ln_y - lf
+        let grad = eta / (w * w) - g * r / (sg * sg)
+        let hess = 1.0 / (w * w) + g * g / (sg * sg)
+        let d = grad / hess
+        eta = eta - d
+        step = if d < 0.0 { 0.0 - d } else { d }
+        it = it + 1
+    }
+    let sd = 1.0 / sqrt(1.0 / (w * w) + g * g / (sg * sg))
+    return LiPosterior {
+        eta_map: eta,
+        cl_map: cl0 * exp(eta),
+        sd_eta: sd,
+        fitted_meq: lim_trough_meq(reg, cl0 * exp(eta), dt),
+        iterations: it,
+        last_step: step,
+    }
+}
+
+// ─── Polypharmacy: renal interactions ───────────────────────────────────────
+// Lithium is cleared only by the kidney, so its clinically important
+// interactions are renal, not CYP. Finley, Warner & Peabody 1995 (Clin
+// Pharmacokinet 29:172-191, DOI 10.2165/00003088-199529030-00004): thiazide
+// diuretics raise lithium concentrations by 25-40 % after initiation. That
+// range is read here as the central 95 % of a log-normal effect on CL:
+//     ln(C_after/C_before) ~ N(m, s²),  m = ½(ln 1.25 + ln 1.40),
+//     s = (ln 1.40 − ln 1.25)/(2·1.96)
+// and, at steady state with CL the only change, CL_after = CL·exp(−m ± s).
+// Reading a reported range as a 95 % interval is an ASSUMPTION (confidence
+// <= 0.40); the 25-40 % itself is measured.
+//
+// NSAIDs and ACE inhibitors: the same review reports drug-specific effects
+// with large inter-individual differences (NSAIDs) and evidence still
+// insufficient to identify patients at risk (ACE inhibitors); Ragheb 1990
+// (J Clin Psychopharmacol 10:350-354) recommends a lithium level every 4-5
+// days until the extent is known. No sourced magnitude exists to put in the
+// model, so it provides none: `lim_interaction_known` returns false and the
+// caller must ask for a level instead of a prediction.
+pub fn lim_ix_none() -> i32 { return 0 }
+pub fn lim_ix_thiazide() -> i32 { return 1 }
+pub fn lim_ix_nsaid() -> i32 { return 2 }
+pub fn lim_ix_acei() -> i32 { return 3 }
+
+pub fn lim_interaction_known(ix: i32) -> bool {
+    return ix == lim_ix_none() || ix == lim_ix_thiazide()
+}
+
+// Median and SD of ln(CL_before/CL_after) for a sourced interaction.
+pub fn lim_ix_ln_effect_median(ix: i32) -> f64 with Mut, Div, Panic {
+    if ix == lim_ix_thiazide() { return 0.5 * (ln(1.25) + ln(1.40)) }
+    return 0.0
+}
+
+pub fn lim_ix_ln_effect_sd(ix: i32) -> f64 with Mut, Div, Panic {
+    if ix == lim_ix_thiazide() { return (ln(1.40) - ln(1.25)) / (2.0 * lim_z95()) }
+    return 0.0
+}
+
+// Time course of the trough when CL changes from cl_before to cl_after at
+// t_switch (a co-medication started or stopped). Records the trough at the
+// end of every dosing interval. Same transport and input as lim_simulate.
+pub struct LiTrace {
+    pub n: i32,
+    pub trough_meq: [f64; 64],
+    pub residual_mg: f64,
+    pub administered: f64,
+    pub steps: i32,
+}
+
+pub fn lim_simulate_switch(reg: LiRegimen, cl_before: f64, cl_after: f64,
+                           t_switch: f64, dt: f64) -> LiTrace with Mut, Div {
+    var p = li_pbpk28_params()
+    p.cl_central = cl_before
+    var s = pbpk28_state_zero()
+    var led = pbpk28_ledger_zero()
+    var tr = LiTrace { n: 0, trough_meq: [0.0; 64], residual_mg: 0.0, administered: 0.0, steps: 0 }
+    let t_end = (reg.n_doses as f64) * reg.tau_h
+    var t = 0.0
+    var a0 = 0.0
+    var next_mark = reg.tau_h
+    while t + 0.5 * dt < t_end {
+        if t + 0.5 * dt >= t_switch { p.cl_central = cl_after }
+        let a1 = lim_cum_absorbed(reg, t + dt)
+        let rel = (a1 - a0) / dt
+        pbpk28_trbdf2_step_mut(&!s, p, rel, dt, &!led)
+        a0 = a1
+        t = t + dt
+        if t + 0.5 * dt >= next_mark && tr.n < 64 {
+            tr.trough_meq[tr.n] = s.cv[0] / lim_mg_per_meq()
+            tr.n = tr.n + 1
+            next_mark = next_mark + reg.tau_h
+        }
+    }
+    tr.residual_mg = pbpk28_ledger_residual(led, s, p, 0.0)
+    tr.administered = led.administered
+    tr.steps = led.steps
+    return tr
+}
+
+// Probability that the TRUE trough lies in [lo, hi] when ln C ~ N(ln m, s²).
+pub fn lim_prob_in_band(median: f64, sd_ln: f64, lo: f64, hi: f64) -> f64 with Mut, Div, Panic {
+    let a = (ln(lo) - ln(median)) / sd_ln
+    let b = (ln(hi) - ln(median)) / sd_ln
+    return lim_norm_cdf(b) - lim_norm_cdf(a)
+}

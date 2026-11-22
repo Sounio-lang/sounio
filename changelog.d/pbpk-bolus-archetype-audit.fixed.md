@@ -1,0 +1,1 @@
+PBPK-28 drug archetype references corrected with no model change: vancomycin cites the Matzke journal article (PMID/DOI) with an infusion-administration note, tacrolimus gains the Ogasawara 2013 reference, and the parity bench addendum records the bolus-IV route audit (only rapamycin is a true IV bolus).

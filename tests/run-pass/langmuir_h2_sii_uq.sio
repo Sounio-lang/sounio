@@ -1,0 +1,283 @@
+//@ run-pass
+//@ requires: madaros
+//@ description: GUM of the Langmuir constant of H2 in sII (same cell model as langmuir_h2_sii_ljd.sio) under the uncertainty of the H2 Lennard-Jones parameters, shared by the three water models. The covariance is that of the four one-site H2 sets (Buch 34.2 K / 2.96 A; Hirschfelder 33.3 / 2.968, 38.0 / 2.915, 37.0 / 2.928), centred on Buch, written in two independent unit latent factors (Cholesky). Checks variance_of(ln C), second_order_mean(ln C), variance_of of the difference between two water models (the shared H2 term cancels), and the mixed Hessian entries d2 ln C / dT dz and d2 ln C / dR dz that give the uncertainty of the enclathration heat and of the lattice sensitivity, 50 values. Expected values: tests/oracles/langmuir_h2_sii/uq_expect.cpp (1e-10 relative); tests/oracles/langmuir_h2_sii/mc2.cpp is the Monte Carlo check of the same first-order GUM.
+//@ expect-stdout: LANGMUIR_H2_SII_UQ_OK
+
+fn invpow(y: f64, k: i64) -> f64 with Mut, Div {
+    var r = 1.0
+    var i: i64 = 0
+    while i < k {
+        r = r / y
+        i = i + 1
+    }
+    r
+}
+
+fn dk(x: f64, k: i64) -> f64 with Mut, Div {
+    invpow(1.0 - x, k) - invpow(1.0 + x, k)
+}
+
+fn integrand(u: f64, eps: f64, a: f64, b: f64, rc: f64, t: f64, z: f64) -> f64 with Mut, Div {
+    let r = rc * u
+    let w0 = 2.0 * z * eps * (a * dk(u, 10) / (10.0 * r) - b * dk(u, 4) / (4.0 * r))
+    let lap = 2.0 * z * eps / r * (a * 11.0 / (rc * rc) * dk(u, 12) - b * 5.0 / (rc * rc) * dk(u, 6))
+    let w = w0 + 1.00263768431755956 / t * lap
+    u * u * exp(0.0 - w / t)
+}
+
+fn ln_langmuir(eps_h: f64, sig_h: f64, eps_o: f64, sig_o: f64, rc: f64, t: f64, z: f64) -> f64 with Mut, Div {
+    let eps = sqrt(eps_h * eps_o)
+    let sig = 0.5 * (sig_h + sig_o)
+    let s2 = sig * sig
+    let s6 = s2 * s2 * s2
+    let a = s6 * s6 * invpow(rc, 11)
+    let b = s6 * invpow(rc, 5)
+    let h = 0.97 / 100.0
+    var acc = 0.0
+    var p: i64 = 0
+    while p < 100 {
+        let c = (p as f64) * h + 0.5 * h
+        let hh = 0.5 * h
+        acc = acc + hh * 0.36268378337836198 * (integrand(c - hh * 0.18343464249564980, eps, a, b, rc, t, z) + integrand(c + hh * 0.18343464249564980, eps, a, b, rc, t, z))
+        acc = acc + hh * 0.31370664587788729 * (integrand(c - hh * 0.52553240991632899, eps, a, b, rc, t, z) + integrand(c + hh * 0.52553240991632899, eps, a, b, rc, t, z))
+        acc = acc + hh * 0.22238103445337447 * (integrand(c - hh * 0.79666647741362674, eps, a, b, rc, t, z) + integrand(c + hh * 0.79666647741362674, eps, a, b, rc, t, z))
+        acc = acc + hh * 0.10122853629037626 * (integrand(c - hh * 0.96028985649753623, eps, a, b, rc, t, z) + integrand(c + hh * 0.96028985649753623, eps, a, b, rc, t, z))
+        p = p + 1
+    }
+    log(0.910178518534339499 * rc * rc * rc / t * acc)
+}
+
+fn close_rel(got: f64, want: f64) -> bool with Mut, Div {
+    var d = got - want
+    if d < 0.0 { d = 0.0 - d }
+    var w = want
+    if w < 0.0 { w = 0.0 - w }
+    d <= 1.0e-14 + 1.0e-10 * w
+}
+
+fn report(name: string, got: f64, want: f64) -> i64 with IO, Mut, Div {
+    print(name)
+    print(" ")
+    print_f64(got)
+    if close_rel(got, want) {
+        print(" ok\n")
+        return 0
+    }
+    print(" FAIL\n")
+    1
+}
+
+fn uq_small() -> i64 with IO, Epistemic, Mut, Div {
+    var bad: i64 = 0
+    let k1 = measure(0.0, uncertainty: 1.0)
+    let k2 = measure(0.0, uncertainty: 1.0)
+    let a = 2.23364425696364341e+00
+    let b = -2.52912550826065453e-02
+    let d = 1.12653584638716957e-03
+    let z1 = k1.value
+    let z2 = k2.value
+    let eh = 34.2 + a * z1
+    let sh = 2.96 + b * z1 + d * z2
+    let ke_spce = measure(78.20, uncertainty: 0.0)
+    let ks_spce = measure(3.166, uncertainty: 0.0)
+    let ke_tip4pice = measure(106.1, uncertainty: 0.0)
+    let ks_tip4pice = measure(3.1668, uncertainty: 0.0)
+    let ke_tip5p = measure(80.51, uncertainty: 0.0)
+    let ks_tip5p = measure(3.12, uncertainty: 0.0)
+    let kr = measure(3.91, uncertainty: 0.0)
+    let kt = measure(250.0, uncertainty: 0.0)
+    let r = kr.value
+    let t = kt.value
+    let l_spce = ln_langmuir(eh, sh, ke_spce.value, ks_spce.value, r, t, 20.0)
+    bad = bad + report("spce_small lnC", l_spce, -3.92316155982970874e+00)
+    bad = bad + report("spce_small var_H(lnC)", variance_of(l_spce), 6.50898891746754855e-03)
+    bad = bad + report("spce_small E[lnC]", second_order_mean(ln_langmuir(eh, sh, ke_spce.value, ks_spce.value, r, t, 20.0)), -3.92547663187930790e+00)
+    let l_tip4pice = ln_langmuir(eh, sh, ke_tip4pice.value, ks_tip4pice.value, r, t, 20.0)
+    bad = bad + report("tip4pice_small lnC", l_tip4pice, -3.53126605330166258e+00)
+    bad = bad + report("tip4pice_small var_H(lnC)", variance_of(l_tip4pice), 8.22569744795440211e-03)
+    bad = bad + report("tip4pice_small E[lnC]", second_order_mean(ln_langmuir(eh, sh, ke_tip4pice.value, ks_tip4pice.value, r, t, 20.0)), -3.53407029069839578e+00)
+    let l_tip5p = ln_langmuir(eh, sh, ke_tip5p.value, ks_tip5p.value, r, t, 20.0)
+    bad = bad + report("tip5p_small lnC", l_tip5p, -3.88271456964013682e+00)
+    bad = bad + report("tip5p_small var_H(lnC)", variance_of(l_tip5p), 6.18139452269448771e-03)
+    bad = bad + report("tip5p_small E[lnC]", second_order_mean(ln_langmuir(eh, sh, ke_tip5p.value, ks_tip5p.value, r, t, 20.0)), -3.88501693897277593e+00)
+    bad = bad + report("diff_tip4pice_spce_small", l_tip4pice - l_spce, 3.91895506528046164e-01)
+    bad = bad + report("diff_tip4pice_spce_small var_H", variance_of(l_tip4pice - l_spce), 1.00411169941258970e-04)
+    bad = bad + report("diff_tip5p_spce_small", l_tip5p - l_spce, 4.04469901895719160e-02)
+    bad = bad + report("diff_tip5p_spce_small var_H", variance_of(l_tip5p - l_spce), 4.23265782603904955e-06)
+    bad
+}
+
+fn uq_large() -> i64 with IO, Epistemic, Mut, Div {
+    var bad: i64 = 0
+    let k1 = measure(0.0, uncertainty: 1.0)
+    let k2 = measure(0.0, uncertainty: 1.0)
+    let a = 2.23364425696364341e+00
+    let b = -2.52912550826065453e-02
+    let d = 1.12653584638716957e-03
+    let z1 = k1.value
+    let z2 = k2.value
+    let eh = 34.2 + a * z1
+    let sh = 2.96 + b * z1 + d * z2
+    let ke_spce = measure(78.20, uncertainty: 0.0)
+    let ks_spce = measure(3.166, uncertainty: 0.0)
+    let ke_tip4pice = measure(106.1, uncertainty: 0.0)
+    let ks_tip4pice = measure(3.1668, uncertainty: 0.0)
+    let ke_tip5p = measure(80.51, uncertainty: 0.0)
+    let ks_tip5p = measure(3.12, uncertainty: 0.0)
+    let kr = measure(4.73, uncertainty: 0.0)
+    let kt = measure(250.0, uncertainty: 0.0)
+    let r = kr.value
+    let t = kt.value
+    let l_spce = ln_langmuir(eh, sh, ke_spce.value, ks_spce.value, r, t, 28.0)
+    bad = bad + report("spce_large lnC", l_spce, -2.86572761993687139e+00)
+    bad = bad + report("spce_large var_H(lnC)", variance_of(l_spce), 2.21945091226002190e-03)
+    bad = bad + report("spce_large E[lnC]", second_order_mean(ln_langmuir(eh, sh, ke_spce.value, ks_spce.value, r, t, 28.0)), -2.86729829006809807e+00)
+    let l_tip4pice = ln_langmuir(eh, sh, ke_tip4pice.value, ks_tip4pice.value, r, t, 28.0)
+    bad = bad + report("tip4pice_large lnC", l_tip4pice, -2.58573529854445979e+00)
+    bad = bad + report("tip4pice_large var_H(lnC)", variance_of(l_tip4pice), 2.80903511232227953e-03)
+    bad = bad + report("tip4pice_large E[lnC]", second_order_mean(ln_langmuir(eh, sh, ke_tip4pice.value, ks_tip4pice.value, r, t, 28.0)), -2.58761220579268659e+00)
+    let l_tip5p = ln_langmuir(eh, sh, ke_tip5p.value, ks_tip5p.value, r, t, 28.0)
+    bad = bad + report("tip5p_large lnC", l_tip5p, -2.85550562180950854e+00)
+    bad = bad + report("tip5p_large var_H(lnC)", variance_of(l_tip5p), 2.14411044021427253e-03)
+    bad = bad + report("tip5p_large E[lnC]", second_order_mean(ln_langmuir(eh, sh, ke_tip5p.value, ks_tip5p.value, r, t, 28.0)), -2.85705870428716977e+00)
+    bad = bad + report("diff_tip4pice_spce_large", l_tip4pice - l_spce, 2.79992321392411600e-01)
+    bad = bad + report("diff_tip4pice_spce_large var_H", variance_of(l_tip4pice - l_spce), 3.47065054769043842e-05)
+    bad = bad + report("diff_tip5p_spce_large", l_tip5p - l_spce, 1.02219981273628455e-02)
+    bad = bad + report("diff_tip5p_spce_large var_H", variance_of(l_tip5p - l_spce), 6.50562199956254267e-07)
+    bad
+}
+
+// channels: z1 0, z2 1, eps_O 2, sigma_O 3, R 4, T 5
+fn hess_spce_small() -> i64 with IO, Epistemic, Mut, Div {
+    var bad: i64 = 0
+    let k1 = measure(0.0, uncertainty: 1.0)
+    let k2 = measure(0.0, uncertainty: 1.0)
+    let ke = measure(78.20, uncertainty: 0.0)
+    let ks = measure(3.166, uncertainty: 0.0)
+    let kr = measure(3.91, uncertainty: 0.0)
+    let kt = measure(250.0, uncertainty: 0.0)
+    let z1 = k1.value
+    let z2 = k2.value
+    let eh = 34.2 + 2.23364425696364341e+00 * z1
+    let sh = 2.96 + -2.52912550826065453e-02 * z1 + 1.12653584638716957e-03 * z2
+    bad = bad + report("spce_small d2/dT dz1", hessian_of(ln_langmuir(eh, sh, ke.value, ks.value, kr.value, kt.value, 20.0), 0, 5), -2.45736641754938736e-04)
+    bad = bad + report("spce_small d2/dT dz2", hessian_of(ln_langmuir(eh, sh, ke.value, ks.value, kr.value, kt.value, 20.0), 1, 5), -5.63777346837548437e-06)
+    bad = bad + report("spce_small d2/dR dz1", hessian_of(ln_langmuir(eh, sh, ke.value, ks.value, kr.value, kt.value, 20.0), 0, 4), -1.02653640756428774e-01)
+    bad = bad + report("spce_small d2/dR dz2", hessian_of(ln_langmuir(eh, sh, ke.value, ks.value, kr.value, kt.value, 20.0), 1, 4), 1.63994934450928802e-03)
+    bad
+}
+
+// channels: z1 0, z2 1, eps_O 2, sigma_O 3, R 4, T 5
+fn hess_tip4pice_small() -> i64 with IO, Epistemic, Mut, Div {
+    var bad: i64 = 0
+    let k1 = measure(0.0, uncertainty: 1.0)
+    let k2 = measure(0.0, uncertainty: 1.0)
+    let ke = measure(106.1, uncertainty: 0.0)
+    let ks = measure(3.1668, uncertainty: 0.0)
+    let kr = measure(3.91, uncertainty: 0.0)
+    let kt = measure(250.0, uncertainty: 0.0)
+    let z1 = k1.value
+    let z2 = k2.value
+    let eh = 34.2 + 2.23364425696364341e+00 * z1
+    let sh = 2.96 + -2.52912550826065453e-02 * z1 + 1.12653584638716957e-03 * z2
+    bad = bad + report("tip4pice_small d2/dT dz1", hessian_of(ln_langmuir(eh, sh, ke.value, ks.value, kr.value, kt.value, 20.0), 0, 5), -2.80999885551872585e-04)
+    bad = bad + report("tip4pice_small d2/dT dz2", hessian_of(ln_langmuir(eh, sh, ke.value, ks.value, kr.value, kt.value, 20.0), 1, 5), -6.88726264803278616e-06)
+    bad = bad + report("tip4pice_small d2/dR dz1", hessian_of(ln_langmuir(eh, sh, ke.value, ks.value, kr.value, kt.value, 20.0), 0, 4), -1.16828010776134127e-01)
+    bad = bad + report("tip4pice_small d2/dR dz2", hessian_of(ln_langmuir(eh, sh, ke.value, ks.value, kr.value, kt.value, 20.0), 1, 4), 1.63025172011048255e-03)
+    bad
+}
+
+// channels: z1 0, z2 1, eps_O 2, sigma_O 3, R 4, T 5
+fn hess_tip5p_small() -> i64 with IO, Epistemic, Mut, Div {
+    var bad: i64 = 0
+    let k1 = measure(0.0, uncertainty: 1.0)
+    let k2 = measure(0.0, uncertainty: 1.0)
+    let ke = measure(80.51, uncertainty: 0.0)
+    let ks = measure(3.12, uncertainty: 0.0)
+    let kr = measure(3.91, uncertainty: 0.0)
+    let kt = measure(250.0, uncertainty: 0.0)
+    let z1 = k1.value
+    let z2 = k2.value
+    let eh = 34.2 + 2.23364425696364341e+00 * z1
+    let sh = 2.96 + -2.52912550826065453e-02 * z1 + 1.12653584638716957e-03 * z2
+    bad = bad + report("tip5p_small d2/dT dz1", hessian_of(ln_langmuir(eh, sh, ke.value, ks.value, kr.value, kt.value, 20.0), 0, 5), -2.37763418134829631e-04)
+    bad = bad + report("tip5p_small d2/dT dz2", hessian_of(ln_langmuir(eh, sh, ke.value, ks.value, kr.value, kt.value, 20.0), 1, 5), -5.78914439170433350e-06)
+    bad = bad + report("tip5p_small d2/dR dz1", hessian_of(ln_langmuir(eh, sh, ke.value, ks.value, kr.value, kt.value, 20.0), 0, 4), -9.84817109928901176e-02)
+    bad = bad + report("tip5p_small d2/dR dz2", hessian_of(ln_langmuir(eh, sh, ke.value, ks.value, kr.value, kt.value, 20.0), 1, 4), 1.40617972639848154e-03)
+    bad
+}
+
+// channels: z1 0, z2 1, eps_O 2, sigma_O 3, R 4, T 5
+fn hess_spce_large() -> i64 with IO, Epistemic, Mut, Div {
+    var bad: i64 = 0
+    let k1 = measure(0.0, uncertainty: 1.0)
+    let k2 = measure(0.0, uncertainty: 1.0)
+    let ke = measure(78.20, uncertainty: 0.0)
+    let ks = measure(3.166, uncertainty: 0.0)
+    let kr = measure(4.73, uncertainty: 0.0)
+    let kt = measure(250.0, uncertainty: 0.0)
+    let z1 = k1.value
+    let z2 = k2.value
+    let eh = 34.2 + 2.23364425696364341e+00 * z1
+    let sh = 2.96 + -2.52912550826065453e-02 * z1 + 1.12653584638716957e-03 * z2
+    bad = bad + report("spce_large d2/dT dz1", hessian_of(ln_langmuir(eh, sh, ke.value, ks.value, kr.value, kt.value, 28.0), 0, 5), -1.42350222441974929e-04)
+    bad = bad + report("spce_large d2/dT dz2", hessian_of(ln_langmuir(eh, sh, ke.value, ks.value, kr.value, kt.value, 28.0), 1, 5), -4.85884396656349488e-06)
+    bad = bad + report("spce_large d2/dR dz1", hessian_of(ln_langmuir(eh, sh, ke.value, ks.value, kr.value, kt.value, 28.0), 0, 4), -3.58306444112954897e-02)
+    bad = bad + report("spce_large d2/dR dz2", hessian_of(ln_langmuir(eh, sh, ke.value, ks.value, kr.value, kt.value, 28.0), 1, 4), -4.38390028209117532e-04)
+    bad
+}
+
+// channels: z1 0, z2 1, eps_O 2, sigma_O 3, R 4, T 5
+fn hess_tip4pice_large() -> i64 with IO, Epistemic, Mut, Div {
+    var bad: i64 = 0
+    let k1 = measure(0.0, uncertainty: 1.0)
+    let k2 = measure(0.0, uncertainty: 1.0)
+    let ke = measure(106.1, uncertainty: 0.0)
+    let ks = measure(3.1668, uncertainty: 0.0)
+    let kr = measure(4.73, uncertainty: 0.0)
+    let kt = measure(250.0, uncertainty: 0.0)
+    let z1 = k1.value
+    let z2 = k2.value
+    let eh = 34.2 + 2.23364425696364341e+00 * z1
+    let sh = 2.96 + -2.52912550826065453e-02 * z1 + 1.12653584638716957e-03 * z2
+    bad = bad + report("tip4pice_large d2/dT dz1", hessian_of(ln_langmuir(eh, sh, ke.value, ks.value, kr.value, kt.value, 28.0), 0, 5), -1.63813078115063718e-04)
+    bad = bad + report("tip4pice_large d2/dT dz2", hessian_of(ln_langmuir(eh, sh, ke.value, ks.value, kr.value, kt.value, 28.0), 1, 5), -5.75247913311314255e-06)
+    bad = bad + report("tip4pice_large d2/dR dz1", hessian_of(ln_langmuir(eh, sh, ke.value, ks.value, kr.value, kt.value, 28.0), 0, 4), -4.03297817834174754e-02)
+    bad = bad + report("tip4pice_large d2/dR dz2", hessian_of(ln_langmuir(eh, sh, ke.value, ks.value, kr.value, kt.value, 28.0), 1, 4), -6.11072619503529029e-04)
+    bad
+}
+
+// channels: z1 0, z2 1, eps_O 2, sigma_O 3, R 4, T 5
+fn hess_tip5p_large() -> i64 with IO, Epistemic, Mut, Div {
+    var bad: i64 = 0
+    let k1 = measure(0.0, uncertainty: 1.0)
+    let k2 = measure(0.0, uncertainty: 1.0)
+    let ke = measure(80.51, uncertainty: 0.0)
+    let ks = measure(3.12, uncertainty: 0.0)
+    let kr = measure(4.73, uncertainty: 0.0)
+    let kt = measure(250.0, uncertainty: 0.0)
+    let z1 = k1.value
+    let z2 = k2.value
+    let eh = 34.2 + 2.23364425696364341e+00 * z1
+    let sh = 2.96 + -2.52912550826065453e-02 * z1 + 1.12653584638716957e-03 * z2
+    bad = bad + report("tip5p_large d2/dT dz1", hessian_of(ln_langmuir(eh, sh, ke.value, ks.value, kr.value, kt.value, 28.0), 0, 5), -1.39496551696360834e-04)
+    bad = bad + report("tip5p_large d2/dT dz2", hessian_of(ln_langmuir(eh, sh, ke.value, ks.value, kr.value, kt.value, 28.0), 1, 5), -4.82778462928248741e-06)
+    bad = bad + report("tip5p_large d2/dR dz1", hessian_of(ln_langmuir(eh, sh, ke.value, ks.value, kr.value, kt.value, 28.0), 0, 4), -3.49197296307038791e-02)
+    bad = bad + report("tip5p_large d2/dR dz2", hessian_of(ln_langmuir(eh, sh, ke.value, ks.value, kr.value, kt.value, 28.0), 1, 4), -4.50294957531900723e-04)
+    bad
+}
+
+fn main() -> i64 with IO, Epistemic, Mut, Div {
+    var bad: i64 = 0
+    bad = bad + uq_small()
+    bad = bad + uq_large()
+    bad = bad + hess_spce_small()
+    bad = bad + hess_tip4pice_small()
+    bad = bad + hess_tip5p_small()
+    bad = bad + hess_spce_large()
+    bad = bad + hess_tip4pice_large()
+    bad = bad + hess_tip5p_large()
+    if bad > 0 { return 1 }
+    print("LANGMUIR_H2_SII_UQ_OK\n")
+    0
+}
