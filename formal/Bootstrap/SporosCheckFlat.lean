@@ -2407,7 +2407,8 @@ theorem hstepSound_spec {bs : List Nat} {nw ws : Nat} {pr : Prog} {wm : WordSlic
   exfalso
   unfold instrOfOpImm at hins
   have hn57 : ¬ op < Prim.all.length := by rw [primAll_len]; exact h57
-  simp [hn57, h80, h81, h82, h83, h84, h85, h86, h87, h88, h89, h8a, h8b, h8c] at hins
+  rw [dif_neg hn57] at hins
+  split at hins <;> first | contradiction | cases hins | omega | simp_all
 
 theorem hstepF_ne_overflow_of_lt {bs : List Nat} {nw ws : Nat} {pr : Prog} {wm : WordSlice} {wd : Word}
     (hm : WordSliceMatches bs wm wd)
@@ -2526,7 +2527,8 @@ theorem hstepF_ne_overflow_of_lt {bs : List Nat} {nw ws : Nat} {pr : Prog} {wm :
   exfalso
   unfold instrOfOpImm at hins
   have hn57 : ¬ op < Prim.all.length := by rw [primAll_len]; exact h57
-  simp [hn57, h80, h81, h82, h83, h84, h85, h86, h87, h88, h89, h8a, h8b, h8c] at hins
+  rw [dif_neg hn57] at hins
+  split at hins <;> first | contradiction | cases hins | omega | simp_all
 
 theorem hstepF_no_overflow_of_small {bs : List Nat} (hb : ∀ b ∈ bs, b < 256)
     {nw ws outs locals annOff na hd ha op imm : Nat}
@@ -4571,7 +4573,7 @@ theorem TailSafe_step {base : Nat} (hb : base_ok base) {s : St} (hs : TailSafe b
           have haccW : ACCEPT < X86Env.W := by decide
           have hzf : (X86Int.aluF .add ((X86Env.W - ACCEPT) % X86Env.W) w3).2.zf = some false :=
             (aluF_add_compl_zf hacc0 haccW hv3.1).2.mpr hv3.2
-          dsimp only [TailSafeOff]
+          simp only [TailSafeOff]
           rw [hzf]; decide
         · -- 0x47: jcc 5 0x59 (2) -> 0x59 or 0x49
           cases hfl : X86Int.cond s.fl 5 with
