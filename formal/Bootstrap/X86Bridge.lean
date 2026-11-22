@@ -1571,15 +1571,14 @@ theorem step_sim {P : Nat → Prop} {imMin : X86Min.Img}
                   exact hsim.regsLe r hr
               regsDef := hbase.regsDef
               regsBound := hbase.regsBound
-              fl := by simpa [X86Min.St.setReg, htfl] using hsim.fl
+              fl := by simpa [X86Min.St.setReg, X86Int.St.set, htfl] using hsim.fl
               memLen := by simpa [X86Min.St.setReg] using htlen
               loCanon := by simpa [X86Min.St.setReg, htlo] using hsim.loCanon
               stackWritable := fun x hx1 hx2 => by
                 rw [hwritable']
                 exact hsim.stackWritable x (by simpa [X86Min.St.setReg, htlo] using hx1) (by simpa [X86Min.St.setReg, htlo] using hx2)
               memLe := fun x v hv => by
-                have hv' : t.rdByte x = some v := by
-                  simpa [X86Min.St.setReg, X86Min.St.rdByte] using hv
+                have hv' : t.rdByte x = some v := hv
                 rw [htrd] at hv'
                 rw [hrd']
                 by_cases hx : sp' ≤ x ∧ x < sp' + 8
@@ -1605,9 +1604,9 @@ theorem step_sim {P : Nat → Prop} {imMin : X86Min.Img}
                   rw [hbytes8_get (x - sp') (by rw [hbytes8_len] at hsp_x; omega)]
                   exact Nat.mod_lt _ (by decide)
                 · exact hsim.memBound x v hv
-              stdin := by simpa [X86Min.St.setReg, htinp] using hsim.stdin
+              stdin := by simpa [X86Min.St.setReg, X86Int.St.set, htinp] using hsim.stdin
               inpBound := by simpa [X86Min.St.setReg, htinp] using hsim.inpBound
-              out := by simpa [X86Min.St.setReg, htout] using hsim.out
+              out := by simpa [X86Min.St.setReg, X86Int.St.set, htout] using hsim.out
               oracle := hsim.oracle }
           · intro code out h; cases h
     | pop d =>
@@ -1699,7 +1698,7 @@ theorem step_sim {P : Nat → Prop} {imMin : X86Min.Img}
                 ripCanon := by simp [hnx_eq, hnx_canon]
                 mLen := by simp [heq_t, hsim.mLen]
                 iLen := hsim.iLen
-                regsLe := by simpa [heq_t] using hsim.regsLe
+                regsLe := by simpa [heq_t, X86Min.St.reg, X86Int.St.reg] using hsim.regsLe
                 regsDef := hsim.regsDef
                 regsBound := hsim.regsBound
                 fl := by simpa [heq_t] using hsim.fl
@@ -1873,12 +1872,12 @@ theorem step_sim {P : Nat → Prop} {imMin : X86Min.Img}
                             have hnone : (((i.set 0 (some 0)).set 1 (some (i.rip + len))).set 11 none).regs[r]? = none :=
                               List.getElem?_eq_none (by rw [hlen]; exact Nat.le_of_not_lt hr16)
                             simp [X86Int.St.reg, hnone] at hu
-                        fl := by simpa [X86Min.St.setReg] using hsim.fl
+                        fl := by simpa [X86Min.St.setReg, X86Int.St.set] using hsim.fl
                         memLen := by simpa [X86Min.St.setReg] using hsim.memLen
                         loCanon := by simpa [X86Min.St.setReg] using hsim.loCanon
                         stackWritable := fun x hx1 hx2 =>
                           hsim.stackWritable x (by simpa [X86Min.St.setReg] using hx1) (by simpa [X86Min.St.setReg] using hx2)
-                        memLe := fun x => by simpa [X86Min.St.setReg, X86Min.St.rdByte] using hsim.memLe x
+                        memLe := hsim.memLe
                         memBound := hsim.memBound
                         stdin := by simpa [X86Min.St.setReg, hinp] using hsim.stdin
                         inpBound := by simp [X86Min.St.setReg]
@@ -1978,15 +1977,14 @@ theorem step_sim {P : Nat → Prop} {imMin : X86Min.Img}
                               have hnone : (((i.set 0 (some 1)).set 1 (some (i.rip + len))).set 11 none).regs[r]? = none :=
                                 List.getElem?_eq_none (by rw [hlen]; exact Nat.le_of_not_lt hr16)
                               simp [X86Int.St.reg, hnone] at hu
-                          fl := by simpa [X86Min.St.setReg, heq_t, s2] using hsim.fl
+                          fl := by simpa [X86Min.St.setReg, X86Int.St.set, heq_t, s2] using hsim.fl
                           memLen := by simpa [X86Min.St.setReg] using htlen
                           loCanon := by simpa [X86Min.St.setReg, heq_t, s2] using hsim.loCanon
                           stackWritable := fun x hx1 hx2 => by
                             rw [hwritable']
                             exact hsim.stackWritable x (by simpa [X86Min.St.setReg, heq_t, s2] using hx1) (by simpa [X86Min.St.setReg, heq_t, s2] using hx2)
                           memLe := fun x u hu => by
-                            have hu' : t.rdByte x = some u := by
-                              simpa [X86Min.St.setReg, X86Min.St.rdByte] using hu
+                            have hu' : t.rdByte x = some u := hu
                             rw [htrd] at hu'
                             rw [hrd']
                             by_cases hx : x = ad
@@ -2008,7 +2006,10 @@ theorem step_sim {P : Nat → Prop} {imMin : X86Min.Img}
                           oracle := hsim.oracle }
                       · intro code out h; cases h
                     · have hnone : (({ m with rip := (m.rip + len) % X86Min.pow2 64, inp := c :: rest }.setReg 1 (some ((m.rip + len) % X86Min.pow2 64))).setReg 11 none).wrByte ad c = none := by
-                        simp [X86Min.St.wrByte, X86Min.St.setReg, hwin]
+                        simp only [X86Min.St.wrByte, X86Min.St.setReg, Bool.and_eq_true]
+                        split
+                        · rename_i h; exact absurd ⟨of_decide_eq_true h.1, of_decide_eq_true h.2⟩ hwin
+                        · rfl
                       rw [hnone]
                       simp
               · have hbad : (some r7 != some 0 || some r2 != some 1) = true := by
@@ -2120,12 +2121,12 @@ theorem step_sim {P : Nat → Prop} {imMin : X86Min.Img}
                               have hnone : (((i.set 0 (some 1)).set 1 (some (i.rip + len))).set 11 none).regs[r]? = none :=
                                 List.getElem?_eq_none (by rw [hlen]; exact Nat.le_of_not_lt hr16)
                               simp [X86Int.St.reg, hnone] at hu
-                          fl := by simpa [X86Min.St.setReg] using hsim.fl
+                          fl := by simpa [X86Min.St.setReg, X86Int.St.set] using hsim.fl
                           memLen := by simpa [X86Min.St.setReg] using hsim.memLen
                           loCanon := by simpa [X86Min.St.setReg] using hsim.loCanon
                           stackWritable := fun x hx1 hx2 =>
                             hsim.stackWritable x (by simpa [X86Min.St.setReg] using hx1) (by simpa [X86Min.St.setReg] using hx2)
-                          memLe := fun x => by simpa [X86Min.St.setReg, X86Min.St.rdByte] using hsim.memLe x
+                          memLe := hsim.memLe
                           memBound := hsim.memBound
                           stdin := by simpa [X86Min.St.setReg] using hsim.stdin
                           inpBound := by simpa [X86Min.St.setReg] using hsim.inpBound
@@ -2432,17 +2433,26 @@ theorem loader_sim_entry : Sim loaderStMin loaderStInt where
     simp [loaderStInt, Mem.find, hnot_code, hin_stk]
   memLe x v hv := by
     have hnone : loaderStMin.rdByte x = none := by
-      simp only [loaderStMin, X86Min.St.rdByte]
-      split
-      · simp [List.getElem?_replicate]
+      unfold X86Min.St.rdByte
+      cases (loaderStMin.lo ≤ x && x < loaderStMin.lo + X86Min.winSize)
+      · simp
+      · simp only [↓reduceIte, loaderStMin, List.getElem?_replicate]
         split <;> rfl
-      · rfl
     rw [hnone] at hv; cases hv
   memBound x v hv := by
     have hfind : ∀ a b, Mem.find loaderStInt.mem x 0 = some (a, b) → ∀ y ∈ b.data, y < 256 := by
       intro a b hfb y hy
       have h0 : ∀ y ∈ loaderElf, y < 256 := by decide +kernel
-      have h1 : ∀ y ∈ loaderStkPair.1.data, y < 256 := by decide +kernel
+      have h1 : ∀ y ∈ loaderStkPair.1.data, y < 256 := by
+        intro y hy
+        simp only [loaderStkPair, initStack, layStrings, List.length_nil, List.map_nil,
+          List.flatten_nil, List.append_nil, List.mem_append, List.mem_replicate] at hy
+        rcases hy with (⟨_, rfl⟩ | hy) | ⟨_, rfl⟩
+        · decide
+        · simp only [le64, List.mem_map, List.mem_range] at hy
+          rcases hy with (((⟨_, _, rfl⟩ | ⟨_, _, rfl⟩) | ⟨_, _, rfl⟩) | ⟨_, _, rfl⟩) | ⟨_, _, rfl⟩ <;>
+            exact Nat.mod_lt _ (by decide)
+        · decide
       simp only [loaderStInt, Mem.find] at hfb
       split at hfb
       · simp at hfb; obtain ⟨_, rfl⟩ := hfb; exact h0 y hy

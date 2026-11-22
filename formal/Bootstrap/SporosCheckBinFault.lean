@@ -69,7 +69,9 @@ private theorem corePrefix_eq :
 
 private theorem spr1Bytes_split_eq :
     spr1Bytes = prefixBeforeTail ++ ((core_38 ++ core_39) ++ (List.replicate 5300 0xf4 ++ initBytes)) := by
-  simp only [spr1Bytes, coreBytes, prefixBeforeTail, ← corePrefix_eq, List.append_assoc]
+  unfold spr1Bytes coreBytes prefixBeforeTail
+  rw [← corePrefix_eq]
+  simp only [List.append_assoc]
 
 private theorem hdrBytes_len_eq : hdrBytes.length = 176 := by
   have h := chunk_lengths_ok
@@ -143,13 +145,13 @@ private theorem memOp_congr_lt {b1 b2 : Nat → Option Nat} {off m bb : Nat} {x 
           · rfl
           · cases hmd : m / 64 with
             | zero => rfl
-            | succ n => cases n with | zero => rw [h1] | succ _ => rw [h1, h3]
+            | succ n => cases n with | zero => simp only [pure, h1] | succ _ => simp only [pure, h3]
     · simp only [hm4, Bool.false_eq_true, ↓reduceIte, bind, Option.bind]
       split
       · rfl
       · cases hmd : m / 64 with
         | zero => rfl
-        | succ n => cases n with | zero => rw [h0] | succ _ => rw [h0, h2]
+        | succ n => cases n with | zero => simp only [pure, h0] | succ _ => simp only [pure, h2]
 
 private theorem decode_congr_12 {b1 b2 : Nat → Option Nat} (a : Nat)
     (h : ∀ i, i < 12 → b1 i = b2 i) :
@@ -2282,7 +2284,8 @@ private theorem p3_chunks_ok :
 
 private theorem p1Tbl_eq_p1Slice : p1Tbl = p1Slice := by
   have h1 : coreTable = p1Chunks.flatten ++ coreTable_12 ++ p1Rest.flatten := by
-    simp only [coreTable, p1Chunks, p1Rest, List.flatten_cons, List.flatten_nil, List.append_nil, List.append_assoc]
+    unfold coreTable p1Chunks p1Rest
+    simp only [List.flatten_cons, List.flatten_nil, List.append_nil, List.append_assoc]
   have hok := p1_chunks_ok
   simp only [Bool.and_eq_true] at hok
   rw [p1Tbl, h1, List.filter_append, List.filter_append,
@@ -2292,7 +2295,8 @@ private theorem p1Tbl_eq_p1Slice : p1Tbl = p1Slice := by
 
 private theorem p2Tbl_eq_p2Slice : p2Tbl = p2Slice := by
   have h1 : coreTable = p2Pre.flatten ++ coreTable_12 ++ p2Chunks.flatten ++ coreTable_24 ++ p2Rest.flatten := by
-    simp only [coreTable, p2Pre, p1Chunks, p2Chunks, p2Rest, List.flatten_cons, List.flatten_nil, List.append_nil,
+    unfold coreTable p2Pre p1Chunks p2Chunks p2Rest
+    simp only [List.flatten_cons, List.flatten_nil, List.append_nil,
       List.append_assoc]
   have hok := p2_chunks_ok
   simp only [Bool.and_eq_true] at hok
@@ -2306,8 +2310,8 @@ private theorem p2Tbl_eq_p2Slice : p2Tbl = p2Slice := by
 
 private theorem p3Tbl_eq_p3Slice : p3Tbl = p3Slice := by
   have h1 : coreTable = p3Pre.flatten ++ coreTable_24 ++ p3Chunks.flatten ++ coreTable_36 := by
-    simp only [coreTable, p3Pre, p2Pre, p1Chunks, p2Chunks, p3Chunks,
-      List.flatten_append, List.flatten_cons, List.flatten_nil, List.append_nil, List.append_assoc]
+    unfold coreTable p3Pre p2Pre p1Chunks p2Chunks p3Chunks
+    simp only [List.flatten_append, List.flatten_cons, List.flatten_nil, List.append_nil, List.append_assoc]
   have hok := p3_chunks_ok
   simp only [Bool.and_eq_true] at hok
   rw [p3Tbl, h1, List.filter_append, List.filter_append, List.filter_append,
@@ -3663,14 +3667,14 @@ private theorem mem_rd_passSubMem_extends {D b : Nat} {bs : List Nat} {m : Mem}
       rw [hrd]; exact ha
   · rw [show D + (8 + 8) = D + 16 by omega, if_neg hD_le] at ha
     by_cases hb1 : b ≤ a ∧ a < b + bs.length
-    · rw [if_pos hb1] at ha
-      dsimp only at ha
+    · simp only [hb1, and_self, ↓reduceIte] at ha
       have hbi : a - b < bs.length := by omega
       have hbuf_i := hbuf (a - b) hbi
       rw [show b + (a - b) = a by omega] at hbuf_i
       rw [List.getElem?_eq_getElem hbi] at ha
       cases ha; exact hbuf_i
-    · rw [if_neg hb1] at ha; cases ha
+    · simp only [hb1, ↓reduceIte] at ha
+      cases ha
 
 private theorem buf_passSubMem {D b : Nat} {bs : List Nat} (hdisj : D + 16 ≤ b ∨ b + bs.length ≤ D) :
     Buf (passSubMem D b bs) b bs := by
@@ -3678,8 +3682,9 @@ private theorem buf_passSubMem {D b : Nat} {bs : List Nat} (hdisj : D + 16 ≤ b
   simp only [passSubMem, Mem.rd, Mem.find, Region.hi, List.length_append, bytes8_len,
     bind, Option.bind]
   have hnoD : ¬ (D ≤ b + i ∧ b + i < D + 16) := by omega
-  rw [if_neg hnoD, if_pos (by omega)]
-  dsimp only
+  rw [if_neg hnoD]
+  have hin : b ≤ b + i ∧ b + i < b + bs.length := by omega
+  simp only [hin, and_self, ↓reduceIte]
   rw [show b + i - b = i by omega, List.getElem?_eq_getElem hi]
 
 private theorem rdN_passSubMem (D b : Nat) (bs : List Nat) :
@@ -3746,9 +3751,10 @@ private theorem mem_rd_modifyTailIdx_go (j0 : Nat) (f : Nat → Nat) :
       List.modify, List.modifyTailIdx, modifyTailIdx_go_length]
     split
     · rename_i hcov
-      simp only [bind, Option.bind]
+      simp only [bind, Option.bind, hcov, and_self, ↓reduceIte]
       exact getElem?_modifyTailIdx_go_ne f j0 (a - r.base) r.data (by omega)
-    · rfl
+    · rename_i hcov
+      simp only [hcov, ↓reduceIte]
   | i0 + 1, r :: rest, idx, a, hne => by
     simp only [List.modifyTailIdx.go, Mem.find]
     split
@@ -3782,7 +3788,8 @@ private theorem memExtends_passSubMem_after_flip {D b : Nat} {bs : List Nat} {m1
     · by_cases h2' : b ≤ a ∧ a < b + bs.length
       · exact Or.inr h2'
       · exfalso
-        rw [show D + (8 + 8) = D + 16 by omega, if_neg h1', if_neg h2'] at ha
+        rw [show D + (8 + 8) = D + 16 by omega, if_neg h1'] at ha
+        simp only [h2', ↓reduceIte] at ha
         cases ha
   have hne : a ≠ a0 := fun h => ha0 (h ▸ ha_in)
   rw [hdiff a hne]; exact h1

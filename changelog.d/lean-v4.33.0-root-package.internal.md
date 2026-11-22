@@ -1,0 +1,1 @@
+Move the root formal package (`formal/lean-toolchain`) from Lean `v4.30.0-rc2` to `v4.33.0`, the version `formal/lean4` already uses, and port the proofs that the new `simp`, `dsimp` and `simpa` behaviour broke (no statement changes).

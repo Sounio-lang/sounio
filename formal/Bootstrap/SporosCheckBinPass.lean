@@ -273,7 +273,7 @@ structure PassBlocks (B D R : Nat) : Prop where
     (B + 3301, .movI R REJECT, 10), (B + 3311, .jmp (B + 3316), 5)]
 
 theorem passBlocks_of_codeAt {B D R : Nat} (hc : CodeAt (passCode B D R)) : PassBlocks B D R := by
-  rw [passCode] at hc
+  unfold passCode at hc
   repeat rw [CodeAt_append] at hc
   rcases hc with ⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨
     c1, c2⟩, c3⟩, c4⟩, c5⟩, c6⟩, c7⟩, c8⟩, c9⟩, c10⟩, c11⟩, c12⟩, c13⟩, c14⟩, c15⟩, c16⟩, c17⟩,

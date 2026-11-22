@@ -333,8 +333,14 @@ theorem initStack_data_length (top : Nat) (x y : List Nat) :
   have hneed : 56 + ((x.length + 1) + (y.length + 1)) ≤
       X86Env.pages (56 + ((x.length + 1) + (y.length + 1)) + 1) :=
     Nat.le_trans (Nat.le_succ _) (pages_ge _)
-  simp only [X86Env.initStack]
-  simp [X86Env.layStrings, le64_length]
+  simp only [X86Env.initStack, X86Env.layStrings,
+    List.length_append, List.length_replicate, List.length_cons, List.length_nil,
+    List.flatten_cons, List.flatten_nil, List.map_cons, List.map_nil,
+    List.append_nil, List.foldl_cons, List.foldl_nil,
+    Nat.zero_add, le64_length]
+  rw [show X86Env.pages _ =
+      X86Env.pages (56 + ((x.length + 1) + (y.length + 1)) + 1) from
+    congrArg X86Env.pages (by omega)]
   omega
 
 theorem initStack_rd64_argc {c : Region} {top : Nat} {x y : List Nat}

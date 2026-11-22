@@ -295,6 +295,7 @@ theorem exec_syscall_exit {len st a2 a3 a4 a5 a6 : Nat} {s : St}
     (h10 : s.reg 10 = some a4) (h8 : s.reg 8 = some a5) (h9 : s.reg 9 = some a6) :
     exec .syscall len s = .exit (st % 256) := by
   simp only [exec, h0, h7, h6, h2, h10, h8, h9, syscall]
+  rfl
 
 theorem ends_syscall_exit {a len st : Nat} {s : St}
     (hf : im a = some (.syscall, len)) (hrip : s.rip = a)
@@ -2916,7 +2917,6 @@ private theorem canon_rd_orac_aux :
               some (some 0x100000000000) := by
             intro t; simp [placeS, page, hfree1]; omega
           refine GoodRdOrac.grow (hpl _) ?_
-          dsimp only [List.drop_succ_cons, List.drop_zero]
           have hsh' : ∀ p ∈ (sh.eraseIdx iBuf ++ [(0x100000000000, 0x100000000000 + 2 * cap)]).eraseIdx
               (sh.eraseIdx iBuf).length, p.2 ≤ 0x100000000000 ∨ 0x600000000000 ≤ p.1 := by
             rw [List.eraseIdx_append_of_length_le (Nat.le_refl _), Nat.sub_self]

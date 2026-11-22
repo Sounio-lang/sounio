@@ -240,7 +240,7 @@ private theorem rdBytes_wrBytes_same_gen (d : List Nat) :
         getElem?_set_self' d off (b % 256) (by simp at hd; omega)]
     have hrest := rdBytes_wrBytes_same_gen (d.set off (b % 256)) (off + 1) bs
       (fun x hx => hlt x (List.mem_cons_of_mem _ hx)) (by rw [List.length_set]; simp at hd; omega)
-    simp only [wrBytes, rdBytes]
+    simp only [wrBytes, List.length_cons, rdBytes]
     rw [h0, Option.getD_some, hrest, Nat.mod_eq_of_lt hb]
 
 private theorem rdBytes_wrBytes_same (d : List Nat) (off : Nat) (bs : List Nat)
