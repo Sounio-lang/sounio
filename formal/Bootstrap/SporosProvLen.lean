@@ -484,32 +484,40 @@ theorem ltfind_map (l : List (Nat × Val)) (k : Nat) :
 
 theorem absSt_st (s : St) (a n v : Nat) (q : Prov) :
     (absSt s).st a n v (q.length % M) = (s.st a n v q).map absSt := by
-  simp only [St.st, LSt.st, absSt]
-  split
-  · simp only [Option.map_some, Option.some.injEq]
+  simp only [St.st, LSt.st]
+  have hms : (absSt s).msize = s.msize := rfl
+  rw [hms]
+  by_cases hb : a + n ≤ s.msize
+  · rw [if_pos hb, if_pos hb]
+    simp only [Option.map_some, Option.some.injEq, absSt]
     congr 1
     funext x
-    dsimp only
-    split <;> rfl
-  · rfl
+    by_cases hx : a ≤ x ∧ x < a + n
+    · rw [if_pos hx, if_pos hx]; rfl
+    · rw [if_neg hx, if_neg hx]
+  · rw [if_neg hb, if_neg hb]; rfl
 
 theorem absSt_ld_some {s : St} {a n v : Nat} {pm : Prov} (h : s.ld a n = some (v, pm)) :
     ∃ lpm, (absSt s).ld a n = some (v, lpm) ∧ pm.length % M = lpm % M := by
-  simp only [St.ld, LSt.ld, absSt] at h ⊢
-  split at h
-  · rename_i hb
+  simp only [St.ld, LSt.ld] at h ⊢
+  have hms : (absSt s).msize = s.msize := rfl
+  rw [hms]
+  by_cases hb : a + n ≤ s.msize
+  · rw [if_pos hb] at h
     rw [if_pos hb]
     simp only [Option.some.injEq, Prod.mk.injEq] at h
     obtain ⟨rfl, rfl⟩ := h
     exact ⟨_, rfl, foldr_prov_length (fun i => (s.mem (a + i)).p) (List.range n)⟩
-  · cases h
+  · rw [if_neg hb] at h; cases h
 
 theorem absSt_ld_none {s : St} {a n : Nat} (h : s.ld a n = none) :
     (absSt s).ld a n = none := by
-  simp only [St.ld, LSt.ld, absSt] at h ⊢
-  split at h
-  · cases h
-  · rw [if_neg (by assumption)]
+  simp only [St.ld, LSt.ld] at h ⊢
+  have hms : (absSt s).msize = s.msize := rfl
+  rw [hms]
+  by_cases hb : a + n ≤ s.msize
+  · rw [if_pos hb] at h; cases h
+  · rw [if_neg hb]
 
 theorem absSt_setTop (s : St) (f : Frame) :
     absSt (s.setTop f) = (absSt s).setTop (absFrame f) := by
@@ -570,19 +578,19 @@ theorem lexecPrim_abs (p : Prim) (args : List Val) (s : St) (o : Origin) :
   have hq1 : ∀ a : Val,
       lq [absVal a] (absSt s).pc =
         (([a].foldr (fun (v : Val) acc => v.p ++ acc) []) ++ s.pc ++ [o]).length % M := by
-    intro a; simpa using (q_length_mod [a] s.pc o).symm
+    intro a; change lq ([a].map absVal) (s.pc.length % M) = _; exact (q_length_mod [a] s.pc o).symm
   have hq2 : ∀ a b : Val,
       lq [absVal a, absVal b] (absSt s).pc =
         (([a, b].foldr (fun (v : Val) acc => v.p ++ acc) []) ++ s.pc ++ [o]).length % M := by
-    intro a b; simpa using (q_length_mod [a, b] s.pc o).symm
+    intro a b; change lq ([a, b].map absVal) (s.pc.length % M) = _; exact (q_length_mod [a, b] s.pc o).symm
   have hq3 : ∀ a b c : Val,
       lq [absVal a, absVal b, absVal c] (absSt s).pc =
         (([a, b, c].foldr (fun (v : Val) acc => v.p ++ acc) []) ++ s.pc ++ [o]).length % M := by
-    intro a b c; simpa using (q_length_mod [a, b, c] s.pc o).symm
+    intro a b c; change lq ([a, b, c].map absVal) (s.pc.length % M) = _; exact (q_length_mod [a, b, c] s.pc o).symm
   have hq4 : ∀ a b c d : Val,
       lq [absVal a, absVal b, absVal c, absVal d] (absSt s).pc =
         (([a, b, c, d].foldr (fun (v : Val) acc => v.p ++ acc) []) ++ s.pc ++ [o]).length % M := by
-    intro a b c d; simpa using (q_length_mod [a, b, c, d] s.pc o).symm
+    intro a b c d; change lq ([a, b, c, d].map absVal) (s.pc.length % M) = _; exact (q_length_mod [a, b, c, d] s.pc o).symm
   cases p <;>
     rcases args with _ | ⟨a, _ | ⟨b, _ | ⟨c, _ | ⟨d, _ | ⟨e, _⟩⟩⟩⟩⟩ <;>
     try rfl
@@ -609,16 +617,20 @@ theorem lexecPrim_abs (p : Prim) (args : List Val) (s : St) (o : Origin) :
     rw [hq2]; simp only [absPR, List.map_cons, List.map_nil, absVal]
   · -- divu
     simp only [lexecPrim, execPrim, List.map_cons, List.map_nil]
-    rw [hq2]; simp only [absVal]; split <;> simp [absPR, absVal]
+    rw [hq2]; simp only [absVal]
+    by_cases hz : a.w % M = 0 <;> simp [hz, absPR, absVal]
   · -- modu
     simp only [lexecPrim, execPrim, List.map_cons, List.map_nil]
-    rw [hq2]; simp only [absVal]; split <;> simp [absPR, absVal]
+    rw [hq2]; simp only [absVal]
+    by_cases hz : a.w % M = 0 <;> simp [hz, absPR, absVal]
   · -- divs
     simp only [lexecPrim, execPrim, List.map_cons, List.map_nil]
-    rw [hq2]; simp only [absVal]; split <;> simp [absPR, absVal]
+    rw [hq2]; simp only [absVal]
+    by_cases hz : a.w % M = 0 <;> simp [hz, absPR, absVal]
   · -- mods
     simp only [lexecPrim, execPrim, List.map_cons, List.map_nil]
-    rw [hq2]; simp only [absVal]; split <;> simp [absPR, absVal]
+    rw [hq2]; simp only [absVal]
+    by_cases hz : a.w % M = 0 <;> simp [hz, absPR, absVal]
   · -- neg
     simp only [lexecPrim, execPrim, List.map_cons, List.map_nil]
     rw [hq1]; simp only [absPR, List.map_cons, List.map_nil, absVal]
@@ -704,7 +716,6 @@ theorem lexecPrim_abs (p : Prim) (args : List Val) (s : St) (o : Origin) :
       simp only [absSt]
       congr 1
       funext x
-      dsimp only
       split
       · simp only [absVal, List.length_append]
         exact congrArg (LVal.mk _) (Nat.add_mod _ _ M).symm
@@ -724,7 +735,6 @@ theorem lexecPrim_abs (p : Prim) (args : List Val) (s : St) (o : Origin) :
       simp only [absSt]
       congr 1
       funext x
-      dsimp only
       split
       · simp only [absVal]
       · rfl
@@ -872,9 +882,10 @@ theorem lexecPrim_abs (p : Prim) (args : List Val) (s : St) (o : Origin) :
     rw [hq1]; simp only [absPR, List.map_cons, List.map_nil, absVal_tag]
     simp only [absVal]; rfl
   · -- demand [a, b] = [th, a']
-    simp only [lexecPrim, execPrim, List.map_cons, List.map_nil, noPhys]
+    simp only [lexecPrim, execPrim, List.map_cons, List.map_nil]
     have haw : (absVal a).w = a.w := rfl
-    rw [haw]
+    have hconf : noPhys.conf b.p = 0 := rfl
+    rw [haw, hconf]
     by_cases hd : 0 < a.w
     · rw [if_pos hd, if_pos hd]; rfl
     · rw [if_neg hd, if_neg hd]
