@@ -235,7 +235,7 @@ tested kernels do.
 **Turing-native** `wmma m16n16k16 f16→f32` (sm_70+). Full derivation +
 codegen-target table: `docs/design/EPISTEMIC_TENSOR_CORE_GUM_TURING.md`.
 
-**Runnable artifact (validates novelty on real silicon, no L4 needed):**
+**Experimental reference kernel:**
 `scripts/gpu/epistemic_wmma_sm75_reference.cu` — `nvcuda::wmma`, fragment-correct by
 construction, GPU-vs-CPU-GUM-oracle check. `nvcc -arch=sm_75` + run on the RTX 8000.
 

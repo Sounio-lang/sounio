@@ -1,0 +1,1 @@
+Cache the native macOS Madaros compilation only for exact source, seed and Apple toolchain inputs. Verify the restored binary digest and rerun seed execution, ABI, regressions, CPU, Metal and the pinned corpus on every integration; reject incompatible or corrupt cache entries.

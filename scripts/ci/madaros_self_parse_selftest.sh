@@ -22,7 +22,7 @@ trap 'rm -rf "$WORK_DIR"' EXIT
 
 # ---------------------------------------------------------------- arm 1
 # Synthetic reports. Numbers match what was measured on 2026-08-04:
-# 120 nodes and 340 edges against capacity 256/512.
+# 120 nodes and 340 edges (capacity is now 256 nodes / 1024 edges).
 emit_report() {  # emit_report <file> <status> <saturated> <parse_failed> <nodes> <edges> [failed_path]
   local f="$1" st="$2" sat="$3" pf="$4" n="$5" e="$6" fp="${7:-}"
   {
@@ -31,6 +31,7 @@ emit_report() {  # emit_report <file> <status> <saturated> <parse_failed> <nodes
     echo "SOUNIO_BOUNDARY_CLOSURE_V1"
     printf 'status\t%s\n' "$st"
     printf 'capacity\t256\n'
+    [[ -z "${NO_EDGE_CAP:-}" ]] && printf 'edge_capacity\t1024\n'
     printf 'saturated\t%s\n' "$sat"
     printf 'parse_failed\t%s\n' "$pf"
     [[ -n "$fp" ]] && printf 'failed_path\t%s\n' "$fp"
@@ -60,14 +61,17 @@ must_reject "$WORK_DIR/parsefail" "a closure that failed to parse"
 emit_report "$WORK_DIR/nopath" incomplete false true 72 123
 must_reject "$WORK_DIR/nopath" "parse_failed with no failed_path"
 
-emit_report "$WORK_DIR/saturated" complete true false 256 512
+emit_report "$WORK_DIR/saturated" complete true false 256 1024
 must_reject "$WORK_DIR/saturated" "a SATURATED closure"
 
 emit_report "$WORK_DIR/overnodes" complete false false 250 340
 must_reject "$WORK_DIR/overnodes" "a closure over the 80% node headroom"
 
-emit_report "$WORK_DIR/overedges" complete false false 120 500
+emit_report "$WORK_DIR/overedges" complete false false 120 900
 must_reject "$WORK_DIR/overedges" "a closure over the 80% edge headroom"
+
+NO_EDGE_CAP=1 emit_report "$WORK_DIR/noedgecap" complete false false 120 340
+must_reject "$WORK_DIR/noedgecap" "a report with no edge_capacity field"
 
 emit_report "$WORK_DIR/unres" complete false false 120 340
 printf 'unresolved\tcaller.sio\tmissing::thing\n' >>"$WORK_DIR/unres"
@@ -85,7 +89,7 @@ must_reject "$WORK_DIR/empty" "an empty report"
 printf 'total nonsense\nno header here\n' >"$WORK_DIR/nonsense"
 must_reject "$WORK_DIR/nonsense" "output with no SOUNIO_BOUNDARY_CLOSURE_V1 header"
 
-echo "  arm1 verdict function: accepts the good shape, rejects 9 bad ones"
+echo "  arm1 verdict function: accepts the good shape, rejects 10 bad ones"
 
 # ---------------------------------------------------------------- arms 2 and 3
 MADAROS="${SOUNIO_MADAROS_SELF_PARSE_BIN:-${MADAROS_RAW_BIN:-$ROOT_DIR/artifacts/self-hosted/madaros}}"

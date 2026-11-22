@@ -1,0 +1,220 @@
+//@ run-pass
+//@ requires: slow
+//@ timeout: 5400
+//@ expect-stdout: LJ_NIST_PARITY_OK
+// examples/molecular/lj_nist_parity.sio
+//
+// stdlib/molecular/lj.sio against the NIST Lennard-Jones benchmark tables.
+//
+// REFERENCE VALUES, transcribed 2026-11-13. All for the potential truncated
+// at 3 sigma with standard long-range corrections, reduced units, T* = 0.85.
+//
+//   [mc]   mmlapps.nist.gov/srs/LJ_PURE/mc.htm -- NVT Monte Carlo, N = 500
+//          rho* = 0.776 : U*/N = -5.5121E+00 +/- 4.55E-04
+//                         p*   =  6.7714E-03 +/- 1.77E-03
+//          rho* = 0.009 : U*/N = -9.3973E-02 +/- 1.29E-04
+//                         p*   =  7.1641E-03 +/- 2.24E-06
+//   [sat]  NIST SAT-TMMC, grand-canonical transition-matrix MC, V = 512
+//          ln z_sat = -4.7788E+00 +/- 2.35E-05
+//          rho_vap* =  9.6404E-03 +/- 9.37E-07
+//
+// PREDICTIONS, WRITTEN BEFORE THE FIRST RUN OF THIS FILE.
+//
+//   P1  canonical liquid, N = 500, rho* = 0.776:
+//       U*/N = -5.5121 and p* = 0.0068.
+//   P2  canonical vapour, N = 500, rho* = 0.009:
+//       U*/N = -0.093973 and p* = 0.0071641.
+//   P3  grand canonical, V = 512, ln z = -4.7788, started empty:
+//       rho* = 0.0096404. The box stays on the vapour branch because the
+//       barrier to the liquid at coexistence is far beyond a run this long.
+//   The Widom check that was P4 of this file when it was first run lives in
+//   lj_widom_finite_size.sio, with the account of why it failed as stated.
+//
+// DECISION RULE, FIXED WITH THE PREDICTIONS. Each quantity is the mean over
+// K = 8 independently seeded runs and its error is the standard error over
+// those 8 values; no within-run error bar is used. A prediction HOLDS if
+//       |mine - NIST| <= 3 * sqrt(se_mine^2 + se_NIST^2)
+// AND se_mine is below the resolution listed in `check` below. The second
+// condition is there so that a run too short to tell cannot pass.
+//
+// Run:
+//   export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
+//   bin/souc run examples/molecular/lj_nist_parity.sio
+
+use molecular::lj::*
+use math::pure::{exp}
+
+fn ae(a: f64, b: f64) -> f64 { if a > b { a - b } else { b - a } }
+
+fn sqrt_n(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    if g < 1.0 { g = 1.0 }
+    var i: i64 = 0
+    while i < 200 { g = 0.5 * (g + x / g); i = i + 1 }
+    g
+}
+
+fn cbrt_n(x: f64) -> f64 with Mut, Div, Panic {
+    var g = x
+    if g < 1.0 { g = 1.0 }
+    var i: i64 = 0
+    while i < 200 { g = (2.0 * g + x / (g * g)) / 3.0; i = i + 1 }
+    g
+}
+
+// Prints one comparison line and returns 1 if the prediction holds.
+fn check(mine: f64, se: f64, nist: f64, se_nist: f64, resolution: f64) -> i64 with IO, Mut, Div, Panic {
+    let tol = 3.0 * sqrt_n(se * se + se_nist * se_nist)
+    let d = ae(mine, nist)
+    print("    mine   = "); println(mine)
+    print("    se     = "); println(se)
+    print("    NIST   = "); println(nist)
+    print("    |diff| = "); println(d)
+    print("    3 se   = "); println(tol)
+    if se >= resolution { println("    NOT RESOLVED: se above the stated resolution"); return 0 }
+    if d > tol { println("    FAILS"); return 0 }
+    println("    HOLDS")
+    1
+}
+
+// One canonical run. Writes U/N (tail included), p (tail included), and, if
+// widom > 0, the Widom mean, into out[0..3].
+fn run_nvt(seed: i64, n: i64, rho: f64, temp: f64, rc: f64, delta: f64,
+           equil: i64, prod: i64, every: i64, widom: i64,
+           pos: &![f64; 3072], out: &![f64; 4]) with Mut, Div, Panic {
+    mol_seed(seed)
+    let beta = 1.0 / temp
+    let l = cbrt_n((n as f64) / rho)
+    let v = l * l * l
+    let _np = mol_init_grid(pos, n, l)
+    var s: i64 = 0
+    while s < equil {
+        let (_du, _a) = mol_sweep_nvt(pos, n, l, rc, beta, delta)
+        s = s + 1
+    }
+    var su = 0.0
+    var sw = 0.0
+    var swid = 0.0
+    var nsamp: i64 = 0
+    var nwid: i64 = 0
+    s = 0
+    while s < prod {
+        let (_du, _a) = mol_sweep_nvt(pos, n, l, rc, beta, delta)
+        if s % every == 0 {
+            let (u, w) = mol_total_energy_virial(pos, n, l, rc)
+            su = su + u
+            sw = sw + w
+            nsamp = nsamp + 1
+            if widom > 0 {
+                swid = swid + mol_widom_sum(pos, n, l, rc, beta, widom)
+                nwid = nwid + widom
+            }
+        }
+        s = s + 1
+    }
+    let um = su / (nsamp as f64)
+    let wm = sw / (nsamp as f64)
+    out[0] = um / (n as f64) + lj_tail_energy_per_particle(rho, rc)
+    out[1] = rho * temp + wm / (3.0 * v) + lj_tail_pressure(rho, rc)
+    if nwid > 0 { out[2] = swid / (nwid as f64) } else { out[2] = 0.0 }
+}
+
+// One grand-canonical run in a cubic box of side l. Returns the mean density.
+fn run_gc(seed: i64, l: f64, temp: f64, rc: f64, lnz: f64, delta: f64,
+          equil: i64, prod: i64, pos: &![f64; 3072]) -> f64 with Mut, Div, Panic {
+    mol_seed(seed)
+    let beta = 1.0 / temp
+    let z = exp(lnz)
+    var n: i64 = 0
+    var c: i64 = 0
+    while c < equil {
+        if n > 0 { let (_du, _a) = mol_sweep_nvt(pos, n, l, rc, beta, delta) }
+        var e: i64 = 0
+        while e < 10 {
+            let (n2, _d, _k) = mol_trial_exchange(pos, n, l, rc, beta, z)
+            n = n2
+            e = e + 1
+        }
+        c = c + 1
+    }
+    var sn = 0.0
+    var cnt: i64 = 0
+    c = 0
+    while c < prod {
+        if n > 0 { let (_du, _a) = mol_sweep_nvt(pos, n, l, rc, beta, delta) }
+        var e: i64 = 0
+        while e < 10 {
+            let (n2, _d, _k) = mol_trial_exchange(pos, n, l, rc, beta, z)
+            n = n2
+            sn = sn + (n as f64)
+            cnt = cnt + 1
+            e = e + 1
+        }
+        c = c + 1
+    }
+    sn / (cnt as f64) / (l * l * l)
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var pos: [f64; 3072] = [0.0; 3072]
+    var out: [f64; 4] = [0.0; 4]
+    var a: [f64; 64] = [0.0; 64]
+    var b: [f64; 64] = [0.0; 64]
+    let kruns: i64 = 8
+    var held: i64 = 0
+
+    println("stdlib/molecular/lj.sio vs NIST Lennard-Jones benchmarks, T* = 0.85, rc = 3 + LRC")
+    println("")
+
+    // ---- P1 -------------------------------------------------------------
+    var r: i64 = 0
+    while r < kruns {
+        run_nvt(1000 + 17 * r, 500, 0.776, 0.85, 3.0, 0.11, 400, 1600, 4, 0, &!pos, &!out)
+        a[r as usize] = out[0]
+        b[r as usize] = out[1]
+        r = r + 1
+    }
+    let (u1, su1) = mol_mean_sem(&a, kruns)
+    let (p1, sp1) = mol_mean_sem(&b, kruns)
+    println("P1  canonical liquid, N = 500, rho* = 0.776")
+    println("  U*/N")
+    held = held + check(u1, su1, 0.0 - 5.5121, 0.000455, 0.003)
+    println("  p*")
+    held = held + check(p1, sp1, 0.0067714, 0.00177, 0.02)
+    println("")
+
+    // ---- P2 -------------------------------------------------------------
+    r = 0
+    while r < kruns {
+        run_nvt(2000 + 17 * r, 500, 0.009, 0.85, 3.0, 2.5, 400, 1500, 4, 0, &!pos, &!out)
+        a[r as usize] = out[0]
+        b[r as usize] = out[1]
+        r = r + 1
+    }
+    let (u2, su2) = mol_mean_sem(&a, kruns)
+    let (p2, sp2) = mol_mean_sem(&b, kruns)
+    println("P2  canonical vapour, N = 500, rho* = 0.009")
+    println("  U*/N")
+    held = held + check(u2, su2, 0.0 - 0.093973, 0.000129, 0.001)
+    println("  p*")
+    held = held + check(p2, sp2, 0.0071641, 0.00000224, 0.00005)
+    println("")
+
+    // ---- P3 -------------------------------------------------------------
+    r = 0
+    while r < kruns {
+        a[r as usize] = run_gc(3000 + 17 * r, 8.0, 0.85, 3.0, 0.0 - 4.7788, 2.0, 20000, 400000, &!pos)
+        r = r + 1
+    }
+    let (rho3, srho3) = mol_mean_sem(&a, kruns)
+    println("P3  grand canonical, V = 512, ln z = -4.7788")
+    println("  rho*")
+    held = held + check(rho3, srho3, 0.0096404, 0.000000937, 0.00005)
+    println("")
+
+    print("predictions held: "); println(held)
+    if held != 5 { println("LJ_NIST_PARITY_FAILED"); return 1 }
+    println("LJ_NIST_PARITY_OK")
+    return 0
+}

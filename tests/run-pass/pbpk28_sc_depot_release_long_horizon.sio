@@ -1,0 +1,56 @@
+//@ run-pass
+//@ expect-stdout-contains: PBPK28_SC_DEPOT_RELEASE_LONG_HORIZON_PASS
+//
+// Subcutaneous depot input of the semaglutide and tirzepatide scenarios,
+// rate(t) = F * Dose * ka * exp(-ka * t), on a multi-week horizon.
+//
+// For any t the rate is positive and rate(t + 60 h) / rate(t) = exp(-60 ka).
+// For semaglutide ka = ln 2 / 60 h, so that ratio is exactly 1/2.
+// With the 20-term Taylor sum the scenarios used before, the semaglutide
+// ratio at t = 1000 h (ka * t = 11.6) is not 1/2 and the tirzepatide rate at
+// t = 1000 h (ka * t = 16.4) is not the closed-form value.
+
+use darwin_pbpk::scenarios::semaglutide_sc_depot::*
+use darwin_pbpk::scenarios::tirzepatide_sc_depot::*
+use math::pure::{exp}
+
+fn ld_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn ld_rel(tag: string, got: f64, want: f64, tol: f64) -> i32 with IO, Mut, Div, Panic {
+    let r = ld_abs(got - want) / ld_abs(want)
+    print("  "); print(tag); print(" rel. diff x 1e12 = "); println(r * 1.0e12)
+    if !(r <= tol) {
+        println("  [FAIL]")
+        return 1
+    }
+    return 0
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var fails: i32 = 0
+    var k = 0
+    while k < 4 {
+        var t = 24.0
+        if k == 1 { t = 168.0 }
+        if k == 2 { t = 504.0 }
+        if k == 3 { t = 1000.0 }
+        let s0 = sema_release_rate_at(t)
+        let s1 = sema_release_rate_at(t + 60.0)
+        if !(s0 > 0.0) { println("  [FAIL] semaglutide rate not positive"); fails = fails + 1 }
+        fails = fails + ld_rel("semaglutide rate(t+60)/rate(t) vs 1/2", s1 / s0, 0.5, 1.0e-9)
+        let r0 = tirz_release_rate_at(t)
+        let want = tirz_f() * tirz_dose_mg() * tirz_ka() * exp(0.0 - tirz_ka() * t)
+        if !(r0 > 0.0) { println("  [FAIL] tirzepatide rate not positive"); fails = fails + 1 }
+        fails = fails + ld_rel("tirzepatide rate vs closed form", r0, want, 1.0e-9)
+        k = k + 1
+    }
+    if fails == 0 {
+        println("PBPK28_SC_DEPOT_RELEASE_LONG_HORIZON_PASS")
+        return 0
+    }
+    println("PBPK28_SC_DEPOT_RELEASE_LONG_HORIZON_FAIL")
+    return 1
+}

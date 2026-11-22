@@ -1,0 +1,210 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: GUM_FO_TANGENT_CLONE_STRUCT_RETURNS_OK
+//@ description: First-order GUM through calls that RETURN a struct whose scalar f64 fields are read afterwards (an LJ shell sum returning {energy, force}, a returned local, an early return inside a loop, a measurement made inside the call) and through calls whose struct parameters hold NESTED structs (an atom with a Vec3 position, by value, by reference and as a method receiver reading self.pos.x). Bodies loop, so the #1706 re-lowering refuses them. Expected values: tests/oracles/gum_fo_tangent_clone_struct_returns.cpp.
+
+struct EF { energy: f64, force: f64 }
+struct Vec3 { x: f64, y: f64, z: f64 }
+struct Atom { pos: Vec3, q: f64 }
+
+fn lj_energy(eps: f64, r: f64) -> f64 with Mut, Div {
+    var acc = 0.0
+    var i: i64 = 1
+    while i <= 3 {
+        let q = 1.0 / ((i as f64) * r)
+        var q6 = 1.0
+        var j: i64 = 0
+        while j < 6 {
+            q6 = q6 * q
+            j = j + 1
+        }
+        acc = acc + 4.0 * eps * (q6 * q6 - q6)
+        i = i + 1
+    }
+    acc
+}
+
+fn lj_shell(eps: f64, r: f64) -> EF with Mut, Div {
+    var e = 0.0
+    var f = 0.0
+    var i: i64 = 1
+    while i <= 3 {
+        let q = 1.0 / ((i as f64) * r)
+        var q6 = 1.0
+        var j: i64 = 0
+        while j < 6 {
+            q6 = q6 * q
+            j = j + 1
+        }
+        e = e + 4.0 * eps * (q6 * q6 - q6)
+        f = f + 4.0 * eps * (12.0 * q6 * q6 - 6.0 * q6) / r
+        i = i + 1
+    }
+    EF { energy: e, force: f }
+}
+
+fn lj_local(eps: f64, r: f64) -> EF with Mut, Div {
+    var e = 0.0
+    var f = 0.0
+    var i: i64 = 1
+    while i <= 3 {
+        let q = 1.0 / ((i as f64) * r)
+        var q6 = 1.0
+        var j: i64 = 0
+        while j < 6 {
+            q6 = q6 * q
+            j = j + 1
+        }
+        e = e + 4.0 * eps * (q6 * q6 - q6)
+        f = f + 4.0 * eps * (12.0 * q6 * q6 - 6.0 * q6) / r
+        i = i + 1
+    }
+    let out = EF { energy: e, force: f }
+    out
+}
+
+fn lj_cut(eps: f64, r: f64, ncut: i64) -> EF with Mut, Div {
+    var e = 0.0
+    var f = 0.0
+    var i: i64 = 1
+    while i <= 3 {
+        if i > ncut {
+            return EF { energy: e, force: f }
+        }
+        let q = 1.0 / ((i as f64) * r)
+        var q6 = 1.0
+        var j: i64 = 0
+        while j < 6 {
+            q6 = q6 * q
+            j = j + 1
+        }
+        e = e + 4.0 * eps * (q6 * q6 - q6)
+        f = f + 4.0 * eps * (12.0 * q6 * q6 - 6.0 * q6) / r
+        i = i + 1
+    }
+    EF { energy: e, force: f }
+}
+
+fn site_phi(a: Atom) -> f64 with Mut, Div {
+    let s2 = a.pos.x * a.pos.x + a.pos.y * a.pos.y + a.pos.z * a.pos.z
+    var acc = 0.0
+    var i: i64 = 1
+    while i <= 3 {
+        acc = acc + a.q / ((i as f64) + s2)
+        i = i + 1
+    }
+    acc
+}
+
+fn site_phi_ref(a: &Atom) -> f64 with Mut, Div {
+    let s2 = (*a).pos.x * (*a).pos.x + a.pos.y * a.pos.y + a.pos.z * a.pos.z
+    var acc = 0.0
+    var i: i64 = 1
+    while i <= 3 {
+        acc = acc + a.q / ((i as f64) + s2)
+        i = i + 1
+    }
+    acc
+}
+
+impl Atom {
+    fn phi(self: &Atom) -> f64 with Mut, Div {
+        let s2 = self.pos.x * self.pos.x + self.pos.y * self.pos.y + self.pos.z * self.pos.z
+        var acc = 0.0
+        var i: i64 = 1
+        while i <= 3 {
+            acc = acc + self.q / ((i as f64) + s2)
+            i = i + 1
+        }
+        acc
+    }
+}
+
+fn site_ef(a: Atom) -> EF with Mut, Div {
+    let s2 = a.pos.x * a.pos.x + a.pos.y * a.pos.y + a.pos.z * a.pos.z
+    var e = 0.0
+    var f = 0.0
+    var i: i64 = 1
+    while i <= 3 {
+        let t = 1.0 / ((i as f64) + s2)
+        e = e + a.q * t
+        f = f + 2.0 * a.pos.x * a.q * t * t
+        i = i + 1
+    }
+    EF { energy: e, force: f }
+}
+
+fn noisy(eps: f64) -> EF with Mut, Div, Epistemic {
+    let m = measure(0.5, uncertainty: 0.05)
+    EF { energy: eps * m.value, force: m.value }
+}
+
+fn close(got: f64, want: f64) -> bool with Mut, Div {
+    var d = got - want
+    if d < 0.0 { d = 0.0 - d }
+    var w = want
+    if w < 0.0 { w = 0.0 - w }
+    d <= 1.0e-12 + 1.0e-12 * w
+}
+
+fn report(name: string, got: f64, want: f64) -> i64 with IO, Mut, Div {
+    print(name)
+    print(" ")
+    print_f64(got * 1000000.0)
+    print("e-6")
+    if close(got, want) {
+        print(" ok\n")
+        return 0
+    }
+    print(" FAIL\n")
+    1
+}
+
+fn main() -> i32 with IO, Mut, Div, Epistemic {
+    var bad: i64 = 0
+    let ep = measure(0.997, uncertainty: 0.02)
+    let rk = measure(1.12, uncertainty: 0.01)
+    let eps: f64 = ep.value
+    let r: f64 = rk.value
+
+    let g = lj_energy(eps, r)
+    bad = bad + report("lj_energy_f64", variance_of(g), 0.00042781780426466852)
+    let s = lj_shell(eps, r)
+    bad = bad + report("lj_energy_var", variance_of(s.energy), 0.00042781780426466852)
+    bad = bad + report("lj_force_var", variance_of(s.force), 0.34260474080287223)
+    bad = bad + report("lj_energy_minus_force_var", variance_of(s.energy - s.force), 0.34344286665382651)
+    bad = bad + report("lj_energy_minus_same_call_var", variance_of(s.energy - g), 0.0)
+    bad = bad + report("lj_energy_minus_half_var", variance_of(s.energy - 0.5 * g), 0.00010695445106616713)
+    let l = lj_local(eps, r)
+    bad = bad + report("lj_local_force_var", variance_of(l.force), 0.34260474080287223)
+    let c = lj_cut(eps, r, 2)
+    bad = bad + report("lj_cut2_energy_var", variance_of(c.energy), 0.00042543306632924729)
+    bad = bad + report("lj_cut2_force_var", variance_of(c.force), 0.34368875484758082)
+
+    let nz = noisy(eps)
+    bad = bad + report("noisy_energy_var", variance_of(nz.energy), 0.0025850225000000004)
+    bad = bad + report("noisy_force_var", variance_of(nz.force), 0.0025000000000000005)
+
+    let mx = measure(0.8, uncertainty: 0.01)
+    let my = measure(0.5, uncertainty: 0.02)
+    let mz = measure(0.6, uncertainty: 0.015)
+    let mq = measure(0.9, uncertainty: 0.03)
+    let a = Atom { pos: Vec3 { x: mx.value, y: my.value, z: mz.value }, q: mq.value }
+    let p1 = site_phi(a)
+    bad = bad + report("site_phi_var", variance_of(p1), 0.00097341198980140532)
+    let p2 = site_phi_ref(&a)
+    bad = bad + report("site_phi_ref_var", variance_of(p2), 0.00097341198980140532)
+    let p3 = a.phi()
+    bad = bad + report("site_phi_self_var", variance_of(p3), 0.00097341198980140532)
+    let se = site_ef(a)
+    bad = bad + report("site_ef_energy_var", variance_of(se.energy), 0.00097341198980140532)
+    bad = bad + report("site_ef_force_var", variance_of(se.force), 0.00037981143919824361)
+    bad = bad + report("site_ef_sum_var", variance_of(se.energy + se.force), 0.0025084733580541582)
+    bad = bad + report("site_ef_minus_same_var", variance_of(se.energy - p1), 0.0)
+
+    if bad == 0 {
+        print("GUM_FO_TANGENT_CLONE_STRUCT_RETURNS_OK\n")
+        return 0
+    }
+    1
+}

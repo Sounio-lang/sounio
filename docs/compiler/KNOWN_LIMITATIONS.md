@@ -36,7 +36,7 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 | Rung | Scope | Engine |
 |---|---|---|
 | KL-9 | seed: #1494 imported-module typecheck errors non-fatal | lean_single |
-| KL-11 | #1792 first-order / variance across user calls (pow FO closed) | madaros |
+| KL-11 | #1792 first-order / variance across user calls (pow FO closed; f64-returning helpers with any body closed by tangent clones, first and second order, also through function-typed parameters, 2026-11-15) | madaros |
 | KL-14 | FFI: 14a–14d3 CLOSED | madaros |
 | KL-15 | `f256` surface (15a softfloat add/sub partial), `Knowledge<f128>`/GUM | madaros |
 | KL-16 | Hessian Tier-4 (16a–16f CLOSED; residual H-multi/non-H00 if/a64 atan2) | lean_single |
@@ -73,6 +73,169 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 
 ### KL-11 — #1792: first-order channels do not cross user calls
 
+- **Closed for `f64`-returning helpers with any body (tangent clones,
+  2026-11-15).** A function with an `f64` return and `f64`, `Knowledge`,
+  integer or bool parameters (at most 15, no receiver, no epistemic query in
+  its body) is called from an `Epistemic` function through a clone,
+  `<name>__fotan`. The clone writes the run-time Jacobian row `∂f/∂p_k`, plus
+  the variance of measurements made inside the call, to a hidden caller-owned
+  out-array. The caller applies the chain rule on its own channels
+  (`TgNode`, `tg_lower_call`, `tg_call_variance` in `self-hosted/ir/lower.sio`).
+  `var` reassignment, loops, early `return`, recursion, nested helper calls,
+  measurements inside the call and imported callees all carry the channel,
+  and correlation with the caller's other uses of the same input is kept.
+  Pin: `tests/run-pass/gum_fo_tangent_clone_calls.sio`, which checks nine
+  values against `tests/oracles/gum_fo_tangent_clone_calls.cpp` at 1e-12.
+  Struct parameters (by value or by reference) and methods (`self`,
+  `self: &T`) carry one tangent per scalar `f64` field. The argument has to
+  name a local (`p`, `&p`); pin:
+  `tests/run-pass/gum_fo_tangent_clone_structs.sio`.
+  Struct returns (`fn f(..) -> S`, scalar `f64` fields of `S` read after a
+  `let r = f(..)`: the clone writes one Jacobian row per field, the caller
+  chain-rules each) and nested struct fields (`p.pos.x`, `self.pos.x`, depth
+  up to 3, at most 32 tangents) are covered too; pin:
+  `tests/run-pass/gum_fo_tangent_clone_struct_returns.sio`. A struct return
+  needs every return to be a struct literal or a local and no field
+  assignment or `var` struct in the body.
+  Second order is closed the same way (2026-11-15, hyper-dual clones). A
+  function that calls `hessian_of` or `second_order_mean` calls such a helper
+  through `<name>__fotan2`: the helper lowered with second order on, writing
+  the Hessian of its result over its tangents after the gradient row. The
+  caller applies `H = sum_k J_k H(a_k) + sum_kl Hf_kl g_k g_l^T`. Loops,
+  reassigned `var`s, early returns, recursion, mixed partials between two
+  measured inputs, composed arguments, struct and `self` tangents and
+  correlation with the caller's other uses of the input are exact (pins:
+  `tests/run-pass/gum_fo_tangent_clone_second_order_on.sio`,
+  `tests/run-pass/gum_so_hyperdual_clones.sio`, oracle
+  `tests/oracles/gum_so_hyperdual_clones.cpp`, 1e-10 relative).
+  Wide second order (2026-11-15). The second-order tables cover all 32
+  channels (528 Hessian slots, column-major upper triangle, so a row of
+  `n` channels is the prefix of a wider one), 128 bound locals carry Hessian
+  rows, and the declared correlation matrix is 32 x 32 (it was 8 x 8, so a
+  `correlate` between channels above 7 was dropped). `hessian_of(r, j, k)`
+  accepts `j`, `k` below 32. A call with nine and with twelve tangents
+  returns its exact Hessian (`nine_h*`, `twelve_h*` in
+  `tests/run-pass/gum_so_hyperdual_clones.sio`, replacing the NaN that
+  `nine_tangents_nan` pinned), and 32 measured quantities in one expression
+  carry exactly (`tests/run-pass/gum_so_32_channels.sio`, oracle
+  `tests/oracles/gum_so_32_channels.cpp`). A callee takes up to 32 tangents
+  (it was 24).
+  A measurement made inside a second-order callee is exact. Its channels sit
+  above the tangents, so the Hessian over the tangents is unchanged; the clone
+  also writes the internal curvature term `sum_m H_mm sigma_m^2` in one extra
+  out slot, and the caller adds it as a curvature-only channel (no
+  sensitivity, sigma^2 = 1, `H_dd` = the term). `second_order_mean` reads
+  `1/2 H_dd`, and a later call's chain rule carries it on, including where the
+  callee is stationary in its measurement (internal variance 0, all of the
+  contribution curvature) and where the callee calls a drawing callee (pins
+  `draw1_*`, `draw2_*`, `draw3_*` in `gum_so_hyperdual_clones.sio`).
+  `hessian_of(f(x), j, k)` and `second_order_mean(f(x))` whose call occurs
+  only inside the query emit the clone call inside the query lowering, for an
+  IO callee as well: a query argument is evaluated once, like any call
+  argument, and `second_order_mean` now lowers its value before the walk so
+  the walk reuses that call (the side effect happens exactly once and the
+  value is exact; pin `io_query_only_*`).
+  A `var` declared before the first `measure` (#3547) gets its private
+  sensitivity, Hessian and variance slots as soon as a channel exists in the
+  block it was declared in, so a loop-carried update, a nested loop and a
+  branch through it are exact (pins `late_loop_*`, `late_nested_*`,
+  `late_branch_*` in `gum_so_hyperdual_clones.sio`). Before, variance_of read
+  19.71 where the value is 59.13 and the Hessian read 0.
+  A `correlate` between two quantities measured inside a callee is carried
+  exactly, at first and second order (2026-11-15). A callee containing
+  `correlate` is no longer kept out of the clone registry; `tg_store_row`
+  adds the cross terms `2 J_i J_j rho_ij sigma_i sigma_j` to the internal
+  variance and `2 H_ij rho_ij sigma_i sigma_j` to the curvature term (whose
+  half is the mean term), for each internal pair with a declared correlation,
+  so the clone is no longer skipped and the callee's own uncertainty no longer
+  reads 0 or short when the argument is certain. Pins `corr_*` in
+  `tests/run-pass/gum_so_hyperdual_clones.sio` (oracle
+  `tests/oracles/gum_so_hyperdual_clones.cpp`, 1e-10 relative): uncertain and
+  certain argument, first-order-only and second-order queries, positive and
+  negative rho, and a callee that calls the correlating callee. A
+  `correlate` with an operand that is not `<measure local>.value` (a
+  parameter, a value derived from one), here or in a cloned callee, is refused
+  with the same diagnostic (pin
+  `tests/compile-fail/gum_refuse_correlate_param_in_callee.sio`); before it was
+  dropped without a diagnostic.
+  A call with no tangent clone to a function that can draw a measurement,
+  directly or through what it calls, is refused when its result reaches a
+  query, whatever its arguments (`tg_unreg_draws_call`, and `tg_unreg_reach`
+  for a cloned callee that calls such a function; pin
+  `tests/compile-fail/gum_refuse_unregistered_drawing_callee.sio`). The scan
+  follows method calls (a call site resolves the impl method through the
+  receiver type; inside a body, by the method's short name, over every impl
+  method of that name) and `Type::f` paths, and treats a call through a
+  parameter, a non-closure local or a computed callee as able to draw unless
+  the function is a HOF the specialisation resolves (pins
+  `gum_refuse_unregistered_drawing_{method,fnptr,closure}.sio`;
+  `tests/run-pass/gum_method_no_measure_exact.sio` keeps a method without a
+  measure exact). Before,
+  a callee that asks for an uncertainty and measures inside itself, called with
+  certain arguments, read variance 0.
+  Struct returns that hold a struct field (`Site { pos: Vec3, e: f64 }`, read
+  as `r.pos.x`), and struct results used without a `let` (`f(x).energy`,
+  `f(x).pos.x`, `g(f(x))` with `g` taking the struct by value), are exact too:
+  the call is recorded in the value path and each field row is chain-ruled
+  where the field-access walk reads it. With second order on, a struct return
+  goes through a hyper-dual clone with one Hessian block and one internal
+  curvature term per output field (up to 32 tangents; a measurement inside
+  the call adds its curvature as a curvature-only channel per field, and a
+  `correlate` between two such measurements is exported with them), so
+  `hessian_of(r.energy, j, k)` and `second_order_mean(r.energy)` are exact. Pin:
+  `tests/run-pass/gum_fo_tangent_clone_struct_returns2.sio`, oracle
+  `tests/oracles/gum_fo_tangent_clone_struct_returns2.cpp` (1e-12 first order,
+  1e-10 second order).
+  A measurement made inside a struct-returning call that feeds two output
+  fields keeps their covariance: the clone exports each internal measurement
+  once (its sigma^2 and one sensitivity per field) and the caller makes one
+  shared channel for it (`Var(p.u - p.w)` for `u = eps*m`, `w = m` reads
+  `m^2 ue^2 + (eps-1)^2 um^2`). A struct return with more than four such
+  measurements is refused at compile time
+  (`tests/compile-fail/gum_refuse_struct_return_internal_cap.sio`).
+  The struct rows are second-order exact with up to 32 tangents and 32
+  channels (a row is `nf + 1` slots, then at second order the Hessian over the
+  tangents in the 528-slot layout and the row's internal curvature term), also
+  when the callee measures inside itself: each internal measurement is one
+  shared channel across the fields, each field's internal curvature a
+  curvature-only channel, and a `correlate` between two internal measurements
+  is exported with them (pin `tests/run-pass/gum_so_struct_return_internal.sio`,
+  oracle `tests/oracles/gum_so_struct_return_internal.cpp`, 1e-10 relative).
+  A call to a higher-order helper whose function argument the specialisation
+  resolves carries the callee's own measurements (pin
+  `tests/run-pass/gum_fo_hof_drawing_fnptr_exact.sio`); one it cannot resolve
+  (a function chosen at run time, a closure) and that can draw is refused (pins
+  `tests/compile-fail/gum_refuse_unregistered_drawing_{fnptr,closure}.sio`).
+  Higher-order calls are closed the same way (2026-11-15). A function with
+  function-typed parameters (`fn apply1(f: fn(f64) -> f64 with Mut, Div, x:
+  f64) -> f64`) is cloned once per tuple of function arguments,
+  `apply1__fotan_dbl_s<n>` (and `__fotan2_..` with second order on): inside
+  the clone `f(x)` is a direct call to `dbl`, which goes through its own
+  clone, so the chain rule nests. The argument is resolved at compile time: a
+  named function, a `let` alias of one, or a function parameter of an
+  enclosing specialised clone (forwarding through any depth). Two function
+  parameters, a loop calling the parameter, one HOF at several call sites
+  with different functions, binary function arguments, the product and
+  quotient rules over such a call, `variance_of`, `covariance_of` and
+  `hessian_of` with the call written inside the query, and correlation with
+  the caller's other uses of the input are exact (pin:
+  `tests/run-pass/gum_fo_tangent_clone_hof.sio`, oracle
+  `tests/oracles/gum_fo_tangent_clone_hof.cpp`, 1e-12 first order, 1e-10
+  second order). A function argument that is only known at run time (chosen
+  by an `if`) cannot be specialised and the query is refused at compile time
+  (pin: `tests/compile-fail/gum_refuse_uncovered_call_zero.sio`).
+  A query whose answer depends on a call the compiler cannot differentiate is
+  refused at compile time rather than answered 0 (see the refusal entry
+  below).
+  A query is refused at compile time, never answered 0 or short, when it reads
+  a measured quantity beyond the 32-slot channel table (pin
+  `tests/compile-fail/gum_refuse_uncovered_hessian.sio`; before, the 33rd
+  quantity's variance and curvature were silently left out), when it reads a
+  `var` declared before the first `measure` whose loop-carried update could
+  not be given slots because the first `measure` sat in a nested block (pin
+  `tests/compile-fail/gum_refuse_late_var_nested_measure.sio`), and, as
+  before, when it reaches a call the compiler cannot differentiate (pin
+  `tests/compile-fail/gum_refuse_uncovered_call_zero.sio`).
 - **Narrowed (#1706, 2026-10-13).** A call to a *pure helper* (an `f64`
   return, or a struct return when a field of the call is read; `f64`, integer
   or bool parameters, struct parameters by value or by reference whose
@@ -117,8 +280,7 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   `ir_register_knowledge_layout` now tags it `1`. The two call-boundary pins pass on Madaros (measured 2026-10-15):
   `tests/run-pass/gum_fo_across_call.sio` prints `CALL_var 0.002117` against
   its oracle, and `tests/run-pass/fo_call_boundary_arity3.sio` prints
-  `id3_var 1.000000`. Neither file carries `//@ known-failure`. What stays
-  open is the list above. Re-measured 2026-09-22: the specific
+  `id3_var 1.000000`. Neither file carries `//@ known-failure`. Re-measured 2026-09-22: the specific
   `rapamycin_epistemic_adaptive` witness (F1) now reports non-zero variance
   too, and the accompanying test change is `b2df0727` (2026-09-18) — but that
   commit touches only the test fixture and its recorded gate/dataset
@@ -136,13 +298,14 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 - Locus: `ir/lower.sio` Knowledge layout / `variance_*_regs` / `pending_variance_reg`.
   Audit: `docs/audit/EPISTEMIC_FABRICATION_DETECT_2026-08-17.md`,
   `docs/audit/MADAROS_FO_CALL_BOUNDARY_DISPATCH_2026-08-18.md`.
-- **`pow` FO / Hessian transfer — CLOSED (KL-11 partial, 2026-09-12).**
+- **`pow` FO / Hessian transfer — CLOSED (KL-11 partial, 2026-09-12; mixed exponent 2026-10-31).**
   `fo_xfer_seed_transcendentals` registers `pow` as kind 9; `fo_apply_transfer_kind`
-  emits `∂/∂x`, `∂²/∂x²`, and first-order `∂/∂y` when the exponent carries
-  sensitivity. Witness: `tests/run-pass/kl11_pow_fo_hessian.sio`
-  (`hessian_of(pow(x, 3.0), 0, 0)` at `x=0.5` → `3.0`). Pin:
-  `scripts/ci/madaros_kl11_pow_fo_gate.sh`. Mixed Hessian in the exponent, and
-  FO across arbitrary user `fn` bodies, remain open.
+  emits `∂/∂x`, `∂²/∂x²`, first-order `∂/∂y`, `∂²/∂y²`, and the mixed `∂²/∂x∂y`.
+  Witnesses: `tests/run-pass/kl11_pow_fo_hessian.sio`
+  (`hessian_of(pow(x, 3.0), 0, 0)` at `x=0.5` → `3.0`) and
+  `tests/run-pass/kl11_pow_mixed_hessian.sio` (at `x=2`, `y=3`:
+  `Hxx=12`, `Hxy=x^(y-1)*(1+y*ln x)`, `Hyy=x^y*(ln x)^2`). Pin:
+  `scripts/ci/madaros_kl11_pow_fo_gate.sh`. 
 
 
 ### KL-13 — derived units and unit loss (#2388) — CLOSED
@@ -430,6 +593,18 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
     (`stdlib/str/lib.sio`'s `pub fn str_eq(a: &Str, b: &Str)` received two
     string handles). Both names are on the shadow list now, so the user fn is
     `<name>__user` and the operator keeps the runtime.
+  - **Native float builtins (2026-11-16).** `sqrt`, `exp`, `log`, `sin`,
+    `cos` and `pow` are not intercepted by the checker or the lowerer; the
+    native backend binds a call to whichever IR function of that name has a
+    body, and the merged IR is keyed by bare name. So a `fn sqrt` anywhere in
+    the module closure (56 private and 2 pub ones exist in the tree) became
+    THE sqrt of the program: modules that never imported it, and the
+    lowerer's own GUM / meet arithmetic, ran its body; `use pb::m::{fb}`
+    printed `sqrt(4.0) = 104` for a `pb::m` with `pub fn sqrt(x) { x + 100 }`,
+    and `use math::pure::{exp}` alone made a bare `sqrt` require Panic (E035).
+    The six names are on the shadow list now. Pin:
+    `scripts/ci/madaros_builtin_math_shadow_gate.sh`
+    (`tests/multimodule/builtin_math_shadow/`).
 - Pins: `tests/run-pass/user_fn_shadows_builtin_measure.sio`,
   `tests/run-pass/user_print_f64_does_not_capture_println.sio`,
   `tests/run-pass/user_str_eq_does_not_capture_string_eq.sio`,

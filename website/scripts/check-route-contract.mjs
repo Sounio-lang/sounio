@@ -22,14 +22,12 @@ const requiredRoutes = [
 ];
 
 const redirectContracts = [
-  { file: 'src/pages/showcases/[slug].astro', needle: '/science/' },
   { file: 'src/pages/registry/index.astro', needle: '/packages/' },
   { file: 'src/pages/registry/[name].astro', needle: '/packages/' },
   { file: 'src/pages/blog/index.astro', needle: '/insights/' },
   { file: 'src/pages/manifesto.astro', needle: '/about/vision/' },
   { file: 'src/pages/roadmap.astro', needle: '/about/roadmap/' },
   { file: 'src/pages/changelog.astro', needle: '/releases/' },
-  { file: 'src/pages/[lang]/showcases/[slug].astro', needle: '/science/' },
   { file: 'src/pages/[lang]/registry/index.astro', needle: '/packages/' },
   { file: 'src/pages/[lang]/registry/[name].astro', needle: '/packages/' },
   { file: 'src/pages/[lang]/blog/index.astro', needle: '/insights/' },
@@ -43,6 +41,8 @@ const removedMetaRefresh = [
   'src/pages/docs/[...slug].astro',
   'src/pages/[lang]/docs/index.astro',
   'src/pages/[lang]/docs/[...slug].astro',
+  'src/pages/showcases/[slug].astro',
+  'src/pages/[lang]/showcases/[slug].astro',
 ];
 
 async function exists(rel) {
@@ -65,7 +65,7 @@ async function run() {
 
   for (const file of removedMetaRefresh) {
     if (await exists(file)) {
-      errors.push(`Docs meta-refresh page must stay deleted (use vercel.json routes): ${file}`);
+      errors.push(`Meta-refresh page must stay deleted (use vercel.json routes): ${file}`);
     }
   }
 

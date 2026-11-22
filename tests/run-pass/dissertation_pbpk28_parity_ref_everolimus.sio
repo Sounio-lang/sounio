@@ -1,0 +1,105 @@
+//@ run-pass
+//@ timeout: 120
+// ============================================================================
+// DISSERTATION PBPK28 PARITY REFERENCE — EVEROLIMUS (SIO-524)
+//
+// XIENCE V drug-eluting stent: 100 ug/cm^2 fluoropolymer, canonical device
+// 3.0 x 18 mm = 0.088 mg everolimus, ~80% eluted by 30 days. Higuchi release
+// Q(t) = KH*sqrt(t), KH = 0.00262 mg/h^1/2 (80% of 0.088 mg at t = 720 h).
+// Systemic sink CL = 8.8 L/h (transplant popPK, FDA Zortress label 2024).
+// No renal clearance of parent is modeled (proteolytic/CYP3A clearance;
+// parent is the main circulating component).
+//
+// This ref runs the stdlib scenario ITSELF
+// (scenarios/everolimus_des.sio): its step, its release law, its params.
+// It holds no copy of the model (venlafaxine pattern). The companion is
+// website/src/lib/pbpk28_core.mjs (DEFAULT_PARAMS_EVEROLIMUS) and the gate
+// case at scripts/ci/dissertation_pbpk28_parity_gate.sh.
+//
+// PK only: arterial-wall concentration (therapeutic site) is NOT modeled —
+// declared limitation, SIO-524 follow-up. Stent input enters blood directly
+// (no first-pass).
+//
+// Integrator: fully-coupled CN on the 27-state arrow matrix, dt = 0.001,
+// release rate at the step midpoint (clipped at t < 0.1 h like Node).
+// ============================================================================
+
+use darwin_pbpk::core::pbpk28_params::*
+use darwin_pbpk::tsit5_pbpk28::*
+use darwin_pbpk::scenarios::everolimus_des::*
+use io::sci_print::*
+
+fn emit_at(scen: EverolimusScenario, p: PBPKParams28, t: f64, rel_cum: f64) with IO, Mut, Div {
+    var i = 0
+    while i < 14 {
+        print("PARITY|t=")
+        println(t)
+        println("")
+        print("PARITY|i=")
+        println(i)
+        print("PARITY|cv=")
+        println_f64_sci(scen.pbpk.cv[i], 10)
+        print("PARITY|ct=")
+        println_f64_sci(scen.pbpk.ct[i], 10)
+        print("PARITY|cavg=")
+        println_f64_sci(pbpk28_organ_average(scen.pbpk, p, i), 10)
+        i = i + 1
+    }
+    print("TMASS|t=")
+    println(t)
+    println("")
+    print("TMASS|m=")
+    println(pbpk28_total_mass(scen.pbpk, p))
+    println("")
+    print("TREL|t=")
+    println(t)
+    println("")
+    print("TREL|cum=")
+    println(rel_cum)
+    println("")
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("DISSERTATION_PBPK28_EVEROLIMUS_PARITY_REF v1")
+    println("compartments=14")
+    println("states=28")
+    println("dt=0.001")
+    println("dose_mg=0.088")
+    println("release=stent_higuchi_KH_0.00262")
+    println("cl_hep_L_per_h=8.8")
+    println("integrator=fully_coupled_CN_27state")
+    println("drug=everolimus")
+    println("samples=12")
+
+    let p = evr_pbpk28_params()
+    var scen = evr_scenario_init()
+    let dt = 0.001
+    var t = 0.0
+    var rel_cum = 0.0
+
+    var s = 0
+    while s < 12 {
+        var target = 0.1
+        if s == 1 { target = 0.5 }
+        if s == 2 { target = 1.0 }
+        if s == 3 { target = 2.0 }
+        if s == 4 { target = 4.0 }
+        if s == 5 { target = 6.0 }
+        if s == 6 { target = 8.0 }
+        if s == 7 { target = 12.0 }
+        if s == 8 { target = 16.0 }
+        if s == 9 { target = 20.0 }
+        if s == 10 { target = 24.0 }
+        if s == 11 { target = 30.0 }
+        while t + dt * 0.5 < target {
+            rel_cum = rel_cum + evr_release_rate_at(t + 0.5 * dt) * dt
+            scen = evr_step(scen, p, t, dt)
+            t = t + dt
+        }
+        emit_at(scen, p, t, rel_cum)
+        s = s + 1
+    }
+
+    println("DISSERTATION_PBPK28_EVEROLIMUS_PARITY_DONE")
+    return 0
+}

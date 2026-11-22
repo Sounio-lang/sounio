@@ -1,0 +1,191 @@
+// examples/molecular/h2_sii_epistemic.sio -- the H2 content of the sII hydrate as
+// Knowledge: grand-canonical Monte Carlo (molecular::host_guest, full guest-guest
+// interaction) for three water models, with two sources of uncertainty carried by
+// GUM channels:
+//   - the H2 Lennard-Jones parameters, shared by all three water models: the
+//     covariance of four published one-site sets (Buch 34.2 K / 2.96 A;
+//     Hirschfelder 33.3 / 2.968, 38.0 / 2.915, 37.0 / 2.928), centred on Buch and
+//     written as two unit latent channels z1, z2 (Cholesky):
+//       eps_H = 34.2 + 2.2336 z1,   sig_H = 2.96 - 0.025291 z1 + 0.0011265 z2;
+//     the occupancy responds through its fluctuation sensitivities,
+//     N(z) = N + (dN/deps_H) d eps_H + (dN/dsig_H) d sig_H;
+//   - the Monte Carlo error of each run, its own channel per model.
+// Because z1, z2 are the same channels in every model, variance_of a difference
+// between two water models keeps only what does not cancel.
+//
+// PREDICTIONS, WRITTEN BEFORE THE RUN, from the C++ GCMC of the same model
+// (gcmc_g.cpp, 4e6 trials per point; the shared and independent figures follow from
+// its gradients):
+//   200 K, 300 MPa:  N(SPC/E) = 31.82, N(TIP4P/Ice) = 33.08, N(TIP5P) = 32.35 per cell;
+//                    u_H2(N) = 0.70 for each (about 2.2%);
+//                    TIP4P/Ice - SPC/E = 1.26 with u_H2 shared 0.008 (independent: 0.99);
+//                    TIP5P - SPC/E = 0.52 with u_H2 shared 0.011 (independent: 0.99).
+// PASS RULE: each N within 3 combined standard errors (this run, the C++ run) of the
+// prediction; for each difference, the H2 part of its standard uncertainty is below
+// one tenth of what independent treatment gives, and the difference exceeds three of
+// its standard uncertainties (statistical and H2 together).
+
+use molecular::lj::{mol_seed}
+use molecular::host_guest::*
+
+fn ae(a: f64, b: f64) -> f64 { if a > b { a - b } else { b - a } }
+
+// One GCMC run; returns (mean N per cell, its standard error, dN/deps_H, dN/dsig_H)
+// for the total occupancy, from 20 blocks.
+fn run_model(eps_o: f64, sig_o: f64, tk: f64, f_mpa: f64, steps: i64, seed: i64) -> (f64, f64, f64, f64) with Mut, Div, Panic {
+    let a = 17.31
+    var frac: [f64; 12288] = [0.0; 12288]
+    let no = hg_sii_oxygens(&!frac, 0.21796, 0.18198, 0.37081)
+    var host: [f64; 12288] = [0.0; 12288]
+    let nh = hg_replicate(&!host, &frac, no, a, 12.0)
+    var cen: [f64; 192] = [0.0; 192]
+    let nc = hg_sii_cages(&!cen, a)
+    let ncell = hg_build_cells(&host, nh, a, 12.0, 8)
+    let lam = 1.00263768431755956 / tk
+    let v = a * a * a
+    let sys = HgSys {
+        l: a, t: tk, eps: sqrt(eps_o * 34.2), sig: 0.5 * (sig_o + 2.96), eps_h: 34.2, sig_h: 2.96,
+        lam: lam, lam2: 2.0 * lam, cut: 12.0, rho: 136.0 / v, rc2: 8.655 * 8.655,
+        bfv: f_mpa * 1.0e-24 * v / (1.380649e-23 * tk), mode: 1, nh: nh, nc: nc, step: 0.6,
+    }
+    mol_seed(seed)
+    var pos: [f64; 3072] = [0.0; 3072]
+    var cage: [i64; 1024] = [0; 1024]
+    var wf: [f64; 1024] = [0.0; 1024]
+    var n: i64 = 0
+    var s: i64 = 0
+    while s < steps / 10 {
+        n = hg_trial(&sys, &host, &cen, &!pos, &!cage, &!wf, n)
+        s = s + 1
+    }
+    let nb: i64 = 20
+    let per = steps / nb
+    let beta = 1.0 / tk
+    var m1 = 0.0
+    var m2 = 0.0
+    var ge_sum = 0.0
+    var gs_sum = 0.0
+    var b: i64 = 0
+    while b < nb {
+        var cn = 0.0
+        var sn = 0.0
+        var cg = 0.0
+        var gn = 0.0
+        var ue = 0.0
+        var us = 0.0
+        var nue = 0.0
+        var nus = 0.0
+        var k: i64 = 0
+        while k < per {
+            n = hg_trial(&sys, &host, &cen, &!pos, &!cage, &!wf, n)
+            if k % 10 == 0 {
+                sn = sn + (n as f64)
+                cn = cn + 1.0
+                if k % 100 == 0 {
+                    let (ge, gs) = hg_config_grad(&sys, &host, &pos, &cage, n)
+                    cg = cg + 1.0
+                    gn = gn + (n as f64)
+                    ue = ue + ge
+                    us = us + gs
+                    nue = nue + (n as f64) * ge
+                    nus = nus + (n as f64) * gs
+                }
+            }
+            k = k + 1
+        }
+        let bm = sn / cn
+        m1 = m1 + bm
+        m2 = m2 + bm * bm
+        let mn = gn / cg
+        ge_sum = ge_sum + (0.0 - beta * (nue / cg - mn * ue / cg))
+        gs_sum = gs_sum + (0.0 - beta * (nus / cg - mn * us / cg))
+        b = b + 1
+    }
+    let mean = m1 / (nb as f64)
+    let var_b = (m2 / (nb as f64) - mean * mean) * (nb as f64) / ((nb - 1) as f64)
+    (mean, sqrt(var_b / (nb as f64)), ge_sum / (nb as f64), gs_sum / (nb as f64))
+}
+
+fn verdict_n(name: string, got: f64, err: f64, want: f64, werr: f64) -> i64 with IO, Mut, Div, Panic {
+    print(name)
+    print(" N = ")
+    print_f64(got)
+    print(" +- ")
+    print_f64(err)
+    print(" (MC)  predicted ")
+    print_f64(want)
+    if ae(got, want) <= 3.0 * sqrt(err * err + werr * werr) {
+        print("  ok\n")
+        return 0
+    }
+    print("  FAIL\n")
+    1
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic, Epistemic {
+    let ca = 2.23364425696364341
+    let cb = 0.0 - 2.52912550826065453e-02
+    let cd = 1.12653584638716957e-03
+    // the shared H2 channels
+    let kz1 = measure(0.0, uncertainty: 1.0)
+    let kz2 = measure(0.0, uncertainty: 1.0)
+    let z1 = kz1.value
+    let z2 = kz2.value
+    let (n0, e0, ge0, gs0) = run_model(78.20, 3.166, 200.0, 300.0, 4000000, 71)
+    let (n1, e1, ge1, gs1) = run_model(106.1, 3.1668, 200.0, 300.0, 4000000, 72)
+    let (n2, e2, ge2, gs2) = run_model(80.51, 3.12, 200.0, 300.0, 4000000, 73)
+    // each run's Monte Carlo error is its own channel
+    let km0 = measure(0.0, uncertainty: e0)
+    let km1 = measure(0.0, uncertainty: e1)
+    let km2 = measure(0.0, uncertainty: e2)
+    let spce = n0 + km0.value + (ge0 * ca + gs0 * cb) * z1 + gs0 * cd * z2
+    let tip4 = n1 + km1.value + (ge1 * ca + gs1 * cb) * z1 + gs1 * cd * z2
+    let tip5 = n2 + km2.value + (ge2 * ca + gs2 * cb) * z1 + gs2 * cd * z2
+    var bad: i64 = 0
+    bad = bad + verdict_n("SPC/E    ", n0, e0, 31.820, 0.038)
+    bad = bad + verdict_n("TIP4P/Ice", n1, e1, 33.080, 0.058)
+    bad = bad + verdict_n("TIP5P    ", n2, e2, 32.345, 0.061)
+    print("u(N) with H2 and MC:  SPC/E ")
+    print_f64(sqrt(variance_of(spce)))
+    print("  TIP4P/Ice ")
+    print_f64(sqrt(variance_of(tip4)))
+    print("  TIP5P ")
+    print_f64(sqrt(variance_of(tip5)))
+    print("\n")
+    // differences: GUM keeps the shared H2 channels correlated
+    let d41 = tip4 - spce
+    let d51 = tip5 - spce
+    let u41 = sqrt(variance_of(d41))
+    let u51 = sqrt(variance_of(d51))
+    // the H2 part alone, and what independent H2 parameters would give
+    let h41 = sqrt(variance_of(d41) - e1 * e1 - e0 * e0)
+    let h51 = sqrt(variance_of(d51) - e2 * e2 - e0 * e0)
+    let hind41 = sqrt(variance_of(tip4) - e1 * e1 + variance_of(spce) - e0 * e0)
+    let hind51 = sqrt(variance_of(tip5) - e2 * e2 + variance_of(spce) - e0 * e0)
+    print("TIP4P/Ice - SPC/E = ")
+    print_f64(d41)
+    print(" +- ")
+    print_f64(u41)
+    print("   H2 part shared ")
+    print_f64(h41)
+    print(" vs independent ")
+    print_f64(hind41)
+    print("\n")
+    print("TIP5P - SPC/E     = ")
+    print_f64(d51)
+    print(" +- ")
+    print_f64(u51)
+    print("   H2 part shared ")
+    print_f64(h51)
+    print(" vs independent ")
+    print_f64(hind51)
+    print("\n")
+    if !(h41 < 0.1 * hind41 && h51 < 0.1 * hind51) { print("FAIL: the shared H2 term did not cancel\n"); bad = bad + 1 }
+    if !(d41 > 3.0 * u41 && d51 > 3.0 * u51) { print("FAIL: a difference is not resolved\n"); bad = bad + 1 }
+    if bad != 0 {
+        print("H2_SII_EPISTEMIC_FAIL\n")
+        return 1
+    }
+    print("H2_SII_EPISTEMIC_OK\n")
+    0
+}

@@ -1,0 +1,149 @@
+// darwin_pbpk/drugs/fentanyl.sio — Fentanyl on PBPK28: adult 70 kg anchor and a
+// weight-scaled pediatric variant with an explicit clearance multiplier.
+// Library, no main.
+//
+// Ported from the sedation-weaning study module (Sounio-lang/sounio-pbpk-
+// sedation-weaning, src/drugs/fentanyl.sio, "Uncertainty-quantified PBPK modeling
+// of opioid weaning in critically ill children", Agourakis DC 2026), which no
+// longer compiles against this stdlib (it imports core::pbpk28_bridge and
+// core::pbpk_params14, neither of which exists here). This port builds
+// PBPKParams28 directly, drops the PBPK14 path, and replaces the source's
+// fentanyl_vss_kp_l70 (a naive sum of Kp*V, which is not a distribution volume)
+// with the proper steady-state volume fentanyl_vss_of below.
+//
+// Pharmacological identity
+//   Lipophilic weak base (pKa 8.43, logP 4.05, MW 336.5), mu-opioid agonist.
+//   fu = 0.208, B/P = 0.87. CL total 55 L/h (0.79 L/h/kg), mid-range of the
+//   intravenous healthy-volunteer data of McClain & Hug 1980 (Clin Pharmacol
+//   Ther 28:106, doi 10.1038/clpt.1980.138; ~0.78-0.80 L/h/kg as carried by the
+//   source module). ~93 % hepatic (CYP3A4 N-dealkylation to norfentanyl), ~7 %
+//   renal unchanged (PubMed-checked: < 8 % of the dose is recovered as unchanged
+//   fentanyl, McClain & Hug 1980; ~7 % urine and ~33 % norfentanyl, Kovar 2020,
+//   doi 10.3390/pharmaceutics12100908).
+//
+// Distribution regime. Every exchanging organ carries PS = 10 * Q (permeation
+// ten times faster than delivery, i.e. near flow-limited), the rule of the source
+// module for this lipophilic drug. This differs from morphine (PS = 0.5 * Q,
+// permeability-limited) and is a property of the drug, not an inconsistency.
+// Because lipophilic tissues load slowly through their small perfusion, the
+// slow adipose phase (V_adipose,eff ~ 229 L perfused at 10 L/h) governs the
+// terminal slope (measured terminal t1/2 21.0 h, see limitation 1).
+//
+// Declared limitations (kept visible, not tuned away)
+//   1. Distribution volume. With the Kp set below V_ss is 510.2 L (7.29 L/kg),
+//      MRT = V_ss/CL = 9.28 h. Reported by tests/run-pass/darwin_fentanyl_pbpk28.sio
+//      against the terminal half-life of McClain & Hug 1980 (219 min, verified
+//      in PubMed): the PBPK28 terminal half-life (slope between 150 and 250 h)
+//      is 21.0 h, 5.8 times longer, because the adipose Kp (12, source
+//      calibration) loads a 20 L depot that drains through 10 L/h of flow. The gap is
+//      reported, not corrected; closing it is a calibration decision (adipose
+//      Kp, volumes). Han 2025 adipose Kp (170.4) is deferred to Knowledge<T>
+//      priors in the source module and is not used here.
+//   2. Clearance acts on blood through cl_central (PBPK28 single-drug
+//      convention), not as a hepatic-organ sink inside the transport.
+//   3. Pediatric variant. Volumes, flows and PS scale linearly with w/70; Kp and
+//      the vascular fractions do not. f_cl multiplies the HEPATIC clearance only
+//      and is an INPUT, not an ontogeny model. A sourced route for it is CYP3A4
+//      maturation (Salem 2014, doi 10.1007/s40262-014-0140-7: adult activity at
+//      ~1.3 y). The renal 7 % is scaled by weight alone (no GFR curve here).
+//   4. Active metabolites are absent (norfentanyl is inactive); no
+//      concentration-dependent binding, no CYP3A4 inhibition (see ddi/).
+//   5. Research parity card (ADR009); no clinical-validity claim and not a
+//      dosing tool.
+//
+// Units: L, L/h, mg/L (= ug/mL). Organ order:
+//   [blood, liver, kidney, brain, heart, lung, muscle, adipose, gut, skin,
+//    bone, spleen, pancreas, other].
+
+use darwin_pbpk::core::pbpk28_params::*
+
+pub fn fentanyl_mw() -> f64 { return 336.5 }
+pub fn fentanyl_fu() -> f64 { return 0.208 }
+pub fn fentanyl_rb() -> f64 { return 0.87 }
+
+// Adult 70 kg totals (L/h). 0.93 hepatic / 0.07 renal.
+pub fn fentanyl_cl_total_adult() -> f64 { return 55.0 }
+pub fn fentanyl_hepatic_fraction() -> f64 { return 0.93 }
+pub fn fentanyl_cl_hepatic_adult() -> f64 { return 51.15 }  // 0.93 * 55
+pub fn fentanyl_cl_renal_adult() -> f64 { return 3.85 }     // 0.07 * 55
+
+// Total clearance (L/h) for body weight w (kg) and a multiplier f_cl on the
+// hepatic part only. f_cl = 1, w = 70 returns the adult 55 L/h.
+pub fn fentanyl_cl_eff_lh(weight: f64, f_cl: f64) -> f64 {
+    let wr = weight / 70.0
+    return wr * (fentanyl_cl_hepatic_adult() * f_cl + fentanyl_cl_renal_adult())
+}
+
+// ─── PBPK28 arrays (70 kg) ──────────────────────────────────────────────────
+pub fn fentanyl_v70() -> [f64; 14] {
+    [5.0, 1.8, 0.31, 1.45, 0.33, 1.1, 28.0, 20.0, 1.2, 3.6, 6.6, 0.18, 0.09, 3.7]
+}
+pub fn fentanyl_q70() -> [f64; 14] {
+    [350.0, 90.0, 74.0, 44.0, 16.0, 350.0, 42.0, 10.0, 55.0, 21.0, 17.0, 10.0, 8.0, 13.0]
+}
+// Kp: lipophilic; muscle and adipose are the large storage sites.
+pub fn fentanyl_kp() -> [f64; 14] {
+    [1.0, 5.0, 5.0, 8.0, 4.0, 5.5, 7.5, 12.0, 6.0, 6.0, 1.2, 3.0, 3.0, 3.0]
+}
+pub fn fentanyl_vasc_frac() -> [f64; 14] {
+    [1.000, 0.210, 0.160, 0.037, 0.262, 0.262, 0.040, 0.050, 0.024, 0.019, 0.041, 0.282, 0.180, 0.050]
+}
+// PS (L/h) = 10 * Q for every exchanging organ (near flow-limited); blood has no
+// tissue layer (0.0).
+pub fn fentanyl_ps70() -> [f64; 14] {
+    [0.0, 900.0, 740.0, 440.0, 160.0, 3500.0, 420.0, 100.0, 550.0, 210.0, 170.0, 100.0, 80.0, 130.0]
+}
+
+pub fn pbpk28_params_fentanyl() -> PBPKParams28 {
+    PBPKParams28 {
+        v_ref:      fentanyl_v70(),
+        vasc_frac:  fentanyl_vasc_frac(),
+        kp:         fentanyl_kp(),
+        ps:         fentanyl_ps70(),
+        q:          fentanyl_q70(),
+        cl_central: fentanyl_cl_total_adult(),
+    }
+}
+
+// Pediatric: volumes, flows and PS scale with w/70; Kp and the vascular
+// fractions do not; cl_central = fentanyl_cl_eff_lh(weight, f_cl).
+pub fn pbpk28_params_fentanyl_ped(weight: f64, f_cl: f64) -> PBPKParams28 with Mut, Div, Panic {
+    let wr = weight / 70.0
+    let b = pbpk28_params_fentanyl()
+    var v = [0.0; 14]
+    var q = [0.0; 14]
+    var ps = [0.0; 14]
+    var i: i32 = 0
+    while i < 14 {
+        v[i] = b.v_ref[i] * wr
+        q[i] = b.q[i] * wr
+        ps[i] = b.ps[i] * wr
+        i = i + 1
+    }
+    PBPKParams28 {
+        v_ref:      v,
+        vasc_frac:  b.vasc_frac,
+        kp:         b.kp,
+        ps:         ps,
+        q:          q,
+        cl_central: fentanyl_cl_eff_lh(weight, f_cl),
+    }
+}
+
+// Steady-state distribution volume of the exchanging model (L):
+//   V_ss = V_b + sum_i V_i * (f_v,i + (1 - f_v,i) * Kp_i)
+// counting an organ's tissue layer only if it is reachable (ps > 0).
+pub fn fentanyl_vss_of(p: PBPKParams28) -> f64 with Mut {
+    var vss = p.v_ref[0]
+    var i: i32 = 1
+    while i < 14 {
+        let fv = p.vasc_frac[i]
+        if p.ps[i] > 0.0 {
+            vss = vss + p.v_ref[i] * (fv + (1.0 - fv) * p.kp[i])
+        } else {
+            vss = vss + p.v_ref[i] * fv
+        }
+        i = i + 1
+    }
+    return vss
+}
