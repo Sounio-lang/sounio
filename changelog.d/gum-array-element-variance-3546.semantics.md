@@ -1,0 +1,1 @@
+Madaros preserves first-order GUM source sensitivities through straight-line stores and loads of local `f64` arrays at literal indices, including shared-source correlation and deterministic overwrites. The measured-array example in issue #3546 now reports variance `0.040000` instead of `0.000000`.

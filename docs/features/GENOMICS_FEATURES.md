@@ -15,7 +15,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.features.genom
 
 # Sounio Genomics Module — Complete Feature Documentation
 
-**Status**: Production-ready | **Version**: 0.100.0+ | **Lines of Code**: 3,600+
+**Status: research language (pre-1.0).** APIs may change; not recommended for production use. This historical note is not that status, and it does not name a compiler version. The module write-up below is about 3,600 lines.
 
 ## Overview
 
@@ -24,7 +24,7 @@ The Sounio genomics module provides a comprehensive, epistemic-aware toolkit for
 ### What's Included
 
 - **10 core stdlib modules** (types, parsers, alignment, variants, expression, ontology, GPU)
-- **3,600+ lines** of production-ready Sio code
+- **3,600+ lines** of Sounio source in this historical note
 - **23 comprehensive stress tests** covering edge cases and extreme numerical scenarios
 - **DeepSeek Math integration** for algorithmic verification
 - **GPU-accelerated kernels** for sequence operations
@@ -494,5 +494,4 @@ See full documentation:
 ---
 
 **Last Updated**: February 3, 2026
-**Sounio Version**: 0.100.0+
-**Status**: Production-ready 🚀
+**Status: research language (pre-1.0).** APIs may change; not recommended for production use. The February 2026 label on this note is not the current project status, and this footer does not name a compiler version.

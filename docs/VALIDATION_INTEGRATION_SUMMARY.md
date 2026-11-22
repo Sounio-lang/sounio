@@ -233,6 +233,5 @@ bash scripts/ci/sounio_validation.sh validate 2>&1 | tee debug.log
 
 ---
 
-**Status**: ✅ Complete and ready for use
-**Last Updated**: $(date -u +'%Y-%m-%d')
-**Integration Level**: Production-ready
+**Status: research language (pre-1.0).** APIs may change; not recommended for production use.
+**Note label:** the checklist above is a historical integration note, not the current project status.

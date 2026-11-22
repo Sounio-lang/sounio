@@ -1,0 +1,156 @@
+import { FORMER_LANGUAGE_NAME } from './structured-data.mjs';
+import { UNCERTAINTY_EN } from './uncertainty-page.mjs';
+
+/**
+ * English <title> and meta description for the pages that Search Console
+ * showed at positions 5–7 with almost no clicks (audit 27 Oct 2026).
+ * Visible headings and localized copy stay where they are; BaseLayout
+ * applies this map only when the page locale is English.
+ *
+ * Lengths are code units, the same count the search-appearance check uses.
+ */
+export const ENGLISH_SEARCH = {
+  '/': {
+    title: 'Sounio, a programming language: units, uncertainty',
+    description:
+      'Metres added to seconds is refused before the program runs, and a Knowledge value carries a standard uncertainty. Sounio 3.0 (pre-release).',
+  },
+  '/learn/': {
+    title: 'Sounio guides: effect system, units, and uncertainty',
+    description:
+      'Language guides for Sounio: units of measure, the effect system, refinement types, uncertainty propagation, and the self-hosted compiler.',
+  },
+  '/learn/getting-started/': {
+    title: 'Sounio getting started: Linux prebuilt or macOS build',
+    description:
+      'Open the Sounio demo Codespace, or clone and run hello.sio. Linux x86-64 uses the committed prebuilt; macOS ARM64 builds from source.',
+  },
+  '/learn/epistemic/': {
+    title: 'Uncertainty propagation types in the Sounio language',
+    description:
+      'Epistemic types treat uncertainty, confidence, and provenance as program data. The guide shows Knowledge values and the checked unwrap boundary.',
+  },
+  '/learn/compiler/self-hosted/': {
+    title: 'Sounio self-hosted compiler: x86-64 ELF without LLVM',
+    description:
+      'The Sounio compiler runs 12 named -O passes and emits a Linux x86-64 ELF, static unless external relocations exist, with no LLVM and no Cranelift.',
+  },
+  '/about/roadmap/': {
+    title: 'Sounio roadmap: language, runtime, and what is open',
+    description:
+      'The Sounio roadmap tracks language, runtime, and ecosystem milestones, including runtime and backend work that is still in progress.',
+  },
+  '/learn/effects/': {
+    title: 'Effect System in Sounio: Side Effects in the Signature',
+    description:
+      'Effect system in Sounio: side effects sit in the function signature. Built-in names form a closed checked list. A caller that omits one is rejected.',
+  },
+  '/learn/compiler/effect-system/': {
+    title: 'Sounio effect system: how the effect checker works',
+    description:
+      'How the Sounio compiler checks the effect system: source map of self-hosted/check/effects.sio and the effects subsystem, and what handlers do today.',
+    // last_validated on en/compiler/effect-system.mdx. Not a release version.
+    dateModified: '2026-10-29',
+  },
+  '/learn/epistemic/uncertainty/': {
+    title: UNCERTAINTY_EN.documentTitle,
+    description: UNCERTAINTY_EN.description,
+  },
+  '/learn/examples/': {
+    title: 'Sounio examples: uncertainty and Knowledge types',
+    description:
+      'Sounio 3.0 (pre-release) examples the compiler checks: a Knowledge COVID kernel, vancomycin uncertainty, and a compile-fail that rejects low confidence.',
+  },
+};
+
+/** Approved S1 copy for the English self-hosted compiler page. */
+export const SELF_HOSTED_PAGE = {
+  h1: 'Sounio self-hosted compiler',
+  lede: 'The Sounio compiler is written in Sounio (.sio). It parses, type-checks, lowers to IR, runs the 12 named passes of the -O cleanup listed on this page, and emits a Linux x86-64 ELF that is static unless the program has external relocations, with no LLVM and no Cranelift on that path. Linux x86-64 is the default shipped target.',
+  crumbs: ['Learn', 'Compiler', 'Self-hosted compiler'],
+  author: {
+    '@type': 'Person',
+    name: 'Demetrios Chiuratto Agourakis',
+    url: 'https://www.souniolang.org/about/',
+    sameAs: ['https://orcid.org/0009-0001-8671-8878'],
+  },
+  about: {
+    '@type': 'SoftwareApplication',
+    name: 'Sounio',
+    alternateName: FORMER_LANGUAGE_NAME,
+  },
+};
+
+/** Approved copy for the English effect-system hub. The search title stays in ENGLISH_SEARCH. */
+export const EFFECTS_PAGE = {
+  h1: 'Effect system: side effects in the function signature',
+  lede: 'An effect system tracks what a function may do besides returning a value and records that in its type. This page is that contract for learners of Sounio: effects are written in the signature, and a caller that omits a callee effect is rejected at compile time. Compiler internals are a separate source map.',
+  author: {
+    '@type': 'Person',
+    name: 'Demetrios Chiuratto Agourakis',
+    url: 'https://www.souniolang.org/about/',
+    sameAs: ['https://orcid.org/0009-0001-8671-8878'],
+  },
+  about: [
+    {
+      '@type': 'Thing',
+      name: 'Effect system',
+      sameAs: 'https://en.wikipedia.org/wiki/Effect_system',
+    },
+  ],
+  isPartOf: {
+    '@type': 'WebSite',
+    name: 'Sounio',
+    url: 'https://www.souniolang.org/',
+  },
+  proficiencyLevel: 'Intermediate',
+  dependencies: [],
+  dateModified: '2026-11-06',
+};
+
+/**
+ * Spanish learn hub. The nav label "Aprender — Sounio" was a second result
+ * for the query "sounio", next to the homepage. The visible H1 stays the
+ * journey line; only the document title and meta description change.
+ */
+export const SPANISH_SEARCH = {
+  '/learn/': {
+    title: 'Guías de Sounio: efectos, unidades e incertidumbre',
+    description:
+      'Guías del lenguaje Sounio: unidades de medida, el sistema de efectos, tipos de refinamiento, propagación de incertidumbre y el compilador autoalojado.',
+  },
+};
+
+export function englishSearchFor(barePath, locale) {
+  if (locale !== 'en') return undefined;
+  return ENGLISH_SEARCH[barePath];
+}
+
+export function searchCopyFor(barePath, locale) {
+  if (locale === 'en') return ENGLISH_SEARCH[barePath];
+  if (locale === 'es') return SPANISH_SEARCH[barePath];
+  return undefined;
+}
+
+const COMPILER_VERSION = /v0\.80|v0\.99|v0\.100|v1\.0/;
+
+const SEARCH_COPY = [
+  ...Object.entries(ENGLISH_SEARCH),
+  ...Object.entries(SPANISH_SEARCH).map(([pathName, copy]) => [`es:${pathName}`, copy]),
+];
+
+for (const [page, copy] of SEARCH_COPY) {
+  // /learn/examples/ is 48: the title has to keep the word "examples"
+  // and still name uncertainty and Knowledge. The version phrase is
+  // in the meta description. Every other page, including Spanish, stays in 50–60.
+  const titleMin = page === '/learn/examples/' ? 48 : 50;
+  if (copy.title.length < titleMin || copy.title.length > 60) {
+    throw new Error(`${page} title length ${copy.title.length} is outside ${titleMin}–60`);
+  }
+  if (copy.description.length < 120 || copy.description.length > 155) {
+    throw new Error(`${page} description length ${copy.description.length} is outside 120–155`);
+  }
+  if (COMPILER_VERSION.test(copy.title) || COMPILER_VERSION.test(copy.description)) {
+    throw new Error(`${page} title or description names a compiler version`);
+  }
+}

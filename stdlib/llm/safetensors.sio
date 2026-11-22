@@ -1,0 +1,322 @@
+// stdlib::llm::safetensors - safetensors reader (binary-safe, own scanner).
+//
+// The whole file is read through libc stdio via dlopen/dlsym (the same
+// call-through pattern as hetero::cuda_exec / net_worker): model files
+// are binary, and going through byte buffers avoids any text-string
+// semantics on weights. The JSON header is scanned with a small purpose-
+// built parser - stdlib/data/json.sio is an emitter, not a parser, and
+// the header grammar needed here is tiny: find "name", then read its
+// dtype / shape / data_offsets.
+//
+// Tensors decode into f64 host masters (tensor2::cpu_kernel::CpuBuf):
+// F32/F16/BF16 via the real IEEE conversions of tensor2::convert (the
+// values are NOT f64 in disguise at rest - they are decoded once, at
+// load), F64 verbatim, I64 widened. Missing tensor -> CpuBuf of len 0,
+// never a crash, so loaders can branch on optionality (e.g. lm_head
+// when embeddings are tied).
+
+extern "C" {
+    fn dlopen(filename: *mut u8, flags: i32) -> *mut u8
+    fn dlsym(handle: *mut u8, symbol: *mut u8) -> *mut u8
+}
+
+use tensor2::cpu_kernel::{CpuBuf, ck_alloc}
+use tensor2::convert::{bf16_bits_to_f64, f16_bits_to_f64, f32_bits_to_f64}
+
+pub fn st_dtype_f32() -> i32 { 1 }
+pub fn st_dtype_bf16() -> i32 { 2 }
+pub fn st_dtype_f16() -> i32 { 3 }
+pub fn st_dtype_f64() -> i32 { 4 }
+pub fn st_dtype_i64() -> i32 { 5 }
+
+pub struct StFile {
+    pub data: *mut u8,
+    pub len: i64,
+    pub hdr_len: i64,
+    pub ok: bool,
+}
+
+pub struct StEntry {
+    pub found: bool,
+    pub dtype: i32,
+    pub rank: i32,
+    pub dims: [i64; 4],
+    pub count: i64,
+    pub off: i64,
+}
+
+pub fn st_byte_at(data: *mut u8, i: i64) -> i64 {
+    (read_i64(data as *mut i64, i / 8) >> ((i % 8) * 8)) & 255
+}
+
+fn st_write_byte(data: *mut u8, i: i64, v: i64) {
+    let w = read_i64(data as *mut i64, i / 8)
+    let sh = (i % 8) * 8
+    let mask = 255 << sh
+    let cleared = w & ((0 - 1) - mask)
+    write_i64(data as *mut i64, i / 8, cleared | ((v & 255) << sh))
+}
+
+fn st_cstr(s: string) -> *mut u8 with Alloc, Mut {
+    let n = str_len(s)
+    let buf = heap_alloc(n + 8)
+    var i: i64 = 0
+    while i < n {
+        st_write_byte(buf, i, str_char_at(s, i))
+        i = i + 1
+    }
+    st_write_byte(buf, n, 0)
+    buf
+}
+
+fn st_sym(libc: *mut u8, name: string) -> *mut u8 with Alloc, Mut {
+    dlsym(libc, st_cstr(name))
+}
+
+// Read an entire file as bytes. ok=false on any failure.
+pub fn st_read_all(path: string) -> StFile with Alloc, Mut, Panic {
+    var f = StFile { data: 0 as *mut u8, len: 0, hdr_len: 0, ok: false }
+    let libc = dlopen(st_cstr("libc.so.6"), 1)
+    if (libc as i64) == 0 { return f }
+    let raw_open = st_sym(libc, "fopen")
+    if (raw_open as i64) == 0 { return f }
+    let fopen = raw_open as fn(*mut u8, *mut u8) -> *mut u8
+    let fp = fopen(st_cstr(path), st_cstr("rb"))
+    if (fp as i64) == 0 { return f }
+    let fseek = st_sym(libc, "fseek") as fn(*mut u8, i64, i32) -> i32
+    let ftell = st_sym(libc, "ftell") as fn(*mut u8) -> i64
+    let fread = st_sym(libc, "fread") as fn(*mut u8, i64, i64, *mut u8) -> i64
+    if fseek(fp, 0, 2) != 0 { return f }
+    let size = ftell(fp)
+    if size <= 0 { return f }
+    if fseek(fp, 0, 0) != 0 { return f }
+    let buf = heap_alloc(size + 16)
+    let got = fread(buf, 1, size, fp)
+    if got != size { return f }
+    f.data = buf
+    f.len = size
+    // Header length: little-endian u64 in the first 8 bytes.
+    var hl: i64 = 0
+    var i: i64 = 0
+    while i < 8 {
+        hl = hl | (st_byte_at(buf, i) << (i * 8))
+        i = i + 1
+    }
+    f.hdr_len = hl
+    f.ok = true
+    f
+}
+
+// Find `"key"` in data[from, limit); returns index just past the closing
+// quote, or -1. Keys are compared byte by byte against the string.
+fn st_find_key(data: *mut u8, from: i64, limit: i64, key: string) -> i64 {
+    let klen = str_len(key)
+    var i = from
+    while i + klen + 2 < limit {
+        if st_byte_at(data, i) == 34 {
+            var eq = true
+            var j: i64 = 0
+            while j < klen {
+                if st_byte_at(data, i + 1 + j) != (str_char_at(key, j) & 255) { eq = false }
+                j = j + 1
+            }
+            if eq && st_byte_at(data, i + 1 + klen) == 34 {
+                return i + klen + 2
+            }
+        }
+        i = i + 1
+    }
+    -1
+}
+
+// Parse an i64 at the first number-looking position at/after `from`;
+// returns (value, position just past the number).
+fn st_parse_i64(data: *mut u8, from: i64, limit: i64) -> [i64; 2] {
+    var i = from
+    while i < limit {
+        let c = st_byte_at(data, i)
+        if (c >= 48 && c <= 57) || c == 45 { break }
+        i = i + 1
+    }
+    var neg = false
+    if i < limit && st_byte_at(data, i) == 45 { neg = true; i = i + 1 }
+    var v: i64 = 0
+    while i < limit {
+        let c = st_byte_at(data, i)
+        if c < 48 || c > 57 { break }
+        v = v * 10 + (c - 48)
+        i = i + 1
+    }
+    if neg { v = 0 - v }
+    var out: [i64; 2] = [v, i]
+    out
+}
+
+fn st_dtype_from(data: *mut u8, from: i64, limit: i64) -> i32 {
+    // value of "dtype" starts at the next quote
+    var i = from
+    while i < limit && st_byte_at(data, i) != 34 { i = i + 1 }
+    i = i + 1
+    let c0 = if i < limit { st_byte_at(data, i) } else { 0 }
+    let c1 = if i + 1 < limit { st_byte_at(data, i + 1) } else { 0 }
+    if c0 == 70 && c1 == 51 { return st_dtype_f32() }
+    if c0 == 66 { return st_dtype_bf16() }
+    if c0 == 70 && c1 == 49 { return st_dtype_f16() }
+    if c0 == 70 && c1 == 54 { return st_dtype_f64() }
+    if c0 == 73 { return st_dtype_i64() }
+    0
+}
+
+pub fn st_find(st: &StFile, name: string) -> StEntry with Mut {
+    var e = StEntry { found: false, dtype: 0, rank: 0, dims: [0; 4], count: 0, off: 0 }
+    if !st.ok { return e }
+    let hend = 8 + st.hdr_len
+    let namepos = st_find_key(st.data, 8, hend, name)
+    if namepos < 0 { return e }
+    var limit = namepos + 512
+    if limit > hend { limit = hend }
+    let dpos = st_find_key(st.data, namepos, limit, "dtype")
+    if dpos < 0 { return e }
+    e.dtype = st_dtype_from(st.data, dpos, limit)
+    let spos = st_find_key(st.data, namepos, limit, "shape")
+    if spos < 0 { return e }
+    // shape numbers until ']'
+    var p = spos
+    var count: i64 = 1
+    var rank: i32 = 0
+    var guard = 0
+    while p < limit && guard < 8 {
+        let c = st_byte_at(st.data, p)
+        if c == 93 { break }
+        if (c >= 48 && c <= 57) {
+            let r = st_parse_i64(st.data, p, limit)
+            if rank < 4 { e.dims[rank as usize] = r[0] }
+            count = count * r[0]
+            rank = rank + 1
+            p = r[1]
+        } else {
+            p = p + 1
+        }
+        guard = guard + 1
+    }
+    e.rank = rank
+    e.count = count
+    let opos = st_find_key(st.data, namepos, limit, "data_offsets")
+    if opos < 0 { return e }
+    let r1 = st_parse_i64(st.data, opos, limit)
+    e.off = 8 + st.hdr_len + r1[0]
+    e.found = true
+    e
+}
+
+fn st_elem_bytes(dtype: i32) -> i64 {
+    if dtype == 1 { return 4 }
+    if dtype == 2 { return 2 }
+    if dtype == 3 { return 2 }
+    if dtype == 4 { return 8 }
+    if dtype == 5 { return 8 }
+    0
+}
+
+// Decode tensor `name` into an f64 master. Missing -> len 0.
+pub fn st_load_f64(st: &StFile, name: string) -> CpuBuf with Alloc, Mut, Panic, Div {
+    let e = st_find(st, name)
+    if !e.found { return ck_alloc(0) }
+    var out = ck_alloc(e.count)
+    let eb = st_elem_bytes(e.dtype)
+    if eb == 0 { return out }
+    var i: i64 = 0
+    while i < e.count {
+        let b = e.off + i * eb
+        var v: f64 = 0.0
+        if e.dtype == 4 {
+            v = bits_to_f64(read_i64(st.data as *mut i64, b / 8))
+        } else if e.dtype == 1 {
+            var bits: i64 = 0
+            var j: i64 = 0
+            while j < 4 { bits = bits | (st_byte_at(st.data, b + j) << (j * 8)); j = j + 1 }
+            v = f32_bits_to_f64(bits)
+        } else if e.dtype == 2 {
+            let bits = (read_i64(st.data as *mut i64, b / 8) >> ((b % 8) * 8)) & 65535
+            v = bf16_bits_to_f64(bits)
+        } else if e.dtype == 3 {
+            let bits = (read_i64(st.data as *mut i64, b / 8) >> ((b % 8) * 8)) & 65535
+            v = f16_bits_to_f64(bits)
+        } else if e.dtype == 5 {
+            v = (read_i64(st.data as *mut i64, b / 8)) as f64
+        }
+        write_f64(out.data, i, v)
+        i = i + 1
+    }
+    out
+}
+
+// --- small JSON-value scanners over raw bytes (config files etc.) ---
+
+// First integer value of "key" in a byte buffer; 0 when absent.
+pub fn st_scan_i64(data: *mut u8, len: i64, key: string) -> i64 with Mut {
+    let p = st_find_key(data, 0, len, key)
+    if p < 0 { return 0 }
+    let r = st_parse_i64(data, p, len)
+    r[0]
+}
+
+// First float value of "key"; handles decimals and exponents crudely
+// (enough for eps/theta in model configs).
+pub fn st_scan_f64(data: *mut u8, len: i64, key: string) -> f64 with Mut, Div, Panic {
+    let p = st_find_key(data, 0, len, key)
+    if p < 0 { return 0.0 }
+    var i = p
+    while i < len {
+        let c = st_byte_at(data, i)
+        if (c >= 48 && c <= 57) || c == 45 { break }
+        i = i + 1
+    }
+    var neg = false
+    if i < len && st_byte_at(data, i) == 45 { neg = true; i = i + 1 }
+    var v: f64 = 0.0
+    while i < len {
+        let c = st_byte_at(data, i)
+        if c < 48 || c > 57 { break }
+        v = v * 10.0 + ((c - 48) as f64)
+        i = i + 1
+    }
+    if i < len && st_byte_at(data, i) == 46 {
+        i = i + 1
+        var scale: f64 = 0.1
+        while i < len {
+            let c = st_byte_at(data, i)
+            if c < 48 || c > 57 { break }
+            v = v + ((c - 48) as f64) * scale
+            scale = scale / 10.0
+            i = i + 1
+        }
+    }
+    if i < len && (st_byte_at(data, i) == 101 || st_byte_at(data, i) == 69) {
+        i = i + 1
+        var eneg = false
+        if i < len && st_byte_at(data, i) == 45 { eneg = true; i = i + 1 }
+        if i < len && st_byte_at(data, i) == 43 { i = i + 1 }
+        var ev: i64 = 0
+        while i < len {
+            let c = st_byte_at(data, i)
+            if c < 48 || c > 57 { break }
+            ev = ev * 10 + (c - 48)
+            i = i + 1
+        }
+        var mult: f64 = 1.0
+        var k: i64 = 0
+        while k < ev { mult = mult * 10.0; k = k + 1 }
+        if eneg { v = v / mult } else { v = v * mult }
+    }
+    if neg { 0.0 - v } else { v }
+}
+
+// True when "key" is followed by JSON true.
+pub fn st_scan_bool(data: *mut u8, len: i64, key: string) -> bool with Mut {
+    let p = st_find_key(data, 0, len, key)
+    if p < 0 { return false }
+    var i = p
+    while i < len && st_byte_at(data, i) == 32 || i < len && st_byte_at(data, i) == 58 { i = i + 1 }
+    i < len && st_byte_at(data, i) == 116
+}

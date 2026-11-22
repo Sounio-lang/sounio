@@ -19,9 +19,9 @@ bash scripts/dev/build_native_metal_runtime.sh "$SOUNIO_METAL_RUNTIME" > "$OUT/m
 "$OUT/metal-conformance" "$SOUNIO_METAL_RUNTIME" > "$OUT/metal-conformance.log" 2>&1
 "${CXX:-/usr/bin/clang++}" -std=c++23 -O2 -pthread -Wall -Wextra -Werror \
     scripts/ci/madaros_macos_corpus.cpp -o "$OUT/corpus"
-bash scripts/ci/madaros_macos_corpus_diagnostics_gate.sh "$OUT/corpus" "$OUT/diagnostic-negative"
+CORPUS_COMPILE_CACHE_RESTORE= bash scripts/ci/madaros_macos_corpus_diagnostics_gate.sh "$OUT/corpus" "$OUT/diagnostic-negative"
 shasum -a 256 "$COMPILER" "$SOUNIO_METAL_RUNTIME" tests/manifests/madaros_macos_200.txt \
     vendor/metal-softfloat/softfloat64.metal > "$OUT/identity-with-runtime.txt"
 "$OUT/corpus" "$COMPILER" tests/manifests/madaros_macos_200.txt "$OUT/results" "${CORPUS_JOBS:-4}" "${CORPUS_BUILD_TIMEOUT:-180}"
 cat "$OUT/results/summary.txt"
-echo "PASS: all 200 manifest members compiled and executed, including required real Metal launches; see source snapshots for fixture revisions"
+echo "PASS: all 200 manifest members compiled (fresh or exact verified cache) and executed now, including required real Metal launches; see source snapshots for fixture revisions"

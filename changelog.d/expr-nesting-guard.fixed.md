@@ -1,0 +1,1 @@
+Fixes the SIO-573 silent compiler SIGSEGV on deeply nested expressions: lowering now tracks expression-nesting depth at a single choke point and refuses with a diagnostic sized to the reserved compiler stack instead of crashing (an 11-deep chain fits 8MB, a 12-deep chain crashed).

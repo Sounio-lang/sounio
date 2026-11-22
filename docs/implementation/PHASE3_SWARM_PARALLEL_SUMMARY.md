@@ -166,25 +166,6 @@ def find_circular_dependencies(self) -> List[List[str]]:
 - "Sounio: Find Unused Exports" - Export usage report
 - "Sounio: Show Dependency Graph" - Visual dependency map
 
-## Command Line Usage
-
-```bash
-# Basic analysis
-python3 tools/analyze/workspace_analysis.py ./src
-
-# JSON output
-python3 tools/analyze/workspace_analysis.py ./src --format json
-
-# Custom worker count
-python3 tools/analyze/workspace_analysis.py ./src --workers 8
-
-# Exclude patterns
-python3 tools/analyze/workspace_analysis.py ./src --exclude test_ vendor/
-
-# With progress
-python3 tools/analyze/workspace_analysis.py ./src --verbose
-```
-
 ## Sample Output
 
 ### Text Format
@@ -261,26 +242,6 @@ python3 tools/analyze/workspace_analysis.py ./src --verbose
 | **Overhead** | <5% for process pool |
 
 ## Use Cases
-
-### CI/CD Integration
-```yaml
-- name: Check for orphaned modules
-  run: |
-    python3 tools/analyze/workspace_analysis.py ./src --format json | \
-      jq -e '.summary.orphanedModules == 0' || \
-      (echo "Orphaned modules found!" && exit 1)
-```
-
-### Pre-Commit Hook
-```bash
-#!/bin/bash
-# Check for circular dependencies before commit
-if ! python3 tools/analyze/workspace_analysis.py ./src --format json | \
-     jq -e '.summary.circularDependencies == 0'; then
-    echo "❌ Circular dependencies detected!"
-    exit 1
-fi
-```
 
 ### IDE Integration
 ```typescript

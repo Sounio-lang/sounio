@@ -781,17 +781,12 @@ These are record/state APIs, not an automatically installed runtime for
 E2E fixtures need execution and interpretation at this library scope.
 
 **`ASYNC-012` — `library-contract`.**
-`stdlib/async/channel.sio` supplies `AsyncChannelState` and an ordinary
-64-word ring buffer. `channel_ring_push` leaves a full buffer unchanged;
-`channel_ring_pop` leaves an empty buffer unchanged; `channel_ring_peek`
-returns zero for an empty buffer. They do not suspend a producer or receiver.
-
-`stdlib/sync/channel.sio::IntChannel` is a separate 1024-word ring API.
+`stdlib/sync/channel.sio::IntChannel` is a 1024-word ring API.
 Its send operation returns false when full or closed; receive returns zero
 when empty, which is indistinguishable from a stored zero without another
 state check. Closing prevents further send and does not itself erase queued
-values. Neither API's ordinary field accesses supply atomic synchronization
-or a cross-thread memory model. Their capacity constants are separate from
+values. Its ordinary field accesses do not supply atomic synchronization
+or a cross-thread memory model. Its capacity constant is separate from
 the pipe interface in `ASYNC-009`.
 
 ### 6.5 Claims that the fixtures do not establish

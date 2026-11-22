@@ -1,0 +1,204 @@
+//@ run-pass
+// GGUF fixture load + GPU forward prefill (ntok 1 and 4).
+// Default: /workspace/llm-models/tiny-mixtral-moe.gguf (Q4_K)
+// Generate: python3 scripts/llm/gen_tiny_mixtral_gguf.py --quant q4k|q5k|q8_0 --out PATH.gguf
+// Usage: llama_gguf_forward_demo [fixture.gguf] [gemm-ptx] [mmid-ptx] [gus-ptx] [mega-ptx] [real.gguf]
+// gus-ptx is used for Q4_K fallback only; mmid/mega defaults follow fixture moe_quant.
+
+use hetero::runtime::{
+    Runtime, rt_load_mmid, rt_load_mmid_q5k, rt_load_mmid_q8_0,
+    rt_load_moe_ffn_mega, rt_load_moe_ffn_mega_q5k, rt_load_moe_ffn_mega_q8_0,
+    rt_load_moe_gate_up_silu, rt_open
+}
+use llm::gguf::{gguf_open}
+use llm::llama::{Llama, kv_new, llama_forward_rt, llama_load_gguf}
+use tensor2::cpu_kernel::{CpuBuf, ck_alloc, ck_get, ck_set}
+
+fn any_moe_pack(m: &Llama) -> bool {
+    var i: i64 = 0
+    let layers = m.cfg.layers as i64
+    while i < layers {
+        let ix = i as usize
+        if m.moe_gate_bytes[ix] > 0 { return true }
+        if m.moe_up_bytes[ix] > 0 { return true }
+        if m.moe_down_bytes[ix] > 0 { return true }
+        i = i + 1
+    }
+    false
+}
+
+fn logits_nonfinite_count(logits: &CpuBuf) -> i64 {
+    var bad: i64 = 0
+    var i: i64 = 0
+    while i < logits.len {
+        let v = ck_get(logits, i)
+        if v != v || v > 1.0e30 || v < 0.0 - 1.0e30 { bad = bad + 1 }
+        i = i + 1
+    }
+    bad
+}
+
+fn default_mmid(moe_quant: i64) -> string {
+    if moe_quant == 1 { return "stdlib/hetero/kernels/mmid_q5k_dp4a_f32.ptx" }
+    if moe_quant == 2 { return "stdlib/hetero/kernels/mmid_q8_0_dp4a_f32.ptx" }
+    "stdlib/hetero/kernels/mmid_q4k_dp4a_f32.ptx"
+}
+
+fn default_mega(moe_quant: i64) -> string {
+    if moe_quant == 1 { return "stdlib/hetero/kernels/moe_ffn_mega_q5k_f32.ptx" }
+    if moe_quant == 2 { return "stdlib/hetero/kernels/moe_ffn_mega_q8_0_f32.ptx" }
+    "stdlib/hetero/kernels/moe_ffn_mega_q4k_f32.ptx"
+}
+
+fn load_gpu_kernels(rt: &!Runtime, moe_quant: i64, mmid_ptx: string, gus_ptx: string, mega_ptx: string) -> bool with Alloc, Mut, Panic, Div, IO {
+    print("moe_quant=")
+    print_int(moe_quant)
+    print(" mmid=")
+    print(mmid_ptx)
+    print("\n")
+    if moe_quant == 1 {
+        if !rt_load_mmid_q5k(rt, mmid_ptx) {
+            print("mmid q5k: PTX load failed\n")
+            return false
+        }
+    } else if moe_quant == 2 {
+        if !rt_load_mmid_q8_0(rt, mmid_ptx) {
+            print("mmid q8_0: PTX load failed\n")
+            return false
+        }
+    } else {
+        if !rt_load_mmid(rt, mmid_ptx) {
+            print("mmid q4k: PTX load failed\n")
+            return false
+        }
+        print("gus=")
+        print(gus_ptx)
+        print("\n")
+        if !rt_load_moe_gate_up_silu(rt, gus_ptx) {
+            print("gus: PTX load failed\n")
+            return false
+        }
+    }
+    print("mega=")
+    print(mega_ptx)
+    print("\n")
+    var mega_ok = false
+    if moe_quant == 1 {
+        mega_ok = rt_load_moe_ffn_mega_q5k(rt, mega_ptx)
+    } else if moe_quant == 2 {
+        mega_ok = rt_load_moe_ffn_mega_q8_0(rt, mega_ptx)
+    } else {
+        mega_ok = rt_load_moe_ffn_mega(rt, mega_ptx)
+    }
+    if mega_ok {
+        print("moe path: mega\n")
+    } else {
+        print("moe path: mmid fallback\n")
+    }
+    true
+}
+
+fn run_forward(m: &!Llama, rt: &Runtime, ntok: i64, layers: i64, gpu_ready: bool, packs: bool) -> i64 with IO, Mut, Panic, Div, Alloc {
+    var tokens = ck_alloc(ntok)
+    var t: i64 = 0
+    while t < ntok {
+        ck_set(&!tokens, t, (t + 1) as f64)
+        t = t + 1
+    }
+    var kv = kv_new(m, 16)
+    let logits = llama_forward_rt(m, &!kv, &tokens, ntok, rt)
+    let bad = logits_nonfinite_count(&logits)
+    print("ntok=")
+    print_int(ntok)
+    print(" gpu_ready=")
+    print_int(if gpu_ready { 1 } else { 0 })
+    print(" last_moe_layers_ok=")
+    print_int(m.last_moe_layers_ok)
+    print(" finite_logits=")
+    print_int(if bad == 0 { 1 } else { 0 })
+    print("\n")
+    if bad != 0 { return 1 }
+    if gpu_ready && logits.len == 0 { return 1 }
+    if packs && gpu_ready {
+        if m.last_moe_layers_ok != layers || m.last_moe_status != 0 {
+            return 1
+        }
+    }
+    0
+}
+
+fn try_real_gguf(path: string) with IO, Alloc, Mut, Panic, Div {
+    if path == "" { return }
+    let probe = gguf_open(path)
+    if !probe.ok {
+        print("GGUF REAL SKIP\n")
+        return
+    }
+    let rm = llama_load_gguf(path)
+    if !rm.loaded {
+        print("GGUF REAL SKIP\n")
+        return
+    }
+    print("gguf_real: loaded=1 n_experts=")
+    print_int(rm.cfg.n_experts)
+    print("\n")
+}
+
+fn main() with IO, Mut, Panic, Div, Alloc {
+    var fixture = "/workspace/llm-models/tiny-mixtral-moe.gguf"
+    var gemm_ptx = "stdlib/hetero/kernels/gemm_naive_f32.ptx"
+    var mmid_ptx = ""
+    var gus_ptx = "stdlib/hetero/kernels/moe_gate_up_silu_q4k_f32.ptx"
+    var mega_ptx = ""
+    var real_gguf = ""
+    if arg_count() > 0 { fixture = get_arg(0) }
+    if arg_count() > 1 { gemm_ptx = get_arg(1) }
+    if arg_count() > 2 { mmid_ptx = get_arg(2) }
+    if arg_count() > 3 { gus_ptx = get_arg(3) }
+    if arg_count() > 4 { mega_ptx = get_arg(4) }
+    if arg_count() > 5 { real_gguf = get_arg(5) }
+
+    let fp = gguf_open(fixture)
+    if !fp.ok {
+        print("GGUF FIXTURE MISSING\nLLAMA GGUF FORWARD DONE\n")
+        exit(0)
+    }
+
+    var m = llama_load_gguf(fixture)
+    if !m.loaded {
+        print("LLAMA GGUF FORWARD FAIL\n")
+        exit(1)
+    }
+
+    let mq = m.cfg.moe_quant
+    if mmid_ptx == "" { mmid_ptx = default_mmid(mq) }
+    if mega_ptx == "" { mega_ptx = default_mega(mq) }
+
+    let layers = m.cfg.layers as i64
+    let packs = any_moe_pack(&m)
+
+    var rt = rt_open(gemm_ptx, "gemm_naive_f32")
+    let gpu_ready = rt.ready
+    if gpu_ready {
+        if !load_gpu_kernels(&!rt, mq, mmid_ptx, gus_ptx, mega_ptx) {
+            print("LLAMA GGUF FORWARD FAIL\n")
+            exit(1)
+        }
+    } else {
+        print("gpu: unavailable (cpu forward)\n")
+    }
+
+    if run_forward(&!m, &rt, 1, layers, gpu_ready, packs) != 0 {
+        print("LLAMA GGUF FORWARD FAIL\n")
+        exit(1)
+    }
+    if run_forward(&!m, &rt, 4, layers, gpu_ready, packs) != 0 {
+        print("LLAMA GGUF FORWARD FAIL\n")
+        exit(1)
+    }
+
+    try_real_gguf(real_gguf)
+
+    print("LLAMA GGUF FORWARD DONE\n")
+    exit(0)
+}

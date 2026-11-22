@@ -16,9 +16,11 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.frontdoor.readme
 
 [English](README.md) · [Ελληνικά — ξεκινήστε εδώ](README.el.md)
 
+**Sounio (formerly Demetrios).** Sounio was previously released as Demetrios, the former name of this language.
+
 **Scientific computing with explicit uncertainty, units and effects — powered by a self-hosted compiler.**
 
-> **Research language — pre-1.0**: Sounio is an active research platform. The compiler and standard library are under development. This is not production-ready software; expect breaking changes, incomplete surfaces, and documented limitations ([KNOWN_LIMITATIONS.md](docs/compiler/KNOWN_LIMITATIONS.md)).
+> **Status: research language (pre-1.0).** APIs may change; not recommended for production use. Open limits: [KNOWN_LIMITATIONS.md](docs/compiler/KNOWN_LIMITATIONS.md).
 
 Sounio is an epistemic systems language created by **Demetrios Chiuratto Agourakis**. Its scientific abstractions and compiler are developed together: measurements carry uncertainty, quantities carry dimensions, and computations declare effects. Explore the language, the compiler and a scientific library spanning eight research domains below.
 
@@ -139,4 +141,4 @@ Checked on 24 October 2026: Warp connected to Notion MCP 1.2.0 over Streamable H
 
 Start with a reproducible issue, a focused example or a documented compiler limit. See [CONTRIBUTING.md](https://github.com/Sounio-lang/sounio/blob/main/CONTRIBUTING.md) for contribution guidance.
 
-Created by **Demetrios Chiuratto Agourakis**. See the [project credits](https://www.souniolang.org/credits) for attribution and AI disclosure. For research citation, see [CITATION.cff](CITATION.cff). Licensed under [Apache-2.0](https://github.com/Sounio-lang/sounio/blob/main/LICENSE).
+Created by **Demetrios Chiuratto Agourakis**. See the [project credits](https://www.souniolang.org/credits) for attribution and AI disclosure. For research citation, see [CITATION.cff](CITATION.cff) ([all-versions DOI](https://doi.org/10.5281/zenodo.18190065)). Licensed under [Apache-2.0](https://github.com/Sounio-lang/sounio/blob/main/LICENSE).
