@@ -1,0 +1,150 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: REF_FIELD_DEREF_STORE_OK
+// Regression gate: `*d = v` through a `&!S` parameter writes into the object `d` refers to, also when the caller passed
+// `&!o.f` (a field), and a scalar-only struct assigned from a place is copied, not aliased.
+//
+// `&!o.f` hands the callee a reference to a temporary slot holding o.f's handle. `*d = v` rebinds the handle in THAT slot, so
+// the store was lost: check clean, exit 0, o.f unchanged (a stale value, no diagnostic). `&!x` of a local worked only because
+// the slot was the local's own. The store now copies v's slots into the existing object. Also pinned: `w.p = w.q` for a struct
+// with no array field (the assignment kept the source handle; a later write to either side showed through the other).
+
+struct S {
+    a: [f64; 4],
+    n: i64,
+}
+
+struct P {
+    x: f64,
+    y: f64,
+}
+
+struct In {
+    q: i64,
+    r: f64,
+}
+
+struct W {
+    ts: S,
+    p: P,
+    q: P,
+    inner: In,
+    tail: i64,
+}
+
+fn mk(v: f64) -> S {
+    S { a: [v; 4], n: 7 }
+}
+
+fn cp(d: &!S, s: &S) with Mut {
+    *d = *s
+}
+
+fn cpv(d: &!S, s: S) with Mut {
+    *d = s
+}
+
+fn cpp(d: &!P, s: &P) with Mut {
+    *d = *s
+}
+
+fn cpi(d: &!In, s: In) with Mut {
+    *d = s
+}
+
+fn bump(s: &!S) with Mut {
+    (*s).a[0] = (*s).a[0] + 100.0
+}
+
+fn chk_f(tag: i64, got: f64, want: f64) -> i64 with IO {
+    if got != want {
+        print("BAD ")
+        print(tag)
+        print(" got ")
+        print(got)
+        print(" want ")
+        print(want)
+        print("\n")
+        return 1
+    }
+    0
+}
+
+fn chk_i(tag: i64, got: i64, want: i64) -> i64 with IO {
+    if got != want {
+        print("BAD ")
+        print(tag)
+        print("\n")
+        return 1
+    }
+    0
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var bad: i64 = 0
+    var w = W { ts: mk(0.0), p: P { x: 0.0, y: 0.0 }, q: P { x: 3.0, y: 4.0 }, inner: In { q: 0, r: 0.0 }, tail: 5 }
+    var src = mk(2.0)
+
+    // 1: `*d = *s` into a field.
+    cp(&!w.ts, &src)
+    bad = bad + chk_f(1, w.ts.a[0], 2.0)
+    bad = bad + chk_f(1, w.ts.a[3], 2.0)
+    bad = bad + chk_i(1, w.ts.n, 7)
+    // the copy is by value: writing the destination leaves the source alone, and the other way round.
+    bump(&!w.ts)
+    bad = bad + chk_f(1, src.a[0], 2.0)
+    src.a[1] = 50.0
+    bad = bad + chk_f(1, w.ts.a[1], 2.0)
+
+    // 2: `*d = v` (v by value) into a field.
+    var s3 = mk(9.0)
+    cpv(&!w.ts, s3)
+    bad = bad + chk_f(2, w.ts.a[0], 9.0)
+    s3.a[0] = 1.0
+    bad = bad + chk_f(2, w.ts.a[0], 9.0)
+
+    // 3: scalar-only struct through a field reference.
+    cpp(&!w.p, &w.q)
+    bad = bad + chk_f(3, w.p.x, 3.0)
+    bad = bad + chk_f(3, w.p.y, 4.0)
+
+    // 4: nested struct field.
+    cpi(&!w.inner, In { q: 11, r: 0.5 })
+    bad = bad + chk_i(4, w.inner.q, 11)
+    bad = bad + chk_f(4, w.inner.r, 0.5)
+
+    // 5: neighbours untouched.
+    bad = bad + chk_i(5, w.tail, 5)
+    bad = bad + chk_f(5, w.q.x, 3.0)
+
+    // 6: the local case that always worked still works.
+    var l = mk(0.0)
+    cp(&!l, &src)
+    bad = bad + chk_f(6, l.a[1], 50.0)
+    cpp(&!w.q, &w.p)
+    bad = bad + chk_f(6, w.q.y, 4.0)
+
+    // 7: scalar-only struct assigned from a place is a copy.
+    w.q = w.p
+    w.p.x = 99.0
+    bad = bad + chk_f(7, w.q.x, 3.0)
+    w.q.y = 77.0
+    bad = bad + chk_f(7, w.p.y, 4.0)
+
+    // 8: in a loop.
+    var k: i64 = 0
+    while k < 3 {
+        var t = mk(10.0 * ((k + 1) as f64))
+        cp(&!w.ts, &t)
+        bump(&!w.ts)
+        bad = bad + chk_f(8, t.a[0], 10.0 * ((k + 1) as f64))
+        bad = bad + chk_f(8, w.ts.a[0], 10.0 * ((k + 1) as f64) + 100.0)
+        k = k + 1
+    }
+
+    if bad == 0 {
+        println("REF_FIELD_DEREF_STORE_OK")
+        return 0
+    }
+    1
+}
