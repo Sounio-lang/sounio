@@ -3,7 +3,7 @@
 // BDF methods for large stiff systems, orders 1-4, with:
 //   - fn-type RHS parameter (no integer dispatch)
 //   - 64x64 Gaussian elimination via Mat64 Jacobian
-//   - GUM uncertainty propagation through the Jacobian
+//   - Restricted first-order independent diagonal variance compatibility path
 //   - Adaptive step size and order control
 //
 // The solver accepts the RHS as a first-class function parameter:
@@ -18,7 +18,7 @@
 // (GUM, JCGM 100:2008): given the Jacobian J already computed for the
 // Newton corrector, the variance at the next step is approximated by
 //   Var(y_{n+1}) ~ (I - beta*h*J)^{-1} * Var(y_n) * (I - beta*h*J)^{-T}
-// using the diagonal approximation for efficiency.
+// only for first-order independent diagonal systems; coupled uncertainty refuses.
 //
 // References:
 //   Hairer, Wanner (1996) "Solving ODEs II: Stiff Problems"
@@ -26,11 +26,8 @@
 //   JCGM 100:2008 "Evaluation of measurement data -- Guide to the
 //     expression of uncertainty in measurement"
 
-extern "C" {
-    fn sqrt(x: f64) -> f64
-    fn exp(x: f64) -> f64
-    fn log(x: f64) -> f64
-}
+use math::pure::{sqrt,exp,ln_checked,is_finite}
+fn log(x:f64)->f64 with Mut,Div,Panic {let r=ln_checked(x);assert(r.status==0);r.value}
 
 // ============================================================================
 // HELPER FUNCTIONS
@@ -51,7 +48,7 @@ fn b64_min(a: f64, b: f64) -> f64 {
     return b
 }
 
-fn b64_sqrt(x: f64) -> f64 {
+fn b64_sqrt(x: f64) -> f64 with Mut,Div,Panic {
     if x <= 0.0 { return 0.0 }
     return sqrt(x)
 }
@@ -62,6 +59,15 @@ fn b64_sqrt(x: f64) -> f64 {
 
 struct Vec64 { data: [f64; 64] }
 struct Mat64 { data: [f64; 4096] }
+fn b64_norm(v:&Vec64,n:i32)->f64 with Mut,Div,Panic {
+ var maximum:f64=0.0
+ var i:i32=0
+ while i<n {if !is_finite(v.data[i]) {return (1.0e308*10.0)};maximum=b64_max(maximum,b64_abs(v.data[i]));i=i+1}
+ if maximum==0.0 {return 0.0}
+ var sum:f64=0.0;i=0
+ while i<n {let x=v.data[i]/maximum;sum=sum+x*x;i=i+1}
+ maximum*b64_sqrt(sum)
+}
 
 // ============================================================================
 // DATA STRUCTURES
@@ -197,67 +203,53 @@ fn b64_predict(y: &Vec64, y1: &Vec64, y2: &Vec64, y3: &Vec64,
 // Solves A*x = b in-place (result written to b)
 // ============================================================================
 
-fn gauss_solve_64(a: &!Mat64, b: &!Vec64, n: i32) with Mut, Panic, Div {
-    var col: i32 = 0
-    while col < n {
-        var max_val: f64 = b64_abs(a.data[col * 64 + col])
-        var max_row: i32 = col
-        var row: i32 = col + 1
-        while row < n {
-            let val = b64_abs(a.data[row * 64 + col])
-            if val > max_val { max_val = val; max_row = row }
-            row = row + 1
-        }
-
-        if max_row != col {
-            var k: i32 = 0
-            while k < n {
-                let tmp = a.data[col * 64 + k]
-                a.data[col * 64 + k] = a.data[max_row * 64 + k]
-                a.data[max_row * 64 + k] = tmp
-                k = k + 1
-            }
-            let tmp_b = b.data[col]
-            b.data[col] = b.data[max_row]
-            b.data[max_row] = tmp_b
-        }
-
-        let pivot = a.data[col * 64 + col]
-        if b64_abs(pivot) < 1.0e-30 {
-            col = col + 1
-        } else {
-            row = col + 1
-            while row < n {
-                let factor = a.data[row * 64 + col] / pivot
-                var k: i32 = col + 1
-                while k < n {
-                    a.data[row * 64 + k] = a.data[row * 64 + k] - factor * a.data[col * 64 + k]
-                    k = k + 1
-                }
-                a.data[row * 64 + col] = 0.0
-                b.data[row] = b.data[row] - factor * b.data[col]
-                row = row + 1
-            }
-            col = col + 1
-        }
-    }
-
-    var i: i32 = n - 1
-    while i >= 0 {
-        var sum: f64 = b.data[i]
-        var j: i32 = i + 1
-        while j < n {
-            sum = sum - a.data[i * 64 + j] * b.data[j]
-            j = j + 1
-        }
-        let diag = a.data[i * 64 + i]
-        if b64_abs(diag) < 1.0e-30 {
-            b.data[i] = 0.0
-        } else {
-            b.data[i] = sum / diag
-        }
-        i = i - 1
-    }
+// Legacy destructive Gaussian solve now reports refusal. The public dynamic
+// solver uses linalg::dynamic_factorize instead of this compatibility helper.
+fn gauss_solve_64(a:&!Mat64,b:&!Vec64,n:i32)->bool with Mut,Div,Panic {
+ if n<1 || n>64 {return false}
+ var scale:f64=0.0
+ var i:i32=0
+ while i<n {
+  if !is_finite(b.data[i]) {return false}
+  var j:i32=0
+  while j<n {let v=a.data[i*64+j];if !is_finite(v) {return false};scale=b64_max(scale,b64_abs(v));j=j+1}
+  i=i+1
+ }
+ let threshold=scale*(n as f64)*2.2204460492503131e-16
+ var col:i32=0
+ while col<n {
+  var row=col
+  var pivot_row=col
+  var maximum:f64=0.0
+  while row<n {let v=b64_abs(a.data[row*64+col]);if v>maximum {maximum=v;pivot_row=row};row=row+1}
+  if maximum==0.0 || maximum<=threshold {return false}
+  if pivot_row!=col {
+   var j:i32=0
+   while j<n {let v=a.data[col*64+j];a.data[col*64+j]=a.data[pivot_row*64+j];a.data[pivot_row*64+j]=v;j=j+1}
+   let v=b.data[col];b.data[col]=b.data[pivot_row];b.data[pivot_row]=v
+  }
+  row=col+1
+  while row<n {
+   let factor=a.data[row*64+col]/a.data[col*64+col]
+   if !is_finite(factor) {return false}
+   var j=col+1
+   while j<n {let v=a.data[row*64+j]-factor*a.data[col*64+j];if !is_finite(v) {return false};a.data[row*64+j]=v;j=j+1}
+   let rhs=b.data[row]-factor*b.data[col]
+   if !is_finite(rhs) {return false}
+   b.data[row]=rhs;a.data[row*64+col]=0.0;row=row+1
+  }
+  col=col+1
+ }
+ i=n-1
+ while i>=0 {
+  var total=b.data[i]
+  var j=i+1
+  while j<n {total=total-a.data[i*64+j]*b.data[j];j=j+1}
+  let value=total/a.data[i*64+i]
+  if !is_finite(value) {return false}
+  b.data[i]=value;i=i-1
+ }
+ true
 }
 
 // ============================================================================
@@ -268,9 +260,11 @@ fn gauss_solve_64(a: &!Mat64, b: &!Vec64, n: i32) with Mut, Panic, Div {
 fn compute_jacobian_64(
     rhs: fn(f64, &Vec64, i32, &!Vec64) with Mut, Div, Panic,
     t: f64, y: &Vec64, f0: &Vec64,
-    n: i32, jac: &!Mat64
-) with Mut, Panic, Div {
-    let eps = 1.0e-8
+    n: i32, jac: &!Mat64, calls:&![i32;1]
+) -> bool with Mut, Panic, Div {
+    calls[0]=0
+    if n<1 || n>64 {return false}
+    let eps = 1.4901161193847656e-8
     var y_pert: Vec64 = Vec64 { data: [0.0; 64] }
     var f_pert: Vec64 = Vec64 { data: [0.0; 64] }
 
@@ -281,18 +275,25 @@ fn compute_jacobian_64(
 
         let delta = eps * b64_max(b64_abs(y.data[j]), 1.0)
         y_pert.data[j] = y.data[j] + delta
+        let actual_delta=y_pert.data[j]-y.data[j]
+        if !is_finite(y_pert.data[j]) || actual_delta==0.0 {return false}
 
         k = 0
-        while k < n { f_pert.data[k] = 0.0; k = k + 1 }
+        while k < n { f_pert.data[k] = (0.0/0.0); k = k + 1 }
         rhs(t, &y_pert, n, &!f_pert)
+        calls[0]=calls[0]+1
 
         var i: i32 = 0
         while i < n {
-            jac.data[i * 64 + j] = (f_pert.data[i] - f0.data[i]) / delta
+            if !is_finite(f_pert.data[i]) || !is_finite(f0.data[i]) {return false}
+            let entry=(f_pert.data[i] - f0.data[i]) / actual_delta
+            if !is_finite(entry) {return false}
+            jac.data[i * 64 + j] = entry
             i = i + 1
         }
         j = j + 1
     }
+    true
 }
 
 // ============================================================================
@@ -319,15 +320,22 @@ fn bdf64_newton_solve(
     result.fevals = 0
     result.jevals = 0
 
+    if n_eqs<1 || n_eqs>64 || !is_finite(t_new) || !is_finite(newton_tol) || newton_tol<=0.0 || max_iter<1 || !is_finite(beta_h) {return}
+    i=0
+    while i<n_eqs {if !is_finite(y_pred.data[i]) || !is_finite(hist_sum.data[i]) {return};i=i+1}
     // Evaluate RHS at prediction
     var f_pred: Vec64 = Vec64 { data: [0.0; 64] }
+    i=0
+    while i<n_eqs {f_pred.data[i]=(0.0/0.0);i=i+1}
     rhs(t_new, y_pred, n_eqs, &!f_pred)
     result.fevals = result.fevals + 1
 
     // Compute Jacobian at prediction
-    compute_jacobian_64(rhs, t_new, y_pred, &f_pred, n_eqs, &!result.jac)
-    result.fevals = result.fevals + n_eqs
-    result.jevals = result.jevals + 1
+    var jac_calls:[i32;1]=[0;1]
+    result.jevals=result.jevals+1
+    let jac_ok=compute_jacobian_64(rhs,t_new,y_pred,&f_pred,n_eqs,&!result.jac,&!jac_calls)
+    result.fevals=result.fevals+jac_calls[0]
+    if !jac_ok {return}
 
     // Build iteration matrix M = I - bh*J
     var M: Mat64 = Mat64 { data: [0.0; 4096] }
@@ -350,6 +358,8 @@ fn bdf64_newton_solve(
     var iter: i32 = 0
     while iter < max_iter {
         var f_k: Vec64 = Vec64 { data: [0.0; 64] }
+        i=0
+        while i<n_eqs {f_k.data[i]=(0.0/0.0);i=i+1}
         rhs(t_new, &result.y, n_eqs, &!f_k)
         result.fevals = result.fevals + 1
 
@@ -357,18 +367,14 @@ fn bdf64_newton_solve(
         var neg_G: Vec64 = Vec64 { data: [0.0; 64] }
         i = 0
         while i < n_eqs {
+            if !is_finite(f_k.data[i]) {return}
             neg_G.data[i] = 0.0 - (result.y.data[i] - hist_sum.data[i] - beta_h * f_k.data[i])
+            if !is_finite(neg_G.data[i]) {return}
             i = i + 1
         }
 
         // Check convergence
-        var g_norm: f64 = 0.0
-        i = 0
-        while i < n_eqs {
-            g_norm = g_norm + neg_G.data[i] * neg_G.data[i]
-            i = i + 1
-        }
-        g_norm = b64_sqrt(g_norm)
+        let g_norm=b64_norm(&neg_G,n_eqs)
 
         if g_norm < newton_tol {
             result.converged = true
@@ -388,32 +394,38 @@ fn bdf64_newton_solve(
             i = i + 1
         }
 
-        gauss_solve_64(&!M_copy, &!neg_G, n_eqs)
+        if !gauss_solve_64(&!M_copy,&!neg_G,n_eqs) {return}
 
         // Update: yk = yk + dy
         i = 0
         while i < n_eqs {
-            result.y.data[i] = result.y.data[i] + neg_G.data[i]
+            let value=result.y.data[i]+neg_G.data[i]
+            if !is_finite(value) {return}
+            result.y.data[i]=value
             i = i + 1
         }
 
         iter = iter + 1
     }
 
-    // Final convergence check with relaxed tolerance
+    // Final convergence check uses exactly the requested tolerance.
     var f_final: Vec64 = Vec64 { data: [0.0; 64] }
+    i=0
+    while i<n_eqs {f_final.data[i]=(0.0/0.0);i=i+1}
     rhs(t_new, &result.y, n_eqs, &!f_final)
     result.fevals = result.fevals + 1
 
     var final_norm: f64 = 0.0
     i = 0
     while i < n_eqs {
+        if !is_finite(f_final.data[i]) {return}
         let g_i = result.y.data[i] - hist_sum.data[i] - beta_h * f_final.data[i]
-        final_norm = final_norm + g_i * g_i
+        if !is_finite(g_i) {return}
+        f_final.data[i]=g_i
         i = i + 1
     }
-    final_norm = b64_sqrt(final_norm)
-    if final_norm < newton_tol * 100.0 {
+    final_norm=b64_norm(&f_final,n_eqs)
+    if final_norm <= newton_tol {
         result.converged = true
     }
     result.iters = max_iter
@@ -425,19 +437,23 @@ fn bdf64_newton_solve(
 
 fn b64_error_norm(err: &Vec64, y_old: &Vec64, y_new: &Vec64,
                   n: i32, atol: f64, rtol: f64) -> f64 with Mut, Panic, Div {
-    var sum: f64 = 0.0
-    var i: i32 = 0
-    while i < n {
-        var scale = atol + rtol * b64_max(b64_abs(y_old.data[i]), b64_abs(y_new.data[i]))
-        if scale < 1.0e-30 { scale = 1.0e-30 }
-        let e = err.data[i] / scale
-        sum = sum + e * e
-        i = i + 1
+    if n<1 || n>64 || !is_finite(atol) || atol<=0.0 || !is_finite(rtol) || rtol<0.0 {return 1.0/0.0}
+    var largest:f64=0.0
+    var squares:f64=0.0
+    var i:i32=0
+    while i<n {
+        let scale=atol+rtol*b64_max(b64_abs(y_old.data[i]),b64_abs(y_new.data[i]))
+        if !is_finite(scale) || scale<=0.0 || !is_finite(err.data[i]) || !is_finite(y_old.data[i]) || !is_finite(y_new.data[i]) {return 1.0/0.0}
+        let e=b64_abs(err.data[i])/scale
+        if !is_finite(e) {return 1.0/0.0}
+        if e>0.0 {
+            if e>largest {let ratio=largest/e;squares=1.0+squares*ratio*ratio;largest=e}
+            else {let ratio=e/largest;squares=squares+ratio*ratio}
+        }
+        i=i+1
     }
-    if n > 0 {
-        return b64_sqrt(sum / (n as f64))
-    }
-    return 0.0
+    if largest==0.0 {return 0.0}
+    largest*b64_sqrt(squares/(n as f64))
 }
 
 // ============================================================================
@@ -447,21 +463,27 @@ fn b64_error_norm(err: &Vec64, y_old: &Vec64, y_new: &Vec64,
 // Var(y_{n+1})_i = Var(y_n)_i / M_ii^2
 // ============================================================================
 
-fn b64_propagate_variance(
-    jac: &Mat64, beta_h: f64,
-    var_in: &Vec64, n: i32, var_out: &!Vec64
-) with Mut, Panic, Div {
-    var i: i32 = 0
-    while i < n {
-        let m_ii = 1.0 - beta_h * jac.data[i * 64 + i]
-        if b64_abs(m_ii) < 1.0e-30 {
-            var_out.data[i] = var_in.data[i] * 1.0e10
-        } else {
-            var_out.data[i] = var_in.data[i] / (m_ii * m_ii)
-        }
-        i = i + 1
-    }
-    while i < 64 { var_out.data[i] = 0.0; i = i + 1 }
+// Diagonal independent-state compatibility model only. A coupled Jacobian
+// requires full covariance, which this legacy Vec64 variance lane cannot carry.
+fn b64_propagate_variance(jac:&Mat64,beta_h:f64,var_in:&Vec64,n:i32,var_out:&!Vec64)->bool with Mut,Div,Panic {
+ var uncertain=false
+ var i:i32=0
+ while i<n {if !is_finite(var_in.data[i]) || var_in.data[i]<0.0 {return false};if var_in.data[i]>0.0 {uncertain=true};i=i+1}
+ if uncertain {
+  i=0
+  while i<n {var j:i32=0;while j<n {if i!=j && jac.data[i*64+j]!=0.0 {return false};j=j+1};i=i+1}
+ }
+ i=0
+ while i<n {
+  let diagonal=1.0-beta_h*jac.data[i*64+i]
+  if !is_finite(diagonal) || diagonal==0.0 {return false}
+  let sigma=b64_sqrt(var_in.data[i])/b64_abs(diagonal)
+  let value=sigma*sigma
+  if !is_finite(value) || (var_in.data[i]>0.0 && value==0.0) {return false}
+  var_out.data[i]=value;i=i+1
+ }
+ while i<64 {var_out.data[i]=0.0;i=i+1}
+ true
 }
 
 // ============================================================================
@@ -474,8 +496,10 @@ fn bdf64_step(
     s: &!BDF64State
 ) -> bool with Mut, Panic, Div {
     let n = s.n_eqs
+    if n<1 || n>64 {s.dt=0.0;return false}
     let h = s.dt
     let t_new = s.t + h
+    if !is_finite(t_new) || h<=0.0 || t_new<=s.t {return false}
 
     // Determine effective order
     var eff_order: i32 = 1
@@ -513,8 +537,7 @@ fn bdf64_step(
 
     if !newton.converged {
         s.dt = s.dt * 0.25
-        s.dt = b64_max(1.0e-14, s.dt)
-        if s.order > 1 { s.order = s.order - 1 }
+        s.n_history=0;s.order=1
         return false
     }
 
@@ -528,9 +551,12 @@ fn bdf64_step(
     }
 
     let err_n = b64_error_norm(&lte, &s.y, &newton.y, n, s.atol, s.rtol)
+    if !is_finite(err_n) || err_n<0.0 {s.dt=0.0;return false}
     let accepted = err_n <= 1.0
 
     if accepted {
+        var new_var:Vec64=Vec64{data:[0.0;64]}
+        if !b64_propagate_variance(&newton.jac,beta_h,&s.variances,n,&!new_var) {s.dt=0.0;return false}
         // Shift history
         i = 0
         while i < 64 {
@@ -545,8 +571,6 @@ fn bdf64_step(
         if s.n_history < 3 { s.n_history = s.n_history + 1 }
 
         // GUM variance propagation
-        var new_var: Vec64 = Vec64 { data: [0.0; 64] }
-        b64_propagate_variance(&newton.jac, beta_h, &s.variances, n, &!new_var)
         i = 0
         while i < 64 { s.variances.data[i] = new_var.data[i]; i = i + 1 }
 
@@ -576,8 +600,9 @@ fn bdf64_step(
         }
     }
 
-    s.dt = b64_max(1.0e-14, s.dt)
     s.dt = b64_min(s.dt, s.dt_max)
+    // Constant-step coefficient history is invalid after a step change.
+    if s.dt!=h {s.n_history=0;s.order=1}
 
     return accepted
 }
@@ -642,7 +667,7 @@ fn solve_bdf64(
         atol: 0.0, rtol: 0.0, newton_tol: 0.0, max_newton_iter: 0
     }
     bdf64_init(n_eqs, y0, t_start, dt_init, atol, rtol, &!state)
-    state.dt_max = (t_end - t_start) / 2.0
+    state.dt_max = t_end - t_start
 
     sol.n_steps = 0
     sol.n_dims = n_eqs
@@ -650,6 +675,10 @@ fn solve_bdf64(
     sol.n_rejected = 0
     sol.n_function_evals = 0
     sol.success = false
+
+    if n_eqs<1 || n_eqs>64 || !is_finite(t_start) || !is_finite(t_end) || t_end<t_start || !is_finite(dt_init) || dt_init<=0.0 || !is_finite(atol) || atol<=0.0 || !is_finite(rtol) || rtol<0.0 {return}
+    var validated:i32=0
+    while validated<n_eqs {if !is_finite(y0.data[validated]) {return};validated=validated+1}
 
     // Store initial point
     let max_stored: i32 = 64
@@ -666,15 +695,15 @@ fn solve_bdf64(
     var total_attempts: i32 = 0
 
     while state.t < t_end && total_attempts < max_total_steps {
-        if state.t + state.dt > t_end { state.dt = t_end - state.t }
-        if state.dt < 1.0e-15 { state.dt = 1.0e-15 }
+        if state.t+state.dt>t_end {state.dt=t_end-state.t;state.n_history=0;state.order=1}
+        if !is_finite(state.dt) || state.dt<=0.0 || state.t+state.dt<=state.t {break}
 
         let accepted = bdf64_step(rhs, &!state)
 
         if accepted {
             sol.n_accepted = sol.n_accepted + 1
-            if sol.n_steps < max_stored {
-                let idx = sol.n_steps
+            {
+                let idx=if sol.n_steps<max_stored {sol.n_steps} else {max_stored-1}
                 sol.times[idx] = state.t
                 k = 0
                 while k < n_eqs {
@@ -682,7 +711,7 @@ fn solve_bdf64(
                     sol.variances.data[idx * 64 + k] = state.variances.data[k]
                     k = k + 1
                 }
-                sol.n_steps = sol.n_steps + 1
+                if sol.n_steps<max_stored {sol.n_steps=sol.n_steps+1}
             }
         } else {
             sol.n_rejected = sol.n_rejected + 1
@@ -691,7 +720,7 @@ fn solve_bdf64(
     }
 
     sol.n_function_evals = state.n_function_evals
-    sol.success = state.t >= t_end - 1.0e-12
+    sol.success = state.t == t_end
 }
 
 // ============================================================================
@@ -721,9 +750,12 @@ fn solve_bdf64_gum(
         atol: 0.0, rtol: 0.0, newton_tol: 0.0, max_newton_iter: 0
     }
     bdf64_init(n_eqs, y0, t_start, dt_init, atol, rtol, &!state)
-    var vi: i32 = 0
-    while vi < n_eqs { state.variances.data[vi] = var0.data[vi]; vi = vi + 1 }
-    state.dt_max = (t_end - t_start) / 2.0
+    sol.success=false;sol.n_steps=0
+    if n_eqs<1 || n_eqs>64 || !is_finite(t_start) || !is_finite(t_end) || t_end<t_start || !is_finite(dt_init) || dt_init<=0.0 || !is_finite(atol) || atol<=0.0 || !is_finite(rtol) || rtol<0.0 {return}
+    state.max_order=1
+    var vi:i32=0
+    while vi<n_eqs {if !is_finite(y0.data[vi]) || !is_finite(var0.data[vi]) || var0.data[vi]<0.0 {return};state.variances.data[vi]=var0.data[vi];vi=vi+1}
+    state.dt_max = t_end - t_start
 
     sol.n_steps = 0
     sol.n_dims = n_eqs
@@ -746,15 +778,15 @@ fn solve_bdf64_gum(
     var total_attempts: i32 = 0
 
     while state.t < t_end && total_attempts < max_total_steps {
-        if state.t + state.dt > t_end { state.dt = t_end - state.t }
-        if state.dt < 1.0e-15 { state.dt = 1.0e-15 }
+        if state.t+state.dt>t_end {state.dt=t_end-state.t;state.n_history=0;state.order=1}
+        if !is_finite(state.dt) || state.dt<=0.0 || state.t+state.dt<=state.t {break}
 
         let accepted = bdf64_step(rhs, &!state)
 
         if accepted {
             sol.n_accepted = sol.n_accepted + 1
-            if sol.n_steps < max_stored {
-                let idx = sol.n_steps
+            {
+                let idx=if sol.n_steps<max_stored {sol.n_steps} else {max_stored-1}
                 sol.times[idx] = state.t
                 k = 0
                 while k < n_eqs {
@@ -762,7 +794,7 @@ fn solve_bdf64_gum(
                     sol.variances.data[idx * 64 + k] = state.variances.data[k]
                     k = k + 1
                 }
-                sol.n_steps = sol.n_steps + 1
+                if sol.n_steps<max_stored {sol.n_steps=sol.n_steps+1}
             }
         } else {
             sol.n_rejected = sol.n_rejected + 1
@@ -771,5 +803,5 @@ fn solve_bdf64_gum(
     }
 
     sol.n_function_evals = state.n_function_evals
-    sol.success = state.t >= t_end - 1.0e-12
+    sol.success = state.t == t_end
 }

@@ -63,7 +63,9 @@ function mapLegacyPathToTarget(webPath) {
   for (const matcher of matchers) {
     const match = basePath.match(matcher.test);
     if (!match) continue;
-    return `${localePrefix}${matcher.map(match)}`;
+    const target = `${localePrefix}${matcher.map(match)}`;
+    if (target === '/' || target.endsWith('/')) return target;
+    return `${target}/`;
   }
 
   return null;
@@ -92,6 +94,11 @@ async function run() {
     const rel = path.relative(distDir, file);
     const webPath = normalizeWebPathFromFile(rel);
     if (!webPath) continue;
+
+    if (/^\/(?:(?:pt|el|zh-hk|zh|ja|es)\/)?showcases\/[^/]+$/.test(webPath)) {
+      errors.push(`showcase meta-refresh stub must not be built: ${webPath}`);
+      continue;
+    }
 
     const expected = mapLegacyPathToTarget(webPath);
     if (!expected) continue;

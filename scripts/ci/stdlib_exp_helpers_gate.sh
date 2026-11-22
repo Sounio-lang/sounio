@@ -70,11 +70,9 @@ stdlib/autodiff/dual.sio exp_f64
 stdlib/autodiff/epistemic_dual.sio exp_f64
 stdlib/autodiff/grad.sio exp_f64
 stdlib/autodiff/tape.sio exp_f64
-stdlib/causal/refutation.sio exp_f64
 stdlib/chemistry/equilibrium.sio exp_approx
 stdlib/epistemic/combine.sio exp_f64
 stdlib/epistemic/meta.sio exp_f64
-stdlib/epistemic/refutation.sio exp_f64
 stdlib/fmri/connectivity_epistemic.sio exp_f64
 stdlib/fmri/preprocess.sio exp_f64
 stdlib/ml/autodiff.sio exp_f64

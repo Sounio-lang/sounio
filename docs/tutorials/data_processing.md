@@ -26,7 +26,7 @@ $SOUC run my_csv_analysis.sio      # a file you create from the snippets below
 
 ## 1. The CsvTable Data Structure
 
-Sounio uses fixed-size arrays for all data. The `CsvTable` struct holds up to 256 rows and 16 columns in a flat `[f64; 4096]` array (row-major layout).
+Sounio uses fixed-size arrays for all data. The production `CsvTable` in `stdlib/csv/parser.sio` holds up to 256 rows and 16 columns in a flat `[f64; 4096]` array, stored column-major with stride 256 (`data[col * 256 + row]`) so column reductions scan contiguous elements. The walkthrough below is a shorter row-major sketch of the same API.
 
 ```sio
 struct CsvTable {
@@ -354,17 +354,17 @@ fn main() -> i32 with IO, Mut, Div, Panic {
 }
 ```
 
-## 6. Row-Major Indexing
+## 6. Column-major storage
 
-The flat `data[4096]` array uses row-major indexing: `data[row * n_cols + col]`. This matches C memory layout and is cache-friendly for row scans.
+The walkthrough snippets above index a row-major sketch with `data[row * n_cols + col]`. The stdlib parser does not. `stdlib/csv/parser.sio` stores each column in a contiguous run of 256 slots:
 
 ```
-Row 0: data[0], data[1], data[2]     (age=25, weight=70, height=175)
-Row 1: data[3], data[4], data[5]     (age=30, weight=80, height=180)
-Row 2: data[6], data[7], data[8]     (age=22, weight=60, height=165)
+column 0: data[0], data[1], data[2]          (ages 25, 30, 22)
+column 1: data[256], data[257], data[258]    (weights 70, 80, 60)
+column 2: data[512], data[513], data[514]    (heights 175, 180, 165)
 ```
 
-Column scans (like `csv_col_mean`) stride by `n_cols`, which is less cache-friendly but works well for tables that fit in L1 cache (4096 f64 values = 32 KB).
+`csv_col_sum`, `csv_col_mean`, `csv_col_variance`, `csv_col_min`, and `csv_col_max` walk `idx` from `col * 256` to `col * 256 + n_rows`. Cell access goes through `csv_at(row, col)`. SMAT matrices in `stdlib/io/scientific.sio` stay row-major because that is the on-disk layout.
 
 ## 7. Design Tradeoffs vs. Dynamic Languages
 
@@ -375,7 +375,7 @@ Column scans (like `csv_col_mean`) stride by `n_cols`, which is less cache-frien
 | Allocation | Zero -- stack only | Dynamic, GC-managed |
 | Effect tracking | Compile-time verified | None |
 | Parse errors | Return code (0 or -1) | Exceptions |
-| Memory layout | Flat f64 array | Column-oriented objects |
+| Memory layout | Column-major flat f64 array, stride 256 | Column-oriented objects |
 
 Sounio's approach trades flexibility for predictability. You know exactly how much memory your program uses before it runs. For scientific workloads where data sizes are known upfront (sensor readings, experimental results, pharmacokinetic parameters), this is a feature, not a limitation.
 

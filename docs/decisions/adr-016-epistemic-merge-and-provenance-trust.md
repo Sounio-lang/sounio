@@ -2,14 +2,14 @@
 topic_id: repo.docs.decisions.adr-016-epistemic-merge-and-provenance-trust
 authority: repo_only
 audience: users
-last_validated: 2026-10-24
-validated_by: formal/TrustSemiring.lean; docs/audit/EPISTEMIC_MERGE_2026-10-24/peelle.cpp
+last_validated: 2026-11-16
+validated_by: formal/TrustSemiring.lean; formal/EpistemicCorr.lean; docs/audit/EPISTEMIC_MERGE_2026-10-24/peelle.cpp; scripts/ci/epistemic_meet_refusal_gate.sh
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.decisions.adr-016-epistemic-merge-and-provenance-trust
 -->
 
 # ADR-016: Epistemic merge, contradiction, typed zeros and provenance trust
 
-**Status**: accepted (implementation pending)
+**Status**: accepted (partly implemented: decisions 2, 3, 5.4 and 7 on the statistical layer of `Knowledge<f64>`, see Implementation)
 **Date**: 2026-10-24
 
 ## Context
@@ -159,7 +159,14 @@ No search found a precedent for these as language-level obligations; absence aft
 
 ## Implementation
 
-Not started. Proposed order: the trust semiring in the ontology runtime (decision 12); the typed zeros (decision 10); `meet`/`contest` with the `E_n` policy (decisions 2–3); budget keys and `n_eff` (decisions 5–6); then the typestate and certificate kernel (decision 11), after Marco 0.
+2026-11-16, Madaros, statistical layer of `Knowledge<f64>`:
+
+- `meet(x1, ..., xn)` (decisions 2.2, 3): generalised least squares over the GUM covariance of the sources, read from the channels they share, so decision 5.2 (a shared instance correlates) holds wherever the shared component is a channel. Policy `E_n <= lim` at `k = 2`, `lim = 1` by default, `consistency: <literal>` to declare another (E305 otherwise); a refusal is a run-time contract (3.6) that prints the sources, their uncertainties and the statistic. Decision 7: a negative GLS weight refuses under every policy. `meet_birge` is the Birge policy (3.4). `en_of`, `birge_of`, `neff_of` (5.4, `n_eff = 1ᵀR⁻¹1` with the known correlations) return the statistics.
+- `contest(x1, ..., xn)` (decision 2.3) carries the sources as `Contest<f64>`; `retract(c, x, because: "...")` (4.3) is its exit, and its reason is required (E306). `meet` of a contest fuses the sources left in it.
+- Proofs: `formal/EpistemicCorr.lean` extends `EpistemicStat` to correlated pairs: `meet_sound`, `meet_refuses_inconsistent`, `meet_refuses_peelle`, `consistent_comm`, `consistent_mono`, `indep_iff` (zero covariance is the independent test), `ignore_pos_corr` (dropping a positive covariance can only accept more), `fused_between`, `neff_pair_bounds`; witness by `decide` on the H₂-in-sII water models (refused correlated, accepted if treated as independent, refused by Peelle under `E_n <= 10`).
+- Tests: `tests/run-pass/epistemic_meet_*.sio`, `epistemic_contest_retract.sio`, the run-time refusals in `scripts/ci/epistemic_meet_refusal_gate.sh`, oracles in `tests/oracles/epistemic_meet/`.
+
+Still open: the certified layer of `meet` (decision 2.2 on intervals, `EpistemicJoint`), provenance keys and partial class correlations (5.1, 5.3, 6), the `n_eff` interval for unknown provenance (5.5), resolution by a third source, traceability or a prior (4.1), the typed zeros (10), the typestate and certificates (11) and the trust semiring (12). Proposed order for what remains: the trust semiring in the ontology runtime (decision 12); the typed zeros (decision 10); `meet`/`contest` with the `E_n` policy (decisions 2–3); budget keys and `n_eff` (decisions 5–6); then the typestate and certificate kernel (decision 11), after Marco 0.
 
 ## Grounded in
 

@@ -1,0 +1,175 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: FFT_CHECKED_PASS
+use math::fft_checked::{fft_plan_new,fft_plan_status,fft_plan_len,fft_plan_payload_bytes,fft_plan_close,fft_complex_into,fft_real_into,fft_forward_into,fft_inverse_into}
+use collections::numeric_buffer::{NumericBuffer,numeric_buffer_new,numeric_buffer_at,numeric_buffer_set,numeric_buffer_close}
+use io::sci_print::{println_f64_sci}
+
+fn fft_row(n:i64,kind:i64,k:i64,re:f64,im:f64) with IO,Mut,Div,Panic {
+    print("FFT ");print(n);print(" ");print(kind);print(" ");println(k)
+    println_f64_sci(re,15)
+    println_f64_sci(im,15)
+}
+fn fft_case(n:i64)->i32 with IO,Alloc,Mut,Div,Panic {
+    let p=fft_plan_new(n,n*16)
+    assert(!(fft_plan_status(&p)!=0))
+    assert(!(fft_plan_len(&p)!=n))
+    let required=if n==1 {8} else {16*n}
+    assert(!(fft_plan_payload_bytes(&p)!=required))
+    var xr=numeric_buffer_new(n+1,(n+1)*8)
+    var xi=numeric_buffer_new(n+1,(n+1)*8)
+    var work=numeric_buffer_new(n*2,n*16)
+    var yr=numeric_buffer_new(n+1,(n+1)*8)
+    var yi=numeric_buffer_new(n+1,(n+1)*8)
+    var backr=numeric_buffer_new(n,n*8)
+    var backi=numeric_buffer_new(n,n*8)
+    var i:i64=0
+    while i<n {
+        var r=((i%16-8) as f64)/8.0
+        let v=((i%8-4) as f64)/16.0
+        if i==37 {r=r+0.5}
+        numeric_buffer_set(&!xr,i,r)
+        numeric_buffer_set(&!xi,i,v)
+        numeric_buffer_set(&!yr,i,77.0)
+        numeric_buffer_set(&!yi,i,88.0)
+        i=i+1
+    }
+    var zero:f64=0.0
+    numeric_buffer_set(&!xr,n,zero/zero)
+    numeric_buffer_set(&!xi,n,zero/zero)
+    numeric_buffer_set(&!yr,n,77.0)
+    numeric_buffer_set(&!yi,n,88.0)
+    numeric_buffer_set(&!work,0,991.0)
+    let mode=fft_complex_into(&p,&xr,&xi,&!work,&!yr,&!yi,false,3)
+    assert(!(mode!=6))
+    assert(!(numeric_buffer_at(&work,0)!=991.0 || numeric_buffer_at(&yr,0)!=77.0))
+    let success=fft_forward_into(&p,&xr,&xi,&!work,&!yr,&!yi)
+    assert(!(success!=0))
+    assert(!(numeric_buffer_at(&yr,n)!=77.0 || numeric_buffer_at(&yi,n)!=88.0))
+    i=0
+    var energy:f64=0.0
+    while i<n {
+        let a=numeric_buffer_at(&yr,i)
+        let b=numeric_buffer_at(&yi,i)
+        fft_row(n,0,i,a,b)
+        energy=energy+a*a+b*b
+        i=i+1
+    }
+    fft_row(n,4,0,energy,0.0)
+    let inverse=fft_inverse_into(&p,&yr,&yi,&!work,&!backr,&!backi)
+    assert(!(inverse!=0))
+    var err:f64=0.0
+    i=0
+    while i<n {
+        let dr=numeric_buffer_at(&backr,i)-numeric_buffer_at(&xr,i)
+        let di=numeric_buffer_at(&backi,i)-numeric_buffer_at(&xi,i)
+        let ar=if dr<0.0 {0.0-dr} else {dr}
+        let ai=if di<0.0 {0.0-di} else {di}
+        if ar>err {err=ar}
+        if ai>err {err=ai}
+        i=i+1
+    }
+    fft_row(n,5,0,err,0.0)
+    assert(!(err>1.0e-10))
+    assert(!(fft_real_into(&p,&xr,&!work,&!yr,&!yi,0)!=0))
+    i=0
+    while i<n/2+1 {
+        fft_row(n,1,i,numeric_buffer_at(&yr,i),numeric_buffer_at(&yi,i))
+        i=i+1
+    }
+    if n<=8 {
+        assert(!(fft_complex_into(&p,&xr,&xi,&!work,&!yr,&!yi,false,2)!=0))
+        i=0
+        while i<n {
+            fft_row(n,2,i,numeric_buffer_at(&yr,i),numeric_buffer_at(&yi,i))
+            i=i+1
+        }
+        assert(!(fft_forward_into(&p,&xr,&xi,&!work,&!yr,&!yi)!=0))
+        i=0
+        while i<n {
+            let a=numeric_buffer_at(&yr,i)
+            let b=numeric_buffer_at(&yi,i)
+            numeric_buffer_set(&!backr,i,a*a-b*b)
+            numeric_buffer_set(&!backi,i,2.0*a*b)
+            i=i+1
+        }
+        assert(!(fft_inverse_into(&p,&backr,&backi,&!work,&!yr,&!yi)!=0))
+        i=0
+        while i<n {
+            fft_row(n,3,i,numeric_buffer_at(&yr,i),numeric_buffer_at(&yi,i))
+            i=i+1
+        }
+    }
+    // Invalid late input must preserve both scratch and every public output.
+    i=0
+    while i<n {numeric_buffer_set(&!yr,i,77.0);numeric_buffer_set(&!yi,i,88.0);i=i+1}
+    numeric_buffer_set(&!work,0,991.0)
+    numeric_buffer_set(&!xr,n-1,zero/zero)
+    assert(!(fft_forward_into(&p,&xr,&xi,&!work,&!yr,&!yi)!=3))
+    assert(!(numeric_buffer_at(&work,0)!=991.0))
+    i=0
+    while i<n {
+        assert(!(numeric_buffer_at(&yr,i)!=77.0 || numeric_buffer_at(&yi,i)!=88.0))
+        i=i+1
+    }
+    numeric_buffer_set(&!xr,n-1,1.0/zero)
+    assert(!(fft_forward_into(&p,&xr,&xi,&!work,&!yr,&!yi)!=3))
+    assert(!(numeric_buffer_at(&work,0)!=991.0))
+    i=0
+    while i<n {assert(!(numeric_buffer_at(&yr,i)!=77.0 || numeric_buffer_at(&yi,i)!=88.0));i=i+1}
+    numeric_buffer_set(&!xr,n-1,1.7976931348623157e308)
+    i=0
+    while i<n-1 {numeric_buffer_set(&!xr,i,1.7976931348623157e308);i=i+1}
+    if n>1 {
+        assert(!(fft_forward_into(&p,&xr,&xi,&!work,&!yr,&!yi)!=5))
+        i=0
+        while i<n {assert(!(numeric_buffer_at(&yr,i)!=77.0 || numeric_buffer_at(&yi,i)!=88.0));i=i+1}
+    }
+    numeric_buffer_close(xr);numeric_buffer_close(xi);numeric_buffer_close(work)
+    numeric_buffer_close(yr);numeric_buffer_close(yi);numeric_buffer_close(backr);numeric_buffer_close(backi)
+    fft_plan_close(p)
+    0
+}
+fn capacity_case()->i32 with IO,Alloc,Mut,Div,Panic {
+    let p=fft_plan_new(4096,65536)
+    var x=numeric_buffer_new(4096,32768)
+    var w=numeric_buffer_new(8192,65536)
+    var a=numeric_buffer_new(2048,16384)
+    var b=numeric_buffer_new(2049,16392)
+    numeric_buffer_set(&!w,0,19.0)
+    numeric_buffer_set(&!a,0,20.0)
+    numeric_buffer_set(&!b,0,21.0)
+    let status=fft_real_into(&p,&x,&!w,&!a,&!b,0)
+    assert(!(status!=2))
+    assert(!(numeric_buffer_at(&w,0)!=19.0 || numeric_buffer_at(&a,0)!=20.0 || numeric_buffer_at(&b,0)!=21.0))
+    numeric_buffer_close(x);numeric_buffer_close(w);numeric_buffer_close(a);numeric_buffer_close(b);fft_plan_close(p)
+    0
+}
+fn main()->i32 with IO,Alloc,Mut,Div,Panic {
+    let empty=fft_plan_new(0,0)
+    assert(!(fft_plan_status(&empty)!=1))
+    fft_plan_close(empty)
+    let huge=fft_plan_new(1152921504606846976,9223372036854775807)
+    assert(!(fft_plan_status(&huge)!=1))
+    assert(!(fft_plan_payload_bytes(&huge)!=0))
+    fft_plan_close(huge)
+    let negative=fft_plan_new(8,0-1)
+    assert(!(fft_plan_status(&negative)!=1))
+    fft_plan_close(negative)
+    let bad=fft_plan_new(3,1024)
+    assert(!(fft_plan_status(&bad)!=1))
+    fft_plan_close(bad)
+    let limited=fft_plan_new(4096,65535)
+    assert(!(fft_plan_status(&limited)!=7))
+    assert(!(fft_plan_payload_bytes(&limited)!=0))
+    fft_plan_close(limited)
+    assert(!(capacity_case()!=0))
+    let a=fft_case(1)
+    if a!=0 {print("CASE1_FAILURE ");println(a);return 5}
+    let b=fft_case(8)
+    if b!=0 {print("CASE8_FAILURE ");println(b);return 6}
+    let c=fft_case(4096)
+    if c!=0 {print("CASE4096_FAILURE ");println(c);return 7}
+    println("FFT_CHECKED_PASS")
+    0
+}
