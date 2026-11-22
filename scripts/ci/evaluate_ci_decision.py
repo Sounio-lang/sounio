@@ -63,6 +63,11 @@ def main() -> int:
         "madaros-witness-gate": any(
             truthy(impact.get(key)) for key in ("compiler", "runtime", "stdlib", "tests", "full")
         ),
+        # Same selection as the job's own `if:`: every tests/run-pass program
+        # under this pull request's Madaros, against tests/madaros_corpus_baseline.txt.
+        "madaros-corpus-regression": any(
+            truthy(impact.get(key)) for key in ("compiler", "runtime", "stdlib", "tests", "full")
+        ),
         "gate-wave-0": any(
             truthy(impact.get(key)) for key in ("compiler", "runtime", "stdlib", "tests", "full")
         ),
