@@ -206,7 +206,11 @@ and [invalid-value E269 refusal](../../tests/compile-fail/knowledge_where_refine
 These are source-selected candidates, not calculations performed here.
 
 `E245` is a separate modular boundary for arithmetic between two
-`Knowledge<T>` values. Adding effects or repairing lineage does not supply
+`Knowledge<T>` values. `+ - * /` over two `Knowledge<f64>` operands that are
+bound names, calls or nested binaries of those now lowers on Madaros
+(first-order GUM variance, minimum confidence;
+[madaros_knowledge_binary_arith.sio](../../tests/run-pass/madaros_knowledge_binary_arith.sio)),
+so E245 remains for `%`, non-f64 payloads and every other operand shape. Adding effects or repairing lineage does not supply
 missing lowering. Inspect
 [knowledge_binary_arith_has_no_lowering.sio](../../tests/compile-fail/knowledge_binary_arith_has_no_lowering.sio)
 and its engine requirement. A seed implementation or a library struct named
@@ -496,6 +500,7 @@ page is not a fresh execution receipt.
 | E286 | type-checker/ontology | error | ontology subsumption could not be verified | [E286.md](explanations/E286.md) |
 | E287 | parser/compat | error | Sounio uses `&!T` for exclusive references, not `&mut T` | [E287.md](explanations/E287.md) |
 | E288 | diagnostics/ownership | error | use after move (registry constructor) | [E288.md](explanations/E288.md) |
+| E289 | lexer (Madaros) | error | malformed binary or octal literal: no digit after `0b`/`0o`, a decimal digit outside the base (`0b102`, `0o8`), or a float suffix (`0b1f32`) | ADR-015 row 5. `0b101`, `0o17`, `0b1010_0101` and `0b1111u8` are accepted; an out-of-range value is E276. |
 | E290 | type-checker/effects | error | unknown effect in handle/perform (SIO-417) | — |
 | E291 | type-checker/effects | error | unknown operation for effect (SIO-417) | — |
 | E292 | type-checker/effects | error | perform of effect not declared or handled here (SIO-417) | — |
@@ -508,9 +513,11 @@ page is not a fresh execution receipt.
 | E299 | type-checker/effects | error | handler backend v1 limit exceeded (results and operation values are i64 words; handler nesting depth at most 8) (SIO-417) | — |
 | E300 | type-checker | error | integer constant is out of range for the annotated type: a compile-time-known constant bound to `i8`/`u8`/`i32`/`u32` must fit (SIO-207). `let c: i32 = 2147483648` used to compile and store 2^31 in an `i32`; an `i64` constant expression that overflows (`9223372036854775807 + 1`, `MIN * 2`) is refused with the same code (ADR-031 R1); signed runtime overflow of `+`/`-`/`*`/negation traps instead of wrapping, with `wrapping_add`/`wrapping_sub`/`wrapping_mul` as the explicit wrap | — |
 | E301 | type-checker/units | error | unit registry capacity exceeded; refusing to discard a unit dimension | The 128 slots include builtins, named units, and derived dimensions. Reuse existing units or reduce distinct declarations/dimensions; exhaustion never makes a value dimensionless (#3548). |
+| E302 | type-checker/control | error | `break` with a value is only allowed inside `loop` | Inside `while` or `for` a `break` carries no value: only `loop` is an expression whose value its breaks supply. Use `loop { .. }`, or assign a `var` declared before the loop and `break` bare. The value used to be lowered and dropped. |
 | E303 | native-lowering/epistemic | error | GUM channel capacity exceeded: first-order lowering supports at most 64 channels per function | Includes synthetic residual channels in a compilation using Knowledge or uncertainty operations. Pure numeric bookkeeping alone does not trigger this refusal (#3545). |
 | E304 | native-lowering/epistemic | error | GUM correlation channel capacity exceeded: correlate() supports only channels 0 through 63 | Applies to both literal and runtime correlation coefficients; refusing preserves covariance instead of silently assuming independence (#3545). |
 | E305 | type-checker/epistemic | error | the consistency policy of meet must be a positive numeric literal | An `E_n` limit is a declared modelling choice (ADR-016, decision 3.3), not a value computed at run time. Write `meet(a, b, consistency: 2.0)`. |
 | E306 | type-checker/epistemic | error | retract needs `because:` with a non-empty string literal | Leaving a contest is explicit and its reason is recorded (ADR-016, decision 4.3): `retract(c, x, because: "...")`. |
 | E307 | native-lowering/epistemic | error | malformed ADR-016 contest or meet | Retract names a value that is not a source of the contest, a statistic gets fewer than two sources, meet gets one source that is not a contest, or a compilation holds more than 8 sources in a contest or 64 contests. | Refused at compile time instead of ignoring the source or reading the statistic as 0. |
+| E308 | type-checker/control | error | the `break` values of this `loop` have different types | A bare `break` is `()`. The first `break` fixes the type of the `loop` expression and every other `break` must match it, as the arms of an `if` must. |
 | E-NOT-IMPORTED | module-resolution | error | a bare call names a pub fn of a module the calling module does not import | Resolved through the caller's own `use` items: a named import, a glob, or a `pub use` re-export of a module that defines it. Before, every function in the module closure was callable from everywhere, and which body a name meant depended on what other modules loaded. Add the `use` item. Off switch `SOUNIO_IMPORT_HYGIENE=off`; `=report` lists violations without refusing. |
