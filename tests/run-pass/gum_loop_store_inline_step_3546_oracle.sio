@@ -1,0 +1,55 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: PASS gum_loop_store_inline_step_3546_oracle
+//@ description: Numeric oracle for the #3546 loop-store witness: the literal-index store keeps the variance, the unqueried loop store keeps the value.
+//
+// y = 1 / (2 h), h = 1e-3 * mean, mean = 2.0 +- 1e-4:
+//   y = 250, dy/dmean = -500 / mean^2 = -125, var(y) = 125^2 * 1e-8 = 1.5625e-4.
+// The loop-indexed form of the same store, followed by a variance query, is
+// refused (tests/compile-fail/gum_loop_store_inline_step_3546.sio).
+
+fn step_of(mean: f64, variance: f64) -> f64 with Mut, Div, Panic {
+    let a = if mean < 0.0 { 0.0 - mean } else { mean }
+    let r = 1.0e-3 * a
+    let s = 0.5 * variance
+    if r > s { r } else { s }
+}
+
+// Loop-indexed store, no uncertainty query: accepted, and the values are exact.
+fn fill_loop(kn: [Knowledge[f64]; 4]) -> f64 with Mut, Div, Panic, Epistemic {
+    var out: [f64; 4] = [0.0; 4]
+    var i: i32 = 0
+    while i < 4 {
+        let k = kn[i]
+        let h = step_of(k.value, k.variance)
+        out[i] = 1.0 / (2.0 * h)
+        i = i + 1
+    }
+    out[0] + out[3]
+}
+
+// Literal-index store: the first-order channel survives.
+fn var_literal(kn: [Knowledge[f64]; 4]) -> f64 with Mut, Div, Panic, Epistemic {
+    var out: [f64; 4] = [0.0; 4]
+    let k = kn[0]
+    let h = step_of(k.value, k.variance)
+    out[0] = 1.0 / (2.0 * h)
+    let y = out[0]
+    variance_of(y)
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div, Epistemic {
+    let k: Knowledge<f64> = measure(2.0, uncertainty: 0.0001)
+    let kn: [Knowledge[f64]; 4] = [k; 4]
+    let s = fill_loop(kn)
+    let v = var_literal(kn)
+    println(s)
+    println(v)
+    var ok = true
+    let ds = s - 500.0
+    if ds > 1.0e-9 || ds < 0.0 - 1.0e-9 { ok = false }
+    let dv = v - 1.5625e-4
+    if dv > 1.0e-12 || dv < 0.0 - 1.0e-12 { ok = false }
+    if ok { println("PASS gum_loop_store_inline_step_3546_oracle") } else { println("FAIL gum_loop_store_inline_step_3546_oracle") }
+    return 0
+}
