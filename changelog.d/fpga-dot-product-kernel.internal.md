@@ -1,1 +1,0 @@
-Second FPGA-profile kernel (1D dot product) with its Futhark reference and prototype gate, proving the prototype emitter translation rules are shape-generic (ADR-022 promotion criterion); no souc behaviour change.

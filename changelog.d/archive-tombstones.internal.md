@@ -1,1 +1,0 @@
-Removed the root `archive/` tree and the retired `scripts/archive/` sprint gates. Notes that told readers to run those scripts now point at the recorded result or at git history. Eight unwired CI probes whose sources called missing files, or only re-filtered another gate, are gone.

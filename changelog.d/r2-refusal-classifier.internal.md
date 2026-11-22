@@ -1,1 +1,0 @@
-The R2 self-falsifying compilation gate now requires claim refusals to exit cleanly with the expected marker, so crashes, timeouts, fatal logs, and exit-zero anomalies no longer pass. Its behavior receipt was refreshed for the current executor with a portable compiler path.
