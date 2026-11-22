@@ -6,6 +6,11 @@
 
 use gpu::pbpk28_gum_kernel::*
 use darwin_pbpk::epistemic_pbpk28::*
+use darwin_pbpk::drugs::venlafaxine::*
+use darwin_pbpk::drugs::midazolam::*
+use darwin_pbpk::ddi::cyp3a_competitive::*
+use darwin_pbpk::pgx::cyp2d6_venlafaxine::*
+use darwin_pbpk::release::matrix_er::*
 use gpu::kaxi_backend::*
 use gpu::kaxi_to_ptx::*
 
@@ -65,6 +70,156 @@ fn check_gum_case(dose_mg: f64, t_end: f64, use_sema: bool) -> i64 with IO, Mut,
             print("gpu_gum rapamycin OK\n")
         }
     }
+    fails
+}
+fn check_gum_case_venla(dose_mg: f64, t_end: f64) -> i64 with IO, Mut, Div, Panic, Epistemic {
+    // Venlafaxine XR 75 mg oral (Gohel 2008 matrix; Wang 2022 ka/F; Lessard
+    // 1999 NM formation): oral input path + CYP2D6 formation sink, NM scope.
+    let prm = ep28_venlafaxine_params()
+    let priors = ep28_venlafaxine_priors()
+    let oi = OralInputs28 { f_abs: venlafaxine_f_oral_xr(), ka: venlafaxine_ka_abs(), cl_form: vfx_cl_form_odv_nm() }
+    let rel = venlafaxine_xr_matrix_gohel2008()
+    let fu_ref = venlafaxine_fu_parent()
+    // XR: dose starts in the matrix (gut0 = 0).
+    let gut0 = 0.0
+    let ref = ep28_run_oral(prm, priors, dose_mg, t_end, oi, rel, fu_ref, gut0)
+    if !ref.success {
+        print("FAIL gpu_gum case ep28_run_oral failed\n")
+        return 1
+    }
+    let cols = ep28_jacobian_columns_oral(prm, priors, dose_mg, t_end, oi, rel, fu_ref, gut0)
+    if !cols.ok {
+        print("FAIL gpu_gum case columns_oral failed\n")
+        return 1
+    }
+    let vc = ep28_prior_vc(priors)
+    let got = pbpk28_gum_combine_f64(cols.d_auc_b, cols.d_cb24, cols.d_auc_l, cols.d_auc_k, vc.0, vc.1)
+    if !got.ok {
+        print("FAIL gpu_gum case kernel combine failed\n")
+        return 1
+    }
+    let got_main = gum_main_array(got)
+    let fails = ep28_gum_parity_check_oral(prm, priors, dose_mg, t_end, oi, rel, fu_ref, gut0, got_main, got.sensitivity)
+    if fails != 0 {
+        print("FAIL gpu_gum case bitwise mismatch\n")
+    } else {
+        print("gpu_gum venlafaxine OK\n")
+    }
+    fails
+}
+fn check_gum_case_midaz(dose_mg: f64, t_end: f64) -> i64 with IO, Mut, Div, Panic, Epistemic {
+    // Midazolam IR 5 mg oral (Heizmann 1984; Smith 1981; Thummel 1996;
+    // Olkkola 1994): immediate-release input path + CYP3A hepatic sink, NM
+    // scope. The oral input path perturbs like venlafaxine XR: dim 0 the
+    // CYP3A liver formation sink, dim 2 cl_central scaled by the drug's own
+    // fu reference.
+    let prm = ep28_midazolam_params()
+    let priors = ep28_midazolam_priors()
+    let sub = midazolam_cyp3a_substrate()
+    let ka = midazolam_absorption_params().ka
+    let oi = OralInputs28 { f_abs: cyp3a_f_oral(sub, 1.0), ka: ka, cl_form: 0.0 }
+    // IR: the dose starts in the gut; the release model is empty (total dose
+    // 0, so KP releases nothing regardless of k/n).
+    let rel = matrix_korsmeyer_peppas(0.0, 0.199, 0.65)
+    let fu_ref = 0.03
+    let gut0 = dose_mg
+    let ref = ep28_run_oral(prm, priors, dose_mg, t_end, oi, rel, fu_ref, gut0)
+    if !ref.success {
+        print("FAIL gpu_gum case ep28_run_oral failed\n")
+        return 1
+    }
+    let cols = ep28_jacobian_columns_oral(prm, priors, dose_mg, t_end, oi, rel, fu_ref, gut0)
+    if !cols.ok {
+        print("FAIL gpu_gum case columns_oral failed\n")
+        return 1
+    }
+    let vc = ep28_prior_vc(priors)
+    let got = pbpk28_gum_combine_f64(cols.d_auc_b, cols.d_cb24, cols.d_auc_l, cols.d_auc_k, vc.0, vc.1)
+    if !got.ok {
+        print("FAIL gpu_gum case kernel combine failed\n")
+        return 1
+    }
+    let got_main = gum_main_array(got)
+    let fails = ep28_gum_parity_check_oral(prm, priors, dose_mg, t_end, oi, rel, fu_ref, gut0, got_main, got.sensitivity)
+    if fails != 0 {
+        print("FAIL gpu_gum case bitwise mismatch\n")
+    } else {
+        print("gpu_gum midazolam OK\n")
+    }
+    fails
+}
+fn check_gum_case_halo(dose_mg: f64, t_end: f64) -> i64 with IO, Mut, Div, Panic, Epistemic {
+    // Haloperidol IR 5 mg oral (Forsman 1977; Haase 1981; Loryan 2014):
+    // immediate-release input path + CYP3A4/2D6 hepatic sink, NM scope.
+    // BBB/D2 identity resolved, not deferred: Kp_brain = 15 (PBPK14
+    // Rodgers-Rowland, lysosomal accumulation) carries the BBB phenotype,
+    // and the therapeutic endpoint is wired as a receipt readout off the
+    // parity-checked AUC: ISF_free,avg = Kpuu × fu × AUC_blood/t_end
+    // (Kpuu = 3.0 Loryan 2014 — the same AUC-based Kpuu the oral BBB trace
+    // and pbpk28-parity cases 14-16 check; rb = 1 so blood = plasma) →
+    // inline d2_occupancy mirror (Kd 1.5 nM Seeman 1976; window 60-80%
+    // Farde 1992). Full 9-dim BBB+D2 GUM lives in pd/d2_gum.sio;
+    // chronic-window validation in validation/haloperidol_d2_pet.sio.
+    // This arm asserts only the wiring (0 < occ < 1, fail-closed) plus
+    // the bitwise parity.
+    let prm = ep28_haloperidol_params()
+    let priors = ep28_haloperidol_priors()
+    // Absorption scalars inlined (NOT via drugs::haloperidol readers):
+    // importing that module pulls struct types (BBBParams/BBBPriors/...) into
+    // this parity binary, and any new struct type flips unrelated f64 results
+    // (Madaros codegen hazard, issue filed). Values mirror the readers:
+    // ka = 0.9/h, F = 0.65 (Forsman 1977; Froemming 1989).
+    let oi = OralInputs28 { f_abs: 0.65, ka: 0.9, cl_form: 0.0 }
+    // IR: the dose starts in the gut; the release model is empty (total dose
+    // 0, so KP releases nothing regardless of k/n).
+    let rel = matrix_korsmeyer_peppas(0.0, 0.199, 0.65)
+    let fu_ref = 0.08
+    let gut0 = dose_mg
+    let ref = ep28_run_oral(prm, priors, dose_mg, t_end, oi, rel, fu_ref, gut0)
+    if !ref.success {
+        print("FAIL gpu_gum case ep28_run_oral failed\n")
+        return 1
+    }
+    let cols = ep28_jacobian_columns_oral(prm, priors, dose_mg, t_end, oi, rel, fu_ref, gut0)
+    if !cols.ok {
+        print("FAIL gpu_gum case columns_oral failed\n")
+        return 1
+    }
+    let vc = ep28_prior_vc(priors)
+    let got = pbpk28_gum_combine_f64(cols.d_auc_b, cols.d_cb24, cols.d_auc_l, cols.d_auc_k, vc.0, vc.1)
+    if !got.ok {
+        print("FAIL gpu_gum case kernel combine failed\n")
+        return 1
+    }
+    let got_main = gum_main_array(got)
+    let fails = ep28_gum_parity_check_oral(prm, priors, dose_mg, t_end, oi, rel, fu_ref, gut0, got_main, got.sensitivity)
+    if fails != 0 {
+        print("FAIL gpu_gum case bitwise mismatch\n")
+        return fails
+    }
+    // D2 receipt: mean ISF-free from the parity-checked AUC via the Kpuu
+    // bridge, then competitive-binding occupancy occ = c/(c+Kd), Kd =
+    // 0.000564 mg/L (1.5 nM Seeman 1976). Inlined rather than calling
+    // pd::d2_occupancy (same struct-type codegen hazard as above; canonical
+    // module + window validation live in pd/d2_occupancy.sio and
+    // validation/haloperidol_d2_pet.sio). Fixed-string band receipt
+    // (the mold prints no floats); window 60-80% Farde 1992.
+    let c_isf_free_avg = 3.0 * 0.08 * ref.auc_blood_mean / t_end
+    let occ = c_isf_free_avg / (c_isf_free_avg + 0.000564)
+    if !(occ > 0.0 && occ < 1.0) {
+        print("FAIL gpu_gum haloperidol D2 wiring\n")
+        return 1
+    }
+    if occ >= 0.60 && occ < 0.80 {
+        print("gpu_gum haloperidol D2 window\n")
+    } else {
+        if occ >= 0.80 {
+            print("gpu_gum haloperidol D2 eps\n")
+        } else {
+            print("gpu_gum haloperidol D2 subtherapeutic\n")
+        }
+    }
+    print("gpu_gum haloperidol OK\n")
     fails
 }
 fn gum_main_array(got: GumCombineOut) -> [f64; 8] with Mut {
@@ -189,6 +344,9 @@ fn main() -> i64 with IO, Mut, Div, Panic, Alloc, Epistemic {
     var fails: i64 = 0
     fails = fails + check_gum_case(5.0, 168.0, false)
     fails = fails + check_gum_case(1.0, 168.0, true)
+    fails = fails + check_gum_case_venla(75.0, 168.0)
+    fails = fails + check_gum_case_midaz(5.0, 168.0)
+    fails = fails + check_gum_case_halo(5.0, 72.0)
     fails = fails + check_gum_emitter()
     fails = fails + check_gum_fail_closed()
     fails = fails + check_gum_sabotage()

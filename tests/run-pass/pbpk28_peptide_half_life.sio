@@ -1,0 +1,121 @@
+//@ run-pass
+//@ timeout: 300
+//@ expect-stdout-contains: PBPK28_PEPTIDE_HALF_LIFE_PASS
+//
+// Semaglutide and tirzepatide PBPK28 profiles, single subcutaneous dose,
+// against published disposition.
+//
+// Semaglutide, 1 mg (inputs: CL/F 0.05 L/h, V/F 12.5 L and F 0.89 from the
+// Ozempic prescribing information, i.e. CL 0.0445 L/h and V 11.125 L;
+// absorption half-life 60 h):
+//   kinetic V_ss of the parameter set            11.125 ± 0.01 L
+//   terminal half-life, 840-1344 h               within 15% of one week (168 h)
+//   average steady-state concentration for 1 mg weekly, AUC(0-inf) / 168 h,
+//                                                within 30% of 123 ng/mL
+//     (Ozempic prescribing information: half-life about 1 week, 123 ng/mL;
+//      the concentration is not independent of the inputs, which come from
+//      the same document)
+// Tirzepatide, 5 mg (inputs: CL/F 0.061 L/h and F 0.80 from the Mounjaro
+// prescribing information, i.e. CL 0.0488 L/h; ka 0.0373 /h, Schneck & Urva
+// 2024; volume at the structural floor, see the scenario):
+//   kinetic V_ss of the parameter set            8.70 ± 0.01 L
+//   terminal half-life, 840-1344 h               within 15% of 5 days (120 h)
+//   time of peak                                 inside 8-72 h
+//   AUC(0-inf)                                   within 2% of Dose/(CL/F) = 82.0 mg.h/L
+//     (Mounjaro prescribing information: half-life about 5 days, time of
+//      peak 8 to 72 h)
+//
+// With the profiles used until 2026-11-15 (semaglutide CL 0.077 L/h, both
+// with the unscaled peptide Kp pattern, kinetic V_ss 21.57 L) the semaglutide
+// half-life is 194 h and its steady-state average 69 ng/mL, and the
+// tirzepatide half-life is 245 h, its time of peak 129 h and its AUC
+// 65.6 mg.h/L: the half-life, concentration, peak-time and AUC checks fail.
+
+use darwin_pbpk::core::pbpk28_params::*
+use darwin_pbpk::tsit5_pbpk28::*
+use darwin_pbpk::scenarios::semaglutide_sc_depot::*
+use darwin_pbpk::scenarios::tirzepatide_sc_depot::*
+use math::pure::ln
+
+fn ph_check(tag: string, x: f64, lo: f64, hi: f64) -> i32 with IO, Mut, Div, Panic {
+    print("  "); print(tag); print(" = "); print(x); print("  allowed ["); print(lo); print(", "); print(hi); println("]")
+    if x < lo || x > hi {
+        println("  [FAIL]")
+        return 1
+    }
+    return 0
+}
+
+// Kinetic volume of the set: central blood plus, per organ, its vascular
+// space at blood concentration and its tissue space at Kp times that.
+fn ph_vss(p: PBPKParams28) -> f64 with Mut {
+    var v = p.v_ref[0]
+    var i = 1
+    while i < 14 {
+        let fv = p.vasc_frac[i]
+        v = v + p.v_ref[i] * (fv + (1.0 - fv) * p.kp[i])
+        i = i + 1
+    }
+    return v
+}
+
+struct PhOut {
+    thalf: f64,
+    auc: f64,
+    tmax: f64,
+}
+
+// which = 0 semaglutide, 1 tirzepatide. Plain PBPK28 transport with the
+// scenario's depot input; no receptor or effect layer.
+fn ph_run(which: i32) -> PhOut with Mut, Div, Panic {
+    var p = pbpk28_params_semaglutide()
+    if which == 1 { p = tirz_pbpk28_params() }
+    var st = pbpk28_state_zero()
+    let dt = 0.05
+    var t = 0.0
+    var auc = 0.0
+    var prev = 0.0
+    var c840 = 0.0
+    var c1344 = 0.0
+    var cmax = 0.0
+    var tmax = 0.0
+    while t + dt * 0.5 < 2016.0 {
+        var rate = sema_release_rate_at(t + 0.5 * dt)
+        if which == 1 { rate = tirz_release_rate_at(t + 0.5 * dt) }
+        st = pbpk28_full_cn_step(st, p, rate, dt)
+        t = t + dt
+        let c = st.cv[0]
+        auc = auc + 0.5 * (prev + c) * dt
+        prev = c
+        if c > cmax { cmax = c; tmax = t }
+        if t < 840.025 { c840 = c }
+        if t < 1344.025 { c1344 = c }
+    }
+    // tail beyond 2016 h, mono-exponential at the measured rate
+    let lam = ln(c840 / c1344) / 504.0
+    return PhOut { thalf: ln(2.0) / lam, auc: auc + prev / lam, tmax: tmax }
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var fails: i32 = 0
+
+    println("semaglutide, 1 mg subcutaneous")
+    fails = fails + ph_check("V_ss (L)", ph_vss(pbpk28_params_semaglutide()), 11.115, 11.135)
+    let s = ph_run(0)
+    fails = fails + ph_check("terminal half-life (h)", s.thalf, 142.8, 193.2)
+    fails = fails + ph_check("AUC(0-inf)/168 h (ng/mL)", s.auc / 168.0 * 1000.0, 86.1, 159.9)
+
+    println("tirzepatide, 5 mg subcutaneous")
+    fails = fails + ph_check("V_ss (L)", ph_vss(tirz_pbpk28_params()), 8.69, 8.71)
+    let z = ph_run(1)
+    fails = fails + ph_check("terminal half-life (h)", z.thalf, 102.0, 138.0)
+    fails = fails + ph_check("time of peak (h)", z.tmax, 8.0, 72.0)
+    fails = fails + ph_check("AUC(0-inf) (mg.h/L)", z.auc, 80.3, 83.6)
+
+    if fails == 0 {
+        println("PBPK28_PEPTIDE_HALF_LIFE_PASS")
+        return 0
+    }
+    println("PBPK28_PEPTIDE_HALF_LIFE_FAIL")
+    return 1
+}

@@ -35,6 +35,7 @@ var IMPORT_RESOLUTION_FAILED: i64 = 0
 var LMR_USE_MOD: [i64; 16384] = [0; 16384]
 var LMR_USE_TGT: [i64; 16384] = [0; 16384]
 var LMR_USE_LINE: [i64; 16384] = [0; 16384]
+var LMR_USE_TOK_ALL: [i64; 16384] = [0; 16384]
 var LMR_USE_COUNT: i64 = 0
 var LMR_USE_OVERFLOW: i64 = 0
 // SRC offset where the extern stubs and native prelude start (set by
@@ -571,6 +572,10 @@ var EPIST_KNOW_SUBTYPE_VIOLATIONS: i64 = 0  // where src conf < dst conf
 var EPIST_EFFECT_VIOLATIONS: i64 = 0
 // Gen 17 D2: Parameterized EpistemicComplete — per-function minimum confidence
 var FN_EPISTEMIC_MIN: [i64; 65536] = [0; 65536]  // 0 = unset (use GATE_THRESHOLD)
+var FN_WIDE_INT_REACH: [i64; 65536] = [0; 65536]
+var FN_WIDE_INT_Q: [i64; 65536] = [0; 65536]
+var TC_WIDE_INT_ACTIVE_FN: i64 = -1
+var TC_WIDE_INT_SIG_PASS: i64 = 0
 // Gen 15 (Option B): epistemic certificate (.econf) support
 // Gen 17 D6: --emit-proof-obligations — Lean 4 proof goals for PLATINUM bindings
 var CLI_EMIT_PROOFS: i64 = 0
@@ -2537,6 +2542,36 @@ fn expr_set_unit_from_type(ty: i64, ty_hash: i64) with Panic, Mut, Div {
 
 // Compute gl_name_hash from raw byte values (for init_unit_table without src buffer)
 // hash = len * 1000003 + sum(byte[i] * (i+1) * 31)
+// Two's-complement wrapping without the wrapping_* builtins. lean_single
+// must stay compilable by the older bootstrap ELF (bin/souc-linux-x86_64),
+// which does not know them, and under the ADR-031 guards a plain + or *
+// that wraps fails. Shifts and bitwise ops never trap, so these build the
+// wrap from them. Only the overflowing slow paths call them.
+fn ls_wadd(a: i64, b: i64) -> i64 with Mut {
+    var x = a
+    var y = b
+    var n: i64 = 0
+    while y != 0 && n < 65 {
+        let c = x & y
+        x = x ^ y
+        y = c << 1
+        n = n + 1
+    }
+    return x
+}
+fn ls_wsub(a: i64, b: i64) -> i64 with Mut { return ls_wadd(a, ls_wadd(b ^ (0 - 1), 1)) }
+fn ls_wmul(a: i64, b: i64) -> i64 with Mut {
+    var r: i64 = 0
+    var x = a
+    var i: i64 = 0
+    while i < 64 {
+        if ((b >> i) & 1) != 0 { r = ls_wadd(r, x) }
+        x = x << 1
+        i = i + 1
+    }
+    return r
+}
+
 fn hash_1(b0: i64) -> i64                        { return 1000003 + b0 * 31 }
 fn hash_2(b0: i64, b1: i64) -> i64               { return 2000006 + b0 * 31 + b1 * 62 }
 fn hash_3(b0: i64, b1: i64, b2: i64) -> i64      { return 3000009 + b0 * 31 + b1 * 62 + b2 * 93 }
@@ -3608,7 +3643,35 @@ fn bind_struct_local_zeroinit_a64(ns: i64, ne: i64, ty_hash: i64) with Mut, Pani
 
 fn copy_struct_into_local_slot_a64(slot: i64, ty_hash: i64) with Mut, Panic, Div {
     let si = st_find(ty_hash)
-    if si < 0 && knowledge_hash_is(ty_hash) == false { emit_store_var_a64(slot); return }
+    if si < 0 && knowledge_hash_is(ty_hash) == false {
+        // A synthetic tuple (no registered struct) arrives as a pointer to the
+        // ONE global return buffer (stabilize_return_agg_a64). Storing that
+        // pointer made the variable an alias of every later aggregate return:
+        // `lp = f(a); rp = f(b)` left lp reading rp's value. Copy the words into
+        // slots of this assignment instead, as materialize_aggregate_expr_a64
+        // does for a struct. (x86 returns into the caller's SRET slot, so its
+        // pointer is stable there.)
+        let tup_n = struct_like_nslots(ty_hash)
+        if tup_n > 0 && tup_cache_lookup(ty_hash) >= 0 {
+            em32(0xAA0003EA)  // mov x10, x0 (src ptr)
+            if tup_n * 8 >= local_bss_spill_bytes() {
+                let tup_tmp = GL_BSS_BASE + a64_stmt_temp_alloc(tup_n * 8)
+                emit_image_addr_a64(tup_tmp)
+                em32(0xAA0003EB)  // mov x11, x0 (dst ptr)
+                emit_copy_words_x10_x11_a64(tup_n)
+                emit_image_addr_a64(tup_tmp)
+            } else {
+                let tup_base = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + tup_n
+                emit_lea_var_a64(tup_base + tup_n - 1)
+                em32(0xAA0003EB)  // mov x11, x0 (dst ptr)
+                emit_copy_words_x10_x11_a64(tup_n)
+                emit_lea_var_a64(tup_base + tup_n - 1)
+            }
+        }
+        emit_store_var_a64(slot)
+        return
+    }
     let nslots = struct_like_nslots(ty_hash)
     em32(0xAA0003EA)  // mov x10, x0 (src ptr)
     emit_load_var_a64(slot)
@@ -4110,6 +4173,44 @@ fn tc_wide_float_refused(tok: i64) -> i64 with IO, Mut, Panic {
     // `f256`) as f64. Refuse the spelling fail-closed instead of emitting a
     // binary with f64 arithmetic under a binary256 type name.
     tc_error_hard(tok, "f256 is not implemented on lean_single; refuse rather than lower as f64")
+}
+
+fn name_is_wide_int_spelling(ns: i64, ne: i64) -> bool with Panic, Mut {
+    if src_match(ns, ne - ns, "i128") { return true }
+    if src_match(ns, ne - ns, "u128") { return true }
+    if src_match(ns, ne - ns, "i256") { return true }
+    if src_match(ns, ne - ns, "u256") { return true }
+    if src_match(ns, ne - ns, "i512") { return true }
+    if src_match(ns, ne - ns, "u512") { return true }
+    return false
+}
+
+fn tok_is_in_main_file(tok: i64) -> bool with Panic, Mut {
+    if tok < 0 || tok >= TC { return false }
+    let pos = TS[tok as usize]
+    if pos < 0 || pos >= SRC_LEN { return false }
+    if LMR_PRELUDE_SRC_START >= 0 && pos >= LMR_PRELUDE_SRC_START { return false }
+    if SRC[0 as usize] as i64 == 1 { return false }
+    return src_file_marker_start(pos) == 0
+}
+
+fn tc_wide_int_refused(tok: i64) -> i64 with IO, Mut, Panic {
+    // KL-9 wide-int counterpart: lean_single used to greenwash unknown
+    // lowercase names (including `i128`/`u128`/`i256`/`u256`/`i512`/`u512`)
+    // as unit-typed f64, silently rounding wide integer arithmetic through
+    // binary64 when paired with `as i256` casts. Refuse fail-closed for any
+    // spelling in <main> or in an imported function reachable from <main>,
+    // without poisoning unused stdlib sibling helpers (e.g. div_witness).
+    let in_main = tok_is_in_main_file(tok)
+    var active_reach: bool = false
+    if TC_WIDE_INT_SIG_PASS != 0 { active_reach = true }
+    if TC_WIDE_INT_ACTIVE_FN >= 0 && TC_WIDE_INT_ACTIVE_FN < FN_COUNT {
+        if FN_WIDE_INT_REACH[TC_WIDE_INT_ACTIVE_FN as usize] != 0 { active_reach = true }
+    }
+    if !in_main && !active_reach { return 0 }
+    tc_error_hard(tok, "wide integer types (i128/u128/i256/u256/i512/u512) are not implemented on lean_single; refuse rather than lower as f64")
+    TYPECHECK_FAILED = 1
+    return 0
 }
 
 fn name_is_lower(ns: i64, ne: i64) -> bool with Panic, Mut {
@@ -8056,6 +8157,13 @@ fn scan_type(p0: i64) with IO, Mut, Panic, Div {
             SCAN_TY_NEXT = p + 1
             return
         }
+        if name_is_wide_int_spelling(ns, ne) && st_find(gl_name_hash(ns, ne)) < 0 && en_find(gl_name_hash(ns, ne)) < 0 {
+            tc_wide_int_refused(p)
+            SCAN_TY = 0
+            SCAN_TY_HASH = 0
+            SCAN_TY_NEXT = p + 1
+            return
+        }
         if src_match(ns, ne - ns, "chan") {
             SCAN_TY = 0
             SCAN_TY_HASH = 0
@@ -8665,6 +8773,20 @@ fn mono_infer_from_nth_arg(gi: i64, call_arg_start: i64) -> i64 with Panic, Mut 
 }
 
 // ─── Lexer ───
+// ADR-015 row 11, first slice: besides ASCII letters, digits and `_`, an identifier may contain
+// `ε` (CE B5), `∂` (E2 88 82), `∇` (E2 88 87) and `∞` (E2 88 9E). Returns the byte length of
+// that character at p, or 0. (The rest of UAX #31 and NFC are later slices.)
+fn lex_ident_mb_len(p: i64) -> i64 with Mut, Panic {
+    let b0 = sb(p)
+    let b1 = sb(p + 1)
+    if b0 == 206 && b1 == 181 { return 2 }
+    if b0 == 226 && b1 == 136 {
+        let b2 = sb(p + 2)
+        if b2 == 130 || b2 == 135 || b2 == 158 { return 3 }
+    }
+    return 0
+}
+
 // ADR-015 row 12: documentation comments are recorded in a side table, in source order,
 // with the index of the token that follows each one. Only the main file counts (imports and
 // the native prelude follow it in SRC). The token stream is unchanged. DOC_KIND: 1 outer line
@@ -8769,6 +8891,10 @@ fn lex_utf8_scalar(pos: i64) -> i64 with Mut, Panic {
     return v
 }
 
+fn lex_is_hexdig(c: i64) -> bool {
+    return (c >= 48 && c <= 57) || (c >= 97 && c <= 102) || (c >= 65 && c <= 70)
+}
+
 fn lex_all() with IO, Mut, Panic, Div {
     TC = 0
     DOC_COUNT = 0
@@ -8869,7 +8995,7 @@ fn lex_all() with IO, Mut, Panic, Div {
                             continue
                         }
                     }
-                    if esc != 110 && esc != 116 && esc != 48 && esc != 92 && esc != 34 {
+                    if esc != 110 && esc != 114 && esc != 116 && esc != 48 && esc != 92 && esc != 34 && esc != 39 {
                         if LEX_ERROR_LINE == 0 {
                             LEX_ERROR_LINE = cur_line
                             LEX_ERROR_KIND = 2
@@ -8903,23 +9029,53 @@ fn lex_all() with IO, Mut, Panic, Div {
             if c == 48 && p + 1 < SRC_LEN && (sb(p + 1) == 120 || sb(p + 1) == 88) {
                 p = p + 2
                 var hx: i64 = 1
+                // ADR-015 row 8: `_` is a digit separator only between two digits (the Madaros rule).
+                var hsep: i64 = 0
+                var hsig: i64 = 0
+                var hstarted: i64 = 0
                 while p < SRC_LEN && hx == 1 {
                     let h = sb(p)
-                    if h >= 48 && h <= 57 { v = v * 16 + h - 48; p = p + 1 }
-                    else if h >= 97 && h <= 102 { v = v * 16 + h - 87; p = p + 1 }
-                    else if h >= 65 && h <= 70 { v = v * 16 + h - 55; p = p + 1 }
-                    else { hx = 0 }
+                    var dv: i64 = 0 - 1
+                    if h >= 48 && h <= 57 { dv = h - 48 }
+                    else if h >= 97 && h <= 102 { dv = h - 87 }
+                    else if h >= 65 && h <= 70 { dv = h - 55 }
+                    if dv >= 0 {
+                        // wraps by design: the width is refused below (E276); slow path only past 2^59
+                        if v >= 0 && v <= 576460752303423487 { v = v * 16 + dv } else { v = ls_wadd(ls_wmul(v, 16), dv) }
+                        p = p + 1
+                        if hstarted == 0 && dv != 0 { hstarted = 1 }
+                        if hstarted == 1 { hsig = hsig + 1 }
+                    } else if h == 95 && lex_is_hexdig(sb(p + 1)) {
+                        hsep = 1
+                        p = p + 1
+                    } else { hx = 0 }
                 }
                 // ADR-015 row 1: refuse a hex literal wider than 64 bits before
                 // the wrapped value reaches the token table. A trailing `p` makes
                 // it a C99 hex-float (`0x1…p-80`), whose mantissa is not an
                 // integer at all — the shared parser guards the same case with
                 // parser_hex_float_tail_ahead before calling parse_int_literal.
-                if !lit_is_float_tail(s, p) && lit_int_width_class(s, p) == 1 {
+                if hsep == 1 {
+                    if !lit_is_float_tail(s, p) && hsig > 16 {
+                        tc_error_hard(TC, "E276: integer literal does not fit any 64-bit integer type")
+                    }
+                } else if !lit_is_float_tail(s, p) && lit_int_width_class(s, p) == 1 {
                     tc_error_hard(TC, "E276: integer literal does not fit any 64-bit integer type")
                 }
             } else {
-                while p < SRC_LEN && sb(p) >= 48 && sb(p) <= 57 { v = v * 10 + sb(p) - 48; p = p + 1 }
+                var dsep: i64 = 0
+                var dovf: i64 = 0
+                while p < SRC_LEN && ((sb(p) >= 48 && sb(p) <= 57) || (sb(p) == 95 && p + 1 < SRC_LEN && sb(p + 1) >= 48 && sb(p + 1) <= 57)) {
+                    if sb(p) == 95 {
+                        dsep = 1
+                    } else {
+                        let dd = sb(p) - 48
+                        if v > 1844674407370955161 || (v == 1844674407370955161 && dd > 5) { dovf = 1 }
+                        // wraps by design: dovf / the width class refuse it (E276)
+                        if v >= 0 && v <= 922337203685477579 { v = v * 10 + dd } else { v = ls_wadd(ls_wmul(v, 10), dd) }
+                    }
+                    p = p + 1
+                }
                 // ADR-015 row 1: same refusal for the decimal spelling. Class 2
                 // (exactly 2^63) is refused only when the minus before it is not
                 // a prefix operator, because `-9223372036854775808` is how the
@@ -8929,9 +9085,14 @@ fn lex_all() with IO, Mut, Panic, Div {
                 // parser does not need this test because the lexer has already
                 // decided the token kind by then).
                 if !lit_is_float_tail(s, p) {
-                    let width_class = lit_int_width_class(s, p)
-                    if width_class == 1 || (width_class == 2 && !lit_prefix_minus_is_unary()) {
-                        tc_error_hard(TC, "E276: integer literal does not fit any 64-bit integer type")
+                    if dsep == 1 {
+                        // With separators the digit run is not contiguous: use the overflow flag (past 2^64-1).
+                        if dovf == 1 { tc_error_hard(TC, "E276: integer literal does not fit any 64-bit integer type") }
+                    } else {
+                        let width_class = lit_int_width_class(s, p)
+                        if width_class == 1 || (width_class == 2 && !lit_prefix_minus_is_unary()) {
+                            tc_error_hard(TC, "E276: integer literal does not fit any 64-bit integer type")
+                        }
                     }
                 }
             }
@@ -8948,7 +9109,8 @@ fn lex_all() with IO, Mut, Panic, Div {
                 FL_FRAC_DIGITS = 0
                 let int_zero: i64 = if v == 0 { 1 } else { 0 }
                 var seen_nonzero: i64 = 0
-                while p < SRC_LEN && sb(p) >= 48 && sb(p) <= 57 {
+                while p < SRC_LEN && ((sb(p) >= 48 && sb(p) <= 57) || (sb(p) == 95 && p + 1 < SRC_LEN && sb(p + 1) >= 48 && sb(p + 1) <= 57)) {
+                    if sb(p) == 95 { p = p + 1  continue }
                     let d = sb(p) - 48
                     if int_zero == 1 && seen_nonzero == 0 && d == 0 {
                         lit_leading_zeros = lit_leading_zeros + 1
@@ -8973,11 +9135,77 @@ fn lex_all() with IO, Mut, Panic, Div {
                     is_float = 1
                     exp_sign = esign
                     p = ep
-                    while p < SRC_LEN && sb(p) >= 48 && sb(p) <= 57 {
-                        exp_val = exp_val * 10 + sb(p) - 48
+                    while p < SRC_LEN && ((sb(p) >= 48 && sb(p) <= 57) || (sb(p) == 95 && p + 1 < SRC_LEN && sb(p + 1) >= 48 && sb(p + 1) <= 57)) {
+                        if sb(p) != 95 { exp_val = exp_val * 10 + sb(p) - 48 }
                         p = p + 1
                     }
                 }
+            }
+            // ADR-015 row 8: a `_` that is not between two digits and does not start a unit suffix
+            // (`1__0`, `10_`) is refused (E284).
+            if p < SRC_LEN && sb(p) == 95 && LEX_ERROR_LINE == 0 {
+                let sf = if p + 1 < SRC_LEN { sb(p + 1) } else { 0 }
+                if !((sf >= 65 && sf <= 90) || (sf >= 97 && sf <= 122)) {
+                    LEX_ERROR_LINE = cur_line
+                    LEX_ERROR_KIND = 12
+                }
+            }
+            // ADR-015 row 6: type suffixes (5u8, 7i32, 2.5f64) with range check
+            var num_suf_len: i64 = 0
+            var num_suf_code: i64 = 0
+            if p < SRC_LEN {
+                let sc0 = sb(p)
+                let sc1 = if p + 1 < SRC_LEN { sb(p + 1) } else { 0 }
+                let sc2 = if p + 2 < SRC_LEN { sb(p + 2) } else { 0 }
+                let sc3 = if p + 3 < SRC_LEN { sb(p + 3) } else { 0 }
+                if sc0 == 117 {  // 'u'
+                    if sc1 == 56 { num_suf_len = 2; num_suf_code = 1 }                      // u8
+                    else if sc1 == 49 && sc2 == 54 { num_suf_len = 3; num_suf_code = 2 }  // u16
+                    else if sc1 == 51 && sc2 == 50 { num_suf_len = 3; num_suf_code = 3 }  // u32
+                    else if sc1 == 54 && sc2 == 52 { num_suf_len = 3; num_suf_code = 4 }  // u64
+                } else if sc0 == 105 {  // 'i'
+                    if sc1 == 56 { num_suf_len = 2; num_suf_code = 5 }                      // i8
+                    else if sc1 == 49 && sc2 == 54 { num_suf_len = 3; num_suf_code = 6 }  // i16
+                    else if sc1 == 51 && sc2 == 50 { num_suf_len = 3; num_suf_code = 7 }  // i32
+                    else if sc1 == 54 && sc2 == 52 { num_suf_len = 3; num_suf_code = 8 }  // i64
+                } else if sc0 == 102 {  // 'f'
+                    if sc1 == 51 && sc2 == 50 { num_suf_len = 3; num_suf_code = 9 }        // f32
+                    else if sc1 == 54 && sc2 == 52 { num_suf_len = 3; num_suf_code = 10 }  // f64
+                    else if sc1 == 49 && sc2 == 50 && sc3 == 56 { num_suf_len = 4; num_suf_code = 11 } // f128
+                    else if sc1 == 50 && sc2 == 53 && sc3 == 54 { num_suf_len = 4; num_suf_code = 12 } // f256
+                }
+                if num_suf_len > 0 {
+                    let trail_c = if p + num_suf_len < SRC_LEN { sb(p + num_suf_len) } else { 0 }
+                    if (trail_c >= 48 && trail_c <= 57) || (trail_c >= 65 && trail_c <= 90) || (trail_c >= 97 && trail_c <= 122) || trail_c == 95 {
+                        num_suf_len = 0
+                        num_suf_code = 0
+                    }
+                }
+            }
+            if num_suf_len > 0 {
+                if num_suf_code >= 9 && num_suf_code <= 12 {
+                    is_float = 1
+                } else if is_float == 0 {
+                    if num_suf_code == 1 {
+                        if v > 255 || v < 0 || dovf == 1 { tc_error_hard(TC, "E276: integer literal does not fit type `u8`") }
+                    } else if num_suf_code == 2 {
+                        if v > 65535 || v < 0 || dovf == 1 { tc_error_hard(TC, "E276: integer literal does not fit type `u16`") }
+                    } else if num_suf_code == 3 {
+                        if v > 4294967295 || v < 0 || dovf == 1 { tc_error_hard(TC, "E276: integer literal does not fit type `u32`") }
+                    } else if num_suf_code == 4 {
+                        if hsig > 16 || dovf == 1 { tc_error_hard(TC, "E276: integer literal does not fit type `u64`") }
+                    } else if num_suf_code == 5 {
+                        if v > 128 || (v > 127 && !lit_prefix_minus_is_unary()) || dovf == 1 { tc_error_hard(TC, "E276: integer literal does not fit type `i8`") }
+                    } else if num_suf_code == 6 {
+                        if v > 32768 || (v > 32767 && !lit_prefix_minus_is_unary()) || dovf == 1 { tc_error_hard(TC, "E276: integer literal does not fit type `i16`") }
+                    } else if num_suf_code == 7 {
+                        if v > 2147483648 || (v > 2147483647 && !lit_prefix_minus_is_unary()) || dovf == 1 { tc_error_hard(TC, "E276: integer literal does not fit type `i32`") }
+                    } else if num_suf_code == 8 {
+                        let width_class = lit_int_width_class(s, p)
+                        if width_class == 1 || (width_class == 2 && !lit_prefix_minus_is_unary()) || dovf == 1 { tc_error_hard(TC, "E276: integer literal does not fit type `i64`") }
+                    }
+                }
+                p = p + num_suf_len
             }
             // Gen 19: _suffix unit annotation on numeric literals (e.g. 500_mg, 9.8_m)
             var lit_unit_hash: i64 = 0
@@ -9003,15 +9231,6 @@ fn lex_all() with IO, Mut, Panic, Div {
             TU[TC as usize] = lit_unit_hash
             TL[TC as usize] = cur_line; TC = TC + 1; continue
         }
-        if c == 206 && p + 1 < SRC_LEN && sb(p + 1) == 181 {
-            TK[TC as usize] = 3
-            TS[TC as usize] = p
-            TE[TC as usize] = p + 2
-            TL[TC as usize] = cur_line
-            TC = TC + 1
-            p = p + 2
-            continue
-        }
         if c == 226 && p + 2 < SRC_LEN && sb(p + 1) == 138 && sb(p + 2) == 165 {
             TK[TC as usize] = 3
             TS[TC as usize] = p
@@ -9022,10 +9241,24 @@ fn lex_all() with IO, Mut, Panic, Div {
             continue
         }
         // Identifier / keyword
-        if (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 95 {
+        if (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 95 || lex_ident_mb_len(p) > 0 {
             let s = p
-            while p < SRC_LEN && ((sb(p) >= 65 && sb(p) <= 90) || (sb(p) >= 97 && sb(p) <= 122) || (sb(p) >= 48 && sb(p) <= 57) || sb(p) == 95) { p = p + 1 }
+            var idgo: i64 = 1
+            while p < SRC_LEN && idgo == 1 {
+                let ic = sb(p)
+                if (ic >= 65 && ic <= 90) || (ic >= 97 && ic <= 122) || (ic >= 48 && ic <= 57) || ic == 95 {
+                    p = p + 1
+                } else {
+                    let mbl = lex_ident_mb_len(p)
+                    if mbl > 0 { p = p + mbl } else { idgo = 0 }
+                }
+            }
             let l = p - s
+            // ADR-015 row 11: an identifier longer than 256 bytes is refused (E282).
+            if l > 256 && LEX_ERROR_LINE == 0 {
+                LEX_ERROR_LINE = cur_line
+                LEX_ERROR_KIND = 10
+            }
             var k: i64 = 3
             if src_match(s, l, "fn") { k = 1 }
             if src_match(s, l, "return") { k = 2 }
@@ -9074,6 +9307,29 @@ fn lex_all() with IO, Mut, Panic, Div {
             TK[TC as usize] = k; TS[TC as usize] = s; TE[TC as usize] = p; TL[TC as usize] = cur_line; TC = TC + 1; continue
         }
         // Two-char operators
+        // ADR-015 row 9: `+-` and `&!` written without the space that tells the readings apart are
+        // refused (E283). `a+-2` could be `a + -2` or the uncertainty operator; `a&!b` could be
+        // `a & !b` or a mutable borrow. `<-` has no use of its own, so `x<-1` stays `x < -1`.
+        if c == 43 && p + 1 < SRC_LEN && sb(p + 1) == 45 && LEX_ERROR_LINE == 0 {
+            let pvb = if p > 0 { sb(p - 1) } else { 32 }
+            let nxb = if p + 2 < SRC_LEN { sb(p + 2) } else { 32 }
+            let pv_ws = pvb == 32 || pvb == 9 || pvb == 10 || pvb == 13 || pvb == 2
+            let nx_ws = nxb == 32 || nxb == 9 || nxb == 10 || nxb == 13
+            if !(pv_ws && nx_ws) {
+                LEX_ERROR_LINE = cur_line
+                LEX_ERROR_KIND = 11
+                LEX_ERROR_BYTE = 43
+            }
+        }
+        if c == 38 && p > 0 && p + 1 < SRC_LEN && sb(p + 1) == 33 && LEX_ERROR_LINE == 0 {
+            let pvb = sb(p - 1)
+            let operand_end = (pvb >= 65 && pvb <= 90) || (pvb >= 97 && pvb <= 122) || (pvb >= 48 && pvb <= 57) || pvb == 95 || pvb == 41 || pvb == 93
+            if operand_end {
+                LEX_ERROR_LINE = cur_line
+                LEX_ERROR_KIND = 11
+                LEX_ERROR_BYTE = 33
+            }
+        }
         if c == 45 && p + 1 < SRC_LEN && sb(p + 1) == 62 { TK[TC as usize] = 10; TS[TC as usize] = p; TE[TC as usize] = p + 2; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 2; continue }
         if c == 61 && p + 1 < SRC_LEN && sb(p + 1) == 61 { TK[TC as usize] = 21; TS[TC as usize] = p; TE[TC as usize] = p + 2; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 2; continue }
         if c == 33 && p + 1 < SRC_LEN && sb(p + 1) == 61 { TK[TC as usize] = 22; TS[TC as usize] = p; TE[TC as usize] = p + 2; TL[TC as usize] = cur_line; TC = TC + 1; p = p + 2; continue }
@@ -11245,10 +11501,12 @@ fn flc_tok_bits(tok: i64) -> i64 with Mut, Panic, Div {
     var i = s
     var v: i64 = 0
     var any_digits: i64 = 0
-    while i < e && sb(i) >= 48 && sb(i) <= 57 {
-        v = v * 10 + (sb(i) - 48)
+    while i < e && ((sb(i) >= 48 && sb(i) <= 57) || (sb(i) == 95 && i + 1 < e && sb(i + 1) >= 48 && sb(i + 1) <= 57)) {
+        if sb(i) != 95 {
+            if v >= 0 && v <= 922337203685477579 { v = v * 10 + (sb(i) - 48) } else { v = ls_wadd(ls_wmul(v, 10), sb(i) - 48) }
+            any_digits = 1
+        }
         i = i + 1
-        any_digits = 1
     }
     if any_digits == 0 { return 0 }
     var frac: i64 = 0
@@ -11261,7 +11519,8 @@ fn flc_tok_bits(tok: i64) -> i64 with Mut, Panic, Div {
         var fd: i64 = 0
         var seen_nz: i64 = 0
         if v != 0 { seen_nz = 1 }
-        while i < e && sb(i) >= 48 && sb(i) <= 57 {
+        while i < e && ((sb(i) >= 48 && sb(i) <= 57) || (sb(i) == 95 && i + 1 < e && sb(i + 1) >= 48 && sb(i + 1) <= 57)) {
+            if sb(i) == 95 { i = i + 1  continue }
             let d = sb(i) - 48
             if seen_nz == 0 && d == 0 {
                 // absorbed leading zero: not part of frac/denom
@@ -11278,8 +11537,8 @@ fn flc_tok_bits(tok: i64) -> i64 with Mut, Panic, Div {
         i = i + 1
         if i < e && sb(i) == 45 { neg = 1  i = i + 1 }
         if i < e && sb(i) == 43 { i = i + 1 }
-        while i < e && sb(i) >= 48 && sb(i) <= 57 {
-            ev = ev * 10 + (sb(i) - 48)
+        while i < e && ((sb(i) >= 48 && sb(i) <= 57) || (sb(i) == 95 && i + 1 < e && sb(i + 1) >= 48 && sb(i + 1) <= 57)) {
+            if sb(i) != 95 { ev = ev * 10 + (sb(i) - 48) }
             i = i + 1
         }
     }
@@ -11301,6 +11560,7 @@ fn flc_tok_bits(tok: i64) -> i64 with Mut, Panic, Div {
                     if cc != 48 { tail_nonzero = 1 }
                     if seen_dot == 0 { dexp = dexp + 1 }
                 }
+            } else if cc == 95 && i + 1 < e && sb(i + 1) >= 48 && sb(i + 1) <= 57 {
             } else { stop = 1 }
         }
         if stop == 1 { i = e } else { i = i + 1 }
@@ -11933,6 +12193,34 @@ fn fsh_emit_fresh_channel_x86(k_vi: i64, ch: i64) with Mut, Panic {
             if sl >= 0 {
                 emit_imm64(0)
                 emit_store_var(sl)
+            }
+        }
+        vi = vi + 1
+    }
+}
+
+// a64 twin of fsh_emit_fresh_channel_x86 (#2827). The a64 pass has no extra
+// channels, so only 0..7. Without it acc = Σ w·k over a loop read 619.444
+// for the 169.444 case above, as the #2917 seed did on x86.
+fn fsh_emit_fresh_channel_a64(k_vi: i64, ch: i64) with Mut, Panic {
+    if k_vi < 0 || ch < 0 || ch > 7 { return }
+    let kd = VAR_DECL_LOOP[k_vi as usize]
+    if kd <= 0 { return }
+    var vi: i64 = 0
+    while vi < VAR_COUNT {
+        if VAR_MUT[vi as usize] == 1 && VAR_DECL_LOOP[vi as usize] < kd {
+            var sl: i64 = -1
+            if ch == 0 { sl = VAR_SSHADOW[vi as usize] }
+            if ch == 1 { sl = VAR_SSHADOW_1[vi as usize] }
+            if ch == 2 { sl = VAR_SSHADOW_2[vi as usize] }
+            if ch == 3 { sl = VAR_SSHADOW_3[vi as usize] }
+            if ch == 4 { sl = VAR_SSHADOW_4[vi as usize] }
+            if ch == 5 { sl = VAR_SSHADOW_5[vi as usize] }
+            if ch == 6 { sl = VAR_SSHADOW_6[vi as usize] }
+            if ch == 7 { sl = VAR_SSHADOW_7[vi as usize] }
+            if sl >= 0 {
+                emit_imm64_a64(0)
+                emit_store_var_a64(sl)
             }
         }
         vi = vi + 1
@@ -12785,6 +13073,7 @@ fn emit_print_src(tok: i64, ss: i64, se: i64, braces: i64) with IO, Mut, Panic, 
                 }
             } else {
                 if c2 == 110 { byte = 10 }
+                else if c2 == 114 { byte = 13 }
                 else if c2 == 116 { byte = 9 }
                 else if c2 == 48 { byte = 0 }
                 else { byte = c2 }
@@ -12853,6 +13142,42 @@ fn emit_assert_fail() with Mut {
     em(0xbf); em32(1)
     em(0xb8); em32(60)
     em(0x0f); em(0x05)
+}
+
+// ADR-031 R1/R2 parity with Madaros: an integer operation whose result does
+// not fit fails instead of wrapping. Emitted right after the flags-setting
+// instruction: `skip_op` is the rel8 jump taken when it fits (0x71 jno,
+// 0x73 jnc). On Linux the failing path writes "sounio: <what>\n" to stderr
+// (the same line Madaros prints) and exits 1; on other targets it exits 1 like
+// emit_assert_fail. The message travels inline: `call` over it pushes its
+// address, so there is no data-section entry and no relocation.
+fn emit_int_trap_x86(skip_op: i64, what: string) with Mut, Panic, Div {
+    if TARGET_OS != 0 {
+        em(skip_op); em(12)
+        emit_assert_fail()
+        return
+    }
+    let n = 8 + str_len(what) + 1
+    em(skip_op); em(n + 35)
+    em(0xe8); em32(n)                     // call over the message
+    em(115); em(111); em(117); em(110); em(105); em(111); em(58); em(32)   // "sounio: "
+    var i: i64 = 0
+    while i < str_len(what) { em(str_char_at(what, i) as i64); i = i + 1 }
+    em(10)
+    em(0x5e)                              // pop rsi (message address)
+    em(0xba); em32(n)                     // mov edx, n
+    em(0xbf); em32(2)                     // mov edi, 2 (stderr)
+    em(0xb8); em32(1)                     // mov eax, 1 (write)
+    em(0x0f); em(0x05)                    // syscall
+    emit_assert_fail()                    // exit(1)
+}
+
+// Bytes emit_int_trap_x86 emits for `what`, so a guard placed before it can
+// jump over it.
+fn int_trap_len_x86(what: string) -> i64 with Panic, Div {
+    if TARGET_OS != 0 { return 14 }
+    let n = 8 + str_len(what) + 1
+    n + 37
 }
 
 fn emit_sqrt_builtin_x86() with Mut {
@@ -17654,6 +17979,21 @@ fn primary_fallback_report(tok: i64) with IO, Mut, Panic {
     tc_mark_failed()
 }
 
+// #3551: use the same derivative as the sensitivity chain rule for GUM variance.
+// The caller saves/restores the primal result around shadow emission.
+fn emit_math_variance_x86(input: i64, derivative: i64) with Mut {
+    EXPR_VSHADOW = -1
+    if input < 0 { return }
+    let out = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    emit_load_var(derivative); em(0x50)
+    emit_load_var(derivative)
+    em(0x59); emit_f64_mul_from_rcx_rax_x86()
+    em(0x50); emit_load_var(input)
+    em(0x59); emit_f64_mul_from_rcx_rax_x86()
+    emit_store_var(out)
+    EXPR_VSHADOW = out
+}
+
 fn compile_primary() with IO, Mut, Panic, Div {
     if tc_reject_rust_macro_at(EP) { }
     LAST_EXPR_IS_CLOSURE = 0
@@ -18489,6 +18829,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
     if k == 18 {
         let op_tok = EP
         EP = EP + 1
+        let neg_operand_start = EP
         compile_primary()
         compile_postfix_tail()
         if EXPR_TY != 0 && ty_is_numeric(EXPR_TY) == false { tc_error_hard(op_tok, "unary - requires numeric operand") }
@@ -18502,8 +18843,13 @@ fn compile_primary() with IO, Mut, Panic, Div {
             if neg_of_lit { LAST_F64_LIT_CL = CL }  // `-lit` is still that literal for exactness
         } else {
             em(0x48); em(0xf7); em(0xd8)  // neg rax
+            // ADR-031 R1: -MIN does not fit. A bare integer literal operand is
+            // exempt: the MIN spelling -9223372036854775808 is the negation of
+            // the 2^63 token and must materialise. (LAST_IS_LITERAL is not
+            // reliable here: an identifier operand leaves it stale.)
+            if operand_is_int_literal(neg_operand_start, EP) == 0 { emit_int_trap_x86(0x71, "integer overflow (i64 unary -)") }
             // Track negation in literal value so compile-time refinement checks use -N not N
-            if LAST_IS_LITERAL != 0 { LAST_LITERAL_VAL = 0 - LAST_LITERAL_VAL }
+            if LAST_IS_LITERAL != 0 { LAST_LITERAL_VAL = ls_wsub(0, LAST_LITERAL_VAL) }
         }
         return
     }
@@ -18567,6 +18913,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     }
                 } else {
                     if c2 == 110 { byte = 10 }
+                    else if c2 == 114 { byte = 13 }
                     else if c2 == 116 { byte = 9 }
                     else if c2 == 48 { byte = 0 }
                     else { byte = c2 }
@@ -20045,6 +20392,37 @@ fn compile_primary() with IO, Mut, Panic, Div {
                 EXPR_IS_F64 = 0
                 EXPR_TY = 11
                 EXPR_TY_HASH = ptr_hash_make(1, 0, 1)
+                return
+            }
+            if fn_find(ns, ne) < 0 && (src_match(ns, ne - ns, "wrapping_add") || src_match(ns, ne - ns, "wrapping_sub") || src_match(ns, ne - ns, "wrapping_mul")) {
+                // SIO-207: explicit two's-complement wrap (Madaros ids 80-82
+                // skip the overflow trap; lean_single has no trap, so the
+                // plain ops are the wrap).
+                var wop: i64 = 2
+                if src_match(ns, ne - ns, "wrapping_add") { wop = 0 }
+                if src_match(ns, ne - ns, "wrapping_sub") { wop = 1 }
+                EP = EP + 1
+                if TK[EP as usize] == 7 {
+                    tc_wrong_arity(name_tok, 2, 0)
+                    EP = EP + 1
+                    em(0x31); em(0xc0)
+                } else {
+                    compile_or()
+                    em(0x50)
+                    if TK[EP as usize] == 28 { EP = EP + 1 } else { tc_wrong_arity(name_tok, 2, 1) }
+                    compile_or()
+                    if TK[EP as usize] == 28 {
+                        tc_wrong_arity(name_tok, 2, 3)
+                        while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
+                    }
+                    if TK[EP as usize] == 7 { EP = EP + 1 }
+                    em(0x59)
+                    if wop == 0 { em(0x48); em(0x01); em(0xc8) }                        // add rax, rcx
+                    if wop == 1 { em(0x48); em(0x29); em(0xc1); em(0x48); em(0x89); em(0xc8) }  // sub rcx, rax; mov rax, rcx
+                    if wop == 2 { em(0x48); em(0x0f); em(0xaf); em(0xc1) }              // imul rax, rcx
+                }
+                EXPR_IS_F64 = 0
+                EXPR_TY = 1
                 return
             }
             if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "heap_free") {
@@ -21759,6 +22137,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                         while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
                     }
                     // β⁶/β⁷: chain rule AD for transcendentals — capture arg shadows before call
+                    let math_v = EXPR_VSHADOW
                     let math_s0 = EXPR_SSHADOW
                     let math_s1 = EXPR_SSHADOW_1
                     let math_s2 = EXPR_SSHADOW_2
@@ -21781,7 +22160,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     let math_h55 = EXPR_HSHADOW_55; let math_h56 = EXPR_HSHADOW_56; let math_h57 = EXPR_HSHADOW_57
                     let math_h66 = EXPR_HSHADOW_66; let math_h67 = EXPR_HSHADOW_67; let math_h77 = EXPR_HSHADOW_77
                     var math_arg_slot: i64 = -1
-                    if sx_any_at(math_sx) || math_s0 >= 0 || math_s1 >= 0 || math_s2 >= 0 || math_s3 >= 0 || math_s4 >= 0 || math_s5 >= 0 || math_s6 >= 0 || math_s7 >= 0 || math_h00 >= 0 || math_h01 >= 0 || math_h11 >= 0 || math_h22 >= 0 || math_h33 >= 0 || math_h44 >= 0 || math_h55 >= 0 || math_h66 >= 0 || math_h77 >= 0 {
+                    if math_v >= 0 || sx_any_at(math_sx) || math_s0 >= 0 || math_s1 >= 0 || math_s2 >= 0 || math_s3 >= 0 || math_s4 >= 0 || math_s5 >= 0 || math_s6 >= 0 || math_s7 >= 0 || math_h00 >= 0 || math_h01 >= 0 || math_h11 >= 0 || math_h22 >= 0 || math_h33 >= 0 || math_h44 >= 0 || math_h55 >= 0 || math_h66 >= 0 || math_h77 >= 0 {
                         math_arg_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
                         emit_store_var(math_arg_slot)
                     }
@@ -21815,7 +22194,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
     EXPR_HSHADOW_55 = -1; EXPR_HSHADOW_56 = -1; EXPR_HSHADOW_57 = -1
     EXPR_HSHADOW_66 = -1; EXPR_HSHADOW_67 = -1
     EXPR_HSHADOW_77 = -1
-                    if sx_any_at(math_sx) || math_s0 >= 0 || math_s1 >= 0 || math_s2 >= 0 || math_s3 >= 0 || math_s4 >= 0 || math_s5 >= 0 || math_s6 >= 0 || math_s7 >= 0 || math_h00 >= 0 || math_h01 >= 0 || math_h11 >= 0 || math_h22 >= 0 || math_h33 >= 0 || math_h44 >= 0 || math_h55 >= 0 || math_h66 >= 0 || math_h77 >= 0 {
+                    if math_v >= 0 || sx_any_at(math_sx) || math_s0 >= 0 || math_s1 >= 0 || math_s2 >= 0 || math_s3 >= 0 || math_s4 >= 0 || math_s5 >= 0 || math_s6 >= 0 || math_s7 >= 0 || math_h00 >= 0 || math_h01 >= 0 || math_h11 >= 0 || math_h22 >= 0 || math_h33 >= 0 || math_h44 >= 0 || math_h55 >= 0 || math_h66 >= 0 || math_h77 >= 0 {
                         var math_res_slot: i64 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
                         emit_store_var(math_res_slot)
                         // Compute f'(arg) into math_deriv_slot
@@ -21905,6 +22284,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                             emit_imm64(0)  // unknown: zero derivative
                         }
                         emit_store_var(math_deriv_slot)
+                        emit_math_variance_x86(math_v, math_deriv_slot)
                         // Propagate: sens_k(f(x)) = f'(arg) · sens_k(x)
                         if math_s0 >= 0 {
                             let msr0 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
@@ -23966,6 +24346,8 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
             var cast_hash = SCAN_TY_HASH
             if cast_ty == 0 && name_is_wide_float_spelling(tns, tne) {
                 tc_wide_float_refused(tp)
+            } else if cast_ty == 0 && name_is_wide_int_spelling(tns, tne) {
+                tc_wide_int_refused(tp)
             } else if cast_ty == 0 && name_is_lower(tns, tne) {
                 cast_ty = 2
                 cast_hash = gl_name_hash(tns, tne)
@@ -24437,6 +24819,7 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                     EP = EP + 1  // skip (
                     EP = EP + 1  // skip )
                     // β⁶/β⁷: capture receiver's shadow state before call
+                    let mm_v = EXPR_VSHADOW
                     let mm_s0 = EXPR_SSHADOW; let mm_s1 = EXPR_SSHADOW_1
                     let mm_s2 = EXPR_SSHADOW_2; let mm_s3 = EXPR_SSHADOW_3
                     let mm_h00 = EXPR_HSHADOW_00; let mm_h01 = EXPR_HSHADOW_01
@@ -24446,7 +24829,7 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                     let mm_h23 = EXPR_HSHADOW_23; let mm_h33 = EXPR_HSHADOW_33
                     var mm_arg_slot: i64 = -1
                     var mm_any_shadow: i64 = 0
-                    if mm_s0 >= 0 || mm_s1 >= 0 || mm_s2 >= 0 || mm_s3 >= 0 || mm_h00 >= 0 || mm_h01 >= 0 || mm_h11 >= 0 || mm_h22 >= 0 || mm_h33 >= 0 {
+                    if mm_v >= 0 || mm_s0 >= 0 || mm_s1 >= 0 || mm_s2 >= 0 || mm_s3 >= 0 || mm_h00 >= 0 || mm_h01 >= 0 || mm_h11 >= 0 || mm_h22 >= 0 || mm_h33 >= 0 {
                         mm_any_shadow = 1
                         mm_arg_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
                         emit_store_var(mm_arg_slot)
@@ -24550,6 +24933,9 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                             emit_imm64(0)
                         }
                         emit_store_var(mm_deriv_slot)
+                        if !src_match(fns, fne - fns, "abs") && !src_match(fns, fne - fns, "floor") {
+                            emit_math_variance_x86(mm_v, mm_deriv_slot)
+                        }
                         if mm_s0 >= 0 {
                             let mmr0 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
                             emit_load_var(mm_deriv_slot); em(0x50); emit_load_var(mm_s0)
@@ -25824,7 +26210,33 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
             EXPR_TY = 2
         } else {
             em(0x48); em(0x87); em(0xc1)  // xchg rax, rcx — rax=lhs, rcx=rhs
-            if op == 19 { em(0x48); em(0x0f); em(0xaf); em(0xc1) }  // imul rax, rcx
+            if op == 19 {
+                if mul_unsigned == 1 {
+                    // mul rcx: rdx:rax = rax * rcx; CF set iff the high half is nonzero
+                    em(0x48); em(0xf7); em(0xe1)
+                    emit_int_trap_x86(0x73, "integer overflow (u64 *)")
+                } else {
+                    em(0x48); em(0x0f); em(0xaf); em(0xc1)  // imul rax, rcx
+                    emit_int_trap_x86(0x71, "integer overflow (i64 *)")
+                }
+            }
+            if op == 20 || op == 29 {
+                // ADR-031 R2: a zero divisor fails (it used to raise SIGFPE).
+                let zero_what = if op == 20 { "division by zero" } else { "remainder by zero" }
+                em(0x48); em(0x85); em(0xc9)          // test rcx, rcx
+                emit_int_trap_x86(0x75, zero_what)    // jnz skips the trap
+                if mul_unsigned == 0 {
+                    // ...and so does MIN / -1, whose quotient does not fit
+                    // (idiv would raise SIGFPE). Negating the dividend
+                    // overflows exactly for MIN.
+                    let min_what = if op == 20 { "integer overflow (i64 /)" } else { "integer overflow (i64 %)" }
+                    em(0x48); em(0x83); em(0xf9); em(0xff)  // cmp rcx, -1
+                    em(0x75); em(6 + int_trap_len_x86(min_what))  // jne past the check
+                    em(0x48); em(0x89); em(0xc2)            // mov rdx, rax
+                    em(0x48); em(0xf7); em(0xda)            // neg rdx
+                    emit_int_trap_x86(0x71, min_what)
+                }
+            }
             if mul_unsigned == 1 {
                 if op == 20 { em(0x48); em(0x31); em(0xd2); em(0x48); em(0xf7); em(0xf1) }  // xor rdx, rdx; div rcx
                 if op == 29 { em(0x48); em(0x31); em(0xd2); em(0x48); em(0xf7); em(0xf1); em(0x48); em(0x89); em(0xd0) }  // xor rdx, rdx; div rcx; mov rax, rdx
@@ -27860,10 +28272,19 @@ fn compile_additive() with IO, Mut, Panic, Div {
                 } else {
                     if op == 17 { em(0x48); em(0x01); em(0xc8) }  // add rax, rcx (commutative: rcx+rax = ok)
                     if op == 18 { em(0x48); em(0x87); em(0xc1); em(0x48); em(0x29); em(0xc8) }  // xchg; sub rax, rcx
-                    // PR-8: constant fold if both operands are known literals; otherwise clear
+                    // ADR-031 R1: unsigned (left operand u64) fails on carry,
+                    // signed on overflow.
+                    if add_left_uns == 1 {
+                        if op == 17 { emit_int_trap_x86(0x73, "integer overflow (u64 +)") } else { emit_int_trap_x86(0x73, "integer overflow (u64 -)") }
+                    } else {
+                        if op == 17 { emit_int_trap_x86(0x71, "integer overflow (i64 +)") } else { emit_int_trap_x86(0x71, "integer overflow (i64 -)") }
+                    }
+                    // PR-8: constant fold if both operands are known literals; otherwise clear.
+                    // The fold only feeds refinement checks; it wraps so the
+                    // compiler itself never traps on it.
                     if left_is_literal == 1 && LAST_IS_LITERAL == 1 {
-                        if op == 17 { LAST_LITERAL_VAL = left_literal_val + LAST_LITERAL_VAL }
-                        if op == 18 { LAST_LITERAL_VAL = left_literal_val - LAST_LITERAL_VAL }
+                        if op == 17 { LAST_LITERAL_VAL = ls_wadd(left_literal_val, LAST_LITERAL_VAL) }
+                        if op == 18 { LAST_LITERAL_VAL = ls_wsub(left_literal_val, LAST_LITERAL_VAL) }
                     } else { LAST_IS_LITERAL = 0 }
                     EXPR_TY = 1
                     EXPR_VSHADOW = -1
@@ -31859,6 +32280,8 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 }
                 if decl_ty == 0 && name_is_wide_float_spelling(ann_ns, ann_ne) {
                     tc_wide_float_refused(EP)
+                } else if decl_ty == 0 && name_is_wide_int_spelling(ann_ns, ann_ne) {
+                    tc_wide_int_refused(EP)
                 } else if decl_ty == 0 && name_is_lower(ann_ns, ann_ne) {
                     decl_ty = 2
                     decl_ty_hash = gl_name_hash(ann_ns, ann_ne)
@@ -37432,11 +37855,85 @@ fn call_sh_restore(b: i64, a: i64) with Mut {
     }
 }
 
+fn mark_wide_int_reachable_fns() with IO, Mut, Panic, Div {
+    fn_lookup_index_sync()
+    var i: i64 = 0
+    var qh: i64 = 0
+    var qt: i64 = 0
+    while i < FN_COUNT {
+        FN_WIDE_INT_REACH[i as usize] = 0
+        let ntk = FN_NAME_TOK[i as usize]
+        if tok_is_in_main_file(ntk) {
+            FN_WIDE_INT_REACH[i as usize] = 1
+            FN_WIDE_INT_Q[qt as usize] = i
+            qt = qt + 1
+        }
+        i = i + 1
+    }
+    while qh < qt {
+        let fi = FN_WIDE_INT_Q[qh as usize]
+        qh = qh + 1
+        let bo = FN_BODY_OPEN[fi as usize]
+        let bc = FN_BODY_CLOSE[fi as usize]
+        if bo > 0 && bc > bo && bc <= TC {
+            var t: i64 = bo
+            while t < bc {
+                if TK[t as usize] == 3 {
+                    let ns = TS[t as usize]
+                    let ne = TE[t as usize]
+                    let h = gl_name_hash(ns, ne)
+                    var entry = FN_LOOKUP_HEAD[(h & 65535) as usize]
+                    while entry != 0 {
+                        let ci = entry - 1
+                        if FN_LOOKUP_HASH[ci as usize] == h && name_eq(FN_NS[ci as usize], FN_NE[ci as usize], ns, ne) {
+                            if FN_WIDE_INT_REACH[ci as usize] == 0 {
+                                FN_WIDE_INT_REACH[ci as usize] = 1
+                                if qt < 65536 {
+                                    FN_WIDE_INT_Q[qt as usize] = ci
+                                    qt = qt + 1
+                                }
+                            }
+                        }
+                        entry = FN_LOOKUP_NEXT[ci as usize]
+                    }
+                }
+                t = t + 1
+            }
+        }
+    }
+    TC_WIDE_INT_SIG_PASS = 1
+    i = 0
+    while i < FN_COUNT {
+        let ntk = FN_NAME_TOK[i as usize]
+        if FN_WIDE_INT_REACH[i as usize] != 0 && !tok_is_in_main_file(ntk) && ntk > 0 && ntk < TC {
+            var q: i64 = ntk + 1
+            if TK[q as usize] == 6 { q = q + 1 }
+            while q < TC && TK[q as usize] != 7 && TK[q as usize] != 0 {
+                if TK[q as usize] == 43 {
+                    q = q + 1
+                    scan_type(q)
+                    q = SCAN_TY_NEXT
+                } else {
+                    q = q + 1
+                }
+            }
+            let rtk = FN_RET_TY_TOK[i as usize]
+            if rtk >= 0 && rtk < TC {
+                scan_type(rtk)
+            }
+        }
+        i = i + 1
+    }
+    TC_WIDE_INT_SIG_PASS = 0
+}
+
 fn compile_all() -> i64 with IO, Mut, Panic, Div {
     CL = 0
     POOL_ALLOC_ROUTINE_CL = 0 - 1
     FN_COUNT = 0
     fn_lookup_index_reset()
+    TC_WIDE_INT_ACTIVE_FN = 0 - 1
+    TC_WIDE_INT_SIG_PASS = 0
     PATCH_COUNT = 0
     FNSIG_COUNT = 1
     GL_COUNT = 0
@@ -39043,12 +39540,14 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     epistemic_infer_pass()
     // Gen 16 Track B: abort if any EpistemicComplete violations detected
     if EPIST_EFFECT_VIOLATIONS > 0 { return 1 }
+    mark_wide_int_reachable_fns()
     if TARGET_ARCH == 1 { return 0 }
 
     // Pass 2: compile each function
     p = 0
     var fn_idx: i64 = 0
     while fn_idx < FN_COUNT {
+        TC_WIDE_INT_ACTIVE_FN = fn_idx
         p = FN_NAME_TOK[fn_idx as usize]
         let is_kernel_fn = FN_IS_KERNEL[fn_idx as usize]
         let body_open = FN_BODY_OPEN[fn_idx as usize]
@@ -39630,6 +40129,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
 
         fn_idx = fn_idx + 1
     }
+    TC_WIDE_INT_ACTIVE_FN = 0 - 1
 
     if fn_idx != FN_COUNT {
         print("error: function pass mismatch compiled=")
@@ -40488,6 +40988,7 @@ fn emit_print_a64_src(tok: i64, ss: i64, se: i64, braces: i64) with IO, Mut, Pan
                 }
             } else {
                 if c2 == 110 { byte = 10 }
+                else if c2 == 114 { byte = 13 }
                 else if c2 == 116 { byte = 9 }
                 else if c2 == 48 { byte = 0 }
                 else { byte = c2 }
@@ -43204,7 +43705,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             em32(0xCB0003E0)  // neg x0, x0
             // Track negation in the literal value so compile-time refinement
             // checks see -N, not N.
-            if LAST_IS_LITERAL != 0 { LAST_LITERAL_VAL = 0 - LAST_LITERAL_VAL }
+            if LAST_IS_LITERAL != 0 { LAST_LITERAL_VAL = ls_wsub(0, LAST_LITERAL_VAL) }
         }
         return
     }
@@ -43260,6 +43761,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     }
                 } else {
                     if c2 == 110 { byte = 10 }
+                    else if c2 == 114 { byte = 13 }
                     else if c2 == 116 { byte = 9 }
                     else if c2 == 48 { byte = 0 }
                     else { byte = c2 }
@@ -44114,6 +44616,35 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 EXPR_TY_HASH = ptr_hash_make(1, 0, 1)
                 return
             }
+            if fn_find(ns, ne) < 0 && (src_match(ns, ne - ns, "wrapping_add") || src_match(ns, ne - ns, "wrapping_sub") || src_match(ns, ne - ns, "wrapping_mul")) {
+                // SIO-207: explicit two's-complement wrap (see x86 twin).
+                var wop: i64 = 2
+                if src_match(ns, ne - ns, "wrapping_add") { wop = 0 }
+                if src_match(ns, ne - ns, "wrapping_sub") { wop = 1 }
+                EP = EP + 1
+                if TK[EP as usize] == 7 {
+                    tc_wrong_arity(name_tok, 2, 0)
+                    EP = EP + 1
+                    em32(0xD2800000)
+                } else {
+                    compile_or_a64()
+                    emit_push_a64()
+                    if TK[EP as usize] == 28 { EP = EP + 1 } else { tc_wrong_arity(name_tok, 2, 1) }
+                    compile_or_a64()
+                    if TK[EP as usize] == 28 {
+                        tc_wrong_arity(name_tok, 2, 3)
+                        while TK[EP as usize] != 7 && TK[EP as usize] != 0 { EP = EP + 1 }
+                    }
+                    if TK[EP as usize] == 7 { EP = EP + 1 }
+                    emit_pop_x1_a64()
+                    if wop == 0 { em32(0x8B000020) }  // add x0, x1, x0
+                    if wop == 1 { em32(0xCB000020) }  // sub x0, x1, x0
+                    if wop == 2 { em32(0x9B007C20) }  // mul x0, x1, x0
+                }
+                EXPR_IS_F64 = 0
+                EXPR_TY = 1
+                return
+            }
             if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "heap_free") {
                 if (FN_EFFECTS[CURRENT_FN as usize] & 16) == 0 { tc_effect_violation(name_tok, 16, FN_EFFECTS[CURRENT_FN as usize]) }
                 EP = EP + 1
@@ -44716,6 +45247,9 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     let m_arg_a = NEXT_SLOT
                     NEXT_SLOT = NEXT_SLOT + 1
                     emit_store_var_a64(m_arg_a)
+                    // The argument's own variance: scaled by f'(u)² below (#3551
+                    // on x86). The a64 pass left it untouched, i.e. f' == 1.
+                    let m_v_a = EXPR_VSHADOW
                     let m_prev_a = B7_TOP
                     var m_u_a = B7_TOP
                     if B7_TOP + B7_FRAME * 2 > 8192 {
@@ -44766,11 +45300,21 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                         if B7F[(m_u_a + m_q_a) as usize] >= 0 { m_any_a = 1 }
                         m_q_a = m_q_a + 1
                     }
+                    EXPR_VSHADOW = -1
+                    if m_any_a == 0 && m_v_a >= 0 {
+                        let m_dv_a = NEXT_SLOT
+                        NEXT_SLOT = NEXT_SLOT + 1
+                        emit_math_deriv_a64(m_kind_a, 0, m_arg_a, m_res_a, 0 - 1)
+                        emit_store_var_a64(m_dv_a)
+                        EXPR_VSHADOW = emit_math_variance_a64(m_v_a, m_dv_a)
+                        emit_load_var_a64(m_res_a)
+                    }
                     if m_any_a == 1 {
                         let m_d1_a = NEXT_SLOT
                         NEXT_SLOT = NEXT_SLOT + 1
                         emit_math_deriv_a64(m_kind_a, 0, m_arg_a, m_res_a, 0 - 1)
                         emit_store_var_a64(m_d1_a)
+                        EXPR_VSHADOW = emit_math_variance_a64(m_v_a, m_d1_a)
                         let m_d2_a = NEXT_SLOT
                         NEXT_SLOT = NEXT_SLOT + 1
                         emit_math_deriv_a64(m_kind_a, 1, m_arg_a, m_res_a, m_d1_a)
@@ -45853,6 +46397,8 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
             var cast_hash = SCAN_TY_HASH
             if cast_ty == 0 && name_is_wide_float_spelling(tns, tne) {
                 tc_wide_float_refused(tp)
+            } else if cast_ty == 0 && name_is_wide_int_spelling(tns, tne) {
+                tc_wide_int_refused(tp)
             } else if cast_ty == 0 && name_is_lower(tns, tne) {
                 cast_ty = 2
                 cast_hash = gl_name_hash(tns, tne)
@@ -46399,6 +46945,7 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
                         if MEAS_KNOW_IDX >= 0 && MEAS_KNOW_IDX < 8 {
                             CHANNEL_INPUT_VAR_SLOT[MEAS_KNOW_IDX as usize] = b4a_vseed
                         }
+                        fsh_emit_fresh_channel_a64(LAST_EXPR_VAR_IDX, MEAS_KNOW_IDX)
                         emit_load_var_a64(b4a_ptr_slot)       // restore ptr
                         em32(0xF9400000)                      // ldr x0, [x0] (.value)
                         // Save .value before the sensitivity seeds (emit_imm64_a64 overwrites x0)
@@ -46820,7 +47367,7 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
             if B7F[(b7_r_m + b7q_m) as usize] >= 0 { b7_any_m = 1 }
             b7q_m = b7q_m + 1
         }
-        if left_f64 == 1 && op == 19 && ((b4am_left_vshadow >= 0 || b4am_right_vshadow >= 0) || b7_any_m == 1) {
+        if left_f64 == 1 && (op == 19 || op == 20) && ((b4am_left_vshadow >= 0 || b4am_right_vshadow >= 0) || b7_any_m == 1) {
             b4am_result_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
             emit_store_var_a64(b4am_result_slot)
         }
@@ -46849,6 +47396,15 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
             let b4am_vres = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
             emit_store_var_a64(b4am_vres)
             EXPR_VSHADOW = b4am_vres
+            // Correlation term, as in compile_multiplicative: h·h is 4h²σ², not 2h²σ².
+            if b4am_left_vshadow >= 0 && b4am_right_vshadow >= 0 {
+                EXPR_VSHADOW = emit_var_mul_cov_term_a64(b4am_vres, b4am_lval_slot, b4am_rval_slot, b4am_left_vshadow, b4am_right_vshadow, b7_l_m, b7_r_m)
+            }
+        }
+        // Quotient rule for the variance (twin of emit_var_div_x86): `/` kept no
+        // variance at all on a64, so variance_of(e / 100.0) read 0.
+        if left_f64 == 1 && op == 20 && (b4am_left_vshadow >= 0 || b4am_right_vshadow >= 0) && b4am_lval_slot >= 0 && b4am_rval_slot >= 0 {
+            EXPR_VSHADOW = emit_var_div_a64(b4am_left_vshadow, b4am_right_vshadow, b4am_lval_slot, b4am_rval_slot, b7_l_m, b7_r_m)
         }
         // β⁵/β⁷ through · , as loops over the frames. The product's own
         // second-order state starts empty -- without the clear, the RHS's
@@ -46871,6 +47427,37 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
                     b7k_m = b7k_m + 1
                 }
                 b7j_m = b7j_m + 1
+            }
+            // β¹¹ (twin of compile_multiplicative): with no variance shadow on
+            // either side but live channels, the product's variance is Σ s_k² σ²_k.
+            if b4am_left_vshadow < 0 && b4am_right_vshadow < 0 {
+                var b4am_live: i64 = 0
+                var b4am_q: i64 = 0
+                while b4am_q < 8 {
+                    if B7F[(b7_o_m + 36 + b4am_q) as usize] >= 0 { b4am_live = 1 }
+                    b4am_q = b4am_q + 1
+                }
+                if b4am_live == 1 {
+                    EXPR_VSHADOW = emit_fo_var_from_sens_a64(B7F[(b7_o_m + 36) as usize], B7F[(b7_o_m + 37) as usize], B7F[(b7_o_m + 38) as usize], B7F[(b7_o_m + 39) as usize], B7F[(b7_o_m + 40) as usize], B7F[(b7_o_m + 41) as usize], B7F[(b7_o_m + 42) as usize], B7F[(b7_o_m + 43) as usize])
+                }
+            }
+        }
+        if left_f64 == 1 && op == 20 && b4am_result_slot >= 0 && b4am_rval_slot >= 0 {
+            var b7c_d: i64 = 0
+            while b7c_d < 8 {
+                B7F[(b7_o_m + 36 + b7c_d) as usize] = emit_s_div_a64(b4am_lval_slot, b4am_rval_slot, B7F[(b7_l_m + 36 + b7c_d) as usize], B7F[(b7_r_m + 36 + b7c_d) as usize])
+                b7c_d = b7c_d + 1
+            }
+            var b7j_d: i64 = 0
+            var b7i_d: i64 = 0
+            while b7j_d < 8 {
+                var b7k_d: i64 = b7j_d
+                while b7k_d < 8 {
+                    B7F[(b7_o_m + b7i_d) as usize] = emit_h_div_a64(B7F[(b7_l_m + b7i_d) as usize], B7F[(b7_r_m + b7i_d) as usize], b4am_result_slot, b4am_rval_slot, B7F[(b7_o_m + 36 + b7j_d) as usize], B7F[(b7_r_m + 36 + b7k_d) as usize], B7F[(b7_o_m + 36 + b7k_d) as usize], B7F[(b7_r_m + 36 + b7j_d) as usize])
+                    b7i_d = b7i_d + 1
+                    b7k_d = b7k_d + 1
+                }
+                b7j_d = b7j_d + 1
             }
         }
         b7_restore_a64(b7_o_m)
@@ -47038,6 +47625,237 @@ fn emit_s_mul_a64(lval: i64, rval: i64, ls: i64, rs: i64) -> i64 with IO, Mut, P
     if ls >= 0 { emit_load_var_a64(ls) } else { emit_imm64_a64(0) }
     emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
     emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+    emit_store_var_a64(res)
+    return res
+}
+
+// s(a/b) = (s(a)·b − a·s(b)) / b². The a64 pass had no division rule: every
+// channel of a quotient was dropped, so variance_of(e / 100.0) read 0 on
+// aarch64 while x86 (compile_multiplicative) read the exact 1e-4.
+fn emit_s_div_a64(lval: i64, rval: i64, ls: i64, rs: i64) -> i64 with IO, Mut, Panic, Div {
+    if ls < 0 && rs < 0 { return -1 }
+    let res = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    if ls >= 0 { emit_load_var_a64(ls) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    emit_load_var_a64(rval)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)  // s(a)·b
+    emit_push_a64()
+    if lval >= 0 { emit_load_var_a64(lval) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if rs >= 0 { emit_load_var_a64(rs) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)  // a·s(b)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E613800)  // s(a)·b − a·s(b)
+    emit_push_a64()
+    emit_load_var_a64(rval)
+    emit_push_a64()
+    emit_load_var_a64(rval)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)  // b²
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E611800)  // / b²
+    emit_store_var_a64(res)
+    return res
+}
+
+// Var(y) = Σ_k s_k(y)² u_k² over the 8 first-order channels (the a64 twin of
+// emit_fo_var_from_sens_x86; the a64 pass has no extra channels).
+fn emit_fo_var_from_sens_a64(s0: i64, s1: i64, s2: i64, s3: i64, s4: i64, s5: i64, s6: i64, s7: i64) -> i64 with IO, Mut, Panic, Div {
+    let out = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_imm64_a64(0)
+    emit_store_var_a64(out)
+    var ch: i64 = 0
+    while ch < 8 {
+        var s: i64 = s0
+        if ch == 1 { s = s1 }
+        if ch == 2 { s = s2 }
+        if ch == 3 { s = s3 }
+        if ch == 4 { s = s4 }
+        if ch == 5 { s = s5 }
+        if ch == 6 { s = s6 }
+        if ch == 7 { s = s7 }
+        let iv = CHANNEL_INPUT_VAR_SLOT[ch as usize]
+        if s >= 0 && iv >= 0 {
+            emit_load_var_a64(s); emit_push_a64()
+            emit_load_var_a64(s)
+            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)  // s²
+            emit_push_a64()
+            emit_load_var_a64(iv)
+            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)  // s² u²
+            emit_push_a64()
+            emit_load_var_a64(out)
+            emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+            emit_store_var_a64(out)
+        }
+        ch = ch + 1
+    }
+    return out
+}
+
+// x0 = A op B for two slots (a missing slot reads 0.0).
+fn emit_bin_slots_a64(a: i64, b: i64, opc: i64) with IO, Mut, Panic, Div {
+    if a >= 0 { emit_load_var_a64(a) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if b >= 0 { emit_load_var_a64(b) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(opc)
+}
+
+// x0 = x0 op B.
+fn emit_bin_x0_slot_a64(b: i64, opc: i64) with IO, Mut, Panic, Div {
+    emit_push_a64()
+    if b >= 0 { emit_load_var_a64(b) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(opc)
+}
+
+// a64 twin of emit_fo_cov_slot_x86: cov(L,R) = Σ_k s_k(L)·s_k(R)·σ²_k over the
+// channels of the two operand frames, or var(L) exactly when both operands
+// carry the same variance-shadow slot (the same quantity, e.g. x*x in a callee
+// where no input channel is in scope).
+fn emit_fo_cov_slot_a64(lv: i64, rv: i64, fl: i64, fr: i64) -> i64 with IO, Mut, Panic, Div {
+    let cov = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    if lv >= 0 && lv == rv {
+        emit_load_var_a64(lv)
+        emit_store_var_a64(cov)
+        return cov
+    }
+    emit_imm64_a64(0)
+    emit_store_var_a64(cov)
+    var c: i64 = 0
+    while c < 8 {
+        let ls = B7F[(fl + 36 + c) as usize]
+        let rs = B7F[(fr + 36 + c) as usize]
+        let iv = CHANNEL_INPUT_VAR_SLOT[c as usize]
+        if ls >= 0 && rs >= 0 && iv >= 0 {
+            emit_bin_slots_a64(ls, rs, 0x1E610800)
+            emit_bin_x0_slot_a64(iv, 0x1E610800)
+            emit_bin_x0_slot_a64(cov, 0x1E612800)
+            emit_store_var_a64(cov)
+        }
+        c = c + 1
+    }
+    return cov
+}
+
+// var(L+R) = var(L) + var(R) + 2·cov(L,R) (a64 twin of emit_var_add_correlated_x86).
+fn emit_var_add_correlated_a64(lv: i64, rv: i64, fl: i64, fr: i64) -> i64 with IO, Mut, Panic, Div {
+    let cov = emit_fo_cov_slot_a64(lv, rv, fl, fr)
+    let out = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_bin_slots_a64(cov, cov, 0x1E612800)
+    emit_bin_x0_slot_a64(lv, 0x1E612800)
+    emit_bin_x0_slot_a64(rv, 0x1E612800)
+    emit_store_var_a64(out)
+    return out
+}
+
+// var(L−R) = var(L) + var(R) − 2·cov(L,R). Where every input has a channel this
+// equals x86's Σ_k (s_k(L) − s_k(R))²·σ²_k; the a64 pass has 8 channels and
+// no extras, so the channel-only form would DROP the variance of every input
+// past the eighth (the octonion scalar part read half its GUM value). This
+// form keeps it, counting a channel-less input as independent -- the same
+// treatment x86 gives inputs past its 32.
+fn emit_var_sub_correlated_a64(lv: i64, rv: i64, fl: i64, fr: i64) -> i64 with IO, Mut, Panic, Div {
+    let cov = emit_fo_cov_slot_a64(lv, rv, fl, fr)
+    let out = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_bin_slots_a64(lv, rv, 0x1E612800)
+    emit_push_a64()
+    emit_bin_slots_a64(cov, cov, 0x1E612800)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E613800)
+    emit_store_var_a64(out)
+    return out
+}
+
+// var(L·R) += 2·L·R·cov(L,R) (a64 twin of emit_var_mul_cov_term_x86).
+fn emit_var_mul_cov_term_a64(var_slot: i64, lval: i64, rval: i64, lv: i64, rv: i64, fl: i64, fr: i64) -> i64 with IO, Mut, Panic, Div {
+    let cov = emit_fo_cov_slot_a64(lv, rv, fl, fr)
+    let out = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_bin_slots_a64(lval, rval, 0x1E610800)
+    emit_bin_x0_slot_a64(cov, 0x1E610800)
+    emit_push_a64(); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)  // ×2
+    emit_bin_x0_slot_a64(var_slot, 0x1E612800)
+    emit_store_var_a64(out)
+    return out
+}
+
+// q = L/R; var(q) = (var(L) + q²·var(R) − 2·q·cov(L,R)) / R²
+// (a64 twin of emit_var_div_x86). a/a gives 0 through the same-slot identity.
+fn emit_var_div_a64(lv: i64, rv: i64, lval: i64, rval: i64, fl: i64, fr: i64) -> i64 with IO, Mut, Panic, Div {
+    let cov = emit_fo_cov_slot_a64(lv, rv, fl, fr)
+    let q = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_bin_slots_a64(lval, rval, 0x1E611800)
+    emit_store_var_a64(q)
+    let acc = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    if lv >= 0 { emit_load_var_a64(lv) } else { emit_imm64_a64(0) }
+    emit_store_var_a64(acc)
+    if rv >= 0 {
+        emit_bin_slots_a64(q, q, 0x1E610800)
+        emit_bin_x0_slot_a64(rv, 0x1E610800)
+        emit_bin_x0_slot_a64(acc, 0x1E612800)
+        emit_store_var_a64(acc)
+    }
+    let t = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_bin_slots_a64(q, cov, 0x1E610800)
+    emit_push_a64(); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)  // 2·q·cov
+    emit_store_var_a64(t)
+    emit_bin_slots_a64(acc, t, 0x1E613800)
+    emit_store_var_a64(acc)
+    let r2 = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_bin_slots_a64(rval, rval, 0x1E610800)
+    emit_store_var_a64(r2)
+    let out = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_bin_slots_a64(acc, r2, 0x1E611800)
+    emit_store_var_a64(out)
+    return out
+}
+
+// Var(f(u)) = f'(u)²·Var(u), with the same f' the sensitivity chain uses
+// (a64 twin of emit_math_variance_x86, #3551). -1 when u carries no variance.
+fn emit_math_variance_a64(input: i64, d1: i64) -> i64 with IO, Mut, Panic, Div {
+    if input < 0 { return -1 }
+    let out = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_bin_slots_a64(d1, d1, 0x1E610800)
+    emit_bin_x0_slot_a64(input, 0x1E610800)
+    emit_store_var_a64(out)
+    return out
+}
+
+// H_jk(a/b) from a = q·b: H(a) = H(q)·b + s(q)⊗s(b) + s(b)⊗s(q) + q·H(b), so
+// H_jk(q) = (H_jk(a) − s_j(q)·s_k(b) − s_k(q)·s_j(b) − q·H_jk(b)) / b.
+// sqj / sqk are the QUOTIENT's channels (emit_s_div_a64 output).
+fn emit_h_div_a64(lh: i64, rh: i64, qval: i64, rval: i64, sqj: i64, sbk: i64, sqk: i64, sbj: i64) -> i64 with IO, Mut, Panic, Div {
+    if lh < 0 && rh < 0 && (sqj < 0 || sbk < 0) && (sqk < 0 || sbj < 0) { return -1 }
+    let res = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    if lh >= 0 { emit_load_var_a64(lh) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if sqj >= 0 { emit_load_var_a64(sqj) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if sbk >= 0 { emit_load_var_a64(sbk) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E613800)
+    emit_push_a64()
+    if sqk >= 0 { emit_load_var_a64(sqk) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if sbj >= 0 { emit_load_var_a64(sbj) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E613800)
+    emit_push_a64()
+    emit_load_var_a64(qval)
+    emit_push_a64()
+    if rh >= 0 { emit_load_var_a64(rh) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E613800)
+    emit_push_a64()
+    emit_load_var_a64(rval)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E611800)
     emit_store_var_a64(res)
     return res
 }
@@ -47381,13 +48199,35 @@ fn compile_additive_a64() with IO, Mut, Panic, Div {
                 emit_store_var_a64(b4aa_result_slot)
             }
             if b4aa_left_vshadow >= 0 || b4aa_right_vshadow >= 0 {
-                if b4aa_left_vshadow >= 0 { emit_load_var_a64(b4aa_left_vshadow) } else { emit_imm64_a64(0) }
-                emit_push_a64()
-                if b4aa_right_vshadow >= 0 { emit_load_var_a64(b4aa_right_vshadow) } else { emit_imm64_a64(0) }
-                emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)  // fadd
-                let b4aa_vres = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-                emit_store_var_a64(b4aa_vres)
-                EXPR_VSHADOW = b4aa_vres
+                // Same rules as compile_additive (x86): the variance shadow is the
+                // total variance and the channels supply the covariance. The a64
+                // pass used the blind var(a)+var(b) for both + and −, so e+e read
+                // 2·var(e) and x−x read 2·var(x).
+                var b4aa_ch_live: i64 = 0
+                var b4aa_q: i64 = 0
+                while b4aa_q < 8 {
+                    if B7F[(b7_l_a + 36 + b4aa_q) as usize] >= 0 || B7F[(b7_r_a + 36 + b4aa_q) as usize] >= 0 { b4aa_ch_live = 1 }
+                    b4aa_q = b4aa_q + 1
+                }
+                if op == 18 && b4aa_left_vshadow >= 0 && b4aa_left_vshadow == b4aa_right_vshadow {
+                    let b4aa_z = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                    emit_imm64_a64(0)
+                    emit_store_var_a64(b4aa_z)
+                    EXPR_VSHADOW = b4aa_z
+                } else if b4aa_right_vshadow < 0 {
+                    EXPR_VSHADOW = b4aa_left_vshadow
+                } else if b4aa_left_vshadow < 0 {
+                    EXPR_VSHADOW = b4aa_right_vshadow
+                } else if op == 17 {
+                    EXPR_VSHADOW = emit_var_add_correlated_a64(b4aa_left_vshadow, b4aa_right_vshadow, b7_l_a, b7_r_a)
+                } else if b4aa_ch_live == 1 {
+                    EXPR_VSHADOW = emit_var_sub_correlated_a64(b4aa_left_vshadow, b4aa_right_vshadow, b7_l_a, b7_r_a)
+                } else {
+                    emit_bin_slots_a64(b4aa_left_vshadow, b4aa_right_vshadow, 0x1E612800)
+                    let b4aa_vres = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                    emit_store_var_a64(b4aa_vres)
+                    EXPR_VSHADOW = b4aa_vres
+                }
             }
             // β⁵/β⁷ through ± , as loops over the frames rather than 4 + 36
             // inline copies. Channels 4-7 had no a64 site at all before this:
@@ -47411,8 +48251,8 @@ fn compile_additive_a64() with IO, Mut, Panic, Div {
             // PR-8: constant fold if both operands are known literals; otherwise
             // clear (mirror of compile_additive).
             if left_is_literal_a == 1 && LAST_IS_LITERAL == 1 {
-                if op == 17 { LAST_LITERAL_VAL = left_literal_val_a + LAST_LITERAL_VAL }
-                if op == 18 { LAST_LITERAL_VAL = left_literal_val_a - LAST_LITERAL_VAL }
+                if op == 17 { LAST_LITERAL_VAL = ls_wadd(left_literal_val_a, LAST_LITERAL_VAL) }
+                if op == 18 { LAST_LITERAL_VAL = ls_wsub(left_literal_val_a, LAST_LITERAL_VAL) }
             } else { LAST_IS_LITERAL = 0 }
             EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1; sx_clear()
         }
@@ -47759,6 +48599,8 @@ fn compile_stmt_a64_body() with IO, Mut, Panic, Div {
                 }
                 if decl_ty == 0 && name_is_wide_float_spelling(ann_ns, ann_ne) {
                     tc_wide_float_refused(EP)
+                } else if decl_ty == 0 && name_is_wide_int_spelling(ann_ns, ann_ne) {
+                    tc_wide_int_refused(EP)
                 } else if decl_ty == 0 && name_is_lower(ann_ns, ann_ne) {
                     decl_ty = 2
                     decl_ty_hash = gl_name_hash(ann_ns, ann_ne)
@@ -49957,6 +50799,7 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
     var p: i64 = 0
     var fn_idx: i64 = 0
     while fn_idx < FN_COUNT {
+        TC_WIDE_INT_ACTIVE_FN = fn_idx
         p = FN_NAME_TOK[fn_idx as usize]
         let body_open = FN_BODY_OPEN[fn_idx as usize]
         let body_close = FN_BODY_CLOSE[fn_idx as usize]
@@ -50345,6 +51188,7 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
         }
         fn_idx = fn_idx + 1
     }
+    TC_WIDE_INT_ACTIVE_FN = 0 - 1
 
     // Every diagnostic the arm64 pass raised above set TYPECHECK_FAILED through
     // tc_mark_failed, and nothing read it: this function emitted the binary and
@@ -50874,12 +51718,17 @@ fn lmr_print_mod(m: i64) with IO, Mut, Panic {
     }
 }
 
-// Is token t the start of a top-level `use` line of its module? (`use` lexes
-// as an ordinary identifier.)
+// Is token t the `use` keyword of a top-level `use` or `pub use` line of its
+// module? (`use` lexes as an ordinary identifier.)
 fn lmr_is_use_tok(t: i64) -> bool with Panic, Mut {
     if TK[t as usize] != 3 { return false }
     if !src_match(TS[t as usize], TE[t as usize] - TS[t as usize], "use") { return false }
-    if TS[t as usize] > 0 && SRC[(TS[t as usize] - 1) as usize] as i64 != 10 && SRC[(TS[t as usize] - 1) as usize] as i64 != 2 { return false }
+    var line_start_tok: i64 = t
+    if t > 0 && TK[(t - 1) as usize] == 49 && TL[(t - 1) as usize] == TL[t as usize] {
+        line_start_tok = t - 1
+    }
+    let s = TS[line_start_tok as usize]
+    if s > 0 && SRC[(s - 1) as usize] as i64 != 10 && SRC[(s - 1) as usize] as i64 != 2 { return false }
     return true
 }
 
@@ -50930,6 +51779,62 @@ fn lmr_use_is_glob(t: i64, e: i64) -> bool with Panic, Mut {
     return false
 }
 
+fn lmr_use_has_brace(t: i64, e: i64) -> bool with Panic, Mut {
+    var q: i64 = t + 1
+    while q < e {
+        if TK[q as usize] == 8 { return true }
+        q = q + 1
+    }
+    return false
+}
+
+fn lmr_mod_is_braced_only(d: i64) -> bool with Panic, Mut {
+    if d <= 0 { return false }
+    var saw_pub_use: i64 = 0
+    var ri: i64 = 0
+    while ri < LMR_USE_COUNT {
+        if LMR_USE_TGT[ri as usize] == d {
+            let ut = LMR_USE_TOK_ALL[ri as usize]
+            if ut <= 0 { return false }
+            if TK[(ut - 1) as usize] != 49 || TL[(ut - 1) as usize] != TL[ut as usize] { return false }
+            let ue = lmr_use_end(ut)
+            if !lmr_use_has_brace(ut, ue) { return false }
+            saw_pub_use = 1
+        }
+        ri = ri + 1
+    }
+    return saw_pub_use == 1
+}
+
+// Returns the defining module (>= 0) if module m exports a top-level free fn
+// named like token n — either directly (`pub fn`) or via `pub use` re-export —
+// or -1 if not exported, or -2 if re-exported ambiguously from two definers.
+fn lmr_mod_export_owner(m: i64, n: i64, depth: i64) -> i64 with Panic, Mut {
+    if lmr_mod_exports(m, n) { return m }
+    if depth >= 8 { return -1 }
+    var owner: i64 = -1
+    var ri: i64 = 0
+    while ri < LMR_USE_COUNT {
+        if LMR_USE_MOD[ri as usize] == m {
+            let ut = LMR_USE_TOK_ALL[ri as usize]
+            let tgt = LMR_USE_TGT[ri as usize]
+            if ut > 0 && TK[(ut - 1) as usize] == 49 && TL[(ut - 1) as usize] == TL[ut as usize] && tgt >= 0 && tgt != m {
+                let ue = lmr_use_end(ut)
+                if lmr_use_names(ut, ue, n) || lmr_use_is_glob(ut, ue) {
+                    let sub = lmr_mod_export_owner(tgt, n, depth + 1)
+                    if sub == -2 { return -2 }
+                    if sub >= 0 {
+                        if owner >= 0 && owner != sub { return -2 }
+                        owner = sub
+                    }
+                }
+            }
+        }
+        ri = ri + 1
+    }
+    return owner
+}
+
 // Which definer does module x mean by collision name c? -1: no import (keep
 // the old binding), -2: refused (diagnostic printed).
 fn lmr_resolve_in_module(x: i64, c: i64) -> i64 with IO, Mut, Panic {
@@ -50944,10 +51849,25 @@ fn lmr_resolve_in_module(x: i64, c: i64) -> i64 with IO, Mut, Panic {
     while k < LMR_MOD_USE_N {
         let tgt = LMR_MOD_USE_TGT[k as usize]
         let ut = LMR_MOD_USE_TOK[k as usize]
-        if tgt >= 0 && ut >= 0 && lmr_mod_exports(tgt, n) {
+        var exp_mod: i64 = -1
+        if tgt >= 0 && ut >= 0 { exp_mod = lmr_mod_export_owner(tgt, n, 0) }
+        if exp_mod == -2 {
+            let ue_amb = lmr_use_end(ut)
+            if lmr_use_names(ut, ue_amb, n) || lmr_use_is_glob(ut, ue_amb) {
+                print("error[module_name_resolution]: `")
+                lmr_print_tok(n)
+                print("` in module ")
+                lmr_print_mod(x)
+                print("\n  is re-exported ambiguously via `pub use` in module ")
+                lmr_print_mod(tgt)
+                print(".\n")
+                return -2
+            }
+        }
+        if exp_mod >= 0 {
             let ue = lmr_use_end(ut)
             if lmr_use_names(ut, ue, n) {
-                if explicit >= 0 && explicit != tgt {
+                if explicit >= 0 && explicit != exp_mod {
                     print("error[module_name_resolution]: `")
                     lmr_print_tok(n)
                     print("` in module ")
@@ -50955,24 +51875,34 @@ fn lmr_resolve_in_module(x: i64, c: i64) -> i64 with IO, Mut, Panic {
                     print("\n  is imported by name from two modules that each define it:\n  ")
                     lmr_print_mod(explicit)
                     print(" and ")
-                    lmr_print_mod(tgt)
+                    lmr_print_mod(exp_mod)
                     print(".\n  Import it from one of them only.\n")
                     return -2
                 }
-                explicit = tgt
+                explicit = exp_mod
             } else if lmr_use_is_glob(ut, ue) {
-                if tgt == d1 { glob_has_d1 = 1 }
+                if exp_mod == d1 { glob_has_d1 = 1 }
                 if glob1 < 0 {
-                    glob1 = tgt
-                } else if glob1 != tgt && glob2 < 0 {
-                    glob2 = tgt
+                    glob1 = exp_mod
+                } else if glob1 != exp_mod && glob2 < 0 {
+                    glob2 = exp_mod
                 }
             }
         }
         k = k + 1
     }
     if explicit >= 0 { return explicit }
-    if glob1 < 0 { return -1 }
+    if glob1 < 0 {
+        if d1 < 0 {
+            let def_mod = LMR_DEF_MOD[LMR_C_DEF[c as usize] as usize]
+            var kd: i64 = 0
+            while kd < LMR_MOD_USE_N {
+                if LMR_MOD_USE_TGT[kd as usize] == def_mod { return def_mod }
+                kd = kd + 1
+            }
+        }
+        return -1
+    }
     if glob2 < 0 { return glob1 }
     if glob_has_d1 == 1 {
         print("warning[module_name_resolution]: `")
@@ -51048,10 +51978,13 @@ fn lmr_arrow_follows_on_line(t: i64) -> bool with Panic, Mut {
     return false
 }
 
-// Is token t on a top-level `use` line (an import-list entry)?
+// Is token t on a top-level `use` or `pub use` line (an import-list entry)?
 fn lmr_is_use_line_tok(t: i64) -> bool with Panic, Mut {
     var q: i64 = t
     while q > 0 && TL[(q - 1) as usize] == TL[t as usize] && TK[(q - 1) as usize] != 77 && TK[(q - 1) as usize] != 27 { q = q - 1 }
+    if TK[q as usize] == 49 && q + 1 <= t && TL[(q + 1) as usize] == TL[t as usize] {
+        return lmr_is_use_tok(q + 1)
+    }
     return lmr_is_use_tok(q)
 }
 
@@ -51197,7 +52130,41 @@ fn lmr_resolve() with IO, Mut, Panic, Div {
         }
         t = t + 1
     }
-    // 3. collision names: defined in two or more modules
+    if LMR_USE_OVERFLOW != 0 {
+        print("error[module_name_resolution]: more than 16384 `use` items; cannot resolve same-named functions\n")
+        LMR_FAILED = 1
+        return
+    }
+    var ri0: i64 = 0
+    while ri0 < LMR_USE_COUNT {
+        LMR_USE_TOK_ALL[ri0 as usize] = -1
+        ri0 = ri0 + 1
+    }
+    var ms0: i64 = 0
+    var mx0: i64 = 0
+    while mx0 < LMR_MOD_COUNT {
+        var me0: i64 = ms0
+        while me0 < TC && TK[me0 as usize] != 77 && TK[me0 as usize] != 0 && LMR_TOK_MOD[me0 as usize] == mx0 { me0 = me0 + 1 }
+        var q0: i64 = ms0
+        while q0 < me0 {
+            if lmr_is_use_tok(q0) {
+                var rj: i64 = 0
+                while rj < LMR_USE_COUNT {
+                    if LMR_USE_MOD[rj as usize] == mx0 && LMR_USE_LINE[rj as usize] == TL[q0 as usize] && LMR_USE_TOK_ALL[rj as usize] < 0 {
+                        LMR_USE_TOK_ALL[rj as usize] = q0
+                        rj = LMR_USE_COUNT
+                    }
+                    rj = rj + 1
+                }
+            }
+            q0 = q0 + 1
+        }
+        ms0 = me0
+        if ms0 < TC && TK[ms0 as usize] == 77 { ms0 = ms0 + 1 }
+        mx0 = mx0 + 1
+    }
+    // 3. collision names (defined in two or more modules) and symbols in
+    // modules reached exclusively via braced `{...}` selective imports.
     LMR_C_COUNT = 0
     var i: i64 = 0
     while i < LMR_DEF_COUNT {
@@ -51225,16 +52192,15 @@ fn lmr_resolve() with IO, Mut, Panic, Div {
                 print("  here rather than bind a call to another module's function.\n")
                 LMR_FAILED = 1
                 return
+            } else if lmr_mod_is_braced_only(LMR_DEF_MOD[i as usize]) && LMR_C_COUNT < 4096 {
+                LMR_C_DEF[LMR_C_COUNT as usize] = i
+                LMR_C_D1[LMR_C_COUNT as usize] = -1
+                LMR_C_COUNT = LMR_C_COUNT + 1
             }
         }
         i = i + 1
     }
     if LMR_C_COUNT == 0 { return }
-    if LMR_USE_OVERFLOW != 0 {
-        print("error[module_name_resolution]: more than 16384 `use` items; cannot resolve same-named functions\n")
-        LMR_FAILED = 1
-        return
-    }
     // 4. per module: resolve each collision name, then rewrite its tokens.
     var mstart: i64 = 0
     var x: i64 = 0
@@ -51247,16 +52213,7 @@ fn lmr_resolve() with IO, Mut, Panic, Div {
         while ri < LMR_USE_COUNT {
             if LMR_USE_MOD[ri as usize] == x && LMR_MOD_USE_N < 1024 {
                 LMR_MOD_USE_TGT[LMR_MOD_USE_N as usize] = LMR_USE_TGT[ri as usize]
-                LMR_MOD_USE_TOK[LMR_MOD_USE_N as usize] = -1
-                // the token of the `use` on that line of this module
-                var q: i64 = mstart
-                while q < mend {
-                    if lmr_is_use_tok(q) && TL[q as usize] == LMR_USE_LINE[ri as usize] {
-                        LMR_MOD_USE_TOK[LMR_MOD_USE_N as usize] = q
-                        q = mend
-                    }
-                    q = q + 1
-                }
+                LMR_MOD_USE_TOK[LMR_MOD_USE_N as usize] = LMR_USE_TOK_ALL[ri as usize]
                 LMR_MOD_USE_N = LMR_MOD_USE_N + 1
             }
             ri = ri + 1
@@ -51299,8 +52256,17 @@ fn lmr_resolve() with IO, Mut, Panic, Div {
                                     }
                                     if last >= 0 && lmr_tok_name_eq(last, q - 2) {
                                         let tg = LMR_MOD_USE_TGT[k2 as usize]
-                                        if tg >= 0 && lmr_mod_exports(tg, n) {
-                                            if qt >= 0 && qt != tg {
+                                        var exp_tg: i64 = -1
+                                        if tg >= 0 { exp_tg = lmr_mod_export_owner(tg, n, 0) }
+                                        if exp_tg == -2 {
+                                            print("error[module_name_resolution]: a module-qualified call in module ")
+                                            lmr_print_mod(x)
+                                            print("\n  names a qualifier that re-exports `")
+                                            lmr_print_tok(n)
+                                            print("` ambiguously.\n")
+                                            LMR_FAILED = 1
+                                        } else if exp_tg >= 0 {
+                                            if qt >= 0 && qt != exp_tg {
                                                 print("error[module_name_resolution]: a module-qualified call in module ")
                                                 lmr_print_mod(x)
                                                 print("\n  names a qualifier that resolves to two modules defining `")
@@ -51308,7 +52274,7 @@ fn lmr_resolve() with IO, Mut, Panic, Div {
                                                 print("`.\n")
                                                 LMR_FAILED = 1
                                             }
-                                            qt = tg
+                                            qt = exp_tg
                                         }
                                     }
                                 }
@@ -51610,59 +52576,55 @@ fn append_native_prelude() with Mut, Panic, Div {
     append_src_lit("    out\n")
     append_src_lit("}\n\n")
 
+    // sin / cos to double precision (#3639). The kernels were Taylor through
+    // u^13 / u^12 on |u| <= pi/4 and the reduction subtracted a single-double
+    // 2 pi and pi, so |x| <= 10 lost about 4e-13 (measured against glibc sinl
+    // in tests/run-pass/builtin_trig_double_precision.sio). Now: Cody-Waite
+    // r = (x - n hi) - n lo with n = round(x / (pi/2)), hi = (float)(pi/2)
+    // (exact n*hi for |n| < 2^29), and kernels through u^17 / u^18 on
+    // |r| <= pi/4, truncation below 1e-19. Same method as the Madaros native
+    // builtin (codegen_x86_linux.sio, emit_builtin_trig).
     append_src_lit("fn __native_cos_kernel(u: f64) -> f64 with Mut, Div, Panic {\n")
-    append_src_lit("    let u2 = u * u\n")
-    append_src_lit("    let u4 = u2 * u2\n")
-    append_src_lit("    let u6 = u4 * u2\n")
-    append_src_lit("    let u8 = u6 * u2\n")
-    append_src_lit("    let u10 = u8 * u2\n")
-    append_src_lit("    let u12 = u10 * u2\n")
-    append_src_lit("    1.0 - u2/2.0 + u4/24.0 - u6/720.0 + u8/40320.0 - u10/3628800.0 + u12/479001600.0\n")
+    append_src_lit("    let z = u * u\n")
+    append_src_lit("    let c8 = 4.7794773323873853e-14 + z * (-1.5619206968586225e-16)\n")
+    append_src_lit("    let c6 = 2.0876756987868099e-09 + z * (-1.1470745597729725e-11 + z * c8)\n")
+    append_src_lit("    let c4 = 2.4801587301587302e-05 + z * (-2.7557319223985888e-07 + z * c6)\n")
+    append_src_lit("    1.0 + z * (-0.5 + z * (0.041666666666666664 + z * (-0.0013888888888888889 + z * c4)))\n")
     append_src_lit("}\n\n")
 
     append_src_lit("fn __native_sin_kernel(u: f64) -> f64 with Mut, Div, Panic {\n")
-    append_src_lit("    let u2 = u * u\n")
-    append_src_lit("    let u3 = u * u2\n")
-    append_src_lit("    let u5 = u3 * u2\n")
-    append_src_lit("    let u7 = u5 * u2\n")
-    append_src_lit("    let u9 = u7 * u2\n")
-    append_src_lit("    let u11 = u9 * u2\n")
-    append_src_lit("    let u13 = u11 * u2\n")
-    append_src_lit("    u - u3/6.0 + u5/120.0 - u7/5040.0 + u9/362880.0 - u11/39916800.0 + u13/6227020800.0\n")
+    append_src_lit("    let z = u * u\n")
+    append_src_lit("    let s7 = 1.6059043836821613e-10 + z * (-7.6471637318198164e-13 + z * 2.8114572543455206e-15)\n")
+    append_src_lit("    let s5 = 2.7557319223985893e-06 + z * (-2.505210838544172e-08 + z * s7)\n")
+    append_src_lit("    u + u * z * (-0.16666666666666666 + z * (0.0083333333333333332 + z * (-0.00019841269841269841 + z * s5)))\n")
     append_src_lit("}\n\n")
 
     append_src_lit("fn __native_sin_f64(x: f64) -> f64 with Mut, Div, Panic {\n")
-    append_src_lit("    let pi = 3.14159265358979323846\n")
-    append_src_lit("    let two_pi = 6.28318530717958647692\n")
-    append_src_lit("    let half_pi = 1.57079632679489661923\n")
-    append_src_lit("    let qtr_pi = 0.78539816339744830962\n")
-    append_src_lit("    var t = x\n")
-    append_src_lit("    var sign: f64 = 1.0\n")
-    append_src_lit("    while t > pi { t = t - two_pi }\n")
-    append_src_lit("    while t < 0.0 - pi { t = t + two_pi }\n")
-    append_src_lit("    if t < 0.0 { t = 0.0 - t; sign = 0.0 - 1.0 }\n")
-    append_src_lit("    if t > half_pi { t = pi - t }\n")
-    append_src_lit("    if t > qtr_pi {\n")
-    append_src_lit("        return sign * __native_cos_kernel(half_pi - t)\n")
-    append_src_lit("    }\n")
-    append_src_lit("    sign * __native_sin_kernel(t)\n")
+    append_src_lit("    let q = x * 0.63661977236758138\n")
+    append_src_lit("    var n: i64 = 0\n")
+    append_src_lit("    if q >= 0.0 { n = (q + 0.5) as i64 } else { n = 0 - ((0.5 - q) as i64) }\n")
+    append_src_lit("    let nf = n as f64\n")
+    append_src_lit("    let r = (x - nf * 1.5707963705062866) - nf * (-4.3711390001837346e-08)\n")
+    append_src_lit("    var k = n % 4\n")
+    append_src_lit("    if k < 0 { k = k + 4 }\n")
+    append_src_lit("    if k == 0 { return __native_sin_kernel(r) }\n")
+    append_src_lit("    if k == 1 { return __native_cos_kernel(r) }\n")
+    append_src_lit("    if k == 2 { return 0.0 - __native_sin_kernel(r) }\n")
+    append_src_lit("    0.0 - __native_cos_kernel(r)\n")
     append_src_lit("}\n\n")
 
     append_src_lit("fn __native_cos_f64(x: f64) -> f64 with Mut, Div, Panic {\n")
-    append_src_lit("    let pi = 3.14159265358979323846\n")
-    append_src_lit("    let two_pi = 6.28318530717958647692\n")
-    append_src_lit("    let half_pi = 1.57079632679489661923\n")
-    append_src_lit("    let qtr_pi = 0.78539816339744830962\n")
-    append_src_lit("    var t = x\n")
-    append_src_lit("    var negate: f64 = 1.0\n")
-    append_src_lit("    while t > pi { t = t - two_pi }\n")
-    append_src_lit("    while t < 0.0 - pi { t = t + two_pi }\n")
-    append_src_lit("    if t < 0.0 { t = 0.0 - t }\n")
-    append_src_lit("    if t > half_pi { t = pi - t; negate = 0.0 - 1.0 }\n")
-    append_src_lit("    if t > qtr_pi {\n")
-    append_src_lit("        return negate * __native_sin_kernel(half_pi - t)\n")
-    append_src_lit("    }\n")
-    append_src_lit("    negate * __native_cos_kernel(t)\n")
+    append_src_lit("    let q = x * 0.63661977236758138\n")
+    append_src_lit("    var n: i64 = 0\n")
+    append_src_lit("    if q >= 0.0 { n = (q + 0.5) as i64 } else { n = 0 - ((0.5 - q) as i64) }\n")
+    append_src_lit("    let nf = n as f64\n")
+    append_src_lit("    let r = (x - nf * 1.5707963705062866) - nf * (-4.3711390001837346e-08)\n")
+    append_src_lit("    var k = n % 4\n")
+    append_src_lit("    if k < 0 { k = k + 4 }\n")
+    append_src_lit("    if k == 0 { return __native_cos_kernel(r) }\n")
+    append_src_lit("    if k == 1 { return 0.0 - __native_sin_kernel(r) }\n")
+    append_src_lit("    if k == 2 { return 0.0 - __native_cos_kernel(r) }\n")
+    append_src_lit("    __native_sin_kernel(r)\n")
     append_src_lit("}\n\n")
 
     append_src_lit("fn __native_atan_f64(x: f64) -> f64 with Mut, Div, Panic {\n")
@@ -51759,13 +52721,9 @@ fn append_native_prelude() with Mut, Panic, Div {
     append_src_lit("    }\n")
     append_src_lit("}\n\n")
 
-    // Range-aware f64 printer: switches to scientific notation when the
-    // value is too large for the i64 mantissa cast (≥ 1e15) or too small
-    // for the requested fixed-decimal precision (rounds to all zeros).
-    // Without these guards, very large values saturate via cvttsd2si to
-    // the i64-MIN bit pattern (printing "9223372036854775808" for any
-    // 1e24-scale input) and very small values silently print as
-    // "0.000000".
+    // f64 printer: fixed decimal at every magnitude (ADR-031 R4). Below 2^63
+    // the integer part goes through i64; at or above it the exact decimal is
+    // built in limbs (see the guard below), so cvttsd2si never saturates.
     append_src_lit("fn __native_print_f64_n(x: f64, decimals: i64) with IO, Mut, Panic, Div {\n")
     append_src_lit("    if x != x { print(\"nan\"); return }\n")
     append_src_lit("    if x * 0.0 != 0.0 {\n")
@@ -51787,47 +52745,60 @@ fn append_native_prelude() with Mut, Panic, Div {
     append_src_lit("        scale_i = scale_i + 1\n")
     append_src_lit("    }\n")
     append_src_lit("    let scale = scale_int as f64\n")
-    // OVERFLOW guard: |y| ≥ 1e15 → scientific. The threshold is below the
-    // i64 saturation point (~9.2e18) and above the f64-exact integer bound
-    // (2^53 ≈ 9e15) where the fixed-decimal path starts losing precision.
-    append_src_lit("    if y >= 1000000000000000.0 {\n")
-    append_src_lit("        var exp_e: i64 = 0\n")
-    append_src_lit("        while y >= 10.0 {\n")
-    append_src_lit("            y = y / 10.0\n")
-    append_src_lit("            exp_e = exp_e + 1\n")
+    // ADR-031 R4: the text of a finite f64 is the exact decimal with
+    // `decimals` fraction digits, the digits of C++23 printf("%.6f") for the
+    // default 6, at every magnitude (Madaros prints the same, #3506). This
+    // printer used to switch to scientific notation at |y| >= 1e15 and for
+    // values that round to zero, which printf never does.
+    //
+    // |y| >= 2^63 does not fit the i64 used by the fixed path. Such a value is
+    // an integer, mantissa * 2^k with k >= 11, so its exact decimal is built
+    // in base-1e9 limbs (35 suffice for DBL_MAX) by doubling 30 bits at a
+    // time, and every fraction digit is 0. Each step stays below 2^61.
+    append_src_lit("    if y >= 9223372036854775808.0 {\n")
+    append_src_lit("        let bits = f64_to_bits(y)\n")
+    append_src_lit("        let biased = (bits / 4503599627370496) % 2048\n")
+    append_src_lit("        let m = (bits % 4503599627370496) + 4503599627370496\n")
+    append_src_lit("        var k = biased - 1075\n")
+    append_src_lit("        var limbs: [i64; 40] = [0; 40]\n")
+    append_src_lit("        limbs[0] = m % 1000000000\n")
+    append_src_lit("        limbs[1] = (m / 1000000000) % 1000000000\n")
+    append_src_lit("        limbs[2] = m / 1000000000000000000\n")
+    append_src_lit("        var n: i64 = 3\n")
+    append_src_lit("        while k > 0 {\n")
+    append_src_lit("            var sh = k\n")
+    append_src_lit("            if sh > 30 { sh = 30 }\n")
+    append_src_lit("            var mul: i64 = 1\n")
+    append_src_lit("            var si: i64 = 0\n")
+    append_src_lit("            while si < sh {\n")
+    append_src_lit("                mul = mul * 2\n")
+    append_src_lit("                si = si + 1\n")
+    append_src_lit("            }\n")
+    append_src_lit("            var carry: i64 = 0\n")
+    append_src_lit("            var li: i64 = 0\n")
+    append_src_lit("            while li < n {\n")
+    append_src_lit("                let t = limbs[li] * mul + carry\n")
+    append_src_lit("                limbs[li] = t % 1000000000\n")
+    append_src_lit("                carry = t / 1000000000\n")
+    append_src_lit("                li = li + 1\n")
+    append_src_lit("            }\n")
+    append_src_lit("            if carry > 0 {\n")
+    append_src_lit("                limbs[n] = carry\n")
+    append_src_lit("                n = n + 1\n")
+    append_src_lit("            }\n")
+    append_src_lit("            k = k - sh\n")
     append_src_lit("        }\n")
-    append_src_lit("        let whole_e = y as i64\n")
-    append_src_lit("        __native_print_u64_no_nl(whole_e)\n")
+    append_src_lit("        while n > 1 && limbs[n - 1] == 0 { n = n - 1 }\n")
+    append_src_lit("        __native_print_u64_no_nl(limbs[n - 1])\n")
+    append_src_lit("        var li2 = n - 2\n")
+    append_src_lit("        while li2 >= 0 {\n")
+    append_src_lit("            __native_print_fixed_digits(limbs[li2], 9)\n")
+    append_src_lit("            li2 = li2 - 1\n")
+    append_src_lit("        }\n")
     append_src_lit("        if d > 0 {\n")
     append_src_lit("            print_char(46)\n")
-    append_src_lit("            var fe = ((y - (whole_e as f64)) * scale + 0.5) as i64\n")
-    append_src_lit("            if fe >= scale_int { fe = scale_int - 1 }\n")
-    append_src_lit("            __native_print_fixed_digits(fe, d)\n")
+    append_src_lit("            __native_print_fixed_digits(0, d)\n")
     append_src_lit("        }\n")
-    append_src_lit("        print_char(101)\n")
-    append_src_lit("        __native_print_u64_no_nl(exp_e)\n")
-    append_src_lit("        return\n")
-    append_src_lit("    }\n")
-    // UNDERFLOW guard: 0 < y < 0.5 / scale_int → fixed path rounds to all
-    // zeros. Switch to scientific so callers can see the magnitude.
-    append_src_lit("    let tiny_thresh = 0.5 / scale\n")
-    append_src_lit("    if y > 0.0 && y < tiny_thresh {\n")
-    append_src_lit("        var exp_e: i64 = 0\n")
-    append_src_lit("        while y < 1.0 {\n")
-    append_src_lit("            y = y * 10.0\n")
-    append_src_lit("            exp_e = exp_e + 1\n")
-    append_src_lit("        }\n")
-    append_src_lit("        let whole_e = y as i64\n")
-    append_src_lit("        __native_print_u64_no_nl(whole_e)\n")
-    append_src_lit("        if d > 0 {\n")
-    append_src_lit("            print_char(46)\n")
-    append_src_lit("            var fe = ((y - (whole_e as f64)) * scale + 0.5) as i64\n")
-    append_src_lit("            if fe >= scale_int { fe = scale_int - 1 }\n")
-    append_src_lit("            __native_print_fixed_digits(fe, d)\n")
-    append_src_lit("        }\n")
-    append_src_lit("        print_char(101)\n")
-    append_src_lit("        print_char(45)\n")
-    append_src_lit("        __native_print_u64_no_nl(exp_e)\n")
     append_src_lit("        return\n")
     append_src_lit("    }\n")
     // FIXED-DECIMAL path for in-range values.
@@ -51974,9 +52945,15 @@ fn resolve_imports() with IO, Mut, Panic, Div {
                 continue
             }
         }
-        // Check for "use " at line start (117=u, 115=s, 101=e, 32=space)
+        // Check for "use " or "pub use " at line start
+        var use_prefix_len: i64 = 0
         if pos + 4 < SRC_LEN && sb(pos) == 117 && sb(pos+1) == 115 && sb(pos+2) == 101 && sb(pos+3) == 32 {
-            pos = pos + 4  // skip "use "
+            use_prefix_len = 4
+        } else if pos + 8 < SRC_LEN && sb(pos) == 112 && sb(pos+1) == 117 && sb(pos+2) == 98 && sb(pos+3) == 32 && sb(pos+4) == 117 && sb(pos+5) == 115 && sb(pos+6) == 101 && sb(pos+7) == 32 {
+            use_prefix_len = 8
+        }
+        if use_prefix_len > 0 {
+            pos = pos + use_prefix_len  // skip "use " or "pub use "
             // #2773: this use's record; its target is filled in below once known.
             var lmr_rec: i64 = -1
             if LMR_USE_COUNT < 16384 {
@@ -53266,6 +54243,29 @@ fn main() -> i64 with IO, Mut, Panic, Div {
             print("` is a reserved word and cannot name a binding at line ")
             print_int(LEX_ERROR_LINE)
             print("\n")
+            return 1
+        }
+        if LEX_ERROR_KIND == 10 {
+            // Same code and wording as Madaros E282.
+            print("error[E282]: identifier too long at line ")
+            print_int(LEX_ERROR_LINE)
+            print("\n")
+            return 1
+        }
+        if LEX_ERROR_KIND == 12 {
+            // Same code and wording as Madaros E284.
+            print("error[E284]: digit separator `_` must sit between two digits at line ")
+            print_int(LEX_ERROR_LINE)
+            print("\n")
+            return 1
+        }
+        if LEX_ERROR_KIND == 11 {
+            // Same code and wording as Madaros E283.
+            print("error[E283]: ambiguous operator spelling `")
+            if LEX_ERROR_BYTE == 33 { print("&!") } else { print("+-") }
+            print("` at line ")
+            print_int(LEX_ERROR_LINE)
+            print(": add a space\n")
             return 1
         }
         print("lex error line ")

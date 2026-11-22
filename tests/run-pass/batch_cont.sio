@@ -20,7 +20,7 @@ fn cmp_rows(a: &CpuBuf, b: &CpuBuf, n: i64) -> bool with Mut, Panic {
     true
 }
 
-fn scenario(m: &!Llama, rt: &Runtime, use_gpu: bool) -> bool with Alloc, Mut, Panic, Div {
+fn scenario(m: &!Llama, rt: &Runtime, use_gpu: bool, pagedev: bool) -> bool with Alloc, Mut, Panic, Div, IO {
     let vocab = m.cfg.vocab
     let chunk: i64 = 2
     // prompt bank: A=[1,150,2700,13] @0, B=[1,500,9000] @4, C=[1,777,888] @7.
@@ -54,13 +54,22 @@ fn scenario(m: &!Llama, rt: &Runtime, use_gpu: bool) -> bool with Alloc, Mut, Pa
     var pkk = paged_kv_new_batch(m, 16)
     var pkv = paged_kv_new_batch(m, 16)
     var slots: [SvSlot; 4] = [SvSlot { off: 0 - 1, nid: 0, cur: 0, gen: 0, maxgen: 0, last: 0 }; 4]
-    var q = SvQueue { off: [0; 8], n: [0; 8], pmax: [0; 8], count: 0 }
+    var q = SvQueue { off: [0; 8], n: [0; 8], pmax: [0; 8], vs: [0 - 1; 8], xl: [0; 8], vl: [0; 8], gn: [0; 8], ss: [0 - 1; 8], count: 0 }
     var rslot: [i64; 16] = [0; 16]
     var rpos: [i64; 16] = [0; 16]
     var toks: [i64; 16] = [0; 16]
     var kind: [i64; 16] = [0; 16]
     var rowtok: [i64; 16] = [0; 16]
     var meta: [i64; 4] = [0; 4]
+    var spill: [i64; 4096] = [0; 4096]
+    var vspill: [i64; 4096] = [0; 4096]
+    var scnt: [i64; 4] = [0; 4]
+    var xlen: [i64; 4] = [0; 4]
+    var vvalid: [i64; 4] = [0; 4]
+    var t_sos: [i64; 4] = [0 - 1; 4]
+    var t_sprio: [i64; 8] = [0; 8]
+    var t_swait: [i64; 8] = [0; 8]
+    var t_ids: [CpuBuf; 8] = [CpuBuf { data: 0 as *mut f64, len: 0 }; 8]
     // seq identity per engine slot: -1 unknown, else 0/1/2 (A/B/C).
     var slotseq: [i64; 4] = [0 - 1; 4]
     var pushed_b = false
@@ -74,17 +83,17 @@ fn scenario(m: &!Llama, rt: &Runtime, use_gpu: bool) -> bool with Alloc, Mut, Pa
         turn = turn + 1
         // scripted arrivals: B joins while A decodes; C waits for a free slot.
         if turn == 1 {
-            q.count = svb_qpush(&!q, 0, 4, amax)
+            q.count = svb_qpush(&!q, 0, 4, amax, 0 - 1)
         }
         if turn == 3 && !pushed_b {
-            q.count = svb_qpush(&!q, 4, 3, bmax)
+            q.count = svb_qpush(&!q, 4, 3, bmax, 0 - 1)
             pushed_b = true
         }
         if pushed_b && !pushed_c && (rdone[0] == 1 || rdone[1] == 1) {
-            q.count = svb_qpush(&!q, 7, 3, cmax)
+            q.count = svb_qpush(&!q, 7, 3, cmax, 0 - 1)
             pushed_c = true
         }
-        let out = svb_pump(m, &!pkk, &!pkv, &!slots, &bank, &!q, rt, use_gpu, chunk, &!rslot, &!rpos, &!toks, &!kind, &!rowtok, &!meta)
+        let out = svb_pump(m, &!pkk, &!pkv, &!slots, &!bank, &!q, rt, use_gpu, pagedev, chunk, &!rslot, &!rpos, &!toks, &!kind, &!rowtok, &!meta, &!spill, &!vspill, &!scnt, &!xlen, &!vvalid, &!t_sos, &t_ids, &t_sprio, &!t_swait)
         q.count = meta[1]
         let n = meta[0]
         if n <= 0 {
@@ -177,11 +186,14 @@ fn main() with IO, Mut, Panic, Div, Alloc {
     var m = llama_load("tests/fixtures/tiny-random-Llama")
     if !m.loaded { print("BATCHCONT FAIL\n") exit(1) }
     let rt = rt_open("stdlib/hetero/kernels/gemm_tiled_f32.ptx", "gemm_tiled_f32")
-    var ok = scenario(&!m, &rt, false)
+    var ok = scenario(&!m, &rt, false, false)
     if rt.ready {
         var m2 = llama_load("tests/fixtures/tiny-random-Llama")
         if !m2.loaded { ok = false }
-        if !scenario(&!m2, &rt, true) { ok = false }
+        if !scenario(&!m2, &rt, true, false) { ok = false }
+        var m3 = llama_load("tests/fixtures/tiny-random-Llama")
+        if !m3.loaded { ok = false }
+        if !scenario(&!m3, &rt, true, true) { ok = false }
     }
     if ok { print("BATCHCONT PASS\n") } else { print("BATCHCONT FAIL\n") }
     if !ok { exit(1) }
