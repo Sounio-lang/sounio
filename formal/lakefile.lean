@@ -86,6 +86,7 @@ lean_lib Bootstrap where
     .one `Bootstrap.TMRBurst,
     .one `Bootstrap.TMRBurstCheck,
     .one `Bootstrap.SporosProvLen,
+    .one `Bootstrap.X86Vm,
     .submodules `Sporos]
 
 -- The two seeds on every listing (about 20 minutes of kernel time, the two in parallel), and
@@ -136,6 +137,9 @@ lean_exe «tmr-bound-check» where
 
 lean_exe «x86uni-diff» where
   root := `Bootstrap.X86UniDiffModel
+
+lean_exe «x86vm-diff» where
+  root := `Bootstrap.X86VmDiffModel
 
 lean_exe aarch64run where
   root := `Bootstrap.RunAArch64

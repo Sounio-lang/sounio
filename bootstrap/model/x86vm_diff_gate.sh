@@ -42,34 +42,16 @@ CXX="${CXX:-g++}"
 "$CXX" -O2 -std=c++23 -Wall -Wextra -Werror "$CPU_SRC" -o "$cpu_bin"
 
 VM_DIFF_BIN="$FORMAL_DIR/.lake/build/bin/x86vm-diff"
-ensure_model_ready() {
-  if [ -x "$VM_DIFF_BIN" ] && [ "${X86VM_FORCE_LEAN_RUN:-0}" != "1" ] &&
-     [ "$VM_DIFF_BIN" -nt "$FORMAL_DIR/Bootstrap/X86Vm.lean" ] &&
-     [ "$VM_DIFF_BIN" -nt "$MODEL_LEAN" ]; then
-    return 0
-  fi
-  if ! (cd "$FORMAL_DIR" && "$LAKE_BIN" build Bootstrap.X86Dec >"$build_log" 2>&1); then
-    cat "$build_log" >&2
-    exit 1
-  fi
-  vm_olean="$FORMAL_DIR/.lake/build/lib/lean/Bootstrap/X86Vm.olean"
-  if [ ! -f "$vm_olean" ] || [ "$FORMAL_DIR/Bootstrap/X86Vm.lean" -nt "$vm_olean" ]; then
-    mkdir -p "$(dirname "$vm_olean")"
-    (cd "$FORMAL_DIR" && "$LAKE_BIN" env lean -R . -o "$vm_olean" "Bootstrap/X86Vm.lean")
-  fi
-}
+# The Lean side is the `x86vm-diff` executable (`Bootstrap/X86VmDiffModel.lean`);
+# lake rebuilds it when X86Vm or the model changed. The build log is shown only on failure.
+if ! (cd "$FORMAL_DIR" && "$LAKE_BIN" build x86vm-diff >"$build_log" 2>&1); then
+  cat "$build_log" >&2
+  exit 1
+fi
 
 run_model() {
-  if [ -x "$VM_DIFF_BIN" ] && [ "${X86VM_FORCE_LEAN_RUN:-0}" != "1" ] &&
-     [ "$VM_DIFF_BIN" -nt "$FORMAL_DIR/Bootstrap/X86Vm.lean" ] &&
-     [ "$VM_DIFF_BIN" -nt "$MODEL_LEAN" ]; then
-    "$VM_DIFF_BIN" "$@"
-  else
-    (cd "$FORMAL_DIR" && "$LAKE_BIN" env lean --run "Bootstrap/X86VmDiffModel.lean" "$@")
-  fi
+  "$VM_DIFF_BIN" "$@"
 }
-
-ensure_model_ready
 
 # 1. Randomized differential suite across all 31 X86Vm + 33 X86Dec forms.
 "$cpu_bin" "$cases_file" "$CASES" "$SEED"
