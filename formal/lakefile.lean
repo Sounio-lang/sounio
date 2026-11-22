@@ -90,6 +90,8 @@ lean_lib Bootstrap where
     .one `Bootstrap.AArch64Env,
     .one `Bootstrap.AArch64Phys,
     .one `Bootstrap.TMRVoterArm64,
+    .one `Bootstrap.SporosVmBinData,
+    .one `Bootstrap.SporosVmCheckBytes,
     .submodules `Sporos]
 
 -- The two seeds on every listing (about 20 minutes of kernel time, the two in parallel), and
@@ -114,6 +116,42 @@ lean_lib BootstrapSporosStage1 where
     .one `Bootstrap.SporosX1FinalParser,
     .one `Bootstrap.SporosX1FinalRefuse,
     .one `Bootstrap.SporosX1FinalWalkRefuse]
+
+-- The native Sporos VM (`bootstrap/model/sporos_vm`) simulates `Sporos.run`: about 18 minutes
+-- of kernel time across 28 modules (12 minutes on four cores), so built by
+-- bootstrap/model/sporos_vm_proofs.sh (by hand or on the lab cluster), not on every pull request.
+-- SporosVmBinData and SporosVmCheckBytes, the binary and its byte check, are in Bootstrap.
+lean_lib BootstrapSporosVm where
+  roots := #[`Bootstrap.SporosVmBin]
+  globs := #[
+    .one `Bootstrap.SporosVmBin,
+    .one `Bootstrap.SporosVmCore,
+    .one `Bootstrap.SporosVmExec,
+    .one `Bootstrap.SporosVmFault,
+    .one `Bootstrap.SporosVmOpsCall,
+    .one `Bootstrap.SporosVmOpsCall1,
+    .one `Bootstrap.SporosVmOpsCall2,
+    .one `Bootstrap.SporosVmOpsCtrl,
+    .one `Bootstrap.SporosVmOpsData,
+    .one `Bootstrap.SporosVmOpsData1,
+    .one `Bootstrap.SporosVmOpsData2,
+    .one `Bootstrap.SporosVmOpsData3,
+    .one `Bootstrap.SporosVmOpsJmp,
+    .one `Bootstrap.SporosVmPrimBase,
+    .one `Bootstrap.SporosVmPrimBlock,
+    .one `Bootstrap.SporosVmPrimDispatch,
+    .one `Bootstrap.SporosVmPrimHeap,
+    .one `Bootstrap.SporosVmPrimIo,
+    .one `Bootstrap.SporosVmPrimMem,
+    .one `Bootstrap.SporosVmPrimTab,
+    .one `Bootstrap.SporosVmPrimTab1,
+    .one `Bootstrap.SporosVmPrimTab2,
+    .one `Bootstrap.SporosVmPrimTab3,
+    .one `Bootstrap.SporosVmPrimTabBase,
+    .one `Bootstrap.SporosVmReady,
+    .one `Bootstrap.SporosVmSim,
+    .one `Bootstrap.SporosVmSimBase,
+    .one `Bootstrap.SporosVmWitness]
 
 -- The Sporos reference interpreter as a program (`sporos PROGRAM.spb < in > out`)
 -- and the writer of the example programs (`sporos-examples DIR`).
