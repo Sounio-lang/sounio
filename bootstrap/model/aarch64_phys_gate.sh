@@ -141,50 +141,20 @@ else
   exit 2
 fi
 
-# Build or locate the aarch64-phys-check Lean binary (post-integration Lake exe
-# if wired in formal/lakefile.lean, otherwise pre-integration native leanc build).
-checker=""
-if [[ -n "${lake:-}" ]] && grep -q 'aarch64-phys-check' "$root/formal/lakefile.lean" 2>/dev/null; then
-  (cd "$root/formal" && "$lake" build aarch64-phys-check >/dev/null)
-  checker="$root/formal/.lake/build/bin/aarch64-phys-check"
-else
-  mkdir -p "$work/olean/Bootstrap" "$work/c"
-  prefix="$("$lean" --print-prefix)"
-  leanc="$prefix/bin/leanc"
-  mods=(PDist TMR TMRExposure AArch64Env AArch64Phys TMRVoterArm64 AArch64PhysCheck)
-  c_files=()
-  for m in "${mods[@]}"; do
-    pre_olean="$root/formal/.lake/build/lib/lean/Bootstrap/${m}.olean"
-    pre_c="$root/formal/.lake/build/ir/Bootstrap/${m}.c"
-    if [[ -f "$pre_olean" && -f "$pre_c" ]]; then
-      cp "$pre_olean" "$work/olean/Bootstrap/${m}.olean"
-      cp "$pre_c" "$work/c/${m}.c"
-    else
-      (
-        cd "$root/formal"
-        LEAN_PATH="$work/olean" "$lean" -R . "Bootstrap/${m}.lean" \
-          -o "$work/olean/Bootstrap/${m}.olean" -c "$work/c/${m}.c"
-      )
-    fi
-    c_files+=("$work/c/${m}.c")
-  done
-  if [[ -x "$leanc" ]]; then
-    if "$leanc" -O2 -o "$work/aarch64-phys-check" "${c_files[@]}" 2>"$work/leanc.err"; then
-      checker="$work/aarch64-phys-check"
-    fi
-  fi
+# The Lean side is the `aarch64-phys-check` executable (`Bootstrap/AArch64PhysCheck.lean`);
+# lake rebuilds it when the model changed. The build log is shown only on failure.
+if [[ -z "${lake:-}" || ! -x "$lake" ]]; then
+  echo "AARCH64_PHYS_GATE_FAIL: lake not found next to $lean" >&2
+  exit 2
 fi
+if ! (cd "$root/formal" && "$lake" build aarch64-phys-check > "$work/lake_build.log" 2>&1); then
+  cat "$work/lake_build.log" >&2
+  exit 1
+fi
+checker="$root/formal/.lake/build/bin/aarch64-phys-check"
 
 run_checker() {
-  if [[ -n "$checker" && -x "$checker" ]]; then
-    "$checker" "$@"
-  else
-    (
-      cd "$root/formal"
-      LEAN_PATH="$work/olean:$root/formal/.lake/build/lib/lean" \
-        "$lean" --run "Bootstrap/AArch64PhysCheck.lean" "$@"
-    )
-  fi
+  "$checker" "$@"
 }
 
 # Always run the pure-Lean model selftest first (all architectures).
