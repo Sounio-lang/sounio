@@ -269,7 +269,7 @@ for fmt, corpus, probe in pairs:
     for r in dr:
         lit = r["source_literal"]
         if lit.startswith("-"):
-            # Sounio has no unary minus — limb-oracle only; still require table.
+            # Leading-'-' rows are limb-oracle only; still require table.
             if f"ORACLE_{r['id']}_EXPECTED" not in text:
                 missing.append(f"limb_table:{r['id']}")
             continue

@@ -2,8 +2,8 @@
 topic_id: repo.docs.architecture.cybernetics-layer-2
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.architecture.cybernetics-layer-2
 -->
 
@@ -142,7 +142,7 @@ examples/
 
 ## Theory Summary
 
-This is the **world's first implementation** of a comprehensive second-order cybernetics system in any programming language:
+This is, to our knowledge, the first implementation of a comprehensive second-order cybernetics system in any programming language:
 
 - **Distinction** (Spencer-Brown 1969): The primitive act of cognition as a computational primitive
 - **Eigenforms** (von Foerster 1976): Objects as stable fixed points of observation

@@ -12,6 +12,8 @@
 #
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=../lib/classify_compile.sh
+source "$ROOT/scripts/lib/classify_compile.sh"
 cd "$ROOT"
 
 unset SOUC_BIN SOUNIO_SOUC_BIN SOUNIO_SOUC_ENGINE || true
@@ -97,6 +99,12 @@ run_expect_e258() {
   local rc=$?
   set -e
   if grep -Fq 'error[E258]' "$log"; then
+    # rc alone is not a refusal: a crash, timeout or OOM kill is not one (#2425).
+    sounio_expect_refusal "$rc" "$log" "" E258 || {
+      tail -25 "$log" >&2 || true
+      fail "$label: printed E258 but is not a clean refusal: $(sounio_refusal_reason)"
+      return
+    }
     pass "$label:E258"
     return
   fi

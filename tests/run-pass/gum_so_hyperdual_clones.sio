@@ -1,0 +1,486 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: GUM_SO_HYPERDUAL_OK
+//@ description: Second-order GUM through user calls, beyond the Newton / Boltzmann / mixed-partial witnesses of gum_fo_tangent_clone_second_order_on.sio: struct parameters and methods (one tangent per scalar f64 field), a `var` reassigned under a branch, a loop with an early return, a helper that loops over a helper that loops, a Knowledge parameter, the same call read twice, and a call whose value is also used. The hyper-dual clone writes the Hessian of the result over its tangents; the caller forms H = sum_k J_k H(a_k) + sum_kl Hf_kl g_k g_l^T. Also: an IO callee whose call appears only inside hessian_of / second_order_mean runs exactly once and the value is exact; a measurement made inside the callee (its curvature term 1/2 H_mm u_m^2 reaches second_order_mean, also stationary in the measurement and through a callee of a drawing callee); nine and twelve tangents (the old 8-channel limit read NaN); a `correlate` between two quantities measured inside a callee (the cross terms of the internal variance and of the curvature term, first and second order, an uncertain and a certain argument, positive and negative rho), and a `var` declared before the first measure() carried through a loop, nested loops and a branch (#3547). Expected values: tests/oracles/gum_so_hyperdual_clones.cpp (second-order jets through the same algorithm; 1e-10 relative).
+
+ontology HyProbe {
+    class Parameter { property amount: f64 where amount >= 0.0 }
+    class WellDepth subclass_of Parameter
+}
+
+struct Pair {
+    a: f64,
+    b: f64,
+}
+
+// sum_{i=1..3} a exp(-b i / 10) over the fields of a struct
+fn shell_pair(p: Pair) -> f64 with Mut, Div {
+    var s = 0.0
+    var i: i64 = 1
+    while i <= 3 {
+        s = s + p.a * exp(0.0 - p.b * (i as f64) / 10.0)
+        i = i + 1
+    }
+    s
+}
+
+impl Pair {
+    fn shell(self: &Pair) -> f64 with Mut, Div {
+        var s = 0.0
+        var i: i64 = 1
+        while i <= 3 {
+            s = s + self.a * exp(0.0 - self.b * (i as f64) / 10.0)
+            i = i + 1
+        }
+        s
+    }
+}
+
+fn branchy(x: f64) -> f64 with Mut, Div {
+    var y = x
+    if x > 10.0 {
+        y = y * y
+    } else {
+        y = y * y * y
+    }
+    y
+}
+
+fn partition(b: f64, d: f64) -> f64 with Mut, Div {
+    var z = 0.0
+    var n: i64 = 0
+    while n <= 5 {
+        let t = exp(0.0 - (n as f64) * b * d)
+        z = z + t
+        if t < 0.001 { return z }
+        n = n + 1
+    }
+    z
+}
+
+fn boltz_sum(e: f64) -> f64 with Mut, Div {
+    var s = 0.0
+    var i: i64 = 1
+    while i <= 4 {
+        s = s + exp(0.0 - e * (i as f64) / 100.0)
+        i = i + 1
+    }
+    s
+}
+
+// sum_{j=1..3} boltz_sum(j x): a loop calling a looping helper
+fn outer(x: f64) -> f64 with Mut, Div {
+    var s = 0.0
+    var j: i64 = 1
+    while j <= 3 {
+        s = s + boltz_sum((j as f64) * x)
+        j = j + 1
+    }
+    s
+}
+
+fn kboltz(k: Knowledge<WellDepth>) -> f64 with Epistemic, Mut, Div {
+    let e: f64 = k.value
+    boltz_sum(e)
+}
+
+var IO_CALLS: i64 = 0
+
+fn noisy_io(x: f64) -> f64 with IO, Mut, Div {
+    IO_CALLS = IO_CALLS + 1
+    print("noisy_io called\n")
+    var y = x
+    y = y * y
+    y
+}
+
+// nine tangents: all measured by the caller, past the old 8-channel limit
+fn nine(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64, a8: f64) -> f64 with Mut, Div {
+    var s = a0
+    s = s * a1
+    s = s + a2 * a3 * a4
+    s = s + exp(0.05 * a5 * a6)
+    s = s + a7 / (a8 + 10.0)
+    s
+}
+
+// twelve tangents
+fn twelve(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64, a8: f64, a9: f64, a10: f64, a11: f64) -> f64 with Mut, Div {
+    var s = a0
+    s = s * a1
+    s = s + a2 * a3
+    s = s + exp(0.1 * a4 * a5)
+    s = s + a6 * a7 * a8
+    s = s + a9 / (a10 + 10.0)
+    s = s + a11 * a11 * a0
+    s
+}
+
+// a measurement made inside the callee: the callee's own curvature term
+// (1/2 H_mm u_m^2) is part of the second-order mean
+fn drawn1(a: f64) -> f64 with Epistemic, Mut, Div {
+    let km = measure(2.0, uncertainty: 0.3)
+    let m: f64 = km.value
+    var y = a
+    y = exp(0.2 * y)
+    y * m * m
+}
+
+// stationary in the internal measurement: its first-order variance is 0, all of
+// its contribution is curvature
+fn drawn2(a: f64) -> f64 with Epistemic, Mut, Div {
+    let km = measure(2.0, uncertainty: 0.3)
+    let m: f64 = km.value
+    var y = a
+    y = y + (m - 2.0) * (m - 2.0)
+    y
+}
+
+// a callee that calls a drawing callee
+fn outer_draw(a: f64) -> f64 with Epistemic, Mut, Div {
+    var y = drawn1(a)
+    y = y * a
+    y
+}
+
+// a correlate between two quantities measured inside the callee: the internal
+// variance carries the cross term 2 J1 J2 rho u1 u2 and the curvature term the
+// cross term 2 H12 rho u1 u2
+fn corr1(a: f64) -> f64 with Epistemic, Mut, Div {
+    let k1 = measure(2.0, uncertainty: 0.3)
+    let k2 = measure(3.0, uncertainty: 0.2)
+    let m1: f64 = k1.value
+    let m2: f64 = k2.value
+    let _c = correlate(m1, m2, 0.6)
+    var y = a
+    y = exp(0.2 * y)
+    y * m1 * m2 + m1 * m1
+}
+
+// the same with an anticorrelation, written as the dialect writes a negative literal
+fn corr1n(a: f64) -> f64 with Epistemic, Mut, Div {
+    let k1 = measure(2.0, uncertainty: 0.3)
+    let k2 = measure(3.0, uncertainty: 0.2)
+    let m1: f64 = k1.value
+    let m2: f64 = k2.value
+    let _c = correlate(m1, m2, 0.0 - 0.5)
+    var y = a
+    y = exp(0.2 * y)
+    y * m1 * m2 + m1 * m1
+}
+
+// a callee that calls the correlating callee
+fn corr_outer(a: f64) -> f64 with Epistemic, Mut, Div {
+    var y = corr1(a)
+    y = y * a
+    y
+}
+
+fn close_rel(got: f64, want: f64) -> bool with Mut, Div {
+    var d = got - want
+    if d < 0.0 { d = 0.0 - d }
+    var w = want
+    if w < 0.0 { w = 0.0 - w }
+    d <= 1.0e-14 + 1.0e-10 * w
+}
+
+fn report_rel(name: string, got: f64, want: f64) -> i64 with IO, Mut, Div {
+    print(name)
+    print(" ")
+    print_f64(got)
+    if close_rel(got, want) {
+        print(" ok\n")
+        return 0
+    }
+    print(" FAIL\n")
+    1
+}
+
+fn check_struct() -> i64 with IO, Mut, Div, Epistemic {
+    let ka = measure(2.0, uncertainty: 0.1)
+    let kb = measure(1.5, uncertainty: 0.2)
+    let p = Pair { a: ka.value, b: kb.value }
+    var bad: i64 = 0
+    let r = shell_pair(p)
+    bad = bad + report_rel("struct_param_mixed", hessian_of(r, 0, 1), -0.42552288726538134)
+    bad = bad + report_rel("struct_param_bb", hessian_of(r, 1, 1), 0.1912526844749578)
+    let m = p.shell()
+    bad = bad + report_rel("method_mixed", hessian_of(m, 0, 1), -0.42552288726538134)
+    bad
+}
+
+fn check_branch() -> i64 with IO, Mut, Div, Epistemic {
+    let kh = measure(12.0, uncertainty: 0.5)
+    let kl = measure(3.0, uncertainty: 0.5)
+    let xh: f64 = kh.value
+    let xl: f64 = kl.value
+    let rh = branchy(xh)
+    let rl = branchy(xl)
+    var bad: i64 = 0
+    bad = bad + report_rel("branch_then", hessian_of(rh, 0, 0), 2.0)
+    bad = bad + report_rel("branch_else", hessian_of(rl, 1, 1), 18.0)
+    bad = bad + report_rel("branch_cross_zero", hessian_of(rl, 0, 1), 0.0)
+    bad
+}
+
+fn check_partition() -> i64 with IO, Mut, Div, Epistemic {
+    let kb = measure(0.8, uncertainty: 0.05)
+    let kd = measure(1.3, uncertainty: 0.1)
+    let b: f64 = kb.value
+    let d: f64 = kd.value
+    let z = partition(b, d)
+    var bad: i64 = 0
+    bad = bad + report_rel("early_return_loop_bb", hessian_of(z, 0, 0), 2.7686003915697621)
+    bad = bad + report_rel("early_return_loop_bd", hessian_of(z, 0, 1), 0.87795442172109495)
+    bad = bad + report_rel("early_return_loop_dd", hessian_of(z, 1, 1), 1.0484640536122178)
+    bad
+}
+
+fn check_nested() -> i64 with IO, Mut, Div, Epistemic {
+    let k = measure(11.4, uncertainty: 0.3)
+    let x: f64 = k.value
+    report_rel("nested_helpers", hessian_of(outer(x), 0, 0), 0.016806857433411621)
+}
+
+fn check_knowledge() -> i64 with IO, Mut, Div, Epistemic {
+    let ev: WellDepth = 34.2
+    let ke: Knowledge<WellDepth> = measure(ev, uncertainty: 1.0)
+    // the same call read twice, and once more through its value
+    let a = kboltz(ke)
+    var bad: i64 = 0
+    bad = bad + report_rel("knowledge_param", hessian_of(a, 0, 0), 0.0010028518039351185)
+    bad = bad + report_rel("same_call_twice", hessian_of(kboltz(ke) + kboltz(ke), 0, 0), 0.002005703607870237)
+    bad
+}
+
+fn check_io_once() -> i64 with IO, Mut, Div, Epistemic {
+    let k = measure(3.0, uncertainty: 0.1)
+    let x: f64 = k.value
+    var bad: i64 = 0
+    // the value is used: the call (and its print) happens once, through the clone
+    let r = noisy_io(x)
+    bad = bad + report_rel("io_callee_with_value", hessian_of(r, 0, 0), 2.0)
+    // the call appears only inside the query: the query argument is evaluated
+    // exactly once, so the side effect happens exactly once and H is exact
+    let before = IO_CALLS
+    let h = hessian_of(noisy_io(x), 0, 0)
+    bad = bad + report_rel("io_query_only_hessian", h, 2.0)
+    bad = bad + report_rel("io_query_only_calls", (IO_CALLS - before) as f64, 1.0)
+    let before2 = IO_CALLS
+    let m = second_order_mean(noisy_io(x))
+    bad = bad + report_rel("io_query_only_mean", m, 9.0099999999999998)
+    bad = bad + report_rel("io_query_only_mean_calls", (IO_CALLS - before2) as f64, 1.0)
+    bad
+}
+
+fn check_draw() -> i64 with IO, Mut, Div, Epistemic {
+    let ka = measure(1.5, uncertainty: 0.1)
+    let a: f64 = ka.value
+    var bad: i64 = 0
+    let r1 = drawn1(a)
+    bad = bad + report_rel("draw1_hess_aa", hessian_of(r1, 0, 0), 0.21597740921216055)
+    bad = bad + report_rel("draw1_mean", second_order_mean(r1), 5.5220024100319138)
+    bad = bad + report_rel("draw1_sq_mean", second_order_mean(r1 * r1), 33.113000535736646)
+    let r2 = drawn2(a)
+    bad = bad + report_rel("draw2_hess_aa", hessian_of(r2, 0, 0), 0.0)
+    bad = bad + report_rel("draw2_mean", second_order_mean(r2), 1.5900000000000001)
+    let r3 = outer_draw(a)
+    bad = bad + report_rel("draw3_hess_aa", hessian_of(r3, 0, 0), 2.4837402059398457)
+    bad = bad + report_rel("draw3_mean", second_order_mean(r3), 8.2938024855084773)
+    bad
+}
+
+// correlate inside a callee (first and second order)
+fn check_corr() -> i64 with IO, Mut, Div, Epistemic {
+    let ka = measure(1.5, uncertainty: 0.1)
+    let a: f64 = ka.value
+    var bad: i64 = 0
+    let r = corr1(a)
+    bad = bad + report_rel("corr_var", variance_of(r), 7.714062766401061)
+    bad = bad + report_rel("corr_hess_aa", hessian_of(r, 0, 0), 0.32396611381824081)
+    bad = bad + report_rel("corr_mean", second_order_mean(r), 12.239367593097846)
+    bad = bad + report_rel("corr_sq_mean", second_order_mean(r * r), 157.49652166991851)
+    bad = bad + report_rel("corr_var_sq", variance_of(r * r), 4517.0311523378768)
+    let q = corr_outer(a)
+    bad = bad + report_rel("corr_outer_var", variance_of(q), 19.408493549354748)
+    bad = bad + report_rel("corr_outer_mean", second_order_mean(q), 18.375249695337679)
+    bad
+}
+
+// the same callee, first-order queries only
+fn check_corr_fo() -> i64 with IO, Mut, Div, Epistemic {
+    let ka = measure(1.5, uncertainty: 0.1)
+    let a: f64 = ka.value
+    var bad: i64 = 0
+    let r = corr1(a)
+    bad = bad + report_rel("corr_fo_var", variance_of(r), 7.714062766401061)
+    bad = bad + report_rel("corr_fo_var_sq", variance_of(r * r), 4517.0311523378768)
+    bad
+}
+
+// the caller's argument carries no uncertainty: only the callee's pair counts
+fn check_corr_certain() -> i64 with IO, Mut, Div, Epistemic {
+    let a0: f64 = 1.5
+    var bad: i64 = 0
+    let r = corr1(a0)
+    bad = bad + report_rel("corr_certain_var", variance_of(r), 7.6878242556754381)
+    bad = bad + report_rel("corr_certain_mean", second_order_mean(r), 12.237747762528755)
+    bad = bad + report_rel("corr_certain_sq_mean", second_order_mean(r * r), 157.43108600391454)
+    bad = bad + report_rel("corr_certain_var_sq", variance_of(r * r), 4501.6669825187237)
+    bad
+}
+
+fn check_corr_neg() -> i64 with IO, Mut, Div, Epistemic {
+    let ka = measure(1.5, uncertainty: 0.1)
+    let a: f64 = ka.value
+    var bad: i64 = 0
+    let r = corr1n(a)
+    bad = bad + report_rel("corr_neg_var", variance_of(r), 4.8454937756915202)
+    bad = bad + report_rel("corr_neg_mean", second_order_mean(r), 12.150276911797828)
+    bad = bad + report_rel("corr_neg_sq_mean", second_order_mean(r * r), 152.47210913889958)
+    bad = bad + report_rel("corr_neg_var_sq", variance_of(r * r), 2837.3176361214914)
+    bad
+}
+
+// #3547: `var` declared before the first measure() -- a loop-carried update, a
+// nested loop and a branch all run through it
+fn check_late_var() -> i64 with IO, Mut, Div, Epistemic {
+    var bad: i64 = 0
+    var s = 0.0
+    var i: i64 = 0
+    let ka = measure(2.0, uncertainty: 0.1)
+    let kb = measure(3.0, uncertainty: 0.2)
+    let a: f64 = ka.value
+    let b: f64 = kb.value
+    while i < 3 {
+        s = s + a * b
+        i = i + 1
+    }
+    s = s * b
+    bad = bad + report_rel("late_loop_var", variance_of(s), 59.130000000000003)
+    bad = bad + report_rel("late_loop_h01", hessian_of(s, 0, 1), 18.0)
+    bad = bad + report_rel("late_loop_h11", hessian_of(s, 1, 1), 12.0)
+    bad = bad + report_rel("late_loop_mean", second_order_mean(s), 54.240000000000002)
+    bad = bad + check_late_nested()
+    bad = bad + check_late_branch()
+    bad
+}
+
+fn check_late_nested() -> i64 with IO, Mut, Div, Epistemic {
+    var s = 0.0
+    var t = 1.0
+    let ka = measure(2.0, uncertainty: 0.1)
+    let kb = measure(3.0, uncertainty: 0.2)
+    let a: f64 = ka.value
+    let b: f64 = kb.value
+    var i: i64 = 0
+    while i < 2 {
+        var j: i64 = 0
+        while j < 3 {
+            s = s + a * b
+            t = t * a
+            j = j + 1
+        }
+        i = i + 1
+    }
+    let r = s + t
+    var bad: i64 = 0
+    bad = bad + report_rel("late_nested_var", variance_of(r), 446.75999999999999)
+    bad = bad + report_rel("late_nested_h01", hessian_of(r, 0, 1), 6.0)
+    bad = bad + report_rel("late_nested_h00", hessian_of(r, 0, 0), 480.0)
+    bad = bad + report_rel("late_nested_mean", second_order_mean(r), 102.40000000000001)
+    bad
+}
+
+fn check_late_branch() -> i64 with IO, Mut, Div, Epistemic {
+    var s = 0.0
+    let ka = measure(2.0, uncertainty: 0.1)
+    let kb = measure(3.0, uncertainty: 0.2)
+    let a: f64 = ka.value
+    let b: f64 = kb.value
+    if a > 1.0 {
+        s = a * b * b
+    } else {
+        s = a + b
+    }
+    var i: i64 = 0
+    while i < 2 {
+        s = s * a
+        i = i + 1
+    }
+    var bad: i64 = 0
+    bad = bad + report_rel("late_branch_var", variance_of(s), 208.80000000000001)
+    bad = bad + report_rel("late_branch_h01", hessian_of(s, 0, 1), 72.0)
+    bad = bad + report_rel("late_branch_mean", second_order_mean(s), 72.859999999999999)
+    bad
+}
+
+fn check_nine() -> i64 with IO, Mut, Div, Epistemic {
+    let k0 = measure(1.5, uncertainty: 0.1)
+    let k1 = measure(1.6, uncertainty: 0.1)
+    let k2 = measure(1.7, uncertainty: 0.1)
+    let k3 = measure(1.8, uncertainty: 0.1)
+    let k4 = measure(1.9, uncertainty: 0.1)
+    let k5 = measure(2.0, uncertainty: 0.1)
+    let k6 = measure(2.1, uncertainty: 0.1)
+    let k7 = measure(2.2, uncertainty: 0.1)
+    let k8 = measure(2.3, uncertainty: 0.1)
+    let r = nine(k0.value, k1.value, k2.value, k3.value, k4.value, k5.value, k6.value, k7.value, k8.value)
+    var bad: i64 = 0
+    bad = bad + report_rel("nine_h01", hessian_of(r, 0, 1), 1.0)
+    bad = bad + report_rel("nine_h24", hessian_of(r, 2, 4), 1.8)
+    bad = bad + report_rel("nine_h56", hessian_of(r, 5, 6), 0.074637522627382963)
+    bad = bad + report_rel("nine_h55", hessian_of(r, 5, 5), 0.013601300611023095)
+    bad = bad + report_rel("nine_h78", hessian_of(r, 7, 8), -0.0066098221957829328)
+    bad = bad + report_rel("nine_h88", hessian_of(r, 8, 8), 0.0023644892407678783)
+    bad
+}
+
+fn check_twelve() -> i64 with IO, Mut, Div, Epistemic {
+    let k0 = measure(1.2, uncertainty: 0.1)
+    let k1 = measure(1.3, uncertainty: 0.1)
+    let k2 = measure(1.4, uncertainty: 0.1)
+    let k3 = measure(1.5, uncertainty: 0.1)
+    let k4 = measure(1.6, uncertainty: 0.1)
+    let k5 = measure(1.7, uncertainty: 0.1)
+    let k6 = measure(1.8, uncertainty: 0.1)
+    let k7 = measure(1.9, uncertainty: 0.1)
+    let k8 = measure(2.0, uncertainty: 0.1)
+    let k9 = measure(2.1, uncertainty: 0.1)
+    let k10 = measure(2.2, uncertainty: 0.1)
+    let k11 = measure(2.3, uncertainty: 0.1)
+    let r = twelve(k0.value, k1.value, k2.value, k3.value, k4.value, k5.value, k6.value, k7.value, k8.value, k9.value, k10.value, k11.value)
+    var bad: i64 = 0
+    bad = bad + report_rel("twelve_h01", hessian_of(r, 0, 1), 1.0)
+    bad = bad + report_rel("twelve_h45", hessian_of(r, 4, 5), 0.16696106656677298)
+    bad = bad + report_rel("twelve_h44", hessian_of(r, 4, 4), 0.037933764337891036)
+    bad = bad + report_rel("twelve_h68", hessian_of(r, 6, 8), 1.8999999999999999)
+    bad = bad + report_rel("twelve_h910", hessian_of(r, 9, 10), -0.0067186240257995173)
+    bad = bad + report_rel("twelve_h1010", hessian_of(r, 10, 10), 0.0023129689269145884)
+    bad = bad + report_rel("twelve_h11_0", hessian_of(r, 11, 0), 4.5999999999999996)
+    bad = bad + report_rel("twelve_h1111", hessian_of(r, 11, 11), 2.3999999999999999)
+    bad
+}
+
+fn main() -> i32 with IO, Mut, Div, Epistemic {
+    var bad: i64 = 0
+    bad = bad + check_struct()
+    bad = bad + check_branch()
+    bad = bad + check_partition()
+    bad = bad + check_nested()
+    bad = bad + check_knowledge()
+    bad = bad + check_io_once()
+    bad = bad + check_draw()
+    bad = bad + check_late_var()
+    bad = bad + check_corr()
+    bad = bad + check_corr_fo()
+    bad = bad + check_corr_certain()
+    bad = bad + check_corr_neg()
+    bad = bad + check_nine()
+    bad = bad + check_twelve()
+    if bad == 0 {
+        print("GUM_SO_HYPERDUAL_OK\n")
+        return 0
+    }
+    1
+}

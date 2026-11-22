@@ -1,0 +1,3 @@
+K1 batched decode on NVIDIA L4 (job 20540, ExitCode 0:0): batch demo bit-exact parity on CPU and GPU (cpu parity=1, gpu parity=1, BATCHDONE PASS); two-client overlap OVERLAP-OK with the batched turn live on shared iterations.
+K2 chat completions on L4 (same job, STEP4 CHAT-OK): non-stream 200 with message content and usage, SSE stream 200 with delta frames plus data DONE, bad role 400, empty messages 400, tools param accepted with no lift on a base model. Unit receipts CHATTPL PASS and CHATBODY PASS (tool_calls lift with name, arguments, finish tool_calls).
+No regression on Plan I/J receipts in the same run (SERVJPARAMS PASS, SERVEDONE PASS, OVERLAP-OK).

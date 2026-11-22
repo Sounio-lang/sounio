@@ -33,7 +33,7 @@ pathname="${2:-}"
 # if regeneration fails we fall back to leaving "our" version in place ($out is
 # already our version), so the merge never hard-fails on these generated files.
 if [[ -f "$ROOT/scripts/docs/sync_governance_metadata.mjs" ]]; then
-    node "$ROOT/scripts/docs/sync_governance_metadata.mjs" >/dev/null 2>&1 || true
+    node "$ROOT/scripts/docs/sync_governance_metadata.mjs" --snapshot >/dev/null 2>&1 || true
 fi
 
 # Hand git the freshly regenerated content for this specific file.

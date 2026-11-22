@@ -1,0 +1,155 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: H2O_CELL_YIELD_OK
+// The cell returns water in moles and electrical work in megajoules.
+// The water variance is the batch. The work variance is the product rule.
+// Correlation moves the work and leaves the water.
+//
+// Oracle class: sounio_closed_form_twin (ADR-009).
+// covariance_of is the claimant. gum_cov_cell is the clock: central
+// differences of the scalar cell functions, then the GUM sum written out.
+// The clock does not call covariance_of. No verified_foreign_reference
+// covers this claim.
+
+ontology Fuel {
+    class Substance { property amount: f64 where amount >= 0.0 }
+    class H2 subclass_of Substance
+    class H2O subclass_of Substance
+    class ElectricalWork subclass_of Substance
+    disjoint H2, H2O
+    disjoint H2O, ElectricalWork
+}
+
+struct CellOut {
+    water: Knowledge[H2O, ValidUntil("2026-12-31"), epsilon < 0.05, Derived]
+    work: Knowledge[ElectricalWork, ValidUntil("2026-12-31"), epsilon < 0.05, Derived]
+}
+
+var FARADAY: f64 = 96485.3321
+var N_MOL: f64 = 210.826
+var U_MOL: f64 = 2.10826
+var E_CELL: f64 = 0.65
+var U_VOLT: f64 = 0.01
+
+fn cell(h: Knowledge<H2>, e: Knowledge<f64>) -> CellOut with Epistemic, Mut, Div {
+    let n: f64 = h.value
+    let volts: f64 = e.value
+    let mj: f64 = n * 2.0 * FARADAY * volts / 1.0e6
+    let w: H2O = n
+    let k: ElectricalWork = mj
+    CellOut {
+        water: Knowledge { value: w, epsilon: 0.01, validity: "2027-06-30", provenance: "cell" },
+        work: Knowledge { value: k, epsilon: 0.01, validity: "2027-06-30", provenance: "cell" }
+    }
+}
+
+
+fn cell_water_mol(n: f64, volts: f64) -> f64 {
+    n
+}
+
+fn cell_work_mj(n: f64, volts: f64) -> f64 {
+    n * 2.0 * FARADAY * volts / 1.0e6
+}
+
+fn gum_cov_cell(n: f64, volts: f64, u_n: f64, u_v: f64, rho: f64) -> f64 {
+    let h = 0.001
+    let dw_dn = (cell_water_mol(n + h, volts) - cell_water_mol(n - h, volts)) / (2.0 * h)
+    let dw_dv = (cell_water_mol(n, volts + h) - cell_water_mol(n, volts - h)) / (2.0 * h)
+    let dW_dn = (cell_work_mj(n + h, volts) - cell_work_mj(n - h, volts)) / (2.0 * h)
+    let dW_dv = (cell_work_mj(n, volts + h) - cell_work_mj(n, volts - h)) / (2.0 * h)
+    let diag = dw_dn * dW_dn * (u_n * u_n) + dw_dv * dW_dv * (u_v * u_v)
+    let cross = (dw_dn * dW_dv + dw_dv * dW_dn) * u_n * u_v * rho
+    diag + cross
+}
+
+fn gum_var_water(n: f64, volts: f64, u_n: f64, u_v: f64, rho: f64) -> f64 {
+    let h = 0.001
+    let dw_dn = (cell_water_mol(n + h, volts) - cell_water_mol(n - h, volts)) / (2.0 * h)
+    let dw_dv = (cell_water_mol(n, volts + h) - cell_water_mol(n, volts - h)) / (2.0 * h)
+    let diag = dw_dn * dw_dn * (u_n * u_n) + dw_dv * dw_dv * (u_v * u_v)
+    let cross = 2.0 * dw_dn * dw_dv * u_n * u_v * rho
+    diag + cross
+}
+
+fn gum_var_work(n: f64, volts: f64, u_n: f64, u_v: f64, rho: f64) -> f64 {
+    let h = 0.001
+    let dW_dn = (cell_work_mj(n + h, volts) - cell_work_mj(n - h, volts)) / (2.0 * h)
+    let dW_dv = (cell_work_mj(n, volts + h) - cell_work_mj(n, volts - h)) / (2.0 * h)
+    let diag = dW_dn * dW_dn * (u_n * u_n) + dW_dv * dW_dv * (u_v * u_v)
+    let cross = 2.0 * dW_dn * dW_dv * u_n * u_v * rho
+    diag + cross
+}
+
+fn near(actual: f64, expected: f64, tol: f64) -> bool {
+    let d = actual - expected
+    if d < 0.0 { return (0.0 - d) < tol }
+    d < tol
+}
+
+fn main() -> i32 with IO, Mut, Div, Epistemic {
+    let tagged: H2 = N_MOL
+    let batch: Knowledge<H2> = measure(tagged, uncertainty: U_MOL)
+    let e_now: f64 = E_CELL
+    let volts: Knowledge<f64> = measure(e_now, uncertainty: U_VOLT)
+    let yielded = cell(batch, volts)
+    let water_mol: f64 = yielded.water.value
+    let var_water = variance_of(yielded.water.value)
+    let mj: f64 = yielded.work.value
+    let var_work = variance_of(yielded.work.value)
+    let cov_engine = covariance_of(yielded.water.value, yielded.work.value)
+    let c_ne = 2.0 * FARADAY / 1.0e6
+    let expect_mj = N_MOL * c_ne * E_CELL
+    let expect_water = U_MOL * U_MOL
+    let term_n = (c_ne * E_CELL) * (c_ne * E_CELL) * (U_MOL * U_MOL)
+    let term_v = (c_ne * N_MOL) * (c_ne * N_MOL) * (U_VOLT * U_VOLT)
+    let expect_both = term_n + term_v
+
+    let n_c: f64 = batch.value
+    let v_c: f64 = volts.value
+    let _rho = correlate(n_c, v_c, 1.0)
+    let yielded_rho = cell(batch, volts)
+    let var_water_rho = variance_of(yielded_rho.water.value)
+    let var_work_rho = variance_of(yielded_rho.work.value)
+    let cov_engine_rho = covariance_of(yielded_rho.water.value, yielded_rho.work.value)
+    let water_live = variance_of(yielded.water.value)
+    let work_live = variance_of(yielded.work.value)
+    let cov_live = covariance_of(yielded.water.value, yielded.work.value)
+    let cross = 2.0 * (c_ne * E_CELL) * (c_ne * N_MOL) * U_MOL * U_VOLT
+    let expect_rho = expect_both + cross
+
+    print("mol ")
+    print_f64(water_mol)
+    print(" wv ")
+    print_f64(var_water)
+    print(" mj ")
+    print_f64(mj)
+    print(" kv ")
+    print_f64(var_work)
+    print(" wr ")
+    print_f64(var_water_rho)
+    print(" kr ")
+    print_f64(var_work_rho)
+    print("\n")
+
+    let clock = gum_cov_cell(N_MOL, E_CELL, U_MOL, U_VOLT, 0.0)
+    let clock_rho = gum_cov_cell(N_MOL, E_CELL, U_MOL, U_VOLT, 1.0)
+    let clock_water = gum_var_water(N_MOL, E_CELL, U_MOL, U_VOLT, 1.0)
+    let clock_work = gum_var_work(N_MOL, E_CELL, U_MOL, U_VOLT, 1.0)
+    print(" cov ")
+    print_f64(cov_engine)
+    print(" clock ")
+    print_f64(clock)
+    print(" covr ")
+    print_f64(cov_engine_rho)
+    print(" clockr ")
+    print_f64(clock_rho)
+    print("\n")
+
+    if near(water_mol, N_MOL, 0.001) && near(var_water, expect_water, 0.0001) && near(mj, expect_mj, 0.001) && near(var_work, expect_both, 0.0001) && near(var_water_rho, expect_water, 0.0001) && near(var_work_rho, expect_rho, 0.0001) && var_work_rho > var_work && near(cov_engine, clock, 0.0001) && near(cov_engine_rho, clock_rho, 0.0001) && clock_rho > clock && near(water_live, clock_water, 0.0001) && near(work_live, clock_work, 0.0001) && near(cov_live, clock_rho, 0.0001) {
+        println("H2O_CELL_YIELD_OK")
+        return 0
+    }
+    println("H2O_CELL_YIELD_FAIL")
+    1
+}

@@ -1,0 +1,230 @@
+//@ run-pass
+//@ requires: slow
+//@ timeout: 3000
+// Full statistical overtake witness: 62,914,560,000 wide draws.
+// Native CPU reference budget; execute on a dedicated Foundry/Slurm CPU.
+// Quick CHSH coverage does not establish this statistical acceptance.
+
+use qpu::chsh::{
+    qpu_s,
+    qpu_keep,
+    qpu_corr,
+    qpu_bell_job,
+    qpu_basis_job,
+    qpu_shift_job,
+    qpu_partial_job,
+    qpu_party_shots,
+    qpu_copy_shots,
+    qpu_anti_shots,
+    qpu_block_read,
+    qpu_both_from,
+    qpu_both_wide,
+    PartyMean,
+    BlockRead,
+    BothShot,
+}
+
+use quantum::qasm_tape::{
+    tape_new,
+    tape_h,
+    tape_cx,
+    tape_ry,
+    tape_rz,
+    tape_measure,
+    tape_qasm,
+    tape_replay_1,
+    tape_replay_2,
+    tape_counts,
+    ShotCounts,
+    BasisProb,
+    Tape,
+}
+
+use quantum::born_shot_law::{
+    ry_chsh_exit,
+    ry_chsh_party_noise,
+    ry_chsh_copy_noise,
+    ry_chsh_anti_noise,
+    ry_chsh_both,
+}
+
+fn has_word(hay: string, needle: string) -> bool with Mut, Panic, Div {
+    let n = str_len(hay)
+    let m = str_len(needle)
+    if m == 0 { return true }
+    if n < m { return false }
+    var i: i64 = 0
+    let last = n - m
+    while i <= last {
+        let piece = str_slice(hay, i, i + m)
+        if str_eq(piece, needle) { return true }
+        i = i + 1
+    }
+    false
+}
+
+fn near(a: f64, b: f64, tol: f64) -> bool {
+    let d = a - b
+    let ad = if d < 0.0 { 0.0 - d } else { d }
+    ad < tol
+}
+
+fn check(name: string, ok: bool) -> i32 with IO {
+    if ok {
+        print(name)
+        print(": PASS\n")
+        return 0
+    }
+    print(name)
+    print(": FAIL\n")
+    return 1
+}
+
+fn sqrt_pos(x: f64) -> f64 with Mut, Div {
+    var y = 1.0
+    var n = 0
+    while n < 16 {
+        y = 0.5 * (y + x / y)
+        n = n + 1
+    }
+    y
+}
+
+// sigma^2 such that e^{-sigma^2} = 1/sqrt(2). The cut is not a pasted constant.
+
+fn abs_f(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+// The fence of 3 accepted one block. These four blocks are the expectation.
+// At 1000 shots the mean sits inside 2 empirical standard errors, and block 0
+// is still the far one. At 4000 shots the mean has fallen by more than half
+// and sits inside 2 of both the empirical width and the shot-noise formula.
+
+// The meeting is sixteen blocks of 4000 shots on the 31-bit stream. The
+// overtake is 0.00015625 radian past it, sixteen blocks of 327680000 shots
+// on the period-2^64 stream, with its own seeds. The 31-bit stream reuses
+// its cycle at this length and the blocks scatter past the shot-noise
+// formula. Each reading has to sit inside 2 plug-in standard errors and
+// inside 2 empirical standard errors, and the measured gap has to clear 4
+// of both.
+fn overtake_ok(pi: f64) -> bool with Mut, Div, Panic {
+    let db = pi / 4.0
+    let meet_e = pi / 2.0
+    let past_e = pi / 2.0 + 0.00015625
+    let om = ry_chsh_both(0.0, db, meet_e, pi)
+    let op = ry_chsh_both(0.0, db, past_e, pi)
+    var r: i64 = 0
+    var n: i64 = 0
+    var mp = 0.0
+    var mc = 0.0
+    var mg = 0.0
+    var mm2 = 0.0
+    var cm2 = 0.0
+    var gm2 = 0.0
+    var mvp = 0.0
+    var mvc = 0.0
+    var mvg = 0.0
+    var pp = 0.0
+    var pc = 0.0
+    var pg = 0.0
+    var pm2 = 0.0
+    var pcm2 = 0.0
+    var pgm2 = 0.0
+    var pvp = 0.0
+    var pvc = 0.0
+    var pvg = 0.0
+    while r < 16 {
+        let m: BothShot = qpu_both_from(0.0, db, meet_e, pi, 4000, 40001 + 8000 * r)
+        let p: BothShot = qpu_both_wide(0.0, db, past_e, pi, 327680000, 200001 + 8000 * r)
+        n = n + 1
+        let nf = n as f64
+        let dmp = m.pair - mp
+        mp = mp + dmp / nf
+        mm2 = mm2 + dmp * (m.pair - mp)
+        let dmc = m.copy - mc
+        mc = mc + dmc / nf
+        cm2 = cm2 + dmc * (m.copy - mc)
+        let g = m.pair - m.copy
+        let dmg = g - mg
+        mg = mg + dmg / nf
+        gm2 = gm2 + dmg * (g - mg)
+        mvp = mvp + m.pair_se * m.pair_se
+        mvc = mvc + m.copy_se * m.copy_se
+        mvg = mvg + m.pair_se * m.pair_se + m.copy_se * m.copy_se
+        let dpp = p.pair - pp
+        pp = pp + dpp / nf
+        pm2 = pm2 + dpp * (p.pair - pp)
+        let dpc = p.copy - pc
+        pc = pc + dpc / nf
+        pcm2 = pcm2 + dpc * (p.copy - pc)
+        let h = p.copy - p.pair
+        let dpg = h - pg
+        pg = pg + dpg / nf
+        pgm2 = pgm2 + dpg * (h - pg)
+        pvp = pvp + p.pair_se * p.pair_se
+        pvc = pvc + p.copy_se * p.copy_se
+        pvg = pvg + p.pair_se * p.pair_se + p.copy_se * p.copy_se
+        r = r + 1
+    }
+    let msp = sqrt_pos(mvp / 256.0)
+    let msc = sqrt_pos(mvc / 256.0)
+    let msg = sqrt_pos(mvg / 256.0)
+    let psp = sqrt_pos(pvp / 256.0)
+    let psc = sqrt_pos(pvc / 256.0)
+    let psg = sqrt_pos(pvg / 256.0)
+    let emp_mp = sqrt_pos(mm2 / 15.0) / 4.0
+    let emp_mc = sqrt_pos(cm2 / 15.0) / 4.0
+    let emp_mg = sqrt_pos(gm2 / 15.0) / 4.0
+    let emp_pp = sqrt_pos(pm2 / 15.0) / 4.0
+    let emp_pc = sqrt_pos(pcm2 / 15.0) / 4.0
+    let emp_pg = sqrt_pos(pgm2 / 15.0) / 4.0
+    let og = op.copy - op.bell
+    if near(om.bell, 2.0, 0.000001) {
+        if near(om.copy, 2.0, 0.000001) {
+            if abs_f(mp - om.bell) < 2.0 * msp {
+                if abs_f(mp - om.bell) < 2.0 * emp_mp {
+                    if abs_f(mc - om.copy) < 2.0 * msc {
+                        if abs_f(mc - om.copy) < 2.0 * emp_mc {
+                            if abs_f(mg) < 2.0 * msg {
+                                if abs_f(mg) < 2.0 * emp_mg {
+                                    if op.bell < 2.0 {
+                                        if op.copy > op.bell {
+                                            if pp < 2.0 {
+                                                if pc > pp {
+                                                    if pg > 4.0 * psg {
+                                                        if pg > 4.0 * emp_pg {
+                                                            if abs_f(pp - op.bell) < 2.0 * psp {
+                                                                if abs_f(pp - op.bell) < 2.0 * emp_pp {
+                                                                    if abs_f(pc - op.copy) < 2.0 * psc {
+                                                                        if abs_f(pc - op.copy) < 2.0 * emp_pc {
+                                                                            if abs_f(pg - og) < 2.0 * psg {
+                                                                                if abs_f(pg - og) < 2.0 * emp_pg { return true }
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+fn main() -> i32 with Mut, Div, Panic, IO {
+    let pi = 3.141592653589793
+    let fail = check("Q_overtake", overtake_ok(pi))
+    if fail == 0 { print("ALL_PASS\n") }
+    return fail
+}

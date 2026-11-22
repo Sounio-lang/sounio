@@ -1,0 +1,984 @@
+// stdlib/darwin_pbpk/circ28.sio — whole-body PBPK kernel with a closed circulation
+//
+// Twenty-eight states, the same count as tsit5_pbpk28.sio, laid out as a
+// circulation instead of a star around one blood pool:
+//
+//   venous pool -> lung -> arterial pool -> organs -> venous pool
+//   gut, spleen and pancreas drain into the liver (portal vein); the liver
+//   also receives the hepatic artery and drains into the venous pool.
+//
+//   x[0]            venous blood                       (mg per L of blood)
+//   x[1]            arterial blood                     (mg per L of blood)
+//   x[2 + 2(i-1)]   vascular space of organ i, i=1..13 (mg per L of blood)
+//   x[3 + 2(i-1)]   tissue space of organ i            (mg per L of tissue)
+//
+// Organ order (i): 1 liver, 2 kidney, 3 brain, 4 heart, 5 lung, 6 muscle,
+// 7 adipose, 8 gut, 9 skin, 10 bone, 11 spleen, 12 pancreas, 13 rest.
+//
+// Why a new kernel. In tsit5_pbpk28.sio every organ, the lung included, hangs
+// in parallel from one 5 L blood pool, clearance acts on that pool, and
+// concentrations are whole-blood with no plasma partition. Three consequences
+// were measured on its drug sets (2026-11-15):
+//   - the organ vascular spaces (3.60 L) add to the 5 L pool, so no parameter
+//     set can have a volume below 8.60 L, above the published volumes of
+//     semaglutide and tirzepatide;
+//   - oral first pass is a bioavailability constant applied to the input,
+//     which invited combining an apparent clearance with F a second time;
+//   - the lung does not see the whole cardiac output and the splanchnic bed
+//     does not feed the liver, so the early distribution and the first pass
+//     are not those of the circulation.
+// Here blood volumes add up to the blood volume, plasma concentration is
+// blood concentration divided by the blood-to-plasma ratio, hepatic clearance
+// is an intrinsic clearance acting in liver tissue, renal clearance acts on
+// the arterial plasma reaching the kidney, and oral drug enters gut tissue so
+// that first-pass extraction, in the gut wall and in the liver, is produced by
+// the portal route.
+//
+// Equations (C blood concentrations, T tissue concentrations, bp blood to
+// plasma ratio, kp tissue to plasma partition, ps permeability-surface
+// product referred to plasma, CO cardiac output):
+//
+//   exchange_i  = ps_i (C_i / bp - T_i / kp_i)
+//   venous      V_ven dC_ven/dt = sum_out Q_out C_out - CO C_ven
+//                                 - (cl_plasma / bp) C_ven + iv(t)
+//   lung        V_v dC/dt = CO (C_ven - C) - exchange
+//   arterial    V_art dC_art/dt = CO (C_lung - C_art)
+//   organ i     V_v dC/dt = Q_i (C_art - C) - exchange
+//               kidney: the inflow term loses (cl_renal / bp) C_art
+//   liver       V_v dC/dt = Q_ha C_art + sum_portal Q_j C_j - Q_h C - exchange
+//   tissue i    V_t dT/dt = exchange
+//               liver: - (clint + clform) fu T / kp
+//               gut:   + oral(t) - clint_gut fu T / kp
+//
+// with Q_h = Q_ha + Q_gut + Q_spleen + Q_pancreas and CO the sum of the
+// arterial flows (q[1] is the hepatic artery; q[5] is not read).
+//
+// Integration: the two-stage, second-order, L-stable SDIRK scheme of
+// Alexander (1977), gamma = 1 - 1/sqrt(2), on dx/dt = A x + u. Both stages
+// solve with the same matrix (I - gamma dt A), factored once per parameter
+// set and step (LU without pivoting; the matrix is strictly diagonally
+// dominant by columns in mass form for any dt). Crank-Nicolson was measured
+// first and rejected: after an intravenous bolus with dt = 0.01 h it rang to
+// -2.1 mg/L in the lung vascular space (lung turnover is 1200 /h), because
+// its amplification factor tends to -1 for stiff modes; an L-stable scheme
+// damps them. Eliminated masses and the areas under the venous and arterial
+// curves are accumulated with the weights of the scheme, so that
+// dose = eliminated + remaining and AUC = eliminated / clearance hold to
+// rounding at any step size. No state is clamped. Doses enter as rates: a
+// jump written into a state excites the stiff modes, for which the scheme's
+// amplification factor is small but negative (down to -0.2), and produced
+// a transient -0.28 mg/L in the test case; the same dose infused over one
+// step produced none. An intravenous bolus is an infusion of stated length.
+
+pub struct Circ28Params {
+    pub v_ven: f64,          // L, venous blood pool
+    pub v_art: f64,          // L, arterial blood pool
+    pub v: [f64; 14],        // L, organ volume (index 0 unused)
+    pub vf: [f64; 14],       // vascular fraction of the organ volume
+    pub q: [f64; 14],        // L/h, arterial flow to the organ; q[1] hepatic artery
+    pub kp: [f64; 14],       // tissue to plasma partition coefficient
+    pub ps: [f64; 14],       // L/h, permeability-surface product (plasma)
+    pub bp: f64,             // blood to plasma concentration ratio
+    pub fu: f64,             // unbound fraction in plasma
+    pub clint: f64,          // L/h, hepatic intrinsic clearance of unbound drug
+    pub clform: f64,         // L/h, hepatic intrinsic clearance forming a tracked metabolite
+    pub clint_gut: f64,      // L/h, gut-wall intrinsic clearance of unbound drug
+    pub cl_renal: f64,       // L/h, renal clearance referred to plasma
+    pub cl_plasma: f64,      // L/h, clearance from venous plasma (e.g. proteolysis)
+}
+
+pub struct Circ28State {
+    pub x: [f64; 28],
+}
+
+// Accumulated over a run: masses removed (mg) and areas under the blood
+// concentration curves (mg.h/L).
+pub struct Circ28Elim {
+    pub hepatic: f64,
+    pub formed: f64,
+    pub renal: f64,
+    pub plasma: f64,
+    pub gut: f64,
+    pub auc_ven: f64,
+    pub auc_art: f64,
+}
+
+// Factored system for one parameter set and one step size.
+pub struct Circ28Sys {
+    pub lu: [f64; 784],      // LU of (I - gamma dt A), row-major, unit lower triangle
+    pub a: [f64; 784],       // A, row-major
+    pub dt: f64,
+    pub k_hep: f64,          // L/h: mass rate = k_hep * T_liver
+    pub k_form: f64,
+    pub k_ren: f64,          // mass rate = k_ren * C_art
+    pub k_pla: f64,          // mass rate = k_pla * C_ven
+    pub k_gut: f64,          // mass rate = k_gut * T_gut
+}
+
+pub fn circ28_state_zero() -> Circ28State {
+    Circ28State { x: [0.0; 28] }
+}
+
+pub fn circ28_elim_zero() -> Circ28Elim {
+    Circ28Elim { hepatic: 0.0, formed: 0.0, renal: 0.0, plasma: 0.0, gut: 0.0, auc_ven: 0.0, auc_art: 0.0 }
+}
+
+pub fn circ28_iv(i: i32) -> i32 { return 2 + 2 * (i - 1) }
+pub fn circ28_it(i: i32) -> i32 { return 3 + 2 * (i - 1) }
+
+fn circ28_is_portal(i: i32) -> bool {
+    return i == 8 || i == 11 || i == 12
+}
+
+// Liver outflow: hepatic artery plus the portal organs.
+pub fn circ28_q_hepatic(p: Circ28Params) -> f64 {
+    return p.q[1] + p.q[8] + p.q[11] + p.q[12]
+}
+
+// Cardiac output: the sum of the arterial flows (lung excluded).
+pub fn circ28_cardiac_output(p: Circ28Params) -> f64 with Mut {
+    var co = 0.0
+    var i: i32 = 1
+    while i < 14 {
+        if i != 5 { co = co + p.q[i] }
+        i = i + 1
+    }
+    return co
+}
+
+// Volume of each state (L): blood volumes for vascular states, tissue volumes
+// for tissue states.
+pub fn circ28_state_volume(p: Circ28Params, k: i32) -> f64 {
+    if k == 0 { return p.v_ven }
+    if k == 1 { return p.v_art }
+    let i = (k - 2) / 2 + 1
+    if (k - 2) % 2 == 0 { return p.v[i] * p.vf[i] }
+    return p.v[i] * (1.0 - p.vf[i])
+}
+
+// Total blood volume (L).
+pub fn circ28_blood_volume(p: Circ28Params) -> f64 with Mut {
+    var vb = p.v_ven + p.v_art
+    var i: i32 = 1
+    while i < 14 {
+        vb = vb + p.v[i] * p.vf[i]
+        i = i + 1
+    }
+    return vb
+}
+
+// Steady-state volume of distribution referred to plasma (L):
+// bp * blood volume + sum of tissue volume * kp.
+pub fn circ28_vss_plasma(p: Circ28Params) -> f64 with Mut {
+    var vss = p.bp * circ28_blood_volume(p)
+    var i: i32 = 1
+    while i < 14 {
+        vss = vss + p.v[i] * (1.0 - p.vf[i]) * p.kp[i]
+        i = i + 1
+    }
+    return vss
+}
+
+// Total drug mass in the body (mg).
+pub fn circ28_total_mass(s: &Circ28State, p: Circ28Params) -> f64 with Mut {
+    var m = 0.0
+    var k: i32 = 0
+    while k < 28 {
+        m = m + circ28_state_volume(p, k) * (*s).x[k]
+        k = k + 1
+    }
+    return m
+}
+
+// Plasma concentration in the venous pool (mg/L).
+pub fn circ28_plasma_venous(s: &Circ28State, p: Circ28Params) -> f64 with Div {
+    return (*s).x[0] / p.bp
+}
+
+// Hepatic extraction ratio at steady state, from the same equations:
+// tissue balance ps (C/bp - T/kp) = (clint + clform) fu T/kp gives an
+// effective blood clearance cl_eff = (ps * ci / (ps + ci)) / bp with
+// ci = (clint + clform) * fu, and E = cl_eff / (Q_h + cl_eff).
+pub fn circ28_hepatic_extraction(p: Circ28Params) -> f64 with Div {
+    let ci = (p.clint + p.clform) * p.fu
+    if !(ci > 0.0) { return 0.0 }
+    let cl_eff = (p.ps[1] * ci / (p.ps[1] + ci)) / p.bp
+    let qh = circ28_q_hepatic(p)
+    return cl_eff / (qh + cl_eff)
+}
+
+// Gut wall. Drug in gut tissue is metabolised at clint_gut * fu * T_gut / kp_gut,
+// the same unbound driving concentration as in the liver. From the gut
+// balance with no drug arriving by the artery, the fraction of an oral dose
+// that leaves the gut wall unchanged is
+//   Fg = Qg / (Qg + clint_gut fu),  Qg = Q_gut bp ps_gut / (ps_gut + Q_gut bp),
+// the form of the Qgut model (Yang et al. 2007) with the villous flow played
+// by Q_gut bp and the permeability clearance by ps_gut. (That model is
+// usually written with an unbound fraction of 1 in the enterocyte; the same
+// value of Fg is obtained here by supplying clint_gut / fu.)
+pub fn circ28_gut_availability(p: Circ28Params) -> f64 with Div {
+    let cg = p.clint_gut * p.fu
+    if !(cg > 0.0) { return 1.0 }
+    let qb = p.q[8] * p.bp
+    let qg = qb * p.ps[8] / (p.ps[8] + qb)
+    return qg / (qg + cg)
+}
+
+// Extraction ratio of the gut wall for drug arriving by the artery.
+pub fn circ28_gut_extraction(p: Circ28Params) -> f64 with Div {
+    let cg = p.clint_gut * p.fu
+    if !(cg > 0.0) { return 0.0 }
+    let cl_eff = (p.ps[8] * cg / (p.ps[8] + cg)) / p.bp
+    return cl_eff / (p.q[8] + cl_eff)
+}
+
+// Blood clearance (L/h) of the gut wall and the liver in series for drug in
+// arterial blood: the gut removes Q_gut Eg, and the liver removes Eh of what
+// reaches it, Q_h - Q_gut Eg.
+pub fn circ28_splanchnic_clearance(p: Circ28Params) -> f64 with Div {
+    let eg = circ28_gut_extraction(p)
+    let eh = circ28_hepatic_extraction(p)
+    return p.q[8] * eg + eh * (circ28_q_hepatic(p) - p.q[8] * eg)
+}
+
+// Adds a to entry (r, c) of a 28 x 28 row-major matrix.
+fn circ28_add(m: &![f64; 784], r: i32, c: i32, a: f64) with Mut {
+    (*m)[r * 28 + c] = (*m)[r * 28 + c] + a
+}
+
+// Fills `a` with the rate matrix A of dx/dt = A x (1/h).
+fn circ28_fill_rate_matrix(p: Circ28Params, a: &![f64; 784]) with Mut, Div {
+    var k: i32 = 0
+    while k < 784 {
+        (*a)[k] = 0.0
+        k = k + 1
+    }
+    let co = circ28_cardiac_output(p)
+    let qh = circ28_q_hepatic(p)
+    let ven = 0
+    let art = 1
+
+    // venous pool: loses CO and plasma clearance
+    circ28_add(a, ven, ven, 0.0 - (co + p.cl_plasma / p.bp) / p.v_ven)
+    // arterial pool: fed by lung vascular, loses CO
+    circ28_add(a, art, circ28_iv(5), co / p.v_art)
+    circ28_add(a, art, art, 0.0 - co / p.v_art)
+
+    var i: i32 = 1
+    while i < 14 {
+        let iv = circ28_iv(i)
+        let it = circ28_it(i)
+        let vv = p.v[i] * p.vf[i]
+        let vt = p.v[i] * (1.0 - p.vf[i])
+        let ps = p.ps[i]
+        let kp = p.kp[i]
+
+        // exchange between vascular and tissue space
+        circ28_add(a, iv, iv, 0.0 - ps / (p.bp * vv))
+        circ28_add(a, iv, it, ps / (kp * vv))
+        circ28_add(a, it, iv, ps / (p.bp * vt))
+        circ28_add(a, it, it, 0.0 - ps / (kp * vt))
+
+        if i == 5 {
+            // lung: whole cardiac output from the venous pool
+            circ28_add(a, iv, ven, co / vv)
+            circ28_add(a, iv, iv, 0.0 - co / vv)
+        } else if i == 1 {
+            // liver: hepatic artery in, hepatic flow out to the venous pool
+            circ28_add(a, iv, art, p.q[1] / vv)
+            circ28_add(a, iv, iv, 0.0 - qh / vv)
+            circ28_add(a, ven, iv, qh / p.v_ven)
+            // intrinsic clearance on unbound tissue concentration
+            circ28_add(a, it, it, 0.0 - (p.clint + p.clform) * p.fu / (kp * vt))
+        } else {
+            let qi = p.q[i]
+            circ28_add(a, iv, art, qi / vv)
+            circ28_add(a, iv, iv, 0.0 - qi / vv)
+            if circ28_is_portal(i) {
+                // outflow to the liver vascular space
+                circ28_add(a, circ28_iv(1), iv, qi / (p.v[1] * p.vf[1]))
+            } else {
+                circ28_add(a, ven, iv, qi / p.v_ven)
+            }
+            if i == 8 {
+                // gut-wall metabolism on unbound tissue concentration
+                circ28_add(a, it, it, 0.0 - p.clint_gut * p.fu / (kp * vt))
+            }
+            if i == 2 {
+                // renal clearance removes drug from the arterial plasma inflow
+                circ28_add(a, iv, art, 0.0 - (p.cl_renal / p.bp) / vv)
+            }
+        }
+        i = i + 1
+    }
+}
+
+pub fn circ28_gamma() -> f64 { return 0.29289321881345254 }
+
+// Builds A and factors (I - gamma dt A) for step dt (h).
+pub fn circ28_prepare(p: Circ28Params, dt: f64, sys: &!Circ28Sys) with Mut, Div {
+    var a: [f64; 784] = [0.0; 784]
+    circ28_fill_rate_matrix(p, &!a)
+    let h = circ28_gamma() * dt
+    var r: i32 = 0
+    while r < 28 {
+        var c: i32 = 0
+        while c < 28 {
+            let id = if r == c { 1.0 } else { 0.0 }
+            (*sys).lu[r * 28 + c] = id - h * a[r * 28 + c]
+            (*sys).a[r * 28 + c] = a[r * 28 + c]
+            c = c + 1
+        }
+        r = r + 1
+    }
+    // Doolittle LU in place, no pivoting.
+    var j: i32 = 0
+    while j < 28 {
+        let piv = (*sys).lu[j * 28 + j]
+        var rr: i32 = j + 1
+        while rr < 28 {
+            let f = (*sys).lu[rr * 28 + j] / piv
+            (*sys).lu[rr * 28 + j] = f
+            if f != 0.0 {
+                var cc: i32 = j + 1
+                while cc < 28 {
+                    (*sys).lu[rr * 28 + cc] = (*sys).lu[rr * 28 + cc] - f * (*sys).lu[j * 28 + cc]
+                    cc = cc + 1
+                }
+            }
+            rr = rr + 1
+        }
+        j = j + 1
+    }
+    (*sys).dt = dt
+    (*sys).k_hep = p.clint * p.fu / p.kp[1]
+    (*sys).k_form = p.clform * p.fu / p.kp[1]
+    (*sys).k_ren = p.cl_renal / p.bp
+    (*sys).k_pla = p.cl_plasma / p.bp
+    (*sys).k_gut = p.clint_gut * p.fu / p.kp[8]
+}
+
+pub fn circ28_sys_zero() -> Circ28Sys {
+    Circ28Sys { lu: [0.0; 784], a: [0.0; 784], dt: 0.0, k_hep: 0.0, k_form: 0.0, k_ren: 0.0, k_pla: 0.0, k_gut: 0.0 }
+}
+
+// k <- (I - gamma dt A)^-1 (A y + u), in place in k; u has two entries.
+fn circ28_stage(sys: &Circ28Sys, y: &[f64; 28], u_ven: f64, u_gut: f64, k: &![f64; 28]) with Mut, Div {
+    var r: i32 = 0
+    while r < 28 {
+        var acc = 0.0
+        var c: i32 = 0
+        while c < 28 {
+            let e = (*sys).a[r * 28 + c]
+            if e != 0.0 { acc = acc + e * (*y)[c] }
+            c = c + 1
+        }
+        (*k)[r] = acc
+        r = r + 1
+    }
+    (*k)[0] = (*k)[0] + u_ven
+    (*k)[17] = (*k)[17] + u_gut
+    r = 1
+    while r < 28 {
+        var acc = (*k)[r]
+        var c: i32 = 0
+        while c < r {
+            let l = (*sys).lu[r * 28 + c]
+            if l != 0.0 { acc = acc - l * (*k)[c] }
+            c = c + 1
+        }
+        (*k)[r] = acc
+        r = r + 1
+    }
+    r = 27
+    while r >= 0 {
+        var acc = (*k)[r]
+        var c: i32 = r + 1
+        while c < 28 {
+            let u = (*sys).lu[r * 28 + c]
+            if u != 0.0 { acc = acc - u * (*k)[c] }
+            c = c + 1
+        }
+        (*k)[r] = acc / (*sys).lu[r * 28 + r]
+        r = r - 1
+    }
+}
+
+// One step. iv_rate (mg/h) enters the venous pool and oral_rate (mg/h)
+// enters gut tissue (state 17); both are held constant over the step, so
+// the mass entered is exactly dt times the rate. Adds the masses eliminated
+// and the areas under the venous and arterial curves to `el`.
+pub fn circ28_step(
+    s: &!Circ28State,
+    p: Circ28Params,
+    sys: &Circ28Sys,
+    iv_rate: f64,
+    oral_rate: f64,
+    el: &!Circ28Elim
+) with Mut, Div {
+    let dt = (*sys).dt
+    let g = circ28_gamma()
+    let u_ven = iv_rate / p.v_ven
+    let u_gut = oral_rate / (p.v[8] * (1.0 - p.vf[8]))
+
+    var y: [f64; 28] = [0.0; 28]
+    var k1: [f64; 28] = [0.0; 28]
+    var k2: [f64; 28] = [0.0; 28]
+    var r: i32 = 0
+    while r < 28 {
+        y[r] = (*s).x[r]
+        r = r + 1
+    }
+    circ28_stage(sys, &y, u_ven, u_gut, &!k1)
+    r = 0
+    while r < 28 {
+        y[r] = (*s).x[r] + (1.0 - g) * dt * k1[r]
+        r = r + 1
+    }
+    circ28_stage(sys, &y, u_ven, u_gut, &!k2)
+
+    // stage values: X1 = x + g dt k1, X2 = x_new; weights (1 - g) and g
+    let w1 = (1.0 - g) * dt
+    let w2 = g * dt
+    let x1_ven = (*s).x[0] + g * dt * k1[0]
+    let x1_art = (*s).x[1] + g * dt * k1[1]
+    let x1_tl = (*s).x[3] + g * dt * k1[3]
+    let x1_tg = (*s).x[17] + g * dt * k1[17]
+    r = 0
+    while r < 28 {
+        (*s).x[r] = (*s).x[r] + w1 * k1[r] + w2 * k2[r]
+        r = r + 1
+    }
+    let q_ven = w1 * x1_ven + w2 * (*s).x[0]
+    let q_art = w1 * x1_art + w2 * (*s).x[1]
+    let q_tl = w1 * x1_tl + w2 * (*s).x[3]
+    let q_tg = w1 * x1_tg + w2 * (*s).x[17]
+    (*el).auc_ven = (*el).auc_ven + q_ven
+    (*el).auc_art = (*el).auc_art + q_art
+    (*el).hepatic = (*el).hepatic + (*sys).k_hep * q_tl
+    (*el).formed = (*el).formed + (*sys).k_form * q_tl
+    (*el).renal = (*el).renal + (*sys).k_ren * q_art
+    (*el).plasma = (*el).plasma + (*sys).k_pla * q_ven
+    (*el).gut = (*el).gut + (*sys).k_gut * q_tg
+}
+
+// Reference adult male (ICRP Publication 89, 2002: 73 kg, cardiac output
+// 6.5 L/min = 390 L/h, blood volume 5.3 L).
+//   v    organ volume including its own blood: ICRP 89 Table 2.8 masses over
+//        tissue densities (ICRU 46 as tabulated in Phys Med Biol 2018,
+//        PMID 29999494, Tables 4-5) plus the organ's blood. Gut is stomach,
+//        small and large intestine walls; rest closes the body mass.
+//   vf   blood of the organ's nutrient bed (small arteries, capillaries,
+//        small veins) over v: ICRP 89 Table 2.14 (regional blood content, %
+//        of blood volume) times 5.3 L. This is the in-vivo blood through
+//        which the organ flow passes, the definition that makes v vf / q the
+//        vascular transit time; with it the Leggett-Williams circulation
+//        model reproduces observed appearance times (mesenteric artery to
+//        portal vein 9.3 s against 8.5 s observed). Fractions measured on
+//        excised tissue (0.025 for gut in PK-Sim) give transit times ten
+//        times shorter and are not used. Lung holds the pulmonary blood only;
+//        bronchial blood and flow are in rest.
+//   q    ICRP 89 Tables 2.39-2.40 (% of cardiac output); q[1] is the hepatic
+//        artery (6.5 %), the portal organs are gut 15 %, spleen 3 %, pancreas
+//        1 %; the arterial flows add up to 390 L/h.
+//   pools  venous = large veins 18 % + right heart 4.5 % of blood volume;
+//        arterial = aorta and large arteries 6 % + left heart 4.5 %
+//        (ICRP 89 Tables 2.13-2.14). Pools + organ blood = 5.300 L.
+// The widest literature ranges are for the liver and small-intestine blood
+// contents (4-12 % and 0.9-4.4 % of blood volume, Leggett and Williams).
+// kp, bp, fu and the clearances are placeholders for a drug; ps holds
+// generic permeability-surface products carried over from pbpk28_params_*
+// and has no source of its own: a drug set must supply its own.
+pub fn circ28_physiology() -> Circ28Params {
+    Circ28Params {
+        v_ven: 1.1925,
+        v_art: 0.5565,
+        v:  [0.0, 2.228, 0.401, 1.458, 0.373, 1.057, 28.361, 15.528, 1.529, 3.159, 8.448, 0.216, 0.166, 4.315],
+        vf: [0.0, 0.237882, 0.264339, 0.043621, 0.142091, 0.526490, 0.026163, 0.017066, 0.242642, 0.050332, 0.043916, 0.343519, 0.191566, 0.052816],
+        q:  [0.0, 25.35, 74.10, 46.80, 15.60, 390.0, 66.30, 19.50, 58.50, 19.50, 19.50, 11.70, 3.90, 29.25],
+        kp: [0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+        ps: [0.0, 1800.0, 1110.0, 88.0, 160.0, 10500.0, 336.0, 40.0, 660.0, 126.0, 51.0, 150.0, 96.0, 78.0],
+        bp: 1.0,
+        fu: 1.0,
+        clint: 0.0,
+        clform: 0.0,
+        clint_gut: 0.0,
+        cl_renal: 0.0,
+        cl_plasma: 0.0,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Exact propagator
+//
+// Why. The amplification factor of the SDIRK scheme above,
+// R(z) = (1 + (1 - 2 gamma) z) / (1 - gamma z)^2, is negative for
+// z < -1/(1 - 2 gamma) = -2.41. The venous and arterial pools turn over at
+// 327 /h and 701 /h and the vascular spaces at up to 16000 /h, so on a 0.05 h
+// grid every stiff component changes sign at every step. Measured
+// (tests/run-pass/circ28_exact_propagator.sio, row E1): 1 mg infused over one
+// 0.05 h step into a set with Kp 11-61 and ps = 20 Q leaves the venous plasma
+// at -8.59 ng/mL after the next step, with the mass balance closed.
+//
+// What. The system is linear and time-invariant, and inputs are constant
+// over a step, so the step has a closed form. In amounts m = V x,
+//   dm/dt = M m + u,   M = V A V^-1,
+//   m(t + dt) = E m(t) + P u,           E = exp(M dt), P = int_0^dt exp(M s) ds,
+//   int_t^t+dt m = P m(t) + Q u,        Q = int_0^dt P(s) ds.
+// M is a compartmental matrix: off-diagonal entries >= 0 (they are flows over
+// volumes) and column sums <= 0 (a column loses only what is eliminated).
+// Hence E, P and Q are entrywise non-negative for every dt > 0, and so are
+// the matrices of the concentration form, E_c = V^-1 E V, G = V^-1 P. A
+// non-negative state with non-negative inputs stays non-negative at any step
+// size; there is no truncation error in time; a step is one matrix-vector
+// product. The tallies are integrals of four concentrations (venous,
+// arterial, liver tissue, gut tissue), i.e. four rows of P and Q, so they
+// are exact as well: dose = eliminated + remaining at any dt.
+//
+// How (construction chosen, and what was rejected).
+//  1. Uniformisation for a short base step h = dt / 2^s: with q the largest
+//     turnover and Pi = I + M/q >= 0,
+//       E(h) = sum_k w_k Pi^k,  P(h) = (1/q) sum_k W_k Pi^k,
+//       Q(h) = (1/q^2) sum_k V_k Pi^k,
+//     w_k the Poisson weights of theta = q h, W_k = sum_{j>k} w_j,
+//     V_k = sum_{j>k} W_j. Every term is a product or sum of non-negative
+//     numbers: no subtraction. s is the smallest integer with theta <= 0.5,
+//     and 18 terms leave a remainder below 0.5^19/19! = 2e-23.
+//  2. Doubling, s times, again with non-negative operands only:
+//       Q(2h) = Q + h P + Q E,   P(2h) = P + E P,   E(2h) = E E.
+//     (Q and E commute, both being functions of M; written with Q on the
+//     left, a row of Q(2h) needs only the same row of Q, so only the four
+//     tally rows of Q are carried.)
+//     This is the block form of Van Loan's augmented exponential,
+//     exp([[M, I, 0], [0, 0, I], [0, 0, 0]] h) = [[E, P, Q], [0, I, hI],
+//     [0, 0, I]], squared block by block: two 28 x 28 products and one 4 x 28
+//     product per doubling instead of one 84 x 84 product (12 times the work), and no entry that
+//     is known to be 0, 1 or h is ever computed.
+//  3. The diagonal of E comes from the conservation law, not from the series:
+//       E_jj = 1 - sum_{i != j} E_ij - sum_i loss_i P_ij,
+//     loss_i the elimination rate constant of state i. This is what keeps the
+//     result accurate. A relative rounding error c in E(h) taken as it comes
+//     from the series becomes (1 + c)^(2^s) after s doublings (s = 20 for
+//     dt = 12 h): the same as a spurious gain or loss of about eps q = 4e-12
+//     per hour in every state. Recomputing the diagonal after each doubling
+//     makes every column of the closed system (states plus eliminated mass)
+//     add up to 1 at every level, so the one direction that does not decay,
+//     total mass, cannot drift; the off-diagonal entries are only ever formed
+//     from non-negative products and keep their relative accuracy. The single
+//     subtraction is 1 - (a number in [0, 1]); if rounding makes it negative
+//     (by a few 1e-16 for a state that empties completely) it is set to 0.
+//     That is the only place a value is clipped, and it is a matrix entry
+//     whose exact value is non-negative, not a state.
+//  Rejected: a diagonal Pade approximant of M dt (subtractions in numerator
+//  and denominator, a linear solve, and no sign guarantee on the result);
+//  the 84 x 84 augmented matrix (cost); integrating the tallies with a
+//  quadrature of the propagated state (not exact).
+//
+// Precondition: cl_renal / bp <= q[2], or the kidney inflow entry of M is
+// negative and M is not compartmental. `metzler` is then 0 and the result is
+// not to be used.
+//
+// Limits: the propagator belongs to one parameter set and one step size. A
+// model whose matrix changes in time (enzyme inhibition, saturable binding)
+// has no fixed propagator; see the report of this change for what it needs.
+
+pub struct Circ28Exact {
+    pub e: [f64; 784],       // E_c: x(t+dt) = E_c x(t) + ..., row-major
+    pub g: [f64; 784],       // G: change of state r per unit mass rate (mg/h) into state c
+    pub ip: [f64; 112],      // integral over the step of x[0], x[1], x[3], x[17] per unit x[c](t)
+    pub iq: [f64; 112],      // the same per unit mass rate into state c
+    pub g_iv: [f64; 28],     // column 0 of G: intravenous rate
+    pub g_oral: [f64; 28],   // column 17 of G: oral rate into gut tissue
+    pub dt: f64,
+    pub k_hep: f64,
+    pub k_form: f64,
+    pub k_ren: f64,
+    pub k_pla: f64,
+    pub k_gut: f64,
+    pub q_max: f64,          // 1/h, largest turnover
+    pub theta: f64,          // q_max * dt / 2^squarings
+    pub squarings: i32,
+    pub metzler: i32,        // 1 if M is compartmental, 0 otherwise
+    pub min_entry: f64,      // smallest entry of e, g, ip, iq (>= 0 when metzler = 1)
+}
+
+pub fn circ28_exact_zero() -> Circ28Exact {
+    Circ28Exact {
+        e: [0.0; 784], g: [0.0; 784], ip: [0.0; 112], iq: [0.0; 112],
+        g_iv: [0.0; 28], g_oral: [0.0; 28],
+        dt: 0.0, k_hep: 0.0, k_form: 0.0, k_ren: 0.0, k_pla: 0.0, k_gut: 0.0,
+        q_max: 0.0, theta: 0.0, squarings: 0, metzler: 0, min_entry: 0.0
+    }
+}
+
+// State whose integral is tally row k: venous, arterial, liver tissue, gut tissue.
+fn circ28_exact_row(k: i32) -> i32 {
+    if k == 0 { return 0 }
+    if k == 1 { return 1 }
+    if k == 2 { return 3 }
+    return 17
+}
+
+// c <- a b, 28 x 28 row-major. Zero entries of a are skipped.
+fn circ28_exact_mul(a: &[f64; 784], b: &[f64; 784], c: &![f64; 784]) with Mut {
+    var r: i32 = 0
+    while r < 28 {
+        let ro = r * 28
+        var j: i32 = 0
+        while j < 28 {
+            (*c)[ro + j] = 0.0
+            j = j + 1
+        }
+        var k: i32 = 0
+        while k < 28 {
+            let f = (*a)[ro + k]
+            if f != 0.0 {
+                let ko = k * 28
+                j = 0
+                while j < 28 {
+                    (*c)[ro + j] = (*c)[ro + j] + f * (*b)[ko + j]
+                    j = j + 1
+                }
+            }
+            k = k + 1
+        }
+        r = r + 1
+    }
+}
+
+// Doubling of the four tally rows of Q: Q <- Q + h P + Q E.
+fn circ28_exact_qrows(q4: &![f64; 112], pm: &[f64; 784], em: &[f64; 784], h: f64) with Mut {
+    var row: [f64; 28] = [0.0; 28]
+    var k: i32 = 0
+    while k < 4 {
+        let ko = k * 28
+        let po = circ28_exact_row(k) * 28
+        var c: i32 = 0
+        while c < 28 {
+            row[c] = (*q4)[ko + c] + h * (*pm)[po + c]
+            c = c + 1
+        }
+        var j: i32 = 0
+        while j < 28 {
+            let f = (*q4)[ko + j]
+            let jo = j * 28
+            c = 0
+            while c < 28 {
+                row[c] = row[c] + f * (*em)[jo + c]
+                c = c + 1
+            }
+            j = j + 1
+        }
+        c = 0
+        while c < 28 {
+            (*q4)[ko + c] = row[c]
+            c = c + 1
+        }
+        k = k + 1
+    }
+}
+
+// Sets the diagonal of em from the conservation law (item 3 above).
+fn circ28_exact_close(em: &![f64; 784], pm: &[f64; 784], loss: &[f64; 28]) with Mut {
+    var c: i32 = 0
+    while c < 28 {
+        var t = 0.0
+        var r: i32 = 0
+        while r < 28 {
+            if r != c { t = t + (*em)[r * 28 + c] }
+            t = t + (*loss)[r] * (*pm)[r * 28 + c]
+            r = r + 1
+        }
+        var d = 1.0 - t
+        if d < 0.0 { d = 0.0 }
+        (*em)[c * 28 + c] = d
+        c = c + 1
+    }
+}
+
+// Builds the propagator of parameter set p for step dt (h).
+pub fn circ28_exact_prepare(p: Circ28Params, dt: f64, ex: &!Circ28Exact) with Mut, Div {
+    var a: [f64; 784] = [0.0; 784]
+    circ28_fill_rate_matrix(p, &!a)
+    var vol: [f64; 28] = [0.0; 28]
+    var k: i32 = 0
+    var q = 0.0
+    while k < 28 {
+        vol[k] = circ28_state_volume(p, k)
+        let d = 0.0 - a[k * 28 + k]
+        if d > q { q = d }
+        k = k + 1
+    }
+    if !(q > 0.0) { q = 1.0 }
+
+    // elimination rate constants per unit amount (1/h)
+    var loss: [f64; 28] = [0.0; 28]
+    loss[0] = (p.cl_plasma / p.bp) / p.v_ven
+    loss[1] = (p.cl_renal / p.bp) / p.v_art
+    loss[3] = (p.clint + p.clform) * p.fu / (p.kp[1] * vol[3])
+    loss[17] = p.clint_gut * p.fu / (p.kp[8] * vol[17])
+
+    // Pi = I + M / q, M = V A V^-1
+    var pi: [f64; 784] = [0.0; 784]
+    var metz: i32 = 1
+    var r: i32 = 0
+    while r < 28 {
+        var c: i32 = 0
+        while c < 28 {
+            if r == c {
+                pi[r * 28 + c] = 1.0 + a[r * 28 + c] / q
+            } else {
+                let m = vol[r] * a[r * 28 + c] / vol[c]
+                if m < 0.0 { metz = 0 }
+                pi[r * 28 + c] = m / q
+            }
+            c = c + 1
+        }
+        r = r + 1
+    }
+
+    // base step
+    var theta = q * dt
+    var h = dt
+    var s: i32 = 0
+    while theta > 0.5 {
+        theta = theta * 0.5
+        h = h * 0.5
+        s = s + 1
+    }
+    // Poisson weights and their tail sums
+    var w: [f64; 41] = [0.0; 41]
+    var wt: [f64; 41] = [0.0; 41]
+    var vt: [f64; 41] = [0.0; 41]
+    w[0] = 1.0
+    var sum = 1.0
+    var j: i32 = 1
+    while j < 41 {
+        w[j] = w[j - 1] * theta / (j as f64)
+        sum = sum + w[j]
+        j = j + 1
+    }
+    j = 0
+    while j < 41 {
+        w[j] = w[j] / sum
+        j = j + 1
+    }
+    j = 39
+    while j >= 0 {
+        wt[j] = wt[j + 1] + w[j + 1]
+        j = j - 1
+    }
+    j = 39
+    while j >= 0 {
+        vt[j] = vt[j + 1] + wt[j + 1]
+        j = j - 1
+    }
+
+    var em: [f64; 784] = [0.0; 784]
+    var pm: [f64; 784] = [0.0; 784]
+    var q4: [f64; 112] = [0.0; 112]
+    var pw: [f64; 784] = [0.0; 784]
+    var tmp: [f64; 784] = [0.0; 784]
+    k = 0
+    while k < 28 {
+        pw[k * 28 + k] = 1.0
+        em[k * 28 + k] = w[0]
+        pm[k * 28 + k] = wt[0] / q
+        k = k + 1
+    }
+    k = 0
+    while k < 4 {
+        q4[k * 28 + circ28_exact_row(k)] = vt[0] / (q * q)
+        k = k + 1
+    }
+    var n: i32 = 1
+    while n < 19 {
+        circ28_exact_mul(&pi, &pw, &!tmp)
+        let c0 = w[n]
+        let c1 = wt[n] / q
+        let c2 = vt[n] / (q * q)
+        k = 0
+        while k < 784 {
+            let t = tmp[k]
+            pw[k] = t
+            em[k] = em[k] + c0 * t
+            pm[k] = pm[k] + c1 * t
+            k = k + 1
+        }
+        k = 0
+        while k < 4 {
+            let po = circ28_exact_row(k) * 28
+            var c: i32 = 0
+            while c < 28 {
+                q4[k * 28 + c] = q4[k * 28 + c] + c2 * tmp[po + c]
+                c = c + 1
+            }
+            k = k + 1
+        }
+        n = n + 1
+    }
+    circ28_exact_close(&!em, &pm, &loss)
+
+    // doubling
+    n = 0
+    while n < s {
+        circ28_exact_qrows(&!q4, &pm, &em, h)
+        circ28_exact_mul(&em, &pm, &!tmp)
+        k = 0
+        while k < 784 {
+            pm[k] = pm[k] + tmp[k]
+            k = k + 1
+        }
+        circ28_exact_mul(&em, &em, &!tmp)
+        k = 0
+        while k < 784 {
+            em[k] = tmp[k]
+            k = k + 1
+        }
+        circ28_exact_close(&!em, &pm, &loss)
+        h = h + h
+        n = n + 1
+    }
+
+    // concentration form
+    var mn = 1.0
+    r = 0
+    while r < 28 {
+        var c: i32 = 0
+        while c < 28 {
+            let ev = em[r * 28 + c] * vol[c] / vol[r]
+            let gv = pm[r * 28 + c] / vol[r]
+            (*ex).e[r * 28 + c] = ev
+            (*ex).g[r * 28 + c] = gv
+            if ev < mn { mn = ev }
+            if gv < mn { mn = gv }
+            c = c + 1
+        }
+        (*ex).g_iv[r] = (*ex).g[r * 28]
+        (*ex).g_oral[r] = (*ex).g[r * 28 + 17]
+        r = r + 1
+    }
+    k = 0
+    while k < 4 {
+        let row = circ28_exact_row(k)
+        var c: i32 = 0
+        while c < 28 {
+            let pv = pm[row * 28 + c] * vol[c] / vol[row]
+            let qv = q4[k * 28 + c] / vol[row]
+            (*ex).ip[k * 28 + c] = pv
+            (*ex).iq[k * 28 + c] = qv
+            if pv < mn { mn = pv }
+            if qv < mn { mn = qv }
+            c = c + 1
+        }
+        k = k + 1
+    }
+    (*ex).dt = dt
+    (*ex).k_hep = p.clint * p.fu / p.kp[1]
+    (*ex).k_form = p.clform * p.fu / p.kp[1]
+    (*ex).k_ren = p.cl_renal / p.bp
+    (*ex).k_pla = p.cl_plasma / p.bp
+    (*ex).k_gut = p.clint_gut * p.fu / p.kp[8]
+    (*ex).q_max = q
+    (*ex).theta = theta
+    (*ex).squarings = s
+    (*ex).metzler = metz
+    (*ex).min_entry = mn
+}
+
+// Adds the step integrals of the four tally concentrations to `el`.
+fn circ28_exact_tally(ex: &Circ28Exact, el: &!Circ28Elim, q_ven: f64, q_art: f64, q_tl: f64, q_tg: f64) with Mut {
+    (*el).auc_ven = (*el).auc_ven + q_ven
+    (*el).auc_art = (*el).auc_art + q_art
+    (*el).hepatic = (*el).hepatic + (*ex).k_hep * q_tl
+    (*el).formed = (*el).formed + (*ex).k_form * q_tl
+    (*el).renal = (*el).renal + (*ex).k_ren * q_art
+    (*el).plasma = (*el).plasma + (*ex).k_pla * q_ven
+    (*el).gut = (*el).gut + (*ex).k_gut * q_tg
+}
+
+// One exact step of length ex.dt. iv_rate (mg/h) enters the venous pool and
+// oral_rate (mg/h) enters gut tissue, both constant over the step. The
+// parameter set is the one given to circ28_exact_prepare. Tallies as in
+// circ28_step, but exact.
+pub fn circ28_exact_step(
+    s: &!Circ28State,
+    ex: &Circ28Exact,
+    iv_rate: f64,
+    oral_rate: f64,
+    el: &!Circ28Elim
+) with Mut, Div {
+    var xn: [f64; 28] = [0.0; 28]
+    var qi: [f64; 4] = [0.0; 4]
+    var k: i32 = 0
+    while k < 4 {
+        var acc = (*ex).iq[k * 28] * iv_rate + (*ex).iq[k * 28 + 17] * oral_rate
+        var c: i32 = 0
+        while c < 28 {
+            acc = acc + (*ex).ip[k * 28 + c] * (*s).x[c]
+            c = c + 1
+        }
+        qi[k] = acc
+        k = k + 1
+    }
+    var r: i32 = 0
+    while r < 28 {
+        var acc = (*ex).g_iv[r] * iv_rate + (*ex).g_oral[r] * oral_rate
+        var c: i32 = 0
+        while c < 28 {
+            acc = acc + (*ex).e[r * 28 + c] * (*s).x[c]
+            c = c + 1
+        }
+        xn[r] = acc
+        r = r + 1
+    }
+    r = 0
+    while r < 28 {
+        (*s).x[r] = xn[r]
+        r = r + 1
+    }
+    circ28_exact_tally(ex, el, qi[0], qi[1], qi[2], qi[3])
+}
+
+// One exact step with a source in any state: src[k] is the mass rate (mg/h)
+// entering state k, constant over the step. `p` is not read (the volumes are
+// already inside ex.g); it is in the signature so that a caller of the
+// SDIRK source step changes only the function name and the system argument.
+pub fn circ28_exact_step_src(
+    s: &!Circ28State,
+    p: Circ28Params,
+    ex: &Circ28Exact,
+    src: &[f64; 28],
+    el: &!Circ28Elim
+) with Mut, Div {
+    var xn: [f64; 28] = [0.0; 28]
+    var qi: [f64; 4] = [0.0; 4]
+    var k: i32 = 0
+    while k < 4 {
+        var acc = 0.0
+        var c: i32 = 0
+        while c < 28 {
+            acc = acc + (*ex).ip[k * 28 + c] * (*s).x[c] + (*ex).iq[k * 28 + c] * (*src)[c]
+            c = c + 1
+        }
+        qi[k] = acc
+        k = k + 1
+    }
+    var r: i32 = 0
+    while r < 28 {
+        var acc = 0.0
+        var c: i32 = 0
+        while c < 28 {
+            acc = acc + (*ex).e[r * 28 + c] * (*s).x[c] + (*ex).g[r * 28 + c] * (*src)[c]
+            c = c + 1
+        }
+        xn[r] = acc
+        r = r + 1
+    }
+    r = 0
+    while r < 28 {
+        (*s).x[r] = xn[r]
+        r = r + 1
+    }
+    circ28_exact_tally(ex, el, qi[0], qi[1], qi[2], qi[3])
+}

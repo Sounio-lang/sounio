@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=../lib/classify_compile.sh
+source "$ROOT_DIR/scripts/lib/classify_compile.sh"
 cd "$ROOT_DIR"
 
 POSITIVE="tests/frontend/knowledge_static_diabetes_context.sio"
@@ -32,11 +34,15 @@ else
 fi
 
 NEGATIVE_LOG="$TMP_DIR/negative.log"
-if "$FRONTEND" --check "$NEGATIVE" >"$NEGATIVE_LOG" 2>&1; then
+__refusal_rc=0
+"$FRONTEND" --check "$NEGATIVE" >"$NEGATIVE_LOG" 2>&1 || __refusal_rc=$?
+if [[ "$__refusal_rc" -eq 0 ]]; then
   printf 'FAIL  %s unexpectedly passed Stage1 ontology proof-context checker\n' "$NEGATIVE" >&2
   cat "$NEGATIVE_LOG" >&2
   exit 1
 fi
+# rc != 0 is not yet a refusal: a crash, timeout or OOM kill is not (#2425).
+sounio_expect_failed_exit "$__refusal_rc" "$NEGATIVE_LOG" || { printf 'FAIL  %s: not a clean refusal: %s\n' "$NEGATIVE_LOG" "$(sounio_refusal_reason)" >&2; cat "$NEGATIVE_LOG" >&2; exit 1; }
 
 printf 'PASS  %s rejected by Stage1 checker verdict ontology proof-context bridge\n' "$NEGATIVE"
 
@@ -129,11 +135,15 @@ else
 fi
 
 ORDINARY_NEGATIVE_LOG="$TMP_DIR/ordinary-negative.log"
-if "$FRONTEND" --check "$ORDINARY_NEGATIVE" >"$ORDINARY_NEGATIVE_LOG" 2>&1; then
+__refusal_rc=0
+"$FRONTEND" --check "$ORDINARY_NEGATIVE" >"$ORDINARY_NEGATIVE_LOG" 2>&1 || __refusal_rc=$?
+if [[ "$__refusal_rc" -eq 0 ]]; then
   printf 'FAIL  %s unexpectedly passed ordinary Stage1 checker verdict ontology proof-context bridge\n' "$ORDINARY_NEGATIVE" >&2
   cat "$ORDINARY_NEGATIVE_LOG" >&2
   exit 1
 fi
+# rc != 0 is not yet a refusal: a crash, timeout or OOM kill is not (#2425).
+sounio_expect_failed_exit "$__refusal_rc" "$ORDINARY_NEGATIVE_LOG" || { printf 'FAIL  %s: not a clean refusal: %s\n' "$ORDINARY_NEGATIVE_LOG" "$(sounio_refusal_reason)" >&2; cat "$ORDINARY_NEGATIVE_LOG" >&2; exit 1; }
 
 printf 'PASS  %s rejected by ordinary Stage1 checker verdict ontology proof-context bridge\n' "$ORDINARY_NEGATIVE"
 
@@ -147,11 +157,15 @@ else
 fi
 
 ORDINARY_MULTI_NEGATIVE_LOG="$TMP_DIR/ordinary-multi-negative.log"
-if "$FRONTEND" --check "$ORDINARY_MULTI_NEGATIVE" >"$ORDINARY_MULTI_NEGATIVE_LOG" 2>&1; then
+__refusal_rc=0
+"$FRONTEND" --check "$ORDINARY_MULTI_NEGATIVE" >"$ORDINARY_MULTI_NEGATIVE_LOG" 2>&1 || __refusal_rc=$?
+if [[ "$__refusal_rc" -eq 0 ]]; then
   printf 'FAIL  %s unexpectedly passed ordinary Stage1 checker verdict multi-constraint ontology proof-context bridge\n' "$ORDINARY_MULTI_NEGATIVE" >&2
   cat "$ORDINARY_MULTI_NEGATIVE_LOG" >&2
   exit 1
 fi
+# rc != 0 is not yet a refusal: a crash, timeout or OOM kill is not (#2425).
+sounio_expect_failed_exit "$__refusal_rc" "$ORDINARY_MULTI_NEGATIVE_LOG" || { printf 'FAIL  %s: not a clean refusal: %s\n' "$ORDINARY_MULTI_NEGATIVE_LOG" "$(sounio_refusal_reason)" >&2; cat "$ORDINARY_MULTI_NEGATIVE_LOG" >&2; exit 1; }
 
 printf 'PASS  %s rejected by ordinary Stage1 checker verdict multi-constraint ontology proof-context bridge\n' "$ORDINARY_MULTI_NEGATIVE"
 
@@ -165,11 +179,15 @@ else
 fi
 
 ORDINARY_RETURN_NEGATIVE_LOG="$TMP_DIR/ordinary-return-negative.log"
-if "$FRONTEND" --check "$ORDINARY_RETURN_NEGATIVE" >"$ORDINARY_RETURN_NEGATIVE_LOG" 2>&1; then
+__refusal_rc=0
+"$FRONTEND" --check "$ORDINARY_RETURN_NEGATIVE" >"$ORDINARY_RETURN_NEGATIVE_LOG" 2>&1 || __refusal_rc=$?
+if [[ "$__refusal_rc" -eq 0 ]]; then
   printf 'FAIL  %s unexpectedly passed ordinary Stage1 checker verdict return ontology proof-context bridge\n' "$ORDINARY_RETURN_NEGATIVE" >&2
   cat "$ORDINARY_RETURN_NEGATIVE_LOG" >&2
   exit 1
 fi
+# rc != 0 is not yet a refusal: a crash, timeout or OOM kill is not (#2425).
+sounio_expect_failed_exit "$__refusal_rc" "$ORDINARY_RETURN_NEGATIVE_LOG" || { printf 'FAIL  %s: not a clean refusal: %s\n' "$ORDINARY_RETURN_NEGATIVE_LOG" "$(sounio_refusal_reason)" >&2; cat "$ORDINARY_RETURN_NEGATIVE_LOG" >&2; exit 1; }
 
 printf 'PASS  %s rejected by ordinary Stage1 checker verdict return ontology proof-context bridge\n' "$ORDINARY_RETURN_NEGATIVE"
 

@@ -2,8 +2,8 @@
 topic_id: repo.docs.website-features
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.website-features
 -->
 
@@ -70,7 +70,7 @@ Current committed signals:
 - science runtime regressions remain tracked separately, with `4` soft local failures at the current snapshot
 
 These numbers come from committed status artifacts and should be preferred over
-generic "fully production-ready" language.
+generic language that calls the project ready for production use. The public line is: research language (pre-1.0). APIs may change; not recommended for production use.
 
 ## 4. Website copy rules
 

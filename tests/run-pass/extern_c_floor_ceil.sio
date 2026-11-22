@@ -1,0 +1,58 @@
+//@ run-pass
+//@ description: #2829 — extern "C" floor/ceil return exact results on both engines (lean_single used to hit the panic fallback stub and exit 1 silently). Checked bit-for-bit, including -0.0, |x| >= 2^52 and |x| >= 2^63.
+//@ expect-stdout: PASS
+
+extern "C" {
+    fn floor(x: f64) -> f64
+    fn ceil(x: f64) -> f64
+}
+
+fn check(tag: string, got: f64, want_bits: i64) -> i64 with IO, Mut, Panic, Div {
+    let g = f64_to_bits(got)
+    if g != want_bits {
+        print("FAIL ") print(tag) print(" got=") print_int(g) print(" want=") print_int(want_bits) print("\n")
+        return 1
+    }
+    return 0
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
+    print_int(floor(7.9) as i64)
+    print("\n")
+    var bad: i64 = 0
+    bad = bad + check("floor 7.9", floor(7.9), f64_to_bits(7.0))
+    bad = bad + check("floor 7.0", floor(7.0), f64_to_bits(7.0))
+    bad = bad + check("floor -7.1", floor(0.0 - 7.1), f64_to_bits(0.0 - 8.0))
+    bad = bad + check("floor -7.0", floor(0.0 - 7.0), f64_to_bits(0.0 - 7.0))
+    bad = bad + check("floor -0.5", floor(0.0 - 0.5), f64_to_bits(0.0 - 1.0))
+    bad = bad + check("floor 0.5", floor(0.5), 0)
+    bad = bad + check("ceil 7.1", ceil(7.1), f64_to_bits(8.0))
+    bad = bad + check("ceil 7.0", ceil(7.0), f64_to_bits(7.0))
+    bad = bad + check("ceil -7.9", ceil(0.0 - 7.9), f64_to_bits(0.0 - 7.0))
+    // ceil of a value in (-1, 0) is -0.0 (sign bit only)
+    bad = bad + check("ceil -0.5", ceil(0.0 - 0.5), 0 - 9223372036854775807 - 1)
+    bad = bad + check("ceil 0.5", ceil(0.5), f64_to_bits(1.0))
+    // Already-integral values far outside i64 range or past 2^52 are returned unchanged.
+    // Built from exact power-of-two products so the test does not depend on decimal
+    // literal rounding.
+    var p52: f64 = 1.0
+    var k: i64 = 0
+    while k < 52 { p52 = p52 * 2.0; k = k + 1 }
+    let big = p52 + 1.0
+    bad = bad + check("floor 2^52+1", floor(big), f64_to_bits(big))
+    bad = bad + check("ceil -(2^52+1)", ceil(0.0 - big), f64_to_bits(0.0 - big))
+    let half = p52 * 0.5 + 0.5
+    bad = bad + check("floor 2^51+0.5", floor(half), f64_to_bits(p52 * 0.5))
+    bad = bad + check("ceil 2^51+0.5", ceil(half), f64_to_bits(p52 * 0.5 + 1.0))
+    var huge: f64 = 1.0
+    k = 0
+    while k < 997 { huge = huge * 2.0; k = k + 1 }
+    huge = huge * 1.5
+    bad = bad + check("floor 1.5*2^997", floor(huge), f64_to_bits(huge))
+    bad = bad + check("ceil -1.5*2^997", ceil(0.0 - huge), f64_to_bits(0.0 - huge))
+    let e63 = p52 * 4096.0 * 2.25
+    bad = bad + check("floor 2.25*2^64", floor(e63), f64_to_bits(e63))
+    if bad != 0 { return 1 }
+    println("PASS")
+    return 0
+}

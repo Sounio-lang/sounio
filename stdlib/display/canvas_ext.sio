@@ -887,3 +887,57 @@ pub fn canvas_bloom(c: &!Canvas, scratch: *mut i64, threshold: i64, cov: i64) wi
         vy = vy + 1
     }
 }
+
+pub struct PixelScissor {
+    pub left: i64, pub top: i64, pub right: i64, pub bottom: i64,
+}
+fn cext_scissor_blend(c: &!Canvas, sc: &PixelScissor, x: i64, y: i64,
+    r: i64, g: i64, b: i64, coverage: i64) with Mut, Div {
+    if x < sc.left || x > sc.right || y < sc.top || y > sc.bottom { return }
+    canvas_blend_pixel(c, x, y, r, g, b, coverage)
+}
+// Integer rational coverage. Endpoints must already be geometrically clipped.
+// Pixel centers are contained inclusively, including the antialiasing fringe.
+// Coordinates bounded to +/-1e6 keep products below 4e12 in signed i64.
+pub fn canvas_draw_line_aa_scissored(c: &!Canvas, sc: &PixelScissor,
+    ax: i64, ay: i64, bx: i64, by: i64, r: i64, g: i64, b: i64) with Mut, Div {
+    if sc.left < -1000000 || sc.right > 1000000 || sc.top < -1000000 || sc.bottom > 1000000 { return }
+    if sc.left > sc.right || sc.top > sc.bottom { return }
+    if ax < sc.left || ax > sc.right || bx < sc.left || bx > sc.right { return }
+    if ay < sc.top || ay > sc.bottom || by < sc.top || by > sc.bottom { return }
+    let dx = if bx > ax { bx - ax } else { ax - bx }
+    let dy = if by > ay { by - ay } else { ay - by }
+    if dx == 0 && dy == 0 {
+        cext_scissor_blend(c, sc, ax, ay, r, g, b, 255)
+        return
+    }
+    let x_major = dx >= dy
+    var major0 = if x_major { ax } else { ay }
+    var major1 = if x_major { bx } else { by }
+    var minor0 = if x_major { ay } else { ax }
+    var minor1 = if x_major { by } else { bx }
+    if major0 > major1 {
+        let save_major = major0
+        let save_minor = minor0
+        major0 = major1; minor0 = minor1
+        major1 = save_major; minor1 = save_minor
+    }
+    let span = major1 - major0
+    let delta = minor1 - minor0
+    var step: i64 = 0
+    while step <= span {
+        let numerator = minor0 * span + delta * step
+        let base = if numerator < 0 { (numerator - span + 1) / span } else { numerator / span }
+        let remainder = numerator - base * span
+        let coverage = remainder * 255 / span
+        let position = major0 + step
+        if x_major {
+            cext_scissor_blend(c, sc, position, base, r, g, b, 255 - coverage)
+            if coverage > 0 { cext_scissor_blend(c, sc, position, base + 1, r, g, b, coverage) }
+        } else {
+            cext_scissor_blend(c, sc, base, position, r, g, b, 255 - coverage)
+            if coverage > 0 { cext_scissor_blend(c, sc, base + 1, position, r, g, b, coverage) }
+        }
+        step = step + 1
+    }
+}

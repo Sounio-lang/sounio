@@ -127,8 +127,8 @@ Combined with reduced blood flows (50% reduction), RK4 enables stable simulation
 
 **Minimal reproduction**:
 ```sounio
-let mut st = State { x: 100.0 }
-let mut i = 0
+var st = State { x: 100.0 }
+var i = 0
 while i < 10 {
     let result = step_function(st)
     st = result.state_new  // ❌ Stops updating after 2 iterations

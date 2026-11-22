@@ -182,7 +182,6 @@ FILES=(
   self-hosted/native/pe_coff.sio
   self-hosted/native/signal_handler.sio
   self-hosted/native/profiling.sio
-  self-hosted/native/hyper_lower.sio
   self-hosted/native/suite.sio
 
   # ── 10. Emit + Printer ──────────────────────────────────────────
@@ -507,7 +506,6 @@ if [ "$BOOTSTRAP_PROFILE" != "full" ]; then
     self-hosted/native/pe_coff.sio
     self-hosted/native/signal_handler.sio
     self-hosted/native/profiling.sio
-    self-hosted/native/hyper_lower.sio
 
     # 8. WebAssembly backend
     self-hosted/wasm/emitter.sio

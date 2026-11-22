@@ -2,8 +2,8 @@
 topic_id: repo.docs.qnn.faq
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.qnn.faq
 -->
 
@@ -415,7 +415,7 @@ SU(2):             2×2 unitary matrices
 
 - [01_hello_quaternion.sio](../../examples/qnn/01_hello_quaternion.sio)
 - [02_basic_linear.sio](../../examples/qnn/02_basic_linear.sio)
-- [qnn_mnist.sio](../../examples/qnn/qnn_mnist.sio) - Full training example (example removed from repo)
+- `qnn_mnist.sio` — full training example (removed from the repo)
 
 ---
 

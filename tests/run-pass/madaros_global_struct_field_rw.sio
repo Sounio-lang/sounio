@@ -1,0 +1,80 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: GLOBAL_STRUCT_FIELD_RW_OK
+//@ description: struct-typed module globals: field read/write, f64-array fields, struct-literal initializers, copies (#2355)
+//
+// Madaros dropped every module-level initializer it could not fold into BSS
+// fill words (any struct literal, any call), so a struct global's handle slot
+// stayed 0 and the first field read or write dereferenced it (rc=139, #2355).
+// It also kept no declared type for a global, so `G.values[i]` on an
+// `[f64; N]` field came back as the IEEE bit pattern read as an integer, and
+// with two structs sharing a field name the slot index was guessed.
+
+struct R { ok: bool, written: i64 }
+struct A { values: [f64; 4], count: i64 }
+// Shares `count` and `values` with A at different indices.
+struct B { tag: i64, flag: bool, count: i64, values: [f64; 4] }
+
+var G: R = R { ok: false, written: 7 }
+var GA: A = A { values: [0.0; 4], count: 0 }
+var GB: B = B { tag: 3, flag: true, count: 11, values: [0.5; 4] }
+
+var GC: R = R { ok: true, written: 42 }
+
+fn put(v: f64) -> i64 with Mut, Panic {
+    let i = GA.count
+    GA.values[i] = v
+    GA.count = i + 1
+    i
+}
+
+fn twice(i: i64) -> f64 with Mut, Panic {
+    let e = GA.values[i]
+    e * 2.0
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    var bad = 0
+
+    // #2355 reproducer: read of the initial value, then write and read back.
+    if G.written != 7 { bad = bad + 1 }
+    if G.ok { bad = bad + 1 }
+    G.written = 5
+    G.ok = true
+    let w: i64 = G.written
+    if w != 5 || !G.ok { bad = bad + 1 }
+
+    // [f64; N] field of a global, indexed, used in arithmetic.
+    GA.values[1] = 2.5
+    let y = GA.values[1]
+    if y - 1.0 != 1.5 { bad = bad + 1 }
+    if GA.values[1] - 1.0 != 1.5 { bad = bad + 1 }
+    let c = put(4.0)
+    if twice(c) != 8.0 { bad = bad + 1 }
+    if GA.count != 1 { bad = bad + 1 }
+
+    // Same field names, other layout.
+    if GB.count != 11 || GB.tag != 3 || !GB.flag { bad = bad + 1 }
+    if GB.values[2] * 4.0 != 2.0 { bad = bad + 1 }
+    GB.values[3] = 7.25
+    if GB.values[3] + GB.values[0] != 7.75 { bad = bad + 1 }
+
+    // A struct-literal initializer runs before main's body.
+    if GC.written != 42 || !GC.ok { bad = bad + 1 }
+
+    // A copy out of a global is a copy, not an alias.
+    var copy: R = GC
+    copy.written = 99
+    if GC.written != 42 { bad = bad + 1 }
+    GC = copy
+    copy.written = 1
+    if GC.written != 99 { bad = bad + 1 }
+
+    if bad != 0 {
+        print("global struct field read/write violations: ")
+        println(bad)
+        return 1
+    }
+    println("GLOBAL_STRUCT_FIELD_RW_OK")
+    0
+}

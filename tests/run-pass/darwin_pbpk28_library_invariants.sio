@@ -1,0 +1,169 @@
+//@ run-pass
+//@ expect-stdout-contains: PBPK28_LIBRARY_INVARIANTS_PASS
+//@ timeout: 300
+//
+// Structural invariants of every PBPK28 parameter set in the library, and the
+// moment-theory quantities they imply, measured without simulating. This is the
+// re-runnable command behind docs/audit/PBPK28_LIBRARY_AUDIT_2026-11-08.md.
+//
+// Hard gates, per parameter set (14 organs x {vascular, interstitial} = 28
+// compartments; blood has no tissue layer):
+//   I1  v_ref[i] > 0 for all 14 organs.
+//   I2  q[i] > 0 and ps[i] > 0 for every exchanging organ (i = 1..13). A tissue
+//       layer with ps = 0 never exchanges and holds no drug (the lung PS = 0 of
+//       the sedation-weaning morphine template broke exactly this).
+//   I3  kp[i] > 0 for all 14 organs.
+//   I4  vasc_frac[i] in [0, 1] for all 14 organs.
+//   I5  V_ss = V_b + sum_i V_i*(fv_i + (1-fv_i)*Kp_i) over reachable layers is
+//       finite and > V_b.
+//   I6  Every checked floating value (v_ref, q, ps, kp, vasc_frac, cl_central)
+//       and V_ss is finite (math::pure::is_finite: rejects NaN and +-Inf). The
+//       sign and range tests above do not: NaN compares false against every
+//       bound, and +Inf passes any `> 0` test.
+// Negative controls (inside this test, so discrimination does not depend on a
+// manual mutant): each injected defect must make `check` return false. Lung
+// PS = 0, NaN in kp / ps / q / vasc_frac / v_ref, and +Inf in kp / v_ref. The
+// finite morphine baseline must still pass.
+// Printed, NOT gated: V_ss, V_ss/CL (MRT) where cl_central > 0. Whether a V_ss
+// matches a published value is a literature question, not an invariant; it is
+// gated per drug where a verified reference exists (morphine, fentanyl tests).
+// aripiprazole carries its elimination as organ sinks (cl_central = 0 by design),
+// so no MRT is printed for it.
+//
+// Decision-support parity card (ADR009); no clinical-validity claim.
+
+use darwin_pbpk::core::pbpk28_params::*
+use math::pure::is_finite
+use darwin_pbpk::drugs::semaglutide::*
+use darwin_pbpk::drugs::morphine::*
+use darwin_pbpk::drugs::fentanyl::*
+use darwin_pbpk::scenarios::clozapine_oral::*
+use darwin_pbpk::scenarios::olanzapine_oral::*
+use darwin_pbpk::scenarios::quetiapine_oral::*
+use darwin_pbpk::scenarios::aripiprazole_oral::*
+use darwin_pbpk::scenarios::lithium_oral::*
+use darwin_pbpk::scenarios::tacrolimus_oral::*
+use darwin_pbpk::scenarios::everolimus_des::*
+use darwin_pbpk::scenarios::vancomycin_iv::*
+use darwin_pbpk::scenarios::tirzepatide_sc_depot::*
+use darwin_pbpk::scenarios::risperidone_oral::*
+
+// Pure predicate: true when every invariant holds. No printing, so the negative
+// controls below can call it without emitting failure noise.
+fn check(p: PBPKParams28) -> bool with Mut, Div, Panic {
+    var good = true
+    var vss = p.v_ref[0]
+    var i: i32 = 0
+    while i < 14 {
+        if !is_finite(p.v_ref[i]) || !is_finite(p.kp[i]) || !is_finite(p.vasc_frac[i]) || !is_finite(p.q[i]) || !is_finite(p.ps[i]) { good = false }
+        if p.v_ref[i] <= 0.0 { good = false }
+        if p.kp[i] <= 0.0 { good = false }
+        if p.vasc_frac[i] < 0.0 || p.vasc_frac[i] > 1.0 { good = false }
+        if i > 0 {
+            if p.q[i] <= 0.0 { good = false }
+            if p.ps[i] <= 0.0 { good = false }
+            let fv = p.vasc_frac[i]
+            if p.ps[i] > 0.0 {
+                vss = vss + p.v_ref[i] * (fv + (1.0 - fv) * p.kp[i])
+            } else {
+                vss = vss + p.v_ref[i] * fv
+            }
+        }
+        i = i + 1
+    }
+    if !is_finite(p.cl_central) { good = false }
+    if !is_finite(vss) { good = false }
+    if !(vss > p.v_ref[0]) { good = false }
+    return good
+}
+
+// Check, then print one AUDIT line per set (V_ss, CL, MRT where CL > 0).
+fn audit(name: string, p: PBPKParams28) -> bool with IO, Mut, Div, Panic {
+    let good = check(p)
+    var vss = p.v_ref[0]
+    var i: i32 = 1
+    while i < 14 {
+        let fv = p.vasc_frac[i]
+        if p.ps[i] > 0.0 { vss = vss + p.v_ref[i] * (fv + (1.0 - fv) * p.kp[i]) } else { vss = vss + p.v_ref[i] * fv }
+        i = i + 1
+    }
+    if !good { print("  INVARIANT FAIL: ") println(name) }
+    print("AUDIT|") print(name)
+    print("|Vss=") print(vss)
+    print("|CL=") print(p.cl_central)
+    print("|MRT=")
+    if p.cl_central > 0.0 { println(vss / p.cl_central) } else { println("n/a") }
+    return good
+}
+
+// A negative control passes only when `check` REJECTS the mutated set.
+fn expect_reject(label: string, p: PBPKParams28) -> bool with IO, Mut, Div, Panic {
+    if check(p) {
+        print("  NEGATIVE CONTROL FAIL (accepted): ") println(label)
+        return false
+    }
+    print("NEGCTL|rejected|") println(label)
+    return true
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("PBPK28_LIBRARY_INVARIANTS v1")
+    var ok = true
+    if !audit("clozapine", clz_pbpk28_params()) { ok = false }
+    if !audit("olanzapine", olz_pbpk28_params()) { ok = false }
+    if !audit("quetiapine", qtp_pbpk28_params()) { ok = false }
+    if !audit("aripiprazole", arp_pbpk28_params()) { ok = false }
+    if !audit("lithium", li_pbpk28_params()) { ok = false }
+    if !audit("tacrolimus", tac_pbpk28_params()) { ok = false }
+    if !audit("everolimus", evr_pbpk28_params()) { ok = false }
+    if !audit("vancomycin", vnc_pbpk28_params()) { ok = false }
+    if !audit("tirzepatide", tirz_pbpk28_params()) { ok = false }
+    if !audit("risperidone_parent", rsp_parent_params()) { ok = false }
+    if !audit("risperidone_9OH", rsp_oh9_params()) { ok = false }
+    if !audit("rapamycin", pbpk28_params_rapamycin()) { ok = false }
+    if !audit("venlafaxine_parent", pbpk28_params_venlafaxine_parent()) { ok = false }
+    if !audit("venlafaxine_ODV", pbpk28_params_venlafaxine_odv()) { ok = false }
+    if !audit("semaglutide_core", pbpk28_params_semaglutide()) { ok = false }
+    if !audit("semaglutide_drugs", semaglutide_pbpk28_params()) { ok = false }
+    if !audit("morphine", pbpk28_params_morphine()) { ok = false }
+    if !audit("fentanyl", pbpk28_params_fentanyl()) { ok = false }
+
+    // Negative controls on the finite morphine baseline.
+    let inf = 1.0e308 * 10.0
+    let nan = inf - inf
+    var m1 = pbpk28_params_morphine()
+    m1.ps[5] = 0.0
+    if !expect_reject("lung ps = 0", m1) { ok = false }
+    var m2 = pbpk28_params_morphine()
+    m2.kp[6] = nan
+    if !expect_reject("kp[muscle] = NaN", m2) { ok = false }
+    var m3 = pbpk28_params_morphine()
+    m3.ps[5] = nan
+    if !expect_reject("ps[lung] = NaN", m3) { ok = false }
+    var m4 = pbpk28_params_morphine()
+    m4.q[1] = nan
+    if !expect_reject("q[liver] = NaN", m4) { ok = false }
+    var m5 = pbpk28_params_morphine()
+    m5.vasc_frac[7] = nan
+    if !expect_reject("vasc_frac[adipose] = NaN", m5) { ok = false }
+    var m6 = pbpk28_params_morphine()
+    m6.v_ref[3] = nan
+    if !expect_reject("v_ref[brain] = NaN", m6) { ok = false }
+    var m7 = pbpk28_params_morphine()
+    m7.kp[7] = inf
+    if !expect_reject("kp[adipose] = +Inf", m7) { ok = false }
+    var m8 = pbpk28_params_morphine()
+    m8.v_ref[7] = inf
+    if !expect_reject("v_ref[adipose] = +Inf", m8) { ok = false }
+    var m9 = pbpk28_params_morphine()
+    m9.cl_central = nan
+    if !expect_reject("cl_central = NaN", m9) { ok = false }
+    if !check(pbpk28_params_morphine()) { println("  CONTROL FAIL: finite baseline rejected"); ok = false }
+
+    if ok {
+        println("PBPK28_LIBRARY_INVARIANTS_PASS")
+        return 0
+    }
+    println("PBPK28_LIBRARY_INVARIANTS_FAIL")
+    return 1
+}

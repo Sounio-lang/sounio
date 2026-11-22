@@ -1,0 +1,127 @@
+// demos/quantum/h2_vqe_2q.sio — two-qubit H2 VQE against exact
+// diagonalisation, with a second-order GUM band on the gate angles that is
+// validated by Monte Carlo.
+//
+//   bin/souc run demos/quantum/h2_vqe_2q.sio      (scripts/talk.sh step 10)
+//
+// Hamiltonian: H = c0 I + c1 Z0 + c2 Z1 + c3 Z0Z1 + c4 (X0X1 + Y0Y1) with the
+// two-qubit H2 coefficients of O'Malley et al., PRX 6, 031007 (2016).
+// c0 excludes nuclear repulsion: the ground eigenvalue is an electronic energy.
+//
+// Checks (all must hold, otherwise the program prints H2_VQE_2Q_FAILED and
+// returns 1; the sentinel H2_VQE_2Q_OK is printed only when every check passes):
+//   1. the optimiser converged and |E_vqe - E_exact| < 1e-9 Ha
+//      (chemical accuracy is 1.6e-3 Ha; the measured gap is ~1e-13 Ha);
+//   2. the parameter-shift gradient at theta* is below 1e-6 (a stationary point);
+//   3. for gate_unc in {0.01, 0.05, 0.1} rad, the second-order GUM standard
+//      uncertainty u_GUM2 divided by the Monte Carlo standard deviation
+//      (N = 20000, seeded) lies in [0.8, 1.25].
+//
+// Limits: statevector simulation of 2 qubits, no noise model, no shot noise,
+// no hardware backend. See demos/quantum/README.md.
+// Independent cross-check: demos/quantum/tools/h2_vqe_crosscheck.cpp.
+
+use quantum::epistemic_vqe::{
+    vqe_optimize,
+    h2_exact_ground_energy,
+    vqe_gum2,
+    vqe_mc_band,
+    vqe_print_sci,
+    VQEResult,
+    GumBand,
+    McBand,
+}
+
+fn absf(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+// One gate_unc row; returns 0 if the ratio is inside [0.8, 1.25], 1 otherwise.
+fn band_row(theta: &[f64; 16], gate_unc: f64, seed: i64) -> i32 with IO, Mut, Div, Panic {
+    let band = vqe_gum2(theta, gate_unc)
+    let mc = vqe_mc_band(theta, gate_unc, 20000, seed)
+    let ratio = band.u_total / mc.sigma
+    print("gate_unc = ")
+    vqe_print_sci(gate_unc, 2)
+    print(" rad   u_GUM1 = ")
+    vqe_print_sci(band.u_first, 3)
+    print("   u_GUM2 = ")
+    vqe_print_sci(band.u_total, 6)
+    print("   MC sigma = ")
+    vqe_print_sci(mc.sigma, 6)
+    print(" (N = ")
+    print(mc.n)
+    print(")   u_GUM2/sigma_MC = ")
+    vqe_print_sci(ratio, 4)
+    if ratio >= 0.8 {
+        if ratio <= 1.25 {
+            println("   PASS")
+            return 0
+        }
+    }
+    println("   FAIL")
+    return 1
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var fail = 0
+    println("== Two-qubit H2 VQE (O'Malley et al., PRX 6, 031007 (2016)) ==")
+
+    let e_exact = h2_exact_ground_energy()
+    let r = vqe_optimize(200, 0.0)
+    let gap = absf(r.energy - e_exact)
+
+    print("E_exact (2x2 block)   = ")
+    vqe_print_sci(e_exact, 12)
+    println(" Ha")
+    print("E_vqe   (Rotosolve)   = ")
+    vqe_print_sci(r.energy, 12)
+    print(" Ha   sweeps = ")
+    println(r.n_iterations)
+    print("|E_vqe - E_exact|     = ")
+    vqe_print_sci(gap, 3)
+    println(" Ha   (bound 1e-9; chemical accuracy 1.6e-3)")
+    print("theta* = ")
+    var k = 0
+    while k < 4 {
+        let tk: f64 = r.optimal_params[k]
+        vqe_print_sci(tk, 15)
+        print(" ")
+        k = k + 1
+    }
+    println("")
+
+    if r.converged != 1 {
+        println("CHECK FAILED: optimiser did not converge")
+        fail = fail + 1
+    }
+    if gap >= 0.000000001 {
+        println("CHECK FAILED: |E_vqe - E_exact| >= 1e-9")
+        fail = fail + 1
+    }
+
+    let b0 = vqe_gum2(&r.optimal_params, 0.05)
+    print("|grad E(theta*)|      = ")
+    vqe_print_sci(b0.grad_norm, 3)
+    println("   (parameter shift; bound 1e-6)")
+    if b0.grad_norm >= 0.000001 {
+        println("CHECK FAILED: gradient at theta* >= 1e-6")
+        fail = fail + 1
+    }
+
+    println("-- gate-angle uncertainty: second-order GUM vs Monte Carlo --")
+    println("   u^2(E) = g'Sg + 1/2 tr((HS)^2), S = gate_unc^2 I; g, H by parameter shift")
+    fail = fail + band_row(&r.optimal_params, 0.01, 1001)
+    fail = fail + band_row(&r.optimal_params, 0.05, 1005)
+    fail = fail + band_row(&r.optimal_params, 0.1, 1010)
+
+    if fail == 0 {
+        println("H2_VQE_2Q_OK")
+        return 0
+    }
+    print("H2_VQE_2Q_FAILED: ")
+    print(fail)
+    println(" check(s) failed")
+    return 1
+}

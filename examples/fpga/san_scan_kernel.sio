@@ -1,0 +1,49 @@
+// examples/fpga/san_scan_kernel.sio
+//
+// First kernel for the FPGA backend MVP (ADR-022), written in the
+// restricted FPGA profile subset: fixed-width integers, static arrays,
+// bounded for loops, no heap, no recursion, no floating point.
+//
+// Semantics (spec san_imagenet_fpga_dl380_spec_2026-08-02, clause T2):
+// each sample exits at the first intermediate point whose Q0.15
+// confidence clears q_delta, else at the final head (index 7, the
+// catastrophe bin). hist counts exits per point; the return value is
+// the total executed MACs, sum of lut[exit] over samples.
+//
+// The prototype emitter (tools/fpga/sio_fpga_emit.py) translates this
+// exact source to HLS C++; the claim clock for its semantics is the
+// Futhark reference (scripts/research/san_scan_reference.fut, ADR-021).
+
+fn san_scan(confs: [[i64; 7]; 256], n_samples: i64, q_delta: i64, lut: [i64; 8], hist: [i64; 8]) -> i64 with Mut {
+    var macs: i64 = 0
+    for s in 0..n_samples {
+        var exit_idx: i64 = 7
+        var settled: bool = false
+        for k in 0..7 {
+            if !settled && confs[s as usize][k as usize] >= q_delta {
+                exit_idx = k
+                settled = true
+            }
+        }
+        hist[exit_idx as usize] = hist[exit_idx as usize] + 1
+        macs = macs + lut[exit_idx as usize]
+    }
+    macs
+}
+
+fn main() -> i32 with IO, Mut {
+    var confs: [[i64; 7]; 256] = [[0; 7]; 256]
+    confs[0][0] = 18022
+    confs[1][0] = 100
+    confs[1][1] = 19000
+    confs[2][0] = 1
+    var lut: [i64; 8] = [100, 200, 300, 400, 500, 600, 700, 800]
+    var hist: [i64; 8] = [0; 8]
+    let macs = san_scan(confs, 3, 18022, lut, hist)
+    if macs == 100 + 200 + 800 {
+        print("SAN_SCAN_KERNEL_SIO_PASS\n")
+        return 0 as i32
+    }
+    print("SAN_SCAN_KERNEL_SIO_FAIL\n")
+    return 1 as i32
+}

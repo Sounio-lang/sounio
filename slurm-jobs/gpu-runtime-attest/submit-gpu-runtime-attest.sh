@@ -42,6 +42,7 @@ REQUIRED_FILES=(
   "scripts/fixtures/gpu_minimal.sio"
   "tests/selfhost/gpu_runtime/test_gpu_runtime_literal.sio"
   "tests/selfhost/gpu_runtime/test_gpu_runtime_file_text.sio"
+  "tests/selfhost/gpu_runtime/test_gpu_runtime_file_binary.sio"
   "tests/selfhost/gpu_runtime/test_gpu_runtime_dynamic_slice.sio"
   "tests/run-pass/gpu_kernel_basic.sio"
   "tests/fixtures/fmri/tiny_real_motion.tsv"
@@ -128,6 +129,7 @@ if [[ "${REMOTE_STAGE_READY}" != "YES" ]]; then
     scripts/fixtures/gpu_minimal.sio \
     tests/selfhost/gpu_runtime/test_gpu_runtime_literal.sio \
     tests/selfhost/gpu_runtime/test_gpu_runtime_file_text.sio \
+    tests/selfhost/gpu_runtime/test_gpu_runtime_file_binary.sio \
     tests/selfhost/gpu_runtime/test_gpu_runtime_dynamic_slice.sio \
     tests/run-pass/gpu_kernel_basic.sio \
     tests/fixtures/fmri/tiny_real_motion.tsv \
@@ -237,6 +239,7 @@ expected_version = sys.argv[3]
 probe_files = [
     'tests/selfhost/gpu_runtime/test_gpu_runtime_literal.sio',
     'tests/selfhost/gpu_runtime/test_gpu_runtime_file_text.sio',
+    'tests/selfhost/gpu_runtime/test_gpu_runtime_file_binary.sio',
     'tests/selfhost/gpu_runtime/test_gpu_runtime_dynamic_slice.sio',
 ]
 
@@ -254,6 +257,7 @@ obj = {
     'required_tests': [
         'gpu_runtime_literal',
         'gpu_runtime_file_text',
+        'gpu_runtime_file_binary',
         'gpu_runtime_dynamic_slice',
         'gpu_backend_compile_smoke',
         'gpu_kernel_basic_runtime_smoke',

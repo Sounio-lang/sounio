@@ -1,0 +1,60 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: EXPR_INDEX_RECEIVER_OK
+//
+// Copilot review (PR #2516): expr_receiver_struct_type_ref's ExprIndex arm
+// (self-hosted/ir/lower.sio) originally only ever handled an indexed base
+// that was an ExprIdent or ExprFieldAccess -- any other indexed-base kind
+// fell through to ir_empty_name() (the same "unresolved owner" signal
+// field_array_elem_is_float_for_base_ref's round-9 fix correctly treats as
+// "not float, don't guess"), misclassifying a legitimate f64-array
+// STRUCT FIELD reached through it as integer-backed and corrupting its
+// arithmetic (the raw f64 bits reinterpreted as an i64 via cvtsi2sd).
+//
+// - comment 4114931470: added ExprCall (`make_holders()[0].values`) and
+//   ExprArrayLit (`[Holder { .. }][0].values`) indexed bases.
+// - comment 4115332468: comment 4114931470's fix missed ExprMethodCall
+//   (`factory.make_holders()[0].values`) -- the identical bug for a
+//   METHOD receiver instead of a free function. This fixture pins all
+//   three shapes in one place.
+struct Holder {
+    values: [f64; 1],
+}
+
+struct Factory {
+    tag: i64,
+}
+
+fn make_holders() -> [Holder; 1] {
+    [Holder { values: [1.5] }]
+}
+
+impl Factory {
+    fn make_holders(self) -> [Holder; 1] with Mut, Panic {
+        [Holder { values: [3.5] }]
+    }
+}
+
+fn main() -> i32 with IO, Mut, Panic {
+    // Copilot review, comment 4115407173: a plain copy into an explicitly
+    // typed `f64` local is the pass-through case that stays correct even
+    // when the classifier misclassifies the source as integer -- it is
+    // the ARITHMETIC on a misclassified value that gets its raw bits
+    // reinterpreted via cvtsi2sd (the actual corruption this fixture
+    // exists to catch), not a bare load. Multiply each indexed expression
+    // by 2.0 BEFORE binding it, so a classification regression shows up as
+    // a wrong number here, not as an accidentally-correct pass-through.
+    //
+    // ExprCall indexed base.
+    let v1: f64 = make_holders()[0].values[0] * 2.0
+    // ExprArrayLit indexed base.
+    let v2: f64 = [Holder { values: [2.5] }][0].values[0] * 2.0
+    // ExprMethodCall indexed base.
+    let factory = Factory { tag: 1 }
+    let v3: f64 = factory.make_holders()[0].values[0] * 2.0
+    if v1 == 3.0 && v2 == 5.0 && v3 == 7.0 {
+        println("EXPR_INDEX_RECEIVER_OK")
+        return 0
+    }
+    1
+}

@@ -1,88 +1,189 @@
-// stdlib/stats/permutation.sio — two-sample permutation test (difference of means)
-//
-// A distribution-free test of whether two samples differ in location: it compares
-// the observed mean difference to the distribution of mean differences under all
-// random relabellings of the pooled data (approximated by `iters` random
-// permutations). No normality assumption.
-//
-//   perm_test_means(x, nx, y, ny, iters, seed) -> p_value   (two-sided)
-//
-// p = (1 + #{ |Δ*| >= |Δ_obs| }) / (iters + 1)   (add-one, so p is never 0).
-//
-// The one-sample / mean bootstrap CI already lives in
-// stats::epistemic::bootstrap (bootstrap_mean_ci, incl. BCa); this adds the
-// permutation test, which was missing.
-//
-// Uses a small self-contained LCG (fully inlined, so the routine makes no nested
-// call while its pooled array is live — issue #852). Deterministic given `seed`.
-//
-// References:
-//   Fisher (1935) "The Design of Experiments"; Ernst (2004) "Permutation methods"
-//   Good (2005) "Permutation, Parametric, and Bootstrap Tests of Hypotheses"
-
+// Two-sided randomization test for an exchangeability null. See PERMUTATION.md.
 module stats::permutation
+use math::pure::{sqrt, is_finite}
 
-/// Two-sample permutation test on the difference of means.
-///
-/// Parâmetros: x, y — the two samples; nx, ny — sizes (nx+ny <= 256);
-///             iters — number of random permutations (e.g. 1000); seed — RNG seed.
-/// Retorno: two-sided p-value (add-one corrected, in (0,1]).
-/// Complexidade: O(iters · (nx+ny)).
-/// Referências: Fisher (1935); Ernst (2004).
-pub fn perm_test_means(x: &[f64; 256], nx: i32, y: &[f64; 256], ny: i32, iters: i32, seed: i64) -> f64 with Mut, Div, Panic {
-    if nx < 1 || ny < 1 { return 1.0 }
-    let nxf = nx as f64
-    let nyf = ny as f64
+pub struct PermutationResult {
+    pub status: i64, // 0 available, 1 size, 2 budget, 3 data, 4 exact capacity, 5 arithmetic
+    pub method: i64, // 1 Monte Carlo, 2 complete label enumeration
+    pub observed_diff: f64,
+    pub p_value: f64,
+    pub hits: i64,
+    pub draws: i64,
+    pub seed_used: i64,
+    pub mc_available: bool,
+    pub mc_se: f64,
+    pub mc_lo: f64,
+    pub mc_hi: f64,
+    pub exchangeability_assessed: bool,
+}
 
-    // observed |mean(x) - mean(y)|
-    var sx = 0.0
-    var i = 0
-    while i < nx { sx = sx + x[i as usize]; i = i + 1 }
-    var sy = 0.0
-    var j = 0
-    while j < ny { sy = sy + y[j as usize]; j = j + 1 }
-    var obs = sx / nxf - sy / nyf
-    if obs < 0.0 { obs = 0.0 - obs }
+fn pm_empty(status: i64) -> PermutationResult {
+    PermutationResult { status: status, method: 0, observed_diff: 0.0, p_value: 0.0,
+        hits: 0, draws: 0, seed_used: 0, mc_available: false,
+        mc_se: 0.0, mc_lo: 0.0, mc_hi: 0.0, exchangeability_assessed: false }
+}
 
-    // pool the data
-    let n = nx + ny
-    var pool: [f64; 256] = [0.0; 256]
-    var k = 0
-    while k < nx { pool[k as usize] = x[k as usize]; k = k + 1 }
-    var q = 0
-    while q < ny { pool[(nx + q) as usize] = y[q as usize]; q = q + 1 }
-
-    // LCG state (kept in [0, 2^31))
-    var state = seed
-    if state < 0 { state = 0 - state }
-    state = state % 2147483648
-
-    let tol = 1.0e-12
-    var count = 0
-    var it = 0
-    while it < iters {
-        // Fisher-Yates shuffle of pool[0..n] with the inline LCG
-        var a = n - 1
-        while a >= 1 {
-            state = (state * 1103515245 + 12345) % 2147483648
-            let b = (state % ((a + 1) as i64)) as i32
-            let tmp = pool[a as usize]
-            pool[a as usize] = pool[b as usize]
-            pool[b as usize] = tmp
-            a = a - 1
-        }
-        // mean of first nx vs the remaining ny
-        var s1 = 0.0
-        var u = 0
-        while u < nx { s1 = s1 + pool[u as usize]; u = u + 1 }
-        var s2 = 0.0
-        var v = 0
-        while v < ny { s2 = s2 + pool[(nx + v) as usize]; v = v + 1 }
-        var d = s1 / nxf - s2 / nyf
-        if d < 0.0 { d = 0.0 - d }
-        if d >= obs - tol { count = count + 1 }
-        it = it + 1
+// Early bounded recurrence; no overflowing factorials.
+fn pm_count(n: i64, k: i64) -> i64 with Mut, Div {
+    let kk = if k < n-k { k } else { n-k }
+    var c: i64 = 1
+    var i: i64 = 1
+    while i <= kk {
+        c = c * (n-kk+i) / i
+        if c > 65536 { return 0 }
+        i = i+1
     }
+    c
+}
 
-    return ((count + 1) as f64) / ((iters + 1) as f64)
+// Independent compensated group sums, avoiding total-minus-subset cancellation.
+fn pm_stat(pool: &[f64;256], order: &[i64;256], n: i64, nx: i64) -> f64 with Mut, Div, Panic {
+    var sx = 0.0
+    var cx = 0.0
+    var sy = 0.0
+    var cy = 0.0
+    var j: i64 = 0
+    while j < n {
+        let value = pool[order[j as usize] as usize]
+        if j < nx {
+            let term = value-cx
+            let next = sx+term
+            cx = (next-sx)-term
+            sx = next
+        } else {
+            let term = value-cy
+            let next = sy+term
+            cy = (next-sy)-term
+            sy = next
+        }
+        j = j+1
+    }
+    sx/(nx as f64)-sy/((n-nx) as f64)
+}
+
+/// Complete enumeration (exact=true, at most 65536 distinct labelings), or
+/// seeded Monte Carlo (exact=false, 1..100000 draws). Two-sided |mean_x-mean_y|.
+/// "Exact" denotes full enumeration, not exact real arithmetic or assessed assumptions.
+pub fn permutation_means(x: &[f64;256], nx: i32, y: &[f64;256], ny: i32,
+    iters: i32, seed: i64, exact: bool) -> PermutationResult with Mut, Div, Panic {
+    if nx < 1 || ny < 1 || nx > 256 || ny > 256 { return pm_empty(1) }
+    let n = (nx as i64)+(ny as i64)
+    if n > 256 { return pm_empty(1) }
+    if !exact && (iters < 1 || iters > 100000) { return pm_empty(2) }
+    let nxx = nx as i64
+    var draws = iters as i64
+    if exact {
+        draws = pm_count(n,nxx)
+        if draws == 0 { return pm_empty(4) }
+    }
+    var scale = 0.0
+    var i: i64 = 0
+    while i < n {
+        let v = if i < nxx { x[i as usize] } else { y[(i-nxx) as usize] }
+        if !is_finite(v) { return pm_empty(3) }
+        let a = if v < 0.0 { 0.0-v } else { v }
+        if a > scale { scale = a }
+        i = i+1
+    }
+    if scale == 0.0 { scale = 1.0 }
+    let anchor = x[0]
+    var pool: [f64;256] = [0.0;256]
+    var order: [i64;256] = [0;256]
+    i = 0
+    while i < n {
+        let v = if i < nxx { x[i as usize] } else { y[(i-nxx) as usize] }
+        let delta = v-anchor
+        pool[i as usize] = if is_finite(delta) { delta/scale } else { v/scale-anchor/scale }
+        order[i as usize] = i
+        i = i+1
+    }
+    let signed_obs = pm_stat(&pool,&order,n,nxx)
+    let observed_diff = signed_obs*scale
+    if !is_finite(observed_diff) { return pm_empty(5) }
+    let obs = if signed_obs < 0.0 { 0.0-signed_obs } else { signed_obs }
+    // Relative tie tolerance (64 binary64 eps), independent of physical units.
+    let threshold = obs*(1.0-1.4210854715202004e-14)
+    var state = seed % 2147483647
+    if state <= 0 { state = state+2147483646 }
+    if state <= 0 { state = 2147483646 }
+    let initial = if exact { 0 } else { state }
+    var hits: i64 = 0
+    var rep: i64 = 0
+    while rep < draws {
+        if exact {
+            // The sorted selected prefix is also the combination cursor.
+            // Fill only its complement: no second 256-index cursor buffer.
+            i = 0
+            var selected: i64 = 0
+            var rest = nxx
+            while i < n {
+                var chosen = false
+                if selected < nxx { chosen = order[selected as usize] == i }
+                if chosen {
+                    order[selected as usize] = i
+                    selected = selected+1
+                } else {
+                    order[rest as usize] = i
+                    rest = rest+1
+                }
+                i = i+1
+            }
+        } else {
+            // Reset each draw; partial Fisher-Yates chooses a uniform subset.
+            i = 0
+            while i < n { order[i as usize] = i; i = i+1 }
+            i = 0
+            while i < nxx {
+                let width = n-i
+                let limit = (2147483646/width)*width
+                state = (16807*state)%2147483647
+                var draw = state-1
+                while draw >= limit { state = (16807*state)%2147483647; draw = state-1 }
+                let j = i+(draw%width)
+                let tmp = order[i as usize]
+                order[i as usize] = order[j as usize]
+                order[j as usize] = tmp
+                i = i+1
+            }
+        }
+        let signed = pm_stat(&pool,&order,n,nxx)
+        let value = if signed < 0.0 { 0.0-signed } else { signed }
+        if value >= threshold { hits = hits+1 }
+        rep = rep+1
+        if exact && rep < draws {
+            var k = nxx-1
+            while k >= 0 && order[k as usize] == n-nxx+k { k = k-1 }
+            if k < 0 { return pm_empty(5) }
+            order[k as usize] = order[k as usize]+1
+            var j = k+1
+            while j < nxx { order[j as usize] = order[(j-1) as usize]+1; j = j+1 }
+        }
+    }
+    let q = (hits as f64)/(draws as f64)
+    if exact {
+        return PermutationResult { status: 0, method: 2, observed_diff: observed_diff,
+            p_value: q, hits: hits, draws: draws, seed_used: 0, mc_available: false,
+            mc_se: 0.0, mc_lo: 0.0, mc_hi: 0.0, exchangeability_assessed: false }
+    }
+    // Wilson 95% interval describes the uncorrected hit probability q, not
+    // uncertainty in an effect or a posterior probability of the null.
+    let z = 1.959963984540054
+    let b = draws as f64
+    let denom = 1.0+z*z/b
+    let center = (q+z*z/(2.0*b))/denom
+    let half = z*sqrt(q*(1.0-q)/b+z*z/(4.0*b*b))/denom
+    let lo = if center-half < 0.0 { 0.0 } else { center-half }
+    let hi = if center+half > 1.0 { 1.0 } else { center+half }
+    PermutationResult { status: 0, method: 1, observed_diff: observed_diff,
+        p_value: ((hits+1) as f64)/((draws+1) as f64),
+        hits: hits, draws: draws, seed_used: initial, mc_available: true,
+        mc_se: sqrt(q*(1.0-q)/b), mc_lo: lo, mc_hi: hi, exchangeability_assessed: false }
+}
+
+/// Compatibility scalar surface. Invalid/unavailable requests return 1.0.
+/// New callers must use permutation_means and inspect status.
+pub fn perm_test_means(x: &[f64;256], nx: i32, y: &[f64;256], ny: i32,
+    iters: i32, seed: i64) -> f64 with Mut, Div, Panic {
+    let r = permutation_means(x,nx,y,ny,iters,seed,false)
+    if r.status == 0 { r.p_value } else { 1.0 }
 }

@@ -35,6 +35,17 @@ check_no_match 'cd[[:space:]]+compiler' "docs/qnn/PERFORMANCE_HANDBOOK.md" \
 check_no_match '0\.100\.0' "docs/compiler/COMPILER_ARCHITECTURE_OVERVIEW.md" \
   "docs/compiler/COMPILER_ARCHITECTURE_OVERVIEW.md contains stale version expectation 0.100.0:"
 
+check_no_match '^// GUM Supplement 1: Propagation of distributions using a Monte Carlo method' \
+  "stdlib/epistemic/gum_supplement1.sio" \
+  "gum_supplement1.sio mislabels linear covariance propagation as Monte Carlo (#3553):"
+
+check_no_match 'Dimension<|Quantity<Value, Unit>|Quantity<f64, Meter>' \
+  "docs/compiler/UNIT_RUNTIME_CHECKING.md" \
+  "UNIT_RUNTIME_CHECKING.md describes nonexistent generic unit types (#3553):"
+
+check_no_match 'logos-based' "docs/compiler/MATURITY.md" \
+  "MATURITY.md describes the retired Rust lexer (#3553):"
+
 check_no_match 'cd[[:space:]]+compiler' "docs/QNN_PERFORMANCE_GUIDE.md" \
   "docs/QNN_PERFORMANCE_GUIDE.md contains stale 'cd compiler' commands:"
 

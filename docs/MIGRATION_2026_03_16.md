@@ -2,8 +2,8 @@
 topic_id: repo.docs.migration-2026-03-16
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.migration-2026-03-16
 -->
 
@@ -66,4 +66,4 @@ Native backend: `AST -> ir/lower.sio -> IrModule -> native/codegen.sio -> x86-64
 
 ## Claude Memory
 
-Backed up to `.claude-memory-backup/`. Restore to `~/.claude/projects/<hash>/memory/` on devPOD.
+Backed up to `.claude-memory-backup/` (removed from this repository on 2026-10-04 and kept privately). Restore to `~/.claude/projects/<hash>/memory/` on devPOD.

@@ -24,6 +24,7 @@
 
 use darwin_pbpk::core::pbpk28_params::*
 use darwin_pbpk::tsit5_pbpk28::*
+use darwin_pbpk::theta_pbpk28::*
 use darwin_pbpk::epistemic_pbpk28::{EpPrior28, ep28_rapamycin_params, ep28_rapamycin_priors, ep28_semaglutide_params, ep28_semaglutide_priors}
 use epistemic::pce::{PCEInput, input_normal, build_bivariate_product, bivariate_sobol_x, bivariate_sobol_y, bivariate_sobol_interaction}
 use epistemic::sobol::{SaltelliResult, saltelli_run}
@@ -54,34 +55,86 @@ fn sp28_sqrt(x: f64) -> f64 with Mut, Div, Panic {
 // ============================================================================
 // MINIMAL AUC SIMULATION (for Sobol model callback — fast, dt=0.5h)
 // ============================================================================
-// Uses the same Crank-Nicolson kernel but at dt=0.5h for speed during
-// Monte-Carlo sweeps. 336 steps for 168h. Bias is ~0.5%; cancels in
-// variance ratios (Saltelli S_i is invariant to systematic bias).
+// dt=0.5h for speed during Monte-Carlo sweeps, 336 steps for 168h.
+// The "~0.5% bias" this header used to claim was measured on 2026-09-26 as
+// +140% (rapamycin) / +28% (semaglutide) at nominal parameters, from the CN
+// negativity floors. It depends on the parameters being sampled, so nothing
+// made it cancel in the variance ratios.
 
+// Bolus run at dt = 0.5 h, t_end = 168 h (336 steps): Rannacher-started
+// clamp-free CN (theta_pbpk28). Shared by sp28_auc_fast and the mass-balance
+// gate. Until 2026-09-26 this was pbpk28_full_cn_step, whose floors biased
+// AUC_blood at this dt by +140% for rapamycin (0.966553 vs Dose/CL = 0.403226)
+// and +28% for semaglutide. A run that books visible negative mass fails
+// (returns false) instead of being floored.
+pub fn sp28_simulate_ledger(prm: PBPKParams28, dose_mg: f64,
+                          st: &!PBPKState28, led: &!PBPK28Ledger) -> bool with Mut, Div {
+    return pbpk28_bolus_run_mut(prm, dose_mg, 0.5, 168.0, 1000, st, led)
+}
+
+// A rejected trajectory returns NaN, not 0.0. saltelli_run has no
+// invalid-sample channel, and a 0.0 would enter its moments as a real AUC.
+// NaN survives the estimators' clamps (max_f64/min_f64 compare, so a NaN
+// operand passes through): a rejected A/B row poisons every index, a
+// rejected C_i row poisons S_i and S_Ti, and a rejected C_ij row -- the
+// second-order sample matrices -- poisons that pair's S_ij.
+// sp28_all_indices_finite checks all three, so TEST 1 of both self-tests
+// fails and no PASS marker is printed.
 fn sp28_auc_fast(prm: PBPKParams28, dose_mg: f64) -> f64 with Mut, Div, Panic {
-    let t_end = 168.0
-    let dt = 0.5
     var st = pbpk28_state_zero()
-    st.cv[0] = dose_mg / prm.v_ref[0]
-    var t = 0.0
-    var auc = 0.0
-    var c_prev = st.cv[0]
-    var steps = 0
-    while t < t_end {
-        if steps > 1000 { return 0.0 }
-        let dt_use = if t + dt > t_end { t_end - t } else { dt }
-        let st_new = pbpk28_full_cn_step(st, prm, 0.0, dt_use)
-        let c_new = st_new.cv[0]
-        if c_new != c_new { return 0.0 }
-        if c_new < 0.0 { return 0.0 }
-        if c_new > 1.0e12 { return 0.0 }
-        auc = auc + 0.5 * (c_prev + c_new) * dt_use
-        c_prev = c_new
-        t = t + dt_use
-        st = st_new
-        steps = steps + 1
+    var led = pbpk28_ledger_zero()
+    if !sp28_simulate_ledger(prm, dose_mg, &!st, &!led) {
+        let zero = 0.0
+        return zero / zero
     }
-    return auc
+    return led.auc[0]
+}
+
+// Sobol' ordering invariant: for the true indices S_i <= S_Ti (the
+// first-order effect is part of the total effect). Prints every parameter
+// whose estimate violates it and returns how many do. No sampling tolerance
+// is applied: this module computes no standard error for the Saltelli
+// estimates, and a margin chosen to admit an observed violation would be a
+// retrofit. Once the estimator is repaired, a noise-level tolerance has to
+// come from its bootstrap standard error.
+fn sp28_order_violations(sr: SaltelliResult) -> i32 with IO, Mut, Div, Panic {
+    var n = 0
+    var i: i32 = 0
+    while i < 7 {
+        let si = sr.first_order[i]
+        let sti = sr.total_order[i]
+        if si > sti {
+            print("  violated: S_i["); print(i); print("] = "); print_f64(si)
+            print(" > S_Ti["); print(i); print("] = "); print_f64(sti); println("")
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+// x is a finite number: x - x is 0 for finite x and NaN for NaN or ±inf.
+fn sp28_finite(x: f64) -> bool {
+    let d = x - x
+    return d == d
+}
+
+// Every first-order, total-order and second-order index for the 7 sampled
+// parameters is finite (neither NaN nor ±inf). saltelli_run stores the
+// 7·6/2 = 21 pairs (i < j) in second_order[0..20].
+fn sp28_all_indices_finite(sr: SaltelliResult) -> bool with Mut, Div, Panic {
+    var ok = true
+    var i: i32 = 0
+    while i < 7 {
+        if !sp28_finite(sr.first_order[i]) || !sp28_finite(sr.total_order[i]) { ok = false }
+        i = i + 1
+    }
+    var p: i32 = 0
+    while p < 21 {
+        if !sp28_finite(sr.second_order[p]) { ok = false }
+        p = p + 1
+    }
+    return ok
 }
 
 // ============================================================================
@@ -162,7 +215,7 @@ fn sobol_model_pbpk28(x: [f64; 10]) -> f64 with Mut, Div, Panic {
 }
 
 // ============================================================================
-// MAIN — TEST SUITE (5 tests)
+// MAIN — TEST SUITE (7 tests)
 // ============================================================================
 
 fn sp28_selftest_main() -> i32 with IO, Mut, Div, Panic {
@@ -217,12 +270,11 @@ fn sp28_selftest_main() -> i32 with IO, Mut, Div, Panic {
     var passed = 0
     var failed = 0
 
-    // TEST 1: Sobol run completes (all S_i finite)
+    // TEST 1: Sobol run completes (all S_i and S_Ti finite; a rejected
+    // trajectory makes some of them NaN, see sp28_auc_fast)
     println("TEST 1: Sobol run completes with finite indices")
-    let s0_ok = sr.first_order[0] == sr.first_order[0]
-    let s4_ok = sr.first_order[4] == sr.first_order[4]
-    if s0_ok && s4_ok {
-        println("  [PASS] S_i[0] and S_i[4] are finite")
+    if sp28_all_indices_finite(sr) {
+        println("  [PASS] S_i, S_Ti and the 21 S_ij finite for all 7 parameters")
         passed = passed + 1
     } else {
         println("  FAIL: NaN detected in Sobol indices")
@@ -326,6 +378,36 @@ fn sp28_selftest_main() -> i32 with IO, Mut, Div, Panic {
     }
     println("")
 
+    // TEST 6: Mass balance at the production dt — exact discrete identity
+    // M(T) + CL·AUC − M(0) = 0 to rounding (theta_pbpk28 gate bounds).
+    println("TEST 6: Mass balance at production dt (rapamycin, dt=0.5h, 5 mg bolus)")
+    var mb_st = pbpk28_state_zero()
+    var mb_led = pbpk28_ledger_zero()
+    let mb_run = sp28_simulate_ledger(ep28_rapamycin_params(), 5.0, &!mb_st, &!mb_led)
+    let mb_ok = mb_run && pbpk28_mass_gate_report(mb_led, mb_st, ep28_rapamycin_params(), 5.0)
+    if mb_ok {
+        println("  [PASS] mass identity closes to rounding; no floor, no visible negativity")
+        passed = passed + 1
+    } else {
+        println("  FAIL: discrete mass identity violated or negative mass visible")
+        failed = failed + 1
+    }
+    println("")
+
+    // TEST 7: Sobol' ordering invariant S_i <= S_Ti for all 7 parameters.
+    // Finite indices that violate it are not Sobol' indices, so the run must
+    // not report PASS for them (see sp28_order_violations).
+    println("TEST 7: S_i <= S_Ti for all 7 parameters (Sobol' ordering invariant)")
+    let n_viol = sp28_order_violations(sr)
+    if n_viol == 0 {
+        println("  [PASS] ordering invariant holds")
+        passed = passed + 1
+    } else {
+        println("  FAIL: estimator output violates S_i <= S_Ti; not usable as Sobol' indices")
+        failed = failed + 1
+    }
+    println("")
+
     println("======================================================================")
     println("  PBPK28 SOBOL+PCE — TEST SUMMARY")
     println("======================================================================")
@@ -333,7 +415,7 @@ fn sp28_selftest_main() -> i32 with IO, Mut, Div, Panic {
     print("  Failed: "); print_f64(failed as f64); println("")
     if failed == 0 {
         println("")
-        println("  ALL 5 TESTS PASSED")
+        println("  ALL 7 TESTS PASSED")
         println("")
         println("  Sobol global sensitivity analysis complete.")
         println("  Cut-HDMR additivity confirmed (quasi-additive model).")
@@ -351,25 +433,33 @@ fn sp28_selftest_main() -> i32 with IO, Mut, Div, Panic {
 // SEMAGLUTIDE SOBOL MODEL
 // ============================================================================
 // Semaglutide (4114 Da GLP-1 RA): proteolytic CL, fu=0.01, low kp (peptide).
-// Sources: Overgaard 2019 (CL, fu), Kapitza 2015 (kp), Tougaard 2022 (fu).
+// Means follow pbpk28_params_semaglutide() and ep28_semaglutide_priors().
 //
-// Idx | parameter         | mean   | CV    | σ
-//   0 | cl_proteolytic    | 0.077  | 0.30  | 0.0231
-//   1 | cl_renal (=0)     | 0.000  | —     | 0  (negligible for peptide)
-//   2 | fu_plasma         | 0.010  | 0.30  | 0.003
-//   3 | kp_brain          | 0.05   | 0.40  | 0.020
-//   4 | kp_liver          | 0.50   | 0.25  | 0.125
-//   5 | kp_kidney         | 0.60   | 0.25  | 0.150
-//   6 | kp_adipose        | 0.10   | 0.40  | 0.040
+// The spreads below are NOT the ep28 prior. This block samples every input
+// uniformly over mean x (1 +/- CV) with the illustrative CVs listed, chosen
+// so that clearance and unbound fraction enter with equal weight (the
+// symmetry the PCE check relies on). ep28_semaglutide_priors() gives the
+// clearance a standard uncertainty of 0.00485 L/h, 11% of the mean. Indices
+// from this block therefore describe sensitivity under equal 30% ranges and
+// are not a cross-check of the GUM budget computed from the ep28 prior.
+//
+// Idx | parameter         | mean    | CV    | sigma
+//   0 | cl_proteolytic    | 0.0445  | 0.30  | 0.01335
+//   1 | cl_renal (=0)     | 0.000   | -     | 0  (negligible for peptide)
+//   2 | fu_plasma         | 0.010   | 0.30  | 0.003
+//   3 | kp_brain          | 0.00975 | 0.40  | 0.00390
+//   4 | kp_liver          | 0.09748 | 0.25  | 0.02437
+//   5 | kp_kidney         | 0.11697 | 0.25  | 0.02924
+//   6 | kp_adipose        | 0.01950 | 0.40  | 0.00780
 
 fn sp28_sema_mean(idx: i32) -> f64 {
-    if idx == 0 { return 0.077 }
+    if idx == 0 { return 0.0445 }
     if idx == 1 { return 0.000 }
     if idx == 2 { return 0.010 }
-    if idx == 3 { return 0.05 }
-    if idx == 4 { return 0.50 }
-    if idx == 5 { return 0.60 }
-    if idx == 6 { return 0.10 }
+    if idx == 3 { return 0.00975 }
+    if idx == 4 { return 0.09748 }
+    if idx == 5 { return 0.11697 }
+    if idx == 6 { return 0.01950 }
     return 1.0
 }
 
@@ -414,7 +504,7 @@ fn sobol_model_semaglutide(x: [f64; 10]) -> f64 with Mut, Div, Panic {
 }
 
 // ============================================================================
-// SEMAGLUTIDE SELFTEST (5 tests — full Saltelli N=512)
+// SEMAGLUTIDE SELFTEST (7 tests — full Saltelli N=512)
 // ============================================================================
 
 fn sp28_selftest_semaglutide_main() -> i32 with IO, Mut, Div, Panic {
@@ -461,13 +551,11 @@ fn sp28_selftest_semaglutide_main() -> i32 with IO, Mut, Div, Panic {
     var passed = 0
     var failed = 0
 
-    // TEST 1: Sobol run completes (finite indices for all parameters)
+    // TEST 1: Sobol run completes (all S_i and S_Ti finite; a rejected
+    // trajectory makes some of them NaN, see sp28_auc_fast)
     println("TEST 1: Sobol run completes with finite indices")
-    let s0_ok = sr.first_order[0] == sr.first_order[0]
-    let s2_ok = sr.first_order[2] == sr.first_order[2]
-    let s4_ok = sr.first_order[4] == sr.first_order[4]
-    if s0_ok && s2_ok && s4_ok {
-        println("  [PASS] S_i[0], S_i[2], S_i[4] are finite")
+    if sp28_all_indices_finite(sr) {
+        println("  [PASS] S_i, S_Ti and the 21 S_ij finite for all 7 parameters")
         passed = passed + 1
     } else {
         println("  FAIL: NaN detected in Sobol indices")
@@ -489,12 +577,13 @@ fn sp28_selftest_semaglutide_main() -> i32 with IO, Mut, Div, Panic {
     }
     println("")
 
-    // TEST 3: PCE confirms a dominant parameter (CL or fu, both CV=30%)
+    // TEST 3: PCE confirms a dominant parameter (CL or fu, both CV=30%;
+    // illustrative equal ranges, not the ep28 clearance prior of 11%)
     // For semaglutide AUC ∝ Dose/(CL_prot × fu/fu_ref),
     // S_CL ≈ S_fu when CV_CL = CV_fu = 0.30. The bivariate PCE
     // confirms their combined dominance over kp.
     println("PCE cross-validation (bivariate {CL_proteo, fu}) ...")
-    let cl_input_s = input_normal(0.077, 0.0231)
+    let cl_input_s = input_normal(0.0445, 0.01335)
     let fu_input_s = input_normal(0.010, 0.003)
     let bpce_s = build_bivariate_product(cl_input_s, fu_input_s, 2)
     let s_cl_pce = bivariate_sobol_x(bpce_s)
@@ -551,6 +640,36 @@ fn sp28_selftest_semaglutide_main() -> i32 with IO, Mut, Div, Panic {
     }
     println("")
 
+    // TEST 6: Mass balance at the production dt — exact discrete identity
+    // M(T) + CL·AUC − M(0) = 0 to rounding (theta_pbpk28 gate bounds).
+    println("TEST 6: Mass balance at production dt (semaglutide, dt=0.5h, 1 mg bolus)")
+    var mb_st = pbpk28_state_zero()
+    var mb_led = pbpk28_ledger_zero()
+    let mb_run = sp28_simulate_ledger(ep28_semaglutide_params(), 1.0, &!mb_st, &!mb_led)
+    let mb_ok = mb_run && pbpk28_mass_gate_report(mb_led, mb_st, ep28_semaglutide_params(), 1.0)
+    if mb_ok {
+        println("  [PASS] mass identity closes to rounding; no floor, no visible negativity")
+        passed = passed + 1
+    } else {
+        println("  FAIL: discrete mass identity violated or negative mass visible")
+        failed = failed + 1
+    }
+    println("")
+
+    // TEST 7: Sobol' ordering invariant S_i <= S_Ti for all 7 parameters.
+    // Finite indices that violate it are not Sobol' indices, so the run must
+    // not report PASS for them (see sp28_order_violations).
+    println("TEST 7: S_i <= S_Ti for all 7 parameters (Sobol' ordering invariant)")
+    let n_viol = sp28_order_violations(sr)
+    if n_viol == 0 {
+        println("  [PASS] ordering invariant holds")
+        passed = passed + 1
+    } else {
+        println("  FAIL: estimator output violates S_i <= S_Ti; not usable as Sobol' indices")
+        failed = failed + 1
+    }
+    println("")
+
     println("======================================================================")
     println("  SOBOL SEMAGLUTIDE TEST SUMMARY")
     println("======================================================================")
@@ -558,7 +677,7 @@ fn sp28_selftest_semaglutide_main() -> i32 with IO, Mut, Div, Panic {
     print("  Failed: "); print_f64(failed as f64); println("")
     if failed == 0 {
         println("")
-        println("  ALL 5 SEMAGLUTIDE SOBOL TESTS PASSED")
+        println("  ALL 7 SEMAGLUTIDE SOBOL TESTS PASSED")
         println("")
         println("  Full Saltelli N=512 for semaglutide: COMPLETE")
         println("  SOBOL_PCE_SEMAGLUTIDE_FULL_PASS")

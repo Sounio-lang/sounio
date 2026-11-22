@@ -48,8 +48,19 @@ pub struct Relocation {
 }
 
 // Relocation table (fixed-size array for bootstrap)
+// entries used to be [Relocation; 4096] inline (~229 KiB). Together with
+// SymbolData and NativeCompiler.fn_offsets that pushed compiler_new past the
+// seed compiler's large-frame cliff and the generated ELF SIGSEGV'd.
+// The fields readers actually use live in NC_RELOC_* (BSS). count and
+// overflow stay here so the by-value header is a few words. One compile
+// owns the arrays; reloc_table_new resets count and appends overwrite
+// from 0. Do not snapshot two live tables — add_* writes the globals.
+pub var NC_RELOC_OFFSET: [i64; 4096] = [0; 4096]
+pub var NC_RELOC_KIND: [i64; 4096] = [0; 4096]
+pub var NC_RELOC_IS_FN: [i64; 4096] = [0; 4096]
+pub var NC_RELOC_TARGET: [i64; 4096] = [0; 4096]
+
 pub struct RelocationTable {
-    pub entries: [Relocation; 4096],
     pub count: i64,
     // Set when an add_* was called with the table already full. Without it the
     // drop is invisible: the entry vanishes, the function returns normally, the
@@ -102,14 +113,10 @@ pub fn reloc_table_new() -> RelocationTable with Mut {
 pub fn add_call_reloc(table: RelocationTable, offset: i64, target_func: i64) -> RelocationTable with Mut, Panic {
     var t = table
     if t.count < reloc_table_capacity() {
-        t.entries[t.count as usize] = Relocation {
-            offset: offset,
-            target: reloc_target_function(target_func),
-            kind: reloc_rel32(),
-            flat_kind_code: 1,
-            flat_is_function: 1,
-            flat_target_index: target_func,
-        }
+        NC_RELOC_OFFSET[t.count as usize] = offset
+        NC_RELOC_KIND[t.count as usize] = 1
+        NC_RELOC_IS_FN[t.count as usize] = 1
+        NC_RELOC_TARGET[t.count as usize] = target_func
         t.count = t.count + 1
     } else {
         t.overflow = true
@@ -121,14 +128,10 @@ pub fn add_call_reloc(table: RelocationTable, offset: i64, target_func: i64) -> 
 pub fn add_data_reloc(table: RelocationTable, offset: i64, data_offset: i64) -> RelocationTable with Mut, Panic {
     var t = table
     if t.count < reloc_table_capacity() {
-        t.entries[t.count as usize] = Relocation {
-            offset: offset,
-            target: reloc_target_data(data_offset),
-            kind: reloc_rip_rel32(),
-            flat_kind_code: 2,
-            flat_is_function: 0,
-            flat_target_index: data_offset,
-        }
+        NC_RELOC_OFFSET[t.count as usize] = offset
+        NC_RELOC_KIND[t.count as usize] = 2
+        NC_RELOC_IS_FN[t.count as usize] = 0
+        NC_RELOC_TARGET[t.count as usize] = data_offset
         t.count = t.count + 1
     } else {
         t.overflow = true
@@ -140,14 +143,10 @@ pub fn add_data_reloc(table: RelocationTable, offset: i64, data_offset: i64) -> 
 pub fn add_rip_reloc(table: RelocationTable, lea_disp_offset: i64, rodata_offset: i64) -> RelocationTable with Mut, Panic {
     var t = table
     if t.count < reloc_table_capacity() {
-        t.entries[t.count as usize] = Relocation {
-            offset: lea_disp_offset,
-            target: reloc_target_data(rodata_offset),
-            kind: reloc_rip_rel32(),
-            flat_kind_code: 2,
-            flat_is_function: 0,
-            flat_target_index: rodata_offset,
-        }
+        NC_RELOC_OFFSET[t.count as usize] = lea_disp_offset
+        NC_RELOC_KIND[t.count as usize] = 2
+        NC_RELOC_IS_FN[t.count as usize] = 0
+        NC_RELOC_TARGET[t.count as usize] = rodata_offset
         t.count = t.count + 1
     } else {
         t.overflow = true
@@ -159,14 +158,10 @@ pub fn add_rip_reloc(table: RelocationTable, lea_disp_offset: i64, rodata_offset
 pub fn add_data_section_reloc(table: RelocationTable, disp_offset: i64, data_offset: i64) -> RelocationTable with Mut, Panic {
     var t = table
     if t.count < reloc_table_capacity() {
-        t.entries[t.count as usize] = Relocation {
-            offset: disp_offset,
-            target: reloc_target_data(data_offset),
-            kind: reloc_data_rel32(),
-            flat_kind_code: 3,
-            flat_is_function: 0,
-            flat_target_index: data_offset,
-        }
+        NC_RELOC_OFFSET[t.count as usize] = disp_offset
+        NC_RELOC_KIND[t.count as usize] = 3
+        NC_RELOC_IS_FN[t.count as usize] = 0
+        NC_RELOC_TARGET[t.count as usize] = data_offset
         t.count = t.count + 1
     } else {
         t.overflow = true
@@ -187,30 +182,31 @@ pub fn apply_relocations(
     var i = 0
 
     while i < table.count {
-        let reloc = table.entries[i as usize]
-        let patch_offset = reloc.offset
-
-        if reloc.kind.kind_code == 1 {
+        let patch_offset = NC_RELOC_OFFSET[i as usize]
+        let reloc_kind = NC_RELOC_KIND[i as usize]
+        let reloc_is_fn = NC_RELOC_IS_FN[i as usize]
+        let reloc_target = NC_RELOC_TARGET[i as usize]
+        if reloc_kind == 1 {
             // Function call: rel32 = target_offset - (patch_offset + 4)
-            if reloc.target.is_function == 1 {
-                let target_idx = reloc.target.target_index
+            if reloc_is_fn == 1 {
+                let target_idx = reloc_target
                 if target_idx < fn_count {
                     let target_offset = fn_offsets[target_idx as usize]
                     let rel32 = target_offset - (patch_offset + 4)
                     b = patch_u32_le(b, patch_offset, rel32)
                 }
             }
-        } else if reloc.kind.kind_code == 2 {
+        } else if reloc_kind == 2 {
             // RIP-relative data: disp32 = (rodata_file_offset + str_offset) - (lea_next_ip)
-            let str_offset = reloc.target.target_index
+            let str_offset = reloc_target
             let text_file_offset = 4096
             let lea_next_ip = text_file_offset + patch_offset + 4
             let string_va = rodata_file_offset + str_offset
             let disp32 = string_va - lea_next_ip
             b = patch_u32_le(b, patch_offset, disp32)
-        } else if reloc.kind.kind_code == 3 {
+        } else if reloc_kind == 3 {
             // .data RIP-relative: same formula as rodata but with data_file_offset
-            let data_off = reloc.target.target_index
+            let data_off = reloc_target
             let text_file_offset2 = 4096
             let next_ip = text_file_offset2 + patch_offset + 4
             let counter_va = data_file_offset + data_off
@@ -279,26 +275,27 @@ pub fn collect_rela_section(
     var rela = rela_section_new()
     var i = 0
     while i < table.count {
-        let reloc = table.entries[i as usize]
-        let r_offset = reloc.offset
+        let r_offset = NC_RELOC_OFFSET[i as usize]
+        let rela_kind = NC_RELOC_KIND[i as usize]
+        let rela_target = NC_RELOC_TARGET[i as usize]
         var r_type: i64 = 0
         var r_sym: i64 = 0
         var r_addend: i64 = 0
-        if reloc.kind.kind_code == 1 {
+        if rela_kind == 1 {
             // Function call: R_X86_64_PLT32
             r_type = 4
-            r_sym = sym_first_fn + reloc.target.target_index
+            r_sym = sym_first_fn + rela_target
             r_addend = -4
-        } else if reloc.kind.kind_code == 2 {
+        } else if rela_kind == 2 {
             // RIP-relative .rodata ref: R_X86_64_PC32
             r_type = 2
             r_sym = sym_rodata
-            r_addend = reloc.target.target_index - 4
+            r_addend = rela_target - 4
         } else {
             // RIP-relative .data ref: R_X86_64_PC32
             r_type = 2
             r_sym = sym_data
-            r_addend = reloc.target.target_index - 4
+            r_addend = rela_target - 4
         }
         // r_info = (r_sym << 32) | r_type
         let r_info = r_sym * 4294967296 + r_type

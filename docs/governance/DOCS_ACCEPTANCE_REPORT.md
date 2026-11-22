@@ -2,8 +2,8 @@
 topic_id: repo.governance.acceptance-report
 authority: repo_only
 audience: maintainers
-last_validated: 2026-03-07
-validated_by: A0
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.governance.acceptance-report
 -->
 

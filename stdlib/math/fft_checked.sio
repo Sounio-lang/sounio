@@ -1,0 +1,168 @@
+// Checked radix-2 DFT, split complex storage, cached immutable plan.
+use math::pure::{is_finite,cos,sin,sqrt}
+use collections::numeric_buffer::{NumericBuffer,numeric_buffer_status,numeric_buffer_len,numeric_buffer_at,numeric_buffer_set}
+
+// Owns only requested cache payload: N i64 permutation entries and N f64
+// twiddle scalars (N=1 has no twiddles). Close exactly once after all borrows.
+pub linear struct FFTPlan {
+    rev: *mut i64,
+    twiddle: *mut f64,
+    n: i64,
+    bytes: i64,
+    status: i64,
+}
+fn fft_radix2(n:i64)->bool with Mut,Div {
+    if n<1 {return false}
+    var q=n
+    while q>1 {
+        if q%2!=0 {return false}
+        q=q/2
+    }
+    true
+}
+fn fft_reverse(i:i64,n:i64)->i64 with Mut,Div {
+    var value=i
+    var bits=n
+    var answer:i64=0
+    while bits>1 {
+        answer=answer*2+value%2
+        value=value/2
+        bits=bits/2
+    }
+    answer
+}
+// Plan status: 0available,1invalid radix/size/budget,7budget insufficient,
+// 8allocation failure,5nonfinite cached arithmetic. No cache payload allocation if invalid.
+pub fn fft_plan_new(n:i64,max_bytes:i64)->FFTPlan with Alloc,Mut,Div,Panic {
+    if !fft_radix2(n) {return FFTPlan{rev:0 as *mut i64,twiddle:0 as *mut f64,n:0,bytes:0,status:1}}
+    if n>576460752303423231 || max_bytes<0 {return FFTPlan{rev:0 as *mut i64,twiddle:0 as *mut f64,n:0,bytes:0,status:1}}
+    let required=if n==1 {8} else {n*16}
+    if required>max_bytes {return FFTPlan{rev:0 as *mut i64,twiddle:0 as *mut f64,n:0,bytes:0,status:7}}
+    let raw_rev=heap_alloc(n*8)
+    if (raw_rev as i64)<=0 {return FFTPlan{rev:0 as *mut i64,twiddle:0 as *mut f64,n:0,bytes:0,status:8}}
+    let rev=raw_rev as *mut i64
+    var twiddle=0 as *mut f64
+    if n>1 {
+        let raw_twiddle=heap_alloc(n*8)
+        if (raw_twiddle as i64)<=0 {return FFTPlan{rev:rev,twiddle:0 as *mut f64,n:n,bytes:n*8,status:8}}
+        twiddle=raw_twiddle as *mut f64
+    }
+    var i:i64=0
+    while i<n {write_i64(rev,i,fft_reverse(i,n));i=i+1}
+    i=0
+    while i<n/2 {
+        let angle=(0.0-6.28318530717958647692)*(i as f64)/(n as f64)
+        let wr=if i==0 {1.0} else {cos(angle)}
+        let wi=if i==0 {0.0} else {sin(angle)}
+        if !is_finite(wr) || !is_finite(wi) {return FFTPlan{rev:rev,twiddle:twiddle,n:n,bytes:required,status:5}}
+        write_f64(twiddle,i,wr)
+        write_f64(twiddle,n/2+i,wi)
+        i=i+1
+    }
+    FFTPlan{rev:rev,twiddle:twiddle,n:n,bytes:required,status:0}
+}
+pub fn fft_plan_status(p:&FFTPlan)->i64 {p.status}
+pub fn fft_plan_len(p:&FFTPlan)->i64 {p.n}
+pub fn fft_plan_payload_bytes(p:&FFTPlan)->i64 {p.bytes}
+pub fn fft_plan_close(p:FFTPlan) with Alloc {
+    let FFTPlan{rev,twiddle,n,bytes,status}=p
+    if (rev as i64)>0 {heap_free(rev as *mut i8)}
+    if (twiddle as i64)>0 {heap_free(twiddle as *mut i8)}
+}
+// Transform codes:0success,2buffer status/length,3nonfinite input,
+// 4unavailable plan,5nonfinite arithmetic,6invalid normalization.
+// Normalization0none,1divide-by-N,2unitary, independent of direction.
+// No allocation/trigonometry; all public outputs are committed only on success.
+// Scratch may change on arithmetic failure, but never on preflight rejection.
+fn fft_run(p:&FFTPlan,xr:&NumericBuffer,xi:&NumericBuffer,work:&!NumericBuffer,
+           yr:&!NumericBuffer,yi:&!NumericBuffer,inverse:bool,normalization:i64,real_input:bool)->i64 with Mut,Div,Panic {
+    if p.status!=0 {return 4}
+    if normalization<0 || normalization>2 {return 6}
+    let n=p.n
+    let bins=if real_input {n/2+1} else {n}
+    if numeric_buffer_status(xr)!=0 || numeric_buffer_status(work)!=0 || numeric_buffer_status(yr)!=0 || numeric_buffer_status(yi)!=0 {return 2}
+    if numeric_buffer_len(xr)<n || numeric_buffer_len(work)<n*2 || numeric_buffer_len(yr)<bins || numeric_buffer_len(yi)<bins {return 2}
+    if !real_input {
+        if numeric_buffer_status(xi)!=0 {return 2}
+        if numeric_buffer_len(xi)<n {return 2}
+    }
+    var i:i64=0
+    while i<n {
+        if !is_finite(numeric_buffer_at(xr,i)) {return 3}
+        if !real_input {
+            if !is_finite(numeric_buffer_at(xi,i)) {return 3}
+        }
+        i=i+1
+    }
+    let factor=if normalization==1 {1.0/(n as f64)} else if normalization==2 {1.0/sqrt(n as f64)} else {1.0}
+    i=0
+    while i<n {
+        let j=read_i64(p.rev,i)
+        numeric_buffer_set(work,j,numeric_buffer_at(xr,i))
+        let imaginary=if real_input {0.0} else {numeric_buffer_at(xi,i)}
+        numeric_buffer_set(work,n+j,imaginary)
+        i=i+1
+    }
+    var width:i64=2
+    while width<=n {
+        let half=width/2
+        let stride=n/width
+        var base:i64=0
+        while base<n {
+            var j:i64=0
+            while j<half {
+                let k=j*stride
+                let wr=read_f64(p.twiddle,k)
+                let stored=read_f64(p.twiddle,n/2+k)
+                let wi=if inverse {0.0-stored} else {stored}
+                let a=base+j
+                let b=a+half
+                let br=numeric_buffer_at(work,b)
+                let bi=numeric_buffer_at(work,n+b)
+                let ar=numeric_buffer_at(work,a)
+                let ai=numeric_buffer_at(work,n+a)
+                let tr=wr*br-wi*bi
+                let ti=wr*bi+wi*br
+                let nr=ar+tr
+                let ni=ai+ti
+                let dr=ar-tr
+                let di=ai-ti
+                if !is_finite(nr) || !is_finite(ni) || !is_finite(dr) || !is_finite(di) {return 5}
+                numeric_buffer_set(work,a,nr)
+                numeric_buffer_set(work,n+a,ni)
+                numeric_buffer_set(work,b,dr)
+                numeric_buffer_set(work,n+b,di)
+                j=j+1
+            }
+            base=base+width
+        }
+        if width==n {break}
+        width=width*2
+    }
+    i=0
+    while i<bins {
+        let re=numeric_buffer_at(work,i)*factor
+        let im=numeric_buffer_at(work,n+i)*factor
+        if !is_finite(re) || !is_finite(im) {return 5}
+        i=i+1
+    }
+    i=0
+    while i<bins {
+        numeric_buffer_set(yr,i,numeric_buffer_at(work,i)*factor)
+        numeric_buffer_set(yi,i,numeric_buffer_at(work,n+i)*factor)
+        i=i+1
+    }
+    0
+}
+pub fn fft_complex_into(p:&FFTPlan,xr:&NumericBuffer,xi:&NumericBuffer,work:&!NumericBuffer,yr:&!NumericBuffer,yi:&!NumericBuffer,inverse:bool,normalization:i64)->i64 with Mut,Div,Panic {
+    fft_run(p,xr,xi,work,yr,yi,inverse,normalization,false)
+}
+pub fn fft_real_into(p:&FFTPlan,input:&NumericBuffer,work:&!NumericBuffer,yr:&!NumericBuffer,yi:&!NumericBuffer,normalization:i64)->i64 with Mut,Div,Panic {
+    fft_run(p,input,input,work,yr,yi,false,normalization,true)
+}
+pub fn fft_forward_into(p:&FFTPlan,xr:&NumericBuffer,xi:&NumericBuffer,work:&!NumericBuffer,yr:&!NumericBuffer,yi:&!NumericBuffer)->i64 with Mut,Div,Panic {
+    fft_complex_into(p,xr,xi,work,yr,yi,false,0)
+}
+pub fn fft_inverse_into(p:&FFTPlan,xr:&NumericBuffer,xi:&NumericBuffer,work:&!NumericBuffer,yr:&!NumericBuffer,yi:&!NumericBuffer)->i64 with Mut,Div,Panic {
+    fft_complex_into(p,xr,xi,work,yr,yi,true,1)
+}

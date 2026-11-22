@@ -61,10 +61,6 @@ fi
 CRITICAL_PATHS=(
   AGENTS.md
   CLAUDE.md
-  CLAUDE_HANDOFF.md
-  ONBOARDING.md
-  .claude/AGENT_OFFLOAD_POLICY.md
-  .claude/PARALLEL_BLOCKER_CONTRACT.md
   self-hosted/compiler
   self-hosted/ir
   self-hosted/native

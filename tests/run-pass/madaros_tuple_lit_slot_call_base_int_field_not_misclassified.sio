@@ -1,0 +1,53 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: TUPLE_LIT_SLOT_CALL_BASE_INT_FIELD_NOT_MISCLASSIFIED PASS
+//
+// Copilot review (PR #2516), finding 2 on the ninth review round:
+// field_array_elem_is_float_for_base_ref (self-hosted/ir/lower.sio) falls
+// back to a global by-NAME scan over every registered struct whenever the
+// field-access owner's concrete struct type can't be resolved via
+// expr_receiver_struct_type_ref -- which it never could for an
+// ExprCall/ExprMethodCall owner (no arm for it there). For
+// `(make_int_holder().values, 0)`, that meant the fallback asked "does ANY
+// registered struct have a field named `values` that's an f64 array?" --
+// and if some OTHER, unrelated struct happens to declare `values: [f64; N]`
+// (FloatNamesake below), the by-name scan matched it and misclassified
+// IntHolder's genuinely-integer `values: [i64; N]` field as an f64 array,
+// so `a[0]` read the integer bit pattern as a float. Fixed by dropping the
+// by-name fallback entirely (matching the sibling field_is_float_for_base_ref
+// predicate's existing conservative default): an unresolved owner type now
+// answers "not a float array" rather than guessing by name.
+//
+// FloatNamesake exists ONLY to register a same-named `values: [f64; N]`
+// field in the struct-layout table -- the exact shape the old by-name
+// fallback would have matched -- proving this test would have failed
+// before the fix rather than passing vacuously because no such collision
+// struct was registered.
+struct IntHolder {
+    values: [i64; 2],
+}
+
+struct FloatNamesake {
+    values: [f64; 2],
+}
+
+fn make_int_holder() -> IntHolder {
+    IntHolder { values: [3, 9] }
+}
+
+fn make_float_namesake() -> FloatNamesake {
+    FloatNamesake { values: [1.5, 2.5] }
+}
+
+fn main() -> i32 with IO, Mut, Panic {
+    let namesake = make_float_namesake()
+    let extra: f64 = namesake.values[0]
+
+    let (a, n) = (make_int_holder().values, 0)
+
+    if a[0] == 3 && a[1] == 9 && n == 0 && extra == 1.5 {
+        println("TUPLE_LIT_SLOT_CALL_BASE_INT_FIELD_NOT_MISCLASSIFIED PASS")
+        return 0
+    }
+    1
+}

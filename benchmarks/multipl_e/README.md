@@ -111,7 +111,7 @@ target-language source code.
 - **Effects** -- functions declare side effects: `with IO, Mut, Panic, Div`.
 - **Fixed-size arrays** -- Python lists become `[T; 256]` with explicit length
   tracking.
-- **No unary minus** -- `-x` becomes `0 - x`.
+- **Negation** -- the translator rewrites `-x` as `0 - x` (unary minus also works).
 - **No closure literals** -- use named function references instead.
 - **Struct wrappers** -- mutable array parameters often need a struct wrapper
   due to the `&![T; N]` JIT propagation bug.

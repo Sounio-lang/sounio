@@ -2,8 +2,8 @@
 topic_id: repo.docs.audit.stats-scipy-e2e-vertical-2026-07-18
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.stats-scipy-e2e-vertical-2026-07-18
 -->
 
@@ -27,7 +27,7 @@ structural edge SciPy cannot express: **GUM bridge on every `TestResult`**.
 ## What is proven
 
 1. **Welch two-sample t** (`stats::hypothesis::t_test_two_sample`) on drug vs
-   placebo n=8 (arrays from `tests/stats/test_epistemic_stats.py`).
+   placebo n=8 (`scripts/stats_scipy_e2e_gate.sh`).
 2. **Cohen's d** via both `TestResult.effect_size` and `stats::effect_size::cohens_d`.
 3. **Levene W** (center = mean) for the same two groups.
 4. **OLS** slope / intercept / r² via `stats::validation` (textbook x=[1..5],

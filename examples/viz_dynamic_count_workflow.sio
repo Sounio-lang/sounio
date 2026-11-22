@@ -1,0 +1,210 @@
+//@ expect-stdout-contains: <svg xmlns=
+//@ expect-stdout-contains: COUNT_WORKFLOW_COMPLETE
+// Synthetic keyed count TABLE -> normalization -> per-gene full NB2 profile -> SVG.
+// No filesystem, shrinkage, FDR or calibrated inference. One scratch set reused.
+use collections::numeric_buffer::{NumericBuffer,numeric_buffer_new,numeric_buffer_set,numeric_buffer_at,numeric_buffer_close,numeric_matrix}
+use collections::integer_buffer::{IntegerBuffer,integer_buffer_new,integer_buffer_set,integer_buffer_at,integer_buffer_close}
+use genomics::count_dataset::{count_dataset_align,count_dataset_gene,count_dataset_offsets,count_dataset_budget_new,count_dataset_reserve_gene,count_dataset_budget_info}
+use genomics::dynamic_normalization::{dynamic_normalization_workspace,dynamic_median_ratio_size_factors}
+use stats::regression::dynamic_dispersion::{DispersionSearchOptions,dynamic_dispersion_workspace,dynamic_dispersion_fit}
+use stats::regression::nb2_diagnostics::{nb2_count_diagnostic}
+use viz::scientific_document::{ScientificDocumentText,scientific_two_panel_plan,scientific_document_validate,scientific_document_svg}
+use math::pure::{ln_checked,is_finite}
+use io::sci_print::{print_f64_sci}
+fn workflow_label(bytes:&!IntegerBuffer,start:i64,text:string)->i64 with Mut,Panic {
+ var i:i64=0
+ while i<str_len(text) {integer_buffer_set(bytes,start+i,str_char_at(text,i) as i64);i=i+1}
+ return start+i
+}
+fn workflow_digit(bytes:&!IntegerBuffer,start:i64,value:i64)->i64 with Mut {
+ if value<0 || value>9 {return -1}
+ integer_buffer_set(bytes,start,48+value)
+ return start+1
+}
+fn main()->i32 with IO,Alloc,Mut,Div,Panic {
+ let genes:i64=6
+ let n:i64=16
+ let p:i64=2
+ let plan=dynamic_dispersion_workspace(n,p,0)
+ let normal_need=dynamic_normalization_workspace(genes,n)
+ if plan.status!=0 || normal_need<0 {return 1}
+ var ck=integer_buffer_new(n,n*8)
+ var mk=integer_buffer_new(n,n*8)
+ var perm=integer_buffer_new(n,n*8)
+ var co=integer_buffer_new(n,n*8)
+ var mo=integer_buffer_new(n,n*8)
+ var istage=integer_buffer_new(n,n*8)
+ var marks=integer_buffer_new(n,n*8)
+ var table=integer_buffer_new(genes*n,genes*n*8)
+ var row=integer_buffer_new(n,n*8)
+ var flags=integer_buffer_new(2*genes,2*genes*8)
+ var factors=numeric_buffer_new(n,n*8)
+ var logs=numeric_buffer_new(n,n*8)
+ var normal_work=numeric_buffer_new(normal_need,normal_need*8)
+ var log_exposure=numeric_buffer_new(n,n*8)
+ var offsets=numeric_buffer_new(n,n*8)
+ var offset_stage=numeric_buffer_new(n,n*8)
+ var a=numeric_buffer_new(n*p,n*p*8)
+ let layout=numeric_matrix(n*p,n,p,p,1,0)
+ var initial=numeric_buffer_new(p,p*8)
+ var beta=numeric_buffer_new(p,p*8)
+ var mu=numeric_buffer_new(n,n*8)
+ var eta=numeric_buffer_new(n,n*8)
+ var candidate_beta=numeric_buffer_new(p,p*8)
+ var candidate_mu=numeric_buffer_new(n,n*8)
+ var candidate_eta=numeric_buffer_new(n,n*8)
+ var best_beta=numeric_buffer_new(p,p*8)
+ var best_mu=numeric_buffer_new(n,n*8)
+ var best_eta=numeric_buffer_new(n,n*8)
+ var weighted=numeric_buffer_new(plan.count_design_elements,plan.count_design_elements*8)
+ var response=numeric_buffer_new(n,n*8)
+ var step=numeric_buffer_new(p,p*8)
+ var qr=numeric_buffer_new(plan.qr_elements,plan.qr_elements*8)
+ var count_stage=numeric_buffer_new(plan.count_stage_elements,plan.count_stage_elements*8)
+ var r=numeric_buffer_new(plan.factor_r_elements,plan.factor_r_elements*8)
+ var scales=numeric_buffer_new(plan.factor_scale_elements,plan.factor_scale_elements*8)
+ var pivot=integer_buffer_new(plan.permutation_elements,plan.permutation_elements*8)
+ var x0=numeric_buffer_new(genes,genes*8)
+ var y0=numeric_buffer_new(genes,genes*8)
+ var mask0=integer_buffer_new(genes,genes*8)
+ var x1=numeric_buffer_new(n,n*8)
+ var y1=numeric_buffer_new(n,n*8)
+ var mask1=integer_buffer_new(n,n*8)
+ var labels=integer_buffer_new(512,4096)
+ var gene_status=integer_buffer_new(genes,genes*8)
+ var gene_profile=integer_buffer_new(genes,genes*8)
+ let data:[i64;16]=[0,0,1,2,5,8,13,19,1,1,2,3,7,12,18,28]
+ var i:i64=0
+ while i<n {
+  integer_buffer_set(&!ck,i,100+n-1-i)
+  integer_buffer_set(&!mk,i,100+i)
+  numeric_buffer_set(&!a,i*p+i/8,1.0)
+  var g:i64=0
+  while g<genes {
+   let sample=n-1-i
+   let size=if sample%2==0 {1}else{2}
+   var value=10*(g+1)
+   if g==3 {value=0}
+   if g==4 {value=data[sample as usize]}
+   if g==5 {value=data[sample as usize]*(sample%3+1)}
+   integer_buffer_set(&!table,g*n+i,value*size)
+   g=g+1
+  }
+  i=i+1
+ }
+ var code:i64=0
+ let aligned=count_dataset_align(&ck,&mk,2000,&!perm,&!co,&!mo,&!istage)
+ if aligned.status!=0 {code=1}
+ if code==0 {
+  let normalized=dynamic_median_ratio_size_factors(&table,genes,n,0,&!factors,&!logs,&!normal_work,&!flags)
+  if normalized.status!=0 {code=2}
+ }
+ if code==0 {if count_dataset_offsets(&logs,&log_exposure,&perm,&!offsets,&!offset_stage,&!marks)!=0 {code=3}}
+ var options=DispersionSearchOptions{method:0,log_alpha_lower: -5.0,log_alpha_upper:3.0,
+ outer_tolerance:1e-6,max_outer_evaluations:100,rcond:0.0,inner_iterations:100,
+ inner_tolerance:1e-9,prior_active:false,prior_center:0.0,prior_variance:1.0,compute_curvature:false}
+ var budget=count_dataset_budget_new(genes,600)
+ var failures:i64=0
+ var poisson:i64=0
+ var positive_edges:i64=0
+ var xmax=1.0
+ var ymax=1.0
+ var residual_limit=1.0
+ var g:i64=0
+ while g<genes {
+  integer_buffer_set(&!gene_status,g, -1)
+  integer_buffer_set(&!gene_profile,g, -1)
+  if code==0 {
+   let reserve=count_dataset_reserve_gene(&!budget,options.max_outer_evaluations)
+   let prepared=count_dataset_gene(&table,genes,n,g,&perm,9007199254740992,&!row,&!marks)
+   if reserve!=0 || prepared!=0 {code=4}
+  }
+  if code==0 {
+   var normalized_total=0.0
+   var group:i64=0
+   while group<p {
+    var sum=0.0
+    i=group*8
+    while i<(group+1)*8 {
+     let col=integer_buffer_at(&perm,i)
+     let value=(integer_buffer_at(&row,i) as f64)/numeric_buffer_at(&factors,col)
+     sum=sum+value
+     i=i+1
+    }
+    normalized_total=normalized_total+sum
+    let logmean=ln_checked(if sum==0.0 {1.0}else{sum/8.0})
+    if logmean.status!=0 {code=5}
+    numeric_buffer_set(&!initial,group,logmean.value)
+    group=group+1
+   }
+   if code==0 {
+    options.log_alpha_upper=if g==5 {-2.0}else{3.0}
+    let fitted=dynamic_dispersion_fit(&a,&layout,&row,&offsets,&initial,&options,&!beta,&!mu,&!eta,
+     &!candidate_beta,&!candidate_mu,&!candidate_eta,&!best_beta,&!best_mu,&!best_eta,
+     &!weighted,&!response,&!step,&!qr,&!count_stage,&!r,&!scales,&!pivot)
+    let fs:i64=fitted.status
+    let ps:i64=fitted.profile_status
+    let alpha:f64=fitted.alpha
+    integer_buffer_set(&!gene_status,g,fs)
+    integer_buffer_set(&!gene_profile,g,ps)
+    if fs!=0 {failures=failures+1} else {
+     let gene_mean=normalized_total/(n as f64)
+     numeric_buffer_set(&!x0,g,gene_mean)
+     numeric_buffer_set(&!y0,g,alpha)
+     integer_buffer_set(&!mask0,g,if ps==0 || ps==1 {1}else{0})
+     if gene_mean>xmax {xmax=gene_mean}
+     if alpha>ymax {ymax=alpha}
+     if fitted.poisson_selected {poisson=poisson+1}
+     if !fitted.poisson_selected {if ps>=2 && ps<=4 {positive_edges=positive_edges+1}}
+     if g==4 {
+      i=0
+      while i<n {
+       let mean=numeric_buffer_at(&mu,i)
+       let diagnostic=nb2_count_diagnostic(integer_buffer_at(&row,i),mean,alpha)
+       if diagnostic.status==0 {
+        let residual:f64=diagnostic.nb2_pearson_residual
+        numeric_buffer_set(&!x1,i,i as f64)
+        numeric_buffer_set(&!y1,i,residual)
+        integer_buffer_set(&!mask1,i,1)
+        let magnitude=if residual<0.0 {-residual}else{residual}
+        if magnitude>residual_limit {residual_limit=magnitude}
+       }
+       i=i+1
+      }
+     }
+    }
+   }
+  }
+  g=g+1
+ }
+ if code==0 {
+  var at:i64=0
+  let t0=at;at=workflow_label(&!labels,at,"Keyed counts: normalization and full NB2 profile")
+  let t1=at;at=workflow_label(&!labels,at,"x normalized mean (counts); y fitted alpha (1)")
+  let t2=at;at=workflow_label(&!labels,at,"x metadata sample index; y gene4 NB2 Pearson residual (1)")
+  let t3=at;at=workflow_label(&!labels,at,"Poisson(alpha=0): ")
+  at=workflow_digit(&!labels,at,poisson)
+  at=workflow_label(&!labels,at,"; positive edges masked: ")
+  at=workflow_digit(&!labels,at,positive_edges)
+  at=workflow_label(&!labels,at,"; failed masked: ")
+  at=workflow_digit(&!labels,at,failures)
+  at=workflow_label(&!labels,at,". Conditional diagnostics; no CI/FDR. COUNT_WORKFLOW_COMPLETE")
+  let text=ScientificDocumentText{title_start:t0,title_len:t1-t0,left_start:t1,left_len:t2-t1,right_start:t2,right_len:t3-t2,footer_start:t3,footer_len:at-t3}
+  var document=scientific_two_panel_plan(1380,620,0.0,xmax+1.0,0.0,ymax+0.25,0.0,15.0,-residual_limit-0.25,residual_limit+0.25)
+  document.zero_right=true
+  let validated=scientific_document_validate(&document,&text,&labels,&x0,&y0,&mask0,&x1,&y1,&mask1)
+  if validated!=0 {code=6} else {
+   g=0
+   while g<genes {print("<!-- gene ");print(g);print(" status ");print(integer_buffer_at(&gene_status,g));print(" profile ");print(integer_buffer_at(&gene_profile,g));print(" alpha ");print_f64_sci(numeric_buffer_at(&y0,g),15);println(" -->");g=g+1}
+   print("<!-- unavailable_genes ");print(failures);print(" poisson_selected ");print(poisson);print(" positive_edges ");print(positive_edges);println(" -->")
+   let rendered=scientific_document_svg(&document,&text,&labels,&x0,&y0,&mask0,&x1,&y1,&mask1)
+   if rendered.status!=0 {code=6} else {println("<!-- COUNT_WORKFLOW_COMPLETE -->")}
+  }
+ }
+ // Reservations remain available through count_dataset_budget_info at checkpoints.
+ integer_buffer_close(ck);integer_buffer_close(mk);integer_buffer_close(perm);integer_buffer_close(co);integer_buffer_close(mo);integer_buffer_close(istage);integer_buffer_close(marks);integer_buffer_close(table);integer_buffer_close(row);integer_buffer_close(flags)
+ numeric_buffer_close(factors);numeric_buffer_close(logs);numeric_buffer_close(normal_work);numeric_buffer_close(log_exposure);numeric_buffer_close(offsets);numeric_buffer_close(offset_stage);numeric_buffer_close(a);numeric_buffer_close(initial);numeric_buffer_close(beta);numeric_buffer_close(mu);numeric_buffer_close(eta)
+ numeric_buffer_close(candidate_beta);numeric_buffer_close(candidate_mu);numeric_buffer_close(candidate_eta);numeric_buffer_close(best_beta);numeric_buffer_close(best_mu);numeric_buffer_close(best_eta);numeric_buffer_close(weighted);numeric_buffer_close(response);numeric_buffer_close(step);numeric_buffer_close(qr);numeric_buffer_close(count_stage);numeric_buffer_close(r);numeric_buffer_close(scales);integer_buffer_close(pivot)
+ numeric_buffer_close(x0);numeric_buffer_close(y0);integer_buffer_close(mask0);numeric_buffer_close(x1);numeric_buffer_close(y1);integer_buffer_close(mask1);integer_buffer_close(labels);integer_buffer_close(gene_status);integer_buffer_close(gene_profile)
+ return code as i32
+}

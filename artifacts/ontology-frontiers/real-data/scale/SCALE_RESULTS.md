@@ -163,7 +163,7 @@ The loop-init array-wall/chain probes are emitted by a heredoc in the
 round-7 session log (not by `gen_probes.py`); their sources are the
 committed `probe_dense_arr_*.sio` / `probe_sparse_loop_*.sio` files.
 
-## 5. Slurm handoff (per docs/ops/foundry_slurm_handoff.md)
+## 5. Slurm handoff
 
 Workspace-safe envelopes are established above; do NOT rerun these in
 the workspace:

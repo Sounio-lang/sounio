@@ -19,6 +19,18 @@ _SOUNIO_RESOLVE_MADAROS_LOADED=1
 _SOUNIO_MADAROS_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _SOUNIO_MADAROS_ROOT_DIR="${_SOUNIO_MADAROS_ROOT_DIR:-$(cd "$_SOUNIO_MADAROS_LIB_DIR/../.." && pwd)}"
 
+# Shared platform candidate for the public launchers and gate resolvers.
+sounio_madaros_host_raw() {
+  if [[ "$(uname -s)/$(uname -m)" == Darwin/arm64 ]]; then
+    local native="$_SOUNIO_MADAROS_ROOT_DIR/artifacts/self-hosted/madaros-arm64-macos"
+    if [[ -x "$native" ]] && file "$native" | grep -Eq 'Mach-O 64-bit.*arm64'; then
+      printf '%s\n' "$native"
+      return 0
+    fi
+  fi
+  return 1
+}
+
 # An explicit override that is set but unusable is refused, not skipped.
 #
 # The chain below tests each candidate with -x and moves on when it fails, so
@@ -54,6 +66,11 @@ _sounio_resolve_madaros_bin() {
   fi
   if [[ -n "${SOUNIO_MADAROS_BIN:-}" && -x "$SOUNIO_MADAROS_BIN" ]]; then
     echo "$SOUNIO_MADAROS_BIN"
+    return 0
+  fi
+  local host_raw
+  if host_raw="$(sounio_madaros_host_raw)"; then
+    echo "$host_raw"
     return 0
   fi
   local wrapper="$_SOUNIO_MADAROS_ROOT_DIR/bin/madaros"

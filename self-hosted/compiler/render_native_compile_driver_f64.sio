@@ -147,16 +147,9 @@ fn f64_bits(v: f64) -> i64 with Mut, Panic, Div {
 }
 
 fn load_source_file(path: string) -> Program with IO, Mut, Div, Panic, Alloc {
-    let data = read_file(path)
-    let size = file_size(path)
-    var buf: [i8; 1048576] = [0; 1048576]
-    var i: i64 = 0
-    while i < size && i < 1048576 {
-        buf[i as usize] = data[i as usize]
-        i = i + 1
-    }
-    let state = lex(buf, size, 0)
-    parse_program_preloaded(state.token_count)
+    // lex() moved out of lexer::mod; it returned an 8MB LexerState.
+    let token_count = lex_file_to_globals(path)
+    parse_program_preloaded(token_count)
 }
 
 // ============================================================================
@@ -249,7 +242,7 @@ fn micro_load_xmm1(code: CodeBuffer, vreg: i64) -> CodeBuffer with Mut, Panic, D
     c
 }
 
-fn micro_compile_function(code: CodeBuffer, func: IrFunction, fn_offsets: [i64; 256]) -> CodeBuffer with Mut, Panic, Div {
+fn micro_compile_function(code: CodeBuffer, func: IrFunction, fn_offsets: [i64; 256]) -> CodeBuffer with IO, Mut, Panic, Div {
     let frame_raw = (func.reg_count + 2) * 8
     let frame_size = ((frame_raw + 15) / 16) * 16
 
@@ -670,10 +663,10 @@ fn micro_compile_function(code: CodeBuffer, func: IrFunction, fn_offsets: [i64; 
     while ri < ret_count && ri < 64 {
         let s = ret_sites[ri as usize]
         let d = epilogue_off - (s + 5)
-        c.bytes[(s + 1) as usize] = (d & 0xFF) as i8
-        c.bytes[(s + 2) as usize] = ((d >> 8) & 0xFF) as i8
-        c.bytes[(s + 3) as usize] = ((d >> 16) & 0xFF) as i8
-        c.bytes[(s + 4) as usize] = ((d >> 24) & 0xFF) as i8
+        NC_BIG_CODE[(s + 1) as usize] = (d & 0xFF) as i8
+        NC_BIG_CODE[(s + 2) as usize] = ((d >> 8) & 0xFF) as i8
+        NC_BIG_CODE[(s + 3) as usize] = ((d >> 16) & 0xFF) as i8
+        NC_BIG_CODE[(s + 4) as usize] = ((d >> 24) & 0xFF) as i8
         ri = ri + 1
     }
 
@@ -686,10 +679,10 @@ fn micro_compile_function(code: CodeBuffer, func: IrFunction, fn_offsets: [i64; 
         let tgt = labels[lid as usize]
         if tgt >= 0 {
             let d = tgt - (s + 4)
-            c.bytes[(s + 0) as usize] = (d & 0xFF) as i8
-            c.bytes[(s + 1) as usize] = ((d >> 8) & 0xFF) as i8
-            c.bytes[(s + 2) as usize] = ((d >> 16) & 0xFF) as i8
-            c.bytes[(s + 3) as usize] = ((d >> 24) & 0xFF) as i8
+            NC_BIG_CODE[(s + 0) as usize] = (d & 0xFF) as i8
+            NC_BIG_CODE[(s + 1) as usize] = ((d >> 8) & 0xFF) as i8
+            NC_BIG_CODE[(s + 2) as usize] = ((d >> 16) & 0xFF) as i8
+            NC_BIG_CODE[(s + 3) as usize] = ((d >> 24) & 0xFF) as i8
         }
         fi = fi + 1
     }
@@ -779,7 +772,7 @@ fn ast_emit_print_int_builtin(code: CodeBuffer) -> CodeBuffer with Mut, Panic, D
     let do_write = c.len
     // Patch jmp_zero_site
     let zero_disp = do_write - (jmp_zero_site + 2)
-    c.bytes[(jmp_zero_site + 1) as usize] = (zero_disp & 0xFF) as i8
+    NC_BIG_CODE[(jmp_zero_site + 1) as usize] = (zero_disp & 0xFF) as i8
 
     // r8+1 = start of string, rbp-1 = last byte written
     // inc r8 (point to first digit)
@@ -806,7 +799,7 @@ fn ast_emit_print_int_builtin(code: CodeBuffer) -> CodeBuffer with Mut, Panic, D
 
 // Emit inline print of a string literal: embeds bytes in code, emits sys_write
 // str_buf/str_len = the string literal content from AST Name field
-fn ast_emit_inline_print_str(code: CodeBuffer, str_buf: [i8; 128], str_len: i64) -> CodeBuffer with Mut, Panic, Div {
+fn ast_emit_inline_print_str(code: CodeBuffer, str_buf: [i8; 384], str_len: i64) -> CodeBuffer with Mut, Panic, Div {
     var c = code
     // jmp over string data
     let jmp_site = c.len
@@ -822,7 +815,7 @@ fn ast_emit_inline_print_str(code: CodeBuffer, str_buf: [i8; 128], str_len: i64)
 
     // Patch jmp disp8
     let jmp_disp = c.len - (jmp_site + 2)
-    c.bytes[(jmp_site + 1) as usize] = (jmp_disp & 0xFF) as i8
+    NC_BIG_CODE[(jmp_site + 1) as usize] = (jmp_disp & 0xFF) as i8
 
     // lea rsi, [rip - (current - str_start)]
     // The string is at str_start in the code buffer. At runtime, we need its VA.
@@ -875,84 +868,79 @@ struct AstCompileCtx {
     fn_count: i64,
 }
 
+// Namespace and loop-patch scratch. This used to occupy the tail of a 64 KiB
+// CodeBuffer (offsets 65400..65531). CodeBuffer no longer has bytes, and those
+// offsets must not alias NC_BIG_CODE. Layout: level*64 is a loop frame
+// (top i32, break count at +4, patches at +8); byte 199 is the level;
+// bytes 200..201 are `ns`.
+var f64drv_side: [i8; 256] = [0; 256]
 fn code_get_ns(c: CodeBuffer) -> i64 with Mut, Panic {
-    let b0 = (c.bytes[65530 as usize] as i64) & 0xFF
-    let b1 = (c.bytes[65531 as usize] as i64) & 0xFF
+    let _cursor = c.len
+    let b0 = (f64drv_side[200 as usize] as i64) & 0xFF
+    let b1 = (f64drv_side[201 as usize] as i64) & 0xFF
     b0 | (b1 << 8)
 }
-
 fn code_set_ns(c: CodeBuffer, ns: i64) -> CodeBuffer with Mut, Panic {
-    var r = c
-    r.bytes[65530 as usize] = (ns & 0xFF) as i8
-    r.bytes[65531 as usize] = ((ns >> 8) & 0xFF) as i8
-    r
+    f64drv_side[200 as usize] = (ns & 0xFF) as i8
+    f64drv_side[201 as usize] = ((ns >> 8) & 0xFF) as i8
+    c
 }
-
-// Loop context stack in high bytes [65400..65529]
-// bytes[65529] = current loop level (-1=none, 0,1,2 = nesting)
-// Per level, 64 bytes starting at base = 65400 + level*64 (but only 3 levels: 0,1,2)
-//   +0..3 = loop_top (continue target, i32)
-//   +4..5 = break_count (u16)
-//   +8..n = break_patches[i] (i32 each, up to 13 patches)
-// Returns -1 when no loop is active (0xFF byte = 255 = -1 when sign-extended)
 fn lctx_level(c: CodeBuffer) -> i64 with Mut, Panic {
-    let raw = (c.bytes[65529 as usize] as i64) & 0xFF
+    let _cursor = c.len
+    let raw = (f64drv_side[199 as usize] as i64) & 0xFF
     if raw == 255 { -1 } else { raw }
 }
 fn lctx_set_level(c: CodeBuffer, v: i64) -> CodeBuffer with Mut, Panic {
-    var r = c
-    // -1 stored as 0xFF
-    if v < 0 { r.bytes[65529 as usize] = (0xFF as i8) } else { r.bytes[65529 as usize] = v as i8 }
-    r
+    if v < 0 { f64drv_side[199 as usize] = (0xFF as i8) } else { f64drv_side[199 as usize] = v as i8 }
+    c
 }
 fn lctx_base(level: i64) -> i64 {
-    65400 + level * 64
+    level * 64
 }
 fn lctx_get_top(c: CodeBuffer, level: i64) -> i64 with Mut, Panic {
+    let _cursor = c.len
     let b = lctx_base(level)
-    ((c.bytes[b as usize] as i64) & 0xFF) |
-    (((c.bytes[(b+1) as usize] as i64) & 0xFF) << 8) |
-    (((c.bytes[(b+2) as usize] as i64) & 0xFF) << 16) |
-    (((c.bytes[(b+3) as usize] as i64) & 0xFF) << 24)
+    ((f64drv_side[b as usize] as i64) & 0xFF) |
+    (((f64drv_side[(b + 1) as usize] as i64) & 0xFF) << 8) |
+    (((f64drv_side[(b + 2) as usize] as i64) & 0xFF) << 16) |
+    (((f64drv_side[(b + 3) as usize] as i64) & 0xFF) << 24)
 }
 fn lctx_set_top(c: CodeBuffer, level: i64, v: i64) -> CodeBuffer with Mut, Panic {
-    var r = c
     let b = lctx_base(level)
-    r.bytes[b as usize] = (v & 0xFF) as i8
-    r.bytes[(b+1) as usize] = ((v >> 8) & 0xFF) as i8
-    r.bytes[(b+2) as usize] = ((v >> 16) & 0xFF) as i8
-    r.bytes[(b+3) as usize] = ((v >> 24) & 0xFF) as i8
-    r
+    f64drv_side[b as usize] = (v & 0xFF) as i8
+    f64drv_side[(b + 1) as usize] = ((v >> 8) & 0xFF) as i8
+    f64drv_side[(b + 2) as usize] = ((v >> 16) & 0xFF) as i8
+    f64drv_side[(b + 3) as usize] = ((v >> 24) & 0xFF) as i8
+    c
 }
 fn lctx_get_break_count(c: CodeBuffer, level: i64) -> i64 with Mut, Panic {
+    let _cursor = c.len
     let b = lctx_base(level) + 4
-    ((c.bytes[b as usize] as i64) & 0xFF) |
-    (((c.bytes[(b+1) as usize] as i64) & 0xFF) << 8)
+    ((f64drv_side[b as usize] as i64) & 0xFF) |
+    (((f64drv_side[(b + 1) as usize] as i64) & 0xFF) << 8)
 }
 fn lctx_set_break_count(c: CodeBuffer, level: i64, v: i64) -> CodeBuffer with Mut, Panic {
-    var r = c
     let b = lctx_base(level) + 4
-    r.bytes[b as usize] = (v & 0xFF) as i8
-    r.bytes[(b+1) as usize] = ((v >> 8) & 0xFF) as i8
-    r
+    f64drv_side[b as usize] = (v & 0xFF) as i8
+    f64drv_side[(b + 1) as usize] = ((v >> 8) & 0xFF) as i8
+    c
 }
 fn lctx_get_break_patch(c: CodeBuffer, level: i64, i: i64) -> i64 with Mut, Panic {
+    let _cursor = c.len
     let b = lctx_base(level) + 8 + (i * 4)
-    ((c.bytes[b as usize] as i64) & 0xFF) |
-    (((c.bytes[(b+1) as usize] as i64) & 0xFF) << 8) |
-    (((c.bytes[(b+2) as usize] as i64) & 0xFF) << 16) |
-    (((c.bytes[(b+3) as usize] as i64) & 0xFF) << 24)
+    ((f64drv_side[b as usize] as i64) & 0xFF) |
+    (((f64drv_side[(b + 1) as usize] as i64) & 0xFF) << 8) |
+    (((f64drv_side[(b + 2) as usize] as i64) & 0xFF) << 16) |
+    (((f64drv_side[(b + 3) as usize] as i64) & 0xFF) << 24)
 }
 fn lctx_set_break_patch(c: CodeBuffer, level: i64, i: i64, v: i64) -> CodeBuffer with Mut, Panic {
-    var r = c
     let b = lctx_base(level) + 8 + (i * 4)
-    r.bytes[b as usize] = (v & 0xFF) as i8
-    r.bytes[(b+1) as usize] = ((v >> 8) & 0xFF) as i8
-    r.bytes[(b+2) as usize] = ((v >> 16) & 0xFF) as i8
-    r.bytes[(b+3) as usize] = ((v >> 24) & 0xFF) as i8
-    r
+    f64drv_side[b as usize] = (v & 0xFF) as i8
+    f64drv_side[(b + 1) as usize] = ((v >> 8) & 0xFF) as i8
+    f64drv_side[(b + 2) as usize] = ((v >> 16) & 0xFF) as i8
+    f64drv_side[(b + 3) as usize] = ((v >> 24) & 0xFF) as i8
+    c
 }
-
 fn micro_lea_rax_slot(code: CodeBuffer, slot: i64) -> CodeBuffer with Mut, Panic, Div {
     // lea rax, [rbp - 8*(slot+1)]
     var c = code
@@ -1456,16 +1444,16 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
         let and_end = c.len
         // Patch jz → short_false
         let jz_d = and_false - (and_jz + 6)
-        c.bytes[(and_jz + 2) as usize] = (jz_d & 0xFF) as i8
-        c.bytes[(and_jz + 3) as usize] = ((jz_d >> 8) & 0xFF) as i8
-        c.bytes[(and_jz + 4) as usize] = ((jz_d >> 16) & 0xFF) as i8
-        c.bytes[(and_jz + 5) as usize] = ((jz_d >> 24) & 0xFF) as i8
+        NC_BIG_CODE[(and_jz + 2) as usize] = (jz_d & 0xFF) as i8
+        NC_BIG_CODE[(and_jz + 3) as usize] = ((jz_d >> 8) & 0xFF) as i8
+        NC_BIG_CODE[(and_jz + 4) as usize] = ((jz_d >> 16) & 0xFF) as i8
+        NC_BIG_CODE[(and_jz + 5) as usize] = ((jz_d >> 24) & 0xFF) as i8
         // Patch jmp → end
         let jmp_d = and_end - (and_jmp + 5)
-        c.bytes[(and_jmp + 1) as usize] = (jmp_d & 0xFF) as i8
-        c.bytes[(and_jmp + 2) as usize] = ((jmp_d >> 8) & 0xFF) as i8
-        c.bytes[(and_jmp + 3) as usize] = ((jmp_d >> 16) & 0xFF) as i8
-        c.bytes[(and_jmp + 4) as usize] = ((jmp_d >> 24) & 0xFF) as i8
+        NC_BIG_CODE[(and_jmp + 1) as usize] = (jmp_d & 0xFF) as i8
+        NC_BIG_CODE[(and_jmp + 2) as usize] = ((jmp_d >> 8) & 0xFF) as i8
+        NC_BIG_CODE[(and_jmp + 3) as usize] = ((jmp_d >> 16) & 0xFF) as i8
+        NC_BIG_CODE[(and_jmp + 4) as usize] = ((jmp_d >> 24) & 0xFF) as i8
         c
     } else if expr.kind == ExprKind::ExprBinary && expr.bin_op == BinaryOp::OpOr {
         // Short-circuit ||: eval left; if non-zero, result=1; else eval right
@@ -1496,16 +1484,16 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
         let or_end = c.len
         // Patch jnz → short_true
         let jnz_d = or_true - (or_jnz + 6)
-        c.bytes[(or_jnz + 2) as usize] = (jnz_d & 0xFF) as i8
-        c.bytes[(or_jnz + 3) as usize] = ((jnz_d >> 8) & 0xFF) as i8
-        c.bytes[(or_jnz + 4) as usize] = ((jnz_d >> 16) & 0xFF) as i8
-        c.bytes[(or_jnz + 5) as usize] = ((jnz_d >> 24) & 0xFF) as i8
+        NC_BIG_CODE[(or_jnz + 2) as usize] = (jnz_d & 0xFF) as i8
+        NC_BIG_CODE[(or_jnz + 3) as usize] = ((jnz_d >> 8) & 0xFF) as i8
+        NC_BIG_CODE[(or_jnz + 4) as usize] = ((jnz_d >> 16) & 0xFF) as i8
+        NC_BIG_CODE[(or_jnz + 5) as usize] = ((jnz_d >> 24) & 0xFF) as i8
         // Patch jmp → end
         let jmpd = or_end - (or_jmp + 5)
-        c.bytes[(or_jmp + 1) as usize] = (jmpd & 0xFF) as i8
-        c.bytes[(or_jmp + 2) as usize] = ((jmpd >> 8) & 0xFF) as i8
-        c.bytes[(or_jmp + 3) as usize] = ((jmpd >> 16) & 0xFF) as i8
-        c.bytes[(or_jmp + 4) as usize] = ((jmpd >> 24) & 0xFF) as i8
+        NC_BIG_CODE[(or_jmp + 1) as usize] = (jmpd & 0xFF) as i8
+        NC_BIG_CODE[(or_jmp + 2) as usize] = ((jmpd >> 8) & 0xFF) as i8
+        NC_BIG_CODE[(or_jmp + 3) as usize] = ((jmpd >> 16) & 0xFF) as i8
+        NC_BIG_CODE[(or_jmp + 4) as usize] = ((jmpd >> 24) & 0xFF) as i8
         c
     } else if expr.kind == ExprKind::ExprBinary {
         // Check if this is a float operation
@@ -2013,10 +2001,10 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
         c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0); c = emit_byte(c, 0)
         let else_off = c.len
         let jz_disp = else_off - (jz_site + 6)
-        c.bytes[(jz_site + 2) as usize] = (jz_disp & 0xFF) as i8
-        c.bytes[(jz_site + 3) as usize] = ((jz_disp >> 8) & 0xFF) as i8
-        c.bytes[(jz_site + 4) as usize] = ((jz_disp >> 16) & 0xFF) as i8
-        c.bytes[(jz_site + 5) as usize] = ((jz_disp >> 24) & 0xFF) as i8
+        NC_BIG_CODE[(jz_site + 2) as usize] = (jz_disp & 0xFF) as i8
+        NC_BIG_CODE[(jz_site + 3) as usize] = ((jz_disp >> 8) & 0xFF) as i8
+        NC_BIG_CODE[(jz_site + 4) as usize] = ((jz_disp >> 16) & 0xFF) as i8
+        NC_BIG_CODE[(jz_site + 5) as usize] = ((jz_disp >> 24) & 0xFF) as i8
         let else_expr_ref: &Option<Box<Expr>> = &expr.else_expr
         match *else_expr_ref {
             Some(ee) => {
@@ -2028,10 +2016,10 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
         }
         let end_off = c.len
         let jmp_disp = end_off - (jmp_site + 5)
-        c.bytes[(jmp_site + 1) as usize] = (jmp_disp & 0xFF) as i8
-        c.bytes[(jmp_site + 2) as usize] = ((jmp_disp >> 8) & 0xFF) as i8
-        c.bytes[(jmp_site + 3) as usize] = ((jmp_disp >> 16) & 0xFF) as i8
-        c.bytes[(jmp_site + 4) as usize] = ((jmp_disp >> 24) & 0xFF) as i8
+        NC_BIG_CODE[(jmp_site + 1) as usize] = (jmp_disp & 0xFF) as i8
+        NC_BIG_CODE[(jmp_site + 2) as usize] = ((jmp_disp >> 8) & 0xFF) as i8
+        NC_BIG_CODE[(jmp_site + 3) as usize] = ((jmp_disp >> 16) & 0xFF) as i8
+        NC_BIG_CODE[(jmp_site + 4) as usize] = ((jmp_disp >> 24) & 0xFF) as i8
         c
     } else if expr.kind == ExprKind::ExprWhile {
         // Push loop level (-1 = no loop → 0; 0 → 1; etc.)
@@ -2072,20 +2060,20 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
         let wend_off = c.len
         // Patch JZ (condition exit) to wend_off
         let wjz_disp = wend_off - (wjz_site + 6)
-        c.bytes[(wjz_site + 2) as usize] = (wjz_disp & 0xFF) as i8
-        c.bytes[(wjz_site + 3) as usize] = ((wjz_disp >> 8) & 0xFF) as i8
-        c.bytes[(wjz_site + 4) as usize] = ((wjz_disp >> 16) & 0xFF) as i8
-        c.bytes[(wjz_site + 5) as usize] = ((wjz_disp >> 24) & 0xFF) as i8
+        NC_BIG_CODE[(wjz_site + 2) as usize] = (wjz_disp & 0xFF) as i8
+        NC_BIG_CODE[(wjz_site + 3) as usize] = ((wjz_disp >> 8) & 0xFF) as i8
+        NC_BIG_CODE[(wjz_site + 4) as usize] = ((wjz_disp >> 16) & 0xFF) as i8
+        NC_BIG_CODE[(wjz_site + 5) as usize] = ((wjz_disp >> 24) & 0xFF) as i8
         // Patch all break jumps to wend_off
         var wbi: i64 = 0
         let wbc = lctx_get_break_count(c, level)
         while wbi < wbc {
             let wbp = lctx_get_break_patch(c, level, wbi)
             let wbd = wend_off - (wbp + 4)
-            c.bytes[(wbp) as usize] = (wbd & 0xFF) as i8
-            c.bytes[(wbp + 1) as usize] = ((wbd >> 8) & 0xFF) as i8
-            c.bytes[(wbp + 2) as usize] = ((wbd >> 16) & 0xFF) as i8
-            c.bytes[(wbp + 3) as usize] = ((wbd >> 24) & 0xFF) as i8
+            NC_BIG_CODE[(wbp) as usize] = (wbd & 0xFF) as i8
+            NC_BIG_CODE[(wbp + 1) as usize] = ((wbd >> 8) & 0xFF) as i8
+            NC_BIG_CODE[(wbp + 2) as usize] = ((wbd >> 16) & 0xFF) as i8
+            NC_BIG_CODE[(wbp + 3) as usize] = ((wbd >> 24) & 0xFF) as i8
             wbi = wbi + 1
         }
         // Pop loop level
@@ -2429,10 +2417,10 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
                             // Patch JZ to here
                             let m_jz_target = c.len
                             let m_jz_disp = m_jz_target - (m_jz_site + 4)
-                            c.bytes[(m_jz_site) as usize] = (m_jz_disp & 0xFF) as i8
-                            c.bytes[(m_jz_site + 1) as usize] = ((m_jz_disp >> 8) & 0xFF) as i8
-                            c.bytes[(m_jz_site + 2) as usize] = ((m_jz_disp >> 16) & 0xFF) as i8
-                            c.bytes[(m_jz_site + 3) as usize] = ((m_jz_disp >> 24) & 0xFF) as i8
+                            NC_BIG_CODE[(m_jz_site) as usize] = (m_jz_disp & 0xFF) as i8
+                            NC_BIG_CODE[(m_jz_site + 1) as usize] = ((m_jz_disp >> 8) & 0xFF) as i8
+                            NC_BIG_CODE[(m_jz_site + 2) as usize] = ((m_jz_disp >> 16) & 0xFF) as i8
+                            NC_BIG_CODE[(m_jz_site + 3) as usize] = ((m_jz_disp >> 24) & 0xFF) as i8
                         } else if ir_name_is_none(pn) {
                             // None: test scrutinee == 0
                             c = micro_load_rax(c, m_scrut_slot)
@@ -2448,10 +2436,10 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
                             // Patch JNZ to here
                             let m_jnz_target = c.len
                             let m_jnz_disp = m_jnz_target - (m_jnz_site + 4)
-                            c.bytes[(m_jnz_site) as usize] = (m_jnz_disp & 0xFF) as i8
-                            c.bytes[(m_jnz_site + 1) as usize] = ((m_jnz_disp >> 8) & 0xFF) as i8
-                            c.bytes[(m_jnz_site + 2) as usize] = ((m_jnz_disp >> 16) & 0xFF) as i8
-                            c.bytes[(m_jnz_site + 3) as usize] = ((m_jnz_disp >> 24) & 0xFF) as i8
+                            NC_BIG_CODE[(m_jnz_site) as usize] = (m_jnz_disp & 0xFF) as i8
+                            NC_BIG_CODE[(m_jnz_site + 1) as usize] = ((m_jnz_disp >> 8) & 0xFF) as i8
+                            NC_BIG_CODE[(m_jnz_site + 2) as usize] = ((m_jnz_disp >> 16) & 0xFF) as i8
+                            NC_BIG_CODE[(m_jnz_site + 3) as usize] = ((m_jnz_disp >> 24) & 0xFF) as i8
                         }
                     }
                     // Advance to next arm
@@ -2467,10 +2455,10 @@ fn ast_compile_expr(code: CodeBuffer, expr: &Expr,
         while m_pi < m_end_count {
             let m_ep = m_end_patches[m_pi as usize]
             let m_end_disp = c.len - (m_ep + 4)
-            c.bytes[(m_ep) as usize] = (m_end_disp & 0xFF) as i8
-            c.bytes[(m_ep + 1) as usize] = ((m_end_disp >> 8) & 0xFF) as i8
-            c.bytes[(m_ep + 2) as usize] = ((m_end_disp >> 16) & 0xFF) as i8
-            c.bytes[(m_ep + 3) as usize] = ((m_end_disp >> 24) & 0xFF) as i8
+            NC_BIG_CODE[(m_ep) as usize] = (m_end_disp & 0xFF) as i8
+            NC_BIG_CODE[(m_ep + 1) as usize] = ((m_end_disp >> 8) & 0xFF) as i8
+            NC_BIG_CODE[(m_ep + 2) as usize] = ((m_end_disp >> 16) & 0xFF) as i8
+            NC_BIG_CODE[(m_ep + 3) as usize] = ((m_end_disp >> 24) & 0xFF) as i8
             m_pi = m_pi + 1
         }
         c
@@ -3230,20 +3218,20 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
     // Scan for pattern: 0xe8 <fn_idx_lo> <fn_idx_hi> 0xCA 0xFE
     var pi: i64 = 0
     while pi < code.len - 4 {
-        if code.bytes[pi as usize] == (0xe8 as i8) &&
-           code.bytes[(pi + 3) as usize] == (0xCA as i8) &&
-           code.bytes[(pi + 4) as usize] == (0xFE as i8) {
-            let lo_byte = code.bytes[(pi + 1) as usize] as i64
-            let hi_byte = code.bytes[(pi + 2) as usize] as i64
+        if NC_BIG_CODE[pi as usize] == (0xe8 as i8) &&
+           NC_BIG_CODE[(pi + 3) as usize] == (0xCA as i8) &&
+           NC_BIG_CODE[(pi + 4) as usize] == (0xFE as i8) {
+            let lo_byte = NC_BIG_CODE[(pi + 1) as usize] as i64
+            let hi_byte = NC_BIG_CODE[(pi + 2) as usize] as i64
             let target_idx = (lo_byte & 0xFF) + ((hi_byte & 0xFF) << 8)
             if target_idx >= 0 && target_idx < fn_count {
                 let target_off = fn_offsets[target_idx as usize]
                 let call_site = pi
                 let disp = target_off - (call_site + 5)
-                code.bytes[(pi + 1) as usize] = (disp & 0xFF) as i8
-                code.bytes[(pi + 2) as usize] = ((disp >> 8) & 0xFF) as i8
-                code.bytes[(pi + 3) as usize] = ((disp >> 16) & 0xFF) as i8
-                code.bytes[(pi + 4) as usize] = ((disp >> 24) & 0xFF) as i8
+                NC_BIG_CODE[(pi + 1) as usize] = (disp & 0xFF) as i8
+                NC_BIG_CODE[(pi + 2) as usize] = ((disp >> 8) & 0xFF) as i8
+                NC_BIG_CODE[(pi + 3) as usize] = ((disp >> 16) & 0xFF) as i8
+                NC_BIG_CODE[(pi + 4) as usize] = ((disp >> 24) & 0xFF) as i8
             }
         }
         pi = pi + 1
@@ -3334,7 +3322,7 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
 
     var ci: i64 = 0
     while ci < total_code && (text_off + ci) < 65536 {
-        out[(text_off + ci) as usize] = code.bytes[ci as usize]
+        out[(text_off + ci) as usize] = NC_BIG_CODE[ci as usize]
         ci = ci + 1
     }
 

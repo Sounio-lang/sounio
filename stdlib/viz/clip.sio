@@ -1,0 +1,77 @@
+// Shared bounded scientific polyline clipping and linear normalization.
+use math::pure::{is_finite}
+pub struct ClipSegment {
+    pub x0: f64, pub y0: f64, pub x1: f64, pub y1: f64,
+    pub status: i64,
+}
+fn clip_clamp_unit(x: f64) -> f64 {
+    if x < 0.0 { 0.0 } else if x > 1.0 { 1.0 } else { x }
+}
+// Liang-Barsky over the closed unit square. Normalized coordinates are
+// bounded to +/-1e6 to bound cancellation before rasterization.
+// status: 0 visible (including a point), 1 outside, 2 invalid/numeric domain.
+pub fn clip_unit_segment(ax: f64, ay: f64, bx: f64, by: f64) -> ClipSegment with Mut, Div {
+    var out = ClipSegment { x0: 0.0, y0: 0.0, x1: 0.0, y1: 0.0, status: 2 }
+    if !is_finite(ax) || !is_finite(ay) || !is_finite(bx) || !is_finite(by) { return out }
+    if ax < -1000000.0 || ax > 1000000.0 || ay < -1000000.0 || ay > 1000000.0 { return out }
+    if bx < -1000000.0 || bx > 1000000.0 || by < -1000000.0 || by > 1000000.0 { return out }
+    let dx: f64 = bx - ax
+    let dy: f64 = by - ay
+    let p: [f64; 4] = [0.0 - dx, dx, 0.0 - dy, dy]
+    let q: [f64; 4] = [ax, 1.0 - ax, ay, 1.0 - ay]
+    var enter: f64 = 0.0
+    var enter_edge: i64 = -1
+    var exit_edge: i64 = -1
+    var exit: f64 = 1.0
+    var i: i64 = 0
+    while i < 4 {
+        let pi: f64 = p[i as usize]
+        let qi: f64 = q[i as usize]
+        if pi == 0.0 {
+            if qi < 0.0 { out.status = 1; return out }
+        } else {
+            let t: f64 = qi / pi
+            if pi < 0.0 {
+                if t > exit { out.status = 1; return out }
+                if t > enter { enter = t; enter_edge = i }
+            } else {
+                if t < enter { out.status = 1; return out }
+                if t < exit { exit = t; exit_edge = i }
+            }
+        }
+        i = i + 1
+    }
+    out.x0 = clip_clamp_unit(ax + enter * dx)
+    out.y0 = clip_clamp_unit(ay + enter * dy)
+    out.x1 = clip_clamp_unit(ax + exit * dx)
+    out.y1 = clip_clamp_unit(ay + exit * dy)
+    // Bind the active clipping face exactly; interpolation may leave residue.
+    if enter_edge == 0 { out.x0 = 0.0 }
+    if enter_edge == 1 { out.x0 = 1.0 }
+    if enter_edge == 2 { out.y0 = 0.0 }
+    if enter_edge == 3 { out.y0 = 1.0 }
+    if exit_edge == 0 { out.x1 = 0.0 }
+    if exit_edge == 1 { out.x1 = 1.0 }
+    if exit_edge == 2 { out.y1 = 0.0 }
+    if exit_edge == 3 { out.y1 = 1.0 }
+    out.status = 0
+    out
+}
+
+pub fn clip_series_segment(ax: f64, ay: f64, bx: f64, by: f64,
+    xmin: f64, xmax: f64, ymin: f64, ymax: f64) -> ClipSegment with Mut, Div {
+    let invalid = ClipSegment { x0: 0.0, y0: 0.0, x1: 0.0, y1: 0.0, status: 2 }
+    if !is_finite(xmin) || !is_finite(xmax) || !is_finite(ymin) || !is_finite(ymax) { return invalid }
+    let dx: f64 = xmax - xmin
+    let dy: f64 = ymax - ymin
+    if dx <= 0.0 || dy <= 0.0 || !is_finite(dx) || !is_finite(dy) { return invalid }
+    let x0: f64 = (ax - xmin) / dx
+    let x1: f64 = (bx - xmin) / dx
+    let y0: f64 = (ay - ymin) / dy
+    let y1: f64 = (by - ymin) / dy
+    clip_unit_segment(x0, y0, x1, y1)
+}
+pub fn clip_pixel(origin: i64, extent: i64, unit: f64) -> i64 {
+    let offset: f64 = unit * (extent as f64) + 0.5
+    origin + (offset as i64)
+}

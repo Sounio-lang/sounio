@@ -1,0 +1,1 @@
+`stdlib/molecular` adds a single-site Lennard-Jones core for NVT and grand-canonical Monte Carlo. `mol_trial_exchange` returns `(N, ΔU, move kind)`. The module comes with independent C++23 oracles for configuration energy and the second virial coefficient, and with a driver that reproduces the NIST LJ benchmarks.

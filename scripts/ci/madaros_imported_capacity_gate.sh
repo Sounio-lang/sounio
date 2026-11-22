@@ -3,6 +3,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=../lib/classify_compile.sh
+source "$ROOT_DIR/scripts/lib/classify_compile.sh"
 KEEP_WORK="${SOUNIO_MADAROS_IMPORTED_CAPACITY_GATE_KEEP:-0}"
 
 fail() {
@@ -176,6 +178,11 @@ if [[ "$compile_rc" -ge 128 ]]; then
   cat "$LOG" >&2
   fail "aggregate capacity witness terminated by signal rc=$compile_rc"
 fi
+# rc alone is not a refusal: a crash, timeout or OOM kill is not one (#2425).
+sounio_expect_failed_exit "$compile_rc" "$LOG" || {
+  cat "$LOG" >&2
+  fail "aggregate capacity witness: not a clean refusal: $(sounio_refusal_reason)"
+}
 if [[ -e "$OUT" ]]; then
   cat "$LOG" >&2
   fail "aggregate capacity rejection left an output artifact: $OUT"

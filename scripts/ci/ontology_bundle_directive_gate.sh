@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=../lib/classify_compile.sh
+source "$ROOT_DIR/scripts/lib/classify_compile.sh"
 cd "$ROOT_DIR"
 
 TMP_DIR="$(mktemp -d)"
@@ -57,11 +59,15 @@ else
   exit 1
 fi
 
-if bin/souc check "$NEGATIVE_EXPANDED" >"$TMP_DIR/negative.log" 2>&1; then
+__refusal_rc=0
+bin/souc check "$NEGATIVE_EXPANDED" >"$TMP_DIR/negative.log" 2>&1 || __refusal_rc=$?
+if [[ "$__refusal_rc" -eq 0 ]]; then
   printf 'FAIL  %s unexpectedly accepted sibling as subclass after expansion\n' "$NEGATIVE_SRC" >&2
   cat "$TMP_DIR/negative.log" >&2
   exit 1
 fi
+# rc != 0 is not yet a refusal: a crash, timeout or OOM kill is not (#2425).
+sounio_expect_failed_exit "$__refusal_rc" "$TMP_DIR/negative.log" || { printf 'FAIL  %s: not a clean refusal: %s\n' "$TMP_DIR/negative.log" "$(sounio_refusal_reason)" >&2; cat "$TMP_DIR/negative.log" >&2; exit 1; }
 if grep -q 'cannot prove ontology subsumption' "$TMP_DIR/negative.log"; then
   printf 'PASS  %s expanded and rejected sibling subsumption\n' "$NEGATIVE_SRC"
 else

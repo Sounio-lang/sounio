@@ -1,0 +1,96 @@
+// Bit-level probe for the matrix_er Korsmeyer-Peppas fraction F(t) = min(1, 0.199*t^0.65).
+// Emits f64_to_bits of F under (a) the current matrix_er helpers (copied verbatim below)
+// and (b) the proposed helpers (canonical stdlib/math/pure.sio ln/exp, imported).
+// docs/audit/repro/matrix_er_kp_bits_probe.mjs computes the same grid in Node and diffs
+// the bits, so this probe is both the accuracy witness and the Sounio<->Node parity witness.
+// Grid: tiny clocks, q24h clocks (n*dt - k*24) + dt at n = k*24/dt - 1 (the upper end of the step
+// before dose k, as vfx_released_qtau -> matrix_step_amount evaluates it) for dt in {0.4,0.2,0.1,0.08,0.05},
+// and t = i*0.05 for i = 1..490 (0.05..24.5 h). Run via bin/souc (Madaros).
+use math::pure::{exp, ln}
+
+fn cur_ln_unit(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 - 1.0e6 }
+    let y = (x - 1.0) / (x + 1.0)
+    var y2 = y * y
+    var term = y
+    var sum = term
+    var k: i64 = 1
+    while k < 20 {
+        term = term * y2
+        sum = sum + term / (2.0 * (k as f64) + 1.0)
+        k = k + 1
+    }
+    return 2.0 * sum
+}
+
+fn cur_exp(x: f64) -> f64 with Mut, Div {
+    var r = 1.0 + x / 1024.0
+    var i = 0
+    while i < 10 {
+        r = r * r
+        i = i + 1
+    }
+    return r
+}
+
+fn cur_pow(t: f64, n: f64) -> f64 with Mut, Div {
+    if t <= 0.0 { return 0.0 }
+    var ln_t = 0.0
+    if t > 2.0 {
+        ln_t = 0.6931471805599453 + cur_ln_unit(t / 2.0)
+    } else {
+        ln_t = cur_ln_unit(t)
+    }
+    return cur_exp(n * ln_t)
+}
+
+fn new_pow(t: f64, n: f64) -> f64 with Mut, Div, Panic {
+    if t <= 0.0 { return 0.0 }
+    return exp(n * ln(t))
+}
+
+fn cap(f: f64) -> f64 { if f > 1.0 { return 1.0 } return f }
+
+fn emit(tag: i64, t: f64) with IO, Mut, Div, Panic {
+    print("KP|")
+    print_int(tag)
+    print("|")
+    print_int(f64_to_bits(t))
+    print("|")
+    print_int(f64_to_bits(cap(0.199 * cur_pow(t, 0.65))))
+    print("|")
+    print_int(f64_to_bits(cap(0.199 * new_pow(t, 0.65))))
+    println("")
+}
+
+fn emit_clocks(dt: f64, steps_per_tau: i64) with IO, Mut, Div, Panic {
+    var k: i64 = 1
+    while k <= 5 {
+        let n = k * steps_per_tau - 1
+        emit(2, (n as f64) * dt - (k as f64) * 24.0 + dt)
+        k = k + 1
+    }
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    emit(1, 3.5e-15)
+    emit(1, 1.0e-12)
+    emit(1, 1.0e-9)
+    emit(1, 1.0e-6)
+    emit(1, 1.0e-4)
+    emit(1, 1.0e-3)
+    emit(1, 0.01)
+    emit(1, 0.02)
+    emit_clocks(0.4, 60)
+    emit_clocks(0.2, 120)
+    emit_clocks(0.1, 240)
+    emit_clocks(0.08, 300)
+    emit_clocks(0.05, 480)
+    var i: i64 = 1
+    while i <= 490 {
+        emit(3, (i as f64) * 0.05)
+        i = i + 1
+    }
+    println("KP_PROBE_DONE")
+    return 0
+}

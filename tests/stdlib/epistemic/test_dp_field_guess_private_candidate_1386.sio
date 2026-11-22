@@ -1,0 +1,50 @@
+//@ run-pass
+//@ expect-stdout: FIELD_GUESS_1386_PASS
+//@ description: a field read whose receiver struct lean_single guesses by field name must not pick a pub struct whose same-named field is private (knightian PBox.variance) over the readable one (Epistemic.variance)
+//
+// stdlib/epistemic/dp.sio reads `r.variance` / `vsp.confidence` on Epistemic
+// values whose type lean_single does not track at that point, so it guesses
+// the struct from the field name. epistemic::knightian (imported by dp.sio)
+// declares `pub struct PBox { ..., variance: f64, confidence: i64 }` with
+// private fields. Once lean_single applied the per-field rule (#1386), that
+// guess refused the read and lowered it to 0 inside the imported module
+// (imported-module errors do not fail the compile), so value_iteration lost
+// every variance and confidence. Before #1386 the same guess picked PBox
+// anyway and read Epistemic values at PBox's field offsets, which is garbage
+// (main's seed prints var=5.9e-321, conf=1000). The answers below are analytic.
+//
+// lean_single only: a Madaros build segfaults inside mdp_new (EpistemicMDP
+// carries two 256-element arrays), exactly as it does on its sibling
+// tests/stdlib/epistemic/test_dp_value_iteration.sio.
+
+// Import order matters (it is the order of tests/stdlib/epistemic/
+// test_dp_robust_value_iteration.sio): knightian first, so its PBox is the
+// first struct with a `variance` field, and dp before knowledge.
+use epistemic::knightian::{PBox, pb_new}
+use epistemic::dp::{EpistemicMDP, mdp_new, mdp_set_trans, value_iteration}
+use epistemic::knowledge::{Epistemic, ep_new}
+
+fn near(a: f64, b: f64, tol: f64) -> bool with Mut, Div, Panic {
+    let d = if a > b { a - b } else { b - a }
+    d <= tol
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    // One state, one action, a self-loop with probability 1 and reward
+    // 1.0 +/- var 0.04 (confidence 900); gamma = 0.5. The fixed point is
+    // val = 1 / (1 - 0.5) = 2, var = 0.04 / (1 - 0.25) = 0.0533..., conf = 900.
+    let unused_box = pb_new(0.0, 1.0, 0.0, 1)
+    var m = mdp_new(1, 1, 0.5)
+    mdp_set_trans(&! m, 0, 0, 0, 1.0, ep_new(1.0, 0.04, 900))
+    let V = value_iteration(&m, 1e-12, 200)
+    let v0 = V[0]
+    print("val=") print_f64(v0.val)
+    print(" var=") print_f64(v0.variance)
+    print(" conf=") print_int(v0.confidence)
+    print("\n")
+    if !near(v0.val, 2.0, 1e-6) { println("FAIL val") return 1 }
+    if !near(v0.variance, 0.04 / 0.75, 1e-6) { println("FAIL variance") return 1 }
+    if v0.confidence != 900 { println("FAIL confidence") return 1 }
+    println("FIELD_GUESS_1386_PASS")
+    return 0
+}

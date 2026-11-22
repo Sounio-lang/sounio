@@ -27,6 +27,14 @@
 # of files that are not tests. If the harness ever starts recursing, this gate
 # must follow it.
 #
+# Second check: an annotation the harness never reads. The harness reads only
+# the header -- the leading run of `//@ ` lines, `//` comment lines and blank
+# lines -- and stops at the first other line. A `//@ ` line after that point is
+# dead text that reads as if it applied. Measured 2026-10-06: three run-pass
+# files carried `//@ requires: madaros` and `//@ expect-stdout:` after a bare
+# `//` line, which the harness then treated as the end of the header, so the
+# lean_single Full Test Suite ran them ungated with no stdout assertion.
+#
 # Run with --selftest (or SELFTEST=1) to exercise the controls alone; they run
 # automatically before the real check.
 set -euo pipefail
@@ -56,6 +64,31 @@ scan_dir() {
     fi
   done
   return "$fail"
+}
+
+# Kept in sync with the header loop in run_sio_test_suite_v2.sh: same three
+# line shapes, a bare `//` included. Prints `file:line: text` per late line.
+late_annotations() {
+  awk '
+    FNR == 1 { in_header = 1 }
+    in_header && ($0 ~ /^[[:space:]]*\/\/@ / || $0 ~ /^[[:space:]]*\/\/([[:space:]]|$)/ || $0 ~ /^[[:space:]]*$/) { next }
+    { in_header = 0 }
+    /^[[:space:]]*\/\/@ / { print FILENAME ":" FNR ": " $0 }
+  ' "$@"
+}
+
+scan_late() {
+  local dir="$1" hits
+  shopt -s nullglob
+  local files=("$dir"/*.sio)
+  [[ ${#files[@]} -gt 0 ]] || return 0
+  hits="$(late_annotations "${files[@]}")"
+  [[ -z "$hits" ]] && return 0
+  printf '%s\n' "$hits" >&2
+  echo "  The harness stops reading annotations at the first line that is not" >&2
+  echo "  \`//@ \`, a \`//\` comment or blank, so the lines above are never applied." >&2
+  echo "  Move them into the leading comment block." >&2
+  return 1
 }
 
 selftest() {
@@ -91,14 +124,33 @@ selftest() {
     rm -f "$tmp/ok.sio"
   done
 
-  # 4. null control -- an empty directory must pass, so the refusals above are
+  # 4. a //@ line after code is never read by the harness and must be refused
+  printf '//@ run-pass\nfn main() -> i64 { 0 }\n//@ requires: madaros\n' > "$tmp/late_ann.sio"
+  if scan_late "$tmp" 2>/dev/null; then
+    echo "selftest FAILED: a //@ line past the header was accepted" >&2
+    return 1
+  fi
+  rm -f "$tmp/late_ann.sio"
+
+  # 5. a bare `//` is a header comment line, not the end of the header -- the
+  #    shape of the 2026-10-06 defect; refusing it would mean the gate and the
+  #    harness disagree about where the header ends. CRLF variant included.
+  printf '//@ run-pass\n// text\n//\n//@ requires: madaros\n\nfn main() -> i64 { 0 }\n' > "$tmp/bare.sio"
+  printf '//@ run-pass\r\n//\r\n//@ requires: madaros\r\nfn main() -> i64 { 0 }\r\n' > "$tmp/bare_crlf.sio"
+  if ! scan_late "$tmp" 2>/dev/null; then
+    echo "selftest FAILED: an annotation after a bare // was refused" >&2
+    return 1
+  fi
+  rm -f "$tmp/bare.sio" "$tmp/bare_crlf.sio"
+
+  # 6. null control -- an empty directory must pass, so the refusals above are
   #    attributable to the files rather than to scan_dir failing generically
-  if ! scan_dir "$tmp" 2>/dev/null; then
+  if ! scan_dir "$tmp" 2>/dev/null || ! scan_late "$tmp" 2>/dev/null; then
     echo "selftest FAILED: an empty directory was refused" >&2
     return 1
   fi
 
-  echo "test annotation selftest passed (2 refusals + 6 accepted forms + null control)."
+  echo "test annotation selftest passed (3 refusals + 7 accepted forms + null control)."
 }
 
 selftest
@@ -110,9 +162,11 @@ fi
 RC=0
 scan_dir tests/run-pass || RC=1
 scan_dir tests/compile-fail || RC=1
+scan_late tests/run-pass || RC=1
+scan_late tests/compile-fail || RC=1
 
 if [[ "$RC" -ne 0 ]]; then
   exit 1
 fi
 
-echo "test annotation coverage passed: every top-level run-pass and compile-fail file either runs or declares its skip."
+echo "test annotation coverage passed: every top-level run-pass and compile-fail file either runs or declares its skip, and every //@ line is inside the header the harness reads."
