@@ -1,1 +1,0 @@
-The committed bootstrap paste, the duplicate seed and manifest copies under `bootstrap/.state/`, and the retired Poseidon VM were removed. Generated bootstrap output still lands in `build/`, and the seeds and manifest under `bootstrap/seeds/` and `bootstrap/artifacts/` are unchanged.
