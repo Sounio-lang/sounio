@@ -213,9 +213,6 @@ fn dead_func() -> () with IO {
 }
 EOF
 
-# Run analyzer
-python3 tools/analyze/dead_code.py /tmp/test.sio
-
 # Test LSP code actions
 python3 /tmp/test_code_action.py
 ```
@@ -252,16 +249,6 @@ bash tools/lsp/test_smoke.sh
 - Shows lightbulb icon on hover
 - Provides "Quick Fix" menu
 - Applies edits automatically
-
-### With CI/CD
-```yaml
-- name: Check for dead code
-  run: |
-    if python3 tools/analyze/dead_code.py ./src --format json | jq -e '.summary.total > 0'; then
-      echo "Dead code detected! Run 'sounio fix' to clean up."
-      exit 1
-    fi
-```
 
 ## Success Criteria ✅
 

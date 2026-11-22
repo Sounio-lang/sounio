@@ -1,0 +1,1 @@
+Loading or storing a field through `&T` or `&!T` no longer treats a bare handle id, or an unboxed object base, as an address to dereference. Implicit and explicit borrows both reach the field instead of faulting.

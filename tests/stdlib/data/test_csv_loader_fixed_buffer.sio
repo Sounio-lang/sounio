@@ -1,0 +1,75 @@
+//@ run-pass
+//@ expect-stdout: DATA_CSV_LOADER_FIXED_PASS
+// stdlib/data/csv_loader.sio on fixed-capacity storage: parsing, the CSR
+// adjacency, and fail-closed statuses for input that does not fit or does not
+// parse (no partial network, no field read as 0).
+use data::csv_loader::*
+
+fn edges_text(count: i64) -> string with Mut {
+    var s = ""
+    var i: i64 = 0
+    while i < count {
+        s = s ++ "0,1\n"
+        i = i + 1
+    }
+    s
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var fails: i64 = 0
+
+    if !run_csv_loader_tests() { println("FAIL self-tests"); fails = fails + 1 }
+
+    // Weighted parse with spaces, a comment, a self-loop and exponent notation.
+    let net = parse_edge_list("# w\n 0 , 2 , 1.5\n2,2,2.5e-1\n3,1,4\n")
+    if net.status != CSV_OK { println("FAIL status"); fails = fails + 1 }
+    if net.num_nodes != 4 || net.num_edges != 3 || !net.weighted { println("FAIL shape"); fails = fails + 1 }
+    if net.edges[0].weight != 1.5 || net.edges[1].weight != 0.25 || net.edges[2].weight != 4.0 { println("FAIL weights"); fails = fails + 1 }
+    if !validate_edge_list(&net) { println("FAIL validate"); fails = fails + 1 }
+
+    // CSR: node 0 -> [2]; node 1 -> [3]; node 2 -> [0, 2] (self-loop once); node 3 -> [1].
+    let adj = to_weighted_adjacency(&net)
+    if adj.status != CSV_OK || adj.num_entries != 5 { println("FAIL csr entries"); fails = fails + 1 }
+    if adjacency_degree(&adj, 2) != 2 { println("FAIL degree 2"); fails = fails + 1 }
+    let n20 = adjacency_neighbor(&adj, 2, 0)
+    let n21 = adjacency_neighbor(&adj, 2, 1)
+    if n20.neighbor != 0 || n20.weight != 1.5 || n21.neighbor != 2 || n21.weight != 0.25 { println("FAIL csr order"); fails = fails + 1 }
+    let unw = to_adjacency_list(&net)
+    let u31 = adjacency_neighbor(&unw, 3, 0)
+    if u31.neighbor != 1 || u31.weight != 1.0 { println("FAIL unweighted csr"); fails = fails + 1 }
+
+    // Exactly CSV_MAX_EDGES edges fit; one more fails closed with no edges kept.
+    let full = parse_edge_list(edges_text(CSV_MAX_EDGES))
+    if full.status != CSV_OK || full.num_edges != CSV_MAX_EDGES { println("FAIL capacity fit"); fails = fails + 1 }
+    let over = parse_edge_list(edges_text(CSV_MAX_EDGES + 1))
+    if over.status != CSV_ERR_EDGE_CAPACITY || over.num_edges != 0 || over.num_nodes != 0 { println("FAIL edge overflow"); fails = fails + 1 }
+    let big = parse_edge_list("0,1\n1,512\n")
+    if big.status != CSV_ERR_NODE_CAPACITY || big.num_edges != 0 { println("FAIL node overflow"); fails = fails + 1 }
+    let big_adj = to_adjacency_list(&big)
+    if big_adj.status != CSV_ERR_NODE_CAPACITY || big_adj.num_entries != 0 { println("FAIL status carried to csr"); fails = fails + 1 }
+
+    // Malformed lines are refused, not read as node 0.
+    let hdr = parse_edge_list("source,target\n0,1\n")
+    if hdr.status != CSV_ERR_MALFORMED || hdr.num_edges != 0 { println("FAIL header"); fails = fails + 1 }
+    let neg = parse_edge_list("0,-1\n")
+    if neg.status != CSV_ERR_MALFORMED { println("FAIL negative id"); fails = fails + 1 }
+    let one = parse_edge_list("7\n")
+    if one.status != CSV_ERR_MALFORMED { println("FAIL one field"); fails = fails + 1 }
+    let four = parse_edge_list("0,1,2,3\n")
+    if four.status != CSV_ERR_MALFORMED { println("FAIL four fields"); fails = fails + 1 }
+    let badw = parse_edge_list("0,1,x\n")
+    if badw.status != CSV_ERR_MALFORMED { println("FAIL bad weight"); fails = fails + 1 }
+    let file = load_edge_list("edges.csv")
+    if file.status != CSV_ERR_UNSUPPORTED { println("FAIL load status"); fails = fails + 1 }
+
+    // Field conversions.
+    if csv_parse_f64(" 0.7 ") != 0.7 || csv_parse_f64("-12.5e2") != 0.0 - 1250.0 { println("FAIL csv_parse_f64"); fails = fails + 1 }
+    if csv_parse_i64("-42") != 0 - 42 || csv_field_ok("abc") { println("FAIL csv_parse_i64/field_ok"); fails = fails + 1 }
+
+    if fails != 0 {
+        println("DATA_CSV_LOADER_FIXED_FAIL")
+        return 1
+    }
+    println("DATA_CSV_LOADER_FIXED_PASS")
+    0
+}
