@@ -23,7 +23,7 @@ function check(w) {
  for(const input of ['formal/**','!formal/**/.lake/**','scripts/ci/*lean*.sh','scripts/ci/epistemic_measure_correspondence_gate.sh','.github/workflows/ci.yml']) assert(key?.includes("'"+input+"'"),'missing key input: '+input);
  assert(key.includes('runner.os')&&key.includes('runner.arch'),'platform identity required');
  const baseline=job.slice(0,a)+job.slice(b);
- assert.equal(crypto.createHash('sha256').update(baseline).digest('hex'),'24a59bdac191f7783423cc7e348b7c83dd4a10ab34577b1c9042c9aed321687a','mandatory proof gates, builds, conditions, or audit commands changed');
+ assert.equal(crypto.createHash('sha256').update(baseline).digest('hex'),'7e5cc907ef6383414148b323e2312e69b403b2003cb78f8bb563cc90f3f751d1','mandatory proof gates, builds, conditions, or audit commands changed');
  const fast=w.slice(w.indexOf('  fast-checks:\n'),w.indexOf('\n  contracts-core:'));
  assert(fast.includes('run: node scripts/ci/lean_cache_contract.mjs "$GITHUB_WORKSPACE" --selftest'),'contract must run in Fast Checks');
 }
@@ -40,6 +40,7 @@ if(process.argv.includes('--selftest')) {
   s=>s.replace('          lake build Bootstrap x86run\n','          true\n'),
   s=>s.replace('          lake build Bootstrap x86run\n','          lake build Bootstrap\n'),
   s=>s.replace('run: bash bootstrap/model/sporos_diff.sh 500','run: echo skipped'),
+  s=>s.replace('run: sh bootstrap/model/sporos_provlen_gate.sh 500','run: echo skipped'),
   s=>s.replace('run: bash bootstrap/model/x86int_diff_gate.sh 200000 1','run: echo skipped'),
   s=>s.replace('run: bash bootstrap/model/x86env_diff_gate.sh 2000 1','run: echo skipped'),
   s=>s.replace('run: bash bootstrap/model/x86dec_fuzz_gate.sh 5000 100000 1','run: echo skipped'),
