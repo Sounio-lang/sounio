@@ -435,7 +435,10 @@ fn make_oct_subalgebra() -> Sed {
 // ============================================================================
 
 fn pr_i32(x: i32) with IO, Panic {
-    if x < 0 { print("-"); pr_i32(0 - x) }
+    // 0 - i32::MIN overflows back to i32::MIN, so negating it recursed
+    // forever (#1489); print it directly.
+    if x == 0 - 2147483647 - 1 { print("-2147483648") }
+    else if x < 0 { print("-"); pr_i32(0 - x) }
     else if x == 0 { print("0") }
     else {
         if x >= 10 { pr_i32(x / 10) }
@@ -448,8 +451,26 @@ fn pr_i32(x: i32) with IO, Panic {
     }
 }
 
+// Fixed-point printing goes through `as i32`, which is only meaningful below
+// 2^31. Larger magnitudes (and the 1e30 "no value" sentinel that used to
+// reach here, #1489) are printed as mantissa e+exponent instead of being cast.
+fn pr_f64_sci(x: f64, dec: i32) with IO, Mut, Div, Panic {
+    var m = x
+    var e = 0
+    while m >= 10.0 && e < 400 {
+        m = m / 10.0
+        e = e + 1
+    }
+    pr_f64(m, dec)
+    print("e+")
+    pr_i32(e)
+}
+
 fn pr_f64(x: f64, dec: i32) with IO, Mut, Div, Panic {
-    if x < 0.0 { print("-"); pr_f64(0.0 - x, dec) }
+    if x != x { print("nan") }
+    else if x < 0.0 { print("-"); pr_f64(0.0 - x, dec) }
+    else if x > 1.0e308 { print("inf") }
+    else if x >= 2147483647.0 { pr_f64_sci(x, dec) }
     else {
         let ip = x as i32
         pr_i32(ip)
@@ -510,7 +531,10 @@ fn run_experiment(name: [i32; 0], c: Sed, max_iter: i32) -> [f64; 16] with IO, M
     print("  Null dims:  "); pr_i32(null_dim); println("/16")
     print("  Anisotropy: "); pr_f64(aniso, 6); println("")
     print("  Max |eig|:  "); pr_f64(max_eig, 6); println("")
-    print("  Min |eig|:  "); pr_f64(min_eig_nz, 6); println("")
+    // min_eig_nz keeps its 1e30 sentinel when every eigenvalue is null.
+    print("  Min |eig|:  ")
+    if null_dim == 16 { print("n/a (all 16 eigenvalues null)") } else { pr_f64(min_eig_nz, 6) }
+    println("")
 
     return eigs
 }
@@ -619,6 +643,7 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     println("  2. Do ZD directions produce different spectra? (Exp 2)")
     println("  3. Are eigenvalue RATIOS norm-independent? (Exp 3)")
     println("================================================================")
+    println("SEDENION_HESSIAN_DEMO_DONE")
 
     0
 }

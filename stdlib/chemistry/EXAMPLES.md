@@ -58,7 +58,7 @@ Literature (key refs from deep research):
 - UQ in silico chem: ACS Chem. Rev. 2026 - mostly external tools; Sounio makes it native
 - PBPK unc: multiple EPA/EMA papers on param unc propagation in models
 
-Sounio only (no other language has this integrated):
+To our knowledge, no other language has this integrated:
 - Write CRN, rates epistemic, stoich matnm, solve propagates unc natively + effects + dual.
 - Run general builder + EState GUM + report per GUM.
 - All in one file, checkable, effect-tracked, units-aware.

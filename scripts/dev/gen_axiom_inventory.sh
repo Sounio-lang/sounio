@@ -146,7 +146,10 @@ w("files say in comments that they use no `sorry` or no axioms).")
 w("")
 w("| Count | Value |")
 w("|---|---:|")
-w(f"| `.lean` files scanned | {len(paths)} |")
+# No row for the number of files scanned: it changes with every new file, so two
+# pull requests that each add a clean .lean file conflicted in the merge queue
+# (merge group of #3597 and #3602, 2026-11-16: 334 vs 335) although neither
+# changed what this inventory is for. The count is still printed on stdout.
 w(f"| `sorry` in code | {n_sorry} |")
 w(f"| `axiom` declarations | {n_ax}, in {len(axioms)} files |")
 w(f"| `native_decide` uses | {n_nd}, in {len(nd)} files |")

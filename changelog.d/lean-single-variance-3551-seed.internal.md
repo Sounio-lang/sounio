@@ -1,0 +1,1 @@
+Refresh the legacy lean_single bootstrap seed and its verified provenance receipt for the transcendental variance correction in #3551. The seed reproduces itself at g1 == g2 and passes deterministic self-compilation and receipt provenance checks.

@@ -4,6 +4,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=../lib/classify_compile.sh
+source "$ROOT_DIR/scripts/lib/classify_compile.sh"
 MADAROS="${SOUNIO_MADAROS_VISIBILITY_CONTEXT_BIN:-$ROOT_DIR/bin/madaros}"
 RAW_MADAROS="${MADAROS_RAW_BIN:-}"
 KEEP_WORK="${SOUNIO_MADAROS_VISIBILITY_CONTEXT_KEEP:-0}"
@@ -144,6 +146,8 @@ expect_private_rejection() {
     cat "$log" >&2
     fail "$label must reject with rc=1, got rc=$rc"
   }
+  # rc alone is not a refusal: a crash, timeout or OOM kill is not one (#2425).
+  sounio_expect_failed_exit "$rc" "$log" || { cat "$log" >&2; fail "$label: not a clean refusal: $(sounio_refusal_reason)"; }
   [[ "$(count_marker 'error[E' "$log")" -eq 1 ]] || {
     cat "$log" >&2
     fail "$label must emit exactly one compiler diagnostic"

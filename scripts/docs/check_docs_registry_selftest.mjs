@@ -244,8 +244,8 @@ async function main() {
     const restamped = await readFile(headerlessPath, 'utf8');
     assert(restamped.startsWith('<!-- docs:meta\n'), 'a genuinely headerless doc was not given a header');
     assert(
-      restamped.includes('last_validated: 2026-03-07'),
-      'a headerless doc was not stamped with the default provenance placeholder'
+      restamped.includes('last_validated: unvalidated') && restamped.includes('validated_by: none'),
+      'a headerless doc was not marked unvalidated (#1240: no invented date, no invented validator)'
     );
     const headerlessCheck = await runNode(registryCheckScript, headerlessDir);
     assert(headerlessCheck.ok, `Checker rejected a freshly stamped headerless doc:\n${headerlessCheck.stderr || headerlessCheck.stdout}`);
@@ -281,13 +281,112 @@ async function main() {
     assert(impossibleSync.ok, `Impossible-date sync failed:\n${impossibleSync.stderr || impossibleSync.stdout}`);
     const impossibleAfterSync = await readFile(impossiblePath, 'utf8');
     assert(
-      impossibleAfterSync.includes('last_validated: 2026-03-07'),
-      'the sync PRESERVED an impossible date instead of falling back to the default'
+      impossibleAfterSync.includes('last_validated: unvalidated'),
+      'the sync PRESERVED an impossible date instead of falling back to the unvalidated marker'
     );
     const impossibleCheckAfterSync = await runNode(registryCheckScript, impossibleDir);
     assert(
       impossibleCheckAfterSync.ok,
       `Checker rejected the fallback-stamped doc:\n${impossibleCheckAfterSync.stderr || impossibleCheckAfterSync.stdout}`
+    );
+
+    // #1240: the retired generator placeholder (2026-03-07, older than the
+    // repository) is shaped like a record and is not one. The generator never
+    // writes it any more; the checker reports every document that still
+    // carries it, and a sync does not invent a record in its place.
+    const legacyDir = await cloneFixture(baseDir, 'legacy-placeholder');
+    cleanupPaths.push(legacyDir);
+    const legacyPath = path.join(legacyDir, 'docs/features/GPU_RUNTIME.md');
+    const legacyContent = (await readFile(legacyPath, 'utf8'))
+      .replace(/^last_validated: .*$/m, 'last_validated: 2026-03-07')
+      .replace(/^validated_by: .*$/m, 'validated_by: A1');
+    await writeFile(legacyPath, legacyContent, 'utf8');
+    await expectFailure(
+      await runNode(registryCheckScript, legacyDir),
+      'retired placeholder is valid only in the stale authority-matrix snapshot',
+      'legacy placeholder rejection outside the generated authority matrix'
+    );
+    const legacySync = await runNode(syncScript, legacyDir, ['--snapshot']);
+    assert(legacySync.ok, `Legacy-placeholder sync failed:\n${legacySync.stderr || legacySync.stdout}`);
+    const legacyAfterSync = await readFile(legacyPath, 'utf8');
+    assert(
+      legacyAfterSync.includes('last_validated: unvalidated')
+        && legacyAfterSync.includes('validated_by: none'),
+      'the sync preserved the retired 2026-03-07 placeholder as validation provenance'
+    );
+    const legacyCheckAfterSync = await runNode(registryCheckScript, legacyDir);
+    assert(
+      legacyCheckAfterSync.ok,
+      `Checker rejected the fallback-stamped legacy doc:\n${legacyCheckAfterSync.stderr || legacyCheckAfterSync.stdout}`
+    );
+
+    // The authority matrix is a generated snapshot. Until its dedicated
+    // refresh lands, only its exact historical placeholder pair may be
+    // reported as stale in normal mode; strict snapshot mode rejects it.
+    const staleMatrixDir = await cloneFixture(baseDir, 'stale-matrix-snapshot');
+    cleanupPaths.push(staleMatrixDir);
+    const matrixRelPath = 'docs/governance/DOCS_AUTHORITY_MATRIX.md';
+    const matrixPath = path.join(staleMatrixDir, matrixRelPath);
+    const currentMatrix = await readFile(matrixPath, 'utf8');
+    const legacyMatrix = currentMatrix.replace('last_validated: unvalidated', 'last_validated: 2026-03-07').replace('validated_by: none', 'validated_by: A1');
+    await writeFile(matrixPath, legacyMatrix, 'utf8');
+    const staleMatrixCheck = await runNode(registryCheckScript, staleMatrixDir);
+    assert(
+      staleMatrixCheck.ok
+        && staleMatrixCheck.stdout.includes('stale generated snapshot docs/governance/DOCS_AUTHORITY_MATRIX.md'),
+      `checker did not report the exact stale matrix pair:\n${staleMatrixCheck.stderr || staleMatrixCheck.stdout}`
+    );
+    await expectFailure(
+      await runNode(registryCheckScript, staleMatrixDir, [], STRICT),
+      'has stale generated snapshot provenance',
+      'strict snapshot rejection of the legacy authority matrix'
+    );
+
+    const malformedMatrixDir = await cloneFixture(baseDir, 'malformed-matrix-provenance');
+    cleanupPaths.push(malformedMatrixDir);
+    const malformedMatrixPath = path.join(malformedMatrixDir, matrixRelPath);
+    const malformedMatrix = (await readFile(malformedMatrixPath, 'utf8')).replace('last_validated: unvalidated', 'last_validated: 2026-13-45').replace('validated_by: none', 'validated_by: A1');
+    await writeFile(malformedMatrixPath, malformedMatrix, 'utf8');
+    await expectFailure(
+      await runNode(registryCheckScript, malformedMatrixDir),
+      'expected a YYYY-MM-DD date, got "2026-13-45"',
+      'malformed authority-matrix provenance rejection'
+    );
+
+    const blankValidatorMatrixDir = await cloneFixture(baseDir, 'blank-validator-matrix');
+    cleanupPaths.push(blankValidatorMatrixDir);
+    const blankValidatorMatrixPath = path.join(blankValidatorMatrixDir, matrixRelPath);
+    const blankValidatorMatrix = (await readFile(blankValidatorMatrixPath, 'utf8')).replace('last_validated: unvalidated', 'last_validated: 2026-08-16').replace('validated_by: none', 'validated_by: ');
+    await writeFile(blankValidatorMatrixPath, blankValidatorMatrix, 'utf8');
+    await expectFailure(
+      await runNode(registryCheckScript, blankValidatorMatrixDir),
+      'expected a non-empty validator, got ""',
+      'blank authority-matrix validator rejection'
+    );
+
+    const structuralMatrixDir = await cloneFixture(baseDir, 'structural-matrix-tamper');
+    cleanupPaths.push(structuralMatrixDir);
+    const structuralMatrixPath = path.join(structuralMatrixDir, matrixRelPath);
+    const structuralMatrix = (await readFile(structuralMatrixPath, 'utf8')).replace('authority: repo_only', 'authority: edited');
+    await writeFile(structuralMatrixPath, structuralMatrix, 'utf8');
+    await expectFailure(
+      await runNode(registryCheckScript, structuralMatrixDir),
+      'metadata mismatch for authority',
+      'authority-matrix structural metadata tamper rejection'
+    );
+
+    // An unvalidated document names no validator.
+    const unvalByDir = await cloneFixture(baseDir, 'unvalidated-with-validator');
+    cleanupPaths.push(unvalByDir);
+    const unvalByPath = path.join(unvalByDir, 'docs/features/GPU_RUNTIME.md');
+    const unvalByContent = (await readFile(unvalByPath, 'utf8'))
+      .replace(/^last_validated: .*$/m, 'last_validated: unvalidated')
+      .replace(/^validated_by: .*$/m, 'validated_by: claude');
+    await writeFile(unvalByPath, unvalByContent, 'utf8');
+    await expectFailure(
+      await runNode(registryCheckScript, unvalByDir),
+      'an unvalidated document names no validator',
+      'unvalidated marker with a validator rejection'
     );
 
     // 2026-08-18 corpus-race regression: DOCS_ACCEPTANCE_REPORT.md used to
@@ -378,7 +477,7 @@ async function main() {
     );
 
     console.log(
-      'Docs registry selftest passed (5 failure scenarios + baseline + 4 provenance-preserve scenarios + 2 corpus-race scenarios + 4 snapshot-race scenarios).'
+      'Docs registry selftest passed (5 failure scenarios + baseline + 4 provenance-preserve scenarios + matrix stale-placeholder, strict-mode, malformed-provenance, blank-validator, structural-tamper, and non-matrix legacy rejection scenarios + 2 corpus-race scenarios + 4 snapshot-race scenarios).'
     );
   } finally {
     await Promise.all(cleanupPaths.map((target) => rm(target, { recursive: true, force: true })));

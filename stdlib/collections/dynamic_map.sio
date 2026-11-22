@@ -1,0 +1,103 @@
+// Dynamic i64->i64 map. Slots are key/value/state i64 triples.
+// State 0 empty,1 used,2 tombstone. Status 0 OK,1 invalid,2 budget,3 alloc,
+// 4 missing. Budget covers the retained payload; rehash temporarily owns both.
+pub linear struct DynamicMap {
+    ptr:*mut i64,size:i64,capacity:i64,max_bytes:i64,status:i64,
+}
+pub struct MapValue {pub value:i64,pub status:i64}
+pub fn dynamic_map_new(max_bytes:i64)->DynamicMap {
+    DynamicMap {ptr:0 as *mut i64,size:0,capacity:0,max_bytes:max_bytes,status:if max_bytes<0 {1} else {0}}
+}
+pub fn dynamic_map_len(m:&DynamicMap)->i64 {m.size}
+pub fn dynamic_map_status(m:&DynamicMap)->i64 {m.status}
+fn dynamic_map_hash(key:i64)->i64 { (key ^ (key >> 32)) & 9223372036854775807 }
+fn dynamic_map_slot(ptr:*mut i64,cap:i64,key:i64)->i64 with Mut,Div {
+    var index=dynamic_map_hash(key)%cap
+    var first_deleted:i64=0-1
+    var probes:i64=0
+    while probes<cap {
+        let state=read_i64(ptr,index*3+2)
+        if state==0 {if first_deleted>=0 {return first_deleted};return index}
+        if state==1 {if read_i64(ptr,index*3)==key {return index}}
+        else {if first_deleted<0 {first_deleted=index}}
+        index=(index+1)%cap;probes=probes+1
+    }
+    return first_deleted
+}
+pub fn dynamic_map_reserve(m:&!DynamicMap,n:i64)->i64 with Alloc,Mut,Div {
+    if m.status!=0 {return m.status}
+    if n<0 {return 1}
+    if n>m.max_bytes/24 {return 2}
+    if n<=m.capacity {return 0}
+    let next=heap_alloc(n*24) as *mut i64
+    if (next as i64)<=0 {return 3}
+    var i:i64=0
+    while i<n {write_i64(next,i*3+2,0);i=i+1}
+    i=0
+    while i<m.capacity {
+        if read_i64(m.ptr,i*3+2)==1 {
+            let key=read_i64(m.ptr,i*3)
+            let slot=dynamic_map_slot(next,n,key)
+            write_i64(next,slot*3,key)
+            write_i64(next,slot*3+1,read_i64(m.ptr,i*3+1))
+            write_i64(next,slot*3+2,1)
+        }
+        i=i+1
+    }
+    if m.capacity>0 {heap_free(m.ptr as *mut i8)}
+    m.ptr=next;m.capacity=n
+    return 0
+}
+pub fn dynamic_map_get(m:&DynamicMap,key:i64)->MapValue with Mut,Div {
+    if m.status!=0 {return MapValue {value:0,status:m.status}}
+    if m.capacity==0 {return MapValue {value:0,status:4}}
+    var index=dynamic_map_hash(key)%m.capacity
+    var probes:i64=0
+    while probes<m.capacity {
+        let state=read_i64(m.ptr,index*3+2)
+        if state==0 {return MapValue {value:0,status:4}}
+        if state==1 {if read_i64(m.ptr,index*3)==key {return MapValue {value:read_i64(m.ptr,index*3+1),status:0}}}
+        index=(index+1)%m.capacity;probes=probes+1
+    }
+    return MapValue {value:0,status:4}
+}
+pub fn dynamic_map_put(m:&!DynamicMap,key:i64,value:i64)->i64 with Alloc,Mut,Div {
+    if m.status!=0 {return m.status}
+    // Updates never require growth, even at the payload limit.
+    if m.capacity>0 {
+        let found=dynamic_map_get(m,key)
+        if found.status==0 {
+            let slot=dynamic_map_slot(m.ptr,m.capacity,key)
+            write_i64(m.ptr,slot*3+1,value)
+            return 0
+        }
+    }
+    let limit=m.max_bytes/24
+    if m.size>=limit {return 2}
+    if m.capacity==0 || m.size>=m.capacity-m.capacity/4 {
+        var next=if m.capacity==0 {8} else {m.capacity}
+        if next>limit/2 {next=limit} else {next=next*2}
+        if next>limit {next=limit}
+        let status=dynamic_map_reserve(m,next)
+        if status!=0 {return status}
+    }
+    let slot=dynamic_map_slot(m.ptr,m.capacity,key)
+    if slot<0 {return 2}
+    write_i64(m.ptr,slot*3,key)
+    write_i64(m.ptr,slot*3+1,value)
+    write_i64(m.ptr,slot*3+2,1)
+    m.size=m.size+1
+    return 0
+}
+pub fn dynamic_map_remove(m:&!DynamicMap,key:i64)->MapValue with Mut,Div {
+    let old=dynamic_map_get(m,key)
+    if old.status!=0 {return old}
+    let slot=dynamic_map_slot(m.ptr,m.capacity,key)
+    write_i64(m.ptr,slot*3+2,2)
+    m.size=m.size-1
+    return old
+}
+pub fn dynamic_map_close(m:DynamicMap) with Alloc {
+    let DynamicMap {ptr,size,capacity,max_bytes,status}=m
+    if capacity>0 {heap_free(ptr as *mut i8)}
+}

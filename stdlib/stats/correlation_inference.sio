@@ -1,0 +1,116 @@
+// Checked correlation inference; model assumptions are caller declarations.
+// Coefficient validity and inferential availability are separate contracts.
+use stats::correlation_core::{CorrelationEstimate,pearson_checked,spearman_checked}
+use stats::student_t::{t_two_tail}
+use stats::bca_normal::{bca_normal_quantile}
+use math::pure::{sqrt,ln_checked,exp,is_finite}
+pub struct CorrelationInference {
+ pub status:i64,
+ pub method:i64,
+ pub n:i64,
+ pub coefficient:f64,
+ pub df:f64,
+ pub t_stat:f64,
+ pub p_value:f64,
+ pub ci_lower:f64,
+ pub ci_upper:f64,
+ pub level:f64,
+ pub p_status:i64,
+ pub ci_status:i64,
+ pub calibration:i64,
+}
+fn correlation_fisher_z(r:f64)->f64 with Mut,Div,Panic {
+ if r> -0.25 && r<0.25 {
+  let square=r*r
+  var power=r
+  var sum=r
+  var j:i64=1
+  while j<32 {
+   power=power*square
+   sum=sum+power/((2*j+1) as f64)
+   j=j+1
+  }
+  return sum
+ }
+ let a=ln_checked(1.0+r)
+ let b=ln_checked(1.0-r)
+ return 0.5*(a.value-b.value)
+}
+fn correlation_tanh(z:f64)->f64 with Mut,Div,Panic {
+ let a=if z<0.0{-z}else{z}
+ if a<1e-8{return z}
+ var magnitude:f64=0.0
+ if a<0.25 {
+  let x=2.0*a
+  var term=x
+  var total=x
+  var j:i64=2
+  while j<=32 {
+   term=term*x/(j as f64)
+   total=total+term
+   j=j+1
+  }
+  magnitude=total/(2.0+total)
+ } else {
+  let e=exp(-2.0*a)
+  magnitude=(1.0-e)/(1.0+e)
+ }
+ if z<0.0{return -magnitude}
+ return magnitude
+}
+fn correlation_inference_result(c:CorrelationEstimate,method:i64)->CorrelationInference {
+ CorrelationInference{status:c.status,method:method,n:c.n,coefficient:c.coefficient,
+ df:0.0,t_stat:0.0,p_value:0.0,ci_lower:0.0,ci_upper:0.0,level:0.0,
+ p_status:1,ci_status:1,calibration:0}
+}
+fn correlation_apply_t(c:CorrelationEstimate,r:&!CorrelationInference,calibration:i64) with Mut,Div,Panic {
+ if c.n<3 {r.p_status=2;return}
+ if c.residual_ratio<=0.0 {r.p_status=3;return}
+ let df=(c.n-2) as f64
+ let t=(c.coefficient*sqrt(df))/c.residual_ratio
+ if !is_finite(t){r.p_status=4;return}
+ let p=t_two_tail(t,df)
+ if !is_finite(p) || p<0.0 || p>1.0 {r.p_status=4;return}
+ r.df=df
+ r.t_stat=t
+ r.p_value=p
+ r.p_status=0
+ r.calibration=calibration
+}
+pub fn pearson_inference(x:&[f64;256],y:&[f64;256],n:i64,conf:f64,
+ assume_normal:bool)->CorrelationInference with Mut,Div,Panic {
+ let c=pearson_checked(x,y,n)
+ var r=correlation_inference_result(c,1)
+ if c.status!=0{return r}
+ if !is_finite(conf) || conf<=0.0 || conf>=1.0 {
+  r.status=5
+  r.coefficient=0.0
+  return r
+ }
+ if !assume_normal{return r}
+ correlation_apply_t(c,&!r,1)
+ if n<4 {r.ci_status=2;return r}
+ if c.residual_ratio<=0.0 || c.coefficient<= -1.0 || c.coefficient>=1.0 {
+  r.ci_status=3;return r
+ }
+ let q=bca_normal_quantile(0.5+0.5*conf)
+ if q.status!=0 {r.ci_status=4;return r}
+ let z=correlation_fisher_z(c.coefficient)
+ let width=q.value/sqrt((n-3) as f64)
+ let lower=correlation_tanh(z-width)
+ let upper=correlation_tanh(z+width)
+ if !is_finite(lower) || !is_finite(upper) || lower>upper {r.ci_status=5;return r}
+ r.ci_lower=lower
+ r.ci_upper=upper
+ r.level=conf
+ r.ci_status=0
+ return r
+}
+pub fn spearman_inference(x:&[f64;256],y:&[f64;256],n:i64,
+ allow_t_approx:bool)->CorrelationInference with Mut,Div,Panic {
+ let c=spearman_checked(x,y,n)
+ var r=correlation_inference_result(c,2)
+ if c.status!=0 || !allow_t_approx{return r}
+ correlation_apply_t(c,&!r,2)
+ return r
+}

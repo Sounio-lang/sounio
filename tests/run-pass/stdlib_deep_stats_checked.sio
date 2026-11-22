@@ -1,0 +1,103 @@
+//@ run-pass
+//@ expect-stdout: DEEP STATS PASS
+use stats::regression::logistic::{logistic_fit_checked,logistic_probability,logistic_normal_two_tail}
+use stats::regression::robust::{robust_fit_checked}
+use math::pure::{is_finite}
+fn close(a:f64,b:f64,tolerance:f64)->bool {
+ let error=if a>b {a-b}else{b-a}
+ error<=tolerance
+}
+fn main()->i32 with IO,Mut,Div,Panic {
+ var a:[f64;2048]=[0.0;2048]
+ var y:[f64;256]=[0.0;256]
+ var i:i64=0
+ while i<256 {a[(i*8) as usize]=1.0 y[i as usize]=(i%2) as f64 i=i+1}
+ let balanced=logistic_fit_checked(&a,&y,256,1,0.0,50,1e-10)
+ assert(balanced.status==0)
+ assert(balanced.rank==1 && balanced.n==256 && balanced.p==1)
+ assert(balanced.coefficients[0]==0.0)
+ assert(balanced.inference_status==1 && !balanced.assumptions_assessed)
+ i=0
+ while i<256 {assert(balanced.probabilities[i as usize]==0.5) i=i+1}
+ // Closed intercept MLE: four successes/two failures => log(2).
+ y[0]=1.0;y[1]=1.0;y[2]=1.0;y[3]=1.0;y[4]=0.0;y[5]=0.0
+ let intercept=logistic_fit_checked(&a,&y,6,1,0.0,100,1e-10)
+ assert(intercept.status==0)
+ assert(close(intercept.coefficients[0],0.6931471805599453094,1e-9))
+ assert(intercept.score_norm<=1e-10 && intercept.step_norm<=1e-10)
+ // This mathematical normal tail discriminates the former sigmoid-as-normal bug.
+ let tail1=logistic_normal_two_tail(1.0)
+ let tail2=logistic_normal_two_tail(-2.0)
+ assert(tail1.status==0 && tail2.status==0)
+ assert(close(tail1.value,0.3173105078629141028,1e-12))
+ assert(close(tail2.value,0.0455002638963584144,1e-12))
+ assert(logistic_normal_two_tail(38.0).status!=0)
+ let positive=logistic_probability(40.0)
+ let negative=logistic_probability(-40.0)
+ assert(positive.status==0 && negative.status==0)
+ assert(positive.complement>0.0 && negative.probability>0.0)
+ assert(positive.complement==negative.probability)
+ y[0]=0.25
+ assert(logistic_fit_checked(&a,&y,6,1,0.0,50,1e-10).status==6)
+ assert(logistic_fit_checked(&a,&y,257,1,0.0,50,1e-10).status==1)
+ y[0]=1.0
+ i=0
+ while i<6 {y[i as usize]=1.0 i=i+1}
+ assert(logistic_fit_checked(&a,&y,6,1,0.0,50,1e-10).status==9)
+ y[0]=1.0;y[1]=1.0;y[2]=1.0;y[3]=1.0;y[4]=0.0;y[5]=0.0
+ assert(logistic_fit_checked(&a,&y,6,1,0.0,1,1e-12).status==7)
+ // A second identical column is rank deficient.
+ i=0
+ while i<6 {a[(i*8+1) as usize]=1.0 i=i+1}
+ assert(logistic_fit_checked(&a,&y,6,2,0.0,50,1e-10).status==3)
+ i=0
+ while i<6 {a[(i*8+1) as usize]=0.0 i=i+1}
+ y[0]= -2.0;y[1]= -1.0;y[2]=0.0;y[3]=1.0;y[4]=2.0;y[5]=20.0
+ let huber=robust_fit_checked(&a,&y,6,1,1,1.345,0.0,100,1e-9)
+ assert(huber.status==0)
+ let expected=1.345*(1.482602218505602*1.5)/5.0
+ assert(close(huber.coefficients[0],expected,1e-7))
+ assert(huber.inference_status==1 && !huber.assumptions_assessed)
+ // Returned weights must be derived from the returned residuals/final MAD.
+ i=0
+ while i<6 {
+  let r=huber.residuals[i as usize]/huber.residual_scale
+  let magnitude=if r<0.0 {-r}else{r}
+  let expected_weight=if magnitude<=1.345 {1.0}else{1.345/magnitude}
+  assert(close(huber.weights[i as usize],expected_weight,1e-12))
+  i=i+1
+ }
+ let tukey=robust_fit_checked(&a,&y,6,1,2,4.685,0.0,100,1e-9)
+ assert(tukey.status==0)
+ assert(close(tukey.coefficients[0],0.0,1e-7))
+ assert(tukey.weights[5]==0.0 && tukey.active_rows==5)
+ i=0
+ while i<6 {
+  let r=tukey.residuals[i as usize]/tukey.residual_scale
+  let magnitude=if r<0.0 {-r}else{r}
+  var expected_weight:f64=0.0
+  if magnitude<4.685 {
+   let u=r/4.685
+   expected_weight=((1.0-u)*(1.0+u))*((1.0-u)*(1.0+u))
+  }
+  assert(close(tukey.weights[i as usize],expected_weight,1e-12))
+  i=i+1
+ }
+ // Exact zero response has exact zero residual, zero scale and all weights one.
+ i=0
+ while i<256 {y[i as usize]=0.0 i=i+1}
+ let perfect=robust_fit_checked(&a,&y,256,1,2,4.685,0.0,50,1e-9)
+ assert(perfect.status==0 && perfect.residual_scale==0.0)
+ assert(perfect.coefficients[0]==0.0 && perfect.active_rows==256)
+ i=0
+ while i<256 {assert(perfect.weights[i as usize]==1.0) i=i+1}
+ // Zero MAD with a nonzero residual has explicit unavailable status.
+ y[5]=10.0
+ assert(robust_fit_checked(&a,&y,6,1,1,1.345,0.0,50,1e-9).status==8)
+ y[0]= -3.0;y[1]= -1.0;y[2]=1.0;y[3]=3.0
+ assert(robust_fit_checked(&a,&y,4,1,2,0.1,0.0,50,1e-9).status==3)
+ assert(robust_fit_checked(&a,&y,4,1,0,1.345,0.0,50,1e-9).status==5)
+ assert(robust_fit_checked(&a,&y,0,1,1,1.345,0.0,50,1e-9).status==1)
+ println("DEEP STATS PASS")
+ 0
+}

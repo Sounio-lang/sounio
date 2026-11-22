@@ -21,7 +21,7 @@ These pages have no locale-specific body content. To translate, create a `[lang]
 - [ ] `/changelog`
 - [ ] `/roadmap`
 - [ ] `/playground`
-- [ ] `/about/`
+- [x] `/about/` — corpo em pt-BR (visão e roteiro continuam em inglês)
 - [ ] `/about/vision`
 - [ ] `/about/roadmap`
 

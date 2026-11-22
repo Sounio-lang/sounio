@@ -2,8 +2,8 @@
 topic_id: repo.docs.handoff.madaros-fixed-array-call-boundary-alias-2026-07-14
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.handoff.madaros-fixed-array-call-boundary-alias-2026-07-14
 -->
 

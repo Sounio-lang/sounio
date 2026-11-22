@@ -6,6 +6,13 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/madaros-a1.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 export SOUNIO_STDLIB_PATH="$ROOT_DIR/stdlib"
 
+# BSD mktemp randomizes only trailing Xs; a suffix after XXXXXX can become a
+# literal name and make a later invocation collide. Receipts need no extension.
+if grep -Eq 'mktemp .*XXXXXX\.' "$ROOT_DIR/bin/madaros"; then
+  echo 'FAIL: launcher mktemp templates must end in Xs for macOS portability' >&2
+  exit 1
+fi
+
 set +e
 "$ROOT_DIR/bin/madaros" build "$WORK/does-not-exist.sio" -o "$WORK/out.elf" >"$WORK/log.txt" 2>&1
 rc=$?
@@ -93,4 +100,20 @@ if [[ -s "$WORK/bad.elf" ]]; then
   echo "FAIL: madaros left an artifact after a failed native build" >&2
   exit 1
 fi
+if grep -Fq 'Compilation successful!' "$WORK/bad-log.txt"; then
+  echo 'FAIL: failed compilation printed the public success marker' >&2
+  exit 1
+fi
+"$ROOT_DIR/bin/madaros" --science-boundary off build \
+  "$ROOT_DIR/tests/run-pass/a64_unit_literal_return.sio" -o "$WORK/good-program" \
+  >"$WORK/good-log.txt" 2>&1
+test -s "$WORK/good-program"
+grep -Fq 'Compilation successful!' "$WORK/good-log.txt"
+grep -Fxq "   Output: $WORK/good-program" "$WORK/good-log.txt"
+"$ROOT_DIR/bin/madaros" --science-boundary off run \
+  "$ROOT_DIR/tests/run-pass/a64_unit_literal_return.sio" >"$WORK/run-log.txt" 2>&1
+grep -q '^   Output: ' "$WORK/run-log.txt"
+sed '1,/^   Output: /d' "$WORK/run-log.txt" >"$WORK/program.stdout"
+sed -n 's|^//@ expect-stdout: ||p' "$ROOT_DIR/tests/run-pass/a64_unit_literal_return.sio" >"$WORK/program.expected"
+diff -u "$WORK/program.expected" "$WORK/program.stdout"
 echo "MADAROS_LAUNCHER_EXIT_STATUS_GATE_PASS"

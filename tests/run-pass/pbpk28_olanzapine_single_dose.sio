@@ -1,0 +1,90 @@
+//@ run-pass
+//@ timeout: 300
+//@ expect-stdout-contains: PBPK28_OLANZAPINE_SINGLE_DOSE_PASS
+//
+// Olanzapine PBPK28 oral scenario, single 10 mg dose, against the Zyprexa arm
+// of Sun et al. 2019 (Clin Pharmacol Drug Dev, doi 10.1002/cpdd.601; 48
+// healthy non-smokers, plasma):
+//
+//   C_max 16.6 +/- 3.8 ng/mL, T_max median 5.0 h (2 to 12),
+//   AUC(0-inf) 632.6 +/- 197.2 ng.h/mL, half-life 34.5 +/- 8.7 h.
+//
+// The scenario's inputs come from other sources (population model of Sun et
+// al. 2021 for CL/F, V/F, ka and lag; Zyprexa label for the first-pass
+// fraction), so the four numbers above are predictions.
+//
+// Asserted:
+//   kinetic V_ss of the parameter set       528.6 +/- 0.1 L
+//   AUC(0-inf) within one SD of the mean    [435.4, 829.8] ng.h/mL
+// Recorded, not met (each pinned to a band so that a change is noticed):
+//   half-life, 168-336 h: 45.7 h, 1.3 SD above the observed mean; the slow
+//     return from poorly perfused tissue lengthens the terminal phase;
+//   T_max 1.6 h against a median of 5 h, and C_max 31.4 ng/mL, 1.9 times
+//     the observed mean: distribution into tissue is perfusion-limited and
+//     takes hours in the model, so the early blood concentration is too
+//     high. PS values are assumed.
+//
+// With the profile used until 2026-11-15 (cl_central 25 L/h with F 0.60,
+// ka 0.6 /h, lag 0.25 h, unscaled Kp) AUC(0-inf) is 240 ng.h/mL: the AUC
+// assertion fails.
+
+use darwin_pbpk::core::pbpk28_params::*
+use darwin_pbpk::tsit5_pbpk28::*
+use darwin_pbpk::scenarios::olanzapine_oral::*
+use math::pure::ln
+
+fn os_check(tag: string, x: f64, lo: f64, hi: f64) -> i32 with IO, Mut, Div, Panic {
+    print("  "); print(tag); print(" = "); print(x); print("  allowed ["); print(lo); print(", "); print(hi); println("]")
+    if x < lo || x > hi {
+        println("  [FAIL]")
+        return 1
+    }
+    return 0
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let p = olz_pbpk28_params()
+    var vss = p.v_ref[0]
+    var i = 1
+    while i < 14 {
+        let fv = p.vasc_frac[i]
+        vss = vss + p.v_ref[i] * (fv + (1.0 - fv) * p.kp[i])
+        i = i + 1
+    }
+
+    var scen = olz_scenario_init()
+    let dt = 0.01
+    var t = 0.0
+    var cmax = 0.0
+    var tmax = 0.0
+    var auc = 0.0
+    var prev = 0.0
+    var c168 = 0.0
+    while t + dt * 0.5 < 336.0 {
+        scen = olz_step(scen, p, t, dt)
+        t = t + dt
+        let c = scen.pbpk.cv[0]
+        auc = auc + 0.5 * (prev + c) * dt
+        prev = c
+        if c > cmax { cmax = c; tmax = t }
+        if t < 168.005 { c168 = c }
+    }
+    let lam = ln(c168 / prev) / 168.0
+    let thalf = ln(2.0) / lam
+    let auc_inf = (auc + prev / lam) * 1000.0
+
+    var fails: i32 = 0
+    fails = fails + os_check("V_ss (L)", vss, 528.5, 528.7)
+    fails = fails + os_check("AUC(0-inf) (ng.h/mL)", auc_inf, 435.4, 829.8)
+    fails = fails + os_check("half-life model / 34.5 h (recorded)", thalf / 34.5, 1.15, 1.50)
+    fails = fails + os_check("T_max (h) (recorded)", tmax, 1.2, 2.0)
+    fails = fails + os_check("C_max model / 16.6 ng/mL (recorded)", cmax * 1000.0 / 16.6, 1.6, 2.2)
+    print("  C_max (ng/mL) = "); println(cmax * 1000.0)
+
+    if fails == 0 {
+        println("PBPK28_OLANZAPINE_SINGLE_DOSE_PASS")
+        return 0
+    }
+    println("PBPK28_OLANZAPINE_SINGLE_DOSE_FAIL")
+    return 1
+}

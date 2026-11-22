@@ -1,0 +1,269 @@
+use math::pure::{is_finite}
+use io::sci_print::{print_f64_sci}
+use collections::numeric_buffer::{NumericBuffer,NumericMatrix,numeric_buffer_status,numeric_buffer_len,numeric_buffer_at,numeric_matrix_status,numeric_matrix_rows,numeric_matrix_cols,numeric_matrix_get}
+use collections::integer_buffer::{IntegerBuffer,integer_buffer_status,integer_buffer_len,integer_buffer_at}
+use display::canvas::{Canvas}
+use display::canvas_ext::{PixelScissor,canvas_draw_line_aa_scissored}
+use viz::dynamic_plot::{DynamicPlotSpec}
+use viz::scatter::{scatter_geometry}
+use viz::uncertainty::{uncertainty_domain,uncertainty_segment,uncertainty_raster_segment}
+use viz::contour_predicate::{contour_saddle_sign}
+pub struct DynamicContourResult {pub status:i64,pub input_cells:i64,pub work_required:i64,pub segments_required:i64,pub painted:i64,pub masked_cells:i64,pub flat_cells:i64,pub degenerate_segments:i64}
+struct ContourPoint {status:i64,x:f64,y:f64}
+struct ContourCell {status:i64,n:i64,flat:i64,degenerate:i64,ax:[f64;2],ay:[f64;2],bx:[f64;2],by:[f64;2]}
+fn cc_add(cell:&!ContourCell,ax:f64,ay:f64,bx:f64,by:f64) with Mut,Panic {
+ if ax==bx && ay==by {cell.degenerate=cell.degenerate+1;return}
+ assert(cell.n<2)
+ let i=cell.n as usize
+ cell.ax[i]=ax;cell.ay[i]=ay;cell.bx[i]=bx;cell.by[i]=by;cell.n=cell.n+1
+}
+fn cc_edge(edge:i64,xlo:f64,xhi:f64,ylo:f64,yhi:f64,values:&[f64;4],level:f64)->ContourPoint with Mut,Div,Panic {
+ let xx:[f64;4]=[xlo,xhi,xhi,xlo];let yy:[f64;4]=[ylo,ylo,yhi,yhi]
+ let next=(edge+1)%4
+ let a=values[edge as usize];let b=values[next as usize]
+ if a==level {return ContourPoint{status:0,x:xx[edge as usize],y:yy[edge as usize]}}
+ if b==level {return ContourPoint{status:0,x:xx[next as usize],y:yy[next as usize]}}
+ var denominator=b-a;var numerator=level-a
+ if !is_finite(denominator) {denominator=b*0.5-a*0.5;numerator=level*0.5-a*0.5}
+ if denominator==0.0 || !is_finite(denominator) || !is_finite(numerator) {return ContourPoint{status:2,x:0.0,y:0.0}}
+ let t=numerator/denominator
+ if !is_finite(t) || t<0.0 || t>1.0 {return ContourPoint{status:2,x:0.0,y:0.0}}
+ let x=xx[edge as usize]+t*(xx[next as usize]-xx[edge as usize])
+ let y=yy[edge as usize]+t*(yy[next as usize]-yy[edge as usize])
+ if !is_finite(x) || !is_finite(y) {return ContourPoint{status:2,x:0.0,y:0.0}}
+ ContourPoint{status:0,x:x,y:y}
+}
+fn cc_nonflat(b:&NumericBuffer,m:&NumericMatrix,row:i64,col:i64,level:f64)->bool {
+ let a=numeric_matrix_get(b,m,row,col);let c=numeric_matrix_get(b,m,row+1,col+1)
+ let d=numeric_matrix_get(b,m,row+1,col);let e=numeric_matrix_get(b,m,row,col+1)
+ a.value!=level || c.value!=level || d.value!=level || e.value!=level
+}
+fn cc_owns(edge:i64,row:i64,col:i64,cols:i64,b:&NumericBuffer,m:&NumericMatrix,mask:&IntegerBuffer,level:f64)->bool with Mut,Panic {
+ if edge==0 {if row>0 {if integer_buffer_at(mask,(row-1)*(cols-1)+col)==1 {if cc_nonflat(b,m,row-1,col,level) {return false}}}}
+ if edge==3 {if col>0 {if integer_buffer_at(mask,row*(cols-1)+col-1)==1 {if cc_nonflat(b,m,row,col-1,level) {return false}}}}
+ true
+}
+fn cc_cell(xs:&NumericBuffer,ys:&NumericBuffer,b:&NumericBuffer,m:&NumericMatrix,mask:&IntegerBuffer,row:i64,col:i64,level:f64)->ContourCell with Mut,Div,Panic {
+ var cell=ContourCell{status:0,n:0,flat:0,degenerate:0,ax:[0.0;2],ay:[0.0;2],bx:[0.0;2],by:[0.0;2]}
+ let va=numeric_matrix_get(b,m,row,col);let vb=numeric_matrix_get(b,m,row,col+1)
+ let vc=numeric_matrix_get(b,m,row+1,col+1);let vd=numeric_matrix_get(b,m,row+1,col)
+ let values:[f64;4]=[va.value,vb.value,vc.value,vd.value]
+ let xlo=numeric_buffer_at(xs,col);let xhi=numeric_buffer_at(xs,col+1)
+ let ylo=numeric_buffer_at(ys,row);let yhi=numeric_buffer_at(ys,row+1)
+ let xx:[f64;4]=[xlo,xhi,xhi,xlo];let yy:[f64;4]=[ylo,ylo,yhi,yhi]
+ if va.value==level && vb.value==level && vc.value==level && vd.value==level {cell.flat=1;return cell}
+ var flat_count:i64=0;var flat_edge:i64= -1
+ var edge:i64=0
+ while edge<4 {
+  let next=(edge+1)%4
+  if values[edge as usize]==level {if values[next as usize]==level {
+   flat_count=flat_count+1;flat_edge=edge
+   if cc_owns(edge,row,col,numeric_buffer_len(xs),b,m,mask,level) {cc_add(&!cell,xx[edge as usize],yy[edge as usize],xx[next as usize],yy[next as usize])}
+  }}
+  edge=edge+1
+ }
+ if flat_count>0 {
+  if flat_count==1 {
+   let opposite=(flat_edge+2)%4;let next=(opposite+1)%4
+   let a=values[opposite as usize];let c=values[next as usize]
+   if (a<level && c>level) || (a>level && c<level) {
+    let point=cc_edge(opposite,xlo,xhi,ylo,yhi,&values,level)
+    if point.status!=0 {cell.status=2;return cell}
+    if flat_edge==0 {cc_add(&!cell,point.x,point.y,point.x,ylo)}
+    if flat_edge==2 {cc_add(&!cell,point.x,point.y,point.x,yhi)}
+    if flat_edge==1 {cc_add(&!cell,point.x,point.y,xhi,point.y)}
+    if flat_edge==3 {cc_add(&!cell,point.x,point.y,xlo,point.y)}
+   }
+  }
+  return cell
+ }
+ var crossed:[i64;4]=[0;4];var count:i64=0
+ edge=0
+ while edge<4 {
+  let next=(edge+1)%4
+  let high=values[edge as usize]>=level;let next_high=values[next as usize]>=level
+  if high!=next_high {crossed[count as usize]=edge;count=count+1}
+  edge=edge+1
+ }
+ if count==0 {return cell}
+ var points_x:[f64;4]=[0.0;4];var points_y:[f64;4]=[0.0;4]
+ var i:i64=0
+ while i<count {
+  let point=cc_edge(crossed[i as usize],xlo,xhi,ylo,yhi,&values,level)
+  if point.status!=0 {cell.status=2;return cell}
+  points_x[i as usize]=point.x;points_y[i as usize]=point.y
+  i=i+1
+ }
+ if count==2 {cc_add(&!cell,points_x[0],points_y[0],points_x[1],points_y[1]);return cell}
+ if count!=4 {cell.status=2;return cell}
+ let saddle=contour_saddle_sign(va.value,vb.value,vc.value,vd.value,level)
+ if saddle.status!=0 {cell.status=2;return cell}
+ if saddle.sign>0 {cc_add(&!cell,points_x[0],points_y[0],points_x[1],points_y[1]);cc_add(&!cell,points_x[2],points_y[2],points_x[3],points_y[3])}
+ if saddle.sign<0 {cc_add(&!cell,points_x[0],points_y[0],points_x[3],points_y[3]);cc_add(&!cell,points_x[1],points_y[1],points_x[2],points_y[2])}
+ if saddle.sign==0 {cc_add(&!cell,points_x[0],points_y[0],points_x[2],points_y[2]);cc_add(&!cell,points_x[1],points_y[1],points_x[3],points_y[3])}
+ cell
+}
+fn cc_preflight(s:&DynamicPlotSpec,xs:&NumericBuffer,ys:&NumericBuffer,b:&NumericBuffer,m:&NumericMatrix,mask:&IntegerBuffer,levels:&NumericBuffer,maxwork:i64,maxsegments:i64)->DynamicContourResult with Mut,Div,Panic {
+ var out=DynamicContourResult{status:1,input_cells:0,work_required:0,segments_required:0,painted:0,masked_cells:0,flat_cells:0,degenerate_segments:0}
+ if !scatter_geometry(s.x,s.y,s.w,s.h) || !uncertainty_domain(s.xmin,s.xmax,s.ymin,s.ymax) {return out}
+ if s.xmin>=s.xmax || s.ymin>=s.ymax || s.r<0 || s.r>255 || s.g<0 || s.g>255 || s.b<0 || s.b>255 || s.interval_kind!=0 || s.level!=0.0 || maxwork<0 || maxsegments<0 {return out}
+ out.status=2
+ if numeric_buffer_status(xs)!=0 || numeric_buffer_status(ys)!=0 || numeric_buffer_status(b)!=0 || numeric_matrix_status(m)!=0 || integer_buffer_status(mask)!=0 || numeric_buffer_status(levels)!=0 {return out}
+ let cols=numeric_buffer_len(xs);let rows=numeric_buffer_len(ys);let nl=numeric_buffer_len(levels)
+ if cols<2 || rows<2 || nl<1 {return out}
+ if numeric_matrix_rows(m)!=rows || numeric_matrix_cols(m)!=cols {return out}
+ if rows-1>9223372036854775807/(cols-1) {return out}
+ let cells=(rows-1)*(cols-1)
+ if integer_buffer_len(mask)!=cells {return out}
+ out.input_cells=cells;out.status=6
+ if nl>9223372036854775807/cells {out.work_required= -1;return out}
+ out.work_required=cells*nl
+ if out.work_required>maxwork || out.work_required>4611686018427387903 {return out}
+ out.status=3
+ var i:i64=0
+ while i<cols {
+  let value=numeric_buffer_at(xs,i)
+  if !is_finite(value) {return out}
+  if i>0 {if value<=numeric_buffer_at(xs,i-1) {return out}}
+  i=i+1
+ }
+ i=0
+ while i<rows {
+  let value=numeric_buffer_at(ys,i)
+  if !is_finite(value) {return out}
+  if i>0 {if value<=numeric_buffer_at(ys,i-1) {return out}}
+  i=i+1
+ }
+ if !is_finite(numeric_buffer_at(xs,cols-1)-numeric_buffer_at(xs,0)) || !is_finite(numeric_buffer_at(ys,rows-1)-numeric_buffer_at(ys,0)) {return out}
+ i=0
+ while i<nl {
+  let value=numeric_buffer_at(levels,i)
+  if !is_finite(value) {return out}
+  if i>0 {if value<=numeric_buffer_at(levels,i-1) {return out}}
+  i=i+1
+ }
+ let last=numeric_matrix_get(b,m,rows-1,cols-1)
+ if last.status!=0 {out.status=2;return out}
+ var row:i64=0
+ var masked:i64=0
+ while row<rows-1 {
+  var col:i64=0
+  while col<cols-1 {
+   let flag=integer_buffer_at(mask,row*(cols-1)+col)
+   if flag!=0 && flag!=1 {return out}
+   if flag==0 {masked=masked+1}else{
+    let a=numeric_matrix_get(b,m,row,col);let c=numeric_matrix_get(b,m,row+1,col+1)
+    let d=numeric_matrix_get(b,m,row+1,col);let e=numeric_matrix_get(b,m,row,col+1)
+    if !is_finite(a.value) || !is_finite(c.value) || !is_finite(d.value) || !is_finite(e.value) {return out}
+   }
+   col=col+1
+  }
+  row=row+1
+ }
+ var required:i64=0;var flats:i64=0;var degenerate:i64=0
+ var li:i64=0
+ while li<nl {
+  row=0
+  while row<rows-1 {
+   var col:i64=0
+   while col<cols-1 {
+    if integer_buffer_at(mask,row*(cols-1)+col)==1 {
+     let cell=cc_cell(xs,ys,b,m,mask,row,col,numeric_buffer_at(levels,li))
+     out.status=5
+     if cell.status!=0 {return out}
+     if cell.n>9223372036854775807-required {return out}
+     required=required+cell.n;flats=flats+cell.flat;degenerate=degenerate+cell.degenerate
+     var segment:i64=0
+     while segment<cell.n {
+      let clipped=uncertainty_segment(cell.ax[segment as usize],cell.ay[segment as usize],cell.bx[segment as usize],cell.by[segment as usize],s.xmin,s.xmax,s.ymin,s.ymax,s.x,s.y,s.w,s.h)
+      if clipped.status==2 {return out}
+      segment=segment+1
+     }
+    }
+    col=col+1
+   }
+   row=row+1
+  }
+  li=li+1
+ }
+ out.masked_cells=masked;out.flat_cells=flats;out.degenerate_segments=degenerate;out.segments_required=required
+ out.status=7
+ if required>maxsegments {return out}
+ out.status=0
+ out
+}
+pub fn dynamic_contour_canvas(c:&!Canvas,s:&DynamicPlotSpec,xs:&NumericBuffer,ys:&NumericBuffer,b:&NumericBuffer,m:&NumericMatrix,mask:&IntegerBuffer,levels:&NumericBuffer,maxwork:i64,maxsegments:i64)->DynamicContourResult with Mut,Div,Panic {
+ var out=cc_preflight(s,xs,ys,b,m,mask,levels,maxwork,maxsegments)
+ if out.status!=0 {return out}
+ if c.width<1 || c.height<1 || c.width>1000000 || c.height>1000000 || (c.pixels as i64)<=0 {out.status=1;return out}
+ var left=s.x;var top=s.y;var right=s.x+s.w;var bottom=s.y+s.h
+ if left<0 {left=0};if top<0 {top=0};if right>=c.width {right=c.width-1};if bottom>=c.height {bottom=c.height-1}
+ let sc=PixelScissor{left:left,top:top,right:right,bottom:bottom}
+ let cols=numeric_buffer_len(xs);let rows=numeric_buffer_len(ys)
+ var li:i64=0
+ while li<numeric_buffer_len(levels) {
+  var row:i64=0
+  while row<rows-1 {
+   var col:i64=0
+   while col<cols-1 {
+    if integer_buffer_at(mask,row*(cols-1)+col)==1 {
+     let cell=cc_cell(xs,ys,b,m,mask,row,col,numeric_buffer_at(levels,li))
+     var segment:i64=0
+     while segment<cell.n {
+      let clipped=uncertainty_segment(cell.ax[segment as usize],cell.ay[segment as usize],cell.bx[segment as usize],cell.by[segment as usize],s.xmin,s.xmax,s.ymin,s.ymax,s.x,s.y,s.w,s.h)
+      if clipped.status==0 {
+       let raster=uncertainty_raster_segment(clipped.x0,clipped.y0,clipped.x1,clipped.y1,sc.left,sc.top,sc.right,sc.bottom)
+       if raster.status==0 {canvas_draw_line_aa_scissored(c,&sc,raster.x0,raster.y0,raster.x1,raster.y1,s.r,s.g,s.b);out.painted=out.painted+1}
+      }
+      segment=segment+1
+     }
+    }
+    col=col+1
+   }
+   row=row+1
+  }
+  li=li+1
+ }
+ out
+}
+pub fn dynamic_contour_svg(s:&DynamicPlotSpec,xs:&NumericBuffer,ys:&NumericBuffer,b:&NumericBuffer,m:&NumericMatrix,mask:&IntegerBuffer,levels:&NumericBuffer,maxwork:i64,maxsegments:i64,id:i64)->DynamicContourResult with IO,Mut,Div,Panic {
+ var out=cc_preflight(s,xs,ys,b,m,mask,levels,maxwork,maxsegments)
+ if out.status!=0 {return out}
+ if id<0 {out.status=1;return out}
+ let x:f64=(s.x as f64)-0.5;let y:f64=(s.y as f64)-0.5;let width:i64=s.w+1;let height:i64=s.h+1
+ print("<defs><clipPath clipPathUnits=\"userSpaceOnUse\" id=\"contour-clip-");print(id);print("\"><rect x=\"");print(x);print("\" y=\"");print(y);print("\" width=\"");print(width);print("\" height=\"");print(height);println("\"/></clipPath></defs>")
+ print("<g data-dynamic-series=\"bilinear-contour\" data-classification=\"high-ge-level\" data-saddle=\"exact-dyadic\" clip-path=\"url(#contour-clip-");print(id);println(")\">")
+ let red:i64=s.r;let green:i64=s.g;let blue:i64=s.b
+ let cols=numeric_buffer_len(xs);let rows=numeric_buffer_len(ys)
+ var li:i64=0
+ while li<numeric_buffer_len(levels) {
+  var row:i64=0
+  while row<rows-1 {
+   var col:i64=0
+   while col<cols-1 {
+    let index=row*(cols-1)+col
+    if integer_buffer_at(mask,index)==1 {
+     let cell=cc_cell(xs,ys,b,m,mask,row,col,numeric_buffer_at(levels,li))
+     var segment:i64=0
+     while segment<cell.n {
+      let clipped=uncertainty_segment(cell.ax[segment as usize],cell.ay[segment as usize],cell.bx[segment as usize],cell.by[segment as usize],s.xmin,s.xmax,s.ymin,s.ymax,s.x,s.y,s.w,s.h)
+      if clipped.status==0 {
+       let ax:i64=clipped.x0;let ay:i64=clipped.y0;let bx:i64=clipped.x1;let by:i64=clipped.y1
+       print("<line data-contour-cell=\"");print(index);print("\" data-contour-level-index=\"");print(li);print("\" data-contour-branch=\"");print(segment)
+       print("\" data-contour-level=\"");print_f64_sci(numeric_buffer_at(levels,li),15)
+       print("\" x1=\"");print(ax);print("\" y1=\"");print(ay);print("\" x2=\"");print(bx);print("\" y2=\"");print(by)
+       print("\" stroke=\"rgb(");print(red);print(",");print(green);print(",");print(blue);println(")\" stroke-width=\"1\" stroke-linecap=\"round\"/>")
+       out.painted=out.painted+1
+      }
+      segment=segment+1
+     }
+    }
+    col=col+1
+   }
+   row=row+1
+  }
+  li=li+1
+ }
+ println("</g>")
+ out
+}

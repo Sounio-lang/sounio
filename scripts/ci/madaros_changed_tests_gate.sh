@@ -51,6 +51,12 @@ for path in "${paths[@]}"; do
     # (that is how the full suite's own compile-fail tests are checked), so
     # widening this case is the only change needed.
     tests/compile-fail/*.sio) ;;
+    # The same hole for library witnesses: tests/stdlib/<area>/test_*.sio is in
+    # the full suite's inventory, but the full suite runs lean_single, which
+    # skips `//@ requires: madaros`. A changed Madaros-only stdlib witness (for
+    # example tests/stdlib/molecular/test_sii_charges_ewald.sio, PR #3639) was
+    # therefore executed by no CI job at all.
+    tests/stdlib/*/test_*.sio) ;;
     *) continue ;;
   esac
   [[ -f "$ROOT_DIR/$path" ]] || continue
@@ -204,6 +210,21 @@ for path in "${selected[@]}"; do
       exit 2
     fi
     echo "MADAROS_CHANGED_TESTS_DYNLINK system=libzstd.so.1"
+  fi
+  if [[ "$path" == "tests/run-pass/sysv_alignment_thunk_witness.sio" ]]; then
+    gcc -shared -fPIC -O0 -o "$work_dir/libkl14d_align.so" \
+      "$ROOT_DIR/tests/fixtures/kl14d/lib_align.c"
+    export LD_LIBRARY_PATH="$work_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    echo "MADAROS_CHANGED_TESTS_DYNLINK probe=$work_dir/libkl14d_align.so"
+  fi
+  if [[ "$path" == "tests/run-pass/dynlink_five_needed.sio" || "$path" == "tests/run-pass/dynlink_all_symbols_dynstr.sio" ]]; then
+    # #2533/#2534 pins: four probe libraries + system libzstd.so.1 / libdl.so.2.
+    gcc -shared -fPIC -O0 -o "$work_dir/libkl14b_probe.so" "$ROOT_DIR/tests/fixtures/kl14b/kl14b_probe.c"
+    gcc -shared -fPIC -O0 -o "$work_dir/libkl14c_probe.so" "$ROOT_DIR/tests/fixtures/kl14c/kl14c_probe.c"
+    gcc -shared -fPIC -O0 -o "$work_dir/libkl14d_a.so" "$ROOT_DIR/tests/fixtures/kl14d/lib_a.c"
+    gcc -shared -fPIC -O0 -o "$work_dir/libkl14d_b.so" "$ROOT_DIR/tests/fixtures/kl14d/lib_b.c"
+    export LD_LIBRARY_PATH="$work_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    echo "MADAROS_CHANGED_TESTS_DYNLINK probes=$work_dir/libkl14{b_probe,c_probe,d_a,d_b}.so"
   fi
   if [[ "$path" == "tests/run-pass/kl14d_dlopen.sio" ]]; then
     gcc -shared -fPIC -O0 -o "$work_dir/libkl14d_dl.so" \

@@ -2,8 +2,8 @@
 topic_id: repo.examples.real-world.readme
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A5
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.examples.real-world.readme
 -->
 
@@ -13,7 +13,7 @@ Production-quality examples showcasing Sounio's unique capabilities in epistemic
 
 ## Overview
 
-These examples demonstrate Sounio's ability to solve real scientific problems that currently require multiple tools (R, Python, specialized software). Each example uses pure Sounio code with **automatic uncertainty propagation** - a feature no other language provides at compile time.
+These examples demonstrate Sounio's ability to solve real scientific problems that currently require multiple tools (R, Python, specialized software). Each example uses pure Sounio code with **automatic uncertainty propagation**. [01_dose_uncertainty.sio](01_dose_uncertainty.sio) multiplies two `EpistemicValue`s and prints `PASS: Variance propagation correct` when the product variance is within 0.01 of `Y²Var(X) + X²Var(Y)`.
 
 ## Examples by Difficulty
 
@@ -94,7 +94,7 @@ $SOUC run examples/real_world/07_sensor_fusion.sio
 ### 1. Epistemic Computing (All Examples)
 - **EpistemicValue** struct with `value` and `variance` fields
 - Automatic GUM-compliant uncertainty propagation
-- No other language has this built into the type system
+- [01_dose_uncertainty.sio](01_dose_uncertainty.sio) carries `value` and `variance` on an `EpistemicValue` struct and prints that same `PASS` line when the delta-method check holds
 
 ### 2. Variance Propagation Formulas
 - **Addition**: Var(X+Y) = Var(X) + Var(Y)
@@ -176,7 +176,7 @@ These examples prove that Sounio can:
 3. **Outperform existing tools** (fewer errors, less code)
 4. **Scale to production** (all examples tested and verified)
 
-No other language offers:
+To our knowledge, no other language offers:
 - Compile-time epistemic types
 - Automatic GUM-compliant uncertainty propagation
 - Type-safe dimensional analysis

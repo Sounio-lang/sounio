@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Harness self-test for //@ expect-stdout-contains, unknown expect-* keys, and the
-# known-failure manifest's optional `path|substring` reason pin.
+# Harness self-test for //@ expect-stdout-contains, unknown expect-* keys, the
+# known-failure manifest's optional `path|substring` reason pin, and
+# //@ requires: vendor-material.
 #
 # The control the defect requires: a garbage marker must go red. If this
 # script stays green while a mutated marker still passes, the bug is back.
@@ -43,6 +44,30 @@ run_list() {
         bash "$HARNESS" --test-list "$list" --jobs 1 --verbose
 }
 
+run_job_probe() {
+    local expected="$1" log="$2"
+    shift 2
+    local -a env_args=() harness_args=()
+    while [[ $# -gt 0 && "$1" != "--" ]]; do
+        env_args+=("$1")
+        shift
+    done
+    if [[ "${1:-}" == "--" ]]; then
+        shift
+        harness_args=("$@")
+    fi
+    expect_rc 0 "$log" env \
+        SOUNIO_TEST_KNOWN_FAILURES_FILE="" \
+        SOUNIO_TEST_CPU_COUNT=8 \
+        SOUNIO_TEST_JOBS= \
+        SOUNIO_TEST_SOUC_BIN="$TMP/mock-souc" \
+        "${env_args[@]}" \
+        CI=1 \
+        bash "$HARNESS" --test-list "$TMP/list_jobs.txt" "${harness_args[@]}"
+    grep -Fxq "Parallel jobs: $expected" "$log" \
+        || fail "expected Parallel jobs: $expected; got $(grep -F 'Parallel jobs:' "$log" | tail -1)"
+}
+
 # Like run_list, but loads the given scratch manifest instead of disabling it --
 # for the known-failure reason-pin cases below.
 run_list_with_manifest() {
@@ -65,6 +90,42 @@ expect_rc() {
         fail "expected exit $want, got $rc"
     }
 }
+
+# --- 0. CI job scaling follows CPU and memory, remains capped and honors overrides ---
+cat > "$TMP/mock-souc" <<'MOCK'
+#!/usr/bin/env bash
+case "$1" in
+    run) echo 'Hello, Sounio!' ;;
+    check) echo 'check: OK' ;;
+esac
+MOCK
+chmod +x "$TMP/mock-souc"
+printf '%s\n' "$HELLO" > "$TMP/list_jobs.txt"
+run_job_probe 1 "$TMP/jobs_low_memory.log" \
+    SOUNIO_TEST_CPU_COUNT=4 \
+    SOUNIO_TEST_JOBS=4 \
+    SOUNIO_TEST_MEMORY_BYTES=$((2 * 1024 * 1024 * 1024))
+run_job_probe 4 "$TMP/jobs_low_cpu.log" \
+    SOUNIO_TEST_CPU_COUNT=2 \
+    SOUNIO_TEST_MEMORY_BYTES=$((8 * 1024 * 1024 * 1024))
+run_job_probe 8 "$TMP/jobs_four_cpu.log" \
+    SOUNIO_TEST_CPU_COUNT=4 \
+    SOUNIO_TEST_JOBS=4 \
+    SOUNIO_TEST_MEMORY_BYTES=$((16 * 1024 * 1024 * 1024))
+run_job_probe 4 "$TMP/jobs_implicit_default.log" \
+    SOUNIO_TEST_MEMORY_BYTES=$((8 * 1024 * 1024 * 1024))
+run_job_probe 8 "$TMP/jobs_default_cap.log" \
+    SOUNIO_TEST_CPU_COUNT=32 \
+    SOUNIO_TEST_MEMORY_BYTES=$((64 * 1024 * 1024 * 1024))
+run_job_probe 2 "$TMP/jobs_cap.log" \
+    SOUNIO_TEST_MEMORY_BYTES=$((8 * 1024 * 1024 * 1024)) \
+    SOUNIO_TEST_JOBS_CAP=2
+run_job_probe 3 "$TMP/jobs_dynamic_disabled.log" \
+    SOUNIO_TEST_MEMORY_BYTES=$((8 * 1024 * 1024 * 1024)) \
+    SOUNIO_TEST_JOBS_DYNAMIC=0 -- --jobs 3
+run_job_probe 12 "$TMP/jobs_explicit_high.log" \
+    SOUNIO_TEST_MEMORY_BYTES=$((8 * 1024 * 1024 * 1024)) \
+    SOUNIO_TEST_JOBS_CAP=2 -- --jobs 12
 
 # --- 1. Live contains: hello prints "Hello, Sounio!" ---
 cp "$HELLO" "$TMP/hello_contains.sio"
@@ -161,5 +222,32 @@ printf '%s\n' "$TMP/reason_fixture.sio" > "$TMP/manifest_legacy.txt"
 expect_rc 0 "$TMP/reason_legacy.log" run_list_with_manifest "$TMP/list_reason.txt" "$TMP/manifest_legacy.txt"
 grep -Fq "Known failures: 1" "$TMP/reason_legacy.log" \
     || fail "legacy plain-path entry regressed"
+
+# --- 7/8/9. //@ requires: vendor-material (#2820) ---
+# The material a test reads is named in its .args sidecar. Absent material is a
+# SKIP that names the missing path (not a known failure); present material lets
+# the test run; a missing sidecar is a test-authoring error (FAIL).
+awk '
+    NR==1 { print; print "//@ requires: vendor-material"; next }
+    { print }
+' "$HELLO" > "$TMP/vendor_missing.sio"
+printf '%s\n' "$TMP/no_such_vendor_file_7b2e.pdf" > "$TMP/vendor_missing.sio.args"
+printf '%s\n' "$TMP/vendor_missing.sio" > "$TMP/list_vendor_missing.txt"
+expect_rc 0 "$TMP/vendor_missing.log" run_list "$TMP/list_vendor_missing.txt"
+grep -Fq "SKIP  vendor_missing.sio (requires:vendor-material (missing $TMP/no_such_vendor_file_7b2e.pdf))" "$TMP/vendor_missing.log" \
+    || fail "vendor-material test with absent material was not skipped naming the path"
+
+cp "$TMP/vendor_missing.sio" "$TMP/vendor_present.sio"
+printf '%s\n' "$HELLO" > "$TMP/vendor_present.sio.args"
+printf '%s\n' "$TMP/vendor_present.sio" > "$TMP/list_vendor_present.txt"
+expect_rc 0 "$TMP/vendor_present.log" run_list "$TMP/list_vendor_present.txt"
+grep -Fq "PASS  vendor_present.sio" "$TMP/vendor_present.log" \
+    || fail "vendor-material test with its material present did not run"
+
+cp "$TMP/vendor_missing.sio" "$TMP/vendor_nosidecar.sio"
+printf '%s\n' "$TMP/vendor_nosidecar.sio" > "$TMP/list_vendor_nosidecar.txt"
+expect_rc 1 "$TMP/vendor_nosidecar.log" run_list "$TMP/list_vendor_nosidecar.txt"
+grep -Fq "requires: vendor-material but no .args sidecar" "$TMP/vendor_nosidecar.log" \
+    || fail "vendor-material test without a sidecar did not fail"
 
 echo "TEST_SUITE_ANNOTATION_SELFTEST_PASS"

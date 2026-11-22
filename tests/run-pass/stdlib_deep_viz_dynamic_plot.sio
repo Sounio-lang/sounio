@@ -1,0 +1,85 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: STDLIB_DEEP_VIZ_DYNAMIC_PLOT_PASS
+//@ expect-stdout: data-dynamic-series="ordered-line"
+//@ expect-stdout: data-dynamic-series="supplied-intervals"
+use collections::numeric_buffer::{numeric_buffer_new,numeric_buffer_set,numeric_buffer_close}
+use collections::integer_buffer::{integer_buffer_new,integer_buffer_set,integer_buffer_close}
+use display::canvas::{Canvas,canvas_clear}
+use viz::dynamic_line_reduce::{dynamic_line_reduce}
+use viz::dynamic_plot::{DynamicPlotSpec,dynamic_line_canvas,dynamic_line_svg,dynamic_interval_canvas,dynamic_interval_svg}
+fn intervals(c:&!Canvas) with IO,Alloc,Mut,Div,Panic {
+ var x=numeric_buffer_new(3,24);var mean=numeric_buffer_new(3,24)
+ var lower=numeric_buffer_new(3,24);var upper=numeric_buffer_new(3,24)
+ var available=integer_buffer_new(3,24)
+ var i:i64=0
+ while i<3 {
+  let center=(i as f64)*2.0-2.0
+  let a=numeric_buffer_set(&!x,i,i as f64)
+  let b=numeric_buffer_set(&!mean,i,center)
+  let d=numeric_buffer_set(&!lower,i,center-1.0)
+  let e=numeric_buffer_set(&!upper,i,center+1.0)
+  let f=integer_buffer_set(&!available,i,1)
+  i=i+1
+ }
+ let spec=DynamicPlotSpec{x:160,y:20,w:100,h:80,xmin:0.0,xmax:2.0,ymin:-2.0,ymax:2.0,r:230,g:120,b:40,interval_kind:4,level:0.0}
+ let drawn=dynamic_interval_canvas(c,&spec,&x,&mean,&lower,&upper,&available)
+ assert(drawn.status==0 && drawn.input_count==3 && drawn.visible_primitives==10)
+ let emitted=dynamic_interval_svg(&spec,&x,&mean,&lower,&upper,&available,2)
+ assert(emitted.status==0 && emitted.visible_primitives==10)
+ // Full-prefix failure before either backend can publish partial intervals.
+ let changed=numeric_buffer_set(&!upper,2,0.0)
+ let failed=dynamic_interval_canvas(c,&spec,&x,&mean,&lower,&upper,&available)
+ assert(failed.status==3 && failed.visible_primitives==0)
+ let failed_svg=dynamic_interval_svg(&spec,&x,&mean,&lower,&upper,&available,3)
+ assert(failed_svg.status==3 && failed_svg.visible_primitives==0)
+ numeric_buffer_close(x);numeric_buffer_close(mean);numeric_buffer_close(lower);numeric_buffer_close(upper)
+ integer_buffer_close(available)
+}
+fn main() with IO,Alloc,Mut,Div,Panic {
+ let n:i64=1025
+ var x=numeric_buffer_new(n,n*8);var y=numeric_buffer_new(n,n*8)
+ var available=integer_buffer_new(n,n*8);var selected=integer_buffer_new(n,n*8)
+ var i:i64=0
+ while i<n {
+  var value:f64=0.0
+  if i==256 {value=1.0};if i==768 {value=-1.0}
+  let a=numeric_buffer_set(&!x,i,i as f64)
+  let b=numeric_buffer_set(&!y,i,value)
+  let flag=if i>=512 && i<515 {0}else{1}
+  let d=integer_buffer_set(&!available,i,flag)
+  i=i+1
+ }
+ let reduced=dynamic_line_reduce(&x,&y,&available,0.0,1024.0,4,&!selected)
+ assert(reduced.status==0 && reduced.written>0)
+ let spec=DynamicPlotSpec{x:20,y:20,w:100,h:80,xmin:0.0,xmax:1024.0,ymin:-1.0,ymax:1.0,r:70,g:180,b:235,interval_kind:0,level:0.0}
+ let pixels=heap_alloc(300*120*8) as *mut i64
+ assert((pixels as i64)>0)
+ var canvas=Canvas{pixels:pixels,width:300,height:120}
+ canvas_clear(&!canvas,0,0,0)
+ let drawn=dynamic_line_canvas(&!canvas,&spec,&x,&y,&available,&selected,reduced.written)
+ assert(drawn.status==0 && drawn.input_count==1025 && drawn.visible_primitives>0)
+ println("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"300\" height=\"120\" viewBox=\"0 0 300 120\">")
+ let emitted=dynamic_line_svg(&spec,&x,&y,&available,&selected,reduced.written,1)
+ assert(emitted.status==0 && emitted.visible_primitives==drawn.visible_primitives)
+ intervals(&!canvas)
+ println("</svg>")
+ var py:i64=0
+ while py<120 {
+  var px:i64=0
+  while px<300 {
+   let color:i64=read_i64(canvas.pixels,py*300+px)
+   if color!=0 {
+    assert(py>=20 && py<=100)
+    assert((px>=20 && px<=120) || (px>=160 && px<=260))
+    print("DYNAMIC_PIXEL ");print(px);print(" ");print(py);print(" ");println(color)
+   }
+   px=px+1
+  }
+  py=py+1
+ }
+ heap_free(canvas.pixels as *mut i8)
+ numeric_buffer_close(x);numeric_buffer_close(y)
+ integer_buffer_close(available);integer_buffer_close(selected)
+ println("STDLIB_DEEP_VIZ_DYNAMIC_PLOT_PASS")
+}

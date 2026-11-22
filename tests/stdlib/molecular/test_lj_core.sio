@@ -1,0 +1,136 @@
+//@ run-pass
+//@ expect-stdout: MOLECULAR_LJ_CORE_OK
+
+// Run-proof for stdlib molecular::lj. Every expected value here is exact or
+// analytic; nothing is compared with a number this code produced earlier.
+use molecular::lj::*
+
+fn ae(a: f64, b: f64) -> f64 { if a > b { a - b } else { b - a } }
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    // Pair potential: zero at r = 1, minimum -1 at r^6 = 2, virial zero there.
+    if ae(lj_u_r2(1.0), 0.0) >= 1.0e-12 { print("FAIL u(1)\n"); return 1 }
+    let r2min = 1.2599210498948732          // 2^(1/3)
+    if ae(lj_u_r2(r2min), 0.0 - 1.0) >= 1.0e-12 { print("FAIL u(min)\n"); return 2 }
+    if ae(lj_w_r2(r2min), 0.0) >= 1.0e-10 { print("FAIL w(min)\n"); return 3 }
+    if ae(lj_w_r2(1.0), 24.0) >= 1.0e-12 { print("FAIL w(1)\n"); return 4 }
+
+    // Tail corrections at rc = 3, rho = 0.776, closed form evaluated in C++ long double:
+    //   U/N = (8/3) pi rho (rc^-9/3 - rc^-3) = -0.240667771540
+    //   p   = (16/3) pi rho^2 (2 rc^-9/3 - rc^-3) = -0.373345513918
+    let ut = lj_tail_energy_per_particle(0.776, 3.0)
+    if ae(ut, 0.0 - 0.240667771540) >= 1.0e-10 { print("FAIL tail U\n"); return 5 }
+    let pt = lj_tail_pressure(0.776, 3.0)
+    if ae(pt, 0.0 - 0.373345513918) >= 1.0e-10 { print("FAIL tail p\n"); return 6 }
+
+    // Two particles at distance 1.5 along x in a box of 10: one pair, known u.
+    var pos: [f64; 3072] = [0.0; 3072]
+    pos[0] = 1.0; pos[1] = 1.0; pos[2] = 1.0
+    pos[3] = 2.5; pos[4] = 1.0; pos[5] = 1.0
+    let (u2, w2) = mol_total_energy_virial(&pos, 2, 10.0, 3.0)
+    if ae(u2, lj_u_r2(2.25)) >= 1.0e-14 { print("FAIL pair u\n"); return 7 }
+    if ae(w2, lj_w_r2(2.25)) >= 1.0e-14 { print("FAIL pair w\n"); return 8 }
+
+    // Minimum image: the same pair across the boundary (0.25 and 9.75 -> 0.5
+    // apart is too close; use 0.5 and 9.0 -> 1.5 apart through the wall).
+    pos[0] = 0.5; pos[3] = 9.0
+    let (u3, _w3) = mol_total_energy_virial(&pos, 2, 10.0, 3.0)
+    if ae(u3, lj_u_r2(2.25)) >= 1.0e-14 { print("FAIL min image\n"); return 9 }
+
+    // Beyond the cutoff the pair contributes nothing.
+    pos[0] = 1.0; pos[3] = 4.5
+    let (u4, _w4) = mol_total_energy_virial(&pos, 2, 10.0, 3.0)
+    if ae(u4, 0.0) >= 1.0e-14 { print("FAIL cutoff\n"); return 10 }
+
+    // Point energy with skip equals the pair energy; without skip on an
+    // occupied point it would diverge, so probe a free point instead.
+    pos[3] = 2.5
+    let e0 = mol_point_energy(&pos, 2, 10.0, 3.0, 1.0, 1.0, 1.0, 0)
+    if ae(e0, lj_u_r2(2.25)) >= 1.0e-14 { print("FAIL point skip\n"); return 11 }
+
+    // Bookkeeping: the running energy kept from sweep increments must equal a
+    // fresh O(N^2) recomputation. This is the test that catches a wrong skip
+    // index, a stale coordinate or a wrap error.
+    mol_seed(12345)
+    let n = mol_init_grid(&!pos, 108, 5.5)
+    if n != 108 { print("FAIL grid\n"); return 12 }
+    let (ustart, _ws) = mol_total_energy_virial(&pos, n, 5.5, 2.5)
+    var urun = ustart
+    var s: i64 = 0
+    var acc_total: i64 = 0
+    while s < 50 {
+        let (du, acc) = mol_sweep_nvt(&!pos, n, 5.5, 2.5, 1.0 / 1.2, 0.15)
+        urun = urun + du
+        acc_total = acc_total + acc
+        s = s + 1
+    }
+    let (ufresh, _wf) = mol_total_energy_virial(&pos, n, 5.5, 2.5)
+    if ae(urun, ufresh) >= 1.0e-8 { print("FAIL nvt bookkeeping\n"); return 13 }
+    if acc_total <= 0 { print("FAIL nothing accepted\n"); return 14 }
+    if acc_total >= 50 * 108 { print("FAIL everything accepted\n"); return 15 }
+
+    // Same for exchange moves, and N must stay inside the buffer.
+    var nn = n
+    var t: i64 = 0
+    while t < 4000 {
+        let (n2, du, _k) = mol_trial_exchange(&!pos, nn, 5.5, 2.5, 1.0 / 1.2, 0.5)
+        nn = n2
+        urun = urun + du
+        t = t + 1
+    }
+    let (ufresh2, _wf2) = mol_total_energy_virial(&pos, nn, 5.5, 2.5)
+    if ae(urun, ufresh2) >= 1.0e-8 { print("FAIL gc bookkeeping\n"); return 16 }
+    if nn < 0 || nn > mol_max() { print("FAIL gc n range\n"); return 17 }
+
+    // Near-ideal limit of the exchange move.
+    // z = 1e-3, V = 20^3 = 8000, rc = 2.5: <N> = z V (1 - 2 B2' z + ...) with
+    // the second-virial shift ~1% at this density, so compare to the virial-
+    // corrected value: rho = z (1 - 2 B2 z), B2(T=2, LJ full) = -0.6276.
+    // rho = 1e-3 (1 + 1.2552e-3) -> <N> = 8.0100. Tolerance 0.15.
+    mol_seed(777)
+    var ni: i64 = 0
+    var sum_n = 0.0
+    t = 0
+    while t < 20000 {
+        let (n3, _d, _k) = mol_trial_exchange(&!pos, ni, 20.0, 2.5, 0.5, 0.001)
+        ni = n3
+        t = t + 1
+    }
+    // Per-move acceptance in the same limit. With N ~ Poisson(lambda = zV = 8),
+    // detailed balance makes the acceptance per attempted insertion,
+    // sum_N P(N) min(1, lambda/(N+1)), equal the acceptance per attempted
+    // deletion, sum_N P(N) min(1, N/lambda): both 0.860413 (C++23, exact sum).
+    // Interactions shift it by O(2 B2 rho) ~ 1e-3; tolerance 0.02 each, and the
+    // two rates within 0.01 of each other (attempt-count noise ~3e-3). Accepted
+    // insertions minus accepted deletions is n_end - n_start, exactly.
+    let n_start = ni
+    var att_ins: i64 = 0
+    var acc_ins: i64 = 0
+    var att_del: i64 = 0
+    var acc_del: i64 = 0
+    t = 0
+    while t < 400000 {
+        let (n3, _d, k) = mol_trial_exchange(&!pos, ni, 20.0, 2.5, 0.5, 0.001)
+        if k == 1 {
+            att_ins = att_ins + 1
+            if n3 != ni { acc_ins = acc_ins + 1 }
+        } else {
+            att_del = att_del + 1
+            if n3 != ni { acc_del = acc_del + 1 }
+        }
+        ni = n3
+        sum_n = sum_n + (ni as f64)
+        t = t + 1
+    }
+    let mean_n = sum_n / 400000.0
+    if ae(mean_n, 8.01) >= 0.15 { print("FAIL gc ideal limit\n"); return 18 }
+    if att_ins + att_del != 400000 { print("FAIL gc move kinds\n"); return 19 }
+    if acc_ins - acc_del != ni - n_start { print("FAIL gc accepted balance\n"); return 20 }
+    let r_ins = (acc_ins as f64) / (att_ins as f64)
+    let r_del = (acc_del as f64) / (att_del as f64)
+    if ae(r_ins, 0.860413) >= 0.02 || ae(r_del, 0.860413) >= 0.02 { print("FAIL gc acceptance\n"); return 21 }
+    if ae(r_ins, r_del) >= 0.01 { print("FAIL gc detailed balance\n"); return 22 }
+
+    print("MOLECULAR_LJ_CORE_OK\n")
+    return 0
+}

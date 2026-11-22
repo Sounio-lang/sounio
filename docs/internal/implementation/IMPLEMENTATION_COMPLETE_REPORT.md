@@ -2,8 +2,8 @@
 topic_id: repo.docs.internal.implementation.implementation-complete-report
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.implementation.implementation-complete-report
 -->
 
@@ -219,7 +219,7 @@ tuner.optimize_for_architecture(X86_64);
 
 O sistema implementado estabelece uma **base sólida** para otimizações avançadas MIR com capacidades únicas para o ecossistema Sounio. O trabalho demonstra **innovation** em otimizações epistêmicas e **performance tuning** automático.
 
-**Status Final: Sistema 85% production-ready** com funcionalidades state-of-the-art que rivalizam LLVM/GCC mas com características específicas para Sounio.
+**Fecho histórico desta nota, não o status atual do projeto.** Status: research language (pre-1.0). APIs may change; not recommended for production use. O parágrafo acima descreve o trabalho de MIR; ele não autoriza uso em produção.
 
 ---
 

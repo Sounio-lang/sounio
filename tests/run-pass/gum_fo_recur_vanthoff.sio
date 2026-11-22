@@ -1,0 +1,117 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: one 12.180705
+//@ expect-stdout: c4 12.180705
+//@ expect-stdout: m1 14.285865
+//@ expect-stdout: v1 76.639194
+//@ expect-stdout: m4 14.122522
+//@ expect-stdout: v4 47.305391
+//@ expect-stdout: RECUR_VANTHOFF_INSIDE
+// Same constants as demos/hydrogen/mh_delivery_pressure.sio.
+// exp(ln P) and (exp(ln P / 4))^4 are the same value.
+// variance_of(exp(ln P)) is the lognormal moment p^2 e^s (e^s - 1).
+// Four multiplications, by hand or by the recurrence, give the linear
+// variance p^2 s and the Taylor centre p*(1 + s/2). That centre sits
+// inside the one-sigma interval of the one-shot lognormal moment.
+
+var R_GAS: f64 = 8.314462618
+var T_HOT: f64 = 353.15
+var DH: f64 = 30800.0
+var DS: f64 = 108.0
+var U_DH: f64 = 1500.0
+var U_DS: f64 = 2.0
+
+fn ln_p(dh: f64, ds: f64) -> f64 {
+    ds / R_GAS - dh / (R_GAS * T_HOT)
+}
+
+fn p_one(dh: f64, ds: f64) -> f64 {
+    exp(ln_p(dh, ds))
+}
+
+fn factor(dh: f64, ds: f64) -> f64 {
+    exp(ln_p(dh, ds) / 4.0)
+}
+
+fn climb(x: f64, n: i64) -> f64 {
+    if n < 1 {
+        1.0
+    } else {
+        x * climb(x, n - 1)
+    }
+}
+
+fn s_ln2() -> f64 {
+    let a = U_DS / R_GAS
+    let b = U_DH / (R_GAS * T_HOT)
+    a * a + b * b
+}
+
+fn near(actual: f64, expected: f64, tol: f64) -> bool {
+    let d = actual - expected
+    if d < 0.0 { return (0.0 - d) < tol }
+    d < tol
+}
+
+fn main() -> i64 with IO, Epistemic {
+    let dh0: f64 = DH
+    let ds0: f64 = DS
+    let hk: Knowledge<f64> = measure(dh0, uncertainty: U_DH)
+    let sk: Knowledge<f64> = measure(ds0, uncertainty: U_DS)
+    let dh = hk.value
+    let ds = sk.value
+    let one = p_one(dh, ds)
+    let fac = factor(dh, ds)
+    let hand = fac * fac * fac * fac
+    let c4 = climb(fac, 4)
+    let m1 = second_order_mean(p_one(dh, ds))
+    let v1 = variance_of(p_one(dh, ds))
+    let m4 = second_order_mean(climb(factor(dh, ds), 4))
+    let v4 = variance_of(climb(factor(dh, ds), 4))
+    let mhand = second_order_mean(hand)
+    let vhand = variance_of(hand)
+    let p0 = p_one(DH, DS)
+    let sl2 = s_ln2()
+    let e_sl = exp(sl2)
+    let mean_form = p0 * exp(0.5 * sl2)
+    let var_form = p0 * p0 * e_sl * (e_sl - 1.0)
+    let var_lin = p0 * p0 * sl2
+    let gap = m4 - mean_form
+    let inside = gap * gap < var_form
+    print("one ")
+    print_f64(one)
+    println("")
+    print("c4 ")
+    print_f64(c4)
+    println("")
+    print("m1 ")
+    print_f64(m1)
+    println("")
+    print("v1 ")
+    print_f64(v1)
+    println("")
+    print("m4 ")
+    print_f64(m4)
+    println("")
+    print("v4 ")
+    print_f64(v4)
+    println("")
+    var fails: i64 = 0
+    if !near(one, p0, 0.000001) { fails = fails + 1 }
+    if !near(c4, p0, 0.000001) { fails = fails + 1 }
+    if !near(m1, mean_form, 0.000001) { fails = fails + 1 }
+    if !near(v1, var_form, 0.00001) { fails = fails + 1 }
+    if !near(v4, var_lin, 0.00001) { fails = fails + 1 }
+    if !near(vhand, var_lin, 0.00001) { fails = fails + 1 }
+    let mean_taylor = p0 * (1.0 + 0.5 * sl2)
+    if !near(m4, mhand, 0.000001) { fails = fails + 1 }
+    if !near(m4, mean_taylor, 0.000001) { fails = fails + 1 }
+    if !inside { fails = fails + 1 }
+    if fails == 0 {
+        println("RECUR_VANTHOFF_INSIDE")
+        0
+    } else {
+        println("RECUR_VANTHOFF_FAIL")
+        1
+    }
+}

@@ -97,6 +97,12 @@ fi
 # harness invoke the raw ELF directly through it, bypassing bin/madaros
 # entirely.
 MADAROS_STACK_KB="${MADAROS_STACK_KB:-524288}"
+# SIO-573: export the reservation so the raw compiler can size its
+# expression-nesting depth budget from it (see bin/madaros).
+export MADAROS_STACK_KB
+# SIO-568: report the host OS so the raw ELF can self-elevate its stack
+# address-space limit on Linux when invoked directly.
+export SOUNIO_HOST_OS="$(uname -s)"
 if [[ "$MADAROS_STACK_KB" == "0" ]]; then
   ulimit -s unlimited 2>/dev/null || true
 else
@@ -110,10 +116,24 @@ _detect_raw_mode() {
   fi
   local base
   base="$(basename "$RAW_SOUC")"
-  if [[ "$base" == *madaros* ]]; then
-    echo "modular"
-    return 0
-  fi
+  # Filename short-circuit. Executing the ELF to read its banner faults
+  # the ~1.8GB image and adds ~1.5s to every harness call.
+  #
+  # These basenames are Madaros even when they do not contain "madaros":
+  #   madaros*          artifacts/self-hosted/madaros, madaros-ci.elf,
+  #                     madaros-linux-x86_64, suite-madaros.elf, madaros.gen2
+  #   *optguard*        optguard-gen1.elf
+  #   *nullfix*         nullfix-gen1.elf
+  #
+  # Do not match lean_single generation names. gen1.elf, gen2.elf, gen3.elf,
+  # souc-stage2, souc-linux-x86_64 and souc-lean-single-* use the positional
+  # CLI and must still fall through to the probe.
+  case "$base" in
+    *madaros*|*optguard*|*nullfix*)
+      echo "modular"
+      return 0
+      ;;
+  esac
   local ident
   ident="$("$RAW_SOUC" /dev/null /dev/null 2>/dev/null | head -n 1 || true)"
   if grep -q "Madaros v" <<<"$ident"; then

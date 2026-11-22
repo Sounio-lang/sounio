@@ -3,6 +3,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=../lib/classify_compile.sh
+source "$ROOT_DIR/scripts/lib/classify_compile.sh"
 SOUC="${SOUNIO_LOOM_CONTINUITY_SOUC:-$ROOT_DIR/bin/souc}"
 ENGINE="${SOUNIO_LOOM_CONTINUITY_ENGINE:-lean_single}"
 STDLIB="$ROOT_DIR/stdlib"
@@ -49,6 +51,8 @@ expect_rejection() {
     cat "$log" >&2
     fail "$label must reject with rc=1, got rc=$rc"
   }
+  # rc alone is not a refusal: a crash, timeout or OOM kill is not one (#2425).
+  sounio_expect_failed_exit "$rc" "$log" || { cat "$log" >&2; fail "$label: not a clean refusal: $(sounio_refusal_reason)"; }
   local count
   count="$(rg -c "error\[$code" "$log" || true)"
   if [[ "$code" == E039 || "$code" == E175 ]]; then
@@ -144,7 +148,16 @@ if rg -q 'error\[E175' "$visibility_log"; then
   cat "$visibility_log" >&2
   fail 'making host admission public did not remove the E175 refusal'
 fi
-if [[ "$visibility_rc" -ne 0 ]] && ! rg -q 'error\[E039' "$visibility_log"; then
+# With the admission public, the only refusal left is the linear baseline: the
+# forged admission returns two linear values the witness never consumes. That
+# is E040 (linear value not consumed); E039 (reuse), which this gate first
+# expected, stays accepted. Every other code -- E246 for an unregistered user
+# effect, E035 for a missing one -- means the program failed for a reason the sabotage was
+# not testing, so it must not count as a pass.
+visibility_codes="$(rg -o 'error\[[A-Z0-9-]+' "$visibility_log" | sed 's/error\[//' | sort -u | tr '\n' ' ')"
+visibility_other="$(rg -o 'error\[[A-Z0-9-]+' "$visibility_log" | sed 's/error\[//' | rg -v '^(E039|E040|E000)$' || true)"
+if [[ "$visibility_rc" -ne 0 ]] && { [[ -n "$visibility_other" ]] || ! rg -q 'error\[E0(39|40)' "$visibility_log"; }; then
+  echo "visibility sabotage codes: $visibility_codes" >&2
   cat "$visibility_log" >&2
   fail 'visibility sabotage failed for a reason other than the known modular linear baseline'
 fi

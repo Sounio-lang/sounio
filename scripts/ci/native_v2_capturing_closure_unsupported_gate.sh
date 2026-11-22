@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=../lib/classify_compile.sh
+source "$ROOT_DIR/scripts/lib/classify_compile.sh"
 cd "$ROOT_DIR"
 
 if [[ "$(uname -s 2>/dev/null || echo unknown)" != "Linux" ]]; then
@@ -110,6 +112,12 @@ expect_compile_fail() {
 
   if [[ "$rc" -eq 0 || -f "$out" ]]; then
     echo "[native-v2-capturing-closure-unsupported] FAIL: $src unexpectedly compiled" >&2
+    cat "$LOG_DIR/$name.log" >&2 || true
+    exit 1
+  fi
+  # rc alone is not a refusal: a crash, timeout or OOM kill is not one (#2425).
+  if ! sounio_expect_failed_exit "$rc" "$LOG_DIR/$name.log"; then
+    echo "[native-v2-capturing-closure-unsupported] FAIL: $src: not a clean refusal: $(sounio_refusal_reason)" >&2
     cat "$LOG_DIR/$name.log" >&2 || true
     exit 1
   fi

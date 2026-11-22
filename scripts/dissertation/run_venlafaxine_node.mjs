@@ -84,6 +84,8 @@ for (const dt of SS_DTS) {
   // ×1e12, as the Sounio ref (Madaros prints f64 as 6-decimal fixed).
   out.push(`VSS|rel_err_cf_e12=${fmt(1.0e12 * (ss.ratio - cf) / cf)}`);
   out.push(`VSS|rel_halfwidth_e12=${fmt(1.0e12 * 0.5 * (ss.ratioHi - ss.ratioLo) / ss.ratio)}`);
+  out.push(`VSS|residual_mg_parent_e12=${fmt(1.0e12 * ss.residualMgParent)}`);
+  out.push(`VSS|residual_mg_odv_e12=${fmt(1.0e12 * ss.residualMgOdv)}`);
   out.push(`VSS|certified=${ss.bounded && ss.ratioLo <= cf && cf <= ss.ratioHi ? 1 : 0}`);
 }
 

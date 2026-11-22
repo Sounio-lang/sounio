@@ -2,8 +2,8 @@
 topic_id: repo.docs.roadmap.2026-technical-showcase-deep-dive
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.roadmap.2026-technical-showcase-deep-dive
 -->
 
@@ -110,7 +110,7 @@ fn prescribe_vancomycin(dose: Knowledge) {
 ```
 
 #### Sounio (First-Class Type-Level Enforcement)
-Sounio is the only language that natively tracks and validates confidence thresholds at **compile time** within the type checker.
+The type checker rejects this under-confident call at **compile time** in [`tests/compile-fail/vancomycin_low_conf.sio`](../../tests/compile-fail/vancomycin_low_conf.sio): `Knowledge[f64, ε=0.40]` does not satisfy a parameter of `Knowledge[f64, ε >= 0.82]`.
 ```sio
 // ASHP 2020 guidelines mandate ε >= 0.82 before AUC-guided dosing is permitted.
 fn prescribe_vancomycin(dose: Knowledge[f64, ε >= 0.82]) with IO {

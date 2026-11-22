@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=../lib/classify_compile.sh
+source "$ROOT_DIR/scripts/lib/classify_compile.sh"
 cd "$ROOT_DIR"
 
 TMP_DIR="$(mktemp -d)"
@@ -35,7 +37,7 @@ fi
 bin/souc check "$SMALL_HEAP_PROBE"
 SMALL_HEAP_LOG="$TMP_DIR/small-heap.log"
 if bin/souc run "$SMALL_HEAP_PROBE" >"$SMALL_HEAP_LOG" 2>&1; then
-  printf 'FAIL  %s unexpectedly completed; expected current mem::box/calloc classifier failure\n' "$SMALL_HEAP_PROBE" >&2
+  printf 'FAIL  %s unexpectedly completed; expected current mem::box/calloc classifier failure\n' "$SMALL_HEAP_PROBE" >&2  # refusal-classifier-exempt: characterizes a known crash shape, not a refusal (#2425)
   cat "$SMALL_HEAP_LOG" >&2
   exit 1
 fi
@@ -52,7 +54,7 @@ fi
 bin/souc check "$HEAP_PROBE"
 HEAP_LOG="$TMP_DIR/heap.log"
 if bin/souc run "$HEAP_PROBE" >"$HEAP_LOG" 2>&1; then
-  printf 'FAIL  %s unexpectedly completed; expected current mem::box/calloc classifier failure\n' "$HEAP_PROBE" >&2
+  printf 'FAIL  %s unexpectedly completed; expected current mem::box/calloc classifier failure\n' "$HEAP_PROBE" >&2  # refusal-classifier-exempt: characterizes a known crash shape, not a refusal (#2425)
   cat "$HEAP_LOG" >&2
   exit 1
 fi
@@ -132,11 +134,15 @@ else
 fi
 
 SEMANTIC_REJECT_LOG="$TMP_DIR/semantic-reject.log"
-if bin/souc run "$SEMANTIC_PROBE" -- "$SEMANTIC_REJECT_WITNESS" >"$SEMANTIC_REJECT_LOG" 2>&1; then
+__refusal_rc=0
+bin/souc run "$SEMANTIC_PROBE" -- "$SEMANTIC_REJECT_WITNESS" >"$SEMANTIC_REJECT_LOG" 2>&1 || __refusal_rc=$?
+if [[ "$__refusal_rc" -eq 0 ]]; then
   printf 'FAIL  %s unexpectedly accepted the negative ontology semantic witness\n' "$SEMANTIC_PROBE" >&2
   cat "$SEMANTIC_REJECT_LOG" >&2
   exit 1
 fi
+# rc != 0 is not yet a refusal: a crash, timeout or OOM kill is not (#2425).
+sounio_expect_failed_exit "$__refusal_rc" "$SEMANTIC_REJECT_LOG" || { printf 'FAIL  %s: not a clean refusal: %s\n' "$SEMANTIC_REJECT_LOG" "$(sounio_refusal_reason)" >&2; cat "$SEMANTIC_REJECT_LOG" >&2; exit 1; }
 
 if grep -q 'k2_check_import_knowledge_context_semantic_probe=rejected' "$SEMANTIC_REJECT_LOG"; then
   printf 'PASS  %s rejected imported in-place negative ontology semantic witness\n' "$SEMANTIC_PROBE"
@@ -171,7 +177,7 @@ fi
 bin/souc check "$COLLECT_ACCESSOR_PROBE"
 COLLECT_ACCESSOR_LOG="$TMP_DIR/collect-accessor.log"
 if bin/souc run "$COLLECT_ACCESSOR_PROBE" -- "$COLLECT_WITNESS" >"$COLLECT_ACCESSOR_LOG" 2>&1; then
-  printf 'FAIL  %s unexpectedly completed; expected current imported collect classifier failure\n' "$COLLECT_ACCESSOR_PROBE" >&2
+  printf 'FAIL  %s unexpectedly completed; expected current imported collect classifier failure\n' "$COLLECT_ACCESSOR_PROBE" >&2  # refusal-classifier-exempt: characterizes a known crash shape, not a refusal (#2425)
   cat "$COLLECT_ACCESSOR_LOG" >&2
   exit 1
 fi

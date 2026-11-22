@@ -1,0 +1,219 @@
+// Checked Normal/Beta facade. Reuses the canonical finite gamma/beta kernels.
+// status0 reports supported finite arithmetic/iteration completion, NOT a
+// universal accuracy certificate.1 domain/options,2 nonfinite parameter/NaN,
+// 3 budget,4 arithmetic,5 unsupported/unrepresentable range.
+// Scalar underflow/overflow retains a finite log with value_available=false.
+// Exact support endpoints may contain genuine +/-infinity, never sentinels.
+use math::pure::{is_finite,ln_checked,exp,sqrt}
+use math::logarithmic::{log1p_checked}
+use special::checked_gamma_beta::{beta_log_prefix_checked,beta_pq_checked,gamma_pq_checked,beta_inverse_checked,gamma_inverse_checked}
+
+pub struct CheckedDensity {
+ pub status:i64,pub value:f64,pub log_value:f64,
+ pub value_available:bool,pub log_available:bool,
+}
+pub struct CheckedDistributionTails {
+ pub status:i64,pub cdf:f64,pub sf:f64,pub log_cdf:f64,pub log_sf:f64,
+ pub cdf_available:bool,pub sf_available:bool,
+ pub log_cdf_available:bool,pub log_sf_available:bool,
+ pub iterations:i64,pub method:i64,
+}
+pub struct CheckedDistributionQuantile {
+ pub status:i64,pub value:f64,pub available:bool,
+ pub lower:f64,pub upper:f64,pub iterations:i64,
+ pub forward_log_tail:f64,pub forward_log_available:bool,
+}
+struct CDValue {status:i64,value:f64}
+fn cd_inf()->f64 {1.0e308*10.0}
+fn cd_abs(x:f64)->f64 {if x<0.0 {-x}else{x}}
+fn cd_options(budget:i64,tol:f64)->bool {budget>=1 && budget<=1000000 && tol>=1.7763568394002505e-15 && tol<=1.0e-4}
+fn cd_density_bad(status:i64)->CheckedDensity {CheckedDensity{status:status,value:0.0,log_value:0.0,value_available:false,log_available:false}}
+fn cd_density_endpoint(value:f64,log_value:f64)->CheckedDensity {CheckedDensity{status:0,value:value,log_value:log_value,value_available:true,log_available:true}}
+fn cd_density_log(log_value:f64)->CheckedDensity with Mut,Div {
+ if !is_finite(log_value) {return cd_density_bad(4)}
+ let value=exp(log_value)
+ let available=is_finite(value) && value>0.0
+ CheckedDensity{status:0,value:if available {value}else{0.0},log_value:log_value,value_available:available,log_available:true}
+}
+fn cd_tails_bad(status:i64,iterations:i64,method:i64)->CheckedDistributionTails {
+ CheckedDistributionTails{status:status,cdf:0.0,sf:0.0,log_cdf:0.0,log_sf:0.0,cdf_available:false,sf_available:false,log_cdf_available:false,log_sf_available:false,iterations:iterations,method:method}
+}
+fn cd_tails_endpoint(upper:bool)->CheckedDistributionTails with Mut {
+ var r=cd_tails_bad(0,0,0)
+ r.cdf_available=true;r.sf_available=true;r.log_cdf_available=true;r.log_sf_available=true
+ if upper {r.cdf=1.0;r.log_sf= -cd_inf()} else {r.sf=1.0;r.log_cdf= -cd_inf()}
+ r
+}
+fn cd_normal_parameters(mu:f64,sigma:f64)->i64 {
+ if !is_finite(mu) || !is_finite(sigma) {return 2}
+ if sigma<=0.0 {return 1}
+ 0
+}
+fn cd_standardize(mu:f64,sigma:f64,x:f64)->CDValue with Mut,Div,Panic {
+ let difference=x-mu
+ var z:f64=0.0
+ if is_finite(difference) {z=difference/sigma} else {z=x/sigma-mu/sigma}
+ if !is_finite(z) {return CDValue{status:5,value:0.0}}
+ CDValue{status:0,value:z}
+}
+fn cd_beta_parameters(a:f64,b:f64)->i64 {
+ if !is_finite(a) || !is_finite(b) {return 2}
+ if a<=0.0 || b<=0.0 {return 1}
+ if a>1000000.0 || b>1000000.0 {return 5}
+ 0
+}
+
+pub fn normal_density_checked(mu:f64,sigma:f64,x:f64)->CheckedDensity with Mut,Div,Panic {
+ let status=cd_normal_parameters(mu,sigma)
+ if status!=0 {return cd_density_bad(status)}
+ if x!=x {return cd_density_bad(2)}
+ if !is_finite(x) {return cd_density_endpoint(0.0,-cd_inf())}
+ let z=cd_standardize(mu,sigma,x)
+ if z.status!=0 {return cd_density_bad(z.status)}
+ let ls=ln_checked(sigma)
+ let square=(0.5*z.value)*z.value
+ if ls.status!=0 || !is_finite(square) {return cd_density_bad(5)}
+ cd_density_log(-square-ls.value-0.9189385332046727417803297)
+}
+
+pub fn normal_tails_checked(mu:f64,sigma:f64,x:f64,budget:i64,tol:f64)->CheckedDistributionTails with Mut,Div,Panic {
+ let status=cd_normal_parameters(mu,sigma)
+ if status!=0 {return cd_tails_bad(status,0,0)}
+ if x!=x || !is_finite(tol) {return cd_tails_bad(2,0,0)}
+ if !cd_options(budget,tol) {return cd_tails_bad(1,0,0)}
+ if !is_finite(x) {return cd_tails_endpoint(x>0.0)}
+ let z=cd_standardize(mu,sigma,x)
+ if z.status!=0 {return cd_tails_bad(z.status,0,0)}
+ let square=(0.5*z.value)*z.value
+ if !is_finite(square) {return cd_tails_bad(5,0,0)}
+ if square==0.0 {
+  var r=cd_tails_bad(0,0,0)
+  r.cdf=0.5;r.sf=0.5;r.log_cdf= -0.6931471805599453;r.log_sf= -0.6931471805599453
+  r.cdf_available=true;r.sf_available=true;r.log_cdf_available=true;r.log_sf_available=true
+  return r
+ }
+ let gamma=gamma_pq_checked(0.5,square,budget,tol)
+ if gamma.status!=0 {return cd_tails_bad(gamma.status,gamma.iterations,gamma.method)}
+ if !gamma.log_upper_available {return cd_tails_bad(4,gamma.iterations,gamma.method)}
+ let small_log=gamma.log_upper-0.6931471805599453
+ let small=exp(small_log)
+ let small_ok=is_finite(small) && small>0.0
+ if !is_finite(small_log) || !is_finite(small) || small<0.0 || small>0.5 {return cd_tails_bad(4,gamma.iterations,gamma.method)}
+ var r=cd_tails_bad(0,gamma.iterations,gamma.method)
+ r.cdf_available=true;r.sf_available=true
+ var large_log:f64=0.0
+ var large_log_ok=false
+ if small_ok {
+  let logged=log1p_checked(-small)
+  if logged.status!=0 {return cd_tails_bad(4,gamma.iterations,gamma.method)}
+  large_log=logged.value;large_log_ok=true
+ }
+ if z.value>=0.0 {
+  r.sf=if small_ok {small}else{0.0};r.sf_available=small_ok;r.log_sf=small_log;r.log_sf_available=true
+  r.cdf=1.0-small;r.log_cdf=large_log;r.log_cdf_available=large_log_ok
+ }else{
+  r.cdf=if small_ok {small}else{0.0};r.cdf_available=small_ok;r.log_cdf=small_log;r.log_cdf_available=true
+  r.sf=1.0-small;r.log_sf=large_log;r.log_sf_available=large_log_ok
+ }
+ r
+}
+
+pub fn beta_density_checked(a:f64,b:f64,x:f64)->CheckedDensity with Mut,Div,Panic {
+ let status=cd_beta_parameters(a,b)
+ if status!=0 {return cd_density_bad(status)}
+ if x!=x {return cd_density_bad(2)}
+ if x<0.0 || x>1.0 {return cd_density_endpoint(0.0,-cd_inf())}
+ if x==0.0 {
+  if a<1.0 {return cd_density_endpoint(cd_inf(),cd_inf())}
+  if a>1.0 {return cd_density_endpoint(0.0,-cd_inf())}
+  let l=ln_checked(b)
+  if l.status!=0 {return cd_density_bad(4)}
+  return cd_density_endpoint(b,l.value)
+ }
+ if x==1.0 {
+  if b<1.0 {return cd_density_endpoint(cd_inf(),cd_inf())}
+  if b>1.0 {return cd_density_endpoint(0.0,-cd_inf())}
+  let l=ln_checked(a)
+  if l.status!=0 {return cd_density_bad(4)}
+  return cd_density_endpoint(a,l.value)
+ }
+ let prefix=beta_log_prefix_checked(a,b,x)
+ let lx=ln_checked(x);let ly=log1p_checked(-x)
+ if prefix.status!=0 || lx.status!=0 || ly.status!=0 {return cd_density_bad(4)}
+ cd_density_log(prefix.value-lx.value-ly.value)
+}
+pub fn beta_tails_checked(a:f64,b:f64,x:f64,budget:i64,tol:f64)->CheckedDistributionTails with Mut,Div,Panic {
+ let status=cd_beta_parameters(a,b)
+ if status!=0 {return cd_tails_bad(status,0,0)}
+ if x!=x || !is_finite(tol) {return cd_tails_bad(2,0,0)}
+ if !cd_options(budget,tol) {return cd_tails_bad(1,0,0)}
+ if x<=0.0 {return cd_tails_endpoint(false)}
+ if x>=1.0 {return cd_tails_endpoint(true)}
+ let pair=beta_pq_checked(a,b,x,budget,tol)
+ if pair.status!=0 {return cd_tails_bad(pair.status,pair.iterations,pair.method)}
+ var r=cd_tails_bad(0,pair.iterations,pair.method)
+ r.cdf=pair.lower;r.sf=pair.upper;r.log_cdf=pair.log_lower;r.log_sf=pair.log_upper
+ r.cdf_available=pair.lower_available;r.sf_available=pair.upper_available
+ r.log_cdf_available=pair.log_lower_available;r.log_sf_available=pair.log_upper_available
+ r
+}
+
+fn cd_quantile_bad(status:i64,iterations:i64)->CheckedDistributionQuantile {
+ CheckedDistributionQuantile{status:status,value:0.0,available:false,lower:0.0,upper:0.0,iterations:iterations,forward_log_tail:0.0,forward_log_available:false}
+}
+fn cd_affine(mu:f64,sigma:f64,z:f64)->CDValue with Mut,Div,Panic {
+ var value=mu+sigma*z
+ if !is_finite(value) {value=(mu/sigma+z)*sigma}
+ if !is_finite(value) {return CDValue{status:5,value:0.0}}
+ CDValue{status:0,value:value}
+}
+pub fn normal_quantile_checked(mu:f64,sigma:f64,p:f64,upper:bool,budget:i64,tol:f64)->CheckedDistributionQuantile with Mut,Div,Panic {
+ let status=cd_normal_parameters(mu,sigma)
+ if status!=0 {return cd_quantile_bad(status,0)}
+ if !is_finite(p) || !is_finite(tol) {return cd_quantile_bad(2,0)}
+ if p<0.0 || p>1.0 || !cd_options(budget,tol) {return cd_quantile_bad(1,0)}
+ var out=cd_quantile_bad(0,0)
+ out.available=true
+ if p==0.0 || p==1.0 {
+  let at_left=if upper {p==1.0}else{p==0.0}
+  out.value=if at_left {-cd_inf()}else{cd_inf()}
+  out.lower=out.value;out.upper=out.value
+  out.forward_log_tail=if p==0.0 {-cd_inf()}else{0.0};out.forward_log_available=true
+  return out
+ }
+ if p==0.5 {
+  out.value=mu;out.lower=mu;out.upper=mu;out.forward_log_tail= -0.6931471805599453;out.forward_log_available=true
+  return out
+ }
+ let small=if p<0.5 {p}else{1.0-p}
+ if budget<2 {return cd_quantile_bad(3,0)}
+ let inverse=gamma_inverse_checked(0.5,small*2.0,true,budget-1,tol)
+ if inverse.status!=0 {return cd_quantile_bad(inverse.status,inverse.iterations)}
+ let positive=if upper {p<0.5}else{p>0.5}
+ let z=sqrt(inverse.value*2.0)
+ let zl=sqrt(inverse.lower*2.0)
+ let zu=sqrt(inverse.upper*2.0)
+ let center=cd_affine(mu,sigma,if positive {z}else{-z})
+ let lower=cd_affine(mu,sigma,if positive {zl}else{-zu})
+ let higher=cd_affine(mu,sigma,if positive {zu}else{-zl})
+ if center.status!=0 || lower.status!=0 || higher.status!=0 {return cd_quantile_bad(5,inverse.iterations)}
+ out.value=center.value;out.lower=lower.value;out.upper=higher.value;out.iterations=inverse.iterations
+ let tails=normal_tails_checked(mu,sigma,out.value,budget,tol)
+ out.iterations=out.iterations+1
+ if tails.status!=0 {return cd_quantile_bad(tails.status,out.iterations)}
+ out.forward_log_available=if upper {tails.log_sf_available}else{tails.log_cdf_available}
+ out.forward_log_tail=if upper {tails.log_sf}else{tails.log_cdf}
+ let target=ln_checked(p)
+ if !out.forward_log_available || target.status!=0 || cd_abs(out.forward_log_tail-target.value)>tol {return cd_quantile_bad(5,out.iterations)}
+ out
+}
+pub fn beta_quantile_checked(a:f64,b:f64,p:f64,upper:bool,budget:i64,tol:f64)->CheckedDistributionQuantile with Mut,Div,Panic {
+ let inverse=beta_inverse_checked(a,b,p,upper,budget,tol)
+ if inverse.status!=0 {return cd_quantile_bad(inverse.status,inverse.iterations)}
+ var out=cd_quantile_bad(0,inverse.iterations)
+ out.available=true;out.value=inverse.value;out.lower=inverse.lower;out.upper=inverse.upper
+ out.forward_log_tail=inverse.forward_log_tail;out.forward_log_available=inverse.forward_log_available
+ if p==0.0 {out.forward_log_tail= -cd_inf();out.forward_log_available=true}
+ if p==1.0 {out.forward_log_tail=0.0;out.forward_log_available=true}
+ out
+}

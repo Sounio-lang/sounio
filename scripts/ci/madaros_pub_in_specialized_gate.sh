@@ -10,6 +10,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=../lib/classify_compile.sh
+source "$ROOT_DIR/scripts/lib/classify_compile.sh"
 FIX="$ROOT_DIR/tests/multimodule/thinlink_pub_in_specialized"
 TAG="[madaros-pub-in-specialized]"
 
@@ -114,10 +116,14 @@ expect_refusal() {
   local label="$1" dir="$2"
   local log="$WORK/$label.log" elf="$WORK/$label.elf"
   [[ -f "$dir/main.sio" ]] || fail "$label: missing fixture $dir/main.sio"
-  if (cd "$dir" && raw_compile --native-compile main.sio -o "$elf") >"$log" 2>&1; then
+  __refusal_rc=0
+  (cd "$dir" && raw_compile --native-compile main.sio -o "$elf") >"$log" 2>&1 || __refusal_rc=$?
+  if [[ "$__refusal_rc" -eq 0 ]]; then
     tail -n 25 "$log" >&2 || true
     fail "$label: compiled, but this access should have been refused (a known-wrong executable)"
   fi
+  # rc != 0 is not yet a refusal: a crash, timeout or OOM kill is not (#2425).
+  sounio_expect_refusal "$__refusal_rc" "$log" "$elf" "" || { fail "not a clean refusal: $(sounio_refusal_reason)"; }
   grep -Fq "error[E175]" "$log" || {
     tail -n 25 "$log" >&2 || true
     fail "$label: refused, but without the expected error[E175] diagnostic"
