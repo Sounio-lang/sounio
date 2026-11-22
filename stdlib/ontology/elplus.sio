@@ -23,8 +23,21 @@
 //! Two computation variants:
 //!
 //!   DENSE (demos / small TBoxes): `elplus_fixpoint` iterates the 8
-//!   completion rules to a genuine fixpoint over capacities of 64
-//!   concepts, 8 roles, 8 composition chains.
+//!   completion rules to a genuine fixpoint.  Two layouts of the same
+//!   engine: the LEGACY layout (64 concepts, 8 roles, 8 composition chains;
+//!   the S / R / rclos / pack arrays and the 64-stride indexing documented
+//!   above, unchanged, `elplus_*`) and the WIDE layout (256 concepts, 16
+//!   roles, 32 chains, 256-stride, `elplus_wide_*`; see the section
+//!   "Wide dense variant" below).  The legacy `elplus_fixpoint_packed` keeps
+//!   its own copy of the 8-rule loop (the original, unchanged except for
+//!   capacity guards) and the wide core carries a second copy with 256-stride
+//!   indexing: an embedding of the legacy arrays into a shared wide workspace
+//!   was tried and dropped because the committed Madaros prebuilt does not see
+//!   direct writes to module-level arrays from a callee (see the 2026-11-15
+//!   report), so both layouts are kept in step by the legacy-vs-wide cell
+//!   comparison in tests/run-pass/elplus_limits_256.sio, section (g).  Inputs
+//!   capacity are refused (wide: status code, legacy: panic), never written
+//!   out of bounds.
 //!
 //!   SPARSE (scale): no concept matrix at all for the role layer.  For
 //!   TBoxes with the OAEI Anatomy profile (no conjunctions, a single
@@ -36,9 +49,8 @@
 //!   (`elplus_sparse_seed_edges`), in-place expansion
 //!   (`elplus_sparse_expand`).  Capacities: 4096 classes (incl. the top
 //!   slot), 4096 stated edges per kind; the two workspace matrices
-//!   (`elplus_clos`, `elplus_emat`, 4096-stride) are module-level because
-//!   module-level arrays passed through `&!` parameters miscompile on the
-//!   current lane (see the sparse section header).  TBoxes
+//!   (`elplus_clos`, `elplus_emat`, 4096-stride) are module-level (see the
+//!   sparse section header).  TBoxes
 //!   with conjunctions, role hierarchies or composition must use the
 //!   dense variant (or a future stratified sparse variant); the round-9
 //!   python mirror (scale/gen_elplus_data.py) runs the GENERAL 8-rule
@@ -58,29 +70,27 @@
 //!   (r1,C,D) and (r2,D,E) with chain r1 o r2 <= r3 give (r3,C,E));
 //!   RtoS (edge (r,C,D) gives C <= ex r.D).
 //!
-//! NOTE (compiler limitations, see
-//! artifacts/ontology-frontiers/compiler-repros/REPORT.md): arrays of
-//! structs and arrays without splat initialization segfault at runtime,
-//! and `where` refinement clauses do not parse, so everything is modelled
-//! with parallel primitive arrays with splat init and runtime checks.
-//!
-//! NOTE: use NAMED imports (`use ontology::elplus::{...}`). The qualified
-//! form (`use ontology::elplus; elplus::f(...)`) miscompiles on the
-//! current Madaros imported-module native lane (see
-//! docs/compiler/KNOWN_LIMITATIONS.md).
+//! Data layout: parallel primitive arrays with runtime checks. The
+//! compiler limits this layout was first chosen around (arrays of structs,
+//! arrays without splat initialisation, module arrays through `&!`, the
+//! qualified import form, imported calls with more than 8 parameters) no
+//! longer reproduce (re-measured 2026-11-14; witnesses
+//! tests/run-pass/{array_struct_literal,module_array_mut_ref,
+//! elplus_qualified_import,elplus_fixpoint14_from_helper}.sio). `where`
+//! refinement clauses are ADR-028 D-19.
 //!
 //! Repair integration (round 10): `elplus_derive_conflicts` derives the
 //! mapping-pair conflict relation from a closed dense EL+ matrix (same
 //! 256-stride output shape as ontology::closure::derive_conflicts, so
 //! ontology::repair plugs in unchanged), and `elplus_subsumes_sparse` /
 //! `elplus_edge_sparse` are O(1) read-only accessors over the sparse
-//! workspace matrices so repair drivers can query the role-aware closure
-//! without crossing a `&!` boundary with the module-level arrays.
+//! workspace matrices so repair drivers can query the role-aware closure.
 //! `elplus_subsumes_dense` / `elplus_edge_dense` are the O(1) dense
 //! counterparts over the `elplus_fixpoint` output matrices, used by the
 //! SNOMED mini-closure adapter (ontology::biomedical::snomed).
 
 // ── Dense variant capacities ─────────────────────────────────────────────
+// Legacy-layout capacities (the wide layout is ELPLUS_WIDE_* below).
 // Maximum number of interned concepts (atoms + top + conjs + existentials).
 pub const ELPLUS_MAXC: i64 = 64
 // Maximum number of roles.
@@ -94,6 +104,491 @@ const ELPLUS_SC: i64 = 4096
 // Maximum number of stated edges per kind (sub or exsub).
 const ELPLUS_SE: i64 = 4096
 
+// ── Wide dense variant (capacity raised 2026-11-15) ───────────────────────
+//
+// The legacy dense API above/below is bound to the 64 / 8 / 8 layout by the
+// array TYPES in its signatures (`[bool; 4096]`, `[bool; 32768]`,
+// `[i64; 704]`, ...) and by the callers' literal strides (`s[a*64+b]`); it is
+// kept source compatible (its rule loop is the original; only capacity guards were added) next to the
+// wide core below.  The wide API has the same rules, the same relations, and the
+// layout below:
+//
+//   S[c*256+d]            [bool; 65536]    (256 x 256)
+//   R[(r*256+c)*256+f]    [bool; 1048576]  (16 x 256 x 256)
+//   rclos[r*16+s]         [bool; 256]      (16 x 16)
+//   pack                  [i64; 4864]      ckind[0..256) carg1[256..512)
+//                                          carg2[512..768) exid[768..4864),
+//                                          exid[768 + r*256 + f]
+//   chains                [i64; 96]        ch1[0..32) ch2[32..64) ch3[64..96)
+//   dims                  [i64; 4]         [nchain, nc, nb, nr]
+//
+// Fail closed.  Every wide entry point validates its dimensions and the
+// concept / existential / chain tables of the used region BEFORE writing
+// anything to its outputs; a violation returns a nonzero status
+// (`elplus_wide_seed`, `elplus_wide_role_closure`) or a negative status
+// (`elplus_wide_fixpoint_packed`: -1 nchain, -2 nc, -3 nb, -4 nr, -5 conjunct
+// out of range, -6 existential role/filler out of range, -7 exid out of range,
+// -8 chain role out of range).  The legacy entry points panic on the same
+// violations at THEIR capacities (before 2026-11-15 they wrote out of bounds
+// silently: `elplus_seed(&!s, 65, 0)` returned normally and corrupted memory).
+//
+// Soundness: the Lean development (formal/OntologyELPlusClosureComplete.lean)
+// quantifies over arbitrary `Fin n` / `Fin m` universes; no size is part of
+// the theorems.  The capacities here are only the bounds of the executable
+// mirror; a TBox that does not fit is REFUSED, never truncated.
+
+// Wide capacities (documentation and caller use; the wide code below uses the
+// literals 256 / 16 / 32 on purpose: with these named constants the committed
+// Madaros prebuilt computed wrong results, measured: elplus_wide_seed(s, 3, 2)
+// set 3 cells instead of 5).
+pub const ELPLUS_WIDE_MAXC: i64 = 256
+pub const ELPLUS_WIDE_MAXR: i64 = 16
+pub const ELPLUS_WIDE_MAXCH: i64 = 32
+
+/// Validate dims and the used part of the tables of a wide-layout pack
+/// against the capacities (`cc` concepts, `cr` roles, `ch` chains) for the
+/// dims, and against the ACTIVE dimensions dims = [nchain, nc, nb, nr] for
+/// every id: concept ids (conjunct arguments, exid entries) must lie in
+/// 0..nc (exid: -1 is the only absence sentinel), existential roles and chain
+/// endpoints in 0..nr, existential fillers in 0..nb, and nb <= nc. Returns 0
+/// when valid, otherwise the positive form of the status documented above
+/// (9 nb > nc). Only entries that the rules can read are examined:
+/// conjunction / existential arguments of concepts c < nc, exid[r][f] for
+/// r < nr, f < nb, and the chains k < nchain.
+fn elplus_wide_check(pack: &[i64; 4864], chains: &[i64; 96], dims: &[i64; 4], cc: i64, cr: i64, ch: i64) -> i64 with Div, Panic {
+    let nchain = dims[0]
+    let nc = dims[1]
+    let nb = dims[2]
+    let nr = dims[3]
+    if nchain < 0 || nchain > ch { return 1 }
+    if nc < 0 || nc > cc { return 2 }
+    if nb < 0 || nb > cc { return 3 }
+    if nr < 0 || nr > cr { return 4 }
+    if nb > nc { return 9 }
+    var c: i64 = 0
+    while c < nc {
+        let kind = pack[c]
+        let a1 = pack[256 + c]
+        let a2 = pack[512 + c]
+        if kind == 2 {
+            if a1 < 0 || a1 >= nc || a2 < 0 || a2 >= nc { return 5 }
+        }
+        if kind == 3 {
+            if a1 < 0 || a1 >= nr || a2 < 0 || a2 >= nb { return 6 }
+        }
+        c = c + 1
+    }
+    var r: i64 = 0
+    while r < nr {
+        var f: i64 = 0
+        while f < nb {
+            let x = pack[768 + r * 256 + f]
+            if x < 0 - 1 || x >= nc { return 7 }
+            f = f + 1
+        }
+        r = r + 1
+    }
+    var k: i64 = 0
+    while k < nchain {
+        let x1 = chains[k]
+        let x2 = chains[32 + k]
+        let x3 = chains[64 + k]
+        if x1 < 0 || x1 >= nr || x2 < 0 || x2 >= nr || x3 < 0 || x3 >= nr { return 8 }
+        k = k + 1
+    }
+    return 0
+}
+
+/// Validate the INPUT state of the matrices against the active dimensions,
+/// before anything is written: a set `rclos` cell outside nr x nr (10), a set
+/// `s` cell outside nc x nc (11), a set `r` cell outside nr x nc x nb (12).
+/// Returns 0 or the positive status.
+fn elplus_wide_check_state(s: &[bool; 65536], r: &[bool; 1048576], rclos: &[bool; 256], dims: &[i64; 4]) -> i64 with Div, Panic {
+    let nc = dims[1]
+    let nb = dims[2]
+    let nr = dims[3]
+    var a: i64 = 0
+    while a < 16 {
+        var b: i64 = 0
+        while b < 16 {
+            if rclos[a * 16 + b] {
+                if a >= nr || b >= nr { return 10 }
+            }
+            b = b + 1
+        }
+        a = a + 1
+    }
+    a = 0
+    while a < 256 {
+        var b: i64 = 0
+        while b < 256 {
+            if s[a * 256 + b] {
+                if a >= nc || b >= nc { return 11 }
+            }
+            b = b + 1
+        }
+        a = a + 1
+    }
+    var rr: i64 = 0
+    while rr < 16 {
+        var c: i64 = 0
+        while c < 256 {
+            var f: i64 = 0
+            while f < 256 {
+                if r[(rr * 256 + c) * 256 + f] {
+                    if rr >= nr || c >= nc || f >= nb { return 12 }
+                }
+                f = f + 1
+            }
+            c = c + 1
+        }
+        rr = rr + 1
+    }
+    return 0
+}
+
+/// Wide role-hierarchy closure: seed reflexivity, then transitive saturation
+/// over the stated cells of `rclos` (16 x 16, stride 16).  Returns 0, or 1
+/// (nothing written) when `nr` is outside 0..=16.
+///
+/// # Complexity
+/// O(nr^3) per pass, at most nr passes.
+pub fn elplus_wide_role_closure(rclos: &![bool; 256], nr: i64) -> i64 with Mut, Div, Panic {
+    if nr < 0 || nr > 16 { return 1 }
+    var r: i64 = 0
+    while r < nr {
+        rclos[r * 16 + r] = true
+        r = r + 1
+    }
+    var changed = true
+    var a: i64 = 0
+    var b: i64 = 0
+    var d: i64 = 0
+    while changed {
+        changed = false
+        a = 0
+        while a < nr {
+            b = 0
+            while b < nr {
+                if rclos[a * 16 + b] {
+                    d = 0
+                    while d < nr {
+                        if rclos[b * 16 + d] {
+                            if !rclos[a * 16 + d] {
+                                rclos[a * 16 + d] = true
+                                changed = true
+                            }
+                        }
+                        d = d + 1
+                    }
+                }
+                b = b + 1
+            }
+            a = a + 1
+        }
+    }
+    return 0
+}
+
+/// Wide subsumption seed: every cell of the 256 x 256 matrix false, then
+/// reflexivity and the top axiom for every concept c < nc.  Returns 0, or
+/// 1 (nc outside 0..=256) / 2 (top outside 0..nc while nc > 0); on a
+/// refusal NOTHING is written.
+///
+/// # Complexity
+/// O(256^2)
+pub fn elplus_wide_seed(s: &![bool; 65536], nc: i64, top: i64) -> i64 with Mut, Div, Panic {
+    if nc < 0 || nc > 256 { return 1 }
+    if nc > 0 {
+        if top < 0 || top >= nc { return 2 }
+    }
+    var a: i64 = 0
+    while a < 256 {
+        var b: i64 = 0
+        while b < 256 {
+            s[a * 256 + b] = false
+            b = b + 1
+        }
+        a = a + 1
+    }
+    var c: i64 = 0
+    while c < nc {
+        s[c * 256 + c] = true
+        s[c * 256 + top] = true
+        c = c + 1
+    }
+    return 0
+}
+
+/// Pack helper: concept `c` of kind `kind` (0 atom, 1 top, 2 conjunction,
+/// 3 existential) with arguments `a1`, `a2` (see the module header).
+/// Returns 0, or 1 when c is outside 0..256, kind outside 0..=3, or an argument
+/// is outside its capacity (nothing written).
+pub fn elplus_wide_set_concept(pack: &![i64; 4864], c: i64, kind: i64, a1: i64, a2: i64) -> i64 with Mut, Div, Panic {
+    if c < 0 || c >= 256 { return 1 }
+    if kind < 0 || kind > 3 { return 1 }
+    if kind == 2 {
+        if a1 < 0 || a1 >= 256 || a2 < 0 || a2 >= 256 { return 1 }
+    }
+    if kind == 3 {
+        if a1 < 0 || a1 >= 16 || a2 < 0 || a2 >= 256 { return 1 }
+    }
+    pack[c] = kind
+    pack[256 + c] = a1
+    pack[512 + c] = a2
+    return 0
+}
+
+/// Pack helper: exid[r][f] = id of the interned `exists r.f` (or -1).
+/// Returns 0, or 1 when r, f or id (-1 or 0..256) is out of range (nothing
+/// written).
+pub fn elplus_wide_set_exid(pack: &![i64; 4864], r: i64, f: i64, id: i64) -> i64 with Mut, Div, Panic {
+    if r < 0 || r >= 16 || f < 0 || f >= 256 { return 1 }
+    if id < 0 - 1 || id >= 256 { return 1 }
+    pack[768 + r * 256 + f] = id
+    return 0
+}
+
+/// Pack helper: chain k is r1 o r2 <= r3.  Returns 0, or 1 when k is out of
+/// range (nothing written).
+pub fn elplus_wide_set_chain(chains: &![i64; 96], k: i64, r1: i64, r2: i64, r3: i64) -> i64 with Mut, Div, Panic {
+    if k < 0 || k >= 32 { return 1 }
+    if r1 < 0 || r1 >= 16 || r2 < 0 || r2 >= 16 || r3 < 0 || r3 >= 16 { return 1 }
+    chains[k] = r1
+    chains[32 + k] = r2
+    chains[64 + k] = r3
+    return 0
+}
+
+/// The 8-rule EL+ completion step iterated to a genuine fixpoint over the
+/// wide capacities (256 concepts, 16 roles, 32 chains): the PRIMARY home of
+/// the rule loop at 256 stride (the legacy 64 / 8 / 8 entry points keep their own copy).
+/// Identical semantics to the legacy documentation of `elplus_fixpoint`
+/// (S seeded with `elplus_wide_seed` plus the stated inclusions; R passed
+/// splat-false and derived here; derived edges that would need a
+/// non-interned existential are skipped, the `conceptUniv` restriction).
+///
+/// Returns the number of rounds (>= 1) or a negative status (see the
+/// section header); on a negative status `s` and `r` are untouched.
+///
+/// # Complexity
+/// O(rounds * (nc^3 + nr*nc*nb^2 + nr^2*nc*nb + nchain*nc*nb^2)), the guarded
+/// inner loops only run for set edges.
+///
+/// # References
+/// - formal/OntologyELPlusClosureComplete.lean, theorems
+///   `closeSatF_trans` ... `closeSatF_RtoS`, `subBPlusC_iff`,
+///   `conflictBPlusC_iff` (over an arbitrary finite universe).
+pub fn elplus_wide_fixpoint_packed(
+    s: &![bool; 65536],
+    r: &![bool; 1048576],
+    pack: &[i64; 4864],
+    rclos: &[bool; 256],
+    chains: &[i64; 96],
+    dims: &[i64; 4]
+) -> i64 with Mut, Div, Panic {
+    let status = elplus_wide_check(pack, chains, dims, 256, 16, 32)
+    if status != 0 { return 0 - status }
+    let status2 = elplus_wide_check_state(s, r, rclos, dims)
+    if status2 != 0 { return 0 - status2 }
+    var nchain: i64 = dims[0]
+    var nc: i64 = dims[1]
+    var nb: i64 = dims[2]
+    var nr: i64 = dims[3]
+    var changed = true
+    var rounds: i64 = 0
+    var a: i64 = 0
+    var k: i64 = 0
+    var d: i64 = 0
+    var c: i64 = 0
+    var rr: i64 = 0
+    var ss: i64 = 0
+    var f: i64 = 0
+    var d2: i64 = 0
+    var f2: i64 = 0
+    var x: i64 = 0
+    var idx: i64 = 0
+    var r1: i64 = 0
+    var r2: i64 = 0
+    var r3: i64 = 0
+    while changed {
+        changed = false
+        rounds = rounds + 1
+
+        // (T) transitivity on S
+        a = 0
+        while a < nc {
+            k = 0
+            while k < nc {
+                if s[a * 256 + k] {
+                    d = 0
+                    while d < nc {
+                        if s[k * 256 + d] && !s[a * 256 + d] {
+                            s[a * 256 + d] = true
+                            changed = true
+                        }
+                        d = d + 1
+                    }
+                }
+                k = k + 1
+            }
+            a = a + 1
+        }
+
+        // (CE) conjunction elimination and (CI) introduction (kind 2)
+        a = 0
+        while a < nc {
+            d = 0
+            while d < nc {
+                if pack[d] == 2 {
+                    if s[a * 256 + d] {
+                        if !s[a * 256 + pack[256 + d]] {
+                            s[a * 256 + pack[256 + d]] = true
+                            changed = true
+                        }
+                        if !s[a * 256 + pack[512 + d]] {
+                            s[a * 256 + pack[512 + d]] = true
+                            changed = true
+                        }
+                    }
+                    if s[a * 256 + pack[256 + d]] && s[a * 256 + pack[512 + d]] {
+                        if !s[a * 256 + d] {
+                            s[a * 256 + d] = true
+                            changed = true
+                        }
+                    }
+                }
+                d = d + 1
+            }
+            a = a + 1
+        }
+
+        // (S2R) stoR: C <= ex r.D becomes edge (r, C, D)
+        a = 0
+        while a < nc {
+            d = 0
+            while d < nc {
+                if pack[d] == 3 && s[a * 256 + d] {
+                    idx = (pack[256 + d] * 256 + a) * 256 + pack[512 + d]
+                    if !r[idx] {
+                        r[idx] = true
+                        changed = true
+                    }
+                }
+                d = d + 1
+            }
+            a = a + 1
+        }
+
+        // (RM) Rmono: edge (r,C,D) and D <= D' give (r,C,D'), D' base
+        rr = 0
+        while rr < nr {
+            c = 0
+            while c < nc {
+                f = 0
+                while f < nb {
+                    if r[(rr * 256 + c) * 256 + f] {
+                        d2 = 0
+                        while d2 < nb {
+                            if s[f * 256 + d2] && pack[768 + rr * 256 + d2] >= 0 {
+                                idx = (rr * 256 + c) * 256 + d2
+                                if !r[idx] {
+                                    r[idx] = true
+                                    changed = true
+                                }
+                            }
+                            d2 = d2 + 1
+                        }
+                    }
+                    f = f + 1
+                }
+                c = c + 1
+            }
+            rr = rr + 1
+        }
+
+        // (RS) roleSub: edge (r,C,D) and r <=* s (rclos) give (s,C,D)
+        rr = 0
+        while rr < nr {
+            ss = 0
+            while ss < nr {
+                if rclos[rr * 16 + ss] {
+                    c = 0
+                    while c < nc {
+                        f = 0
+                        while f < nb {
+                            if r[(rr * 256 + c) * 256 + f] && pack[768 + ss * 256 + f] >= 0 {
+                                idx = (ss * 256 + c) * 256 + f
+                                if !r[idx] {
+                                    r[idx] = true
+                                    changed = true
+                                }
+                            }
+                            f = f + 1
+                        }
+                        c = c + 1
+                    }
+                }
+                ss = ss + 1
+            }
+            rr = rr + 1
+        }
+
+        // (RC) roleComp: edges (r1,C,D) and (r2,D,E) with chain
+        // r1 o r2 <= r3 give (r3,C,E)
+        k = 0
+        while k < nchain {
+            r1 = chains[k]
+            r2 = chains[32 + k]
+            r3 = chains[64 + k]
+            c = 0
+            while c < nc {
+                f = 0
+                while f < nb {
+                    if r[(r1 * 256 + c) * 256 + f] {
+                        f2 = 0
+                        while f2 < nb {
+                            if r[(r2 * 256 + f) * 256 + f2] && pack[768 + r3 * 256 + f2] >= 0 {
+                                idx = (r3 * 256 + c) * 256 + f2
+                                if !r[idx] {
+                                    r[idx] = true
+                                    changed = true
+                                }
+                            }
+                            f2 = f2 + 1
+                        }
+                    }
+                    f = f + 1
+                }
+                c = c + 1
+            }
+            k = k + 1
+        }
+
+        // (R2S) RtoS: edge (r,C,D) gives C <= ex r.D
+        rr = 0
+        while rr < nr {
+            c = 0
+            while c < nc {
+                f = 0
+                while f < nb {
+                    if r[(rr * 256 + c) * 256 + f] {
+                        x = pack[768 + rr * 256 + f]
+                        if x >= 0 && !s[c * 256 + x] {
+                            s[c * 256 + x] = true
+                            changed = true
+                        }
+                    }
+                    f = f + 1
+                }
+                c = c + 1
+            }
+            rr = rr + 1
+        }
+    }
+    return rounds
+}
+
 /// Role-hierarchy closure: seed reflexivity, then transitive saturation
 /// over the stated cells of rclos.  Existing stated cells are kept.
 ///
@@ -104,6 +599,7 @@ const ELPLUS_SE: i64 = 4096
 /// # Complexity
 /// O(nr^3) per pass, at most nr passes.
 pub fn elplus_role_closure(rclos: &![bool; 64], nr: i64) with Mut, Div, Panic {
+    if nr < 0 || nr > ELPLUS_MAXR { panic("elplus_role_closure: nr outside 0..8 (legacy capacity ELPLUS_MAXR); use elplus_wide_role_closure") }
     var r: i64 = 0
     while r < nr {
         rclos[r * ELPLUS_MAXR + r] = true
@@ -149,6 +645,10 @@ pub fn elplus_role_closure(rclos: &![bool; 64], nr: i64) with Mut, Div, Panic {
 /// # Complexity
 /// O(64^2)
 pub fn elplus_seed(s: &![bool; 4096], nc: i64, top: i64) with Mut, Div, Panic {
+    if nc < 0 || nc > ELPLUS_MAXC { panic("elplus_seed: nc outside 0..64 (legacy capacity ELPLUS_MAXC); use elplus_wide_seed") }
+    if nc > 0 {
+        if top < 0 || top >= ELPLUS_MAXC { panic("elplus_seed: top outside 0..64 (legacy capacity ELPLUS_MAXC)") }
+    }
     var a: i64 = 0
     while a < ELPLUS_MAXC {
         var b: i64 = 0
@@ -244,14 +744,11 @@ pub fn elplus_fixpoint(
 
 /// Cross-module packaging of `elplus_fixpoint` and the PRIMARY home of
 /// the 8-rule loop: identical semantics, but 6 parameters instead of
-/// 14.  Imported calls with more than 8 parameters fail native codegen
-/// on the current Madaros lane (thin-link produces no ELF for
-/// 9+-parameter callees unless the caller is the main module's `main`;
-/// probe 2026-08), so the public 14-parameter `elplus_fixpoint` above
-/// is now a thin pack-and-delegate wrapper around this function, and
-/// importers that run the dense fixpoint outside their own `main`
-/// (e.g. the SNOMED adapter in ontology::biomedical::snomed) call this
-/// wrapper directly.
+/// 14; the public 14-parameter `elplus_fixpoint` above packs and
+/// delegates here. (The packing was introduced when imported calls with
+/// more than 8 parameters produced no ELF outside `main`, probe 2026-08;
+/// that no longer reproduces: tests/run-pass/
+/// elplus_fixpoint14_from_helper.sio.)
 ///
 /// # Parameters
 /// - `s`, `r`: as in `elplus_fixpoint` (mutated in place).
@@ -271,6 +768,10 @@ pub fn elplus_fixpoint_packed(
     chains: &[i64; 24],
     dims: &[i64; 4]
 ) -> i64 with Mut, Div, Panic {
+    if dims[0] < 0 || dims[0] > ELPLUS_MAXCH { panic("elplus_fixpoint: nchain outside 0..8 (legacy capacity ELPLUS_MAXCH); use elplus_wide_fixpoint_packed") }
+    if dims[1] < 0 || dims[1] > ELPLUS_MAXC { panic("elplus_fixpoint: nc outside 0..64 (legacy capacity ELPLUS_MAXC); use elplus_wide_fixpoint_packed") }
+    if dims[2] < 0 || dims[2] > ELPLUS_MAXC { panic("elplus_fixpoint: nb outside 0..64 (legacy capacity ELPLUS_MAXC); use elplus_wide_fixpoint_packed") }
+    if dims[3] < 0 || dims[3] > ELPLUS_MAXR { panic("elplus_fixpoint: nr outside 0..8 (legacy capacity ELPLUS_MAXR); use elplus_wide_fixpoint_packed") }
     var ckind: [i64; 64] = [0; 64]
     var carg1: [i64; 64] = [0; 64]
     var carg2: [i64; 64] = [0; 64]
@@ -658,17 +1159,160 @@ pub fn elplus_derive_conflicts(
     }
 }
 
+// ── Wide dense accessors (256 / 16 layout; out-of-range arguments are
+//    answered "no", never read out of bounds) ─────────────────────────────
+
+/// Wide closure query: does concept `a` subsume to `b` in a CLOSED wide
+/// subsumption matrix?  False when a or b is outside 0..256.
+///
+/// # Complexity
+/// O(1)
+pub fn elplus_wide_subsumes(s: &[bool; 65536], a: i64, b: i64) -> bool with Div, Panic {
+    if a < 0 || a >= 256 || b < 0 || b >= 256 { return false }
+    return s[a * 256 + b]
+}
+
+/// Wide role-edge query: derived edge (role, c, f) in a CLOSED wide
+/// role-edge cube?  False when an argument is out of range.
+///
+/// # Complexity
+/// O(1)
+pub fn elplus_wide_edge(r: &[bool; 1048576], role: i64, c: i64, f: i64) -> bool with Div, Panic {
+    if role < 0 || role >= 16 || c < 0 || c >= 256 || f < 0 || f >= 256 { return false }
+    return r[(role * 256 + c) * 256 + f]
+}
+
+/// Count the set cells of the used nc x nc region of a wide subsumption
+/// matrix (nc clamped to 0..256).
+///
+/// # Complexity
+/// O(nc^2)
+pub fn elplus_wide_s_count(s: &[bool; 65536], nc: i64) -> i64 with Div, Panic {
+    var n: i64 = 0
+    var lim: i64 = nc
+    if lim > 256 { lim = 256 }
+    var a: i64 = 0
+    while a < lim {
+        var b: i64 = 0
+        while b < lim {
+            if s[a * 256 + b] {
+                n = n + 1
+            }
+            b = b + 1
+        }
+        a = a + 1
+    }
+    return n
+}
+
+/// Count the set cells of the used nr x nc x nb region of a wide role-edge
+/// cube (each bound clamped to its capacity).
+///
+/// # Complexity
+/// O(nr*nc*nb)
+pub fn elplus_wide_r_count(r: &[bool; 1048576], nr: i64, nc: i64, nb: i64) -> i64 with Div, Panic {
+    var n: i64 = 0
+    var lr: i64 = nr
+    var lc: i64 = nc
+    var lb: i64 = nb
+    if lr > 16 { lr = 16 }
+    if lc > 256 { lc = 256 }
+    if lb > 256 { lb = 256 }
+    var rr: i64 = 0
+    while rr < lr {
+        var c: i64 = 0
+        while c < lc {
+            var f: i64 = 0
+            while f < lb {
+                if r[(rr * 256 + c) * 256 + f] {
+                    n = n + 1
+                }
+                f = f + 1
+            }
+            c = c + 1
+        }
+        rr = rr + 1
+    }
+    return n
+}
+
+/// Wide conflict: exist d1, d2 with s[a][d1], s[b][d2] and disj[d1][d2]
+/// (wide counterpart of `elplus_conflict`).  False when a, b or nc is out of
+/// range.
+///
+/// # Complexity
+/// O(nc^2)
+pub fn elplus_wide_conflict(s: &[bool; 65536], disj: &[bool; 65536], nc: i64, a: i64, b: i64) -> bool with Div, Panic {
+    if nc < 0 || nc > 256 { return false }
+    if a < 0 || a >= 256 || b < 0 || b >= 256 { return false }
+    var hit = false
+    var d1: i64 = 0
+    while d1 < nc {
+        if s[a * 256 + d1] {
+            var d2: i64 = 0
+            while d2 < nc {
+                if s[b * 256 + d2] && disj[d1 * 256 + d2] {
+                    hit = true
+                }
+                d2 = d2 + 1
+            }
+        }
+        d1 = d1 + 1
+    }
+    return hit
+}
+
+/// Wide counterpart of `elplus_derive_conflicts`: same mapping stride
+/// (256, at most 256 mappings) and output shape, over a CLOSED wide
+/// subsumption matrix and a wide disjointness matrix (stride 256).  Returns
+/// 0, or 1 (nothing written) when m or nc is out of range or a concept id
+/// of a mapping is outside 0..256.
+///
+/// # Complexity
+/// O(m^2 * nc^2)
+pub fn elplus_wide_derive_conflicts(
+    conf_pair: &![bool; 65536],
+    m: i64,
+    ent: &[i64; 256],
+    cls: &[i64; 256],
+    s: &[bool; 65536],
+    disj: &[bool; 65536],
+    nc: i64
+) -> i64 with Mut, Div, Panic {
+    if m < 0 || m > 256 || nc < 0 || nc > 256 { return 1 }
+    var q: i64 = 0
+    while q < m {
+        if cls[q] < 0 || cls[q] >= 256 { return 1 }
+        q = q + 1
+    }
+    var i: i64 = 0
+    while i < m {
+        var j: i64 = 0
+        while j < m {
+            conf_pair[i * 256 + j] = false
+            if i != j {
+                if ent[i] == ent[j] {
+                    if elplus_wide_conflict(s, disj, nc, cls[i], cls[j]) {
+                        conf_pair[i * 256 + j] = true
+                    }
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
 // ── Sparse variant (scale; Anatomy profile: no conjunctions, single
 //    active role, no role hierarchy/composition) ────────────────────────
 //
-// The two workspace matrices are module-level ON PURPOSE: passing a
-// module-level array through a `&!` parameter miscompiles on the current
-// Madaros lane (mutations land in a linker stub; large index spreads
-// segfault — probe: round 9 bisect).  Functions here mutate their OWN
-// module globals, which is the pattern the generated data modules
-// already rely on (init_chunk_* functions).  Importers therefore pay
-// ~33MB of BSS; only the scale driver should import this module with the
-// sparse functions in scope.
+// The two workspace matrices are module-level: functions here mutate
+// their own module globals, the pattern the generated data modules rely
+// on (init_chunk_* functions). (This was first forced by a `&!`
+// miscompile of module arrays, round 9 bisect; that no longer reproduces,
+// 16M-word arrays across a module boundary included:
+// tests/run-pass/module_array_mut_ref.sio.)
 //
 // elplus_emat plays a double role: it is seeded with the stated-filler
 // unions (e[c] |= clos[f] for each stated edge (c, f)) and then expanded
@@ -865,9 +1509,7 @@ pub fn elplus_sparse_expand(h: i64, w: i64) with Mut, Div, Panic {
 
 /// Sparse closure query: does class `c` subsume to `d` (columns
 /// 0..w-1 of the workspace closure matrix; column w-1 is the top slot)?
-/// Read-only accessor so importers never pass the module-level matrices
-/// through a `&!` boundary (see the sparse section header); repair
-/// drivers use this in place of direct closure-matrix indexing.
+/// Read-only accessor; repair drivers use this in place of direct closure-matrix indexing.
 ///
 /// # Complexity
 /// O(1)

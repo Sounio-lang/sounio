@@ -1,0 +1,108 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: WIDE_INT_FN_ABI_HIGH_LIMBS_OK
+//@ description: iN/uN (N > 64) values cross user-fn parameter and return boundaries with every limb. Before, a wide param was bound as one machine word and a wide return travelled in rax, so `fn f(q: i256, d: i256)` computed q*d in 64 bits (an ADR-031 overflow trap, or silently mod 2^64 before ADR-031) and `-> i128` dropped the high limb. Expected values are the inline computation (same function, no call) and, for the two printed limbs, tests/oracles/wide_int_fn_abi_high_limbs.cpp.
+
+struct Acc { bias: i64 }
+
+fn mul_witness(q: i256, d: i256, r: i256, n: i256) -> i64 {
+    if q * d + r != n { return 0 }
+    return 1
+}
+
+fn add_one(x: i128) -> i128 {
+    let y: i128 = x + (1 as i128)
+    return y
+}
+
+fn square_tail(x: i128) -> i128 {
+    x * x
+}
+
+fn fact(n: i64) -> i128 {
+    if n <= 1 { return 1 }
+    let rest: i128 = fact(n - 1)
+    return rest * (n as i128)
+}
+
+fn neg_one() -> i128 {
+    return -1
+}
+
+fn widen_u(x: u128) -> u128 {
+    return x
+}
+
+fn widen_s(x: i128) -> i128 {
+    return x
+}
+
+impl Acc {
+    fn shifted(self, x: i128) -> i128 {
+        return x + (self.bias as i128)
+    }
+}
+
+fn main() -> i64 with IO, Mut, Div {
+    var fails: i64 = 0
+    let b32: i128 = 4294967296 as i128
+    let b64: i128 = b32 * b32
+
+    // Parameters: operands whose product needs more than 64 bits.
+    let q: i256 = 133081411987 as i256
+    let d: i256 = 4294967296 as i256
+    let r: i256 = 12345 as i256
+    let n: i256 = q * d + r
+    if mul_witness(q, d, r, n) != 1 { print("param_mul FAIL\n"); fails = fails + 1 }
+    if mul_witness(q, d, r, n + (1 as i256)) != 0 { print("param_mul_neg FAIL\n"); fails = fails + 1 }
+
+    // Return: a value whose high limb is nonzero (2^100 + 1).
+    var two100: i128 = 1 as i128
+    var k: i64 = 0
+    while k < 100 { two100 = two100 * (2 as i128); k = k + 1 }
+    let got_add = add_one(two100)
+    let want_add: i128 = two100 + (1 as i128)
+    if got_add != want_add { print("ret_add_one FAIL\n"); fails = fails + 1 }
+    print("add_one_hi="); print_int((got_add >> 64) as i64); print("\n")
+
+    // Return through the implicit tail expression.
+    let s: i128 = 3037000500 as i128
+    let got_sq = square_tail(s)
+    if got_sq != s * s { print("ret_tail FAIL\n"); fails = fails + 1 }
+
+    // Recursion: 30! needs 108 bits.
+    let got_f = fact(30)
+    var want_f: i128 = 1 as i128
+    var j: i64 = 2
+    while j <= 30 { want_f = want_f * (j as i128); j = j + 1 }
+    if got_f != want_f { print("ret_recursive FAIL\n"); fails = fails + 1 }
+    print("fact30_div_2pow64="); print_int((got_f >> 64) as i64); print("\n")
+
+    // A word literal returned from a wide fn is sign-extended (`-1`, all ones).
+    let m1 = neg_one()
+    if m1 + (1 as i128) != (0 as i128) { print("ret_neg_literal FAIL\n"); fails = fails + 1 }
+
+    // Widened arguments: u64 max zero-extends, i64 -1 sign-extends.
+    let umax: u64 = 18446744073709551615
+    let wu = widen_u(umax as u128)
+    if wu / ((4294967296 as u128) * (4294967296 as u128)) != (0 as u128) { print("arg_u64_zero_ext FAIL\n"); fails = fails + 1 }
+    if wu + (1 as u128) != (4294967296 as u128) * (4294967296 as u128) { print("arg_u64_value FAIL\n"); fails = fails + 1 }
+    let neg: i64 = 0 - 1
+    let ws = widen_s(neg as i128)
+    if ws + (1 as i128) != (0 as i128) { print("arg_i64_sign_ext FAIL\n"); fails = fails + 1 }
+
+    // Method: wide param and wide return past the receiver.
+    let acc = Acc { bias: 7 }
+    let got_m = acc.shifted(two100)
+    if got_m != two100 + (7 as i128) { print("method FAIL\n"); fails = fails + 1 }
+
+    // A wide value copied by `let` keeps every limb.
+    let copy: i128 = two100
+    if copy != two100 { print("let_copy FAIL\n"); fails = fails + 1 }
+
+    if fails == 0 {
+        print("WIDE_INT_FN_ABI_HIGH_LIMBS_OK\n")
+        return 0
+    }
+    return 1
+}

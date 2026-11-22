@@ -1,0 +1,378 @@
+// stdlib/molecular/lj.sio -- classical particles in a periodic cubic box:
+// Lennard-Jones pair energy and virial, Metropolis displacement moves,
+// grand-canonical insertion and deletion, and Widom test-particle insertion.
+//
+// WHY THIS EXISTS. Until this file the tree had Lennard-Jones only as a
+// docking score (medical/docking.sio) and Metropolis only on a gauge lattice
+// (particle_physics/lattice_gauge.sio). Neither is a particle simulation:
+// there was no periodic box, no minimum image, no tail correction, and no
+// move that changes the number of particles. Gas hydrates, adsorption in a
+// porous solid and hydrogen in brine all start from exactly those four
+// things, so they are built here once, in reduced units, and checked against
+// published reference values before anything is put on top of them.
+//
+// WHAT IS CHECKED, AND AGAINST WHAT. NIST publishes benchmark results for the
+// Lennard-Jones fluid truncated at 3 sigma with standard long-range
+// corrections (mmlapps.nist.gov/srs/LJ_PURE). The driver
+// examples/molecular/lj_nist_parity.sio reproduces three of them: canonical
+// energy and pressure at a liquid and at a vapour density, and the vapour
+// density at the tabulated saturation activity in the grand-canonical
+// ensemble. The acceptance rules were written before the first run.
+//
+// UNITS. Reduced Lennard-Jones units throughout: sigma = epsilon = k_B = 1.
+// Lengths in sigma, energies in epsilon, temperature as k_B T / epsilon,
+// density as rho sigma^3, pressure as p sigma^3 / epsilon. The activity is
+// z = exp(beta mu) / Lambda^3 in units of sigma^-3, the convention of the
+// NIST tables, so an ideal gas has rho = z.
+//
+// WHAT THIS IS NOT. One site per particle, one species, a cubic box, a plain
+// O(N) energy sum per move. No cell list, no Ewald sum, no molecules with
+// internal geometry, no quantum correction. Each of those is a separate
+// piece with its own check.
+//
+// LANGUAGE CONSTRAINTS, the same ones hydride/mhhc.sio paid for: no closures,
+// so helpers precede callers; a returned fixed-size array is a heap handle on
+// Madaros, so positions live in a caller-owned buffer and every function
+// writes through `&![f64; 3072]` and returns scalars or tuples only.
+
+module molecular::lj
+
+use math::pure::{exp, ln}
+
+// ============================================================================
+// 0. CAPACITY AND RANDOM NUMBERS
+// ============================================================================
+
+// Up to 1024 particles, three coordinates each, stored x0 y0 z0 x1 y1 z1 ...
+pub fn mol_max() -> i64 { 1024 }
+
+// xorshift128+ state. Two words, never both zero.
+var MOL_RNG_A: i64 = 314159265
+var MOL_RNG_B: i64 = 271828182
+
+// Seed the generator. The two words are spread from one seed by two rounds of
+// a 31-bit LCG and then the generator is run 16 times so that nearby seeds do
+// not give nearby first draws.
+pub fn mol_seed(seed: i64) with Mut {
+    var s = seed
+    if s <= 0 { s = 987654321 }
+    let a = (1103515245 * s + 12345) % 2147483648
+    let b = (1103515245 * a + 12345) % 2147483648
+    MOL_RNG_A = a * 65536 + 314159265
+    MOL_RNG_B = b * 65536 + 271828182
+    var i: i64 = 0
+    while i < 16 {
+        var x = MOL_RNG_A
+        let y = MOL_RNG_B
+        MOL_RNG_A = y
+        x = x ^ (x << 23)
+        x = x ^ ((x >> 17) & 140737488355327)
+        x = x ^ (y ^ ((y >> 26) & 274877906943))
+        MOL_RNG_B = x
+        i = i + 1
+    }
+}
+
+// Uniform on [0, 1) with 53 random bits. The masks after each right shift
+// make the shift logical whatever the engine does with the sign bit, which is
+// what xorshift128+ is defined with.
+pub fn mol_uniform() -> f64 with Mut {
+    var x = MOL_RNG_A
+    let y = MOL_RNG_B
+    MOL_RNG_A = y
+    x = x ^ (x << 23)
+    x = x ^ ((x >> 17) & 140737488355327)
+    x = x ^ (y ^ ((y >> 26) & 274877906943))
+    MOL_RNG_B = x
+    let r = (wrapping_add(x, y) >> 11) & 9007199254740991
+    (r as f64) / 9007199254740992.0
+}
+
+// ============================================================================
+// 1. PAIR POTENTIAL AND TAIL CORRECTIONS
+// ============================================================================
+
+// Lennard-Jones energy from the squared distance. No cutoff test here.
+pub fn lj_u_r2(r2: f64) -> f64 with Div, Panic {
+    let i2 = 1.0 / r2
+    let i6 = i2 * i2 * i2
+    4.0 * i6 * (i6 - 1.0)
+}
+
+// Pair virial w = -r du/dr = 24 (2 r^-12 - r^-6). The pressure is
+// p = rho T + sum(w) / (3 V).
+pub fn lj_w_r2(r2: f64) -> f64 with Div, Panic {
+    let i2 = 1.0 / r2
+    let i6 = i2 * i2 * i2
+    24.0 * i6 * (2.0 * i6 - 1.0)
+}
+
+// Tail coefficient c such that the long-range energy of N particles in a
+// volume V is U_lrc = c N^2 / V, that is (8/3) pi rho (rc^-9 / 3 - rc^-3)
+// per particle.
+pub fn lj_tail_coeff(rc: f64) -> f64 with Div, Panic {
+    let i3 = 1.0 / (rc * rc * rc)
+    let i9 = i3 * i3 * i3
+    (8.0 / 3.0) * 3.14159265358979323846 * (i9 / 3.0 - i3)
+}
+
+// Long-range energy per particle at number density rho.
+pub fn lj_tail_energy_per_particle(rho: f64, rc: f64) -> f64 with Div, Panic {
+    lj_tail_coeff(rc) * rho
+}
+
+// Long-range pressure, (16/3) pi rho^2 (2 rc^-9 / 3 - rc^-3).
+pub fn lj_tail_pressure(rho: f64, rc: f64) -> f64 with Div, Panic {
+    let i3 = 1.0 / (rc * rc * rc)
+    let i9 = i3 * i3 * i3
+    (16.0 / 3.0) * 3.14159265358979323846 * rho * rho * (2.0 * i9 / 3.0 - i3)
+}
+
+// ============================================================================
+// 2. GEOMETRY
+// ============================================================================
+
+// Minimum-image separation along one axis, for coordinates kept in [0, l).
+fn min_image(d: f64, l: f64) -> f64 {
+    let h = 0.5 * l
+    if d > h { return d - l }
+    if d < 0.0 - h { return d + l }
+    d
+}
+
+// Wrap one coordinate back into [0, l) after a move of less than one box.
+fn wrap(x: f64, l: f64) -> f64 {
+    if x >= l { return x - l }
+    if x < 0.0 { return x + l }
+    x
+}
+
+// Place n particles on a simple cubic grid that fills the box. Returns the
+// number placed, which is n unless n exceeds the capacity.
+pub fn mol_init_grid(pos: &![f64; 3072], n: i64, l: f64) -> i64 with Mut, Div, Panic {
+    var count = n
+    if count > mol_max() { count = mol_max() }
+    var m: i64 = 1
+    while m * m * m < count { m = m + 1 }
+    let a = l / (m as f64)
+    var i: i64 = 0
+    while i < count {
+        let ix = i % m
+        let iy = (i / m) % m
+        let iz = i / (m * m)
+        pos[(3 * i) as usize] = ((ix as f64) + 0.5) * a
+        pos[(3 * i + 1) as usize] = ((iy as f64) + 0.5) * a
+        pos[(3 * i + 2) as usize] = ((iz as f64) + 0.5) * a
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================================
+// 3. ENERGIES
+// ============================================================================
+
+// Energy of a point at (x, y, z) with every particle except index `skip`.
+// Pass skip = -1 to count all of them, which is what an insertion needs.
+pub fn mol_point_energy(pos: &[f64; 3072], n: i64, l: f64, rc: f64,
+                        x: f64, y: f64, z: f64, skip: i64) -> f64 with Mut, Div, Panic {
+    let rc2 = rc * rc
+    var u = 0.0
+    var j: i64 = 0
+    while j < n {
+        if j != skip {
+            let dx = min_image(x - pos[(3 * j) as usize], l)
+            let dy = min_image(y - pos[(3 * j + 1) as usize], l)
+            let dz = min_image(z - pos[(3 * j + 2) as usize], l)
+            let r2 = dx * dx + dy * dy + dz * dz
+            if r2 < rc2 {
+                let i2 = 1.0 / r2
+                let i6 = i2 * i2 * i2
+                u = u + 4.0 * i6 * (i6 - 1.0)
+            }
+        }
+        j = j + 1
+    }
+    u
+}
+
+// Total pair energy and total pair virial inside the cutoff, without tail
+// corrections. O(N^2); meant for the start of a run and for sampling.
+pub fn mol_total_energy_virial(pos: &[f64; 3072], n: i64, l: f64, rc: f64) -> (f64, f64) with Mut, Div, Panic {
+    let rc2 = rc * rc
+    var u = 0.0
+    var w = 0.0
+    var i: i64 = 0
+    while i < n {
+        let xi = pos[(3 * i) as usize]
+        let yi = pos[(3 * i + 1) as usize]
+        let zi = pos[(3 * i + 2) as usize]
+        var j: i64 = i + 1
+        while j < n {
+            let dx = min_image(xi - pos[(3 * j) as usize], l)
+            let dy = min_image(yi - pos[(3 * j + 1) as usize], l)
+            let dz = min_image(zi - pos[(3 * j + 2) as usize], l)
+            let r2 = dx * dx + dy * dy + dz * dz
+            if r2 < rc2 {
+                let i2 = 1.0 / r2
+                let i6 = i2 * i2 * i2
+                u = u + 4.0 * i6 * (i6 - 1.0)
+                w = w + 24.0 * i6 * (2.0 * i6 - 1.0)
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    (u, w)
+}
+
+// ============================================================================
+// 4. MOVES
+// ============================================================================
+
+// One sweep of n single-particle displacement trials at fixed N, V, T.
+// `delta` is the largest displacement along each axis. Returns the change in
+// the total pair energy and the number of accepted trials; the caller keeps
+// the running energy. The tail correction does not change at fixed N and V.
+pub fn mol_sweep_nvt(pos: &![f64; 3072], n: i64, l: f64, rc: f64,
+                     beta: f64, delta: f64) -> (f64, i64) with Mut, Div, Panic {
+    var du_total = 0.0
+    var acc: i64 = 0
+    var t: i64 = 0
+    while t < n {
+        var i = (mol_uniform() * (n as f64)) as i64
+        if i >= n { i = n - 1 }
+        let xo = pos[(3 * i) as usize]
+        let yo = pos[(3 * i + 1) as usize]
+        let zo = pos[(3 * i + 2) as usize]
+        let xn = wrap(xo + delta * (2.0 * mol_uniform() - 1.0), l)
+        let yn = wrap(yo + delta * (2.0 * mol_uniform() - 1.0), l)
+        let zn = wrap(zo + delta * (2.0 * mol_uniform() - 1.0), l)
+        let uo = mol_point_energy(pos, n, l, rc, xo, yo, zo, i)
+        let un = mol_point_energy(pos, n, l, rc, xn, yn, zn, i)
+        let du = un - uo
+        var take = false
+        if du <= 0.0 {
+            take = true
+        } else {
+            if mol_uniform() < exp(0.0 - beta * du) { take = true }
+        }
+        if take {
+            pos[(3 * i) as usize] = xn
+            pos[(3 * i + 1) as usize] = yn
+            pos[(3 * i + 2) as usize] = zn
+            du_total = du_total + du
+            acc = acc + 1
+        }
+        t = t + 1
+    }
+    (du_total, acc)
+}
+
+// One grand-canonical trial: insertion or deletion with equal probability,
+// at activity z (sigma^-3). The tail energy c N^2 / V changes with N and is
+// part of the acceptance: adding a particle to N changes it by c (2N+1) / V.
+// Returns (new n, change in pair energy, move attempted: +1 insertion, -1
+// deletion); the trial was accepted exactly when n changed. The move kind is
+// what per-move acceptance statistics need: a rejected insertion and a rejected
+// deletion both leave n and the energy unchanged.
+pub fn mol_trial_exchange(pos: &![f64; 3072], n: i64, l: f64, rc: f64,
+                          beta: f64, z: f64) -> (i64, f64, i64) with Mut, Div, Panic {
+    let v = l * l * l
+    let c = lj_tail_coeff(rc)
+    if mol_uniform() < 0.5 {
+        // insertion
+        if n >= mol_max() { return (n, 0.0, 1) }
+        let x = mol_uniform() * l
+        let y = mol_uniform() * l
+        let zc = mol_uniform() * l
+        let du = mol_point_energy(pos, n, l, rc, x, y, zc, 0 - 1)
+        let dtail = c * ((2 * n + 1) as f64) / v
+        let a = z * v / ((n + 1) as f64) * exp(0.0 - beta * (du + dtail))
+        if mol_uniform() < a {
+            pos[(3 * n) as usize] = x
+            pos[(3 * n + 1) as usize] = y
+            pos[(3 * n + 2) as usize] = zc
+            return (n + 1, du, 1)
+        }
+        return (n, 0.0, 1)
+    }
+    // deletion
+    if n <= 0 { return (n, 0.0, 0 - 1) }
+    var i = (mol_uniform() * (n as f64)) as i64
+    if i >= n { i = n - 1 }
+    let xi = pos[(3 * i) as usize]
+    let yi = pos[(3 * i + 1) as usize]
+    let zi = pos[(3 * i + 2) as usize]
+    let ui = mol_point_energy(pos, n, l, rc, xi, yi, zi, i)
+    let dtail = c * ((2 * n - 1) as f64) / v
+    let a = (n as f64) / (z * v) * exp(beta * (ui + dtail))
+    if mol_uniform() < a {
+        let last = n - 1
+        pos[(3 * i) as usize] = pos[(3 * last) as usize]
+        pos[(3 * i + 1) as usize] = pos[(3 * last + 1) as usize]
+        pos[(3 * i + 2) as usize] = pos[(3 * last + 2) as usize]
+        return (n - 1, 0.0 - ui, 0 - 1)
+    }
+    (n, 0.0, 0 - 1)
+}
+
+// Widom test-particle insertion at fixed N: the sum over `trials` random
+// points of exp(-beta dU), tail change included. With m the mean of that
+// factor, the activity is z = (N+1) / (V m), exactly, in the canonical
+// ensemble. Returns the sum; the caller accumulates and divides.
+pub fn mol_widom_sum(pos: &[f64; 3072], n: i64, l: f64, rc: f64,
+                     beta: f64, trials: i64) -> f64 with Mut, Div, Panic {
+    let v = l * l * l
+    let dtail = lj_tail_coeff(rc) * ((2 * n + 1) as f64) / v
+    var s = 0.0
+    var t: i64 = 0
+    while t < trials {
+        let x = mol_uniform() * l
+        let y = mol_uniform() * l
+        let zc = mol_uniform() * l
+        let du = mol_point_energy(pos, n, l, rc, x, y, zc, 0 - 1)
+        s = s + exp(0.0 - beta * (du + dtail))
+        t = t + 1
+    }
+    s
+}
+
+// ln z from a Widom mean, z in sigma^-3.
+pub fn mol_ln_activity(n: i64, l: f64, widom_mean: f64) -> f64 with Mut, Div, Panic {
+    ln(((n + 1) as f64) / (l * l * l)) - ln(widom_mean)
+}
+
+// ============================================================================
+// 5. STATISTICS OVER INDEPENDENT RUNS
+// ============================================================================
+
+// Mean and standard error of the mean over k independent values. This is the
+// only error bar this module offers: within-run block errors are not provided
+// because they depend on a block length nobody checks.
+pub fn mol_mean_sem(vals: &[f64; 64], k: i64) -> (f64, f64) with Mut, Div, Panic {
+    if k <= 0 { return (0.0, 0.0) }
+    var s = 0.0
+    var i: i64 = 0
+    while i < k { s = s + vals[i as usize]; i = i + 1 }
+    let m = s / (k as f64)
+    if k == 1 { return (m, 0.0) }
+    var q = 0.0
+    i = 0
+    while i < k {
+        let d = vals[i as usize] - m
+        q = q + d * d
+        i = i + 1
+    }
+    let var_mean = q / ((k - 1) as f64) / (k as f64)
+    // Newton square root; var_mean is small and positive.
+    if var_mean <= 0.0 { return (m, 0.0) }
+    var g = var_mean
+    if g < 1.0 { g = 1.0 }
+    var it: i64 = 0
+    while it < 200 {
+        g = 0.5 * (g + var_mean / g)
+        it = it + 1
+    }
+    (m, g)
+}

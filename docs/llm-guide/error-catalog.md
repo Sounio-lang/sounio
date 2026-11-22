@@ -190,6 +190,7 @@ the very information the program must preserve.
 | `E036`, `E214`, `E215` | The actual confidence/completeness or observation requirement for that engine. | Repair missing evidence or incorrect flow. Lowering a threshold or inventing confidence changes the requirement. |
 | `E230`, `E236` | Shared noise/source lineage or a reused correlated binding, and the operation's independence assumption. | Preserve correlation and variance. Do not duplicate measurements, strip wrappers, or assert independence. `Correlated` is not a numerical implementation or covariance proof. |
 | `E178`, `E179` | Noise-source or source-set tracking capacity was exhausted. | Retain the refusal and investigate the supported workload/representation. Disabling tracking changes the claim. |
+| `E303`, `E304` | Native GUM lowering exhausted its 64-channel budget, or explicit correlation needs a channel outside indexes 0 through 63. | These lowering limits differ from the checker's noise-symbol limit (`E178`). Preserve the refusal; dropping sources or covariance would understate uncertainty. |
 | `E243` | A required compile-time correlation coefficient was supplied as an unsupported runtime expression. | Use evidence-supported metadata in a supported representation; substituting zero asserts a different model. |
 | `E244`, `E265` | Argument provenance or temporal validity fails the parameter's requirement. | Repair custody/validity at its real source or supply a satisfying value. Renaming a provenance tag/date is not evidence. |
 | Modular `E042`, `E052`; seed `E208`/`E209` | A refinement is violated or cannot be established. | Inspect the predicate, supported guard/proving path, and exact caller/return. Do not weaken the predicate to accept an invalid value. |
@@ -239,10 +240,20 @@ presenting them as current requirements. Do not demote a precision-sensitive
 task to `f64` to bypass a refusal.
 
 For ontology/causal failures, inspect the actual graph/class and rule.
-Modular `E041`, `E150`–`E152`, `E261`/`E262` name ontology obligations
+Modular `E286`, `E150`–`E152`, `E261`/`E262` name ontology obligations
 on relevant paths; `E067`/`E068` and `E254`–`E257` concern causal-query
 or independence boundaries where wired. A fabricated node or weakened graph
 does not repair the original model. A compiler check is not empirical causality.
+
+Madaros reserves `E041` for **unit mismatch**. The scoped registry entries in
+[`diagnostics/mod.sio`](../../self-hosted/diagnostics/mod.sio) and the explanations
+below agree with its checker and parser. `W041` is a separate warning code.
+The audit reserves `E285` for #3549 (dimensionless transcendental arguments)
+and `E301` for #3548 (unit-registry exhaustion); this remap uses `E286`–`E288`.
+The legacy engine selected by `SOUNIO_SOUC_ENGINE=lean_single` retains `E041`
+for Rust `&mut` syntax and `E001` for a unit mismatch in a `let` binding; it
+does not implement the same ontology validation. Aligning that engine requires
+a separate source change and an ADR-031 R3 seed refresh.
 
 ## Known identity collisions and remaps
 
@@ -255,7 +266,7 @@ or rename codes.
 | `E035` | Modular and seed effect reporters exist. The MCP resource titles it “Recursive type rejected,” which does not describe the current effect reporter. |
 | `E036` | Seed observation-boundary identity versus modular confidence bound. |
 | `E040` | Parser/seed `let mut` refusal versus modular linear-consumption checks. |
-| `E041` | Parser/seed `&mut` refusal; modular ontology message-table identity; separate direct unit-mismatch prints also exist in `check.sio`. |
+| `E041` | Madaros: unit mismatch. Legacy `lean_single`: `&mut` syntax refusal (unit mismatch in a `let` uses `E001`). Madaros uses `E286` for ontology weakening and `E287` for `&mut`; the registry uses `E288` for use-after-move. |
 | `E042`, `E043` | Parser/seed attribute or macro refusal versus modular refinement or unit-conversion identity. |
 | `E070`, `E072` | Historical kernel explanations coexist with other checker identities. Current modular kernel return refusal is `E253`; modular `E072` names a malformed conditional-independence claim. |
 | `E200`, `E221` | Seed undefined identifier / missing main versus modular `Forgettable` effect obligation / missing native math implementation. |
@@ -394,7 +405,7 @@ page is not a fresh execution receipt.
 | E035 | type-checker/effects | error | Effect not declared in function signature | [E035.md](explanations/E035.md) |
 | E036 | type-checker/effects | error | Unobserved\<T\> crosses observation boundary without Observe | [E036.md](explanations/E036.md) |
 | E040 | parser/compat | error | Rust `let mut` — use `var` instead | [E040.md](explanations/E040.md) |
-| E041 | parser/compat | error | Rust `&mut` — use `&!` instead | [E041.md](explanations/E041.md) |
+| E041 | type-checker/units | error | unit mismatch | [E041.md](explanations/E041.md) |
 | E042 | parser/compat | error | Rust attribute `#[...]` not valid in Sounio | [E042.md](explanations/E042.md) |
 | E043 | parser/compat | error | Rust macro `ident!(...)` not valid in Sounio | [E043.md](explanations/E043.md) |
 | E067 | type-checker/epistemic | warning | Potential confounding in epistemic model | [E067.md](explanations/E067.md) |
@@ -481,6 +492,10 @@ page is not a fresh execution receipt.
 | E282 | lexer (Madaros, lean_single) | error | identifier too long: an identifier holds at most 256 bytes and is refused with its location instead of being split | ADR-015 row 11 (first slice). `id_long300` is refused, `id_long256` is accepted. The 128-byte clamps further down (`parser_name_at`, the export pool) are unchanged. |
 | E283 | lexer (Madaros, lean_single) | error | ambiguous operator spelling: `a+-2` (plus a negative, or the uncertainty operator) and `a&!b` (and-not, or a mutable borrow) are refused with a hint to add a space | ADR-015 row 9. `x<-1` is no longer ambiguous: it reads as `x < -1`. `1.0 +- 0.1` and `&!T` after a space, `(`, `,` or `:` are unchanged. |
 | E284 | lexer (Madaros, lean_single) | error | digit separator `_` must sit between two digits: `1__0` and `10_` are refused; `1_000` is a number and `500_mg` keeps its unit suffix | ADR-015 row 8. `lean_single` now accepts `_` between digits like Madaros (`1_000_000`, `0xFF_FF`, `1_000.000_5`). |
+| E285 | type-checker/units | error | transcendental function argument must be dimensionless | #3549. Normalize by a compatible reference quantity before calling the builtin; `Knowledge<T>` checks the inner type. `sqrt` is unchanged. |
+| E286 | type-checker/ontology | error | ontology subsumption could not be verified | [E286.md](explanations/E286.md) |
+| E287 | parser/compat | error | Sounio uses `&!T` for exclusive references, not `&mut T` | [E287.md](explanations/E287.md) |
+| E288 | diagnostics/ownership | error | use after move (registry constructor) | [E288.md](explanations/E288.md) |
 | E290 | type-checker/effects | error | unknown effect in handle/perform (SIO-417) | — |
 | E291 | type-checker/effects | error | unknown operation for effect (SIO-417) | — |
 | E292 | type-checker/effects | error | perform of effect not declared or handled here (SIO-417) | — |
@@ -491,3 +506,11 @@ page is not a fresh execution receipt.
 | E297 | type-checker/effects | error | operation argument count mismatch (SIO-417) | — |
 | E298 | type-checker/effects | error | perform with live linear bindings (a non-resuming handler would drop them) (SIO-417) | — |
 | E299 | type-checker/effects | error | handler backend v1 limit exceeded (results and operation values are i64 words; handler nesting depth at most 8) (SIO-417) | — |
+| E300 | type-checker | error | integer constant is out of range for the annotated type: a compile-time-known constant bound to `i8`/`u8`/`i32`/`u32` must fit (SIO-207). `let c: i32 = 2147483648` used to compile and store 2^31 in an `i32`; an `i64` constant expression that overflows (`9223372036854775807 + 1`, `MIN * 2`) is refused with the same code (ADR-031 R1); signed runtime overflow of `+`/`-`/`*`/negation traps instead of wrapping, with `wrapping_add`/`wrapping_sub`/`wrapping_mul` as the explicit wrap | — |
+| E301 | type-checker/units | error | unit registry capacity exceeded; refusing to discard a unit dimension | The 128 slots include builtins, named units, and derived dimensions. Reuse existing units or reduce distinct declarations/dimensions; exhaustion never makes a value dimensionless (#3548). |
+| E303 | native-lowering/epistemic | error | GUM channel capacity exceeded: first-order lowering supports at most 64 channels per function | Includes synthetic residual channels in a compilation using Knowledge or uncertainty operations. Pure numeric bookkeeping alone does not trigger this refusal (#3545). |
+| E304 | native-lowering/epistemic | error | GUM correlation channel capacity exceeded: correlate() supports only channels 0 through 63 | Applies to both literal and runtime correlation coefficients; refusing preserves covariance instead of silently assuming independence (#3545). |
+| E305 | type-checker/epistemic | error | the consistency policy of meet must be a positive numeric literal | An `E_n` limit is a declared modelling choice (ADR-016, decision 3.3), not a value computed at run time. Write `meet(a, b, consistency: 2.0)`. |
+| E306 | type-checker/epistemic | error | retract needs `because:` with a non-empty string literal | Leaving a contest is explicit and its reason is recorded (ADR-016, decision 4.3): `retract(c, x, because: "...")`. |
+| E307 | native-lowering/epistemic | error | malformed ADR-016 contest or meet | Retract names a value that is not a source of the contest, a statistic gets fewer than two sources, meet gets one source that is not a contest, or a compilation holds more than 8 sources in a contest or 64 contests. | Refused at compile time instead of ignoring the source or reading the statistic as 0. |
+| E-NOT-IMPORTED | module-resolution | error | a bare call names a pub fn of a module the calling module does not import | Resolved through the caller's own `use` items: a named import, a glob, or a `pub use` re-export of a module that defines it. Before, every function in the module closure was callable from everywhere, and which body a name meant depended on what other modules loaded. Add the `use` item. Off switch `SOUNIO_IMPORT_HYGIENE=off`; `=report` lists violations without refusing. |
