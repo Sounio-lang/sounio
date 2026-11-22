@@ -1,1 +1,0 @@
-Removed dead paths: a duplicated CI ratchet step, a workflow self-trigger that named a file that does not exist, ops Makefile targets whose scripts were gone, a Rust root Docker image that copied a `crates/` tree that does not exist, and an unreferenced `bin/souc-linux-x86_64.new`. `scripts/ops/post-tool-use.sh` now sources `scripts/lib/resolve_souc.sh`.

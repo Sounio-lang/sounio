@@ -1,1 +1,0 @@
-Agent skills and the in-tree editor README no longer send work at the removed Rust `compiler/` tree, `editors/`, `playground/`, `jupyter/src`, or missing command and example-gate scripts. The VS Code preview no longer treats `.d` files as Sounio.

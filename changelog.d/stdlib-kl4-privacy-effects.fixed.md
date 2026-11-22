@@ -1,1 +1,0 @@
-Fifty-two stdlib E2E tests compile again on the shipped engine (250 to 302 passing, no regressions). Since module privacy (KL-4) and effect checking were enforced, they had stopped compiling: 112 functions they call are now `pub`, and 61 signatures declare the effects (`IO`, `Mut`, `Panic`, `Div`, `Alloc`) their bodies already used.

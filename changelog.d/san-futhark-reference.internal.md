@@ -1,1 +1,0 @@
-Adds the Futhark reference implementation of the SAN catastrophe-scan semantics (ADR-021 steps 2-4), promoted to verified_foreign_reference with Futhark 0.25.27 pinned in its CI gate; the Python model remains corroboration only.
