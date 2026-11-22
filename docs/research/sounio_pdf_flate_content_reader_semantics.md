@@ -155,4 +155,4 @@ This bundle freezes no claim that:
 This bundle is produced by `SOUNIO_EXECUTABLE` and is proposed for
 `SEMANTICS_FROZEN`. `PARITY_OPEN=false` and `CLAIM_READY=false`. Canonical
 freeze waits on the owner of the Loom language-authority and docs-registry
-transaction; no other language may fill that gap retrospectively.
+transaction; to our knowledge, no other language may fill that gap retrospectively.

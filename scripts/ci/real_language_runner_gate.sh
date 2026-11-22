@@ -33,8 +33,14 @@ assert_contains() {
 
 echo "[real-runner] 1/7 souc --version"
 VERSION_OUT="$(./bin/souc --version 2>&1)"
-assert_contains "$VERSION_OUT" "Madar" "souc --version"
-assert_contains "$VERSION_OUT" "Sounio self-hosted compiler" "souc --version"
+assert_contains "$VERSION_OUT" "(madaros " "souc --version"
+# ADR-018 section 1: --version reports the toolchain SemVer with the engine
+# build after it, never the engine banner ("Madaros v0.80.0") as a version.
+if ! grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)? \(madaros [0-9a-f]+\)' <<<"$VERSION_OUT"; then
+  echo "[real-runner] output for souc --version:" >&2
+  printf '%s\n' "$VERSION_OUT" >&2
+  fail "expected '<semver> (madaros <build>)' in souc --version"
+fi
 
 echo "[real-runner] 2/7 souc info"
 INFO_OUT="$(./bin/souc info 2>&1)"

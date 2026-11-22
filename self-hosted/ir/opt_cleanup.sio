@@ -1920,8 +1920,9 @@ fn ocp_epi_try_synthesize_observed_chain(
 
     var ctx = eg_small_init()
     ocp_configure_small_context(&! ctx, func, algebras)
-    // PRECISION_PRESERVING opt-in: this GUM-guided pass deliberately reassociates
-    // inexact (f64) operands to extract the lower-uncertainty evaluation order.
+    // PRECISION_PRESERVING opt-in: the e-graph may enumerate the f64 bracketings so
+    // that extraction can compare them. With exact variances they tie, and the
+    // order as written is kept (see the pass comment below).
     ctx.allow_inexact_reassoc = true
     // A-layer-2: but on a `with Chaotic` path the chaos gate dominates and refuses all
     // reassociation (e^{λt} amplification), overriding the opt-in above.
@@ -8178,13 +8179,20 @@ fn ocp_epi_eg_rewrite_inner(ctx: &! EgSmallContext, float_op: i64, s1: i64, s2: 
 //   4. On observed-path IrBinOp over epistemic scalars, build EgSmallContext with
 //      uncertainty-annotated nodes
 //   5. eg_small_saturate_float (float associativity, 8 iters)
-//   6. eg_small_extract_epistemic (min-uncertainty extraction)
+//   6. eg_small_extract_epistemic (min-variance extraction, ties keep the source order)
 //   7. Patch instruction if extracted node has a different (lower-uncertainty) structure
 //
-// Scientific novelty: First analytically GUM-guided floating-point rewriting.
-// Herbie (Panchekha et al., PLDI 2015) uses empirical sampling; Sounio uses
-// GUM §5.1.2 delta-method: u(z)² = u(x)² + u(y)² (exact for additive ops).
-// SOTA: JCGM 100:2008 §5.1.2; Willsey et al. egg (2021); Tate et al. (PLDI 2009)
+// What the model licenses. Propagation is GUM §5.1.2 for independent inputs,
+// u(z)² = u(x)² + u(y)², accumulated as exact integer variances with observation
+// identity (operands sharing a leaf are refused). Under it, every bracketing of the
+// same observations has the same measurement uncertainty, so a pure reassociation
+// is never "lower uncertainty" and step 7 does not fire on it: the f64 order of the
+// source is kept. (A per-node floor(sqrt) used to make the bracketings differ by a
+// rounding artefact, and the pass reordered sums on that.) What does differ between
+// bracketings is floating-point rounding, which this pass does not model; licensing
+// a reordering needs that model and is not done here.
+// SOTA: JCGM 100:2008 §5.1.2; Willsey et al. egg (2021); Tate et al. (PLDI 2009);
+// Herbie (Panchekha et al., PLDI 2015) for rounding-error-guided rewriting.
 pub(crate) fn ocp_egraph_epistemic_pass(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     ocp_egraph_epistemic_pass_with_algebras(func, ir_empty_algebra_table())
 }
@@ -10012,6 +10020,7 @@ fn ocp_mfi_instr_move_fields(module: &! IrModule, fi: i64, dst_i: i64, src_i: i6
     let nm = ir_arena_name(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (src_i)))
     let name_id = IR_A_NAME_ID[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (src_i))) as usize]
     let ac = IR_A_ARG_COUNT[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (src_i))) as usize]
+    let site = IR_A_SRC_SITE[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (src_i))) as usize]
     IR_A_OP[(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (dst_i))) as usize] = op
     IR_A_DST[(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (dst_i))) as usize] = dst
     IR_A_SRC1[(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (dst_i))) as usize] = s1
@@ -10034,6 +10043,7 @@ fn ocp_mfi_instr_move_fields(module: &! IrModule, fi: i64, dst_i: i64, src_i: i6
     ir_arena_put_name(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (dst_i)), nm)
     // Codegen prefers interned NAME_ID over arena bytes. Move it too, including zero.
     IR_A_NAME_ID[(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (dst_i))) as usize] = name_id
+    IR_A_SRC_SITE[(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (dst_i))) as usize] = site
     IR_A_ARG_COUNT[(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (dst_i))) as usize] = ac
     // Move call_args ownership: field assign then clear source before NOP.
     // (Same field-level call_args write pattern as module_frontend arebox.)
@@ -10422,16 +10432,16 @@ fn ocp_mfi_integral_center_pass(module: &! IrModule, fi: i64) with Mut, Div, Pan
             let field = IR_A_FIELD_IDX[slot as usize]
             let name = ir_name_at(IR_A_NAME_ID[slot as usize])
             if field == 0 && stage[s1 as usize] == 0
-                && ir_name_eq(name, make_name("value"))
+                && ir_name_eq_lit(name, "value")
                 && literal[s2 as usize] && ocp_mfi_center_integral_literal(literal_value[s2 as usize]) {
                 center[s1 as usize] = literal_value[s2 as usize]
                 stage[s1 as usize] = 1
             } else if field == 1 && stage[s1 as usize] == 1
-                && ir_name_eq(name, make_name("variance")) && squared_known[s2 as usize] {
+                && ir_name_eq_lit(name, "variance") && squared_known[s2 as usize] {
                 uncertainty[s1 as usize] = squared_unc[s2 as usize]
                 stage[s1 as usize] = 2
             } else if field == 2 && stage[s1 as usize] == 2
-                && ir_name_eq(name, make_name("confidence"))
+                && ir_name_eq_lit(name, "confidence")
                 && literal[s2 as usize] && literal_value[s2 as usize] == 1.0 {
                 stage[s1 as usize] = 3
             } else { return }
@@ -10440,7 +10450,7 @@ fn ocp_mfi_integral_center_pass(module: &! IrModule, fi: i64) with Mut, Div, Pan
             let origin = wrapper[s1 as usize]
             if origin >= 0 && origin < 256 && stage[origin as usize] == 3
                 && IR_A_FIELD_IDX[slot as usize] == 0
-                && ir_name_eq(ir_name_at(IR_A_NAME_ID[slot as usize]), make_name("value")) {
+                && ir_name_eq_lit(ir_name_at(IR_A_NAME_ID[slot as usize]), "value") {
                 payload_known[dst as usize] = true
                 payload_origin[dst as usize] = origin
                 payload_value[dst as usize] = center[origin as usize]

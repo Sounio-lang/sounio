@@ -14,6 +14,15 @@
 #   - index / souc / listed fixture files are missing
 #   - a refuse starts passing (xpass) or misses its named diagnostic
 #   - Contest (the measured Claim-ready row) stops checking clean
+#   - any check dies abnormally (signal or timeout, rc >= 124)
+#
+# A compiler that dies on a fixture is never a refusal, even when it printed
+# the expected diagnostic first: the rows below grep the log for the expected
+# text, so a crash *after* the diagnostic used to satisfy refuse_named=yes and
+# be classified Reserved. Measured 2026-11-03: a Madaros built from
+# self-hosted/ at main segfaults (rc=139) on 8 of the 16 rows after printing
+# the right diagnostic, and this gate reported only one of them. rc >= 124
+# covers timeout(1)'s own 124, exec failures (126/127) and any 128+signal.
 #
 # Reserved rows intentionally fail their pass fixtures — that is not a
 # regression. Claim-ready is a *check* fact; pass_run is recorded but does
@@ -70,6 +79,21 @@ hypothesis=0
 refuse_xpass=0
 refuse_nodiag=0
 contest_pass_fail=0
+crashed=0
+
+# timeout(1) exits 124; the shell uses 126/127 for exec failures; a process
+# killed by signal N exits 128+N (139 = SIGSEGV, 134 = SIGABRT, 137 = SIGKILL).
+# None of those is a diagnostic, so none of them is a refusal.
+rc_is_abnormal() {
+  [[ "$1" =~ ^[0-9]+$ ]] && (( $1 >= 124 ))
+}
+
+note_crash() {
+  local kind="$1" phase="$2" rc="$3" log="$4"
+  crashed=$((crashed + 1))
+  echo "TYPEKIND_B_CRASH kind=$kind phase=$phase rc=$rc path=$5" >&2
+  [[ -f "$log" ]] && tail -n 12 "$log" >&2
+}
 
 echo "# derived by scripts/ci/typekind_archaeology_b.sh sha=$sha_main souc=$SOUC"
 echo -e "kind\tderived\tpass_check\trefuse_check\trefuse_named\tpass_run\tdeepest_layer\tpass_path\trefuse_path"
@@ -101,6 +125,9 @@ while IFS=$'\t' read -r kind pass_path refuse_path expected_diag deepest rest ||
       fail "missing_pass kind=$kind path=$pass_path"
     fi
     local_pass_rc="$(check_one "$ROOT_DIR/$pass_path" "$workdir/${kind}.pass.log")"
+    if rc_is_abnormal "$local_pass_rc"; then
+      note_crash "$kind" pass "$local_pass_rc" "$workdir/${kind}.pass.log" "$pass_path"
+    fi
     if [[ "$local_pass_rc" == "0" ]]; then
       set +e
       "$SOUC" run "$ROOT_DIR/$pass_path" >"$workdir/${kind}.pass.run.log" 2>&1
@@ -114,7 +141,12 @@ while IFS=$'\t' read -r kind pass_path refuse_path expected_diag deepest rest ||
       fail "missing_refuse kind=$kind path=$refuse_path"
     fi
     local_refuse_rc="$(check_one "$ROOT_DIR/$refuse_path" "$workdir/${kind}.refuse.log")"
-    if [[ "$local_refuse_rc" != "0" && -n "${expected_diag:-}" && "$expected_diag" != "-" ]]; then
+    if rc_is_abnormal "$local_refuse_rc"; then
+      # Checked before the grep below: the compiler may well have printed the
+      # expected diagnostic and *then* died, which is not a refusal.
+      note_crash "$kind" refuse "$local_refuse_rc" "$workdir/${kind}.refuse.log" "$refuse_path"
+      refuse_named="crash"
+    elif [[ "$local_refuse_rc" != "0" && -n "${expected_diag:-}" && "$expected_diag" != "-" ]]; then
       if grep -F -q -- "$expected_diag" "$workdir/${kind}.refuse.log"; then
         refuse_named="yes"
       else
@@ -135,7 +167,10 @@ while IFS=$'\t' read -r kind pass_path refuse_path expected_diag deepest rest ||
   fi
 
   if (( has_pass == 1 && has_refuse == 1 )); then
-    if [[ "$local_pass_rc" == "0" && "$local_refuse_rc" != "0" && "$refuse_named" == "yes" ]]; then
+    if rc_is_abnormal "$local_pass_rc" || rc_is_abnormal "$local_refuse_rc"; then
+      derived="Hypothesis"
+      hypothesis=$((hypothesis + 1))
+    elif [[ "$local_pass_rc" == "0" && "$local_refuse_rc" != "0" && "$refuse_named" == "yes" ]]; then
       derived="Claim-ready"
       claim_ready=$((claim_ready + 1))
     elif [[ "$local_pass_rc" != "0" && "$local_refuse_rc" != "0" && "$refuse_named" == "yes" ]]; then
@@ -163,14 +198,14 @@ while IFS=$'\t' read -r kind pass_path refuse_path expected_diag deepest rest ||
   echo -e "${kind}\t${derived}\t${local_pass_rc}\t${local_refuse_rc}\t${refuse_named}\t${pass_run}\t${deepest:--}\t${pass_path}\t${refuse_path}"
 done < "$INDEX"
 
-echo "TYPEKIND_B_DERIVED rows=$rows garden=$garden claim_ready=$claim_ready reserved=$reserved executable=$executable hypothesis=$hypothesis refuse_xpass=$refuse_xpass refuse_nodiag=$refuse_nodiag contest_pass_fail=$contest_pass_fail"
+echo "TYPEKIND_B_DERIVED rows=$rows garden=$garden claim_ready=$claim_ready reserved=$reserved executable=$executable hypothesis=$hypothesis refuse_xpass=$refuse_xpass refuse_nodiag=$refuse_nodiag contest_pass_fail=$contest_pass_fail crashed=$crashed"
 
-if (( refuse_xpass > 0 || refuse_nodiag > 0 || contest_pass_fail > 0 )); then
+if (( refuse_xpass > 0 || refuse_nodiag > 0 || contest_pass_fail > 0 || crashed > 0 )); then
   if [[ "$REPORT_ONLY" == "1" ]]; then
-    echo "TYPEKIND_B_REPORT_ONLY would_fail refuse_xpass=$refuse_xpass refuse_nodiag=$refuse_nodiag contest_pass_fail=$contest_pass_fail" >&2
+    echo "TYPEKIND_B_REPORT_ONLY would_fail refuse_xpass=$refuse_xpass refuse_nodiag=$refuse_nodiag contest_pass_fail=$contest_pass_fail crashed=$crashed" >&2
     exit 0
   fi
-  fail "refuse_xpass=$refuse_xpass refuse_nodiag=$refuse_nodiag contest_pass_fail=$contest_pass_fail"
+  fail "refuse_xpass=$refuse_xpass refuse_nodiag=$refuse_nodiag contest_pass_fail=$contest_pass_fail crashed=$crashed"
 fi
 
 echo "TYPEKIND_B_PASS rows=$rows claim_ready=$claim_ready reserved=$reserved garden=$garden"

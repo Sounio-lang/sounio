@@ -1,0 +1,143 @@
+// stdlib/darwin_pbpk/scenarios/aripiprazole_oral.sio — scenario library (no main)
+//
+// End-to-end dissertation scenario for aripiprazole (SIO-523):
+//
+//   - Single 15 mg oral IR tablet (Abilify standard single dose)
+//     → gut pool + first-order absorption (ka = 1.2/h, F = 0.87) with
+//       first-pass loss (the (1 - F) fraction is destroyed each step;
+//       total absorbed = F x dose)
+//         → parent PBPK28 (tsit5_pbpk28, fully-coupled CN)
+//         → two parallel hepatic CYP sinks (CYP3A4 constitutive +
+//           CYP2D6 phenotypic) folded into ONE implicit liver sink —
+//           linear sinks add exactly — via
+//           `pbpk28_full_cn_step_sink_mut`; the mass the sink removes is
+//           the CYP-eliminated mass, cumulated for the mass audit
+//         → ~75 h half-life on a 336 h horizon (4.5 half-lives, parent at
+//           ~4.5% of Cmax by the end: the extended-horizon integrator test)
+//
+// Operator splitting per step (Lie-Trotter, same pattern as risperidone_oral):
+//   1. Exact first-order gut absorption over [t, t+dt] (closed form per step)
+//   2. Parent PBPK28 CN step with the summed CYP sink on the liver (organ 1),
+//      one implicit solve; the returned mass is the step's CYP elimination
+// Mass identity per step is exact up to fp error: residual = mass -
+// (absorbed - cyp_elim), printed as evidence (RRES).
+//
+// Dehydro-aripiprazole (active, ~40% exposure, t1/2 ~94 h) is explicitly OUT
+// of scope — no metabolite system here. Rationale: this card's distinctive
+// tests are the PARALLEL CYP2D6+3A4 pathways (phenotype x constitutive) and
+// the extended-horizon integration; the metabolite system is a follow-up
+// (same machinery as risperidone_oral). No LAI claim (oral-only scenario).
+//
+// Kp are assumed patterns targeting label Vd (~410 L vs 404 L, verified
+// arithmetically); PS flow-limited except brain/adipose/bone (SIO-550, CNS
+// exception for brain). Kernel CYP sink CALIBRATED to the label half-lives
+// (see drug file): CL_3A4 0.52, CL_2D6_NM 0.49 L/h, cl_central 0.
+// No clinical-validity claim: parity only (ADR009).
+//
+// The parity ref tests/run-pass/dissertation_pbpk28_parity_ref_aripiprazole.sio
+// drives this scenario itself, so a scenario change not mirrored in Node
+// breaks the gate.
+//
+// This file is a library with no `main`; it is checked, not run.
+
+use darwin_pbpk::core::pbpk28_params::*
+use darwin_pbpk::tsit5_pbpk28::*
+use darwin_pbpk::drugs::aripiprazole::*
+use math::pure::{exp}
+
+// ─── Aripiprazole PBPK28 profile (scenario-owned) ──────────────────────────
+// Kept here — not in core/pbpk28_params.sio — so this lane never churns the
+// website-pinned domain source. Standard 70 kg physiology.
+pub fn arp_pbpk28_params() -> PBPKParams28 {
+    PBPKParams28 {
+        v_ref:     [5.0, 1.8, 0.31, 1.45, 0.33, 1.1, 28.0, 20.0, 1.2, 3.6, 6.6, 0.18, 0.09, 3.7],
+        vasc_frac: [1.000, 0.210, 0.160, 0.037, 0.262, 0.262, 0.040, 0.050, 0.024, 0.019, 0.041, 0.282, 0.180, 0.050],
+        kp:        [1.00, 12.0, 8.0, 6.0, 5.0, 8.0, 8.0, 4.0, 8.0, 3.0, 1.5, 8.0, 6.0, 6.0],
+        ps:        [0.0, 90.0, 74.0, 15.0, 16.0, 350.0, 42.0, 8.0, 55.0, 21.0, 8.0, 10.0, 8.0, 13.0],
+        q:         [350.0, 90.0, 74.0, 44.0, 16.0, 350.0, 42.0, 10.0, 55.0, 21.0, 17.0, 10.0, 8.0, 13.0],
+        cl_central: 0.0,
+    }
+}
+
+// CYP formation/elimination site.
+fn arp_liver_organ() -> i32 { return 1 }
+
+// ─── Composite scenario state ───────────────────────────────────────────────
+pub struct AripiprazoleScenario {
+    pub pbpk: PBPKState28,
+    gut_mg: f64,
+    pheno: i32,
+    cum_absorbed_mg: f64,
+    cum_cyp_mg: f64,
+}
+
+// Initial state: full dose in the gut, zero PBPK.
+pub fn arp_scenario_init(pheno: i32) -> AripiprazoleScenario {
+    AripiprazoleScenario {
+        pbpk: pbpk28_state_zero(),
+        gut_mg: aripiprazole_single_dose_mg(),
+        pheno: pheno,
+        cum_absorbed_mg: 0.0,
+        cum_cyp_mg: 0.0,
+    }
+}
+
+// One split step over [t_start, t_start + dt].
+pub fn arp_step(scen: AripiprazoleScenario, dt: f64)
+    -> AripiprazoleScenario with Mut, Div, Panic
+{
+    let p = arp_pbpk28_params()
+    let ka = aripiprazole_ka_per_h()
+    let f_abs = aripiprazole_f_oral()
+    let cl_cyp = aripiprazole_cl_cyp(scen.pheno)
+
+    // 1. Exact first-order gut absorption; (1 - F) destroyed as first-pass
+    // loss each step (same convention as the oral IR lanes).
+    var gut = scen.gut_mg
+    let frac_abs = 1.0 - exp(0.0 - ka * dt)
+    let gut_frac = gut * frac_abs
+    let absorb_amt = f_abs * gut_frac
+    gut = gut - gut_frac
+    if gut < 0.0 { gut = 0.0 }
+    let parent_input = absorb_amt / dt
+
+    // 2. Parent transport + summed parallel CYP sink on the liver, one
+    // implicit solve. Returns exactly the CYP-eliminated mass.
+    var out_pbpk = scen.pbpk
+    let cyp_mg = pbpk28_full_cn_step_sink_mut(&!out_pbpk, p, parent_input, dt, arp_liver_organ(), cl_cyp)
+
+    AripiprazoleScenario {
+        pbpk: out_pbpk,
+        gut_mg: gut,
+        pheno: scen.pheno,
+        cum_absorbed_mg: scen.cum_absorbed_mg + absorb_amt,
+        cum_cyp_mg: scen.cum_cyp_mg + cyp_mg,
+    }
+}
+
+pub fn arp_integrate_to(scen: AripiprazoleScenario, t_start: f64, target: f64, dt: f64)
+    -> AripiprazoleScenario with Mut, Div, Panic
+{
+    var s = scen
+    var t = t_start
+    while t + dt * 0.5 < target {
+        s = arp_step(s, dt)
+        t = t + dt
+    }
+    return s
+}
+
+// Body mass (mg).
+pub fn arp_mass(scen: AripiprazoleScenario, p: PBPKParams28) -> f64 with Mut {
+    return pbpk28_total_mass(scen.pbpk, p)
+}
+
+// Cross-module readers (struct fields are module-private).
+pub fn arp_cum_absorbed(scen: AripiprazoleScenario) -> f64 { return scen.cum_absorbed_mg }
+pub fn arp_cum_cyp(scen: AripiprazoleScenario) -> f64 { return scen.cum_cyp_mg }
+
+// Exact CN mass-identity residual (mg): mass - (absorbed - cyp_elim).
+// Near zero by construction; printed as evidence, envelope-gated in CI.
+pub fn arp_residual(scen: AripiprazoleScenario, p: PBPKParams28) -> f64 with Mut {
+    return arp_mass(scen, p) - (scen.cum_absorbed_mg - scen.cum_cyp_mg)
+}

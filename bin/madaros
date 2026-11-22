@@ -93,9 +93,17 @@ _madaros_higher_priority_override_present() {
   return 1
 }
 if [[ -f "$ROOT_DIR/scripts/lib/materialize_madaros_prebuilt.sh" ]]; then
-  if ! bash "$ROOT_DIR/scripts/lib/materialize_madaros_prebuilt.sh"; then
-    _mat_rc=$?
-    _madaros_higher_priority_override_present || exit "$_mat_rc"
+  # `|| _mat_rc=$?`, never `if ! ...; then _mat_rc=$?`: inside the `!`-negated
+  # branch `$?` is the negation's own status (0 on failure), not the
+  # materializer's -- a corrupt/missing prebuilt used to `exit 0` here, a
+  # failed materialization reporting success. Same idiom as bin/souc.
+  _mat_rc=0
+  bash "$ROOT_DIR/scripts/lib/materialize_madaros_prebuilt.sh" || _mat_rc=$?
+  if [[ $_mat_rc -ne 0 ]]; then
+    if ! _madaros_higher_priority_override_present; then
+      echo "madaros: committed Madaros prebuilt failed to materialize (rc=$_mat_rc) and no higher-priority override resolves" >&2
+      exit "$_mat_rc"
+    fi
   fi
 fi
 
@@ -105,14 +113,24 @@ fi
 #   3. bin/madaros-linux-x86_64 (checked-in prebuilt)
 _resolve_modular_elf() {
   local cand
-  for cand in "${MADAROS_RAW_BIN:-}" "${SOUNIO_MADAROS_BIN:-}" "$(sounio_madaros_host_raw || true)" "$ROOT_DIR/artifacts/self-hosted/madaros" "$ROOT_DIR/bin/madaros-linux-x86_64"; do
+  # Resolve explicit pins before probing host fallbacks. Shell expands a
+  # for-list eagerly; provenance materialization above remains unchanged.
+  for cand in "${MADAROS_RAW_BIN:-}" "${SOUNIO_MADAROS_BIN:-}"; do
     if [[ -n "$cand" && -x "$cand" && "$(head -c 2 "$cand" 2>/dev/null)" != "#!" ]]; then
-      echo "$cand"
-      return 0
+      echo "$cand"; return 0
+    fi
+  done
+  cand="$(sounio_madaros_host_raw || true)"
+  if [[ -n "$cand" && -x "$cand" && "$(head -c 2 "$cand" 2>/dev/null)" != "#!" ]]; then
+    echo "$cand"; return 0
+  fi
+  for cand in "$ROOT_DIR/artifacts/self-hosted/madaros" "$ROOT_DIR/bin/madaros-linux-x86_64"; do
+    if [[ -n "$cand" && -x "$cand" && "$(head -c 2 "$cand" 2>/dev/null)" != "#!" ]]; then
+      echo "$cand"; return 0
     fi
   done
   echo "error: madaros: no modular compiler raw ELF found" >&2
-  echo "  tried: MADAROS_RAW_BIN, SOUNIO_MADAROS_BIN, $ROOT_DIR/artifacts/self-hosted/madaros, $ROOT_DIR/bin/madaros-linux-x86_64" >&2
+  echo "  tried: MADAROS_RAW_BIN, SOUNIO_MADAROS_BIN, host compiler, $ROOT_DIR/artifacts/self-hosted/madaros, $ROOT_DIR/bin/madaros-linux-x86_64" >&2
   echo "  run: make build-madaros" >&2
   return 1
 }
@@ -134,7 +152,7 @@ if [[ "${SOUNIO_REQUIRE_COMMITTED_MADAROS:-0}" == "1" ]]; then
 fi
 
 MADAROS_VMEM_LIMIT_KB="${MADAROS_VMEM_LIMIT_KB:-33554432}"
-SCIENCE_BOUNDARY_TOOL="$ROOT_DIR/tools/science_boundary/attestor.py"
+SCIENCE_BOUNDARY_TOOL="$ROOT_DIR/tools/science_boundary/attestor.mjs"
 SCIENCE_PACKAGE_RELEASE_TOOL="$ROOT_DIR/tools/science_boundary/package_release.py"
 SCIENCE_BOUNDARY_MODE="auto"
 SCIENCE_MANIFEST=""
@@ -158,6 +176,13 @@ SCIENCE_BOUNDARY_ARGS=()
 # --version, info and help never need the stack and are not gated.
 _madaros_explicit_stack="${MADAROS_STACK_KB+x}"
 MADAROS_STACK_KB="${MADAROS_STACK_KB:-524288}"
+# SIO-573: the raw compiler sizes its expression-nesting depth budget from
+# this reservation, so export it alongside SOUNIO_HOST_OS below.
+export MADAROS_STACK_KB
+# SIO-568: report the host OS so the raw ELF can self-elevate its stack
+# address-space limit on Linux when invoked directly (bin/madaros and the
+# suite wrapper already reserve it via ulimit; the ELF covers the gap).
+export SOUNIO_HOST_OS="$(uname -s)"
 if [[ "$(uname -s)" == Darwin ]]; then
   export SOUNIO_METAL_RUNTIME="${SOUNIO_METAL_RUNTIME:-$ROOT_DIR/artifacts/self-hosted/libsounio_metal.dylib}"
 fi
@@ -374,7 +399,7 @@ _science_evaluate() {
     return 2
   fi
   local command=(
-    python3 "$SCIENCE_BOUNDARY_TOOL" evaluate
+    node "$SCIENCE_BOUNDARY_TOOL" evaluate
     --source "$src"
     --mode "$SCIENCE_BOUNDARY_MODE"
     --compiler "$RAW_MADAROS"
@@ -418,7 +443,7 @@ _science_finalize() {
   local artifact_label="$4"
   local receipt="$5"
   local command=(
-    python3 "$SCIENCE_BOUNDARY_TOOL" finalize
+    node "$SCIENCE_BOUNDARY_TOOL" finalize
     --preflight-receipt "$preflight_receipt"
     --source "$src"
     --compiler "$RAW_MADAROS"
@@ -479,36 +504,7 @@ find_project_root() {
 project_manifest_value() {
   local root="$1"
   local key="$2"
-  python3 - "$root/sounio.toml" "$key" <<'PY'
-import sys
-try:
-    import tomllib
-except ModuleNotFoundError:
-    raise SystemExit(3)
-path, key = sys.argv[1], sys.argv[2]
-text = open(path, "rb").read().decode("utf-8")
-data = tomllib.loads(text)
-if key == "package.name":
-    print(data.get("package", {}).get("name", "sounio-project"))
-elif key == "entry":
-    bins = data.get("bin", [])
-    if isinstance(bins, list) and bins:
-        value = bins[0].get("path", "")
-        if value:
-            print(value)
-            raise SystemExit(0)
-    value = data.get("project", {}).get("entry", "")
-    if value:
-        print(value)
-        raise SystemExit(0)
-    value = data.get("lib", {}).get("path", "")
-    if value and "[[bin]]" not in text:
-        print(value)
-        raise SystemExit(0)
-    print("src/main.sio")
-else:
-    raise SystemExit(2)
-PY
+  node "$ROOT_DIR/tools/science_boundary/manifest_value.mjs" "$root/sounio.toml" "$key"
 }
 
 resolve_source_or_project() {
