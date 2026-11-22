@@ -43,9 +43,46 @@ def main():
    ("kind2-without-phase","KIND_MASK",dict(kind=2)),
    ("kind1-with-phase","KIND_MASK",dict(phase=0)),
    ("phase-out-of-range","PHASE_RANGE",dict(kind=2,phase=65536)),
+   ("sign-mode-range","SIGN_MODE",dict(unroll=16,sign_mode=2)),
+   ("sign-mode-partial-unroll","SIGN_MODE_UNROLL",dict(unroll=8,sign_mode=1)),
+   ("sign-mode-rolled","SIGN_MODE_UNROLL",dict(sign_mode=1)),
+   ("pack-range","PACK",dict(pack=2)),
+   ("pack-with-rolled-sign-mode","SIGN_MODE_UNROLL",dict(pack=1,sign_mode=1)),
+   ("load-range","GRAMMAR",dict(load=3)),
+   ("vector-load-range","VECTOR_LOAD",dict(load=2,layout=1,pack=1,vector_load=2)),
+   ("vector-load-without-staging","VECTOR_LOAD_LOAD",dict(layout=1,pack=1,vector_load=1)),
+   ("vector-load-aos","VECTOR_LOAD_LAYOUT",dict(load=2,pack=1,vector_load=1)),
+   ("vector-load-unpacked","VECTOR_LOAD_PACK",dict(load=2,layout=1,vector_load=1)),
+   ("block-threads-range","BLOCK_THREADS",dict(block_threads=48)),
+   ("block-threads-above","BLOCK_THREADS",dict(block_threads=256)),
+   ("block-threads-with-pack","BLOCK_THREADS_PACK",dict(block_threads=32,pack=1)),
    ("result-injection","PROPOSAL_FORMAT",dict(expected=1)),
    ("authority-injection","PROPOSAL_FORMAT",dict(claim_ready=1))]:
     check(label,reason,changes)
+  # sign_mode=1 is a lowering of the same algebra: same tensor, its own plan id.
+  fixed=check("sign-mode-fixed-add-sub",changes=dict(unroll=16,sign_mode=1))
+  rolled=check("sign-mode-zero",changes=dict(unroll=16,sign_mode=0))
+  assert fixed["sign_mode"]==1 and "sign_mode" not in rolled,(fixed,rolled)
+  assert fixed["tensor_sha256"]==first["tensor_sha256"] and fixed["plan_id"]==rolled["plan_id"]+65536,(fixed,rolled)
+  # pack=1 is a schedule of the same algebra: same tensor, its own plan id.
+  packed=check("pack-two-vectors",changes=dict(pack=1))
+  assert packed["pack"]==1 and "pack" not in first,(packed,first)
+  assert packed["tensor_sha256"]==first["tensor_sha256"] and packed["plan_id"]==first["plan_id"]+131072,(packed,first)
+  both=check("pack-and-sign-mode",changes=dict(unroll=16,sign_mode=1,pack=1))
+  assert both["plan_id"]==fixed["plan_id"]+131072 and both["sign_mode"]==1 and both["pack"]==1,(both,fixed)
+  # load=2 stages through shared memory: same tensor, its own plan id.
+  staged=check("load-staged",changes=dict(load=2))
+  assert staged["load"]==2 and staged["tensor_sha256"]==first["tensor_sha256"],(staged,first)
+  vector=check("load-staged-vector",changes=dict(load=2,layout=1,pack=1,vector_load=1))
+  assert vector["vector_load"]==1 and vector["pack"]==1 and vector["load"]==2,vector
+  # block_threads=32/64/128 is the r740-only wide block: same tensor, its own plan id.
+  for threads,step in ((32,1),(64,2),(128,3)):
+    wide=check("block-threads-"+str(threads),changes=dict(block_threads=threads))
+    assert wide["block_threads"]==threads and wide["tensor_sha256"]==first["tensor_sha256"],(wide,first)
+    assert wide["plan_id"]==first["plan_id"]+step*1048576,(wide,first)
+  check("block-threads-spark-target","BLOCK_THREADS_TARGET",changes=dict(block_threads=32),mode="ptx")
+  narrow=check("block-threads-16",changes=dict(block_threads=16))
+  assert "block_threads" not in narrow and narrow["plan_id"]==first["plan_id"],(narrow,first)
   check("unknown-facts","UNKNOWN_OR_CONTRADICTORY_FACTS",context_changes=dict(facts_state=0))
   check("contradictory-facts","UNKNOWN_OR_CONTRADICTORY_FACTS",context_changes=dict(facts_state=2))
   check("missing-shuffle","CAPABILITY",context_changes=dict(capabilities=39))
@@ -65,10 +102,13 @@ def main():
   base=check("operator-phase-0",changes=dict(kind=2,phase=0))
   assert base["kind"]=="operator" and base["phase_code"]==0,base
   assert base["tensor_sha256"]==first["tensor_sha256"],(base,first)
-  # Well-definedness is all this engine establishes. Novelty belongs to the
-  # GL(4,2) atlas and must stay undischarged in the receipt.
-  assert base["novelty"]=="NOT_CLASSIFIED",base
+  # Receipt contract v2: kind=2 receipts carry the eisa_h.pireus_operator_atlas.v1
+  # classification (GL(4,2) x swap x sign gauge, V13 62 + V1 corpus 3). Phase 0 is
+  # the corpus sedenion itself (N0, class 63); nothing here is a scientific claim.
+  assert base["schema"]==2 and first["schema"]==1 and "novelty" not in first,(base,first)
   assert base["classifier"]=="eisa_h.pireus_operator_atlas.v1",base
+  assert (base["novelty"],base["atlas_class"],base["atlas_origin"])==("N0",63,"V1_CORPUS"),base
+  assert base["scientific_novelty"] is False and base["historical_novelty"] is False and base["claim_ready"] is False,base
   # Distinct phases name distinct operators: the phase code determines the
   # tensor, so a collision would mean the receipt does not identify what was
   # admitted. These eight codes land in six distinct GL(4,2) affine classes,
@@ -77,6 +117,7 @@ def main():
   for phase in (1128,2,8,74,198,1129,4,16):
    receipt=check("operator-phase-%d"%phase,changes=dict(kind=2,phase=phase))
    assert receipt["phase_code"]==phase,receipt
+   assert receipt["novelty"] in ("N0","N1","N2") and receipt["claim_ready"] is False,receipt
    assert receipt["tensor_sha256"] not in seen,(phase,seen[receipt["tensor_sha256"]],receipt)
    seen[receipt["tensor_sha256"]]=phase
   assert len(seen)==9,seen

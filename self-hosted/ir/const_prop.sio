@@ -527,6 +527,12 @@ fn cp_classify_binop(op: BinaryOp) -> i64 {
     if op == BinaryOp::OpUAdd { return CP_BINOP_ADD }
     if op == BinaryOp::OpUSub { return CP_BINOP_SUB }
     if op == BinaryOp::OpUMul { return CP_BINOP_MUL }
+    // i32 fused-guard variants fold with the signed tags; the fold is exact only
+    // when the result also fits 32 bits (binop_unsigned = 2, see
+    // cp_fold_int_is_exact).
+    if op == BinaryOp::OpAddI32 { return CP_BINOP_ADD }
+    if op == BinaryOp::OpSubI32 { return CP_BINOP_SUB }
+    if op == BinaryOp::OpMulI32 { return CP_BINOP_MUL }
     if op == BinaryOp::OpDiv { return CP_BINOP_DIV }
     if op == BinaryOp::OpUDiv { return CP_BINOP_UDIV }
     if op == BinaryOp::OpRem { return CP_BINOP_MOD }
@@ -700,19 +706,27 @@ fn cp_fold_int_is_exact(op: i64, is_unsigned: i64, a: i64, b: i64) -> bool with 
     if op == CP_BINOP_ADD {
         if b > 0 && a > imax - b { return false }
         if b < 0 && a < imin - b { return false }
-        if is_unsigned != 0 {
+        if is_unsigned == 1 {
             // carry iff ua > UMAX - ub, and UMAX - ub is the bitwise not of b
             let nb = (0 - 1) - b
             if (a ^ imin) > (nb ^ imin) { return false }
+        }
+        if is_unsigned == 2 {
+            let r = a + b
+            if r < 0 - 2147483648 || r > 2147483647 { return false }
         }
         return true
     }
     if op == CP_BINOP_SUB {
         if b < 0 && a > imax + b { return false }
         if b > 0 && a < imin + b { return false }
-        if is_unsigned != 0 {
+        if is_unsigned == 1 {
             // borrow iff ua < ub
             if (a ^ imin) < (b ^ imin) { return false }
+        }
+        if is_unsigned == 2 {
+            let r = a - b
+            if r < 0 - 2147483648 || r > 2147483647 { return false }
         }
         return true
     }
@@ -720,7 +734,11 @@ fn cp_fold_int_is_exact(op: i64, is_unsigned: i64, a: i64, b: i64) -> bool with 
         if a == 0 || b == 0 { return true }
         let lim: i64 = 3037000499
         if a > lim || a < 0 - lim || b > lim || b < 0 - lim { return false }
-        if is_unsigned != 0 && (a < 0 || b < 0) { return false }
+        if is_unsigned == 1 && (a < 0 || b < 0) { return false }
+        if is_unsigned == 2 {
+            let r = a * b
+            if r < 0 - 2147483648 || r > 2147483647 { return false }
+        }
         return true
     }
     if op == CP_BINOP_DIV || op == CP_BINOP_MOD {
@@ -1148,6 +1166,9 @@ fn cp_extract_instr(instr: IrInstr, idx: i64) -> CpInstr with Mut, Div, Panic {
         ci.binop_tag = cp_classify_binop(instr.bin_op)
         if instr.bin_op == BinaryOp::OpUAdd || instr.bin_op == BinaryOp::OpUSub || instr.bin_op == BinaryOp::OpUMul {
             ci.binop_unsigned = 1
+        }
+        if instr.bin_op == BinaryOp::OpAddI32 || instr.bin_op == BinaryOp::OpSubI32 || instr.bin_op == BinaryOp::OpMulI32 {
+            ci.binop_unsigned = 2
         }
     }
 
