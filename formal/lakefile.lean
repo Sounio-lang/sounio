@@ -87,6 +87,9 @@ lean_lib Bootstrap where
     .one `Bootstrap.TMRBurstCheck,
     .one `Bootstrap.SporosProvLen,
     .one `Bootstrap.X86Vm,
+    .one `Bootstrap.AArch64Env,
+    .one `Bootstrap.AArch64Phys,
+    .one `Bootstrap.TMRVoterArm64,
     .one `Bootstrap.SporosVmBinData,
     .one `Bootstrap.SporosVmCheckBytes,
     .submodules `Sporos]
@@ -184,6 +187,9 @@ lean_exe aarch64run where
 
 lean_exe «aarch64-diff» where
   root := `Bootstrap.AArch64DiffModel
+
+lean_exe «aarch64-phys-check» where
+  root := `Bootstrap.AArch64PhysCheck
 
 lean_exe «tmr-burst-check» where
   root := `Bootstrap.TMRBurstCheck
