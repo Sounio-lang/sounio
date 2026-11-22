@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.read-file-16mib-verification-2026-11-01
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.read-file-16mib-verification-2026-11-01
+-->
+
 # read_file >16 MiB verification
 Date: 2026-11-01
 
