@@ -180,18 +180,11 @@ echo "sporos_vm_gate: phase1 determinism=ok committed_parity=ok fuzz_build=ok by
 LAKE_BIN="$(pick_lake 2>/dev/null || true)"
 if [ "$SKIP_LEAN" != "1" ] && [ "${SPOROS_SKIP_LEAN:-0}" != "1" ] && [ -n "$LAKE_BIN" ] && [ -f "$ROOT/formal/Bootstrap/SporosVmCheckBytes.lean" ]; then
   FORMAL_DIR="$ROOT/formal"
-  DEC_OLEAN="$FORMAL_DIR/.lake/build/lib/lean/Bootstrap/X86Dec.olean"
-  VM_OLEAN="$FORMAL_DIR/.lake/build/lib/lean/Bootstrap/X86Vm.olean"
-  BIN_OLEAN="$FORMAL_DIR/.lake/build/lib/lean/Bootstrap/SporosVmBinData.olean"
-  ( cd "$FORMAL_DIR" && "$LAKE_BIN" build Bootstrap.X86Dec Bootstrap.X86Int Bootstrap.X86Env Bootstrap.PDist >/dev/null )
-  mkdir -p "$FORMAL_DIR/.lake/build/lib/lean/Bootstrap"
-  if [ ! -f "$VM_OLEAN" ] || [ "$FORMAL_DIR/Bootstrap/X86Vm.lean" -nt "$VM_OLEAN" ] || [ "$DEC_OLEAN" -nt "$VM_OLEAN" ]; then
-    ( cd "$FORMAL_DIR" && "$LAKE_BIN" env lean -R . -o "$VM_OLEAN" Bootstrap/X86Vm.lean )
-  fi
-  if [ ! -f "$BIN_OLEAN" ] || [ "$VM_LEAN" -nt "$BIN_OLEAN" ] || [ "$VM_OLEAN" -nt "$BIN_OLEAN" ]; then
-    ( cd "$FORMAL_DIR" && "$LAKE_BIN" env lean -R . -o "$BIN_OLEAN" Bootstrap/SporosVmBinData.lean )
-  fi
-  ( cd "$FORMAL_DIR" && "$LAKE_BIN" env lean -R . Bootstrap/SporosVmCheckBytes.lean )
+  # Build SporosVmBinData with lake, then elaborate SporosVmCheckBytes directly so that
+  # its byte comparison against the committed binary runs every time (a cached lake
+  # build of it would not rerun when only bootstrap/model/sporos_vm changed).
+  ( cd "$FORMAL_DIR" && "$LAKE_BIN" build Bootstrap.SporosVmBinData >"$W/lake_build.log" 2>&1 ) || { cat "$W/lake_build.log" >&2; exit 1; }
+  ( cd "$FORMAL_DIR" && "$LAKE_BIN" env lean Bootstrap/SporosVmCheckBytes.lean )
 fi
 
 # ---------------------------------------------------------------------------

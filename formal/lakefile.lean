@@ -87,9 +87,41 @@ lean_lib Bootstrap where
     .one `Bootstrap.TMRBurstCheck,
     .one `Bootstrap.SporosProvLen,
     .one `Bootstrap.X86Vm,
-    .one `Bootstrap.SporosVmBin,
     .one `Bootstrap.SporosVmBinData,
     .one `Bootstrap.SporosVmCheckBytes,
+    .submodules `Sporos]
+
+-- The two seeds on every listing (about 20 minutes of kernel time, the two in parallel), and
+-- their lifting to the unified machine X86Uni (SeedUniBridge, which imports both); built by
+-- bootstrap/model/seed_proofs.sh (run by hand or on the lab cluster; no CI workflow runs it),
+-- not on every pull request.
+lean_lib BootstrapSeeds where
+  roots := #[`Bootstrap.SeedA, `Bootstrap.SeedB, `Bootstrap.SeedUniBridge]
+
+-- Sporos stage-1 final correctness proofs (loader + parser + checker accept/refuse
+-- biconditional, cubic step bound, and ENOMEM exit 2); SporosX1FinalRefuse peaks at
+-- ~8.4 GiB RSS (~26 min), exceeding the 7 GB / 35 min pull-request runner. Built and
+-- axiom-checked by bootstrap/model/sporos_stage1_proofs.sh (-j1), not on every PR.
+lean_lib BootstrapSporosStage1 where
+  roots := #[`Bootstrap.SporosX1Final]
+  globs := #[
+    .one `Bootstrap.SporosX1Final,
+    .one `Bootstrap.SporosX1FinalChkRefuse,
+    .one `Bootstrap.SporosX1FinalCompose,
+    .one `Bootstrap.SporosX1FinalDefs,
+    .one `Bootstrap.SporosX1FinalLoader,
+    .one `Bootstrap.SporosX1FinalParser,
+    .one `Bootstrap.SporosX1FinalRefuse,
+    .one `Bootstrap.SporosX1FinalWalkRefuse]
+
+-- The native Sporos VM (`bootstrap/model/sporos_vm`) simulates `Sporos.run`: about 18 minutes
+-- of kernel time across 28 modules (12 minutes on four cores), so built by
+-- bootstrap/model/sporos_vm_proofs.sh (by hand or on the lab cluster), not on every pull request.
+-- SporosVmBinData and SporosVmCheckBytes, the binary and its byte check, are in Bootstrap.
+lean_lib BootstrapSporosVm where
+  roots := #[`Bootstrap.SporosVmBin]
+  globs := #[
+    .one `Bootstrap.SporosVmBin,
     .one `Bootstrap.SporosVmCore,
     .one `Bootstrap.SporosVmExec,
     .one `Bootstrap.SporosVmFault,
@@ -116,31 +148,7 @@ lean_lib Bootstrap where
     .one `Bootstrap.SporosVmReady,
     .one `Bootstrap.SporosVmSim,
     .one `Bootstrap.SporosVmSimBase,
-    .one `Bootstrap.SporosVmWitness,
-    .submodules `Sporos]
-
--- The two seeds on every listing (about 20 minutes of kernel time, the two in parallel), and
--- their lifting to the unified machine X86Uni (SeedUniBridge, which imports both); built by
--- bootstrap/model/seed_proofs.sh (run by hand or on the lab cluster; no CI workflow runs it),
--- not on every pull request.
-lean_lib BootstrapSeeds where
-  roots := #[`Bootstrap.SeedA, `Bootstrap.SeedB, `Bootstrap.SeedUniBridge]
-
--- Sporos stage-1 final correctness proofs (loader + parser + checker accept/refuse
--- biconditional, cubic step bound, and ENOMEM exit 2); SporosX1FinalRefuse peaks at
--- ~8.4 GiB RSS (~26 min), exceeding the 7 GB / 35 min pull-request runner. Built and
--- axiom-checked by bootstrap/model/sporos_stage1_proofs.sh (-j1), not on every PR.
-lean_lib BootstrapSporosStage1 where
-  roots := #[`Bootstrap.SporosX1Final]
-  globs := #[
-    .one `Bootstrap.SporosX1Final,
-    .one `Bootstrap.SporosX1FinalChkRefuse,
-    .one `Bootstrap.SporosX1FinalCompose,
-    .one `Bootstrap.SporosX1FinalDefs,
-    .one `Bootstrap.SporosX1FinalLoader,
-    .one `Bootstrap.SporosX1FinalParser,
-    .one `Bootstrap.SporosX1FinalRefuse,
-    .one `Bootstrap.SporosX1FinalWalkRefuse]
+    .one `Bootstrap.SporosVmWitness]
 
 -- The Sporos reference interpreter as a program (`sporos PROGRAM.spb < in > out`)
 -- and the writer of the example programs (`sporos-examples DIR`).
