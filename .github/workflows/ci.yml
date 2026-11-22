@@ -44,6 +44,7 @@ jobs:
       stdlib: ${{ steps.classify.outputs.stdlib }}
       tests: ${{ steps.classify.outputs.tests }}
       lean: ${{ steps.classify.outputs.lean }}
+      bootstrap: ${{ steps.classify.outputs.bootstrap }}
       math: ${{ steps.classify.outputs.math }}
       ontology: ${{ steps.classify.outputs.ontology }}
       clinical: ${{ steps.classify.outputs.clinical }}
@@ -2982,7 +2983,7 @@ jobs:
     needs: [impact, fast-checks]
     if: needs.impact.outputs.lean == 'true' || needs.impact.outputs.full == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 35  # measured 17 min on the #3663 and #3665 heads (2026-11-18); TMRBurst and its gate pass 20
+    timeout-minutes: 35  # 31.8 min on the #3687 head (2026-11-22) before the bootstrap steps moved to Bootstrap Proofs; 13.8 min of that stays here
     steps:
       - uses: actions/checkout@v4
       - name: Materialize the committed Madaros prebuilt
@@ -3034,6 +3035,87 @@ jobs:
         run: |
           cd formal
           lake build OctonionAlgebra
+      - name: Build all default-target proof modules
+        run: |
+          cd formal/lean4
+          # Build every @[default_target] in lakefile.lean (currently 27).
+          # Previously this step only built SounioGradedModal/MeasConf/
+          # ProofObligation, which let other top-level modules (e.g.
+          # SounioFloatInstance, SounioCausality, SounioPathionBridge)
+          # silently rot without CI catching breakage. PR #66's audit
+          # surfaced this — a PR adding a broken SounioFloatInstance
+          # passed "Lean Proofs ✓" because no other module imported it.
+          lake build
+      # Paper A §6 NS metatheory (EpistemicEffectsNS): compiles, sorry-free, axiom
+      # footprint ⊆ {propext, Quot.sound, Classical.choice}, load-bearing theorem
+      # names present, registered as a default target. Named here so the
+      # workflow-reference ratchet sees it run.
+      - name: NS metatheory gate (Paper A §6, EpistemicEffectsNS)
+        run: bash scripts/ci/ns_metatheory_lean_gate.sh
+      # Anti-Garbling FUSION theorem (EpistemicEffectsNSA): NS calculus over CD(n) with the
+      # second (basis-support) certificate; certified re-association is garbling-free;
+      # third-axis (norm shortcut) sedenion witness. Kernel-decided only (no native_decide);
+      # sorry-free; axioms ⊆ {propext, Quot.sound, Classical.choice}. Named here so the
+      # workflow-reference ratchet sees it run.
+      - name: Anti-garbling fusion gate (EpistemicEffectsNSA)
+        run: bash scripts/ci/antigarbling_fusion_lean_gate.sh
+      - name: Verify egc_graded_soundness is axiom-free
+        run: |
+          cd formal/lean4
+          cat > /tmp/axiom_check.lean <<'EOF'
+          import SounioGradedModal
+          #print axioms SounioGradedModal.egc_graded_soundness
+          EOF
+          lake env lean /tmp/axiom_check.lean 2>&1 | grep -v "propext\|Classical\|Quot" \
+            | grep "axioms" && echo "unexpected axioms" && exit 1 || echo "✓ No unexpected axioms"
+      # The real `#print axioms` list for the headline theorems that
+      # formal/AXIOM_INVENTORY.md refers to (the inventory generator does not
+      # run Lean). Builds the formal/ package modules too: before this step no
+      # CI job compiled OntologyELPlusClosureComplete, ElfLinker or TypeChecker.
+      - name: Axiom report for headline theorems
+        run: bash scripts/ci/lean_axiom_report.sh
+      # The counts in formal/AXIOM_INVENTORY.md are generated from source;
+      # a PR that adds an axiom or a native_decide must regenerate it.
+      - name: Axiom inventory is current
+        run: bash scripts/dev/gen_axiom_inventory.sh --check
+
+  # The bootstrap chain (formal/Bootstrap, formal/Sporos, bootstrap/model): its own
+  # job so that a bootstrap PR does not also rebuild formal/lean4, and a formal/lean4
+  # PR does not rebuild the bootstrap model. The heavy bootstrap proofs (seeds,
+  # stage 1, sporos_vm) run on the lab cluster through their scripts, not here.
+  bootstrap-proofs:
+    name: Bootstrap Proofs
+    needs: [impact, fast-checks]
+    if: needs.impact.outputs.bootstrap == 'true' || needs.impact.outputs.full == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35  # split out of Lean Proofs on 2026-11-22: these steps took 18.0 of its 31.8 min on the #3687 head
+    steps:
+      - uses: actions/checkout@v4
+      - name: Materialize the committed Madaros prebuilt
+        run: bash scripts/lib/materialize_madaros_prebuilt.sh
+      # Toolchains and build products have different lifetimes. A toolchain-only
+      # key made immutable .lake snapshots rebuild every later proof change.
+      - name: Cache elan toolchains
+        uses: actions/cache@v4
+        with:
+          path: ~/.elan
+          key: lean-elan-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('formal/lean-toolchain', 'formal/lean4/lean-toolchain') }}
+      # Exact source key only: never restore proof objects from another source
+      # tree or toolchain. All lake builds and gates below remain unconditional,
+      # including on a cache hit.
+      - name: Cache exact-source Lean build products
+        uses: actions/cache@v4
+        with:
+          path: |
+            formal/.lake
+          key: bootstrap-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('formal/**', '!formal/**/.lake/**', 'bootstrap/**', 'scripts/ci/*lean*.sh', '.github/workflows/ci.yml') }}
+      - name: Install elan (Lean toolchain manager)
+        run: |
+          if ! command -v elan &>/dev/null; then
+            curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
+              | sh -s -- -y --no-modify-path
+          fi
+          echo "$HOME/.elan/bin" >> $GITHUB_PATH
       # Bootstrap model (formal/Bootstrap): a minimal x86-64 semantics for the
       # two seed loaders and short kernel-checked runs of both. SeedData.lean
       # must match the seed files. The full self-reproduction and cross-check
@@ -3114,49 +3196,10 @@ jobs:
       # instruction fetches straddling a guard page, against the CPU (`TMRBurst`).
       - name: Bootstrap TMR burst and page-straddle gate
         run: bash bootstrap/model/tmr_burst_straddle_gate.sh 3400 20000 1
-      - name: Build all default-target proof modules
-        run: |
-          cd formal/lean4
-          # Build every @[default_target] in lakefile.lean (currently 27).
-          # Previously this step only built SounioGradedModal/MeasConf/
-          # ProofObligation, which let other top-level modules (e.g.
-          # SounioFloatInstance, SounioCausality, SounioPathionBridge)
-          # silently rot without CI catching breakage. PR #66's audit
-          # surfaced this — a PR adding a broken SounioFloatInstance
-          # passed "Lean Proofs ✓" because no other module imported it.
-          lake build
-      # Paper A §6 NS metatheory (EpistemicEffectsNS): compiles, sorry-free, axiom
-      # footprint ⊆ {propext, Quot.sound, Classical.choice}, load-bearing theorem
-      # names present, registered as a default target. Named here so the
-      # workflow-reference ratchet sees it run.
-      - name: NS metatheory gate (Paper A §6, EpistemicEffectsNS)
-        run: bash scripts/ci/ns_metatheory_lean_gate.sh
-      # Anti-Garbling FUSION theorem (EpistemicEffectsNSA): NS calculus over CD(n) with the
-      # second (basis-support) certificate; certified re-association is garbling-free;
-      # third-axis (norm shortcut) sedenion witness. Kernel-decided only (no native_decide);
-      # sorry-free; axioms ⊆ {propext, Quot.sound, Classical.choice}. Named here so the
-      # workflow-reference ratchet sees it run.
-      - name: Anti-garbling fusion gate (EpistemicEffectsNSA)
-        run: bash scripts/ci/antigarbling_fusion_lean_gate.sh
-      - name: Verify egc_graded_soundness is axiom-free
-        run: |
-          cd formal/lean4
-          cat > /tmp/axiom_check.lean <<'EOF'
-          import SounioGradedModal
-          #print axioms SounioGradedModal.egc_graded_soundness
-          EOF
-          lake env lean /tmp/axiom_check.lean 2>&1 | grep -v "propext\|Classical\|Quot" \
-            | grep "axioms" && echo "unexpected axioms" && exit 1 || echo "✓ No unexpected axioms"
-      # The real `#print axioms` list for the headline theorems that
-      # formal/AXIOM_INVENTORY.md refers to (the inventory generator does not
-      # run Lean). Builds the formal/ package modules too: before this step no
-      # CI job compiled OntologyELPlusClosureComplete, ElfLinker or TypeChecker.
-      - name: Axiom report for headline theorems
-        run: bash scripts/ci/lean_axiom_report.sh
-      # The counts in formal/AXIOM_INVENTORY.md are generated from source;
-      # a PR that adds an axiom or a native_decide must regenerate it.
-      - name: Axiom inventory is current
-        run: bash scripts/dev/gen_axiom_inventory.sh --check
+      # The `#print axioms` list for the headline bootstrap theorems built here
+      # (the formal/ package part is in the Lean Proofs job).
+      - name: Axiom report for headline bootstrap theorems
+        run: bash scripts/ci/lean_axiom_report.sh --bootstrap
 
   website:
     name: Website
@@ -3252,6 +3295,7 @@ jobs:
       - gate-wave-0
       - sounio-lint
       - lean-proofs
+      - bootstrap-proofs
       - website
       - r6-corpus-sweep
       - slow-lane
