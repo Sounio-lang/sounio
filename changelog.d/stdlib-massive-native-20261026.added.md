@@ -1,1 +1,0 @@
-Checked owned byte buffers, dynamic i64 deques/maps and binary readers now accompany Linux x86-64 native atomics, mutexes, threads, OS entropy, monotonic time and TCP/UDP operations, with C++23 reference and ownership controls.

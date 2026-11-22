@@ -261,4 +261,72 @@ for want in "-3" "-1" "-9223372036854775808" "-4611686018427387904" "92233720368
   }
 done
 
+# 5) The i32 guard is one fused operation, not a five-op IR window. The window
+# (shl 32, sar 32, compare, branch, panic call) cost about 30 machine
+# instructions per i32 + - * on the stack-slot emitter and made i32 kernels
+# run 1.3x to 2x slower than the same code in i64. The deterministic proxy
+# for "the guard is cheap" is code size: a build with 400 dynamic i32 adds must
+# not outgrow the same build in i64 by more than two pages (the ELF is
+# page-rounded); with the window it outgrew it by about 50 KB.
+gen_adds() {
+  local ty="$1" n="$2" out="$3"
+  {
+    echo "fn id(x: $ty) -> $ty { x }"
+    echo "fn main() with IO {"
+    echo "  var a: $ty = id(1)"
+    local i
+    for i in $(seq 1 "$n"); do echo "  a = a + id($i)"; done
+    echo "  println(a)"
+    echo "}"
+  } > "$out"
+}
+elf_size_of() {
+  local src="$1" elf="$1.elf"
+  if ! "$SOUC" compile "$src" -o "$elf" >"$src.log" 2>&1; then
+    echo "FAIL: $(basename "$src") did not compile"; tail -10 "$src.log" || true; exit 1
+  fi
+  stat -c %s "$elf"
+}
+gen_adds i32 10 "$OUT/adds_i32_10.sio";   gen_adds i32 410 "$OUT/adds_i32_410.sio"
+gen_adds i64 10 "$OUT/adds_i64_10.sio";   gen_adds i64 410 "$OUT/adds_i64_410.sio"
+g32=$(( $(elf_size_of "$OUT/adds_i32_410.sio") - $(elf_size_of "$OUT/adds_i32_10.sio") ))
+g64=$(( $(elf_size_of "$OUT/adds_i64_410.sio") - $(elf_size_of "$OUT/adds_i64_10.sio") ))
+if [ "$g32" -gt $(( g64 + 8192 )) ]; then
+  echo "FAIL: 400 i32 adds grew the binary by $g32 bytes against $g64 for i64: the i32 guard is not fused"
+  exit 1
+fi
+if [ "$("$OUT/adds_i32_410.sio.elf")" != "84256" ]; then
+  echo "FAIL: i32 add chain printed the wrong value"
+  exit 1
+fi
+
+# 6) Loop-iteration regions reset in place at every iteration end
+# (__rgn_reset). An iteration that allocated nothing has an empty range to
+# zero; `rep stosq` with rcx = 0 still pays its microcode start-up, which made
+# allocation-free loops that call a function about 1.5x slower. Every zeroing
+# `rep stosq` the region runtime emits must be preceded by the empty-range test
+# (test rcx, rcx; je over the 9-byte tail): 48 85 c9 0f 84 09 00 00 00, then
+# mov rdi, lo; xor eax, eax; rep stosq.
+cat > "$OUT/loop_reset.sio" <<'SIO'
+fn bump(x: i64) -> i64 { x + 1 }
+fn main() with IO {
+  var i: i64 = 0
+  var s: i64 = 0
+  while i < 1000 {
+    s = s + bump(i)
+    i = i + 1
+  }
+  println(s)
+}
+SIO
+"$SOUC" compile "$OUT/loop_reset.sio" -o "$OUT/loop_reset.elf" >"$OUT/loop_reset.log" 2>&1 || {
+  echo "FAIL: loop_reset probe did not compile"; tail -10 "$OUT/loop_reset.log" || true; exit 1; }
+[ "$("$OUT/loop_reset.elf")" = "500500" ] || { echo "FAIL: loop_reset probe printed the wrong sum"; exit 1; }
+od -An -v -tx1 -w1000000 "$OUT/loop_reset.elf" | tr -d ' \n' > "$OUT/loop_reset.hex"
+guarded=$(grep -o '4885c90f84090000004c89cf4831c0f348ab' "$OUT/loop_reset.hex" | wc -l)
+if [ "$guarded" -lt 1 ]; then
+  echo "FAIL: the region zeroing does not skip an empty range (no guarded rep stosq in the runtime)"
+  exit 1
+fi
+
 echo "MADAROS_INT_OVERFLOW_GATE_OK"
