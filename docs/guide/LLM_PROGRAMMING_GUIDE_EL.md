@@ -12,6 +12,8 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.guide.llm-prog
 **Έκδοση ελληνικού οδηγού:** Οκτώβριος 2026.
 **Βάση των υφιστάμενων παραδειγμάτων:** `f5b2c5850be9f3d3995719ffcade44a6d851658a`.
 
+**Status: research language (pre-1.0).** APIs may change; not recommended for production use.
+
 Ο οδηγός απευθύνεται σε μοντέλα συνομιλίας, βοηθούς επεξεργαστή και agents.
 Δώστε ένα πλήρες πρόγραμμα κοντά στη ζητούμενη εργασία, κάντε μία αλλαγή
 κάθε φορά και ελέγξτε το αποτέλεσμα. Η διαδικασία δεν εξαρτάται από

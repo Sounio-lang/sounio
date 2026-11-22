@@ -6,6 +6,7 @@ module native::machine_ir
 
 use parser::ast::{Name, BinaryOp, UnaryOp, empty_name}
 use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IrRegList, BSS_BASE_LINUX, IR_FLOAT_REG_MARKER_FLAG, IR_FLOAT_NO_MARKERS}
+use ir::ir::{ir_arena_load, ir_float_bits_capacity, ir_float_bits_get, ir_fn_get, ir_name_at, ir_region_slot_r}
 
 pub let MIR_MAX_BLOCKS: i64 = 1
 // MIR_MAX_INSTRS history:
@@ -503,7 +504,10 @@ pub fn native_v2_pseudo_from_ir(instr: IrInstr) -> MachineInstr with Alloc, Mut,
         mi.opcode = MIR_OP_PSEUDO_UNARY
         mi.dst = machine_operand_stack_slot(instr.dst)
         mi.src1 = machine_operand_stack_slot(instr.src1)
-        mi.aux = machine_operand_imm64((instr.imm_flags / 2) & 1)
+        // SIO-557: aux bit 0 is src1-float; bits 2/3 carry the deref width
+        // (4 = signed byte, 12 = unsigned byte). A deref is never float
+        // (float travels only via OpNeg), so the values never collide.
+        mi.aux = machine_operand_imm64(((instr.imm_flags / 2) & 1) | (instr.imm_flags & 12))
         mi.un_op = instr.un_op
         return mi
     }
@@ -1314,6 +1318,10 @@ pub fn native_v2_lower_legal_function_from_ir_ref(func: &IrFunction, out: &! Mac
                 var un_mi = native_v2_make_unary(temp, temp, machine_instr_un_op(instr))
                 if src_is_float == 1 {
                     un_mi.aux = machine_operand_imm64(1)
+                } else {
+                    // SIO-557: preserve the deref width bits (4/12) through
+                    // legalization; float travels only via the ==1 arm above.
+                    un_mi.aux = machine_operand_imm64(machine_instr_aux_value(instr) & 12)
                 }
                 native_v2_emit_legal_instr_mut(out, un_mi)
             }
@@ -1533,6 +1541,10 @@ pub fn native_v2_legalize_function(func: MachineFunction) -> MachineFunction wit
                 var un_mi = native_v2_make_unary(temp, temp, machine_instr_un_op(instr))
                 if src_is_float == 1 {
                     un_mi.aux = machine_operand_imm64(1)
+                } else {
+                    // SIO-557: preserve the deref width bits (4/12) through
+                    // legalization; float travels only via the ==1 arm above.
+                    un_mi.aux = machine_operand_imm64(machine_instr_aux_value(instr) & 12)
                 }
                 out = _emit_legal_byval(out, un_mi)
             }

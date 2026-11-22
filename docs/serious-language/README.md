@@ -88,7 +88,7 @@ The safe real-world line is:
 Do not use this package to imply:
 
 - all stdlib modules are callable;
-- GPU runtime paths are generally production-ready;
+- GPU runtime paths are ready for production use;
 - every Lean theorem is axiom-free or sorry-free;
 - the modular compiler tree is already the source used to build the checked binary;
 - scaffolded research modules are user-ready features.

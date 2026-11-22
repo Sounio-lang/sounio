@@ -823,5 +823,5 @@ When modifying SOIR format:
 
 - [DEVELOPER_WORKFLOW.md](../contributor-guide/DEVELOPER_WORKFLOW.md) - Daily workflow guide
 - [SOIR_REFERENCE.md](../architecture/SOIR_REFERENCE.md) - Complete format specification
-- [SELF_HOSTING_PHASES.md](internal/implementation/SELF_HOSTING_PHASES.md) - Bootstrap roadmap
+- [SELF_HOSTING_PHASES.md](./SELF_HOSTING_PHASES.md) - Bootstrap roadmap
 - `.claude/decisions/2026-02-13-rustless-cutover.md` - Design decisions

@@ -1,0 +1,1 @@
+The Madaros changed-tests gate now also runs changed `tests/stdlib/<area>/test_*.sio` witnesses marked `//@ requires: madaros`. The full suite runs lean_single and skips them, so before this a Madaros-only stdlib witness changed in a PR was executed by no CI job.

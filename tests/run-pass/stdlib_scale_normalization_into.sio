@@ -1,0 +1,102 @@
+//@ run-pass
+//@ requires: madaros
+//@ timeout: 120
+//@ expect-stdout: SCALE NORMALIZATION INTO PASS
+use collections::numeric_buffer::{numeric_buffer_new,numeric_buffer_at,numeric_buffer_set,numeric_buffer_close}
+use collections::integer_buffer::{integer_buffer_new,integer_buffer_at,integer_buffer_set,integer_buffer_close}
+use genomics::dynamic_normalization::{dynamic_normalization_workspace,dynamic_median_ratio_size_factors_workspace,dynamic_size_factors_slot,dynamic_size_factors_snapshot,dynamic_size_factors_slot_status,dynamic_size_factors_slot_genes_used,dynamic_size_factors_slot_genes_excluded,dynamic_median_ratio_size_factors_into,dynamic_median_ratio_size_factors}
+use io::sci_print::{println_f64_sci}
+fn norm_count(kind:i64,g:i64,s:i64)->i64 with Div,Panic {
+ if kind==0 || kind==1 {
+  let values:[i64;15]=[1,4,9,2,8,0,0,3,12,6,12,6,0,0,0]
+  return values[(g*3+s) as usize]
+ }
+ if kind==2 {return (g+1)*(s%7+1)}
+ if kind==3 {
+  let q:i64=9007199254740992
+  if g==0 {if s==0 {return q}else{return q-1}}
+  if s==0 {return q-2}else{return q}
+ }
+ 8
+}
+fn normalization_case(kind:i64) with Alloc,IO,Mut,Div,Panic {
+ let genes:i64=if kind==2 {513}else{if kind==3 {2}else{if kind==4 {3}else{5}}}
+ let samples:i64=if kind==2 {17}else{if kind==3 {2}else{if kind==4 {4}else{3}}}
+ let mode:i64=if kind==1 {1}else{0}
+ let row_stride:i64=if kind==4 {0}else{if kind==1 || kind==2 {samples*2+3}else{samples}}
+ let col_stride:i64=if kind==4 {0}else{if kind==1 || kind==2 {2}else{1}}
+ let offset:i64=if kind==1 || kind==2 {3}else{0}
+ let count_len:i64=if kind==4 {1}else{offset+genes*row_stride}
+ let plan=dynamic_median_ratio_size_factors_workspace(genes,samples)
+ assert(plan.status==0 && plan.numeric_elements==2*genes+2*samples && plan.integer_elements==genes)
+ var counts=integer_buffer_new(count_len,count_len*8)
+ var packed=integer_buffer_new(genes*samples,genes*samples*8)
+ var anchors=integer_buffer_new(genes,genes*8)
+ var flags=integer_buffer_new(2*genes,2*genes*8)
+ var factors=numeric_buffer_new(samples,samples*8)
+ var logs=numeric_buffer_new(samples,samples*8)
+ var old_factors=numeric_buffer_new(samples,samples*8)
+ var old_logs=numeric_buffer_new(samples,samples*8)
+ var work=numeric_buffer_new(plan.numeric_elements,plan.numeric_elements*8)
+ var old_work=numeric_buffer_new(plan.numeric_elements,plan.numeric_elements*8)
+ var slot=dynamic_size_factors_slot()
+ var at:i64=0
+ while at<count_len {integer_buffer_set(&!counts,at, -7);at=at+1}
+ var g:i64=0
+ while g<genes {
+  var s:i64=0
+  while s<samples {
+   let value=norm_count(kind,g,s)
+   integer_buffer_set(&!counts,offset+g*row_stride+s*col_stride,value)
+   integer_buffer_set(&!packed,g*samples+s,value)
+   s=s+1
+  }
+  g=g+1
+ }
+ let status=dynamic_median_ratio_size_factors_into(&counts,genes,samples,row_stride,col_stride,offset,mode,&!factors,&!logs,&!work,&!anchors,&!slot)
+ assert(status==0 && dynamic_size_factors_slot_status(&slot)==0)
+ let old=dynamic_median_ratio_size_factors(&packed,genes,samples,mode,&!old_factors,&!old_logs,&!old_work,&!flags)
+ assert(old.status==0)
+ let used:i64=dynamic_size_factors_slot_genes_used(&slot)
+ let excluded:i64=dynamic_size_factors_slot_genes_excluded(&slot)
+ print("normalization into case: ");println(kind)
+ print("normalization into used: ");println(used)
+ print("normalization into excluded: ");println(excluded)
+ var s:i64=0
+ while s<samples {
+  let factor:f64=numeric_buffer_at(&factors,s)
+  let logged:f64=numeric_buffer_at(&logs,s)
+  assert(f64_to_bits(factor)==f64_to_bits(numeric_buffer_at(&old_factors,s)))
+  assert(f64_to_bits(logged)==f64_to_bits(numeric_buffer_at(&old_logs,s)))
+  print("normalization into factor: ");println_f64_sci(factor,15)
+  print("normalization into log: ");println_f64_sci(logged,15)
+  s=s+1
+ }
+ let snapshot=dynamic_size_factors_snapshot(&slot)
+ // Reuse the same slot after success; failed mode validation must not commit.
+ let bad=dynamic_median_ratio_size_factors_into(&counts,genes,samples,row_stride,col_stride,offset,2,&!factors,&!logs,&!work,&!anchors,&!slot)
+ assert(bad==1 && dynamic_size_factors_slot_status(&slot)==1)
+ assert(snapshot.status==0 && snapshot.genes_used==used)
+ s=0
+ while s<samples {
+  assert(f64_to_bits(numeric_buffer_at(&factors,s))==f64_to_bits(numeric_buffer_at(&old_factors,s)))
+  assert(f64_to_bits(numeric_buffer_at(&logs,s))==f64_to_bits(numeric_buffer_at(&old_logs,s)))
+  s=s+1
+ }
+ integer_buffer_close(counts)
+ integer_buffer_close(packed)
+ integer_buffer_close(anchors)
+ integer_buffer_close(flags)
+ numeric_buffer_close(factors)
+ numeric_buffer_close(logs)
+ numeric_buffer_close(old_factors)
+ numeric_buffer_close(old_logs)
+ numeric_buffer_close(work)
+ numeric_buffer_close(old_work)
+}
+fn main()->i32 with Alloc,IO,Mut,Div,Panic {
+ var kind:i64=0
+ while kind<5 {normalization_case(kind);kind=kind+1}
+ println("SCALE NORMALIZATION INTO PASS")
+ 0
+}

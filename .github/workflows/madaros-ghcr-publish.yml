@@ -1,0 +1,135 @@
+name: Publish pinned Madaros distribution to GHCR
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/madaros-ghcr-publish.yml
+      - .github/packages/madaros-archive.Dockerfile
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/sounio-lang/madaros-distribution
+  RELEASE_TAG: madaros-distribution-20260920-preview
+  ARCHIVE_SHA256: f0d4511124ad3bfc8c07173b2b33e83acbed7c3cb5a13bd00714e733d1b9c6d3
+  SOURCE_COMMIT: 9a661a2b89a835fc1ba8d690f42682d900a890de
+  BUNDLE_ROOT: sounio-2026.09.19-scalar-linux-x86_64
+
+concurrency:
+  group: madaros-distribution-publication
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Download and verify the immutable release input
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          package_dir="$RUNNER_TEMP/madaros-ghcr-package"
+          mkdir -p "$package_dir"
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern madaros-distribution.tar.gz --pattern SHA256SUMS \
+            --dir "$package_dir"
+          cd "$package_dir"
+          expected_line="$ARCHIVE_SHA256  madaros-distribution.tar.gz"
+          test "$(cat SHA256SUMS)" = "$expected_line"
+          printf '%s\n' "$expected_line" | sha256sum --check --status
+          tar -tzf madaros-distribution.tar.gz | grep -Fx "$BUNDLE_ROOT/distribution.json"
+          tar -tzf madaros-distribution.tar.gz | grep -Fx "$BUNDLE_ROOT/runtime/bin/madaros-linux-x86_64"
+          tar -tzf madaros-distribution.tar.gz | grep -Fx "$BUNDLE_ROOT/runtime/stdlib/"
+          tar -xOzf madaros-distribution.tar.gz "$BUNDLE_ROOT/distribution.json" | \
+            jq -e --arg source "$SOURCE_COMMIT" \
+              '.schema == "sounio.compiler-distribution.v1" and .platform == "linux-x86_64" and .source_commit == $source and .stdlib.source_commit == $source'
+
+      - name: Build and compare the archive package
+        run: |
+          set -euo pipefail
+          package_dir="$RUNNER_TEMP/madaros-ghcr-package"
+          image_tag="$IMAGE:$RELEASE_TAG-run-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          docker build --platform linux/amd64 \
+            -f .github/packages/madaros-archive.Dockerfile \
+            --build-arg "RELEASE_TAG=$RELEASE_TAG" \
+            --build-arg "SOURCE_COMMIT=$SOURCE_COMMIT" \
+            -t "$image_tag" "$package_dir"
+          test "$(docker image inspect "$image_tag" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$SOURCE_COMMIT"
+          cid=$(docker create "$image_tag" /not-run)
+          trap 'docker rm "$cid" >/dev/null' EXIT
+          docker cp "$cid:/distribution/madaros-distribution.tar.gz" "$RUNNER_TEMP/copied-madaros-distribution.tar.gz"
+          cmp "$package_dir/madaros-distribution.tar.gz" "$RUNNER_TEMP/copied-madaros-distribution.tar.gz"
+          docker cp "$cid:/distribution/SHA256SUMS" "$RUNNER_TEMP/copied-SHA256SUMS"
+          cmp "$package_dir/SHA256SUMS" "$RUNNER_TEMP/copied-SHA256SUMS"
+          docker save "$image_tag" | gzip -1 > "$RUNNER_TEMP/madaros-image.tar.gz"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: madaros-image
+          path: ${{ runner.temp }}/madaros-image.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: validate
+    if: github.event_name == 'workflow_dispatch' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: madaros-image
+          path: ${{ runner.temp }}
+      - name: Load the image that passed validation
+        run: |
+          set -euo pipefail
+          docker load -i "$RUNNER_TEMP/madaros-image.tar.gz"
+          image_tag="$IMAGE:$RELEASE_TAG-run-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          test "$(docker image inspect "$image_tag" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$SOURCE_COMMIT"
+
+      - name: Authenticate to GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      - name: Push and verify by registry digest
+        run: |
+          set -euo pipefail
+          image_tag="$IMAGE:$RELEASE_TAG-run-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          docker push "$image_tag"
+          reference=$(docker image inspect "$image_tag" --format '{{index .RepoDigests 0}}')
+          case "$reference" in "$IMAGE"@sha256:*) ;; *) echo 'Missing GHCR digest' >&2; exit 1 ;; esac
+          docker pull "$reference"
+          cid=$(docker create "$reference" /not-run)
+          trap 'docker rm "$cid" >/dev/null' EXIT
+          docker cp "$cid:/distribution/madaros-distribution.tar.gz" "$RUNNER_TEMP/pulled-madaros-distribution.tar.gz"
+          printf '%s  %s\n' "$ARCHIVE_SHA256" "$RUNNER_TEMP/pulled-madaros-distribution.tar.gz" | sha256sum --check --status
+          jq -n --arg package "$reference" --arg tag "$image_tag" \
+            --arg release "$RELEASE_TAG" --arg archive_sha256 "$ARCHIVE_SHA256" \
+            --arg source_commit "$SOURCE_COMMIT" \
+            --arg run "https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            '{package:$package,tag:$tag,release:$release,archive_sha256:$archive_sha256,source_commit:$source_commit,run:$run,kind:"archive-only; not a runnable compiler image"}' \
+            > "$RUNNER_TEMP/madaros-ghcr-receipt.json"
+          printf 'Published verified archive package: `%s`\n' "$reference" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: madaros-ghcr-receipt
+          path: ${{ runner.temp }}/madaros-ghcr-receipt.json
+          if-no-files-found: error
+
+      - name: Logout
+        if: always()
+        run: docker logout ghcr.io

@@ -25,18 +25,6 @@ bin/souc
 artifacts/omega/souc-bin/souc-linux-x86_64-gpu
 ```
 
-On the current snapshot, `souc info` for the default JIT profile reports:
-
-- version `1.0.0-beta.4`
-- **Cranelift JIT NOT compiled** — `souc info` prints `[-] Cranelift JIT - rebuild
-  with --features jit`. Measured 2026-08-27: no artifact enables it, no build path
-  passes the feature, and the binary exports no Cranelift symbol. This bullet
-  previously read "Cranelift JIT enabled" — not compiled
-- LLVM disabled in the checked artifact
-- GPU codegen disabled in the checked JIT artifact
-- LSP, SMT, distributed, and package-manager features disabled in the checked artifact
-- ontology CLI on the checked artifact via `souc ontology <init|info|search|is-subclass|list|lock|update|diff|deprecations|verify>`
-
 > **Two binaries, two different `souc ontology` CLIs — measured 2026-08-26.** The
 > command name is shared and the subcommand sets barely overlap, so which one you
 > get depends on which binary you are holding:
@@ -55,14 +43,6 @@ On the current snapshot, `souc info` for the default JIT profile reports:
 > `souc --help` does not list `ontology` at all on the default binary. That
 > omission is the whole trap: a survey of `--help` concludes the command does not
 > exist, and it does.
-
-For the separate checked GPU profile, `souc info` reports:
-
-- version `1.0.0-beta.4`
-- GPU codegen enabled
-- Cranelift JIT disabled
-- public PTX emission through `build --backend gpu`
-- the same disabled feature families unless you rebuild a different artifact
 
 ## 2. Pipeline map
 
