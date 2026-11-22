@@ -1,0 +1,1 @@
+Module closure edge capacity raised from 512 to 1024. The compiler's own closure reached 439 edges (86%, over the 80% headroom gate). The `--science-boundary-closure` report now states `edge_capacity`, and the verdict reads it instead of assuming twice the node capacity.

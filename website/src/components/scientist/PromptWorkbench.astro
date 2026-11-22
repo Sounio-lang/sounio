@@ -1,0 +1,285 @@
+---
+import { scientistFields } from '../../lib/scientist-prompt.mjs';
+
+interface Props {
+  catalog: typeof import('../../data/scientistWorkflows.json');
+  language: 'en' | 'pt' | 'el';
+  copy: typeof import('../../data/scientistCopy.json')['en'];
+  contexts: Record<string, { sources: { path: string; url: string; sha256: string; revision: string }[]; language_pack: string }>;
+}
+
+const { catalog, language, copy, contexts } = Astro.props;
+const fields = scientistFields as (keyof Props['copy']['fields'])[];
+const first = catalog.workflows[0];
+const clientWorkflows = catalog.workflows.map(workflow => ({
+  id: workflow.id, state: workflow.state,
+  title: { [language]: workflow.title[language] }, goal: { [language]: workflow.goal[language] },
+  questions: { [language]: workflow.questions[language] }, acceptance: { [language]: workflow.acceptance[language] }, limits: { [language]: workflow.limits[language] },
+}));
+const clientContexts = Object.fromEntries(Object.entries(contexts).map(([identifier, context]) => [identifier, { sources: context.sources, language_pack: context.language_pack }]));
+const payload = JSON.stringify({ catalog: { workflows: clientWorkflows }, language, copy, contexts: clientContexts }).replaceAll('<', '\\u003c');
+---
+
+<div class="prompt-workbench" data-scientist-workbench data-assembly-failure={copy.assemblyFailed}>
+  <form class="study-brief" data-study-form novalidate>
+    <h2>{copy.brief}</h2>
+    <label class="workflow-label" for="scientist-workflow">{copy.choose}</label>
+    <select id="scientist-workflow" data-workflow-select>
+      {catalog.workflows.map((workflow) => <option value={workflow.id}>{workflow.title[language]}</option>)}
+    </select>
+    <div class="scientific-fields">
+      {fields.map((field) => (
+        <div class:list={['study-field', { 'wide-field': field === 'question' || field === 'data' }]}>
+          <label for={`scientist-${field}`}>{copy.fields[field]}</label>
+          <textarea id={`scientist-${field}`} rows={field === 'question' ? 4 : 2} placeholder={field === 'question' ? first.goal[language] : undefined} required={field === 'question'} aria-describedby={`scientist-${field}-hint`}></textarea>
+          <p id={`scientist-${field}-hint`} class="field-hint">{copy.hints[field]}</p>
+        </div>
+      ))}
+    </div>
+    <p class="privacy-note">{copy.privacy}</p>
+    <div class="prompt-actions">
+      <button class="copy-prompt" type="submit" data-copy-prompt disabled>{copy.copy}</button>
+      <button class="download-prompt" type="button" data-download-prompt disabled>{copy.download}</button>
+    </div>
+    <p class="prompt-status" data-prompt-status role="status" aria-live="polite"></p>
+    <p class="next-step">{copy.next}</p>
+    <details class="prompt-preview" data-prompt-preview data-pagefind-ignore>
+      <summary>{copy.preview}</summary>
+      <textarea data-prompt-output readonly rows="16" aria-label={copy.preview} spellcheck="false"></textarea>
+    </details>
+    <section class="implementation-stage" aria-labelledby="scientist-implementation-title">
+      <h2 id="scientist-implementation-title">{copy.implementationTitle}</h2>
+      <label for="scientist-intake-reply">{copy.replyLabel}</label>
+      <p id="scientist-reply-hint" class="field-hint">{copy.replyHint}</p>
+      <textarea id="scientist-intake-reply" data-intake-reply rows="8" aria-describedby="scientist-reply-hint" spellcheck="false"></textarea>
+      <button class="download-prompt" type="button" data-validate-intake disabled>{copy.validateReply}</button>
+      <p class="prompt-status" data-intake-status role="status" aria-live="polite">{copy.intakePending}</p>
+      <label class="scientist-confirmation"><input type="checkbox" data-scientist-confirmation /> {copy.confirmBrief}</label>
+      <p class="field-hint">{copy.validationBoundary}</p>
+      <div class="prompt-actions">
+        <button class="copy-prompt" type="button" data-copy-implementation disabled>{copy.copyImplementation}</button>
+        <button class="download-prompt" type="button" data-download-implementation disabled>{copy.downloadImplementation}</button>
+      </div>
+      <details class="prompt-preview" data-implementation-preview data-pagefind-ignore>
+        <summary>{copy.implementationPreview}</summary>
+        <textarea data-implementation-output readonly rows="16" aria-label={copy.implementationPreview} spellcheck="false"></textarea>
+      </details>
+    </section>
+  </form>
+  <aside class="research-protocol" aria-labelledby="scientist-protocol-title">
+    <p class="template-state">{copy.template}</p>
+    <h2 id="scientist-protocol-title">{copy.method}</h2>
+    <section><h3>{copy.questions}</h3><ul data-protocol-questions>{first.questions[language].map((item) => <li>{item}</li>)}</ul></section>
+    <section><h3>{copy.acceptance}</h3><ul data-protocol-acceptance>{first.acceptance[language].map((item) => <li>{item}</li>)}</ul></section>
+    <section><h3>{copy.limits}</h3><ul data-protocol-limits>{first.limits[language].map((item) => <li>{item}</li>)}</ul></section>
+    <section><h3>{copy.sources}</h3><ul data-protocol-sources>{contexts[first.id].sources.map((source) => <li><a href={source.url}>{source.path}</a></li>)}</ul></section>
+  </aside>
+  <script is:inline type="application/json" data-scientist-payload set:html={payload} />
+</div>
+
+<script>
+  import { buildScientistPrompt, buildScientistImplementationPrompt, validateScientistIntake, scientistFields, scientistFieldLimit, scientistReplyLimit } from '../../lib/scientist-prompt.mjs';
+
+  let listeners: AbortController | undefined;
+  function initializeScientist() {
+    listeners?.abort();
+    const root = document.querySelector<HTMLElement>('[data-scientist-workbench]');
+    if (!root) return;
+    for (const button of root.querySelectorAll<HTMLButtonElement>('button')) button.disabled = true;
+    const payload = root.querySelector('[data-scientist-payload]');
+    let configuration;
+    try {
+      configuration = JSON.parse(payload?.textContent ?? '{}');
+      if (!configuration.catalog?.workflows?.length || !configuration.copy || !configuration.contexts) throw new Error('Incomplete scientist configuration');
+    } catch {
+      const status = root.querySelector<HTMLElement>('[data-prompt-status]');
+      if (status) status.textContent = root.dataset.assemblyFailure ?? 'Incomplete scientist context';
+      return;
+    }
+    const { catalog, language, copy, contexts } = configuration;
+    const form = root.querySelector<HTMLFormElement>('[data-study-form]');
+    const select = root.querySelector<HTMLSelectElement>('[data-workflow-select]');
+    const output = root.querySelector<HTMLTextAreaElement>('[data-prompt-output]');
+    const status = root.querySelector<HTMLElement>('[data-prompt-status]');
+    const preview = root.querySelector<HTMLDetailsElement>('[data-prompt-preview]');
+    const download = root.querySelector<HTMLButtonElement>('[data-download-prompt]');
+    const copyButton = root.querySelector<HTMLButtonElement>('[data-copy-prompt]');
+    const reply = root.querySelector<HTMLTextAreaElement>('[data-intake-reply]');
+    const confirmation = root.querySelector<HTMLInputElement>('[data-scientist-confirmation]');
+    const validate = root.querySelector<HTMLButtonElement>('[data-validate-intake]');
+    const intakeStatus = root.querySelector<HTMLElement>('[data-intake-status]');
+    const implementationCopy = root.querySelector<HTMLButtonElement>('[data-copy-implementation]');
+    const implementationDownload = root.querySelector<HTMLButtonElement>('[data-download-implementation]');
+    const implementationOutput = root.querySelector<HTMLTextAreaElement>('[data-implementation-output]');
+    const implementationPreview = root.querySelector<HTMLDetailsElement>('[data-implementation-preview]');
+    if (!form || !select || !output || !status || !preview || !download || !copyButton || !reply || !confirmation || !validate || !intakeStatus || !implementationCopy || !implementationDownload || !implementationOutput || !implementationPreview) return;
+    listeners = new AbortController();
+    const options = { signal: listeners.signal };
+    const current = () => {
+      const answers = Object.fromEntries(scientistFields.map(field => [field, form.querySelector<HTMLTextAreaElement>(`#scientist-${field}`)?.value ?? '']));
+      const workflow = catalog.workflows.find((entry: { id: string }) => entry.id === select.value);
+      return { workflow, language, copy, answers, context: contexts[workflow?.id] };
+    };
+    const signature = () => JSON.stringify([select.value, language, current().answers, reply.value]);
+    let accepted: string | null = null;
+    const updateControls = () => {
+      const enabled = accepted !== null && accepted === signature() && confirmation.checked;
+      implementationCopy.disabled = !enabled;
+      implementationDownload.disabled = !enabled;
+    };
+    const revoke = () => {
+      accepted = null;
+      confirmation.checked = false;
+      implementationOutput.value = '';
+      intakeStatus.textContent = copy.intakePending;
+      updateControls();
+    };
+    revoke();
+    const checkReply = () => {
+      if (!reply.value.trim()) { intakeStatus.textContent = copy.replyRequired; return false; }
+      if (reply.value.length > scientistReplyLimit) { intakeStatus.textContent = copy.replyTooLong; return false; }
+      try {
+        const result = validateScientistIntake({ ...current(), reply: reply.value });
+        if (!result.ok) { intakeStatus.textContent = result.error === 'intake-mismatch' ? copy.replyMismatch : copy.replyInvalid; return false; }
+        return true;
+      } catch { intakeStatus.textContent = copy.replyInvalid; return false; }
+    };
+    validate.addEventListener('click', () => {
+      revoke();
+      if (checkReply()) { accepted = signature(); intakeStatus.textContent = copy.intakeValid; }
+      updateControls();
+    }, options);
+    reply.addEventListener('input', revoke, options);
+    confirmation.addEventListener('change', () => {
+      if (!confirmation.checked) revoke();
+      else updateControls();
+    }, options);
+    const prepareImplementation = () => {
+      if (!checkReply()) { accepted = null; confirmation.checked = false; implementationOutput.value = ''; updateControls(); return null; }
+      if (accepted !== signature() || !confirmation.checked) { revoke(); return null; }
+      try {
+        const prompt = buildScientistImplementationPrompt({ ...current(), intakeReply: reply.value, confirmed: true });
+        implementationOutput.value = prompt;
+        return prompt;
+      } catch { revoke(); intakeStatus.textContent = copy.assemblyFailed; return null; }
+    };
+    const downloadText = (prompt: string, phase: string) => {
+      const url = URL.createObjectURL(new Blob([prompt], { type: 'text/markdown;charset=utf-8' }));
+      try {
+        const anchor = document.createElement('a'); anchor.href = url; anchor.download = `sounio-${select.value}-${language}-${phase}.md`; anchor.click();
+      } finally { setTimeout(() => URL.revokeObjectURL(url), 1000); }
+    };
+    implementationCopy.addEventListener('click', async () => {
+      const prompt = prepareImplementation();
+      if (!prompt) return;
+      const prepared = signature();
+      try { await navigator.clipboard.writeText(prompt); if (accepted === prepared && signature() === prepared && confirmation.checked) intakeStatus.textContent = copy.implementationCopied; }
+      catch { if (accepted === prepared && signature() === prepared && confirmation.checked) { implementationPreview.open = true; implementationOutput.focus(); implementationOutput.select(); intakeStatus.textContent = copy.copyFailed; } }
+    }, options);
+    implementationDownload.addEventListener('click', () => {
+      const prompt = prepareImplementation();
+      if (!prompt) return;
+      try { downloadText(prompt, 'implementation'); } catch { intakeStatus.textContent = copy.downloadFailed; }
+    }, options);
+    implementationPreview.addEventListener('toggle', () => { if (implementationPreview.open && accepted !== null && confirmation.checked) prepareImplementation(); }, options);
+    const assemble = () => {
+      const answers = Object.fromEntries(scientistFields.map(field => [field, form.querySelector<HTMLTextAreaElement>(`#scientist-${field}`)?.value ?? '']));
+      if (!answers.question.trim()) { status.textContent = copy.required; output.value = ''; return null; }
+      if (Object.values(answers).some(value => value.length > scientistFieldLimit)) { status.textContent = copy.tooLong; output.value = ''; return null; }
+      try {
+        const workflow = catalog.workflows.find((entry: { id: string }) => entry.id === select.value);
+        const prompt = buildScientistPrompt({ workflow, language, copy, answers, context: contexts[workflow?.id] });
+        output.value = prompt;
+        return prompt;
+      } catch {
+        status.textContent = copy.assemblyFailed;
+        output.value = '';
+        return null;
+      }
+    };
+    select.addEventListener('change', () => {
+      revoke();
+      try {
+        const workflow = catalog.workflows.find((entry: { id: string }) => entry.id === select.value);
+        if (!workflow) throw new Error('Missing scientist workflow');
+        const question = form.querySelector<HTMLTextAreaElement>('#scientist-question');
+        if (!question) return;
+        question.placeholder = workflow.goal[language];
+        for (const field of ['questions', 'acceptance', 'limits']) {
+          root.querySelector(`[data-protocol-${field}]`)?.replaceChildren(...workflow[field][language].map((value: string) => {
+            const item = document.createElement('li'); item.textContent = value; return item;
+          }));
+        }
+        root.querySelector('[data-protocol-sources]')?.replaceChildren(...contexts[workflow.id].sources.map((source: { url: string; path: string }) => {
+          const item = document.createElement('li'); const link = document.createElement('a'); link.href = source.url; link.textContent = source.path; item.append(link); return item;
+        }));
+        status.textContent = '';
+        if (question.value.trim() || preview.open) assemble();
+        else output.value = '';
+      } catch {
+        status.textContent = copy.assemblyFailed;
+        output.value = '';
+      }
+    }, options);
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const prompt = assemble();
+      if (!prompt) return;
+      try { await navigator.clipboard.writeText(prompt); status.textContent = copy.copied; }
+      catch { preview.open = true; output.focus(); output.select(); status.textContent = copy.copyFailed; }
+    }, options);
+    download.addEventListener('click', () => {
+      const prompt = assemble();
+      if (!prompt) return;
+      try { downloadText(prompt, 'clarification'); } catch { status.textContent = copy.downloadFailed; }
+    }, options);
+    form.addEventListener('input', (event) => {
+      if (!(event.target instanceof HTMLTextAreaElement) || !scientistFields.some(field => event.target === form.querySelector(`#scientist-${field}`))) return;
+      revoke(); status.textContent = ''; if (preview.open) assemble();
+    }, options);
+    preview.addEventListener('toggle', () => { if (preview.open) assemble(); }, options);
+    copyButton.disabled = false;
+    download.disabled = false;
+    validate.disabled = false;
+  }
+  initializeScientist();
+  document.addEventListener('astro:page-load', initializeScientist);
+</script>
+
+<style>
+  .prompt-workbench { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, .9fr); gap: clamp(2rem, 5vw, 5rem); align-items: start; }
+  .implementation-stage { margin-top: 2.5rem; padding-top: 2rem; border-top: 2px solid var(--color-border); }
+  .implementation-stage > button { margin-top: 1rem; }
+  .scientist-confirmation { margin-top: 1rem; }
+  input[type="checkbox"] { width: 1.1rem; height: 1.1rem; accent-color: var(--color-accent-gold); }
+  input:focus-visible { outline: 3px solid var(--color-accent-gold); outline-offset: 3px; }
+  h2 { font-size: 1.65rem; font-weight: 650; line-height: 1.25; margin-bottom: 1.5rem; }
+  h3 { font-size: 1.05rem; font-weight: 650; margin-bottom: .6rem; }
+  label { display: block; font-weight: 600; font-size: .94rem; line-height: 1.5; margin-bottom: .5rem; }
+  textarea, select { width: 100%; padding: .85rem 1rem; color: var(--color-text); background: var(--color-bg-alt); border: 1px solid var(--color-border); border-radius: .45rem; font: inherit; line-height: 1.5; }
+  textarea { resize: vertical; min-height: 5rem; }
+  textarea:focus, select:focus, button:focus-visible, summary:focus-visible { outline: 3px solid var(--color-accent-gold); outline-offset: 3px; }
+  select { margin-bottom: 1.8rem; }
+  .scientific-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1.4rem; }
+  .wide-field { grid-column: 1 / -1; }
+  .field-hint { font-size: .82rem; color: var(--color-text-muted); line-height: 1.6; margin-top: .45rem; }
+  .privacy-note, .next-step { color: var(--color-text-secondary); font-size: .9rem; line-height: 1.8; margin-top: 1.6rem; }
+  .privacy-note { padding-left: 1rem; border-left: 2px solid var(--color-accent-gold); }
+  .prompt-actions { display: flex; gap: 1rem; flex-wrap: wrap; margin-top: 1.6rem; }
+  button { padding: .8rem 1rem; border-radius: .45rem; font-weight: 650; text-align: center; }
+  button:disabled { opacity: .5; }
+  .copy-prompt { background: var(--color-accent-gold); color: #10213a; }
+  .download-prompt { border: 1px solid var(--color-border); }
+  .prompt-status { min-height: 1.6rem; margin-top: .7rem; font-size: .9rem; }
+  .research-protocol { padding: 1.7rem; border-top: 2px solid var(--color-accent-gold); background: var(--color-bg-alt); }
+  .template-state { color: var(--color-text-muted); font-size: .8rem; line-height: 1.6; margin-bottom: .9rem; }
+  .research-protocol section + section { margin-top: 1.5rem; }
+  ul { padding-left: 1.2rem; list-style: disc; color: var(--color-text-secondary); font-size: .9rem; line-height: 1.8; }
+  li + li { margin-top: .5rem; }
+  a { text-decoration: underline; text-underline-offset: .2em; overflow-wrap: anywhere; }
+  .prompt-preview { margin-top: 1.7rem; border-top: 1px solid var(--color-border); padding-top: 1rem; }
+  summary { cursor: pointer; font-size: .9rem; }
+  .prompt-preview textarea { margin-top: 1rem; min-height: 18rem; font-family: var(--font-mono, monospace); font-size: .78rem; }
+  @media (max-width: 900px) { .prompt-workbench { grid-template-columns: minmax(0, 1fr); } }
+  @media (max-width: 550px) { .scientific-fields { grid-template-columns: minmax(0, 1fr); } .prompt-actions { flex-direction: column; } }
+</style>

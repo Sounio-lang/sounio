@@ -53,7 +53,7 @@ from mpon_dyck_scaling import OctTreeClassifier, tree_fold_balanced, count_param
 # ============================================================
 
 ABIDE_DIR = '/workspace/sounio/artifacts/research/abide/'
-MANIFEST = '/workspace/sounio/abide_roi_manifest.tsv'
+MANIFEST = '/workspace/sounio/artifacts/research/brain_ossm_full_cohort/abide_roi_manifest.tsv'
 N_ROIS = 200
 
 

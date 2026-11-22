@@ -2,8 +2,8 @@
 topic_id: repo.docs.tutorials.data-processing
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.tutorials.data-processing
 -->
 
@@ -26,7 +26,7 @@ $SOUC run my_csv_analysis.sio      # a file you create from the snippets below
 
 ## 1. The CsvTable Data Structure
 
-Sounio uses fixed-size arrays for all data. The `CsvTable` struct holds up to 256 rows and 16 columns in a flat `[f64; 4096]` array (row-major layout).
+Sounio uses fixed-size arrays for all data. The production `CsvTable` in `stdlib/csv/parser.sio` holds up to 256 rows and 16 columns in a flat `[f64; 4096]` array, stored column-major with stride 256 (`data[col * 256 + row]`) so column reductions scan contiguous elements. The walkthrough below is a shorter row-major sketch of the same API.
 
 ```sio
 struct CsvTable {
@@ -36,7 +36,7 @@ struct CsvTable {
     max_rows:     i32,              // fixed at 256
     max_cols:     i32,              // fixed at 16
     has_header:   i32,              // 0 = no, 1 = yes
-    header_bytes: [[u8; 32]; 16],   // column names (up to 32 bytes each)
+    header_bytes: [u8; 512],        // column names, flattened: col * 32 + byte
     header_lens:  [i32; 16],
 }
 
@@ -48,7 +48,7 @@ fn csv_table_new() -> CsvTable {
         max_rows:     256,
         max_cols:     16,
         has_header:   0,
-        header_bytes: [[0u8; 32]; 16],
+        header_bytes: [0; 512],
         header_lens:  [0; 16],
     }
 }
@@ -63,7 +63,7 @@ Sounio's JIT has a known limitation: mutations to bare `&![u8; N]` arrays may no
 ```sio
 // WRONG -- bare array mutation may not propagate in JIT
 fn fill_buffer(buf: &![u8; 4096]) with Mut, Panic {
-    (*buf)[0] = 72u8   // might not be visible to caller
+    (*buf)[0] = 72   // might not be visible to caller
 }
 
 // CORRECT -- struct wrapper propagates mutations reliably
@@ -73,11 +73,11 @@ struct CsvBuf {
 }
 
 fn csv_buf_new() -> CsvBuf {
-    CsvBuf { bytes: [0u8; 4096], len: 0 }
+    CsvBuf { bytes: [0; 4096], len: 0 }
 }
 
 fn fill_buffer(buf: &!CsvBuf) with Mut, Panic {
-    buf.bytes[0] = 72u8    // visible to caller
+    buf.bytes[0] = 72    // visible to caller
     buf.len = 1
 }
 ```
@@ -101,7 +101,7 @@ struct CsvTable {
     max_rows:     i32,
     max_cols:     i32,
     has_header:   i32,
-    header_bytes: [[u8; 32]; 16],
+    header_bytes: [u8; 512],
     header_lens:  [i32; 16],
 }
 
@@ -113,7 +113,7 @@ fn csv_table_new() -> CsvTable {
         max_rows:     256,
         max_cols:     16,
         has_header:   0,
-        header_bytes: [[0u8; 32]; 16],
+        header_bytes: [0; 512],
         header_lens:  [0; 16],
     }
 }
@@ -122,30 +122,30 @@ fn csv_table_new() -> CsvTable {
 fn build_csv_input(buf: &!CsvBuf) with Mut, Panic {
     // "1.0,2.0,3.0\n4.0,5.0,6.0\n"
     // ASCII: '1'=49, '.'=46, '0'=48, ','=44, '\n'=10
-    buf.bytes[0] = 49u8     // '1'
-    buf.bytes[1] = 46u8     // '.'
-    buf.bytes[2] = 48u8     // '0'
-    buf.bytes[3] = 44u8     // ','
-    buf.bytes[4] = 50u8     // '2'
-    buf.bytes[5] = 46u8     // '.'
-    buf.bytes[6] = 48u8     // '0'
-    buf.bytes[7] = 44u8     // ','
-    buf.bytes[8] = 51u8     // '3'
-    buf.bytes[9] = 46u8     // '.'
-    buf.bytes[10] = 48u8    // '0'
-    buf.bytes[11] = 10u8    // '\n'
-    buf.bytes[12] = 52u8    // '4'
-    buf.bytes[13] = 46u8    // '.'
-    buf.bytes[14] = 48u8    // '0'
-    buf.bytes[15] = 44u8    // ','
-    buf.bytes[16] = 53u8    // '5'
-    buf.bytes[17] = 46u8    // '.'
-    buf.bytes[18] = 48u8    // '0'
-    buf.bytes[19] = 44u8    // ','
-    buf.bytes[20] = 54u8    // '6'
-    buf.bytes[21] = 46u8    // '.'
-    buf.bytes[22] = 48u8    // '0'
-    buf.bytes[23] = 10u8    // '\n'
+    buf.bytes[0] = 49     // '1'
+    buf.bytes[1] = 46     // '.'
+    buf.bytes[2] = 48     // '0'
+    buf.bytes[3] = 44     // ','
+    buf.bytes[4] = 50     // '2'
+    buf.bytes[5] = 46     // '.'
+    buf.bytes[6] = 48     // '0'
+    buf.bytes[7] = 44     // ','
+    buf.bytes[8] = 51     // '3'
+    buf.bytes[9] = 46     // '.'
+    buf.bytes[10] = 48    // '0'
+    buf.bytes[11] = 10    // '\n'
+    buf.bytes[12] = 52    // '4'
+    buf.bytes[13] = 46    // '.'
+    buf.bytes[14] = 48    // '0'
+    buf.bytes[15] = 44    // ','
+    buf.bytes[16] = 53    // '5'
+    buf.bytes[17] = 46    // '.'
+    buf.bytes[18] = 48    // '0'
+    buf.bytes[19] = 44    // ','
+    buf.bytes[20] = 54    // '6'
+    buf.bytes[21] = 46    // '.'
+    buf.bytes[22] = 48    // '0'
+    buf.bytes[23] = 10    // '\n'
     buf.len = 24
 }
 ```
@@ -153,8 +153,8 @@ fn build_csv_input(buf: &!CsvBuf) with Mut, Panic {
 The parser is called as:
 ```sio
 // csv_parse(input_bytes, input_len, table, delimiter)
-// delimiter 44u8 = ','
-let rc = csv_parse(&buf.bytes, buf.len, &!table, 44u8)
+// delimiter 44 = ','
+let rc = csv_parse(&buf.bytes, buf.len, &!table, 44)
 assert(rc == 0)   // 0 = success, -1 = error
 ```
 
@@ -234,7 +234,7 @@ struct CsvTable {
     max_rows:     i32,
     max_cols:     i32,
     has_header:   i32,
-    header_bytes: [[u8; 32]; 16],
+    header_bytes: [u8; 512],
     header_lens:  [i32; 16],
 }
 
@@ -246,7 +246,7 @@ fn csv_table_new() -> CsvTable {
         max_rows:     256,
         max_cols:     16,
         has_header:   0,
-        header_bytes: [[0u8; 32]; 16],
+        header_bytes: [0; 512],
         header_lens:  [0; 16],
     }
 }
@@ -354,17 +354,17 @@ fn main() -> i32 with IO, Mut, Div, Panic {
 }
 ```
 
-## 6. Row-Major Indexing
+## 6. Column-major storage
 
-The flat `data[4096]` array uses row-major indexing: `data[row * n_cols + col]`. This matches C memory layout and is cache-friendly for row scans.
+The walkthrough snippets above index a row-major sketch with `data[row * n_cols + col]`. The stdlib parser does not. `stdlib/csv/parser.sio` stores each column in a contiguous run of 256 slots:
 
 ```
-Row 0: data[0], data[1], data[2]     (age=25, weight=70, height=175)
-Row 1: data[3], data[4], data[5]     (age=30, weight=80, height=180)
-Row 2: data[6], data[7], data[8]     (age=22, weight=60, height=165)
+column 0: data[0], data[1], data[2]          (ages 25, 30, 22)
+column 1: data[256], data[257], data[258]    (weights 70, 80, 60)
+column 2: data[512], data[513], data[514]    (heights 175, 180, 165)
 ```
 
-Column scans (like `csv_col_mean`) stride by `n_cols`, which is less cache-friendly but works well for tables that fit in L1 cache (4096 f64 values = 32 KB).
+`csv_col_sum`, `csv_col_mean`, `csv_col_variance`, `csv_col_min`, and `csv_col_max` walk `idx` from `col * 256` to `col * 256 + n_rows`. Cell access goes through `csv_at(row, col)`. SMAT matrices in `stdlib/io/scientific.sio` stay row-major because that is the on-disk layout.
 
 ## 7. Design Tradeoffs vs. Dynamic Languages
 
@@ -375,7 +375,7 @@ Column scans (like `csv_col_mean`) stride by `n_cols`, which is less cache-frien
 | Allocation | Zero -- stack only | Dynamic, GC-managed |
 | Effect tracking | Compile-time verified | None |
 | Parse errors | Return code (0 or -1) | Exceptions |
-| Memory layout | Flat f64 array | Column-oriented objects |
+| Memory layout | Column-major flat f64 array, stride 256 | Column-oriented objects |
 
 Sounio's approach trades flexibility for predictability. You know exactly how much memory your program uses before it runs. For scientific workloads where data sizes are known upfront (sensor readings, experimental results, pharmacokinetic parameters), this is a feature, not a limitation.
 

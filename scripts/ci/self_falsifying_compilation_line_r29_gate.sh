@@ -12,6 +12,8 @@
 set -uo pipefail
 
 cd "$(git rev-parse --show-toplevel)" || exit 9
+# shellcheck source=../lib/classify_compile.sh
+source scripts/lib/classify_compile.sh
 
 EXEC="self-hosted/compiler/claim_executor.sio"
 MC_MAIN="scripts/ci/fixtures/self_falsifying_modclosure_main.sio"
@@ -123,6 +125,8 @@ run_probe() { # name source [args...]
 # D1 — a red claim one import away blocks the build.
 rc=$(run_probe d1 "$MC_MAIN" --verify-claims)
 [[ $rc -ne 0 ]] || fail "D1: red imported claim did not block (rc=0)"
+# rc alone is not a refusal: a crash, timeout or OOM kill is not one (#2425).
+sounio_expect_failed_exit "$rc" "$TMP_DIR/d1.txt" || fail "D1: blocked, but not a clean refusal: $(sounio_refusal_reason)"
 grep -q '^VERIFY_CLAIMS_FALSIFIED fail=1$' "$TMP_DIR/d1.txt" \
     || fail "D1: expected VERIFY_CLAIMS_FALSIFIED fail=1"
 grep -q '^CLAIM_FAIL mcl_library_claim_that_is_false' "$TMP_DIR/d1.txt" \
@@ -158,6 +162,8 @@ echo "D4_INVARIANT PASS — one-node closure, ${n_pass} claims green (rc=$rc)"
 # D1 and fails here, which is the whole reason this clause exists.
 rc=$(run_probe d5 "$CHAIN_MAIN" --verify-claims)
 [[ $rc -ne 0 ]] || fail "D5: a claim refuted two imports away did not block"
+# rc alone is not a refusal: a crash, timeout or OOM kill is not one (#2425).
+sounio_expect_failed_exit "$rc" "$TMP_DIR/d5.txt" || fail "D5: blocked, but not a clean refusal: $(sounio_refusal_reason)"
 grep -q '^VERIFY_CLAIMS_SCOPE modules=3$' "$TMP_DIR/d5.txt" \
     || fail "D5: closure is not three nodes — the walk is not transitive"
 grep -q '^CLAIM_FAIL mcl_chain_leaf_claim_false' "$TMP_DIR/d5.txt" \
@@ -177,6 +183,8 @@ echo "D6_SHARED_NODE PASS — leaf reachable two ways verified once"
 # D7 — discrimination, observed in one run rather than inferred from D1+D2.
 rc=$(run_probe d7 "$MIXED_MAIN" --verify-claims)
 [[ $rc -ne 0 ]] || fail "D7: a red import alongside a green one did not block"
+# rc alone is not a refusal: a crash, timeout or OOM kill is not one (#2425).
+sounio_expect_failed_exit "$rc" "$TMP_DIR/d7.txt" || fail "D7: blocked, but not a clean refusal: $(sounio_refusal_reason)"
 grep -q '^CLAIM_PASS mcl_green_library_claim' "$TMP_DIR/d7.txt" \
     || fail "D7: the green import was not reported as a pass — compiler may fail all imports"
 grep -q '^CLAIM_FAIL mcl_library_claim_that_is_false' "$TMP_DIR/d7.txt" \

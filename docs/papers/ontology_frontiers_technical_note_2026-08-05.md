@@ -2,8 +2,8 @@
 topic_id: repo.docs.papers.ontology-frontiers-technical-note-2026-08-05
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.papers.ontology-frontiers-technical-note-2026-08-05
 -->
 
@@ -100,7 +100,7 @@ All formalizations are Lean 4 **without Mathlib**, with **zero `sorry` and
 no new axioms**; confidence arithmetic is exact per-mil naturals. Every
 round passed the repository's mandatory external math review
 (`bin/llm-offload -t math-review -p xai`: PASS; logs in
-`.claude/llm_offload_log.md` and `agent_logs/*offload*.md`).
+`.claude/llm_offload_log.md` and `artifacts/agent-logs/*offload*.md`).
 
 ### 2.1 Soundness — mini-EL and EL⁺
 
@@ -485,7 +485,7 @@ Kazakov, Krötzsch, Simančík, *The Incredible ELK* (ELK 0.6.0 baseline).
 
 **Reviews**: mandatory LLM-offload math review per round
 (`bin/llm-offload -t math-review -p xai`), all PASS; logs in
-`.claude/llm_offload_log.md`, `agent_logs/go_elplus_offload_2026-08-04.md`,
-`agent_logs/go_full_elplus_offload_2026-08-04.md`,
-`agent_logs/multi_ontology_offload_2026-08-05.md`,
+`.claude/llm_offload_log.md`, `artifacts/agent-logs/go_elplus_offload_2026-08-04.md`,
+`artifacts/agent-logs/go_full_elplus_offload_2026-08-04.md`,
+`artifacts/agent-logs/multi_ontology_offload_2026-08-05.md`,
 `artifacts/ontology-frontiers/LEAN_MATH_REVIEW_XAI.md`.

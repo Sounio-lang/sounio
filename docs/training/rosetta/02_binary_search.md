@@ -2,8 +2,8 @@
 topic_id: repo.docs.training.rosetta.02-binary-search
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.training.rosetta.02-binary-search
 -->
 
@@ -73,7 +73,6 @@ fn main() -> i32 with IO, Mut, Panic, Div {
 
 ## Key Differences
 - Fixed-size array `[i64; 256]` with explicit length param vs Python `list`
-- `0 - 1` instead of `-1` (no unary minus)
 - Effects: `Div` for division, `Panic` for array bounds, `Mut` for variables
 - Array passed by reference `&[i64; 256]`
 - No `elif` — use `if/else if` or nested `if`

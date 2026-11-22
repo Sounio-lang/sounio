@@ -1,0 +1,52 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: TUPLE_LIT_SLOT_CALL_BASE_FLOAT_FIELD_RESOLVED PASS
+//
+// Copilot review (PR #2516), finding 1 on the tenth review round: round 9's
+// fix for field_array_elem_is_float_for_base_ref (self-hosted/ir/lower.sio)
+// removed an unsound by-name fallback and returned `false` for every
+// unresolved owner -- but expr_receiver_struct_type_ref (the resolver it
+// consults) had no arm for an ExprCall/ExprMethodCall owner, so a
+// LEGITIMATE f64-array field reached through a call's return value, like
+// `(make_float_holder().values, 0)`, was now ALSO misclassified as integer
+// -- a regression in the opposite direction from round 9's bug. Fixed by
+// teaching expr_receiver_struct_type_ref to resolve a call/method-call
+// owner's declared return struct type (via the existing
+// expr_call_return_struct_name_ref / return_struct_name_for_fn_id
+// machinery) before falling back to `false`.
+//
+// IntNamesake exists ONLY to register a same-named `values: [i64; N]` field
+// in the struct-layout table -- the exact shape round 9's by-name fallback
+// used to match incorrectly -- proving this fix resolves via
+// make_float_holder()'s OWN declared return type, not by reintroducing a
+// by-name scan that would also match IntNamesake and could get lucky for
+// the wrong reason.
+struct FloatHolder {
+    values: [f64; 2],
+}
+
+struct IntNamesake {
+    values: [i64; 2],
+}
+
+fn make_float_holder() -> FloatHolder {
+    FloatHolder { values: [1.5, 0.25] }
+}
+
+fn make_int_namesake() -> IntNamesake {
+    IntNamesake { values: [7, 11] }
+}
+
+fn main() -> i32 with IO, Mut, Panic {
+    let namesake = make_int_namesake()
+    let extra: i64 = namesake.values[0]
+
+    let (a, n) = (make_float_holder().values, 0)
+    let s0: f64 = a[0] * 2.0
+
+    if s0 == 3.0 && n == 0 && extra == 7 {
+        println("TUPLE_LIT_SLOT_CALL_BASE_FLOAT_FIELD_RESOLVED PASS")
+        return 0
+    }
+    1
+}

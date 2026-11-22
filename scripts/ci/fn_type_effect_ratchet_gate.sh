@@ -43,17 +43,9 @@ strip_noise() {
 }
 
 enumerate() {
-  git ls-files -z '*.sio' \
-    | tr '\0' '\n' \
-    | grep -vE '^(archive|bootstrap)/' \
-    | grep -vE '\.sio\.old$' \
-    | while IFS= read -r f; do
-        [ -f "$f" ] || continue
-        strip_noise "$f" | grep -oE "${PAT_TYPE}[^,)]*" | while IFS= read -r hit; do
-          # a bare function type is one whose text carries no `with` clause
-          printf '%s' "$hit" | grep -qE '\bwith[[:space:]]+[A-Za-z]' || printf '%s\t%s\n' "$f" "$hit"
-        done
-      done
+  # Classify using balanced return delimiters: ->() must not hide its own with.
+  # Keep the old hit text for diagnostics/frozen-list compatibility.
+  git ls-files -z '*.sio' | node scripts/ci/fn_type_effect_scan.mjs --files0
 }
 
 selftest() {
@@ -88,6 +80,9 @@ selftest() {
     echo "  FALHA NEGATIVO 4: contou um tipo-funcao em posicao de RETORNO"; rc=1
   else echo "  ok   NEGATIVO 4: posicao de retorno nao conta"; fi
   rm -rf "$tmp"
+  if node scripts/ci/fn_type_effect_scan_test.mjs; then
+    echo "  ok   scanner balanceado e CLI nao-vazio"
+  else rc=1; fi
   echo "falhas: $rc"
   return $rc
 }
@@ -145,7 +140,7 @@ if [ "$atual" -gt "$congelado" ]; then
   # to edit innocent code; that is worse than reporting a bare count.
   if [ -f "$REF_LIST" ]; then
     echo "New sites (present now, absent from ${REF_LIST}):"
-    comm -13 "$REF_LIST" <(enumerate | sort) | sed 's/^/  /'
+    LC_ALL=C comm -13 <(LC_ALL=C sort "$REF_LIST") <(enumerate | LC_ALL=C sort) | sed 's/^/  /'
   else
     echo "New sites: cannot say -- ${REF_LIST} is missing, so there is nothing to"
     echo "  diff against. Regenerate it with:"

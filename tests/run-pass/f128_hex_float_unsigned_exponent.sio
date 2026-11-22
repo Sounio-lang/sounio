@@ -1,0 +1,99 @@
+//@ run-pass
+//@ requires: madaros
+//@ description: C99 hex-float with an UNSIGNED binary exponent (p0, p10, fp0) is the same literal as the signed form, in f64 and f128 positions, short and long fractions — compared bit-exactly
+//@ ladder-stage: V0-E.5.9
+//@ expect-stdout-contains: one_plus_2m64=1.00000000000000000005421010862427522e+0000
+//@ expect-stdout-contains: PASS f128_hex_float_unsigned_exponent
+//
+// Dispatch: docs/audit/MADAROS_HEX_FLOAT_UNSIGNED_EXPONENT_DISPATCH_2026-09-26.md
+//
+// Madaros's flat lexer delivers a hex-float as HexLit + pieces and the parser
+// reassembles it. An unsigned exponent is swallowed by the identifier rule
+// (`p0`, `p10`, `fp0` are one Ident), which the reassembly did not recognise:
+// `0x1.8p0` was field access on `0x1` (E012) and `0x1p0` an undeclared `p0`
+// (E137). The signed form (`p+0`) always worked.
+//
+// f64 expectations are rebuilt by exact doubling/halving (`exact`), so they do
+// not go through the hex-float reader under test; each unsigned literal is also
+// compared with its signed twin. f128 expectations are binary128 limbs.
+// Distinct non-zero exits:
+// 11=f64_p0 12=f64_p0_vs_signed 13=f64_p10 14=f64_upper 15=f64_short 16=f64_short_vs_signed
+// 17=f64_long 18=f64_hexletter 19=f64_digit_then_letter 20=f64_pi 21=f64_pi_vs_signed
+// 22=f64_frac_with_e 23=f64_expr_add 24=f64_expr_sub 25=f64_arg
+// 31=f128_long_2m64 32=f128_long_vs_signed 33=f128_long_2m112 34=f128_short 35=f128_p10
+// 36=f128_hexletter 37=f128_digit_then_letter
+
+use math::softfloat_f128::{f128_to_lo, f128_to_hi}
+use math::softfloat_f128_fmt::{println_f128}
+
+fn exact(m: i64, e: i64) -> f64 with Mut, Div {
+    var v: f64 = m as f64
+    var k: i64 = 0
+    if e > 0 { while k < e { v = v * 2.0; k = k + 1 } }
+    if e < 0 { while k < 0 - e { v = v / 2.0; k = k + 1 } }
+    return v
+}
+
+fn limbs_are(x: f128, lo: i64, hi: i64) -> bool {
+    f128_to_lo(x) == lo && f128_to_hi(x) == hi
+}
+
+fn twice(x: f64) -> f64 { x * 2.0 }
+
+fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
+    // ---- f64, no fraction ----
+    let a: f64 = 0x1p0
+    if a != exact(1, 0) { println("FAIL f64_p0"); return 11 }
+    if a != 0x1p+0 { println("FAIL f64_p0_vs_signed"); return 12 }
+    let b: f64 = 0x1p10
+    if b != exact(1, 10) { println("FAIL f64_p10"); return 13 }
+    let c: f64 = 0X1P3
+    if c != exact(1, 3) { println("FAIL f64_upper"); return 14 }
+
+    // ---- f64, short and long fractions ----
+    let d: f64 = 0x1.8p0
+    if d != exact(3, 0 - 1) { println("FAIL f64_short"); return 15 }
+    if d != 0x1.8p+0 { println("FAIL f64_short_vs_signed"); return 16 }
+    let e: f64 = 0x1.0000000000001p0
+    if e != exact(4503599627370497, 0 - 52) { println("FAIL f64_long"); return 17 }
+    // fraction lexed as Ident(`fp0`)
+    let f: f64 = 0x1.fp0
+    if f != exact(31, 0 - 4) { println("FAIL f64_hexletter"); return 18 }
+    // fraction lexed as IntLit(`0`) + Ident(`fp0`)
+    let g: f64 = 0x1.0fp0
+    if g != exact(271, 0 - 8) { println("FAIL f64_digit_then_letter"); return 19 }
+    let pi: f64 = 0x1.921fb54442d18p1
+    if pi != exact(7074237752028440, 0 - 51) { println("FAIL f64_pi"); return 20 }
+    if pi != 0x1.921fb54442d18p+1 { println("FAIL f64_pi_vs_signed"); return 21 }
+    // fraction lexed as FloatLit(`1e5`) + Ident(`p0`)
+    let h: f64 = 0x1.1e5p0
+    if h != exact(4581, 0 - 12) { println("FAIL f64_frac_with_e"); return 22 }
+
+    // ---- the literal ends at the exponent digits ----
+    let s: f64 = 0x1p0 + 2.0
+    if s != exact(3, 0) { println("FAIL f64_expr_add"); return 23 }
+    let t: f64 = 0x1.8p1 - 1.0
+    if t != exact(2, 0) { println("FAIL f64_expr_sub"); return 24 }
+    if twice(0x1.8p0) != exact(3, 0) { println("FAIL f64_arg"); return 25 }
+
+    // ---- f128: exact binary128, below binary64 resolution ----
+    let k: f128 = 0x1.0000000000000001p0
+    if !limbs_are(k, 281474976710656, 4611404543450677248) { println("FAIL f128_long_2m64"); return 31 }
+    let ks: f128 = 0x1.0000000000000001p+0
+    if !limbs_are(ks, f128_to_lo(k), f128_to_hi(k)) { println("FAIL f128_long_vs_signed"); return 32 }
+    print("one_plus_2m64=")
+    println_f128(k)
+    let k112: f128 = 0x1.0000000000000000000000000001p0
+    if !limbs_are(k112, 1, 4611404543450677248) { println("FAIL f128_long_2m112"); return 33 }
+    let m: f128 = 0x1.8p0
+    if !limbs_are(m, 0, 4611545280939032576) { println("FAIL f128_short"); return 34 }
+    let n: f128 = 0x1p10
+    if !limbs_are(n, 0, 4614219293217783808) { println("FAIL f128_p10"); return 35 }
+    let o: f128 = 0x1.fp0
+    if !limbs_are(o, 0, 4611668426241343488) { println("FAIL f128_hexletter"); return 36 }
+    let q: f128 = 0x1.0fp0
+    if !limbs_are(q, 0, 4611421036125093888) { println("FAIL f128_digit_then_letter"); return 37 }
+
+    println("PASS f128_hex_float_unsigned_exponent")
+    0
+}

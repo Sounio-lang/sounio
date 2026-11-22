@@ -1,0 +1,268 @@
+// docs/audit/repro/pbpk28_rannacher_scenarios_probe.sio
+//
+// Scenario-level mass balance at production dt, before/after:
+//
+//   SEMA  — stdlib/darwin_pbpk/scenarios/semaglutide_sc_depot.sio step,
+//           replicated with booking: SC release (midpoint rate) → PBPK28 →
+//           GLP-1R TMDD pulls/returns C_t in organs 3, 8, 12 (Lie splitting).
+//           PBPK-side residual = M(T) + eliminated + TMDD uptake − administered,
+//           TMDD uptake = Σ V_t,k·(C_t,k before TMDD − after), booked exactly.
+//   VFX   — stdlib/darwin_pbpk/scenarios/venlafaxine_xr.sio step as on main
+//           (explicit CYP2D6 formation + floors), baseline only. Components:
+//           CN floor injection (parent / ODV) and formation-floor creation.
+//
+// Methods: SHIPPED (pbpk28_full_cn_step), RAN (Rannacher, 2 start-up steps
+// after the dose at t = 0), TRBDF2; REF = RAN at dt = 0.005 h.
+
+use darwin_pbpk::core::pbpk28_params::*
+use darwin_pbpk::tsit5_pbpk28::*
+use darwin_pbpk::theta_pbpk28::*
+use darwin_pbpk::tmdd::fkbp12_mtorc1::*
+use darwin_pbpk::tmdd::glp1r::*
+use darwin_pbpk::pd::bergman_glucose_insulin::*
+use darwin_pbpk::release::matrix_er::*
+use darwin_pbpk::drugs::venlafaxine::*
+use darwin_pbpk::pgx::cyp2d6_venlafaxine::*
+
+fn pr_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn pr_sci(x: f64) with IO, Mut, Div {
+    if x == 0.0 {
+        print("0")
+        return
+    }
+    var m = x
+    var e: i32 = 0
+    while pr_abs(m) >= 10.0 {
+        m = m / 10.0
+        e = e + 1
+    }
+    while pr_abs(m) < 1.0 {
+        m = m * 10.0
+        e = e - 1
+    }
+    print(m)
+    print("e")
+    print(e)
+}
+
+fn pr_vt(p: PBPKParams28, i: i32) -> f64 { return p.v_ref[i] * (1.0 - p.vasc_frac[i]) }
+
+// Copy of the scenario's release law: F·D·k_a·exp(−k_a·t), Taylor exp.
+fn sema_rate(t: f64) -> f64 with Mut, Div {
+    if t < 0.0 { return 0.0 }
+    let ka = 0.011552453009332421
+    let arg = 0.0 - ka * t
+    var y = 1.0
+    var term = 1.0
+    var k: i64 = 1
+    while k < 20 {
+        term = term * arg / (k as f64)
+        y = y + term
+        k = k + 1
+    }
+    return 0.89 * 1.0 * ka * y
+}
+
+// method: 0 = SHIPPED, 1 = RAN, 2 = TRBDF2
+fn sema_run(method: i32, dt: f64, t_end: f64) with IO, Mut, Div, Panic {
+    let p = pbpk28_params_semaglutide()
+    let bp = bergman_default_params()
+    var st = pbpk28_state_zero()
+    var tb = TmddState { ct_mass: 0.0, rfree: glp1r_rtotal0_at(3),  dr: 0.0 }
+    var tg = TmddState { ct_mass: 0.0, rfree: glp1r_rtotal0_at(8),  dr: 0.0 }
+    var tp = TmddState { ct_mass: 0.0, rfree: glp1r_rtotal0_at(12), dr: 0.0 }
+    var pd = bergman_state_init()
+    var led = pbpk28_ledger_zero()
+    var admin_s = 0.0
+    var elim_s = 0.0
+    var uptake = 0.0
+    var cmin_pre_tmdd = 0.0
+    var t = 0.0
+    var k: i32 = 0
+    while t < t_end - 0.5 * dt {
+        let rel = sema_rate(t + 0.5 * dt)
+        if method == 0 {
+            let cb0 = st.cv[0]
+            st = pbpk28_full_cn_step(st, p, rel, dt)
+            admin_s = admin_s + rel * dt
+            elim_s = elim_s + p.cl_central * 0.5 * (cb0 + st.cv[0]) * dt
+        } else {
+            if method == 1 {
+                pbpk28_rannacher_step_mut(&!st, p, rel, dt, k < 2, &!led)
+            } else {
+                pbpk28_trbdf2_step_mut(&!st, p, rel, dt, &!led)
+            }
+        }
+        if st.ct[3] < cmin_pre_tmdd { cmin_pre_tmdd = st.ct[3] }
+        if st.ct[8] < cmin_pre_tmdd { cmin_pre_tmdd = st.ct[8] }
+        if st.ct[12] < cmin_pre_tmdd { cmin_pre_tmdd = st.ct[12] }
+
+        var sb = tb
+        sb.ct_mass = st.ct[3]
+        tb = tmdd_step(sb, glp1r_params_at(3), dt)
+        uptake = uptake + pr_vt(p, 3) * (st.ct[3] - tb.ct_mass)
+        st.ct[3] = tb.ct_mass
+
+        var sg = tg
+        sg.ct_mass = st.ct[8]
+        tg = tmdd_step(sg, glp1r_params_at(8), dt)
+        uptake = uptake + pr_vt(p, 8) * (st.ct[8] - tg.ct_mass)
+        st.ct[8] = tg.ct_mass
+
+        var sp = tp
+        sp.ct_mass = st.ct[12]
+        tp = tmdd_step(sp, glp1r_params_at(12), dt)
+        uptake = uptake + pr_vt(p, 12) * (st.ct[12] - tp.ct_mass)
+        st.ct[12] = tp.ct_mass
+
+        pd = pd_step_glucose_insulin(pd, tmdd_occupancy(tp), bp, dt)
+        t = t + dt
+        k = k + 1
+    }
+    let admin = if method == 0 { admin_s } else { led.administered }
+    let elim = if method == 0 { elim_s } else { led.eliminated }
+    let res = pbpk28_total_mass(st, p) + elim + uptake - admin
+    print("SEMA|method=")
+    print(method)
+    print("|dt=")
+    print(dt)
+    print("|cb_end=")
+    pr_sci(st.cv[0])
+    print("|cpanc_end=")
+    pr_sci(pbpk28_organ_average(st, p, 12))
+    print("|occ_panc=")
+    pr_sci(tmdd_occupancy(tp))
+    print("|dG=")
+    print(pd.dg)
+    print("|administered=")
+    print(admin)
+    print("|tmdd_uptake=")
+    pr_sci(uptake)
+    print("|mass_residual_mg=")
+    pr_sci(res)
+    print("|rel_residual=")
+    pr_sci(res / admin)
+    print("|min_conc=")
+    pr_sci(led.min_conc)
+    print("|neg_mass_mg=")
+    pr_sci(led.neg_mass)
+    print("|min_ct_tmdd_organs_pre_tmdd=")
+    pr_sci(cmin_pre_tmdd)
+    println("")
+}
+
+// Copy of the scenario's `mer_exp_neg` (20-term Taylor).
+fn vfx_exp_neg(x: f64) -> f64 with Mut, Div {
+    if x >= 0.0 { return 1.0 }
+    var y = 1.0
+    var term = 1.0
+    var k: i64 = 1
+    while k < 20 {
+        term = term * x / (k as f64)
+        y = y + term
+        k = k + 1
+    }
+    return y
+}
+
+// Venlafaxine XR step exactly as on main (explicit formation, floors), booked.
+fn vfx_baseline(pheno: i32, dt: f64, t_end: f64) with IO, Mut, Div, Panic {
+    let rel = venlafaxine_xr_matrix_gohel2008()
+    var pp = pbpk28_params_venlafaxine_parent()
+    pp.cl_central = venlafaxine_cl_parent_central_pgx(pheno)
+    var op = pbpk28_params_venlafaxine_odv()
+    op.cl_central = venlafaxine_cl_odv_pgx(pheno)
+    let cl_form = vfx_cl_form_odv_adjusted(pheno)
+    let f_abs = venlafaxine_f_oral_xr()
+    let ka = venlafaxine_ka_abs()
+    var par = pbpk28_state_zero()
+    var odv = pbpk28_state_zero()
+    var gut = 0.0
+    var released = 0.0
+    var elim_p = 0.0
+    var elim_o = 0.0
+    var floor_p = 0.0
+    var floor_o = 0.0
+    var form_created = 0.0
+    var formed = 0.0
+    var gut_created = 0.0
+    var t = 0.0
+    while t < t_end - 0.5 * dt {
+        let rel_amt = matrix_step_amount(rel, t, dt)
+        released = released + rel_amt
+        gut = gut + rel_amt
+        let frac_abs = 1.0 - vfx_exp_neg(0.0 - ka * dt)
+        let absorb_amt = f_abs * gut * frac_abs
+        gut = gut - absorb_amt
+        if gut < 0.0 {
+            gut_created = gut_created - gut
+            gut = 0.0
+        }
+        let parent_input = absorb_amt / dt
+
+        let mp0 = pbpk28_total_mass(par, pp)
+        let cbp0 = par.cv[0]
+        par = pbpk28_full_cn_step(par, pp, parent_input, dt)
+        let ep = pp.cl_central * 0.5 * (cbp0 + par.cv[0]) * dt
+        elim_p = elim_p + ep
+        let mp1 = pbpk28_total_mass(par, pp)
+        floor_p = floor_p + (mp1 - (mp0 + absorb_amt - ep))
+
+        let c_liver = pbpk28_organ_average(par, pp, 1)
+        let form_mg = cl_form * c_liver * dt
+        par.cv[1] = par.cv[1] - form_mg / pp.v_ref[1]
+        if par.cv[1] < 0.0 { par.cv[1] = 0.0 }
+        if par.cv[0] < 0.0 { par.cv[0] = 0.0 }
+        let mp2 = pbpk28_total_mass(par, pp)
+        form_created = form_created + (mp2 - (mp1 - form_mg))
+        formed = formed + form_mg
+
+        let mo0 = pbpk28_total_mass(odv, op)
+        let cbo0 = odv.cv[0]
+        odv = pbpk28_full_cn_step(odv, op, form_mg / dt, dt)
+        let eo = op.cl_central * 0.5 * (cbo0 + odv.cv[0]) * dt
+        elim_o = elim_o + eo
+        let mo1 = pbpk28_total_mass(odv, op)
+        floor_o = floor_o + (mo1 - (mo0 + form_mg - eo))
+        t = t + dt
+    }
+    let body = pbpk28_total_mass(par, pp) + pbpk28_total_mass(odv, op)
+    let res = body + elim_p + elim_o + gut - released
+    print("VFX|pheno=")
+    print(pheno)
+    print("|dt=")
+    print(dt)
+    print("|released=")
+    print(released)
+    print("|formed=")
+    print(formed)
+    print("|parent_body=")
+    print(pbpk28_total_mass(par, pp))
+    print("|odv_body=")
+    print(pbpk28_total_mass(odv, op))
+    print("|mass_residual_mg=")
+    pr_sci(res)
+    print("|cn_floor_parent_mg=")
+    pr_sci(floor_p)
+    print("|cn_floor_odv_mg=")
+    pr_sci(floor_o)
+    print("|formation_floor_mg=")
+    pr_sci(form_created)
+    print("|gut_floor_mg=")
+    pr_sci(gut_created)
+    println("")
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    sema_run(0, 0.5, 168.0)
+    sema_run(1, 0.5, 168.0)
+    sema_run(2, 0.5, 168.0)
+    sema_run(1, 0.005, 168.0)
+    vfx_baseline(0, 0.5, 120.0)
+    vfx_baseline(1, 0.5, 120.0)
+    vfx_baseline(2, 0.5, 120.0)
+    vfx_baseline(3, 0.5, 120.0)
+    println("PROBE_DONE")
+    0
+}

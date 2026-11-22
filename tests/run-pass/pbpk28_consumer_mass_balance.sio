@@ -1,0 +1,107 @@
+//@ run-pass
+//@ requires: lean_single
+//@ expect-stdout-contains: PBPK28_CONSUMER_MASS_BALANCE_PASS
+
+// lean_single only: importing validation/pbpk28_sobol_pce.sio fails Madaros
+// type-checking on main (E259, private field reads in
+// sp28_selftest_semaglutide_main), independent of this test. Under Madaros
+// the identity is checked by pbpk28_theta_closed_system_mass.sio and by the
+// ep28 / Hessian self-tests; the MC and sweep modules hit the pre-existing
+// `handles full` wall (exit 182) there.
+
+// Mass-balance gate for every bolus-IV consumer of the PBPK28 step, each on
+// its own simulation path at its own production dt:
+//
+//   epistemic_pbpk28            first-order GUM        dt = 0.05 h
+//   epistemic_pbpk28_hessian    Hessian budget         dt = 0.1 h
+//   cumulants                   M5 cumulant layer      dt = 0.1 h
+//   pbpk28_mc_cross_validation  MC ↔ GUM               dt = 0.5 h
+//   pbpk28_mc_prior_family_sweep prior-family sweep    dt = 0.5 h
+//   pbpk28_sobol_pce            Sobol / PCE            dt = 0.5 h (rapamycin, semaglutide)
+//
+// Until 2026-09-26 all of them stepped with `pbpk28_full_cn_step`, whose
+// negativity floors injected mass the bolus never contained: rapamycin 5 mg,
+// 168 h — 1.408 mg at dt = 0.05, 2.585 mg at 0.1, 6.985 mg at 0.5 (AUC_blood
+// +28% / +52% / +140% against Dose/CL = 0.403226). They now run the
+// Rannacher-started clamp-free CN of theta_pbpk28, and each path must close
+// M(T) + CL·AUC_blood − Dose to rounding with no visible negative mass
+// (bounds: theta_pbpk28 pbpk28_mass_tol_rel / pbpk28_neg_mass_bound_mg).
+
+use darwin_pbpk::core::pbpk28_params::*
+use darwin_pbpk::theta_pbpk28::*
+use darwin_pbpk::epistemic_pbpk28::{ep28_rapamycin_params, ep28_semaglutide_params, ep28_mass_gate}
+use darwin_pbpk::epistemic_pbpk28_hessian::{h28_simulate_ledger}
+use darwin_pbpk::cumulants::{m5_simulate_ledger}
+use darwin_pbpk::validation::pbpk28_mc_cross_validation::{mc28_simulate_ledger}
+use darwin_pbpk::validation::pbpk28_mc_prior_family_sweep::{ms28_simulate_ledger}
+use darwin_pbpk::validation::pbpk28_sobol_pce::{sp28_simulate_ledger}
+
+fn verdict(tag: string, ok: bool) -> i32 with IO {
+    print(tag)
+    if ok {
+        println(": PASS")
+        return 0
+    }
+    println(": FAIL")
+    return 1
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let rapa = ep28_rapamycin_params()
+    let sema = ep28_semaglutide_params()
+    var failed: i32 = 0
+
+    println("epistemic_pbpk28 (dt=0.05)")
+    failed = failed + verdict("  ep28", ep28_mass_gate(0.05, rapa, 5.0, 168.0))
+
+    println("epistemic_pbpk28_hessian (dt=0.1)")
+    var s1 = pbpk28_state_zero()
+    var l1 = pbpk28_ledger_zero()
+    let r1 = h28_simulate_ledger(rapa, 5.0, 168.0, &!s1, &!l1)
+    failed = failed + verdict("  h28", r1 && pbpk28_mass_gate_report(l1, s1, rapa, 5.0))
+
+    println("cumulants (dt=0.1)")
+    var s2 = pbpk28_state_zero()
+    var l2 = pbpk28_ledger_zero()
+    let r2 = m5_simulate_ledger(rapa, 5.0, 168.0, &!s2, &!l2)
+    failed = failed + verdict("  m5", r2 && pbpk28_mass_gate_report(l2, s2, rapa, 5.0))
+
+    println("pbpk28_mc_cross_validation (dt=0.5)")
+    var s3 = pbpk28_state_zero()
+    var l3 = pbpk28_ledger_zero()
+    let r3 = mc28_simulate_ledger(rapa, 5.0, &!s3, &!l3)
+    failed = failed + verdict("  mc28", r3 && pbpk28_mass_gate_report(l3, s3, rapa, 5.0))
+
+    println("pbpk28_mc_prior_family_sweep (dt=0.5)")
+    var s4 = pbpk28_state_zero()
+    var l4 = pbpk28_ledger_zero()
+    let r4 = ms28_simulate_ledger(rapa, 5.0, &!s4, &!l4)
+    failed = failed + verdict("  ms28", r4 && pbpk28_mass_gate_report(l4, s4, rapa, 5.0))
+
+    println("pbpk28_sobol_pce rapamycin (dt=0.5)")
+    var s5 = pbpk28_state_zero()
+    var l5 = pbpk28_ledger_zero()
+    let r5 = sp28_simulate_ledger(rapa, 5.0, &!s5, &!l5)
+    failed = failed + verdict("  sp28 rapamycin", r5 && pbpk28_mass_gate_report(l5, s5, rapa, 5.0))
+
+    println("pbpk28_sobol_pce semaglutide (dt=0.5)")
+    var s6 = pbpk28_state_zero()
+    var l6 = pbpk28_ledger_zero()
+    let r6 = sp28_simulate_ledger(sema, 1.0, &!s6, &!l6)
+    failed = failed + verdict("  sp28 semaglutide", r6 && pbpk28_mass_gate_report(l6, s6, sema, 1.0))
+
+    // AUC_blood is exactly (Dose − M(T))/CL under the identity; the 168 h
+    // body residue is below print resolution, so every path prints Dose/CL.
+    print("AUC_blood ep28-path proxy (h28, dt=0.1): ")
+    println(l1.auc[0])
+    print("Dose/CL: ")
+    println(5.0 / rapa.cl_central)
+
+    if failed == 0 {
+        println("PBPK28_CONSUMER_MASS_BALANCE_PASS")
+    } else {
+        print("failed=")
+        println(failed)
+    }
+    return failed
+}

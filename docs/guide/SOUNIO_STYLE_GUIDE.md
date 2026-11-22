@@ -2,8 +2,8 @@
 topic_id: repo.docs.guide.sounio-style-guide
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A5
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.guide.sounio-style-guide
 -->
 
@@ -16,7 +16,6 @@ Sounio looks like Rust but has DIFFERENT syntax and semantics. This guide covers
 ## 1. Basic Syntax
 
 ```sio
-// Variables (NO semicolons)
 let x = 42
 var y: i32 = 10
 
@@ -32,12 +31,10 @@ var buffer: [u8; 256] = [0; 256]
 
 ### What NOT to Write (Rust-isms)
 ```
-let x = 42;              // ❌ semicolons
 let mut x = 5;            // ❌ use 'var'
 fn foo(x: &mut i32) {}    // ❌ use '&!'
 assert!(x == 5);          // ❌ use 'assert()'
 println!("hi");           // ❌ use 'println()'
-let neg = -42;            // ❌ use '0 - 42'
 ```
 
 ## 2. Effects System
@@ -249,8 +246,8 @@ c = increment(c)
 
 ### Bit Operations
 ```sio
-let high = (b >> 4u8) & 15u8    // shift amount MUST be u8
-let low = b & 15u8
+let high = (b >> 4) & 15
+let low = b & 15
 ```
 
 ## 9. FFI
@@ -283,15 +280,12 @@ Annotations: `//@ run-pass`, `//@ compile-fail`, `//@ error-pattern: <text>`, `/
 
 ## 11. Checklist
 
-1. No semicolons
 2. `&!` not `&mut`, `var` not `let mut`
 3. Effects: `with IO, Mut, Div, Panic` as needed
 4. No Rust macros: `assert()` not `assert!()`, `println()` not `println!()`
-5. No unary minus: `0 - x`
-6. Bit shifts: `u8` operand (`x >> 4u8`)
-7. Array index cast: `arr[i as usize]`
-8. Named fn refs, not closure literals
-9. Bare `&![T;N]`: use `(*arr)[i]` or struct wrapper
+5. Array index cast: `arr[i as usize]`
+6. Named fn refs, not closure literals
+7. Bare `&![T;N]`: use `(*arr)[i]` or struct wrapper
 
 ## 12. Real Code to Study
 

@@ -1,6 +1,6 @@
 # Sounio Scientific Examples Index
 
-Curated examples organized by research domain. All examples can be run with:
+Curated examples organized by research domain. Whether each one currently runs, on each engine, is recorded in [INDEX.md](INDEX.md); module demos that no longer compile (the `epistemic/*_demo`, `fmri/*`, `ontology/*` and `pbpk/*_demo` library demos written before imports were required) are quarantined in [`_attic/`](_attic/README.md). Run an example with:
 
 ```bash
 SOUC=./bin/souc
@@ -25,21 +25,6 @@ $SOUC run examples/<file>.sio
 
 ## 2. Uncertainty Quantification / GUM
 
-### Core Epistemic Modules
-
-- [`epistemic/gum_demo.sio`](epistemic/gum_demo.sio) — GUM (Guide to Uncertainty in Measurement) module demo
-- [`epistemic/core_demo.sio`](epistemic/core_demo.sio) — Epistemic core: Knowledge\<T\> type and uncertainty basics
-- [`epistemic/combine_demo.sio`](epistemic/combine_demo.sio) — Combining independent uncertain measurements
-- [`epistemic/correlation_demo.sio`](epistemic/correlation_demo.sio) — Correlated uncertainty propagation
-- [`epistemic/coverage_demo.sio`](epistemic/coverage_demo.sio) — Coverage intervals and expanded uncertainty
-- [`epistemic/budget_demo.sio`](epistemic/budget_demo.sio) — Uncertainty budget analysis
-- [`epistemic/montecarlo_demo.sio`](epistemic/montecarlo_demo.sio) — Monte Carlo uncertainty propagation
-- [`epistemic/multivariate_demo.sio`](epistemic/multivariate_demo.sio) — Multivariate uncertainty with covariance
-- [`epistemic/stats_demo.sio`](epistemic/stats_demo.sio) — Epistemic statistics module demo
-- [`epistemic/fusion_demo.sio`](epistemic/fusion_demo.sio) — Sensor/data fusion with uncertainty
-- [`epistemic/interval_ieee_demo.sio`](epistemic/interval_ieee_demo.sio) — IEEE-compliant interval arithmetic
-- [`epistemic/sobol_demo.sio`](epistemic/sobol_demo.sio) — Sobol sensitivity indices for variance decomposition
-
 ### Polynomial Chaos Expansion
 
 - [`epistemic/pce_demo.sio`](epistemic/pce_demo.sio) — PCE for nonlinear uncertainty propagation (superior to first-order GUM)
@@ -48,15 +33,7 @@ $SOUC run examples/<file>.sio
 
 ### Epistemic Infrastructure
 
-- [`epistemic/invariants_demo.sio`](epistemic/invariants_demo.sio) — Epistemic invariant checking
 - [`epistemic/ledger_demo.sio`](epistemic/ledger_demo.sio) — Uncertainty provenance ledger
-- [`epistemic/policy_demo.sio`](epistemic/policy_demo.sio) — Uncertainty policy enforcement
-- [`epistemic/proptest_demo.sio`](epistemic/proptest_demo.sio) — Property-based testing with uncertainty
-- [`epistemic/prov_demo.sio`](epistemic/prov_demo.sio) — Provenance tracking for uncertain values
-- [`epistemic/refutation_demo.sio`](epistemic/refutation_demo.sio) — Epistemic refutation testing
-- [`epistemic/roi_demo.sio`](epistemic/roi_demo.sio) — Return-on-investment for uncertainty reduction
-- [`epistemic/slsa_demo.sio`](epistemic/slsa_demo.sio) — SLSA supply chain security for epistemic pipelines
-- [`epistemic/traceability_demo.sio`](epistemic/traceability_demo.sio) — Measurement traceability chain
 
 ### Applied Epistemic Computing
 
@@ -87,13 +64,6 @@ $SOUC run examples/<file>.sio
 - [`science/pkpd_simulation.sio`](science/pkpd_simulation.sio) — One-compartment PK with RK4 integration
 - [`showcase/drug_dose_optimizer.sio`](showcase/drug_dose_optimizer.sio) — Two-compartment PK modeling with epistemic uncertainty
 - [`lethal_dose_sedenion.sio`](lethal_dose_sedenion.sio) — Epistemic warfarin dosing decision (lethal INR risk assessment)
-
-### PBPK Library Demos
-
-- [`pbpk/population_demo.sio`](pbpk/population_demo.sio) — Population PK module demo
-- [`pbpk/error_models_demo.sio`](pbpk/error_models_demo.sio) — PK error models (additive, proportional, combined)
-- [`pbpk/types_demo.sio`](pbpk/types_demo.sio) — PBPK type system demo
-- [`pbpk/covariate_demo.sio`](pbpk/covariate_demo.sio) — Covariate modeling for PK parameters
 
 ### Darwin PBPK Platform
 
@@ -131,16 +101,6 @@ $SOUC run examples/<file>.sio
 - [`brain_associator_demo.sio`](brain_associator_demo.sio) — Clinical brain network analysis (ASD and ADHD FC matrices)
 - [`oct_connectome_demo.sio`](oct_connectome_demo.sio) — First-ever associator fields on octonion-labeled graphs across topologies
 - [`clinical_curvature_analysis.sio`](clinical_curvature_analysis.sio) — Epistemic ORC pipeline on psychiatric networks (depression severity)
-
-### fMRI Processing
-
-- [`fmri/atlas_demo.sio`](fmri/atlas_demo.sio) — fMRI brain atlas parcellation
-- [`fmri/connectivity_demo.sio`](fmri/connectivity_demo.sio) — Functional connectivity matrix computation
-- [`fmri/connectivity_epistemic_demo.sio`](fmri/connectivity_epistemic_demo.sio) — Epistemic functional connectivity with uncertainty
-- [`fmri/nifti_demo.sio`](fmri/nifti_demo.sio) — NIfTI neuroimaging file format I/O
-- [`fmri/pipeline_demo.sio`](fmri/pipeline_demo.sio) — Full fMRI processing pipeline
-- [`fmri/preprocess_demo.sio`](fmri/preprocess_demo.sio) — fMRI preprocessing (motion correction, filtering)
-- [`fusion/eeg_fmri_demo.sio`](fusion/eeg_fmri_demo.sio) — EEG-fMRI multimodal data fusion
 
 ### Connectivity and Networks
 
@@ -214,7 +174,6 @@ $SOUC run examples/<file>.sio
 - [`autodiff/tape_demo.sio`](autodiff/tape_demo.sio) — Reverse-mode AD via tape-based backpropagation
 - [`autodiff/grad_demo.sio`](autodiff/grad_demo.sio) — Gradient computation module demo
 - [`autodiff/epistemic_dual_demo.sio`](autodiff/epistemic_dual_demo.sio) — Epistemic dual numbers (AD + uncertainty)
-- [`epistemic/autodiff_demo.sio`](epistemic/autodiff_demo.sio) — Epistemic autodiff module demo
 - [`ml/autodiff_demo.sio`](ml/autodiff_demo.sio) — ML autodiff module demo
 - [`wave3_symbolic_calculus.sio`](wave3_symbolic_calculus.sio) — Symbolic differentiation and expression manipulation
 
@@ -227,7 +186,6 @@ $SOUC run examples/<file>.sio
 - [`causal_model.sio`](causal_model.sio) — Causal DAG DSL with structural equations
 - [`wave2_causal_intervention.sio`](wave2_causal_intervention.sio) — Causal intervention with do-calculus (observation vs intervention)
 - [`wave2_causal_simpson.sio`](wave2_causal_simpson.sio) — Simpson's paradox resolution via causal reasoning (UC Berkeley admissions)
-- [`epistemic/causal_demo.sio`](epistemic/causal_demo.sio) — Epistemic causal inference module demo
 - [`science/simpsons_paradox.sio`](science/simpsons_paradox.sio) — Simpson's paradox detection and causal correction
 - [`render/causal_dag.sio`](render/causal_dag.sio) — Causal DAG visualization renderer
 

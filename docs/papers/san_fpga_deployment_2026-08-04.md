@@ -2,8 +2,8 @@
 topic_id: repo.docs.papers.san-fpga-deployment-2026-08-04
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.papers.san-fpga-deployment-2026-08-04
 -->
 
@@ -14,7 +14,7 @@ by a measured artifact in the Sounio repository; claims marked `ESTIMATE` or
 `(in progress)` are explicitly noted as such. Human measurement audit is the
 authority; LLM reviews are recorded in §7 only as an AI-assist disclosure.
 **Date:** 2026-08-06 (repositioned after a seven-front novelty audit,
-`agent_logs/san_novelty_audit_2026-08-06.md`)
+`artifacts/agent-logs/san_novelty_audit_2026-08-06.md`)
 **Orthography:** EN-US
 **Companion spec:** `docs/research/san_imagenet_fpga_dl380_spec_2026-08-02.md`
 **Companion contract:** `scripts/research/san_imagenet_fpga_dl380.py`
@@ -187,7 +187,7 @@ architecture; the point is that everything it does leaves a verifiable trail.
 | 4 | Full-CIFAR-10 training study with EarlyStop ablation column: two-mechanism decomposition (freeze-on-green vs early exits), positive (v3/v4) and negative (v1/v2/v5/v6) results | §4.2–§4.9, Slurm jobs 8584–8651 | `MEASURED / MIXED` |
 | 5 | Case study: the ledger catches a five-variant false claim (frozen random gates believed learned); mechanistic explanation of the resulting negative result | §4.9 | `MEASURED` |
 | 6 | Real-image kernel validation on ImageNette2-160, bit-exact on the U250 | `train_san_imagenette.py` + `host_san_scan` | `MEASURED` |
-| 7 | Honest accounting of limits: small-subset regimes, partial meter convention, board-level power, and a novelty audit repositioning every claim against prior art | §5, `agent_logs/san_novelty_audit_2026-08-06.md` | `DECLARED` |
+| 7 | Honest accounting of limits: small-subset regimes, partial meter convention, board-level power, and a novelty audit repositioning every claim against prior art | §5, `artifacts/agent-logs/san_novelty_audit_2026-08-06.md` | `DECLARED` |
 
 ### 1.4 Prior work
 
@@ -898,7 +898,7 @@ it — intervals for final accuracy, S_m, and latency at three new thresholds,
 monotone constraints across the frontier, contract invariants, and
 predictions for the ViT/GPT legs — with the git timestamp as precedence
 proof and a timing disclosure for the one job whose completion preceded the
-commit by 22 minutes (`agent_logs/san_v7_frontier_preregistration_2026-08-06.md`,
+commit by 22 minutes (`artifacts/agent-logs/san_v7_frontier_preregistration_2026-08-06.md`,
 which carries the full scorecard). The measured frontier:
 
 **Table 11: accuracy–compute frontier, five thresholds
@@ -953,7 +953,7 @@ the exit threshold leaves enough margin.
 
 ### 4.12 Second preregistered round: the cost-aware gate, and the ViT/GPT dials
 
-A second preregistration (`agent_logs/san_v8_vitgpt_preregistration_2026-08-06.md`,
+A second preregistration (`artifacts/agent-logs/san_v8_vitgpt_preregistration_2026-08-06.md`,
 committed before any of the six jobs was submitted — the submission
 timestamps are verifiable against it) covered two questions: whether a
 cost-aware gate (SAN-v8) moves the frontier, and whether the ViT/GPT legs
@@ -1134,7 +1134,7 @@ minimisation objective with an auditable trail — not the vocabulary.
 ### 5.5 What this paper is not (novelty audit summary)
 
 Before this revision we ran a structured seven-front audit of the novelty of
-every claim (`agent_logs/san_novelty_audit_2026-08-06.md`, primary sources
+every claim (`artifacts/agent-logs/san_novelty_audit_2026-08-06.md`, primary sources
 throughout). Its verdicts, absorbed into this draft: early-exit heads,
 confidence thresholds, and learned exit policies are established [1,2,11,15,16];
 the correctness-supervised gate of §4.9 is BERxiT's LTE target [11]; freeze-on-green
@@ -1344,7 +1344,7 @@ extended version in *ACM Computing Surveys*. arXiv:2106.05022.
 [45] Regol, F., Chataoui, S., Charpentier, P., Coates, M., Piantanida, P., &
 Günnemann, S. (2024). QuEE: early exiting via learned per-sample error
 prediction. arXiv preprint, June 2024. (Identifier to be confirmed before
-submission; see `agent_logs/san_novelty_audit_2026-08-06.md`.)
+submission; see `artifacts/agent-logs/san_novelty_audit_2026-08-06.md`.)
 
 [46] Skalse, J., Howe, N., Krasheninnikov, D., & Krueger, D. (2022). Defining
 and characterizing reward hacking. *NeurIPS*.

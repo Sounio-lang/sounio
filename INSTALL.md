@@ -1,107 +1,100 @@
 # Sounio Installation Guide
 
-This guide describes the installation path that matches the current repository state as of April 22, 2026.
+The committed Madaros prebuilt behind `bin/souc` is a static Linux x86-64 ELF; it does not run on macOS. Apple Silicon has a separate current-source native ARM64 build and real Metal route integrated in [#2978](https://github.com/Sounio-lang/sounio/pull/2978). Follow the [macOS ARM64 guide](docs/compiler/MADAROS_MACOS_ARM64.md) to build and install the native artifact before using the launcher on that platform.
 
-## Recommended Path For This Checkout
+The prebuilt binary and native source-built route are distinct. See the root [README.md](README.md) for the current repository map and status.
 
-This repository already contains checked-in self-hosted compiler artifacts for Linux `x86_64`, macOS `arm64`, and macOS `x86_64` under `artifacts/self-hosted/`. If you are working directly from this checkout, use the launcher at `bin/souc`; it is the official entrypoint and routes by default to Madaros.
+On Linux x86-64 the commands below are the whole first-contact path. The website guide [Getting Started](website/src/content/docs/en/getting-started.mdx) repeats them.
 
-```bash
-cd /path/to/sounio
+## Prerequisites
 
-export SOUC_BIN="$(pwd)/bin/souc"
-export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
+Linux x86-64 needs:
 
-"$SOUC_BIN" --version
-"$SOUC_BIN" info
-"$SOUC_BIN" check examples/hello.sio
-"$SOUC_BIN" compile examples/hello.sio -o /tmp/hello.out
-"$SOUC_BIN" compile examples/hello.sio -o /tmp/hello-macos --target aarch64-macos
+- `git`
+- `bash`
+- `gzip` — the first `./bin/souc` decompresses the committed prebuilt
+- `sha256sum` from GNU coreutils
+- about 2 GB of free disk
+
+Measured on 27 October 2026, Linux x86-64, `main` at `75fd75c587a799169d59954cd50f2f327eed5f4e`: `git clone --depth 1` occupied 1.1 GB. The first `./bin/souc` then wrote `bin/madaros-linux-x86_64` (129,918,841 bytes). The tree was 1.3 GB after that. A clone without `--depth 1` also downloads history and is larger.
+
+## Linux x86-64
+
+```sh
+git clone --depth 1 https://github.com/Sounio-lang/sounio.git
+cd sounio
+git rev-parse HEAD
+uname -sm
 ```
 
-On this repo snapshot, `bin/souc` is a host-aware launcher around the checked self-hosted artifacts and the official compiler lane:
+`--depth 1` fetches the current commit and not the history. Keep the revision that `git rev-parse HEAD` prints.
 
-- It provides compatibility commands: `check`, `compile`, `build`, `run`, `info`, and `--version`
-- It also supports the raw self-hosted compiler interface: `<source.sio> <output> [flags]`
-- To use the compatibility legacy engine, set `SOUNIO_SOUC_ENGINE=lean_single`.
-- `--target aarch64-macos` and `--target x86_64-macos` emit Mach-O binaries
-- `--target aarch64-linux` emits Linux ARM64 ELF binaries
-- **Update 2026-08-14 (checked, not assumed):** the "does not provide repl/gpu-emit/full tool surface" line just above went stale in the
-  opposite direction of the usual overclaim. Verified today with `./bin/souc --help` and
-  running each command: `souc repl` starts a working file-backed REPL; `souc format` and
-  `souc fmt` run the checked formatter; `souc lsp --stdio` starts and shuts down cleanly;
-  `souc pkg build`/`souc pkg verify` exist; GPU artifact emission is available as
-  `souc build <file.sio> --backend gpu -o out.ptx` (not a separate `gpu-emit` subcommand).
-  This section otherwise describes April 22, 2026 and has not been re-audited beyond the
-  five commands above -- do not assume anything else here is current.
+From the repository root:
 
-On macOS, the emitted binaries are Mach-O instead of ELF.
-
-## Validate The Checkout
-
-Run the conservative smoke tests:
-
-```bash
-"$SOUC_BIN" check examples/hello.sio
-"$SOUC_BIN" compile examples/hello.sio -o /tmp/souc-next
-"$SOUC_BIN" compile examples/hello.sio -o /tmp/hello-macos --target aarch64-macos
-"$SOUC_BIN" run self-hosted/compiler/native_print_f64_smoke.sio
+```sh
+export SOUNIO_STDLIB_PATH="$PWD/stdlib"
+./bin/souc info
+./bin/souc --version
 ```
 
-To run the legacy bootstrap path intentionally, force it explicitly:
+The committed compiler is stored as `bin/madaros-linux-x86_64.gz`. The first `./bin/souc` decompresses it to `bin/madaros-linux-x86_64` and prints one line on stderr with a sha256 prefix and the byte count. Later runs reuse that file.
 
-```bash
-SOUNIO_SOUC_ENGINE=lean_single "$SOUC_BIN" compile self-hosted/compiler/lean_single.sio -o /tmp/souc-next
+`bin/souc` is a launcher, not the compiler binary itself. Inspect the `raw_elf` path reported by `info`. `./bin/souc --version` prints provenance lines on stderr and the version on stdout. Keep that identity with your results. Do not switch engines to work around a platform or setup failure.
+
+The checksum file names `madaros-linux-x86_64` with no directory. Run it from `bin/`, after the first `./bin/souc` invocation. Before that invocation the ELF is not on disk, and the check cannot open it. From the repository root, `sha256sum -c bin/madaros-linux-x86_64.sha256` looks for the ELF in the current directory and fails.
+
+```sh
+(cd bin && sha256sum -c madaros-linux-x86_64.sha256)
 ```
 
-Expected behavior:
+A match prints `madaros-linux-x86_64: OK`.
 
-- the checked launcher resolves a host-native compiler artifact
-- the compiler rebuild smoke produces a host-native binary
-- the macOS-target compile produces a Mach-O ARM64 binary
-- the runtime smoke prints the expected floating-point lines on the host OS
-- emitted binaries must be executed on the matching target OS/architecture
-
-If you need GPU-profile validation:
-
-```bash
-export SOUC_GPU_BIN="$(pwd)/artifacts/omega/souc-bin/souc-linux-x86_64-gpu"
-
-"$SOUC_GPU_BIN" check examples/gpu.sio
-"$SOUC_GPU_BIN" check tests/run-pass/gpu_launch_surface.sio
-"$SOUC_GPU_BIN" build examples/kernel_matmul.sio --backend gpu -o /tmp/kernel_matmul.ptx
+```sh
+./bin/souc check examples/hello.sio
+./bin/souc run examples/hello.sio
 ```
 
-## If You Need A Pinned Compiler Path
+Run the second command only if the check succeeds. `souc --help` does not list `--quiet` or `--silent`. `run` prints compiler log lines and then the program's own output. `run` prints `Hello, Sounio`, with exit status zero. Those log lines are the compiler, not the program.
 
-Use the repo resolver:
+`./bin/souc compile examples/hello.sio -o hello.elf` writes an ELF and does not print `Hello, Sounio`. You do not need that step to see the message.
 
-```bash
-scripts/omega/omega_resolve_souc_bin.sh --print-path --allow-local-fallback
+The program is `examples/hello.sio`:
+
+```sounio
+fn main() -> i32 with IO {
+    println("Hello, Sounio")
+    return 0
+}
 ```
 
-This resolves a pinned release binary and falls back to a local executable only when allowed.
+Force the legacy bootstrap seed only when a page names it:
 
-## Important Notes
+```bash
+SOUNIO_SOUC_ENGINE=lean_single "$PWD/bin/souc" run demos/intro/demo_unidades.sio
+```
 
-- Do not assume `cargo build` at the repo root is the default setup path.
-- Always set `SOUNIO_STDLIB_PATH` when you want deterministic stdlib resolution.
-- Prefer `souc check` when validating examples and docs claims.
-- The checked self-hosted launcher provides `check/run/compile/build`, but broader omega workflows still require the pinned Linux release lane.
+Default Madaros rejects that units demo with `error[E001]` on `let distance: m = 100.0` (#2752).
 
-## What Is Verified Today
+`check --show-ast` and `check --show-types` are ignored. `compile` and `build` reject both flags with `error: madaros build: unsupported option` (exit 2).
 
-The current gate-backed status in this repo is:
+## Other hosts
 
-- `artifacts/stdlib/stdlib_reliability_status.v1.json`: `251 pass / 0 fail / 0 skip / 251 total`
-- `artifacts/stdlib/stdlib_science_pipeline_status.v1.json`: `pass` for `fmri` and `darwin_pbpk`
-- `artifacts/stdlib/stdlib_hyper_execution_status.v1.json`: `pass` for 7 required hyper lanes
+| Host | Setup path |
+| --- | --- |
+| macOS ARM64 (Apple Silicon) | Build and install the native artifact first, following the [macOS ARM64 guide](docs/compiler/MADAROS_MACOS_ARM64.md). The Linux ELF does not run natively on macOS. |
+| Other hosts | This page does not provide a compatible prebuilt. |
 
-Local science runtime regression probes are still tracked in `soft` mode. Strict CI uses fail-closed enforcement.
+The macOS source build requires a signed, executable current-source bootstrap seed, Apple command-line tools with C++23-capable `clang++` and `codesign`, `timeout`, and Boost headers. The full installation gate also requires a real Metal device.
 
-## Deeper References
+Do not start from `cargo build` at the repo root.
 
-- `docs/guide/MINIMUM_VIABLE_SOUNIO.md`
-- `docs/guide/getting-started.md`
-- `docs/reference/STDLIB_REFERENCE.md`
-- `bootstrap/poseidon/README.md`
+## What this page does not claim
+
+The April 22, 2026 counts in `docs/guide/MINIMUM_VIABLE_SOUNIO.md` were not re-measured here. Do not copy them. GPU emission was not re-run on 2026-10-15. `TOUR.md` §6 (2026-10-04) measured `souc build --backend gpu` as an empty-body PTX skeleton. The root README records scoped Spark evidence for GPU/Pireus and says the generic GPU CLI needs its own status.
+
+## Next
+
+- [docs/guide/getting-started.md](docs/guide/getting-started.md)
+- [README.md](README.md)
+- [TOUR.md](TOUR.md)
+- [docs/compiler/KNOWN_LIMITATIONS.md](docs/compiler/KNOWN_LIMITATIONS.md)

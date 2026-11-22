@@ -1,0 +1,293 @@
+//@ run-pass
+//@ expect-stdout-contains: PBPK28_TRBDF2_GATES_PASS
+//@ timeout: 300
+
+// Runtime (2026-09-27): 29.4 s on lean_single (souc-stage2 engine, this
+// workspace pod, run only). CI job 108525867166 put the Full Test Suite
+// runner at 2.65-4.3x slower than the pod (hepatic 11.3 s timed out at
+// 30 s; calibration 42 s passed within 180 s), so the timeout is about
+// 2x the worst projected CI time, 4.3 x 29.4 s.
+//
+// Gates for the clamp-free TR-BDF2 transport of ddi/multidrug28.sio (the
+// default md.method) and its backward-Euler restart after dosing events.
+// Dispatch: docs/audit/PBPK28_CN_FLOOR_CLAMP_MASS_INJECTION_DISPATCH_2026-09-26.md
+// ("Proposed fix", method 6, and "Witness and gate").
+//
+// W   Closed-system witness. CL = 0, no sinks, 50 mg IV bolus into blood,
+//     rapamycin and venlafaxine-parent transport, portal routing, dt = 0.5,
+//     0.1 and 0.05 h over 24 h. At EVERY step n:
+//       |M_n - M_0| / M_0 <= max(1e-12, n·1e-15),
+//     the rounding budget of the dispatch (about 5 ulp of 1.0 per step; the
+//     identity is exact in real arithmetic, so nothing else may remain). No
+//     state or stage entry may fall below -tol·scale: the kernel panics if
+//     one does (tolerance derived in the TR-BDF2 section of
+//     pbpk28_hepatic.sio), so finishing the run is the check; the most
+//     negative relative entry is printed. Control: the same runs on the old
+//     CN + floor kernel step (pbpk28_hepatic_cn_step_ws every step, no
+//     restart, as in the dispatch's repro) must FAIL the mass bound at every
+//     dt and drug -- the floor injects mass. The legacy DRIVER path
+//     (md_method_cn_legacy(): floored CN plus a floored backward-Euler pair
+//     after the bolus) is printed, not gated: in this closed system its
+//     restart damps the bolus ringing before the floor fires much, and it
+//     stays within about the bound (measured 2026-09-27: worst drift/bound
+//     0.47-1.16); its defect shows with sinks, in I.
+//
+// R   Repeated-dosing accuracy. Oral 5 mg every 24 h, 7 doses, 0-168 h, with
+//     liver and gut CYP3A4 sinks (the multidrug gates' victim fixture on the
+//     rapamycin transport). Blood C on the hourly grid and at the 144 h trough
+//     against the same scheme at dt = 0.002 h. By the measured second order
+//     that reference is off by about (0.002/0.025)^2 x 0.0098 % = 6e-5 % of
+//     peak, 0.17 % of the dt = 0.05 error it is compared with; the legacy CN
+//     path at dt = 0.002 agrees with it to 1.8e-7 of peak (measured
+//     2026-09-27, both engines). Gated:
+//     (a) hourly-grid max error <= 0.26 % of peak at dt = 0.1 and 0.05 h: the
+//         dispatch's measured bound for method 6 at dt <= 0.1 h, on a
+//         different forcing (IV bolus and first-order depot into blood,
+//         rapamycin and venlafaxine) -- an independent number, not this
+//         run's;
+//     (b) second order: for both the grid error and the trough error, the
+//         ratio e(0.1)/e(0.05) lies in [3.5, 4.5] and is closer to 4 than
+//         e(0.2)/e(0.1) (the V5 rule of the multidrug gates).
+//     The old path's errors at dt = 0.1 and 0.05 are printed, not gated (its
+//     oral-dosing accuracy is comparable; its defect is mass, see I).
+//
+// I   Exact discrete identity at the production dt. body + lumen + unabsorbed
+//     + eliminated (central CL and sinks, TR-BDF2 / restart quadrature) =
+//     administered, relative to administered, <= max(1e-12, n·1e-15) at
+//     every hour: on R's run at dt = 0.1 and 0.05, and on the multidrug M
+//     fixture (two drugs, mutual CYP3A4 inhibition, oral + IV bolus + IV
+//     infusion) at dt = 0.1 over 48 h, where the clamped mass must also be 0.
+//     Control: the legacy driver path on the rapamycin R run at dt = 0.1 must
+//     FAIL it (its floor fires in the terminal phase; measured residual ~3.8e-8
+//     against a bound of 1.7e-12).
+//
+// Transport parameters are the stock PBPK28 profiles with synthetic CLint and
+// Ki values: kernel/driver correctness fixtures, not drug claims.
+
+use darwin_pbpk::core::pbpk28_params::*
+use darwin_pbpk::pbpk28_hepatic::*
+use darwin_pbpk::ddi::multidrug28::*
+
+fn g_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn mass_tol(n: i32) -> f64 {
+    let t = (n as f64) * 1.0e-15
+    if t > 1.0e-12 { return t }
+    return 1.0e-12
+}
+
+// W ---------------------------------------------------------------------------
+// Returns the worst (|M_n - M_0|/M_0) / mass_tol(n) over the run (<= 1 passes).
+fn witness_run(prof: i32, method: i32, dt: f64) -> f64 with Mut, Div, Panic, IO {
+    var md = md_new(true)
+    md.method = method
+    var p = pbpk28_params_rapamycin()
+    if prof == 3 { p = pbpk28_params_venlafaxine_parent() }
+    p.cl_central = 0.0
+    let v = md_add_drug(&!md, p, 1.0, 1.0, 1.0)
+    md_dose_iv_bolus(&!md, v, 50.0)
+    let m0 = md_body_mass(&md, v)
+    let n = ((24.0 / dt) + 0.5) as i32
+    var worst = 0.0
+    var k: i32 = 0
+    while k < n {
+        md_step(&!md, dt)
+        let r = g_abs(md_body_mass(&md, v) - m0) / m0 / mass_tol(k + 1)
+        if !(r <= worst) { worst = r }
+        k = k + 1
+    }
+    if method == md_method_trbdf2() { print("W TR-BDF2 driver  ") } else { print("W legacy driver   ") }
+    print("drug=") print(prof) print(" dt=") print(dt)
+    print(" steps=") print(n) print(" worst drift/bound=") print(worst)
+    print(" (M(24h)-M0)/M0 x1e12=") print((md_body_mass(&md, v) - m0) / m0 * 1.0e12)
+    print(" clamped mg x1e12=") print(md_clamped(&md, v) * 1.0e12)
+    print(" most negative entry/scale x1e12=") println(md_neg_min_rel(&md, v) * 1.0e12)
+    return worst
+}
+
+// The dispatch's old path: the floored CN kernel step, every step, no restart.
+fn witness_cn_kernel(prof: i32, dt: f64) -> f64 with Mut, Div, Panic, IO {
+    var p = pbpk28_params_rapamycin()
+    if prof == 3 { p = pbpk28_params_venlafaxine_parent() }
+    p.cl_central = 0.0
+    var hep = pbpk28_hepatic_none()
+    hep.portal = true
+    let inp = pbpk28_input_none()
+    var ws = pbpk28_work_new()
+    var s = pbpk28_state_zero()
+    s.cv[0] = 50.0 / p.v_ref[0]
+    let m0 = pbpk28_total_mass(s, p)
+    let n = ((24.0 / dt) + 0.5) as i32
+    var worst = 0.0
+    var k: i32 = 0
+    while k < n {
+        pbpk28_hepatic_cn_step_ws(&!s, p, hep, inp, dt, &!ws)
+        let r = g_abs(pbpk28_total_mass(s, p) - m0) / m0 / mass_tol(k + 1)
+        if !(r <= worst) { worst = r }
+        k = k + 1
+    }
+    print("W CN+floor kernel drug=") print(prof) print(" dt=") print(dt)
+    print(" worst drift/bound=") print(worst)
+    print(" M(24h)/M0 = ") println(pbpk28_total_mass(s, p) / m0)
+    return worst
+}
+
+fn gate_w() -> bool with Mut, Div, Panic, IO {
+    var ok = true
+    var old_fails = true
+    var prof: i32 = 1
+    while prof < 4 {
+        let a = witness_run(prof, md_method_trbdf2(), 0.5)
+        let b = witness_run(prof, md_method_trbdf2(), 0.1)
+        let c = witness_run(prof, md_method_trbdf2(), 0.05)
+        if !(a <= 1.0 && b <= 1.0 && c <= 1.0) { ok = false }
+        let _la = witness_run(prof, md_method_cn_legacy(), 0.5)
+        let _lb = witness_run(prof, md_method_cn_legacy(), 0.1)
+        let _lc = witness_run(prof, md_method_cn_legacy(), 0.05)
+        let oa = witness_cn_kernel(prof, 0.5)
+        let ob = witness_cn_kernel(prof, 0.1)
+        let oc = witness_cn_kernel(prof, 0.05)
+        if oa <= 1.0 || ob <= 1.0 || oc <= 1.0 { old_fails = false }
+        prof = prof + 2
+    }
+    if old_fails { println("W control: the CN+floor kernel fails the witness at every dt and drug") } else { println("W control FAIL: the CN+floor kernel passed the witness somewhere") }
+    return ok && old_fails
+}
+
+// R / I -----------------------------------------------------------------------
+fn add_victim(md: &!MultiDrug28, cl_c: f64) -> i32 with Mut, Panic {
+    var p = pbpk28_params_rapamycin()
+    p.cl_central = cl_c
+    let i = md_add_drug(md, p, 0.1, 0.95, 1.5)
+    md_set_fu_site(md, i, md_site_gut(), 1.0)
+    md_set_clint(md, i, md_site_liver(), md_cyp3a4(), 200.0)
+    md_set_clint(md, i, md_site_gut(), md_cyp3a4(), 30.0)
+    return i
+}
+
+// Hourly blood C into out[1..168]; returns the worst identity residual over the
+// hours divided by its bound at that hour (<= 1 passes).
+fn rd_run(method: i32, dt: f64, out: &![f64; 169]) -> f64 with Mut, Div, Panic {
+    var md = md_new(true)
+    md.method = method
+    md.iters = 0   // one drug, no inhibitor: every factor is exactly 1, so PC == Lie bit for bit
+    let v = add_victim(&!md, 1.5)
+    let steps_per_h = ((1.0 / dt) + 0.5) as i32
+    var worst = 0.0
+    var h: i32 = 0
+    while h < 168 {
+        if h % 24 == 0 { md_dose_oral(&!md, v, 5.0) }
+        md_run_to(&!md, (h + 1) as f64, dt)
+        (*out)[h + 1] = md.cv[v * 14]
+        let r = md_mass_residual(&md, v) / mass_tol((h + 1) * steps_per_h)
+        if !(r <= worst) { worst = r }
+        h = h + 1
+    }
+    return worst
+}
+
+// (grid max error / reference peak, trough(144 h) relative error)
+fn rd_err(c: &[f64; 169], refv: &[f64; 169]) -> (f64, f64) with Mut, Div {
+    var peak = 0.0
+    var h: i32 = 1
+    while h < 169 {
+        if (*refv)[h] > peak { peak = (*refv)[h] }
+        h = h + 1
+    }
+    var emax = 0.0
+    h = 1
+    while h < 169 {
+        let e = g_abs((*c)[h] - (*refv)[h]) / peak
+        if !(e <= emax) { emax = e }
+        h = h + 1
+    }
+    return (emax, ((*c)[144] - (*refv)[144]) / (*refv)[144])
+}
+
+fn order_ok(coarse: f64, fine: f64) -> bool {
+    return fine >= 3.5 && fine <= 4.5 && g_abs(fine - 4.0) < g_abs(coarse - 4.0)
+}
+
+// Returns 1·[R passes] + 2·[I passes].
+fn gate_r_i() -> i32 with Mut, Div, Panic, IO {
+    var refv: [f64; 169] = [0.0; 169]
+    let ir = rd_run(md_method_trbdf2(), 0.002, &!refv)
+    var c2: [f64; 169] = [0.0; 169]
+    var c1: [f64; 169] = [0.0; 169]
+    var c05: [f64; 169] = [0.0; 169]
+    let i2 = rd_run(md_method_trbdf2(), 0.2, &!c2)
+    let i1 = rd_run(md_method_trbdf2(), 0.1, &!c1)
+    let i05 = rd_run(md_method_trbdf2(), 0.05, &!c05)
+    let (g2, t2) = rd_err(&c2, &refv)
+    let (g1, t1) = rd_err(&c1, &refv)
+    let (g05, t05) = rd_err(&c05, &refv)
+    print("R reference dt=0.002: C(144 h) (ng/L) = ") print(refv[144] * 1000000.0) print("  C(1 h) (ug/L) = ") println(refv[1] * 1000.0)
+    print("R TR-BDF2 dt=0.2 : grid max err (% of peak) = ") print(g2 * 100.0) print("  trough err (%) = ") println(t2 * 100.0)
+    print("R TR-BDF2 dt=0.1 : grid max err (% of peak) = ") print(g1 * 100.0) print("  trough err (%) = ") println(t1 * 100.0)
+    print("R TR-BDF2 dt=0.05: grid max err (% of peak) = ") print(g05 * 100.0) print("  trough err (%) = ") println(t05 * 100.0)
+    let gr_c = g2 / g1
+    let gr_f = g1 / g05
+    let tr_c = g_abs(t2) / g_abs(t1)
+    let tr_f = g_abs(t1) / g_abs(t05)
+    print("R order ratios grid (0.2/0.1, 0.1/0.05) = ") print(gr_c) print("  ") println(gr_f)
+    print("R order ratios trough (0.2/0.1, 0.1/0.05) = ") print(tr_c) print("  ") println(tr_f)
+
+    var o1: [f64; 169] = [0.0; 169]
+    var o05: [f64; 169] = [0.0; 169]
+    let io1 = rd_run(md_method_cn_legacy(), 0.1, &!o1)
+    let io05 = rd_run(md_method_cn_legacy(), 0.05, &!o05)
+    let (og1, ot1) = rd_err(&o1, &refv)
+    let (og05, ot05) = rd_err(&o05, &refv)
+    print("R old path dt=0.1 : grid max err (% of peak) = ") print(og1 * 100.0) print("  trough err (%) = ") println(ot1 * 100.0)
+    print("R old path dt=0.05: grid max err (% of peak) = ") print(og05 * 100.0) print("  trough err (%) = ") println(ot05 * 100.0)
+    let r_ok = g1 <= 0.0026 && g05 <= 0.0026 && order_ok(gr_c, gr_f) && order_ok(tr_c, tr_f)
+
+    print("I identity residual / bound, TR-BDF2 dt = 0.002, 0.2, 0.1, 0.05: ") print(ir) print("  ") print(i2) print("  ") print(i1) print("  ") println(i05)
+    print("I identity residual / bound, old path dt = 0.1, 0.05: ") print(io1) print("  ") println(io05)
+
+    // Two coupled drugs (the multidrug gate M fixture) at dt = 0.1.
+    var md = md_new(true)
+    let a = add_victim(&!md, 1.5)
+    let b = add_victim(&!md, 0.5)
+    md_set_ki(&!md, a, md_cyp3a4(), 0.02)
+    md_set_ki(&!md, b, md_cyp3a4(), 0.005)
+    md_dose_oral(&!md, a, 5.0)
+    md_set_iv_rate(&!md, a, 0.3)
+    md_dose_oral(&!md, b, 100.0)
+    md_dose_iv_bolus(&!md, b, 10.0)
+    var worst_m = 0.0
+    var h: i32 = 0
+    while h < 48 {
+        md_run_to(&!md, (h + 1) as f64, 0.1)
+        let bound = mass_tol((h + 1) * 10)
+        let ra = md_mass_residual(&md, a) / bound
+        let rb = md_mass_residual(&md, b) / bound
+        if !(ra <= worst_m) { worst_m = ra }
+        if !(rb <= worst_m) { worst_m = rb }
+        h = h + 1
+    }
+    let clamped = md_clamped(&md, a) + md_clamped(&md, b)
+    print("I two coupled drugs, dt = 0.1, 48 h: identity residual / bound = ") print(worst_m)
+    print("  clamped (mg) = ") print(clamped)
+    print("  most negative entry/scale (x1e12) = ") print(md_neg_min_rel(&md, a) * 1.0e12) print(" ") println(md_neg_min_rel(&md, b) * 1.0e12)
+    let i_ok = ir <= 1.0 && i2 <= 1.0 && i1 <= 1.0 && i05 <= 1.0 && worst_m <= 1.0 && clamped == 0.0 && io1 > 1.0
+    var code: i32 = 0
+    if r_ok { code = code + 1 }
+    if i_ok { code = code + 2 }
+    return code
+}
+
+fn main() -> i32 with Mut, Div, Panic, IO {
+    let w = gate_w()
+    let code = gate_r_i()
+    let r = code == 1 || code == 3
+    let i = code >= 2
+    if w { println("W PASS") } else { println("W FAIL") }
+    if r { println("R PASS") } else { println("R FAIL") }
+    if i { println("I PASS") } else { println("I FAIL") }
+    if w && r && i {
+        println("PBPK28_TRBDF2_GATES_PASS")
+        return 0
+    }
+    return 1
+}

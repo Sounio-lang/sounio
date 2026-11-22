@@ -77,10 +77,13 @@ GATES="confidence_gate dossier frontend_parity pbpk28_parity pbpk_hessian pbpk_s
 run_arm () {
   arm="$1"; label="$2"
   echo "=== ARM ${arm}: ${label} ===" >> "$R"
-  # Force Madaros wrapper: suite gate otherwise defaults SOUC_BIN to
-  # souc-seq-leansingle.sh (Seq<T> lean_single path) which is NOT the A/B question.
+  # Force one engine for every entry: the suite gate otherwise runs each entry
+  # on its pinned engine (madaros / lean_single shim), which is NOT the A/B
+  # question. The suite gate ignores ambient SOUC_BIN; it reads
+  # DPS_SINGLE_ENGINE_BIN for this override.
   export SOUC_BIN="${DISS_AB_SOUC_BIN:-$REPO/bin/souc}"
   export SOUC="$SOUC_BIN"
+  export DPS_SINGLE_ENGINE_BIN="$SOUC_BIN"
   echo "  SOUC_BIN=${SOUC_BIN}" >> "$R"
   for g in $GATES; do
     # confidence gate file is dissertation_confidence_gate_gate.sh (double _gate)

@@ -1,0 +1,204 @@
+//@ run-pass
+//@ expect-stdout-contains: PBPK28_CALIBRATION_GATES_PASS
+//@ timeout: 180
+
+// Runtime (2026-09-27): 8.5 s on lean_single (souc-stage2 engine, this
+// workspace pod, run only). CI job 108525867166 put the Full Test Suite
+// runner at 2.65-4.3x slower than the pod (hepatic 11.3 s timed out at
+// 30 s; calibration 42 s passed within 180 s), so the timeout is about
+// 2x the worst projected CI time, 4.3 x 8.5 s.
+//
+// Gates for stdlib/darwin_pbpk/pbpk28_calibration.sio.
+//
+// C0  Algebraic round trips: forward(inverse(target)) = target to 1e-12.
+// C1  Liver: a sink calibrated to hepatic blood clearance CL_H reproduces it in
+//     the dynamic model: IV bolus AUC = D/(CL_H + CL_c) to 1e-9 (V3's
+//     tolerance: truncation at t_end plus round-off; the clamped mass must be
+//     exactly 0: the default TR-BDF2 transport has no negativity floor).
+//     C1-C3 step at dt = 0.1 h (0.02 until 2026-09-27, changed for runtime):
+//     each is an AUC or AUC ratio of a linear run, which the step's own
+//     quadrature gives exactly for any dt; the 300 h horizon is kept.
+// C2  Gut asymmetry: a gut wall calibrated to (F_G, E_sys) reproduces both in
+//     the dynamic model, with no liver sink: AUC_po/AUC_iv = F_G and the
+//     systemic gut clearance Q_g·E_sys, to 1e-9.
+// C3  Both sites: AUC_po/AUC_iv = F_G·F_H with the liver and the asymmetric gut
+//     calibrated together (the portal route composes the two first passes).
+// C4  Range: an inverse whose result is representable must return it, even
+//     when a textbook intermediate is not. Liver: CL_H = 5e-201,
+//     Q_L = 1e-200, PS = 2e-200 (Q_L·CL_H underflows to 0; the inverse
+//     returned 0, PR #2695 review), and CL_H = 5e153, Q_L = 1e154,
+//     PS = 2e154 (X_L·PS overflows to +Inf; the reference scales down). Gut: F_G = 4e-10, E_sys = 1 - 2^-30,
+//     Q_gut = 1e-315 (Q_gut·E_sys is subnormal with ~27 significant bits, and
+//     the inverse was off by ~2e-9 relative). The reference is the same
+//     inverse on inputs scaled by S = 2^664, where every intermediate is a
+//     normal double, divided by S: power-of-two scaling is exact, so the two
+//     differ only by the rounding of different operation orders. Tolerance,
+//     by operation count with u = 2^-53: liver X_L carries <= 3u per path, the
+//     subtraction PS - X_L amplifies it by kappa - 1 (kappa = PS/(PS - X_L))
+//     and adds u, and the final product and quotient 2u, so <= (3kappa + 3)u
+//     per path and (6kappa + 6)u between them (18u here, kappa = 2); gut X_g
+//     3u, PS_g one more division, CLint_g two more operations, so <= 6u per
+//     path and 12u between them. The unfixed liver inverse returns 0
+//     (relative error 1) and the gut one misses by ~2e-9: both fail. For
+//     ordinary inputs the result is bit-identical to the previous form
+//     (measured over 1920 liver and 2964 gut cases).
+//
+// Targets are midazolam-like (F_G 0.57, E_sys 0.08: Paine 1996; E_H 0.44:
+// Thummel 1996) on the rapamycin physiology, to exercise realistic magnitudes;
+// they are fixtures, not the midazolam profile.
+
+use darwin_pbpk::core::pbpk28_params::*
+use darwin_pbpk::pbpk28_calibration::*
+use darwin_pbpk::ddi::multidrug28::*
+
+fn g_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn e12(x: f64) -> i64 { return (x * 1000000000000.0) as i64 }
+fn rel(a: f64, b: f64) -> f64 with Div { return g_abs(a - b) / g_abs(b) }
+
+// One drug on the rapamycin physiology with the given sinks; returns
+// (AUC_b, clamped mass). fu_b = fu_g = 1, so fu·CLint enters as CLint.
+fn run(fuclint_l: f64, fuclint_g: f64, ps_g: f64, cl_c: f64, oral: bool) -> (f64, f64) with Mut, Div, Panic {
+    var md = md_new(true)
+    var p = pbpk28_params_rapamycin()
+    p.cl_central = cl_c
+    p.ps[8] = ps_g
+    let i = md_add_drug(&!md, p, 1.0, 1.0, 2.0)
+    md_set_clint(&!md, i, md_site_liver(), md_cyp3a4(), fuclint_l)
+    md_set_clint(&!md, i, md_site_gut(), md_cyp3a4(), fuclint_g)
+    if oral { md_dose_oral(&!md, i, 1.0) } else { md_dose_iv_bolus(&!md, i, 1.0) }
+    md_run_to(&!md, 300.0, 0.1)
+    return (md.auc_b[i], md_clamped(&md, i))
+}
+
+// X_L = Q_L·CL_H/(Q_L - CL_H) for the C4 tolerance (kappa), at normal scale.
+fn c4_x_ref(cl_h: f64, q_l: f64) -> f64 with Div { return q_l * cl_h / (q_l - cl_h) }
+
+fn main() -> i32 with Mut, Div, Panic, IO {
+    let p = pbpk28_params_rapamycin()
+    let q_l = p.q[1]
+    let ps_l = p.ps[1]
+    let q_g = p.q[8]
+    let kp_g = p.kp[8]
+    let cl_c = 1.5
+    let bound = 0.0   // clamped mass allowed: none (no floor on the default path)
+
+    // C0
+    let e_h = 0.44
+    let cl_h = e_h * q_l
+    let fl = p28c_liver_fuclint(cl_h, q_l, ps_l)
+    let (ps_g, fg_cl) = p28c_gut_asymmetric(0.57, 0.08, q_g)
+    let c0 = rel(p28c_liver_clh(fl, q_l, ps_l), cl_h) + rel(1.0 - p28c_liver_fh(fl, q_l, ps_l), e_h) + rel(p28c_gut_fg(fg_cl, ps_g, kp_g, q_g), 0.57) + rel(p28c_gut_esys(fg_cl, ps_g, kp_g, q_g), 0.08)
+    print("C0 calibrated liver fu*CLint = ") print(fl) print(" L/h; gut PS_g = ") print(ps_g) print(" L/h, fu_g*CLint_g = ") print(fg_cl) println(" L/h")
+    print("C0 summed round-trip error (x1e12) = ") println(e12(c0))
+    let ok0 = c0 < 1.0e-12
+
+    // C1: liver only, IV
+    let (auc1, cl1) = run(fl, 0.0, p.ps[8], cl_c, false)
+    let err1 = rel(auc1, 1.0 / (cl_h + cl_c))
+    print("C1 IV AUC vs D/(CL_H + CL_c) (rel x1e12) = ") println(e12(err1))
+    let ok1 = err1 < 1.0e-9 && cl1 <= bound
+
+    // C2: gut only
+    let (po2, cp2) = run(0.0, fg_cl, ps_g, cl_c, true)
+    let (iv2, ci2) = run(0.0, fg_cl, ps_g, cl_c, false)
+    let fg_meas = po2 / iv2
+    let esys_meas = (1.0 / iv2 - cl_c) / q_g
+    print("C2 F_G measured = ") print(fg_meas) print("  E_sys measured = ") println(esys_meas)
+    let err2 = rel(fg_meas, 0.57) + rel(esys_meas, 0.08)
+    print("C2 error (rel x1e12) = ") println(e12(err2))
+    let ok2 = err2 < 1.0e-9 && cp2 <= bound && ci2 <= bound
+
+    // C3: both
+    let (po3, cp3) = run(fl, fg_cl, ps_g, cl_c, true)
+    let (iv3, ci3) = run(fl, fg_cl, ps_g, cl_c, false)
+    let f_meas = po3 / iv3
+    let f_expect = 0.57 * (1.0 - e_h)
+    print("C3 F measured = ") print(f_meas) print("  F_G*F_H = ") println(f_expect)
+    let err3 = rel(f_meas, f_expect)
+    print("C3 error (rel x1e12) = ") println(e12(err3))
+    let ok3 = err3 < 1.0e-9 && cp3 <= bound && ci3 <= bound
+
+    // C4
+    let u = 1.1102230246251565e-16
+    var sc = 1.0
+    var kk: i32 = 0
+    while kk < 664 {
+        sc = sc * 2.0
+        kk = kk + 1
+    }
+    let tiny_l = p28c_liver_fuclint(5.0e-201, 1.0e-200, 2.0e-200)
+    let ref_l = p28c_liver_fuclint(5.0e-201 * sc, 1.0e-200 * sc, 2.0e-200 * sc) / sc
+    let x_ref = c4_x_ref(5.0e-201 * sc, 1.0e-200 * sc)
+    let kappa = 2.0e-200 * sc / (2.0e-200 * sc - x_ref)
+    let err_l = rel(tiny_l, ref_l)
+    let tol_l = (6.0 * kappa + 6.0) * u
+    // Large liver case (PR #2695 review): Q_L*CL_H = 5e307 is finite, but
+    // X_L*PS = 2e154*1e154 overflows to +Inf, so the second product takes the
+    // fallback. The reference scales DOWN by S; kappa is the same 2, so the
+    // same (6kappa + 6)u bound applies. Without the overflow branch the
+    // inverse returns +Inf and panics, failing this fixture.
+    let big_l = p28c_liver_fuclint(5.0e153, 1.0e154, 2.0e154)
+    let ref_big = p28c_liver_fuclint(5.0e153 / sc, 1.0e154 / sc, 2.0e154 / sc) * sc
+    let err_big = rel(big_l, ref_big)
+    // Forward round trips at both extremes (PR #2695 review): the forward map
+    // must return the CL_H the inverse started from. Bound: the inverse's own
+    // error, <= (3kappa + 3)u per path, plus two parallel combinations of
+    // <= 3u each in the forward map, whose sensitivity to fu*CLint is <= 1:
+    // (3kappa + 9)u. The textbook forward map returned NaN for the large case.
+    let tol_rt = (3.0 * kappa + 9.0) * u
+    let rt_big = rel(p28c_liver_clh(big_l, 1.0e154, 2.0e154), 5.0e153)
+    let rt_tiny = rel(p28c_liver_clh(tiny_l, 1.0e-200, 2.0e-200), 5.0e-201)
+    let fh_big = p28c_liver_fh(big_l, 1.0e154, 2.0e154)
+    // Gut forward maps at the top of the range (PR #2695 review):
+    // p28c_gut_asymmetric(0.25, 0.5, 8e307) returns PS_g = fu*CLint_g =
+    // 1.6e308, where u + k and PS_g*k overflow and both maps returned NaN.
+    // Bound, by operation count: PS_g and CLint_g carry <= 6u each from the
+    // inverse; a = PS/(PS + CLint) and X_g = PS || CLint have sensitivity <= 1
+    // to each (<= 12u) plus <= 3u of their own; F_G = a*Q/(Q + X) adds
+    // sensitivity <= 1 to X, 2u, and the product 1u: <= 32u. E_sys <= 17u.
+    let (ps_hi, cl_hi) = p28c_gut_asymmetric(0.25, 0.5, 8.0e307)
+    let fg_hi = p28c_gut_fg(cl_hi, ps_hi, 1.0, 8.0e307)
+    let es_hi = p28c_gut_esys(cl_hi, ps_hi, 1.0, 8.0e307)
+    let tol_gf = 32.0 * u
+    // Tiny gut sink (PR #2695 review): fu*CLint = PS = Q = 1e-200, K_p = 1.
+    // X_g = 5e-201, so E_sys = X/(Q + X) = 1/3 and F_G = a*Q/(Q + X) with
+    // a = 1/2 is also 1/3; PS*k = 1e-400 underflowed and both maps returned
+    // X_g = 0 (E_sys 0, F_G 1/2). Exact inputs, so the bounds above suffice.
+    let fg_lo = p28c_gut_fg(1.0e-200, 1.0e-200, 1.0, 1.0e-200)
+    let es_lo = p28c_gut_esys(1.0e-200, 1.0e-200, 1.0, 1.0e-200)
+    // Asymmetric tiny case (same review): fu*CLint = 1, PS = Q = 1e-200.
+    // a = PS/(PS + CLint) and X = PS || CLint both round to 1e-200, so
+    // F_G = a*Q/(Q + X) = 5e-201 (relative corrections ~1e-200); a*Q = 1e-400
+    // underflowed and F_G came back 0.
+    let fg_asym = p28c_gut_fg(1.0, 1.0e-200, 1.0, 1.0e-200)
+    let e_sys4 = 1.0 - 1.0 / 1073741824.0
+    let (ps4, cl4) = p28c_gut_asymmetric(4.0e-10, e_sys4, 1.0e-315)
+    let (rps4, rcl4) = p28c_gut_asymmetric(4.0e-10, e_sys4, 1.0e-315 * sc)
+    let err_g = rel(ps4, rps4 / sc) + rel(cl4, rcl4 / sc)
+    let tol_g = 12.0 * u
+    print("C4 liver tiny inverse x1e200 = ") print(tiny_l * 1.0e200) print("  scaled reference x1e200 = ") print(ref_l * 1.0e200)
+    print("  error / tolerance = ") println(err_l / tol_l)
+    print("C4 liver large inverse x1e-154 = ") print(big_l * 1.0e-154) print("  scaled reference x1e-154 = ") print(ref_big * 1.0e-154)
+    print("  error / tolerance = ") println(err_big / tol_l)
+    print("C4 forward round trip error / tolerance: large ") print(rt_big / tol_rt) print("  tiny ") print(rt_tiny / tol_rt)
+    print("  F_H large = ") println(fh_big)
+    print("C4 gut forward at Q_gut 8e307: F_G = ") print(fg_hi) print("  E_sys = ") print(es_hi)
+    print("  error / tolerance = ") print(rel(fg_hi, 0.25) / tol_gf) print(" ") println(rel(es_hi, 0.5) / tol_gf)
+    print("C4 gut forward at 1e-200: F_G = ") print(fg_lo) print("  E_sys = ") print(es_lo)
+    print("  error / tolerance = ") print(rel(fg_lo, 1.0 / 3.0) / tol_gf) print(" ") println(rel(es_lo, 1.0 / 3.0) / tol_gf)
+    print("C4 gut F_G asymmetric tiny (x1e201) = ") print(fg_asym * 1.0e201) print("  error / tolerance = ") println(rel(fg_asym, 5.0e-201) / tol_gf)
+    print("C4 gut tiny inverse: summed relative error / tolerance = ") println(err_g / tol_g)
+    // F_H = Q_L/(Q_L + X_L) with X_L = Q_L*CL_H/(Q_L - CL_H) = Q_L here: 0.5.
+    let ok4 = err_l <= tol_l && err_g <= tol_g && err_big <= tol_l && rt_big <= tol_rt && rt_tiny <= tol_rt && rel(fh_big, 0.5) <= tol_rt && rel(fg_hi, 0.25) <= tol_gf && rel(es_hi, 0.5) <= tol_gf && rel(fg_lo, 1.0 / 3.0) <= tol_gf && rel(es_lo, 1.0 / 3.0) <= tol_gf && rel(fg_asym, 5.0e-201) <= tol_gf
+
+    if ok0 { println("C0 PASS") } else { println("C0 FAIL") }
+    if ok1 { println("C1 PASS") } else { println("C1 FAIL") }
+    if ok2 { println("C2 PASS") } else { println("C2 FAIL") }
+    if ok3 { println("C3 PASS") } else { println("C3 FAIL") }
+    if ok4 { println("C4 PASS") } else { println("C4 FAIL") }
+    if ok0 && ok1 && ok2 && ok3 && ok4 {
+        println("PBPK28_CALIBRATION_GATES_PASS")
+        return 0
+    }
+    return 1
+}

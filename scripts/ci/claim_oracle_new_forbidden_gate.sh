@@ -46,7 +46,12 @@ fi
 total=$(awk -F'\t' '$0 !~ /^#/ && $1!="gate_id" && $1!=""' "$TSV" | wc -l)
 
 # Forbidden rows: foreign runtime as sole hard-fail judge of a claim.
-forbidden=$(awk -F'\t' '$0 !~ /^#/ && $1!="gate_id" && ($3=="forbidden_as_claim_oracle" || $4=="yes") {print $1}' "$TSV" | sort -u)
+# ADR-009 exception: a row classified verified_foreign_reference may
+# hard-fail (foreign_hard_fail=yes is its expected shape, per
+# docs/decisions/claim_oracle_inventory.schema.md); admission is the
+# manual override act in claim_oracle_inventory.overrides.tsv, not
+# this gate's baseline.
+forbidden=$(awk -F'\t' '$0 !~ /^#/ && $1!="gate_id" && ($3=="forbidden_as_claim_oracle" || ($4=="yes" && $3!="verified_foreign_reference")) {print $1}' "$TSV" | sort -u)
 grandfathered=$(awk -F'\t' '$0 !~ /^#/ && $1!="" {print $1}' "$BASELINE" | sort -u)
 
 new_rows=$(comm -23 <(printf '%s\n' "$forbidden") <(printf '%s\n' "$grandfathered") | sed '/^$/d')

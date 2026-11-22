@@ -1,0 +1,155 @@
+//@ run-pass
+//!
+//! Sounio-owned negative and sabotage witnesses for PDF text line projection.
+
+use document::pdf_text::{
+    SounioPdfTextProjection,
+    SounioPdfTextProjectionDigest,
+    SOUNIO_PDF_TEXT_OK,
+    SOUNIO_PDF_TEXT_ERR_CONTENT_LEXER,
+    SOUNIO_PDF_TEXT_ERR_DIGEST,
+    sounio_pdf_text_projection_empty,
+    sounio_pdf_line_projection_empty,
+    sounio_pdf_text_project_lines,
+    sounio_pdf_text_projection_digest,
+}
+
+fn put_object(
+    text: &!SounioPdfTextProjection,
+    object: i64,
+    page: i64,
+    x: i64,
+    y: i64,
+    scalar: i64,
+    value: i64,
+    font: i64,
+) with Mut, Panic {
+    text.object_page[object as usize] = page
+    text.object_raw_x[object as usize] = x
+    text.object_raw_y[object as usize] = y
+    text.object_device_x[object as usize] = x
+    text.object_device_y[object as usize] = y
+    text.object_matrix_count[object as usize] = 1
+    text.object_show_count[object as usize] = 1
+    text.object_scalar_start[object as usize] = scalar
+    text.object_scalar_count[object as usize] = 1
+    text.scalar_value[scalar as usize] = value
+    text.scalar_font[scalar as usize] = font
+}
+
+fn digest_equal(
+    left: &SounioPdfTextProjectionDigest,
+    right: &SounioPdfTextProjectionDigest,
+) -> bool with Mut, Panic {
+    if left.error != right.error ||
+        left.serialized_bytes != right.serialized_bytes { return false }
+    var at: i64 = 0
+    while at < 32 {
+        if left.bytes[at as usize] != right.bytes[at as usize] {
+            return false
+        }
+        at = at + 1
+    }
+    true
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    var failures: i64 = 0
+    var cases: i64 = 0
+
+    var rejected = sounio_pdf_text_projection_empty()
+    rejected.error = SOUNIO_PDF_TEXT_ERR_CONTENT_LEXER
+    var rejected_lines = sounio_pdf_line_projection_empty()
+    let rejected_error = sounio_pdf_text_project_lines(
+        &rejected, &!rejected_lines)
+    cases = cases + 1
+    if rejected_error != SOUNIO_PDF_TEXT_ERR_CONTENT_LEXER ||
+        rejected_lines.error != SOUNIO_PDF_TEXT_ERR_CONTENT_LEXER {
+        failures = failures + 1
+    }
+
+    var text = sounio_pdf_text_projection_empty()
+    text.pages = 2
+    text.text_objects = 8
+    text.nonempty_objects = 7
+    text.empty_objects = 1
+    text.matrixless_objects = 1
+    text.show_operations = 7
+    text.scalars = 7
+    text.max_graphics_depth = 1
+    put_object(&!text, 0, 0, 30000000, 94000000, 0, 65, 1)
+    put_object(&!text, 1, 0, 20000000, 100000000, 1, 66, 1)
+    put_object(&!text, 2, 1, 10000000, 100000000, 2, 67, 2)
+    put_object(&!text, 3, 0, 10000000, 95000000, 3, 68, 1)
+    put_object(&!text, 4, 1, 20000000, 100000000, 4, 69, 2)
+    text.object_page[5] = 0
+    text.object_scalar_start[5] = 5
+    text.object_scalar_count[5] = 0
+    put_object(&!text, 6, 0, 10000000, 94000000, 5, 70, 1)
+    put_object(&!text, 7, 0, 0, 88000000, 6, 71, 1)
+
+    var lines = sounio_pdf_line_projection_empty()
+    let line_error = sounio_pdf_text_project_lines(&text, &!lines)
+    cases = cases + 1
+    if line_error != SOUNIO_PDF_TEXT_OK ||
+        lines.error != SOUNIO_PDF_TEXT_OK ||
+        lines.pages != 2 || lines.objects != 7 || lines.lines != 4 ||
+        lines.max_line_spread != 5000000 ||
+        lines.min_interline_gap != 6000000 ||
+        lines.ambiguous_assignments != 0 {
+        failures = failures + 1
+    }
+
+    cases = cases + 1
+    if lines.object_line[1] != 0 || lines.object_line[3] != 0 ||
+        lines.object_line[0] != 1 || lines.object_line[6] != 1 ||
+        lines.object_line[7] != 2 ||
+        lines.object_line[2] != 3 || lines.object_line[4] != 3 ||
+        lines.line_object_count[0] != 2 ||
+        lines.line_object_count[1] != 2 ||
+        lines.line_object_count[2] != 1 ||
+        lines.line_object_count[3] != 2 {
+        failures = failures + 1
+    }
+
+    let digest = sounio_pdf_text_projection_digest(&text, &lines)
+    cases = cases + 1
+    if digest.error != SOUNIO_PDF_TEXT_OK ||
+        digest.serialized_bytes <= 0 {
+        failures = failures + 1
+    }
+
+    var lines_again = sounio_pdf_line_projection_empty()
+    let line_error_again = sounio_pdf_text_project_lines(&text, &!lines_again)
+    let digest_again = sounio_pdf_text_projection_digest(
+        &text, &lines_again)
+    cases = cases + 1
+    if line_error_again != SOUNIO_PDF_TEXT_OK ||
+        !digest_equal(&digest, &digest_again) {
+        failures = failures + 1
+    }
+
+    var changed = text
+    changed.scalar_value[0] = 90
+    let changed_digest = sounio_pdf_text_projection_digest(&changed, &lines)
+    cases = cases + 1
+    if changed_digest.error != SOUNIO_PDF_TEXT_OK ||
+        digest_equal(&digest, &changed_digest) {
+        failures = failures + 1
+    }
+
+    var bad_lines = lines
+    bad_lines.object_line[1] = 3
+    let bad_digest = sounio_pdf_text_projection_digest(&text, &bad_lines)
+    cases = cases + 1
+    if bad_digest.error != SOUNIO_PDF_TEXT_ERR_DIGEST {
+        failures = failures + 1
+    }
+
+    print("PDF_TEXT_NEGATIVES cases=")
+    print_int(cases)
+    print(" failures=")
+    print_int(failures)
+    if failures != 0 { return 1 }
+    0
+}

@@ -1,0 +1,120 @@
+# Function-level profile Job for docs/audit/MADAROS_SELF_COMPILE_PROFILE_DISPATCH_2026-09-27.md.
+# The run in that dispatch (fn2-20260927T023032) used the earlier, unpinned version of this
+# manifest (see the dispatch, section 5); this version pins inputs and fails on any error.
+#
+# The ConfigMap is built from the two files beside this manifest:
+#   kubectl -n arc-runners create configmap madaros-prof-tools \
+#     --from-file=rip_sampler.cpp --from-file=symbolize.pl
+# Output lands under /cache/profile/fn2-<UTC timestamp>/ on the sounio-ci-cache PVC.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: madaros-fn-profile2
+  namespace: arc-runners
+spec:
+  activeDeadlineSeconds: 10800
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - {key: kubernetes.io/hostname, operator: In, values: ["r770-proxmox"]}
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      securityContext: {fsGroup: 1001}
+      tolerations:
+      - {effect: NoSchedule, key: sounio.dev/pool, operator: Equal, value: gpu-batch}
+      - {effect: NoSchedule, key: sounio.dev/compute, operator: Equal, value: heavy}
+      volumes:
+      - name: madaros-cache
+        persistentVolumeClaim: {claimName: sounio-ci-cache}
+      - name: tools
+        configMap: {name: madaros-prof-tools}
+      containers:
+      - name: prof
+        image: ghcr.io/actions/actions-runner@sha256:e5496277be5d09bc968b3d64911b74e219ac4a3f2edce956a3ecf9271bea1ef4
+        resources:
+          limits: {cpu: "4", memory: 48Gi}
+          requests: {cpu: "2", memory: 24Gi}
+        volumeMounts:
+        - {mountPath: /cache, name: madaros-cache}
+        - {mountPath: /tools, name: tools}
+        command: ["/bin/bash", "-c"]
+        env:
+        # Inputs are pinned, not "whatever is newest". Set all three before applying.
+        - {name: SOUNIO_REF, value: "897c344892fafd98bfbbb0a611738aad08149d7d"}  # commit profiled in the dispatch
+        - {name: SEED_PATH, value: ""}      # e.g. /cache/madaros/seed/<key>/artifact
+        - {name: SEED_SHA256, value: ""}    # full sha256 of SEED_PATH
+        # The mounted ConfigMap is mutable; the tools are verified against these before use.
+        # Update both together with scripts/dev/profiling/{rip_sampler.cpp,symbolize.pl}.
+        - {name: RIP_SAMPLER_SHA256, value: "106120af160fa7d0a49ed8801a5c2a0105179c723e25ae5039b31ae4b29efa35"}
+        - {name: SYMBOLIZE_SHA256, value: "b5602ab82acb8441a69f6533858858aff88343ff9a8511f25de5f05dd828e7bf"}
+        args:
+        - |
+          set -uo pipefail
+          die() { echo "FAIL: $*" >&2; exit 1; }
+          [ -n "$SEED_PATH" ] && [ -n "$SEED_SHA256" ] || die "SEED_PATH and SEED_SHA256 must be set"
+          OUT=/cache/profile/fn2-$(date -u +%Y%m%dT%H%M%S); mkdir -p "$OUT"; echo "OUT=$OUT"
+          sudo apt-get update -qq >/dev/null && sudo apt-get install -y -qq g++ perl git binutils >/dev/null 2>&1 || die "apt"
+          for t in rip_sampler.cpp:$RIP_SAMPLER_SHA256 symbolize.pl:$SYMBOLIZE_SHA256; do
+            f=${t%%:*}; want=${t#*:}; got=$(sha256sum < "/tools/$f" | cut -c1-64)
+            [ "$got" = "$want" ] || die "/tools/$f sha256 $got != $want (stale ConfigMap?)"
+            echo "tool $f sha256=$got" >> "$OUT/inputs.tools"
+          done
+          g++ -std=c++23 -O2 -o /tmp/rip_sampler /tools/rip_sampler.cpp || die "build rip_sampler"
+          git clone -q https://github.com/Sounio-lang/sounio /tmp/sounio || die "clone"
+          cd /tmp/sounio && git checkout -q "$SOUNIO_REF" || die "checkout $SOUNIO_REF"
+          echo "source=$(git rev-parse HEAD)" | tee "$OUT/inputs"; cat "$OUT/inputs.tools" | tee -a "$OUT/inputs"
+          export SOUNIO_STDLIB_PATH=/tmp/sounio/stdlib
+          got=$(sha256sum < "$SEED_PATH" | cut -c1-64); [ "$got" = "$SEED_SHA256" ] || die "seed sha256 $got != $SEED_SHA256"
+          echo "seed=$SEED_PATH sha256=$got" | tee -a "$OUT/inputs"
+          cp "$SEED_PATH" /tmp/seed && chmod +x /tmp/seed
+          t0=$(date +%s)
+          ( ulimit -s 524288 2>/dev/null || true; /tmp/seed self-hosted/compiler/main.sio /tmp/m2 --debug-fn-map ) > "$OUT/seed.out" 2>&1
+          rc=$?; echo "seed build rc=$rc $(( $(date +%s)-t0 ))s"
+          [ "$rc" -eq 0 ] || { tail -c 2000 "$OUT/seed.out"; die "seed build rc=$rc"; }
+          perl -0777 -ne 'while(/fnmap fn=(\d+)\s+off=(-?\d+)\s+name=(\S+)/g){print "fnmap fn=$1 off=$2 name=$3\n"}' "$OUT/seed.out" > "$OUT/fnmap.txt"
+          [ -s "$OUT/fnmap.txt" ] || die "empty fnmap"
+          echo "fnmap entries=$(wc -l < "$OUT/fnmap.txt")"
+          chmod +x /tmp/m2   # the seed does not set +x
+          echo "m2 sha256=$(sha256sum < /tmp/m2 | cut -c1-64) size=$(stat -c %s /tmp/m2)" | tee -a "$OUT/inputs"
+          readelf -h /tmp/m2 2>/dev/null | grep Entry; readelf -l /tmp/m2 2>/dev/null | grep -A1 LOAD | head -6
+          # Timestamp the compiler's own progress lines (seconds since launch) so the
+          # phase windows below come from THIS run, not from bounds measured elsewhere.
+          t0=$(date +%s)
+          ( ulimit -s 524288 2>/dev/null || true; /tmp/rip_sampler --out "$OUT/samples.txt" --interval-ms 50 --depth 24 -- /tmp/m2 build self-hosted/compiler/main.sio /tmp/gen2 ) 2>&1 \
+            | perl -MTime::HiRes=time -ne 'BEGIN{$|=1;$s=time} printf "%.1f %s", time-$s, $_' > "$OUT/gen2.ts.log"
+          st=("${PIPESTATUS[@]}"); rc=${st[0]}
+          [ "${st[1]}" -eq 0 ] || die "timestamper rc=${st[1]} (phase log incomplete)"
+          echo "gen2 rc=$rc $(( $(date +%s)-t0 ))s samples=$(wc -l < "$OUT/samples.txt")"
+          tail -3 "$OUT/gen2.ts.log"
+          [ "$rc" -eq 0 ] || die "profiled compile rc=$rc (profile would be partial)"
+          # rc=0 alone is not a profile: the child can exit before the first interval,
+          # and the compile must actually have produced its output.
+          [ -s "$OUT/samples.txt" ] || die "no samples recorded"
+          [ -s /tmp/gen2 ] || die "profiled compile wrote no /tmp/gen2"
+          echo "gen2 sha256=$(sha256sum < /tmp/gen2 | cut -c1-64) size=$(stat -c %s /tmp/gen2)" | tee -a "$OUT/inputs"
+          perl /tools/symbolize.pl "$OUT/fnmap.txt" "$OUT/samples.txt" 401000 > "$OUT/profile.txt" || die "symbolize"
+          cat "$OUT/profile.txt"
+          # Phase boundaries from this run's markers; a missing marker skips the windows, never guesses.
+          mark() { awk -v p="$1" 'index($0,p){print $1; exit}' "$OUT/gen2.ts.log"; }
+          b1=$(mark "run_check_mode: verdict"); b2=$(mark "imported_compile: typecheck_done")
+          b3=$(mark "lower_array: seed_done");  b4=$(mark "imported_compile: lower_done"); b5=$(mark "Merged IR:")
+          echo "phase bounds (s): check<$b1 typecheck<$b2 seed_lower<$b3 dep_lower<$b4 merge<$b5 native" | tee -a "$OUT/inputs"
+          if [ -n "$b1" ] && [ -n "$b2" ] && [ -n "$b3" ] && [ -n "$b4" ] && [ -n "$b5" ]; then
+            : > "$OUT/windows.txt"
+            for w in "check 0 $b1" "typecheck $b1 $b2" "seed_lower $b2 $b3" "dep_lower $b3 $b4" "merge $b4 $b5" "native $b5 999999"; do
+              set -- $w
+              awk -v a="$2" -v b="$3" '$1>=a*1000 && $1<b*1000' "$OUT/samples.txt" > /tmp/win.txt || die "window $1 select"
+              [ -s /tmp/win.txt ] || continue
+              perl /tools/symbolize.pl "$OUT/fnmap.txt" /tmp/win.txt 401000 > /tmp/win.sym || die "window $1 symbolize"
+              { echo "== $1 (${2}s-${3}s) =="; awk '/== SELF/{s=1;next} /== INCL/{s=0; i=1; next} s&&n<8{print "S " $0; n++} i&&m<14{print "I " $0; m++}' /tmp/win.sym; } >> "$OUT/windows.txt" || die "window $1 write"
+            done
+            cat "$OUT/windows.txt"
+          else
+            echo "phase markers missing; per-phase windows not computed" | tee "$OUT/windows.txt"
+          fi

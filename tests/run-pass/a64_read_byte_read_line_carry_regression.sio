@@ -1,0 +1,180 @@
+//@ run-pass
+//@ expect-stdout-contains: read_byte/read_line regression ok
+//
+// Regression gate for PR #2623 review comments (Copilot threads 4068240080,
+// 4068240108, 4113839765, 4113946887, 4116322276) on the aarch64 emitters
+// emit_read_byte_a64() / emit_read_line_a64() in
+// self-hosted/compiler/lean_single.sio.
+//
+// Bug 1 (macOS): a failed `read()` syscall on aarch64-macos signals the error
+// by setting the CARRY flag and returning a POSITIVE errno in x0 (XNU
+// convention), whereas aarch64-linux returns a plain negative errno with no
+// carry semantics (see the comment on emit_file_size_a64 in the same file,
+// which already handled this correctly for open()). emit_read_byte_a64()/
+// emit_read_line_a64() emitted a bare `cmp x0, #0` immediately after the
+// read() syscall, which clobbers that carry flag and reads the positive
+// errno as a "successful" byte count -- so on a genuine macOS read() failure,
+// read_byte() returned an uninitialized stack byte instead of -1.
+//
+// Fix 1: normalize a carry-set result to a safe sentinel before the shared
+// byte-count comparison, gated on `TARGET_OS == 2` (macOS):
+//   - emit_read_byte_a64(): sentinel = -1 (this function's own EOF/error
+//     contract; safe because the value is only ever compared/returned, never
+//     used as a buffer index).
+//   - emit_read_line_a64(): sentinel = 0, NOT -1. This function indexes the
+//     mmap'd buffer at buf[bytes_read] on the EOF/error path; -1 would compute
+//     buf[-1], a write one byte before the mapped page. 0 reuses the existing,
+//     safe "empty line" EOF path.
+//
+// Bug 2 (Linux, thread 4113839765): aarch64-linux has no carry-flag error
+// signaling -- a failed read() returns -errno directly in x0 (e.g. -5 for
+// EIO). emit_read_line_a64()'s Linux path skipped the newline-strip probe on
+// a non-positive result (correctly) but never clamped x0 before the
+// null-terminate step below it also uses as a buffer index, so a genuine read
+// failure computed buf[x0] with x0 negative -- e.g. buf[-5] -- an
+// out-of-bounds WRITE before the mapped page (worse than Bug 1, which was
+// only a wrong read). emit_read_byte_a64()'s Linux path has no such buffer
+// index on its EOF/error branch (it just returns -1 unconditionally there),
+// so it was not affected.
+//
+// Fix 2: on the Linux (`TARGET_OS != 2`) path of emit_read_line_a64(), clamp
+// a negative x0 to 0 right after the read() syscall, before the shared
+// EOF/error logic -- reusing the exact branch-based clamp idiom
+// (`cmp`/`b.ge`/`movz #0`) this file already uses in emit_read_file_a64
+// above (there on x2; here on x0). This matches the documented aarch64
+// read_line() contract at docs/audit/windows_assert_a64_parity/READ_LINE.md
+// section 3 ("clamp bytes_read < 0 -> 0" as a deliberate a64/x86 divergence).
+//
+// Bug 3 (thread 4113946887, upstream of Bugs 1 and 2): emit_read_line_a64()
+// never checked its OWN allocating mmap() call for failure before using the
+// result as "buf" -- pushing it, handing it to read() as the destination,
+// and (via Bugs 1/2's own now-fixed clamps) eventually dereferencing it at
+// the null-terminate `strb` near the end of the function. mmap() failing
+// hits the exact same negative-errno (Linux) / carry-set-positive-errno
+// (macOS) pattern as read() -- so an allocation failure that used to be
+// silently miscompiled into a wrong read (Bugs 1/2) would, upstream of
+// them, turn into an out-of-bounds write/segfault through a pointer that
+// was never a valid buffer at all. emit_read_file_a64's own mmap() call has
+// the same latent gap; it is out of scope here (not what the review flagged)
+// and is tracked separately.
+//
+// Fix 3: check the mmap() result immediately after its syscall, before
+// emit_push_a64() ever stores it as "buf" -- same OS-gated carry/negative
+// check as Fixes 1/2, on failure jumping straight past the push/read/strip/
+// null-terminate code to the function's normal return point, mirroring the
+// unconditional-jump idiom (`let X = CL; em32(b); ...; patch_branch_a64(X,
+// CL)`) emit_read_byte_a64's own EOF path already uses above.
+//
+// Bug 4 (thread 4116322276, follow-on from Fix 3): Fix 3's first cut set
+// x0 = 0 (NULL) on the failure path, reasoning by analogy with read_byte()'s
+// -1 int sentinel. That is not a usable empty string for a string-typed
+// return -- it only *defers* the failure to the first string operation a
+// caller performs on the result. Every string primitive in this file
+// dereferences its argument unconditionally with no null check: e.g.
+// emit_str_len_a64 just below does `ldrb w10, [x9, x0]` with x9 = the
+// pointer, no guard. `str_len(read_line())` on the mmap-failure path would
+// therefore fault reading address zero -- Bug 3's out-of-bounds write
+// traded for an unconditional null dereference one call later, not fixed.
+//
+// Fix 4: point x0 at a freshly reserved, permanently zero-initialized
+// 8-byte BSS slot instead of NULL (`bss_alloc_aligned(8)` +
+// `emit_image_addr_a64`, the same allocation/address idiom
+// RET_AGG_BSS_OFF and friends already use elsewhere in this file). BSS is
+// zero-initialized by the loader, so the slot's first byte is already a
+// valid NUL terminator with no store instruction needed, and -- unlike a
+// stack address -- the pointer stays valid for the life of the process, so
+// it is safe for a caller to hold onto. `bss_alloc_aligned` requires the
+// `Div` effect (integer alignment division); emit_read_line_a64()'s own
+// signature is widened from `with Mut, Panic` to `with Mut, Panic, Div` to
+// permit the call (its sole caller, compile_primary_a64, already declares
+// Div).
+//
+// This test exercises the three review-requested behaviours -- read_byte()
+// returning the exact value 255 (0xFF) rather than confusing it with the -1
+// sentinel, read_line() stripping a trailing '\n', and read_byte() returning a
+// clean -1 at EOF -- by writing a small file and redirecting this process's own
+// stdin (fd 0) to read from it via raw open()/dup2() syscalls, so the test does
+// not depend on whatever stdin the test harness happens to provide.
+//
+// Scope note: this runs the DEFAULT (x86-64) engine, which is what CI's
+// "Full Test Suite" job actually executes (souc-stage2 / lean_single native
+// x86-64); it does not exercise either aarch64 fix at runtime (neither
+// aarch64-linux nor aarch64-macos binaries execute in this repo's CI -- the
+// macOS arm64 self-host job runs in `attest` mode only). The raw syscall
+// numbers used below (open=2, dup2=33) are x86-64 Linux-specific, matching
+// the existing convention in tests/run-pass/test_syscall_ffi.sio.
+//
+// All four fixes were verified by cross-compiling this exact probe shape
+// (extended locally with a `str_len(read_line())` call, to exercise Fix 4's
+// exact failure mode) for --target aarch64-linux and --target aarch64-macos
+// and disassembling with an aarch64 objdump (aarch64-linux-gnu-objdump, or
+// <triple>-objdump from any aarch64 binutils package -- e.g. Alpine's
+// binutils-aarch64 ships aarch64-alpine-linux-musl-objdump), using a real
+// x86-64 execution environment to run the seed compiler (Docker/Rosetta or,
+// when that was unavailable mid-session, a local Lima/QEMU x86_64 VM --
+// lean_single itself is an x86-64 Linux ELF and cannot run natively on an
+// Apple Silicon host without one of those). Observed, byte for byte,
+// read_line()'s mmap() call immediately followed by its read() call:
+//   aarch64-macos:
+//     svc #0x80 (mmap) -> b.cc <a> -> adrp/add x0,&empty -> b <end>  (Fix 4)
+//     <a>: push buf; ...; svc #0x80 (read)
+//          -> b.cc <b> -> mov x0,#0 -> <b>: cmp x0, #0x0             (Fix 1)
+//   aarch64-linux:
+//     svc #0x0 (mmap) -> cmp x0,#0 -> b.ge <a> -> movz/movk x0,&empty
+//          -> b <end>                                                (Fix 4)
+//     <a>: push buf; ...; svc #0x0 (read)
+//          -> cmp x0,#0 -> b.ge <b> -> mov x0,#0 -> <b>: cmp x0, #0x0 (Fix 2)
+// `&empty` is a non-zero, in-image address on both targets -- confirmed by
+// hand-decoding the emitted movz/movk (Linux: 0x101006e0) and adrp/add
+// (macOS: 0x1100000 + 0x6e0 = 0x11006e0) immediates -- and .bss grew by
+// exactly 8 bytes relative to the Fix-1..3 build, matching the new
+// `bss_alloc_aligned(8)` reservation. In both builds, <end> lands exactly on
+// the instruction right after the function's normal `emit_pop_x0_a64()` --
+// confirmed by disassembly address arithmetic, i.e. the mmap-failure path
+// never executes the push or the pop and cannot corrupt the stack.
+// read_byte() has no mmap() call and is unaffected by Fixes 3/4; its own
+// fixup is unchanged (see Fix 1/Bug 2 above). The corrected build was also
+// run natively on x86-64 with piped stdin ("hello world\n"): read_byte()
+// consumed 'h' (prints "byte"), read_line() returned "ello world"
+// (str_len 10, printed correctly) -- confirming the surrounding refactor
+// (widening emit_read_line_a64 to `with Mut, Panic, Div` for the
+// bss_alloc_aligned call) introduced no regression on the success path.
+// To reproduce:
+//   SOUNIO_SOUC_ENGINE=lean_single ./bin/souc compile \
+//       tests/run-pass/a64_read_byte_read_line_carry_regression.sio \
+//       -o /tmp/rb.a64.elf --target aarch64-macos   # or aarch64-linux
+//   <aarch64-triple>-objdump -D -b binary -m aarch64 /tmp/rb.a64.elf | less
+
+fn main() -> i32 with IO, Panic {
+    // Craft a controlled stdin: a 0xFF byte, then "hello\n", then EOF.
+    let path = "/tmp/sounio_a64_rb_regress_input.bin"
+    let content = "\xFFhello\n"
+    write_file(path, content, str_len(content))
+
+    // open(path, O_RDONLY) then dup2(fd, 0): redirect this process's own
+    // stdin to read from the file above instead of whatever the harness
+    // gives us.
+    let fd = syscall6(2, path, 0, 0, 0, 0, 0)
+    assert(fd > 0)
+    let dup_rc = syscall6(33, fd, 0, 0, 0, 0, 0)
+    assert(dup_rc == 0)
+
+    // (1) read_byte() must zero-extend 0xFF to 255, not confuse it with the
+    // -1 EOF/error sentinel.
+    let b1 = read_byte()
+    assert(b1 == 255)
+
+    // (2) read_line() must strip the trailing '\n'.
+    let s1 = read_line()
+    assert(str_len(s1) == 5)
+    assert(str_eq(s1, "hello"))
+
+    // (3) read_byte() must return -1 cleanly once stdin is exhausted (EOF),
+    // not a garbage/uninitialized byte.
+    let b2 = read_byte()
+    assert(b2 == 0 - 1)
+
+    syscall6(3, fd, 0, 0, 0, 0, 0)
+    print("read_byte/read_line regression ok\n")
+    0
+}

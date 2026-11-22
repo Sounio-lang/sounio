@@ -1,0 +1,182 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: DEEP COUNT FISHER PASS
+use collections::numeric_buffer::{numeric_buffer_new,numeric_buffer_set,numeric_buffer_at,numeric_buffer_close,numeric_matrix}
+use collections::integer_buffer::{integer_buffer_new,integer_buffer_set,integer_buffer_close}
+use stats::regression::dynamic_count_fisher::{dynamic_count_fisher_workspace,dynamic_count_fit_fisher,dynamic_count_fisher_contrast}
+use math::pure::{ln_checked,is_finite}
+use io::sci_print::{println_f64_sci}
+fn fisher_case(case_id:i64,variant:i64) with Alloc,IO,Mut,Div,Panic {
+ let n:i64=if variant==6 {2}else{if case_id>=4 {512}else{16}}
+ let p:i64=if case_id>=4 {12}else{2}
+ let plan=dynamic_count_fisher_workspace(n,p)
+ assert(plan.status==0)
+ var a=numeric_buffer_new(n*p,n*p*8)
+ let layout=numeric_matrix(n*p,n,p,p,1,0)
+ var counts=integer_buffer_new(n,n*8)
+ var offsets=numeric_buffer_new(n,n*8)
+ var initial=numeric_buffer_new(p,p*8)
+ var coefficients=numeric_buffer_new(p,p*8)
+ var means=numeric_buffer_new(n,n*8)
+ var eta=numeric_buffer_new(n,n*8)
+ let cov_len=if variant==3 {p*p-1}else{p*p}
+ var covariance=numeric_buffer_new(cov_len,cov_len*8)
+ var standard_errors=numeric_buffer_new(p,p*8)
+ var weighted=numeric_buffer_new(plan.count_design_elements,plan.count_design_elements*8)
+ var response=numeric_buffer_new(n,n*8)
+ var step=numeric_buffer_new(p,p*8)
+ var qr=numeric_buffer_new(plan.qr_elements,plan.qr_elements*8)
+ var stage=numeric_buffer_new(plan.count_stage_elements,plan.count_stage_elements*8)
+ var r=numeric_buffer_new(p*p,p*p*8)
+ var scales=numeric_buffer_new(p,p*8)
+ var permutation=integer_buffer_new(p,p*8)
+ var outer=numeric_buffer_new(p,p*8)
+ var solve=numeric_buffer_new(p,p*8)
+ var influences=numeric_buffer_new(p*p,p*p*8)
+ var cov_stage=numeric_buffer_new(p*p,p*p*8)
+ let c_len=if variant==4 {p-1}else{p}
+ var contrast=numeric_buffer_new(c_len,c_len*8)
+ let data:[i64;16]=[0,0,1,2,5,8,13,19,1,1,2,3,7,12,18,28]
+ var scale:f64=1.0
+ if case_id==2 {scale=1e150}
+ if case_id==3 {scale=1e-150}
+ let alpha:f64=if case_id%2==0 {0.0}else{0.25}
+ var i:i64=0
+ while i<n {
+  var count:i64=0
+  if case_id<4 {count=data[i as usize]}
+  else {count=i%p+2+(if (i/p)%2==0 {1}else{ -1})}
+  if variant==6 {count=1;numeric_buffer_set(&!offsets,i, -0.5)}
+  integer_buffer_set(&!counts,i,count)
+  var j:i64=0
+  while j<p {
+   var coordinate:f64=0.0
+   if case_id<4 {coordinate=if j==0 {1.0}else{if i>=8 {scale}else{0.0}}}
+   else {coordinate=if i%p==j {1.0}else{0.0}}
+   if variant==1 {if j==1 {coordinate=0.0}}
+   if variant==6 {coordinate=if i==j {1.0}else{0.0}}
+   numeric_buffer_set(&!a,i*p+j,coordinate)
+   j=j+1
+  }
+  numeric_buffer_set(&!means,i,77.0)
+  numeric_buffer_set(&!eta,i,88.0)
+  i=i+1
+ }
+ if variant==2 {integer_buffer_set(&!counts,0,9007199254740993)}
+ var j:i64=0
+ while j<p {
+  var coefficient:f64=0.0
+  if case_id<4 {
+   let l0=ln_checked(6.0)
+   let l1=ln_checked(9.0)
+   assert(l0.status==0 && l1.status==0)
+   coefficient=if j==0 {l0.value}else{(l1.value-l0.value)/scale}
+  } else {
+   var sum:f64=0.0
+   var size:f64=0.0
+   i=j
+   while i<n {
+    sum=sum+((i%p+2+(if (i/p)%2==0 {1}else{ -1})) as f64)
+    size=size+1.0;i=i+p
+   }
+   let logged=ln_checked(sum/size)
+   assert(logged.status==0)
+   coefficient=logged.value
+  }
+  if variant==6 {coefficient=0.5}
+  numeric_buffer_set(&!initial,j,coefficient)
+  numeric_buffer_set(&!coefficients,j,99.0)
+  numeric_buffer_set(&!standard_errors,j,55.0)
+  j=j+1
+ }
+ i=0
+ while i<cov_len {numeric_buffer_set(&!covariance,i,66.0);i=i+1}
+ if variant!=4 {
+  if variant!=5 {
+   if case_id<4 {numeric_buffer_set(&!contrast,1,scale)}
+   else {numeric_buffer_set(&!contrast,0, -1.0);numeric_buffer_set(&!contrast,p-1,1.0)}
+  }
+ }
+ if variant==6 {
+  let quantum=2.2250738585072014e-308/4503599627370496.0
+  numeric_buffer_set(&!contrast,0,quantum)
+  numeric_buffer_set(&!contrast,1,quantum)
+ }
+ let declared=case_id!=0
+ let plug_in=case_id==3
+ let fit=dynamic_count_fit_fisher(&a,&layout,&counts,&offsets,&initial,alpha,
+ plug_in,declared,declared,0.0,100,1e-9,&!coefficients,&!means,&!eta,&!covariance,
+ &!standard_errors,&!weighted,&!response,&!step,&!qr,&!stage,&!r,&!scales,
+ &!permutation,&!outer,&!solve,&!influences,&!cov_stage)
+ assert(!fit.assumptions_assessed && !fit.finite_sample_calibrated)
+ assert(fit.alpha_plug_in==plug_in && fit.alpha_fixed== !plug_in)
+ assert(fit.model_declared==declared && fit.independence_declared==declared)
+ if variant==1 || variant==2 {
+  assert(fit.covariance_status==1)
+  if variant==1 {assert(fit.fit.status==6)}
+  if variant==2 {assert(fit.fit.status==9)}
+  assert(numeric_buffer_at(&coefficients,0)==99.0)
+ } else {
+  assert(fit.fit.status==0)
+  if variant==3 {assert(fit.covariance_status==2)}
+  else {assert(fit.covariance_status==0 && fit.factor_status==0)}
+ }
+ let result=dynamic_count_fisher_contrast(&fit,&coefficients,&contrast,&r,&scales,
+ &permutation,&outer,&!solve)
+ assert(!result.assumptions_assessed && !result.finite_sample_calibrated)
+ if variant==0 {
+  assert(result.status==0 && result.variance_status==0 && result.standard_error>0.0)
+  let report_status:i64=fit.covariance_status
+  let report_estimate:f64=result.estimate
+  let report_se:f64=result.standard_error
+  let report_variance:f64=result.variance
+  print("fisher case: ");println(case_id)
+  print("fisher status: ");println(report_status)
+  j=0
+  while j<p {
+   let coefficient:f64=numeric_buffer_at(&coefficients,j)
+   let se:f64=numeric_buffer_at(&standard_errors,j)
+   assert(is_finite(coefficient) && is_finite(se) && se>0.0)
+   print("fisher beta: ");println_f64_sci(coefficient,15)
+   print("fisher se: ");println_f64_sci(se,15)
+   j=j+1
+  }
+  i=0
+  while i<p*p {let value:f64=numeric_buffer_at(&covariance,i);print("fisher covariance: ");println_f64_sci(value,15);i=i+1}
+  print("fisher contrast estimate: ");println_f64_sci(report_estimate,15)
+  print("fisher contrast se: ");println_f64_sci(report_se,15)
+  print("fisher contrast variance: ");println_f64_sci(report_variance,15)
+ } else {
+  if variant==1 || variant==2 || variant==3 {assert(result.status==1)}
+  if variant==4 {assert(result.status==2)}
+  if variant==6 {assert(result.status==4 && result.estimate==0.0 && result.standard_error==0.0 && result.variance_status==2)}
+  if variant==5 {assert(result.status==0 && result.estimate==0.0 && result.standard_error==0.0 && result.variance_status==0 && result.variance==0.0)}
+  if variant<4 {
+   i=0
+   while i<cov_len {assert(numeric_buffer_at(&covariance,i)==66.0);i=i+1}
+   j=0
+   while j<p {assert(numeric_buffer_at(&standard_errors,j)==55.0);j=j+1}
+  }
+ }
+ numeric_buffer_close(a);integer_buffer_close(counts);numeric_buffer_close(offsets)
+ numeric_buffer_close(initial);numeric_buffer_close(coefficients);numeric_buffer_close(means)
+ numeric_buffer_close(eta);numeric_buffer_close(covariance);numeric_buffer_close(standard_errors)
+ numeric_buffer_close(weighted);numeric_buffer_close(response);numeric_buffer_close(step)
+ numeric_buffer_close(qr);numeric_buffer_close(stage);numeric_buffer_close(r);numeric_buffer_close(scales)
+ integer_buffer_close(permutation);numeric_buffer_close(outer);numeric_buffer_close(solve)
+ numeric_buffer_close(influences);numeric_buffer_close(cov_stage);numeric_buffer_close(contrast)
+}
+fn main()->i32 with Alloc,IO,Mut,Div,Panic {
+ assert(dynamic_count_fisher_workspace(0,1).status==1)
+ assert(dynamic_count_fisher_workspace(1073741824,1073741824).status==1)
+ var model:i64=0
+ while model<6 {fisher_case(model,0);model=model+1}
+ fisher_case(0,1)
+ fisher_case(0,2)
+ fisher_case(0,3)
+ fisher_case(0,4)
+ fisher_case(0,5)
+ fisher_case(0,6)
+ println("DEEP COUNT FISHER PASS")
+ 0
+}

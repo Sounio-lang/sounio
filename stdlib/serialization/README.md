@@ -11,6 +11,9 @@ Umbrella module for configuration and data interchange formats.
 | JSON | `json::parser` | flat key-value parse + serialize |
 | MessagePack | `msgpack::lib` | binary pack/unpack |
 
+Arrow IPC (stream and file) is `arrow::lib`. It is a native codec, not a
+submodule of this umbrella, and it is not the Arrow C Data Interface.
+
 ## Usage
 
 ```sounio

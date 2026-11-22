@@ -1,0 +1,132 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: DEEP MULTIPLE TESTING PASS
+use collections::numeric_buffer::{numeric_buffer_new,numeric_buffer_at,numeric_buffer_set,numeric_buffer_close}
+use collections::integer_buffer::{integer_buffer_new,integer_buffer_at,integer_buffer_set,integer_buffer_close}
+use stats::dynamic_multiple_testing::{dynamic_adjust_pvalues,dynamic_adjust_by}
+use io::sci_print::{println_f64_sci}
+fn mt_close(a:f64,b:f64)->bool {
+ let d=if a>b {a-b}else{b-a}
+ d<=1e-12
+}
+fn large_family()->bool with Alloc,Mut,Div,Panic {
+ let n:i64=513
+ var p=numeric_buffer_new(n,n*8)
+ var available=integer_buffer_new(n,n*8)
+ var output=numeric_buffer_new(n,n*8)
+ var indices=integer_buffer_new(n,n*8)
+ var stage=numeric_buffer_new(n,n*8)
+ var i:i64=0
+ while i<n {numeric_buffer_set(&!p,i,0.25);integer_buffer_set(&!available,i,1);i=i+1}
+ let bh=dynamic_adjust_pvalues(&p,&available,n,1,&!output,&!indices,&!stage)
+ assert(bh.status==0 && bh.available_count==513 && bh.dependence_requirement==1)
+ i=0
+ while i<n {
+  assert(numeric_buffer_at(&output,i)==0.25)
+  assert(integer_buffer_at(&indices,i)==i)
+  i=i+1
+ }
+ let by=dynamic_adjust_by(&p,&available,n,&!output,&!indices,&!stage)
+ assert(by.status==0 && by.method==2 && by.harmonic_factor>4.0)
+ i=0
+ while i<n {assert(numeric_buffer_at(&output,i)==1.0) i=i+1}
+ // Unavailable hypotheses stay in the family and ignore their numeric payload.
+ i=0
+ while i<n {numeric_buffer_set(&!p,i,-123.0);integer_buffer_set(&!available,i,0);i=i+1}
+ let missing=dynamic_adjust_by(&p,&available,n,&!output,&!indices,&!stage)
+ assert(missing.status==0 && missing.family_size==513 && missing.available_count==0)
+ i=0
+ while i<n {assert(numeric_buffer_at(&output,i)==1.0) i=i+1}
+ numeric_buffer_close(p);integer_buffer_close(available)
+ numeric_buffer_close(output);integer_buffer_close(indices);numeric_buffer_close(stage)
+ true
+}
+fn tiny_family()->bool with Alloc,Mut,Div,Panic {
+ var p=numeric_buffer_new(2,16)
+ var available=integer_buffer_new(2,16)
+ var output=numeric_buffer_new(2,16)
+ var indices=integer_buffer_new(2,16)
+ var stage=numeric_buffer_new(2,16)
+ // The pinned compiler needs a normal numerator for subnormal construction.
+ let quantum=2.2250738585072014e-308/4503599627370496.0
+ assert(quantum>0.0)
+ numeric_buffer_set(&!p,0,quantum);numeric_buffer_set(&!p,1,1.0)
+ integer_buffer_set(&!available,0,1);integer_buffer_set(&!available,1,1)
+ let bh=dynamic_adjust_pvalues(&p,&available,2,1,&!output,&!indices,&!stage)
+ assert(bh.status==0 && numeric_buffer_at(&output,0)==quantum*2.0)
+ let by=dynamic_adjust_by(&p,&available,2,&!output,&!indices,&!stage)
+ assert(by.status==0 && numeric_buffer_at(&output,0)==quantum*3.0)
+ numeric_buffer_close(p);integer_buffer_close(available)
+ numeric_buffer_close(output);integer_buffer_close(indices);numeric_buffer_close(stage)
+ true
+}
+fn empty_family()->bool with Alloc,Mut,Div,Panic {
+ var p=numeric_buffer_new(0,0)
+ var available=integer_buffer_new(0,0)
+ var output=numeric_buffer_new(0,0)
+ var indices=integer_buffer_new(0,0)
+ var stage=numeric_buffer_new(0,0)
+ let result=dynamic_adjust_by(&p,&available,0,&!output,&!indices,&!stage)
+ assert(result.status==0 && result.family_size==0 && result.harmonic_factor==1.0)
+ numeric_buffer_close(p);integer_buffer_close(available)
+ numeric_buffer_close(output);integer_buffer_close(indices);numeric_buffer_close(stage)
+ true
+}
+fn main()->i32 with Alloc,IO,Mut,Div,Panic {
+ assert(large_family());assert(tiny_family());assert(empty_family())
+ let n:i64=8
+ var p=numeric_buffer_new(n,64)
+ var available=integer_buffer_new(n,64)
+ var output=numeric_buffer_new(n,64)
+ var indices=integer_buffer_new(n,64)
+ var stage=numeric_buffer_new(n,64)
+ let values:[f64;8]=[0.01,0.04,0.03,0.02,0.9,0.0,-123.0,1.0]
+ let bonf:[f64;8]=[0.08,0.32,0.24,0.16,1.0,0.0,1.0,1.0]
+ let bh_expected:[f64;8]=[1.0/25.0,8.0/125.0,3.0/50.0,4.0/75.0,1.0,0.0,1.0,1.0]
+ var i:i64=0
+ while i<n {
+  numeric_buffer_set(&!p,i,values[i as usize])
+  integer_buffer_set(&!available,i,if i==6 {0}else{1})
+  numeric_buffer_set(&!output,i,-777.0)
+  i=i+1
+ }
+ integer_buffer_set(&!available,7,2)
+ let bad_flag=dynamic_adjust_by(&p,&available,n,&!output,&!indices,&!stage)
+ assert(bad_flag.status==2 && numeric_buffer_at(&output,0)== -777.0)
+ integer_buffer_set(&!available,7,1)
+ numeric_buffer_set(&!p,7,-1.0)
+ let bad_p=dynamic_adjust_by(&p,&available,n,&!output,&!indices,&!stage)
+ assert(bad_p.status==4 && numeric_buffer_at(&output,7)== -777.0)
+ numeric_buffer_set(&!p,7,1.0)
+ assert(dynamic_adjust_pvalues(&p,&available,n,3,&!output,&!indices,&!stage).status==5)
+ assert(dynamic_adjust_by(&p,&available,n-1,&!output,&!indices,&!stage).status==1)
+ var method:i64=0
+ while method<3 {
+  let result=dynamic_adjust_pvalues(&p,&available,n,method,&!output,&!indices,&!stage)
+  assert(result.status==0 && result.family_size==8 && result.available_count==7)
+  assert(!result.assumptions_assessed)
+  if method==2 {assert(mt_close(result.harmonic_factor,761.0/280.0))}
+  print("adjusted method: ");println(method)
+  i=0
+  while i<n {
+   let value=numeric_buffer_at(&output,i)
+   var expected=bonf[i as usize]
+   if method==1 {expected=bh_expected[i as usize]}
+   if method==2 {
+    expected=bh_expected[i as usize]*(761.0/280.0)
+    if expected>1.0 {expected=1.0}
+   }
+   assert(mt_close(value,expected))
+   if expected==0.0 {assert(value==0.0)}
+   print("adjusted value: ");println_f64_sci(value,15)
+   i=i+1
+  }
+  // Effective p=1 tie is ordered by original index.
+  assert(integer_buffer_at(&indices,6)==6 && integer_buffer_at(&indices,7)==7)
+  method=method+1
+ }
+ numeric_buffer_close(p);integer_buffer_close(available)
+ numeric_buffer_close(output);integer_buffer_close(indices);numeric_buffer_close(stage)
+ println("DEEP MULTIPLE TESTING PASS")
+ 0
+}

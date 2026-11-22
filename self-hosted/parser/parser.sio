@@ -5,11 +5,14 @@ module parser::parser
 use parser::ast::*
 use lexer::token::*
 use lexer::cursor::*
+use lexer::tables::{keyword_lookup}
+use lexer::span::{srcmap_current}
 
-// Keep token storage out of Parser state so Parser method calls don't
-// repeatedly copy a 65k token array by value.
-var PARSER_TOKENS: [Token; 2097152] = [Token::new(); 2097152]
-// Boot4-compatible parallel scalar arrays (boot4 can't index struct-typed global arrays)
+// Token storage lives in the parallel scalar arrays below, outside Parser state.
+// (A `[Token; 2097152]` global, PARSER_TOKENS, used to sit here unread: nothing
+// called its accessor. Once lean_single gave global struct arrays real element
+// storage (#1655), its `[Token::new(); N]` initializer would have written ~640 MB
+// at every compiler start, so it was removed rather than kept as dead weight.)
 var PT_KIND: [TokenKind; 2097152] = [TokenKind::Eof; 2097152]
 var PT_KIND_CODE: [i64; 2097152] = [0; 2097152]
 var PT_START: [i64; 2097152] = [0; 2097152]
@@ -107,18 +110,22 @@ pub fn parser_new() -> Parser {
     }
 }
 
-pub fn parser_set_tokens(tokens: [Token; 2097152], token_count: i64) with Mut, Panic, Div {
+// #1156: the token array is taken by reference. By value, every call copied
+// 2,097,152 tokens (~688 MB: a Token carries a 256-byte text buffer) into
+// the callee frame, and a program that merely contains this function makes the
+// native lowerer materialise that aggregate.
+pub fn parser_set_tokens(tokens: &[Token; 2097152], token_count: i64) with Mut, Panic, Div {
     var i: i64 = 0
     while i < token_count && i < 2097152 {
         // Write to parallel scalar arrays (boot4-compatible)
-        PT_KIND[i as usize] = tokens[i as usize].kind
-        PT_KIND_CODE[i as usize] = tokens[i as usize].kind as i64
-        PT_START[i as usize] = tokens[i as usize].start
-        PT_END[i as usize] = tokens[i as usize].end
-        PT_LINE[i as usize] = tokens[i as usize].line
-        PT_COL[i as usize] = tokens[i as usize].col
-        PT_INT_VALUE[i as usize] = tokens[i as usize].int_value
-        PT_TEXT_LEN[i as usize] = tokens[i as usize].text_len
+        PT_KIND[i as usize] = (*tokens)[i as usize].kind
+        PT_KIND_CODE[i as usize] = (*tokens)[i as usize].kind as i64
+        PT_START[i as usize] = (*tokens)[i as usize].start
+        PT_END[i as usize] = (*tokens)[i as usize].end
+        PT_LINE[i as usize] = (*tokens)[i as usize].line
+        PT_COL[i as usize] = (*tokens)[i as usize].col
+        PT_INT_VALUE[i as usize] = (*tokens)[i as usize].int_value
+        PT_TEXT_LEN[i as usize] = (*tokens)[i as usize].text_len
         i = i + 1
     }
 }
@@ -137,15 +144,7 @@ pub fn parser_set_token_at(idx: i64, tok: Token) with Mut, Panic {
     }
 }
 
-fn parser_get_token_at(idx: i64) -> Token with Panic {
-    if idx >= 0 && idx < 2097152 {
-        PARSER_TOKENS[idx as usize]
-    } else {
-        Token::with_kind(TokenKind::Eof, 0, 0, 0, 0)
-    }
-}
-
-// Boot4-safe: write token fields directly into PARSER_TOKENS without creating Token local
+// Boot4-safe: write token fields directly into the PT_* arrays without creating a Token local
 // Avoids boot4's 4MB stack frame for functions with IS_SPTR=4 locals
 pub fn parser_set_token_scalar(idx: i64, kind: TokenKind, start: i64, end: i64, line: i64, col: i64) with Mut, Panic {
     if idx >= 0 && idx < 2097152 {
@@ -175,10 +174,8 @@ fn parser_set_token_float_value(idx: i64, val: f64) with Mut, Panic {
 }
 
 fn parser_set_token_text_byte(idx: i64, byte_idx: i64, val: i8) with Mut, Panic {
-    // PARSER_TOKENS struct write skipped for stage0 compatibility
     // Token text is stored in PT_TEXT_* parallel arrays instead
     if idx >= 0 && idx < 2097152 && byte_idx >= 0 && byte_idx < 256 {
-        // Skip: PARSER_TOKENS[idx as usize].text[byte_idx as usize] = val
         let dummy = val
     }
 }
@@ -314,6 +311,210 @@ pub fn parser_last_had_error() -> bool {
 pub fn parser_last_error_count() -> i64 {
     PARSER_LAST_ERROR_COUNT
 }
+
+// ADR-015 row 1: an integer literal that fits no integer type must be refused,
+// never silently wrapped. The lexer accumulates into i64 and has no notion of
+// width, so `99999999999999999999` became 7766279631452241919 and
+// `0x1FFFFFFFFFFFFFFFF` became -1 with rc=0 (probes int_huge / int_hex_over in
+// docs/audit/S01_LEXICAL_PROBES_2026-10-22). This is the width-independent half
+// of the ruling: a literal wider than 64 bits fits no type, so it is refused at
+// the token. The band (i64 MAX, u64 MAX] is deliberately NOT refused here — the
+// corpus uses it as a type-independent bit pattern (`0xBF31A9BDE18F45C7` in the
+// codegen emitters, 51 sites) and as annotated `u64` literals (6 sites), and
+// deciding it needs the declared type, which is the checker's half.
+//
+// Reads the token's own source bytes: the accumulated value is already wrapped
+// by the time the parser sees it, so only the spelling tells the truth.
+pub fn parser_span_int_literal_overflow(start: i64, end: i64) -> bool with Mut, Panic {
+    if end <= start + 1 { return false }
+    var base: i64 = 10
+    var digits_from = start
+    let b0 = cursor_source_byte(start)
+    let b1 = cursor_source_byte(start + 1)
+    if b0 == (48 as i8) {
+        if b1 == (120 as i8) || b1 == (88 as i8) { base = 16; digits_from = start + 2 }
+        else if b1 == (98 as i8) || b1 == (66 as i8) { base = 2; digits_from = start + 2 }
+        else if b1 == (111 as i8) || b1 == (79 as i8) { base = 8; digits_from = start + 2 }
+    }
+    // Count significant digits (separators and leading zeros carry no width),
+    // and remember where they start: the boundary tests below read at most 18
+    // digits at a time so no accumulation can wrap. No hand-copied ASCII table
+    // of 2^63 or 2^64 anywhere — a [i8; 20] of the latter silently drifted from
+    // the constant it claimed to encode and refused u64 MAX, and a 19-digit
+    // accumulator overflows i64 and came back negative, which made an earlier
+    // version accept 99999999999999999999.
+    var seen = false
+    var count: i64 = 0
+    var first_sig = digits_from   // position of the first significant digit
+    var i = digits_from
+    while i < end {
+        let c = cursor_source_byte(i)
+        if c == (95 as i8) {
+            i = i + 1
+            continue
+        }
+        // Hex digits are hex: the first version tested '0'..'9' for every base,
+        // so 0x1FFFFFFFFFFFFFFFF stopped at the first 'F' and counted one digit.
+        var d: i64 = 0
+        var is_digit = true
+        if c >= (48 as i8) && c <= (57 as i8) { d = (c - (48 as i8)) as i64 }
+        else if base == 16 && c >= (97 as i8) && c <= (102 as i8) { d = (c - (87 as i8)) as i64 }
+        else if base == 16 && c >= (65 as i8) && c <= (70 as i8) { d = (c - (55 as i8)) as i64 }
+        else { is_digit = false }
+        if !is_digit { break }   // a suffix (`5u8`) ends the number
+        if !seen {
+            if d == 0 {
+                i = i + 1
+                continue
+            }
+            seen = true
+            first_sig = i
+        }
+        count = count + 1
+        i = i + 1
+    }
+    if !seen { return false }
+    // Non-decimal bases decide on digit count alone: 16 hex digits is exactly
+    // u64 MAX, 64 binary and 22 octal likewise.
+    if base == 16 { return count > 16 }
+    if base == 2 { return count > 64 }
+    if base == 8 { return count > 22 }
+    if count > 20 { return true }
+    if count < 19 { return false }
+    // (19 and 20 significant digits are the only bands where the width alone
+    // cannot decide: i64 MAX is 19 digits and u64 MAX is 20.)
+    // Decimal, 19 or 20 significant digits. Accumulating 19 digits in i64 is NOT
+    // safe — 9999999999999999999 exceeds i64 MAX and wraps negative, which made
+    // an earlier version of this test accept 99999999999999999999. So: the first
+    // significant digit branches, the next 18 are accumulated (always < 10^18,
+    // exact), and any digit past the 19th is read separately. 1844674407370955161
+    // is 2^64/10 and 922337203685477580 is 2^63/10, both exactly 18 digits.
+    // value = first digit * 10^k + the rest. Comparing the whole run at once
+    // would need 19 or 20 digits in an i64, which overflows; split this way each
+    // part stays below 2^63 and every comparison is exact.
+    // Both remaining cases split the value as <two digits> * 10^18 + <18 digits>,
+    // because 18 digits never overflow i64 (999999999999999999 < 2^63-1) while 19
+    // of them can: 19999999999999999999 was the case an earlier cut of this test
+    // accumulated straight past i64 MIN.
+    let d0 = cursor_source_byte(first_sig)
+    var i2 = first_sig + 1
+    var d1 = d0
+    var skip = true
+    while i2 < end && skip {          // `_` inside the literal is not a digit
+        let c1 = cursor_source_byte(i2)
+        if c1 == (95 as i8) { i2 = i2 + 1; continue }
+        d1 = c1
+        skip = false
+    }
+    i2 = i2 + 1
+    var acc: i64 = 0
+    var got: i64 = 0
+    while i2 < end && got < 18 {
+        let cc = cursor_source_byte(i2)
+        if cc == (95 as i8) { i2 = i2 + 1; continue }
+        if cc < (48 as i8) || cc > (57 as i8) { break }
+        acc = acc * 10 + ((cc - (48 as i8)) as i64)
+        got = got + 1
+        i2 = i2 + 1
+    }
+    let lead2 = ((d0 - (48 as i8)) as i64) * 10 + ((d1 - (48 as i8)) as i64)
+    if count == 20 {
+        // 2^64 = 18 * 10^18 + 446744073709551616.
+        if lead2 > 18 { return true }
+        if lead2 < 18 { return false }
+        return acc >= 446744073709551616
+    }
+    // 19 digits. 2^63 = 92 * 10^18 + 23372036854775808, and i64 MAX is one
+    // below. 2^63 is still inside the documented u64 band; the parser's job here
+    // is only width, not signedness. Let the checker decide how a value in
+    // (i64 MAX, u64 MAX] is used.
+    if lead2 != 92 { return false }
+    if acc != 23372036854775808 { return false }
+    false
+}
+
+// ADR-015 row 6: extracts numeric type suffix (e.g. "u8", "i32", "f64") from the token's span.
+// Returns an empty Name if the literal has no suffix.
+pub fn parse_suffix_name_from_source(start: i64, end: i64) -> Name with Mut, Panic {
+    var name = Name { buf: [0; 384], len: 0 }
+    if end <= start + 1 { return name }
+    let l = end - start
+    if l >= 4 {
+        let b0 = cursor_source_byte(end - 4)
+        let b1 = cursor_source_byte(end - 3)
+        let b2 = cursor_source_byte(end - 2)
+        let b3 = cursor_source_byte(end - 1)
+        if b0 == (102 as i8) && b1 == (49 as i8) && b2 == (50 as i8) && b3 == (56 as i8) {  // f128
+            name.buf[0] = b0; name.buf[1] = b1; name.buf[2] = b2; name.buf[3] = b3; name.len = 4
+            return name
+        }
+        if b0 == (102 as i8) && b1 == (50 as i8) && b2 == (53 as i8) && b3 == (54 as i8) {  // f256
+            name.buf[0] = b0; name.buf[1] = b1; name.buf[2] = b2; name.buf[3] = b3; name.len = 4
+            return name
+        }
+    }
+    if l >= 3 {
+        let b0 = cursor_source_byte(end - 3)
+        let b1 = cursor_source_byte(end - 2)
+        let b2 = cursor_source_byte(end - 1)
+        if (b0 == (117 as i8) || b0 == (105 as i8)) && ((b1 == (49 as i8) && b2 == (54 as i8)) || (b1 == (51 as i8) && b2 == (50 as i8)) || (b1 == (54 as i8) && b2 == (52 as i8))) {
+            // u16, u32, u64, i16, i32, i64
+            name.buf[0] = b0; name.buf[1] = b1; name.buf[2] = b2; name.len = 3
+            return name
+        }
+        if b0 == (102 as i8) && ((b1 == (51 as i8) && b2 == (50 as i8)) || (b1 == (54 as i8) && b2 == (52 as i8))) {
+            // f32, f64
+            name.buf[0] = b0; name.buf[1] = b1; name.buf[2] = b2; name.len = 3
+            return name
+        }
+    }
+    if l >= 2 {
+        let b0 = cursor_source_byte(end - 2)
+        let b1 = cursor_source_byte(end - 1)
+        if (b0 == (117 as i8) || b0 == (105 as i8)) && b1 == (56 as i8) {
+            // u8, i8
+            name.buf[0] = b0; name.buf[1] = b1; name.len = 2
+            return name
+        }
+    }
+    name
+}
+
+// Is the byte before `start` a minus acting as a prefix operator on this
+// literal? A `-` is binary subtraction when the token before it can already end
+// a value (`x - 1`, `f() - 1`, `a[0] - 1`), and prefix otherwise (`-1`, `f(-1)`,
+// `(-1)`, `x == -1`). Read from the source rather than from a token-kind list so
+// the test cannot go stale when the lexer's kind numbers move.
+fn parser_prefix_minus_before(start: i64) -> bool with Mut, Panic {
+    var i = start - 1
+    while i >= 0 {
+        let c = cursor_source_byte(i)
+        if c == (32 as i8) || c == (9 as i8) || c == (10 as i8) || c == (13 as i8) {
+            i = i - 1
+            continue
+        }
+        if c != (45 as i8) { return false }
+        break
+    }
+    if i < 0 { return false }
+    i = i - 1
+    while i >= 0 {
+        let c2 = cursor_source_byte(i)
+        if c2 == (32 as i8) || c2 == (9 as i8) || c2 == (10 as i8) || c2 == (13 as i8) {
+            i = i - 1
+            continue
+        }
+        break
+    }
+    if i < 0 { return true }
+    let before = cursor_source_byte(i)
+    let ends_value = (before >= (48 as i8) && before <= (57 as i8)) ||
+        (before >= (65 as i8) && before <= (90 as i8)) ||
+        (before >= (97 as i8) && before <= (122 as i8)) || before == (95 as i8) ||
+        before == (41 as i8) || before == (93 as i8)
+    !ends_value
+}
+
 
 pub fn parser_reset_truncated_literals() with Mut {
     PARSER_TRUNCATED_LITERALS = 0
@@ -485,6 +686,59 @@ fn token_kind_from_flat_code(kind: i64) -> TokenKind {
 
 // Read token kind from parallel scalar code array. Avoid reading PT_KIND for
 // high-valued variants because the boot4 global enum array corrupts them.
+// #1472: copy a source span into keyword_lookup's buffer shape and ask the one
+// keyword table in lexer/tables.sio.
+fn pt_keyword_lookup_span(start: i64, len: i64) -> TokenKind with Mut, Panic {
+    var text: [i8; 256] = [0; 256]
+    var i: i64 = 0
+    while i < len && i < 256 {
+        text[i as usize] = CURSOR_SOURCE[(start + i) as usize]
+        i = i + 1
+    }
+    keyword_lookup(text, len)
+}
+
+// The lowercase item-introducing keyword family. Every member is also a
+// contextual identifier (tk_is_contextual_ident) except `contest`, which the
+// expression parser handles directly, and `audit`, which is the `expr audit Name`
+// attachment operator as well as an item.
+fn tk_is_item_keyword_lower(k: TokenKind) -> bool {
+    k == TokenKind::ModelsLower
+        || k == TokenKind::PolicyLower
+        || k == TokenKind::ContestLower
+        || k == TokenKind::AuditLower
+        || k == TokenKind::ValidationLower
+        || k == TokenKind::AcquisitionPolicyLower
+        || k == TokenKind::RecoursePolicyLower
+        || k == TokenKind::MonitoringPolicyLower
+        || k == TokenKind::TransitionPolicyLower
+        || k == TokenKind::TransitionProtocolLower
+        || k == TokenKind::AlternativePolicyLower
+        || k == TokenKind::AlternativeFrontierLower
+        || k == TokenKind::DecisionPolicyLower
+        || k == TokenKind::DeferralPolicyLower
+}
+
+// The fallback arm of parse_prefix used to set had_error and return in
+// silence, so `let x = @y` failed with no line and no reason. Same wording
+// family as Parser::expect, same 20-message cap.
+pub fn parser_report_expected_expression(pos: i64, error_count: i64) with Mut, IO, Panic, Div {
+    if error_count > 20 {
+        return
+    }
+    print("parse error: expected expression at line ")
+    if pos >= 0 && pos < 2097152 {
+        print_int(PT_LINE[pos as usize])
+        print(":")
+        print_int(PT_COL[pos as usize])
+        print(": found ")
+        print(tk_display_name(pt_read_kind(pos)))
+        print("\n")
+    } else {
+        print("unknown\n")
+    }
+}
+
 pub fn pt_read_kind(idx: i64) -> TokenKind with Mut, Panic, Div {
     if idx >= 0 && idx < 2097152 {
         let code = PT_KIND_CODE[idx as usize]
@@ -797,12 +1051,6 @@ pub fn pt_read_kind(idx: i64) -> TokenKind with Mut, Panic, Div {
             if a == (97 as i8) && b == (102 as i8) && c == (102 as i8) && d == (105 as i8) && e == (110 as i8) && f == (101 as i8) {
                 return TokenKind::Affine
             }
-            if a == (109 as i8) && b == (111 as i8) && c == (100 as i8) && d == (101 as i8) && e == (108 as i8) && f == (115 as i8) {
-                return TokenKind::ModelsLower
-            }
-            if a == (112 as i8) && b == (111 as i8) && c == (108 as i8) && d == (105 as i8) && e == (99 as i8) && f == (121 as i8) {
-                return TokenKind::PolicyLower
-            }
         }
         if len == 7 {
             let a = CURSOR_SOURCE[start as usize]
@@ -824,9 +1072,6 @@ pub fn pt_read_kind(idx: i64) -> TokenKind with Mut, Panic, Div {
             }
             if a == (67 as i8) && b == (111 as i8) && c == (110 as i8) && d == (116 as i8) && e == (101 as i8) && f == (115 as i8) && g == (116 as i8) {
                 return TokenKind::Contest
-            }
-            if a == (99 as i8) && b == (111 as i8) && c == (110 as i8) && d == (116 as i8) && e == (101 as i8) && f == (115 as i8) && g == (116 as i8) {
-                return TokenKind::ContestLower
             }
         }
         if len == 8 {
@@ -880,6 +1125,18 @@ pub fn pt_read_kind(idx: i64) -> TokenKind with Mut, Panic, Div {
             if (ch0 >= (97 as i8) && ch0 <= (122 as i8)) ||
                (ch0 >= (65 as i8) && ch0 <= (90 as i8)) ||
                ch0 == (95 as i8) {
+                // #1472: the lowercase item keywords (`models`, `policy`, `contest`,
+                // `audit`, `validation`, `*_policy`, `transition_protocol`,
+                // `alternative_frontier`) come from the ONE keyword table,
+                // lexer/tables.sio:keyword_lookup, instead of a second inlined copy
+                // that had drifted (it knew only models/policy/contest, so the
+                // `audit` / `validation` / `acquisition_policy` item forms were
+                // unparseable on this path). They stay contextual identifiers
+                // everywhere else (lexer/token.sio:tk_is_contextual_ident).
+                if ch0 >= (97 as i8) && ch0 <= (122 as i8) && len <= 24 {
+                    let kw = pt_keyword_lookup_span(start, len)
+                    if tk_is_item_keyword_lower(kw) { return kw }
+                }
                 return TokenKind::Ident
             }
         }
@@ -903,12 +1160,137 @@ pub fn pt_read_kind(idx: i64) -> TokenKind with Mut, Panic, Div {
     }
 }
 
+// #1472: contextual keyword test against the ONE keyword table. Inside an item
+// body (`require`, `route`, `objective`, `strategy`, `step`, `max_steps`,
+// `rollback_route`) the word is a keyword; everywhere else it is a name, so
+// pt_read_kind keeps returning Ident for it. This asks keyword_lookup about the
+// token's text instead of relying on a second, drifting table.
+pub fn parser_at_kw(p: Parser, kind: TokenKind) -> bool with Mut, Panic, Div {
+    if parser_peek(p) == kind { return true }
+    if p.pending_gt > 0 || p.pos < 0 || p.pos >= p.token_count { return false }
+    let start = PT_START[p.pos as usize]
+    let len = PT_END[p.pos as usize] - start
+    if len <= 0 || len > 24 { return false }
+    pt_keyword_lookup_span(start, len) == kind
+}
+
 pub fn pt_read_kind_code(idx: i64) -> i64 with Panic {
     if idx >= 0 && idx < 2097152 {
         PT_KIND_CODE[idx as usize]
     } else {
         0
     }
+}
+
+// #2828: a module that declares its own `struct Box` / `enum Box` (or imports
+// one by name, `use m::{Box}`) refers to THAT type everywhere it spells `Box`;
+// the definition shadows the builtin Box<T>. Lowering recognises the builtin by
+// the bare name (ir_name_is_box, ~28 sites), so a user struct called Box had
+// its first field dereferenced as a heap pointer (SIGSEGV, or a silent wrong
+// value). Rather than teach every one of those sites about scope, the parser
+// gives the user type a distinct spelling, `Box__user`, in the module where it
+// is in scope -- the same move builtin_shadow_apply_items makes for a user fn
+// named like a builtin (KL-21). Set per parse by parser_prescan_user_box.
+var PARSER_USER_BOX: i64 = 0
+
+fn parser_token_is_box(idx: i64) -> bool with Panic {
+    if PT_END[idx as usize] - PT_START[idx as usize] != 3 { return false }
+    let s = PT_START[idx as usize]
+    CURSOR_SOURCE[s as usize] == 66 as i8 && CURSOR_SOURCE[(s + 1) as usize] == 111 as i8
+        && CURSOR_SOURCE[(s + 2) as usize] == 120 as i8
+}
+
+// Mirror parse_use_item / parse_type_path's finite import prefix. The flat
+// lexer discards newlines, so scanning until Newline/Semi leaks a glob or
+// path import into the next item's Box annotation. An explicit Box is only
+// the terminal path segment or a name in the selective import list; glob
+// imports do not name a Box. No `as` import aliases exist in this grammar.
+fn parser_prescan_next_non_newline(idx: i64, token_count: i64) -> i64 with Mut, Panic, Div {
+    var i = idx
+    while i < token_count && i < 2097152 && pt_read_kind(i) == TokenKind::Newline {
+        i = i + 1
+    }
+    i
+}
+
+fn parser_prescan_import_box(idx: i64, token_count: i64) -> bool with Mut, Panic, Div {
+    var i = parser_prescan_next_non_newline(idx, token_count)
+    if i >= token_count || i >= 2097152 { return false }
+    let first = pt_read_kind(i)
+    if first != TokenKind::Ident && !tk_is_keyword(first) { return false }
+    var terminal_box = parser_token_is_box(i)
+    i = parser_prescan_next_non_newline(i + 1, token_count)
+    while i < token_count && i < 2097152 && pt_read_kind(i) == TokenKind::ColonColon {
+        i = parser_prescan_next_non_newline(i + 1, token_count)
+        if i >= token_count || i >= 2097152 { return false }
+        let k = pt_read_kind(i)
+        if k == TokenKind::Star { return false }
+        if k == TokenKind::LBrace {
+            i = parser_prescan_next_non_newline(i + 1, token_count)
+            var imports_box = false
+            while i < token_count && i < 2097152 {
+                let item_kind = pt_read_kind(i)
+                if item_kind == TokenKind::RBrace { return imports_box }
+                if item_kind != TokenKind::Ident && !tk_is_keyword(item_kind) { return false }
+                if parser_token_is_box(i) { imports_box = true }
+                i = parser_prescan_next_non_newline(i + 1, token_count)
+                if i >= token_count || i >= 2097152 { return false }
+                let after_item = pt_read_kind(i)
+                if after_item == TokenKind::RBrace { return imports_box }
+                if after_item != TokenKind::Comma { return false }
+                i = parser_prescan_next_non_newline(i + 1, token_count)
+            }
+            return false
+        }
+        if k != TokenKind::Ident && !tk_is_keyword(k) { return false }
+        terminal_box = parser_token_is_box(i)
+        i = parser_prescan_next_non_newline(i + 1, token_count)
+    }
+    terminal_box
+}
+
+pub fn parser_prescan_user_box(token_count: i64) with Mut, Panic, Div {
+    PARSER_USER_BOX = 0
+    var depth: i64 = 0
+    var i: i64 = 0
+    while i < token_count && i < 2097152 {
+        let k = pt_read_kind(i)
+        if k == TokenKind::LBrace {
+            depth = depth + 1
+        } else if k == TokenKind::RBrace {
+            if depth > 0 { depth = depth - 1 }
+        } else if k == TokenKind::Use && depth == 0 {
+            if parser_prescan_import_box(i + 1, token_count) {
+                PARSER_USER_BOX = 1
+                return
+            }
+        } else if k == TokenKind::Ident && parser_token_is_box(i) {
+            if depth == 0 && i > 0 {
+                var j = i - 1
+                while j > 0 && pt_read_kind(j) == TokenKind::Newline { j = j - 1 }
+                let pk = pt_read_kind(j)
+                if pk == TokenKind::Struct || pk == TokenKind::Enum {
+                    PARSER_USER_BOX = 1
+                    return
+                }
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn parser_user_box_rename(name: Name) -> Name with Mut, Panic, Div {
+    if PARSER_USER_BOX == 0 || name.len != 3 { return name }
+    if name.buf[0] != 66 as i8 || name.buf[1] != 111 as i8 || name.buf[2] != 120 as i8 { return name }
+    var out = name
+    out.buf[3] = 95 as i8
+    out.buf[4] = 95 as i8
+    out.buf[5] = 117 as i8
+    out.buf[6] = 115 as i8
+    out.buf[7] = 101 as i8
+    out.buf[8] = 114 as i8
+    out.len = 9
+    out
 }
 
 // The Name of an arbitrary token, for two-word contextual keywords where the
@@ -929,7 +1311,7 @@ pub fn parser_name_at(p: Parser, idx: i64) -> Name with Mut, Panic, Div {
         name.buf[i as usize] = CURSOR_SOURCE[(s + i) as usize]
         i = i + 1
     }
-    name
+    parser_user_box_rename(name)
 }
 
 pub fn pt_read_start(idx: i64) -> i64 with Panic {
@@ -1034,20 +1416,23 @@ pub fn parser_advance(p_in: Parser) -> Parser with Mut, Panic, Div {
 // which needs integers wider than i64 -- so this is Clinger's AlgorithmM on a
 // small bignum.
 //
-// Base 2^31 limbs so that limb*10 + carry stays far inside i64. 64 limbs is
-// 1984 bits, against 1329 for 10^400, which is the clamp applied to dexp.
+// Base 2^31 limbs so that limb*10 + carry stays far inside i64. 160 limbs
+// is 4960 bits: an 800-significant-digit retained significand is 2658 bits
+// and 10^1123 (the largest denominator the retained path can build inside
+// the finite binary64 range) is 3730 bits.
 //
 // Module-level rather than local arrays on purpose: boot4 corrupts
 // struct-by-value and large local aggregates, and the rest of this file
 // already uses the scalar-globals idiom for the same reason.
-var PFL_N: [i64; 64] = [0; 64]
+var PFL_N: [i64; 160] = [0; 160]
 var PFL_NL: i64 = 0
-var PFL_D: [i64; 64] = [0; 64]
+var PFL_D: [i64; 160] = [0; 160]
 var PFL_DL: i64 = 0
+var PFL_OVERFLOW: bool = false
 
 fn pfl_set(is_num: bool, v: i64) with Mut, Panic, Div {
     var i: i64 = 0
-    while i < 64 {
+    while i < 160 {
         if is_num { PFL_N[i as usize] = 0 } else { PFL_D[i as usize] = 0 }
         i = i + 1
     }
@@ -1072,12 +1457,34 @@ fn pfl_mul_small(is_num: bool, m: i64) with Mut, Panic, Div {
         carry = prod / 2147483648
         i = i + 1
     }
-    while carry > 0 && len < 64 {
+    while carry > 0 && len < 160 {
         if is_num { PFL_N[len as usize] = carry % 2147483648 } else { PFL_D[len as usize] = carry % 2147483648 }
         carry = carry / 2147483648
         len = len + 1
     }
+    if carry > 0 { PFL_OVERFLOW = true }
     if is_num { PFL_NL = len } else { PFL_DL = len }
+}
+
+// PFL_N = PFL_N * 10 + d, for building a decimal significand digit by digit.
+fn pfl_num_mul10_add(d: i64) with Mut, Panic, Div {
+    if PFL_NL == 0 {
+        if d != 0 { PFL_N[0] = d  PFL_NL = 1 }
+        return
+    }
+    pfl_mul_small(true, 10)
+    var carry = d
+    var i: i64 = 0
+    while carry > 0 {
+        if i >= PFL_NL {
+            if PFL_NL >= 160 { PFL_OVERFLOW = true  return }
+            PFL_NL = PFL_NL + 1
+        }
+        let v = PFL_N[i as usize] + carry
+        PFL_N[i as usize] = v % 2147483648
+        carry = v / 2147483648
+        i = i + 1
+    }
 }
 
 fn pfl_bits(is_num: bool) -> i64 with Mut, Panic, Div {
@@ -1150,10 +1557,11 @@ fn pfl_scale2(x: f64, k: i64) -> f64 with Mut, Panic, Div {
     v
 }
 
-// sig * 10^dexp, correctly rounded. Only called when the exact fast paths
-// cannot answer.
-fn pfl_slow(sig: i64, dexp: i64) -> f64 with Mut, Panic, Div {
-    pfl_set(true, sig)
+// PFL_N * 10^dexp, correctly rounded, with the significand already in
+// PFL_N. `sticky` says the true value is strictly greater than the retained
+// significand (a nonzero digit was discarded past the 800 retained digits;
+// see parser_parse_float_token_big for why 800 digits make sticky enough).
+fn pfl_slow_prepared(dexp: i64, sticky: bool) -> f64 with Mut, Panic, Div {
     pfl_set(false, 1)
     var k: i64 = 0
     if dexp > 0 {
@@ -1176,6 +1584,18 @@ fn pfl_slow(sig: i64, dexp: i64) -> f64 with Mut, Panic, Div {
     // while every normal value was already exact.
     var want: i64 = 53
     if e < 0 - 1022 { want = e + 1075 }
+    // #2769: want == 0 is e == -1075, i.e. the value is in [2^-1075, 2^-1074):
+    // no significand bit is kept, but the value is at least half the smallest
+    // subnormal, so it still has to be ROUNDED, not flushed. Above the half
+    // (N/D > 1) it rounds up to 2^-1074 (4.9406564584124654e-324); exactly the
+    // half is a tie and rounds to even, 0. Returning 0.0 here read every
+    // literal in that interval -- including 4.9406564584124654e-324 and 3e-324
+    // -- as zero, silently.
+    if want == 0 {
+        pfl_sub()
+        if pfl_is_zero(true) && !sticky { return 0.0 }
+        return pfl_scale2(1.0, 0 - 1074)
+    }
     if want < 1 { return 0.0 }
     if want > 53 { want = 53 }
 
@@ -1194,7 +1614,7 @@ fn pfl_slow(sig: i64, dexp: i64) -> f64 with Mut, Panic, Div {
     var round_up = false
     if pfl_cmp() >= 0 {
         pfl_sub()
-        if !pfl_is_zero(true) { round_up = true }
+        if !pfl_is_zero(true) || sticky { round_up = true }
         else { if q % 2 == 1 { round_up = true } }
     }
     if round_up { q = q + 1 }
@@ -1210,6 +1630,13 @@ fn pfl_slow(sig: i64, dexp: i64) -> f64 with Mut, Panic, Div {
     // is, so the halving chain in pfl_scale2 is exact rather than repeatedly
     // rounding.
     pfl_scale2(q as f64, e - (want - 1))
+}
+
+// sig * 10^dexp, correctly rounded. Only called when the exact fast paths
+// cannot answer and the i64 significand is the whole literal.
+fn pfl_slow(sig: i64, dexp: i64) -> f64 with Mut, Panic, Div {
+    pfl_set(true, sig)
+    pfl_slow_prepared(dexp, false)
 }
 
 // Exact powers of ten, built by multiplication rather than written out:
@@ -1394,6 +1821,78 @@ pub fn f64_hex_literal_from_source(start: i64, end: i64) -> f64 with Mut, Panic,
     f64lit_scale_pow2(mant as f64, bexp)
 }
 
+// Long-decimal path (#2826): the token has a nonzero digit the i64
+// significand could not absorb, so sig * 10^dexp is a truncation of the
+// literal. Re-read the source digits into the bignum, retaining the first
+// 800 significant digits and remembering a nonzero tail as sticky. 800
+// suffices for a proof, not just in practice: a binary64 rounding midpoint
+// is an odd multiple of a power of two whose exact decimal expansion has at
+// most 769 significant digits (17 digits of odd significand times 5^1075,
+// 752 digits), so a midpoint lying strictly inside the retained interval
+// would need more significant digits than any midpoint has. Hence the only
+// ambiguity sticky must resolve is "retained value exactly at the midpoint,
+// true value above it" -- which is exactly what sticky says.
+fn parser_parse_float_token_big(start: i64, end: i64) -> f64 with Mut, Panic, Div {
+    var int_digits: i64 = 0
+    var seen_dot = false
+    var i = start
+    while i < end {
+        let cc = CURSOR_SOURCE[i as usize] as i64
+        if cc == 101 || cc == 69 { break }
+        if cc == 46 {
+            seen_dot = true
+        } else if cc >= 48 && cc <= 57 {
+            if !seen_dot { int_digits = int_digits + 1 }
+        }
+        i = i + 1
+    }
+    var exp_neg = false
+    var exp_value: i64 = 0
+    if i < end {
+        i = i + 1
+        if i < end && (CURSOR_SOURCE[i as usize] as i64) == 43 { i = i + 1 }
+        if i < end && (CURSOR_SOURCE[i as usize] as i64) == 45 { exp_neg = true  i = i + 1 }
+        while i < end {
+            let cc = CURSOR_SOURCE[i as usize] as i64
+            if cc >= 48 && cc <= 57 {
+                if exp_value < 100000 { exp_value = exp_value * 10 + (cc - 48) }
+            }
+            i = i + 1
+        }
+    }
+    if exp_neg { exp_value = 0 - exp_value }
+    PFL_OVERFLOW = false
+    pfl_set(true, 0)
+    var started = false
+    var sticky = false
+    var retained: i64 = 0
+    var first_pow: i64 = 0
+    var power = int_digits - 1
+    i = start
+    while i < end {
+        let cc = CURSOR_SOURCE[i as usize] as i64
+        if cc == 101 || cc == 69 { break }
+        if cc >= 48 && cc <= 57 {
+            let d = cc - 48
+            if !started && d == 0 {
+                // leading zero: no significand yet
+            } else {
+                if !started { started = true  first_pow = power + exp_value }
+                if retained < 800 {
+                    pfl_num_mul10_add(d)
+                    retained = retained + 1
+                } else if d != 0 { sticky = true }
+            }
+            power = power - 1
+        }
+        i = i + 1
+    }
+    if !started { return 0.0 }
+    if first_pow > 308 { return pfl_scale2(1.0, 2000) }
+    if first_pow < 0 - 324 { return 0.0 }
+    pfl_slow_prepared(first_pow - (retained - 1), sticky)
+}
+
 // Decimal -> binary64 (#1626). Exact significand + decimal exponent, scaled in
 // as few roundings as possible.
 //
@@ -1428,6 +1927,7 @@ fn parser_parse_float_token(start: i64, end: i64) -> f64 with Mut, Panic, Div {
     }
     var sig: i64 = 0
     var dexp: i64 = 0
+    var sig_tail_nonzero = false
     var seen_dot = false
     var i = start
     while i < end {
@@ -1452,6 +1952,7 @@ fn parser_parse_float_token(start: i64, end: i64) -> f64 with Mut, Panic, Div {
                     dexp = dexp - 1
                 }
             } else {
+                if ch != (48 as i8) { sig_tail_nonzero = true }
                 if !seen_dot {
                     dexp = dexp + 1
                 }
@@ -1492,6 +1993,9 @@ fn parser_parse_float_token(start: i64, end: i64) -> f64 with Mut, Panic, Div {
     }
     if sig == 0 {
         return 0.0
+    }
+    if sig_tail_nonzero {
+        return parser_parse_float_token_big(start, end)
     }
     let sf = sig as f64
     // Past +-400 the answer is infinity or zero either way; clamping keeps a
@@ -1615,9 +2119,71 @@ pub fn parser_ahead_is_hex_frac_p_ident(p: Parser, offset: i64) -> bool with Mut
     true
 }
 
+// C99 hex-float exponent with NO sign: the lexer's identifier rule swallows the
+// exponent digits, so `p0` / `p10` / `fp0` arrive as ONE Ident. A signed
+// exponent (`p+0`) stops the Ident at the sign, which is why only that form was
+// recognised. True when the Ident at p.pos+offset is
+//   <hex digit>{min_hex,} [pP] <decimal digit> <ident chars>*
+// (the trailing ident chars are a glued suffix, accepted exactly as a glued
+// suffix Ident is after `p+0`).
+pub fn parser_ahead_fused_exp_ident(p: Parser, offset: i64, min_hex: i64) -> bool with Mut, Panic, Div {
+    if p.pending_gt > 0 {
+        return false
+    }
+    let idx = p.pos + offset
+    if idx < 0 || idx >= p.token_count {
+        return false
+    }
+    if pt_read_kind(idx) != TokenKind::Ident {
+        return false
+    }
+    let s = PT_START[idx as usize]
+    let e = PT_END[idx as usize]
+    if s < 0 || e > CURSOR_SOURCE_LEN || e - s < 2 {
+        return false
+    }
+    var i: i64 = s
+    while i < e {
+        let ch = CURSOR_SOURCE[i as usize]
+        let is_hex = (ch >= 48 as i8 && ch <= 57 as i8)
+            || (ch >= 97 as i8 && ch <= 102 as i8)
+            || (ch >= 65 as i8 && ch <= 70 as i8)
+        if !is_hex {
+            break
+        }
+        i = i + 1
+    }
+    if i - s < min_hex || i + 1 >= e {
+        return false
+    }
+    let pch = CURSOR_SOURCE[i as usize]
+    if pch != 112 as i8 && pch != 80 as i8 {
+        return false
+    }
+    let d = CURSOR_SOURCE[(i + 1) as usize]
+    if d < 48 as i8 || d > 57 as i8 {
+        return false
+    }
+    true
+}
+
+// Token at p.pos+offset starts exactly where the previous token ends.
+pub fn parser_ahead_glued(p: Parser, offset: i64) -> bool with Mut, Panic, Div {
+    if p.pending_gt > 0 {
+        return false
+    }
+    let idx = p.pos + offset
+    if idx < 1 || idx >= p.token_count {
+        return false
+    }
+    PT_START[idx as usize] == PT_END[(idx - 1) as usize]
+}
+
 // V0-B: true when tokens after a HexLit look like a C99 hex-float tail:
 //   p±exp   or   .frac p±exp   or   FloatLit(.frac) p±exp
 //   or   . Ident(hexdigits+p) ±exp   (long hex frac fused with p)
+// and, with an unsigned exponent, the same shapes with `p<digits>` fused into
+// one glued Ident: `0x1p0`, `0x1.8p0`, `0x1.0fp0`, `0x1.fp0`.
 pub fn parser_hex_float_tail_ahead(p: Parser) -> bool with Mut, Panic, Div {
     if parser_ahead_is_p_ident(p, 1) {
         let after_p = parser_peek_ahead(p, 2)
@@ -1625,6 +2191,10 @@ pub fn parser_hex_float_tail_ahead(p: Parser) -> bool with Mut, Panic, Div {
             return parser_peek_ahead(p, 3) == TokenKind::IntLit
         }
         return after_p == TokenKind::IntLit
+    }
+    // `0x1p0`: HexLit + Ident(`p0`).
+    if parser_ahead_fused_exp_ident(p, 1, 0) && parser_ahead_glued(p, 1) {
+        return true
     }
     if parser_peek_ahead(p, 1) == TokenKind::Dot {
         let frac = parser_peek_ahead(p, 2)
@@ -1635,6 +2205,11 @@ pub fn parser_hex_float_tail_ahead(p: Parser) -> bool with Mut, Panic, Div {
                     return parser_peek_ahead(p, 5) == TokenKind::IntLit
                 }
                 return after_p == TokenKind::IntLit
+            }
+            // `0x1.8p0` / `0x1.0000000000000001p0`: IntLit(`8`) + Ident(`p0`);
+            // `0x1.0fp0`: IntLit(`0`) + Ident(`fp0`).
+            if parser_ahead_fused_exp_ident(p, 3, 0) && parser_ahead_glued(p, 3) {
+                return true
             }
         }
         // Fraction that starts with a decimal digit and continues with a hex
@@ -1660,6 +2235,10 @@ pub fn parser_hex_float_tail_ahead(p: Parser) -> bool with Mut, Panic, Div {
             }
             return after_p == TokenKind::IntLit
         }
+        // `0x1.fp0`: Ident(`fp0`), hex fraction and unsigned exponent fused.
+        if parser_ahead_fused_exp_ident(p, 2, 1) && parser_ahead_glued(p, 2) {
+            return true
+        }
     }
     // Lexer may fuse ".8" into a single FloatLit after HexLit "0x1".
     if parser_peek_ahead(p, 1) == TokenKind::FloatLit && parser_ahead_is_p_ident(p, 2) {
@@ -1668,6 +2247,10 @@ pub fn parser_hex_float_tail_ahead(p: Parser) -> bool with Mut, Panic, Div {
             return parser_peek_ahead(p, 4) == TokenKind::IntLit
         }
         return after_p == TokenKind::IntLit
+    }
+    if parser_peek_ahead(p, 1) == TokenKind::FloatLit
+        && parser_ahead_fused_exp_ident(p, 2, 0) && parser_ahead_glued(p, 2) {
+        return true
     }
     false
 }
@@ -1809,11 +2392,20 @@ impl Parser {
                 print_int(PT_LINE[p.pos as usize])
                 print(":")
                 print_int(PT_COL[p.pos as usize])
-                print(" expected=")
+                // Names, not numbers: `kind as i64` is a TokenKind discriminant
+                // while PT_KIND_CODE holds a flat lexer code for literals and
+                // operators, so the two raw numbers came from different
+                // numberings (docs/spec/2026-10 LEX-001). Both are kept in the
+                // brackets, labelled, for tools that read them.
+                print(": expected ")
+                print(tk_display_name(kind))
+                print(", found ")
+                print(tk_display_name(p.peek()))
+                print(" [expected kind=")
                 print_int(kind as i64)
-                print(" actual=")
+                print(", found code=")
                 print_int(PT_KIND_CODE[p.pos as usize])
-                print("\n")
+                print("]\n")
             } else {
                 print("unknown\n")
             }
@@ -1856,7 +2448,7 @@ impl Parser {
     fn current_span(self: Parser) -> Span with Panic, Div {
         if self.pos < self.token_count {
             Span::new(
-                0,
+                srcmap_current() as i32,
                 PT_START[self.pos as usize],
                 PT_END[self.pos as usize]
             )
@@ -1870,6 +2462,19 @@ impl Parser {
             Span::new(start.file_id, start.start, PT_END[self.pos as usize])
         } else {
             Span::new(start.file_id, start.start, start.end)
+        }
+    }
+
+    // Same end rule as span_from, but the start byte is a scalar. Expr.span on
+    // the native runtime can be arena index 0 with a null payload; reading
+    // start.file_id then SIGSEGVs at address 0x20 (slot 4). That is the Gen3
+    // preflight crash, in parse_expr_bp, on the first binary operator of
+    // main.sio. Token tables are already live at that point.
+    fn span_from_off(self: Parser, start_off: i64) -> Span with Panic, Div {
+        if self.pos < self.token_count {
+            Span::new(srcmap_current() as i32, start_off, PT_END[self.pos as usize])
+        } else {
+            Span::new(srcmap_current() as i32, start_off, start_off)
         }
     }
 
@@ -1919,7 +2524,7 @@ impl Parser {
                 name.buf[i as usize] = CURSOR_SOURCE[(s + i) as usize]
                 i = i + 1
             }
-            name
+            parser_user_box_rename(name)
         } else {
             Name { buf: [0; 384], len: 0 }
         }
@@ -1932,6 +2537,13 @@ impl Parser {
     fn at_expr_start(self: Parser) -> bool with Mut, Panic, Div {
         let k = self.peek()
         k == TokenKind::IntLit
+            // Hex, binary and octal integers are their own token kinds, and the
+            // primary parser accepts all three. Missing here, `return 0x10`
+            // parsed as a bare return followed by a dropped statement `0x10`,
+            // and the checker reported "expected i64, found ()" at `return`.
+            || k == TokenKind::HexLit
+            || k == TokenKind::BinLit
+            || k == TokenKind::OctLit
             || k == TokenKind::FloatLit
             || k == TokenKind::StringLit
             || k == TokenKind::CharLit
@@ -2034,6 +2646,8 @@ pub fn error_expr(span: Span) -> Expr {
         fields: None,
         cast_type: None,
         handler_block: None,
+        handler_clauses: None,
+        op_name: empty_name(),
         closure_params: None,
         closure_return: None,
         closure_effects: None,
@@ -2064,10 +2678,28 @@ pub fn mk_expr(kind: ExprKind, span: Span) -> Expr {
         fields: None,
         cast_type: None,
         handler_block: None,
+        handler_clauses: None,
+        op_name: empty_name(),
         closure_params: None,
         closure_return: None,
         closure_effects: None,
         closure_body: None,
         type_args: None,
     }
+}
+
+// Read-only views of the token arrays, for tools that print tokens (--emit-docs).
+pub fn parser_pt_start(i: i64) -> i64 {
+    if i >= 0 && i < 2097152 { return PT_START[i as usize] }
+    return 0 - 1
+}
+
+pub fn parser_pt_end(i: i64) -> i64 {
+    if i >= 0 && i < 2097152 { return PT_END[i as usize] }
+    return 0 - 1
+}
+
+pub fn parser_pt_line(i: i64) -> i64 {
+    if i >= 0 && i < 2097152 { return PT_LINE[i as usize] }
+    return 0 - 1
 }

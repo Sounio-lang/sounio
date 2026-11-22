@@ -2,8 +2,8 @@
 topic_id: repo.docs.research.m0-baseline-inventory
 authority: historical
 audience: researchers
-last_validated: 2026-03-07
-validated_by: A6
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.m0-baseline-inventory
 -->
 
@@ -76,7 +76,6 @@ Gap: no `SounioApproxCausalKnowledge.lean` (composition); no `SounioKnightian.le
 From `CLAUDE.md`:
 - `Knowledge<T>` is monomorphic (f64 only). `Knowledge<Knowledge<f64>>` will need a struct wrapper, not nested generics.
 - No closure literals — use named fn refs.
-- No unary minus — use `0 - x`.
 - `&![T; N]` bare array mutation broken in JIT — use struct wrapper.
 - GPU codegen exists but no end-to-end CLI path.
 

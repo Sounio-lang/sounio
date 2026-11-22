@@ -14,6 +14,15 @@
 - [ ] Test improvement (adding compile-fail gates or golden snapshot validations)
 - [ ] Performance improvement (reduction of bootstrap build time or codegen optimization)
 
+## Changelog
+
+<!-- Compiler, runtime, stdlib or CI-script changes need changelog.d/<slug>.<kind>.md
+     (kind=internal when nothing is user-visible). See changelog.d/README.md and ADR-018. -->
+
+- Fragment(s): <!-- e.g. changelog.d/fix-atan-reduction.numerical-correction.md -->
+- [ ] Changes printed numbers (kind `numerical` or `numerical-correction`)
+- [ ] Changes what existing programs do or whether they compile (kind `breaking`, `refusal` or `semantics`)
+
 ## Related Issues
 
 <!-- Link any related issues here, e.g., "Fixes #123" or "Related to #456" -->
@@ -48,10 +57,7 @@
 - [ ] **Sounio Syntax Standards**: I used `var` instead of `let mut`, and `&!` instead of `&mut`.
 - [ ] **Algebraic Effects declared**: Every modified function declares its active side-effects correctly (`with IO, Mut, Div, Panic`, etc.).
 - [ ] **No Rust Macro syntax**: I used standard `println()` and `assert()` instead of `println!` or `assert!`.
-- [ ] **Mathematical Operators**: I wrote negative numbers using explicit math (`0 - x` instead of `-x`).
-- [ ] **Bit Shifts**: Shift operands are explicitly cast or typed as `u8` (e.g. `x >> 4u8`).
 - [ ] **Compile and Type-Check**: I verified my code compiles and type-checks successfully using `./bin/souc check <file>`.
 - [ ] **Test Suite passes**: I have run `bash scripts/run_sio_test_suite.sh` and verified that the entire test suite is green.
-- [ ] **Documentation Registry Sync**: I ran `node scripts/docs/check_docs_registry.mjs` and ensured the topic registry is consistent. If I edited documentation, I updated the metadata with `node scripts/docs/sync_governance_metadata.mjs`.
-- [ ] **LLM-Offload Policy Compliance**: If this PR touches math derivations, Lean 4 proofs, or clinical pathways, I ran the mandatory `bin/llm-offload` audits and appended logs to `.claude/llm_offload_log.md`.
+- [ ] **Documentation Registry Sync**: I ran `node scripts/docs/check_docs_registry.mjs` and ensured the topic registry is consistent. If I edited documentation, I updated the metadata headers with `node scripts/docs/sync_governance_metadata.mjs` and did not commit `topic-registry.v1.json`, `DOCS_AUTHORITY_MATRIX.md` or the dataset snapshot.
 - [ ] **Apache-2.0 License**: I understand that my contributions will be licensed under the Apache License, Version 2.0.

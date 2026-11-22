@@ -247,6 +247,41 @@ pub fn sha256_update(state: SHA256State, data: [u8; 256], len: i32) -> SHA256Sta
     return s
 }
 
+// Absorb one 64-bit value as 8 big-endian bytes, IN PLACE.
+//
+// #2820: sha256_update takes the state and a [u8; 256] by value, so on Madaros
+// every call copies the state's arrays and the 256-byte block into fresh
+// arena space that is never reclaimed (2080 + 544 + 96 bytes per call). The
+// Pireus digest chains feed hundreds of thousands of words one at a time and
+// ran out of the 2 GiB arena. This entry point writes into the caller's state
+// through `&!`; it allocates only inside sha256_compress, once per 64 bytes.
+// Byte-for-byte the same digest as sha256_update with the same 8 bytes.
+pub fn sha256_update_be64(s: &!SHA256State, value: i64) with Mut, Panic, Div {
+    var k: i64 = 0
+    while k < 8 {
+        let byte = ((value >> ((7 - k) * 8)) & 255) as u8
+        let bl = (*s).buf_len
+        (*s).buffer[bl] = byte
+        (*s).buf_len = bl + 1
+        (*s).total_len = (*s).total_len + 1
+        if bl + 1 == 64 {
+            let nh = sha256_compress((*s).h, (*s).buffer)
+            var j: i64 = 0
+            while j < 8 {
+                (*s).h[j] = nh[j]
+                j = j + 1
+            }
+            (*s).buf_len = 0
+            var bi: i64 = 0
+            while bi < 64 {
+                (*s).buffer[bi] = 0
+                bi = bi + 1
+            }
+        }
+        k = k + 1
+    }
+}
+
 // Produce the final SHA-256 digest (FIPS 180-4 §5.1.1 padding + §6.2.2).
 pub fn sha256_finalize(state: SHA256State) -> SHA256Digest with Mut, Panic, Div {
     var s = state

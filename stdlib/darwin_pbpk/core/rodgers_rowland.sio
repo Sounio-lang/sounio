@@ -5,7 +5,8 @@
 // Rodgers-Rowland (2006) mechanistic tissue:plasma partition coefficient
 // prediction for neutral compounds with GUM uncertainty propagation.
 //
-// Reference: Rodgers T & Rowland M (2006) J Pharm Sci 95:1743-1764
+// Reference: Rodgers T & Rowland M (2006) J Pharm Sci 95(6):1238-1257,
+//            doi:10.1002/jps.20502.
 //
 // SCOPE: Neutral compounds only (rapamycin is a neutral macrolide, pKa N/A).
 //
@@ -31,12 +32,11 @@
 // MATH HELPERS
 // ============================================================================
 
-fn rr_sqrt(x: f64) -> f64 with Mut, Div {
-    if x <= 0.0 { return 0.0 }
-    var y = x
-    var i = 0
-    while i < 12 { y = (y + x / y) * 0.5; i = i + 1 }
-    y
+use math::pure::{exp, sqrt}
+
+fn rr_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    // Delegate to the shared range-reduced square-root helper.
+    sqrt(x)
 }
 
 fn rr_abs(x: f64) -> f64 {
@@ -45,17 +45,8 @@ fn rr_abs(x: f64) -> f64 {
 
 // exp(x) — Taylor series, matches ppcr_neural_net_demo pattern
 fn rr_exp(x: f64) -> f64 with Mut, Div, Panic {
-    if x > 20.0 { return rr_exp(x - 10.0) * rr_exp(10.0) }
-    if x < 0.0 - 20.0 { return 0.0 }
-    var sum = 1.0
-    var term = 1.0
-    var i = 1
-    while i <= 20 {
-        term = term * x / (i as f64)
-        sum = sum + term
-        i = i + 1
-    }
-    sum
+    // #846: delegate to the shared, full-range math::pure::exp.
+    exp(x)
 }
 
 // 10^x = exp(x * ln(10))
@@ -165,12 +156,19 @@ pub struct RRScaledUnc {
 // CORE COMPUTATION — Neutral Compound R-R (Eq. 6 in Rodgers 2006)
 // ============================================================================
 // For a neutral molecule (no ionization, fu_water = 1.0):
-//   Kpu_i = fw_e_i + fw_i_i + P*(fn_L_i + 0.3*fn_P_i)   [unbound tissue:unbound plasma]
-//   Kp_i  = Kpu_i / fu_plasma                             [total tissue:total plasma]
+//   Kpu_i = fw_e_i + fw_i_i + P*(fn_L_i + 0.3*fn_P_i)
+//   Kp_i  = fu_plasma * Kpu_i
+//
+// Declared concentration conventions:
+//   Kpu   = C_tissue,total / C_plasma,unbound
+//   Kp    = C_tissue,total / C_plasma,total
+//   Kp,uu = C_tissue,unbound / C_plasma,unbound
+// Therefore Kp = fu_plasma*Kpu and Kp,uu = (fu_tissue/fu_plasma)*Kp.
+// This neutral function does not use or recompute blood:plasma ratio or Ka.
 //
 // Analytical GUM sensitivities:
-//   ∂Kp/∂logP = P * ln(10) * (fn_L + 0.3*fn_P) / fu_plasma
-//   ∂Kp/∂fu   = -Kp / fu_plasma
+//   ∂Kp/∂logP = fu_plasma * P * ln(10) * (fn_L + 0.3*fn_P)
+//   ∂Kp/∂fu   = Kpu = Kp / fu_plasma
 //   u²(Kp) = (∂Kp/∂logP)² u²(logP) + (∂Kp/∂fu)² u²(fu)
 
 pub fn rr_neutral(
@@ -196,16 +194,16 @@ pub fn rr_neutral(
         // Lipid composite term (neutral lipid + 30% of phospholipid)
         let lipid_c = fn_l + 0.3 * fn_ph
 
-        // Unbound tissue:unbound plasma ratio
+        // Total tissue:unbound plasma ratio
         let kpu = fw_e + fw_i + P * lipid_c
 
-        // Total tissue:total plasma (JCGM-compatible; accounts for plasma binding)
-        let kp_i = kpu / fu_plasma
+        // Total tissue:total plasma
+        let kp_i = fu_plasma * kpu
         kp[i] = kp_i
 
         // GUM sensitivity coefficients (analytical)
-        let dkp_dlogP = P * ln10 * lipid_c / fu_plasma
-        let dkp_dfu   = 0.0 - kp_i / fu_plasma
+        let dkp_dlogP = fu_plasma * P * ln10 * lipid_c
+        let dkp_dfu   = kpu
 
         // Combined GUM variance (JCGM 100:2008 Eq 13)
         let var_i = dkp_dlogP * dkp_dlogP * u_logP * u_logP
@@ -264,7 +262,7 @@ pub fn rr_scaled_uncertainty(
         // logP contribution: u(Kp_i) from u_logP
         let term_logP = ls * u_logP * kp_i
 
-        // fu contribution: u(Kp_i) from u_fu — ∂Kp/∂fu = -Kp/fu
+        // fu contribution: u(Kp_i) from u_fu — ∂Kp/∂fu = Kp/fu
         let term_fu = kp_i / fu * u_fu
 
         u_kp[i] = rr_sqrt(term_logP * term_logP + term_fu * term_fu)
@@ -340,6 +338,11 @@ struct DrugPropertiesRR {
 // T2: GUM uncertainties non-zero for all 14 compartments
 // T3: Log-sensitivities in valid range (0, ln(10)] for lipid-rich tissues
 // T4: Scaled GUM uncertainties non-zero and finite
+// T5: Kp = fu_plasma * Kpu at logP = 0, organ by organ
+// T6: central-difference dKp/dfu = Kpu > 0 at fu = 0.2
+// T7: central-difference dKp/dlogP matches the analytical coefficient
+// T8: raw GUM uncertainty squared recovers its analytical variance
+// T9: shared exp path anchors 10^-3 and 10^7 to their absolute values
 
 fn main() -> i32 with IO, Mut, Div, Panic {
     let rr = rr_rapamycin()
@@ -389,6 +392,129 @@ fn main() -> i32 with IO, Mut, Div, Panic {
         passed = passed + 1
     } else {
         println("T3 FAIL: log-sensitivity out of expected range")
+        failed = failed + 1
+    }
+
+    // T5: Closed-form unit conversion. At logP = 0, P = 1. The tissue
+    // composition and logP stay fixed; B:P and Ka are outside this neutral
+    // partition function and therefore not recomputed.
+    let unit_point = rr_neutral(0.0, 0.2, 0.0, 0.0)
+    var unit_ok = 0
+    var u = 0
+    while u < 14 {
+        let lipid_c = rr_fn_l(u) + 0.3 * rr_fn_ph(u)
+        let kpu = rr_fw_e(u) + rr_fw_i(u) + lipid_c
+        let expected_kp = 0.2 * kpu
+        let err = rr_abs(unit_point.kp[u] - expected_kp)
+        if err <= 1.0e-12 * (1.0 + rr_abs(expected_kp)) {
+            unit_ok = unit_ok + 1
+        }
+        u = u + 1
+    }
+    if unit_ok == 14 {
+        println("T5 PASS: Kp = fu_plasma * Kpu (14/14)")
+        passed = passed + 1
+    } else {
+        print("T5 FAIL: closed-form Kp conversion matched ")
+        print_int(unit_ok)
+        println("/14 tissues")
+        failed = failed + 1
+    }
+
+    // T6: fu sensitivity at logP = 0 and fu = 0.2. Central difference uses
+    // h = 1e-6; logP, tissue composition, B:P and Ka policy remain fixed.
+    let h_fu = 1.0e-6
+    let fu_lo = rr_neutral(0.0, 0.2 - h_fu, 0.0, 0.0)
+    let fu_hi = rr_neutral(0.0, 0.2 + h_fu, 0.0, 0.0)
+    var dfu_ok = 0
+    var f = 0
+    while f < 14 {
+        let numerical = (fu_hi.kp[f] - fu_lo.kp[f]) / (2.0 * h_fu)
+        let expected = unit_point.kp[f] / 0.2
+        let err = rr_abs(numerical - expected)
+        if numerical > 0.0 && err <= 1.0e-8 * (1.0 + rr_abs(expected)) {
+            dfu_ok = dfu_ok + 1
+        }
+        f = f + 1
+    }
+    if dfu_ok == 14 {
+        println("T6 PASS: dKp/dfu = Kpu > 0 (14/14; h=1e-6)")
+        passed = passed + 1
+    } else {
+        print("T6 FAIL: fu derivative matched ")
+        print_int(dfu_ok)
+        println("/14 tissues")
+        failed = failed + 1
+    }
+
+    // T7: logP sensitivity at logP = 0 and fu = 0.2. Central difference
+    // uses h = 1e-6; fu, composition, B:P and Ka policy remain fixed.
+    let h_logp = 1.0e-6
+    let logp_lo = rr_neutral(0.0 - h_logp, 0.2, 0.0, 0.0)
+    let logp_hi = rr_neutral(h_logp, 0.2, 0.0, 0.0)
+    let ln10_exact = 2.302585092994046
+    var dlogp_ok = 0
+    var g = 0
+    while g < 14 {
+        let numerical = (logp_hi.kp[g] - logp_lo.kp[g]) / (2.0 * h_logp)
+        let lipid_c = rr_fn_l(g) + 0.3 * rr_fn_ph(g)
+        let expected = 0.2 * ln10_exact * lipid_c
+        let err = rr_abs(numerical - expected)
+        if err <= 1.0e-8 * (1.0 + rr_abs(expected)) {
+            dlogp_ok = dlogp_ok + 1
+        }
+        g = g + 1
+    }
+    if dlogp_ok == 14 {
+        println("T7 PASS: dKp/dlogP analytical agreement (14/14; h=1e-6)")
+        passed = passed + 1
+    } else {
+        print("T7 FAIL: logP derivative matched ")
+        print_int(dlogp_ok)
+        println("/14 tissues")
+        failed = failed + 1
+    }
+
+    // T8: rr_sqrt must remain accurate at the actual rapamycin variance
+    // magnitudes. Squaring the reported standard uncertainty must recover the
+    // analytical variance; this catches fixed-iteration Newton paths that stop
+    // before reaching their quadratic-convergence regime.
+    let p_rapa = rr_pow10(7.0)
+    var variance_ok = 0
+    var v = 0
+    while v < 14 {
+        let lipid_c = rr_fn_l(v) + 0.3 * rr_fn_ph(v)
+        let kpu = rr_fw_e(v) + rr_fw_i(v) + p_rapa * lipid_c
+        let dkp_dlogp = 0.08 * p_rapa * 2.302585092994046 * lipid_c
+        let term_logp = dkp_dlogp * 1.05
+        let term_fu = kpu * 0.02
+        let expected_variance = term_logp * term_logp + term_fu * term_fu
+        let observed_variance = rr.kp_unc_raw[v] * rr.kp_unc_raw[v]
+        let err = rr_abs(observed_variance - expected_variance)
+        if err <= 1.0e-9 * (1.0 + rr_abs(expected_variance)) {
+            variance_ok = variance_ok + 1
+        }
+        v = v + 1
+    }
+    if variance_ok == 14 {
+        println("T8 PASS: raw GUM sqrt recovers variance (14/14)")
+        passed = passed + 1
+    } else {
+        print("T8 FAIL: raw GUM sqrt recovered ")
+        print_int(variance_ok)
+        println("/14 variances")
+        failed = failed + 1
+    }
+
+    // T9: #846 moved rr_exp to math::pure::exp. Absolute anchors verify that
+    // the obsolete fixed Taylor path from historical PR #2703 is not active.
+    let pow10_low_err = rr_abs(rr_pow10(0.0 - 3.0) - 0.001)
+    let pow10_high_err = rr_abs(rr_pow10(7.0) - 10000000.0)
+    if pow10_low_err <= 1.0e-12 && pow10_high_err <= 1.0e-3 {
+        println("T9 PASS: rr_pow10 absolute anchors (-3, 7)")
+        passed = passed + 1
+    } else {
+        println("T9 FAIL: rr_pow10 absolute anchors (-3, 7)")
         failed = failed + 1
     }
 

@@ -1,6 +1,6 @@
 // stdlib/physics/em.sio — Electromagnetism (real E2E, no stubs/mocks)
 //
-// Complete real implementation using units::Quantity + GUM-style uncertainty.
+// Legacy electromagnetism formulas; checked Lorentz propagation is in lorentz.sio.
 // Epistemic via components bridge.
 //
 // Covers:
@@ -10,7 +10,7 @@
 // - Simple magnetic field for infinite wire
 // - Field energy density (electric)
 //
-// All formulas are the actual physics equations with real propagation.
+// Other uncertainty formulas retain their separate legacy limitations.
 //
 // References:
 // - Griffiths: Introduction to Electrodynamics
@@ -18,12 +18,14 @@
 
 module physics::em
 
-use units::{quantity_new, dim_energy, dim_force, dim_length, Quantity, UnitDim, dim_add_exp, dim_mass, dim_acceleration};
+use physics::lorentz::{lorentz_force_independent,lorentz_force_scalar_independent}
+
+use units::lib::{quantity_new, dim_energy, dim_force, dim_length, Quantity, UnitDim};
 use constants::lib::{MU_0, EPSILON_0};
-use constants::physical::*;
+use constants::physical::{speed_of_light_approx};
 let C: f64 = speed_of_light_approx();
 
-struct Vec3 { x: f64, y: f64, z: f64 }
+pub struct Vec3 { pub x: f64, pub y: f64, pub z: f64 }
 struct MatVec3 { x: f64, y: f64, z: f64 }
 struct Mat3 {
     m00: f64, m01: f64, m02: f64,
@@ -31,7 +33,7 @@ struct Mat3 {
     m20: f64, m21: f64, m22: f64
 }
 
-fn vec3_new(x: f64, y: f64, z: f64) -> Vec3 { Vec3 { x: x, y: y, z: z } }
+pub fn vec3_new(x: f64, y: f64, z: f64) -> Vec3 { Vec3 { x: x, y: y, z: z } }
 fn vec3_add(a: Vec3, b: Vec3) -> Vec3 { Vec3 { x: a.x + b.x, y: a.y + b.y, z: a.z + b.z } }
 fn vec3_scale(v: Vec3, s: f64) -> Vec3 { Vec3 { x: v.x * s, y: v.y * s, z: v.z * s } }
 fn vec3_cross(a: Vec3, b: Vec3) -> Vec3 {
@@ -72,7 +74,6 @@ fn mat3_vec_mul(m: Mat3, v: MatVec3) -> MatVec3 {
     }
 }
 
-fn dim_force() -> UnitDim { dim_add_exp(dim_mass(), dim_acceleration()) }
 
 // EM dims use force/energy base (no native charge dim in 7D SI)
 fn dim_electric_field() -> UnitDim {
@@ -141,16 +142,11 @@ pub fn potential_energy(q: f64, uq: f64, v: f64, uv: f64) -> (f64, f64) {
     (u_val, uu)
 }
 
-// Lorentz force F = q E + q (v x B) magnitude (real, full 3D version below)
-pub fn lorentz_force_scalar(q: f64, uq: f64, e: f64, ue: f64, v: f64, uv: f64, b: f64, ub: f64) -> (f64, f64) {
-    let f_val = q * e + q * v * b;
-    let uf_e = abs_f64(q)*ue + abs_f64(e)*uq;
-    let uf_b = abs_f64(q)*v*ub + abs_f64(q)*b*uv + abs_f64(v*b)*uq ;
-    let sum_var = uf_e*uf_e + uf_b*uf_b;
-    let uf = if sum_var <= 0.0 { 0.0 } else {
-        var y = sum_var; var i=0; while i<30 { y = 0.5*(y + sum_var/y); i=i+1; } y
-    };
-    (f_val, uf)
+// Signed scalar proxy F = q*(E+v*B); independent input standard errors.
+pub fn lorentz_force_scalar(q: f64, uq: f64, e: f64, ue: f64, v: f64, uv: f64, b: f64, ub: f64) -> (f64, f64) with Mut, Div, Panic {
+    let result = lorentz_force_scalar_independent(q, uq, e, ue, v, uv, b, ub)
+    if result.status != 0 { return (0.0, -1.0) }
+    (result.force, result.standard_uncertainty)
 }
 
 // Magnetic field of infinite straight wire B = (mu0 I) / (2 pi r)
@@ -193,7 +189,7 @@ pub fn test_wire_b() -> bool {
     check_near(b, 0.0002, 0.00005) && ub > 0.0
 }
 
-pub fn test_lorentz() -> bool {
+pub fn test_lorentz() -> bool with Mut, Div, Panic {
     let (f, uf) = lorentz_force_scalar(1.6e-19, 0.0, 100.0, 1.0, 0.0, 0.0, 0.1, 0.001);
     check_near(f, 1.6e-17, 1e-18)
 }
@@ -232,14 +228,18 @@ pub fn magnetic_force_on_wire(I: f64, uI: f64, L: f64, uL: f64, B: f64, uB: f64)
 }
 
 // DEEPER: Full 3D Lorentz force F = q (E + v × B) using Vec3
-pub fn lorentz_force_3d(q: f64, uq: f64, e: Vec3, ue: f64, v: Vec3, uv: f64, b: Vec3, ub: f64) -> (Vec3, f64) {
-    let cross_vb = vec3_cross(v, b);
-    let f_e = vec3_scale(e, q);
-    let f_b = vec3_scale(cross_vb, q);
-    let f = vec3_add(f_e, f_b);
-    // prop approx
-    let uf = abs_f64(q) * (ue + uv + ub);
-    (f, uf)
+// Legacy uncertainties are isotropic independent per-component standard errors.
+// The returned scalar is sqrt(trace(Cov(F))), not uncertainty of |F|.
+pub fn lorentz_force_3d(q: f64, uq: f64, e: Vec3, ue: f64, v: Vec3, uv: f64, b: Vec3, ub: f64) -> (Vec3, f64) with Mut, Div, Panic {
+    let electric: [f64;3] = [e.x,e.y,e.z]
+    let velocity: [f64;3] = [v.x,v.y,v.z]
+    let magnetic: [f64;3] = [b.x,b.y,b.z]
+    let electric_u: [f64;3] = [ue;3]
+    let velocity_u: [f64;3] = [uv;3]
+    let magnetic_u: [f64;3] = [ub;3]
+    let result = lorentz_force_independent(q,uq,&electric,&electric_u,&velocity,&velocity_u,&magnetic,&magnetic_u)
+    if result.status != 0 { return (vec3_new(0.0,0.0,0.0),-1.0) }
+    (vec3_new(result.force[0],result.force[1],result.force[2]),result.vector_standard_uncertainty)
 }
 
 pub fn test_parallel_wires() -> bool {
@@ -392,7 +392,7 @@ pub fn test_radiation() -> bool {
     check_near(pr, 1.0 / C, 1e-10) && upr > 0.0
 }
 
-pub fn test_lorentz_3d() -> bool {
+pub fn test_lorentz_3d() -> bool with Mut, Div, Panic {
     let e = vec3_new(100.0, 0.0, 0.0);
     let v = vec3_new(0.0, 0.0, 0.0);
     let b = vec3_new(0.0, 0.1, 0.0);

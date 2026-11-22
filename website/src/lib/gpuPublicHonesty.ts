@@ -1,9 +1,9 @@
 /**
  * U2 — GPU public contract 13/13. March 2026. Never in CI.
  *
- * This is the same class as the June 6/6 and the May 251/251: a green
+ * This is the same class as the June 6/6 and the May 251/251: a green public-claims: historical
  * count that survived because nobody ran it. The artifact names
- * `souc-linux-x86_64-gpu` / `souc 1.0.0-beta.4`. That is a launcher,
+ * `souc-linux-x86_64-gpu` / `souc 1.0.0-beta.4`. That is a launcher, public-claims: historical
  * not Madaros or lean_single. Do not invent an engine.
  *
  * Instance of MeasurementClaim, not a third kernel.

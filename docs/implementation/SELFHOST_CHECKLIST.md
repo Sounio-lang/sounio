@@ -2,8 +2,8 @@
 topic_id: repo.docs.implementation.selfhost-checklist
 authority: repo_only
 audience: maintainers
-last_validated: 2026-03-07
-validated_by: A7
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.implementation.selfhost-checklist
 -->
 
@@ -11,7 +11,9 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.implementation
 
 ## Purpose
 
-`scripts/dev/selfhost-check.sh` runs the Stage0/Stage1 smoke checks in one command and prints machine-readable gate lines:
+> **Removed.** `selfhost-check.sh` and `golden-update.sh` drove the Cargo-era compiler (`cargo build -p souc`, `rustc`, `souc sysroot install`, `souc compile --emit hlir`), none of which exists any more. They left the tree with `scripts/archive/`. Git history holds them. Nothing below is a command to run.
+
+The old `selfhost-check.sh` printed Stage0/Stage1 smoke lines:
 
 - `PASS [stage] ...`
 - `WARN [stage] ...`
@@ -29,19 +31,7 @@ Artifacts and logs are written to `/tmp/sounio-selfhost-check` by default.
 
 ## Usage
 
-```bash
-cd ~/work/sounio
-bash scripts/dev/selfhost-check.sh
-```
-
-Useful overrides:
-
-```bash
-FILE=examples/minimal.sio bash scripts/dev/selfhost-check.sh
-SOUNIO_SELFHOST_STRICT=1 bash scripts/dev/selfhost-check.sh
-SOUNIO_SYSROOT_HOME=/tmp/sounio-sysroots-stage0 bash scripts/dev/selfhost-check.sh
-WORK_DIR=/tmp/sounio-check-alt bash scripts/dev/selfhost-check.sh
-```
+Those invocations were removed with the scripts. The old interface took `FILE`, `SOUNIO_SELFHOST_STRICT`, `SOUNIO_SYSROOT_HOME`, and `WORK_DIR`.
 
 Strict mode behavior:
 
@@ -50,15 +40,4 @@ Strict mode behavior:
 
 ## Golden Promotion
 
-Use `scripts/dev/golden-update.sh` to update `tests/golden/minimal.hlir.golden.txt` with backup:
-
-```bash
-cd ~/work/sounio
-bash scripts/dev/golden-update.sh
-```
-
-Optional overrides:
-
-```bash
-FILE=examples/minimal.sio GOLDEN_FILE=tests/golden/minimal.hlir.golden.txt bash scripts/dev/golden-update.sh
-```
+`golden-update.sh` used to refresh `tests/golden/minimal.hlir.golden.txt` with a backup, taking `FILE` and `GOLDEN_FILE`. It was removed with `scripts/archive/`.

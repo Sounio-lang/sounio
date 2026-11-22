@@ -124,7 +124,7 @@ author laziness alone.
 | ADR-006 (`docs/decisions/adr-006-fixed-point-trust-anchor.md`) | policy: change source → validate FP → commit `.sio` + ELF together | policy for **boot4** artifact path; pre-dates dual naming | n/a |
 | Scattered audit recipes | `scripts/dev/souc-build-lock.sh ./bin/souc-lean-single-x86_64 lean_single.sio /tmp/…` | ad hoc | no |
 | `scripts/dev/seed-1678/README.md` | explains *why* ELF must ship with source | handoff note | no |
-| Handoffs (`docs/handoff/compiler_generic_struct_return_diagnosis.md`) | "requires Foundry refresh of bin/souc-lean-single-x86_64" | names Foundry; no recipe | no |
+| Handoffs (a compiler-diagnosis note) | "requires Foundry refresh of bin/souc-lean-single-x86_64" | names Foundry; no recipe | no |
 | Commit `973b022b1a` message | documents Slurm off-pod resync, g0→g1→g2→g3 depth | one successful instance | no |
 
 ### What does **not** exist

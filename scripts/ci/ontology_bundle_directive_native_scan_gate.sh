@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=../lib/classify_compile.sh
+source "$ROOT_DIR/scripts/lib/classify_compile.sh"
 cd "$ROOT_DIR"
 
 TMP_DIR="$(mktemp -d)"
@@ -319,7 +321,7 @@ else
 fi
 
 if bin/souc run "$SOURCECHECK_CACHE_CLASSIFIER_PROBE" -- "$SNOMED_CACHE_SRC" >"$SOURCECHECK_CLASSIFIER_LOG" 2>&1; then
-  printf 'FAIL  imported sourcecheck cache hydrator unexpectedly completed; expected current imported collect classifier failure\n' >&2
+  printf 'FAIL  imported sourcecheck cache hydrator unexpectedly completed; expected current imported collect classifier failure\n' >&2  # refusal-classifier-exempt: characterizes a known crash shape, not a refusal (#2425)
   cat "$SOURCECHECK_CLASSIFIER_LOG" >&2
   exit 1
 fi
@@ -510,11 +512,15 @@ else
   exit 1
 fi
 
-if bin/souc run "$CHECK_MOD_KNOWLEDGE_CONTEXT_SIDECAR_PROBE" -- "$SNOMED_KNOWLEDGE_REJECT_SRC" >"$CHECK_MOD_KNOWLEDGE_CONTEXT_SIDECAR_REJECT_LOG" 2>&1; then
+__refusal_rc=0
+bin/souc run "$CHECK_MOD_KNOWLEDGE_CONTEXT_SIDECAR_PROBE" -- "$SNOMED_KNOWLEDGE_REJECT_SRC" >"$CHECK_MOD_KNOWLEDGE_CONTEXT_SIDECAR_REJECT_LOG" 2>&1 || __refusal_rc=$?
+if [[ "$__refusal_rc" -eq 0 ]]; then
   printf 'FAIL  check::mod sidecar unexpectedly accepted reverse SNOMED Knowledge<T> proof-context\n' >&2
   cat "$CHECK_MOD_KNOWLEDGE_CONTEXT_SIDECAR_REJECT_LOG" >&2
   exit 1
 fi
+# rc != 0 is not yet a refusal: a crash, timeout or OOM kill is not (#2425).
+sounio_expect_failed_exit "$__refusal_rc" "$CHECK_MOD_KNOWLEDGE_CONTEXT_SIDECAR_REJECT_LOG" || { printf 'FAIL  %s: not a clean refusal: %s\n' "$CHECK_MOD_KNOWLEDGE_CONTEXT_SIDECAR_REJECT_LOG" "$(sounio_refusal_reason)" >&2; cat "$CHECK_MOD_KNOWLEDGE_CONTEXT_SIDECAR_REJECT_LOG" >&2; exit 1; }
 if grep -q 'k2_check_mod_knowledge_context_ontocache_sidecar_probe=sourcecheck_enter' "$CHECK_MOD_KNOWLEDGE_CONTEXT_SIDECAR_REJECT_LOG" &&
    grep -q 'k2_check_mod_knowledge_context_ontocache_sidecar_probe=verdict=1' "$CHECK_MOD_KNOWLEDGE_CONTEXT_SIDECAR_REJECT_LOG" &&
    grep -q 'k2_check_mod_knowledge_context_ontocache_sidecar_probe=rejected' "$CHECK_MOD_KNOWLEDGE_CONTEXT_SIDECAR_REJECT_LOG"; then
@@ -533,11 +539,15 @@ else
   exit 1
 fi
 
-if "$FRONTEND" --check "$SNOMED_FRONTEND_COMPOSITE_REJECT_SRC" >"$FRONTEND_COMPOSITE_REJECT_LOG" 2>&1; then
+__refusal_rc=0
+"$FRONTEND" --check "$SNOMED_FRONTEND_COMPOSITE_REJECT_SRC" >"$FRONTEND_COMPOSITE_REJECT_LOG" 2>&1 || __refusal_rc=$?
+if [[ "$__refusal_rc" -eq 0 ]]; then
   printf 'FAIL  modular frontend unexpectedly accepted imported-cache Knowledge<T> with invalid numeric field\n' >&2
   cat "$FRONTEND_COMPOSITE_REJECT_LOG" >&2
   exit 1
 fi
+# rc != 0 is not yet a refusal: a crash, timeout or OOM kill is not (#2425).
+sounio_expect_failed_exit "$__refusal_rc" "$FRONTEND_COMPOSITE_REJECT_LOG" || { printf 'FAIL  %s: not a clean refusal: %s\n' "$FRONTEND_COMPOSITE_REJECT_LOG" "$(sounio_refusal_reason)" >&2; cat "$FRONTEND_COMPOSITE_REJECT_LOG" >&2; exit 1; }
 printf 'PASS  modular frontend rejected imported-cache Knowledge<T> when numeric proof-context fails\n'
 
 if "$FRONTEND" --check "$SNOMED_FRONTEND_UNIT_COMPOSITE_SRC" >"$FRONTEND_UNIT_COMPOSITE_LOG" 2>&1; then
@@ -548,11 +558,15 @@ else
   exit 1
 fi
 
-if "$FRONTEND" --check "$SNOMED_FRONTEND_UNIT_COMPOSITE_REJECT_SRC" >"$FRONTEND_UNIT_COMPOSITE_REJECT_LOG" 2>&1; then
+__refusal_rc=0
+"$FRONTEND" --check "$SNOMED_FRONTEND_UNIT_COMPOSITE_REJECT_SRC" >"$FRONTEND_UNIT_COMPOSITE_REJECT_LOG" 2>&1 || __refusal_rc=$?
+if [[ "$__refusal_rc" -eq 0 ]]; then
   printf 'FAIL  modular frontend unexpectedly accepted imported-cache Knowledge<T> with invalid unit field\n' >&2
   cat "$FRONTEND_UNIT_COMPOSITE_REJECT_LOG" >&2
   exit 1
 fi
+# rc != 0 is not yet a refusal: a crash, timeout or OOM kill is not (#2425).
+sounio_expect_failed_exit "$__refusal_rc" "$FRONTEND_UNIT_COMPOSITE_REJECT_LOG" || { printf 'FAIL  %s: not a clean refusal: %s\n' "$FRONTEND_UNIT_COMPOSITE_REJECT_LOG" "$(sounio_refusal_reason)" >&2; cat "$FRONTEND_UNIT_COMPOSITE_REJECT_LOG" >&2; exit 1; }
 printf 'PASS  modular frontend rejected imported-cache Knowledge<T> when unit proof-context fails\n'
 
 if bin/souc run "$CHECK_MOD_SAME_CHECKER_SHADOW_CLASSIFIER_PROBE" -- "$SNOMED_CACHE_SRC" >"$CHECK_MOD_SAME_CHECKER_SHADOW_CLASSIFIER_LOG" 2>&1; then
@@ -895,11 +909,15 @@ else
   exit 1
 fi
 
-if bin/souc run "$CHECK_MOD_KNOWLEDGE_CONTEXT_SIDECAR_PROBE" -- "$PART_KNOWLEDGE_DISJOINT_REJECT_SRC" >"$PART_CHECK_MOD_KNOWLEDGE_CONTEXT_SIDECAR_REJECT_LOG" 2>&1; then
+__refusal_rc=0
+bin/souc run "$CHECK_MOD_KNOWLEDGE_CONTEXT_SIDECAR_PROBE" -- "$PART_KNOWLEDGE_DISJOINT_REJECT_SRC" >"$PART_CHECK_MOD_KNOWLEDGE_CONTEXT_SIDECAR_REJECT_LOG" 2>&1 || __refusal_rc=$?
+if [[ "$__refusal_rc" -eq 0 ]]; then
   printf 'FAIL  check::mod sidecar unexpectedly accepted disjoint PART Knowledge<T> proof-context\n' >&2
   cat "$PART_CHECK_MOD_KNOWLEDGE_CONTEXT_SIDECAR_REJECT_LOG" >&2
   exit 1
 fi
+# rc != 0 is not yet a refusal: a crash, timeout or OOM kill is not (#2425).
+sounio_expect_failed_exit "$__refusal_rc" "$PART_CHECK_MOD_KNOWLEDGE_CONTEXT_SIDECAR_REJECT_LOG" || { printf 'FAIL  %s: not a clean refusal: %s\n' "$PART_CHECK_MOD_KNOWLEDGE_CONTEXT_SIDECAR_REJECT_LOG" "$(sounio_refusal_reason)" >&2; cat "$PART_CHECK_MOD_KNOWLEDGE_CONTEXT_SIDECAR_REJECT_LOG" >&2; exit 1; }
 if grep -q 'k2_check_mod_knowledge_context_ontocache_sidecar_probe=sourcecheck_enter' "$PART_CHECK_MOD_KNOWLEDGE_CONTEXT_SIDECAR_REJECT_LOG" &&
    grep -q 'k2_check_mod_knowledge_context_ontocache_sidecar_probe=verdict=1' "$PART_CHECK_MOD_KNOWLEDGE_CONTEXT_SIDECAR_REJECT_LOG" &&
    grep -q 'k2_check_mod_knowledge_context_ontocache_sidecar_probe=rejected' "$PART_CHECK_MOD_KNOWLEDGE_CONTEXT_SIDECAR_REJECT_LOG"; then

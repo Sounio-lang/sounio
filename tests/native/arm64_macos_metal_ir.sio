@@ -1,0 +1,52 @@
+use native::codegen_arm64_macos::{compile_arm64_macos_to_file}
+use gpu::native_metal::{native_metal_begin, native_metal_collect_program, native_metal_failed}
+use lexer::mod::{lex_file_parse_items}
+use parser::ast::{Program, make_name, empty_path, UnaryOp}
+use ir::ir::*
+
+fn emit(f: &!IrFunction, instr: IrInstr) with Mut, Panic, Div {
+    ir_arena_store(ir_region_slot_w((*f).region, (*f).instr_count), instr)
+    (*f).instr_count = (*f).instr_count + 1
+}
+fn main() with IO, Mut, Panic, Div, Alloc {
+    native_metal_begin(true)
+    let empty_program = Program { module_path: empty_path(), items: None }
+    var programs: [Program; 256] = [empty_program; 256]
+    programs[0] = Program { module_path: empty_path(), items: lex_file_parse_items("tests/run-pass/a64_unit_literal_return.sio") }
+    let cpu_program = programs[0]
+    native_metal_collect_program(&cpu_program)
+    assert(!native_metal_failed())
+    programs[0] = Program { module_path: empty_path(), items: lex_file_parse_items("tests/run-pass/gpu_vec_add.sio") }
+    let program = programs[0]
+    native_metal_collect_program(&program)
+    assert(!native_metal_failed())
+    var m = ir_empty_module()
+    var f = ir_empty_function()
+    f.name = make_name("main")
+    f.reg_count = 16
+    ir_function_alloc_region(&!f)
+    emit(&!f, ir_alloc_array(0, 32, 4))
+    emit(&!f, ir_alloc_array(1, 32, 4))
+    emit(&!f, ir_load_imm(2, 0))
+    emit(&!f, ir_load_float(3, 1.25))
+    emit(&!f, ir_index_set(0, 2, 3))
+    emit(&!f, ir_load_float(3, 2.5))
+    emit(&!f, ir_index_set(1, 2, 3))
+    emit(&!f, ir_load_imm(4, 4))
+    emit(&!f, ir_unaryop(5, UnaryOp::OpRefMut, 0))
+    emit(&!f, ir_unaryop(6, UnaryOp::OpRef, 1))
+    let args = Some(Box::new(ir_reg_list_cons(4, Some(Box::new(ir_reg_list_cons(5, Some(Box::new(ir_reg_list_single(6)))))))))
+    emit(&!f, ir_call_extern(7, make_name("vec_add_in_place"), args, 3))
+    var get = ir_index_get(8, 0, 2)
+    get.imm_flags = IR_FLOAT_REG_MARKER_FLAG
+    emit(&!f, get)
+    emit(&!f, ir_call(9, 1, make_name("print_f64"), Some(Box::new(ir_reg_list_single(8))), 1))
+    emit(&!f, ir_load_imm(10, 0))
+    emit(&!f, ir_return(10))
+    ir_module_fn_set(&!m, 0, f)
+    var printer = ir_empty_function()
+    printer.name = make_name("print_f64")
+    ir_module_fn_set(&!m, 1, printer)
+    m.fn_count = 2
+    assert(compile_arm64_macos_to_file(&m, get_arg(0)) == 0)
+}

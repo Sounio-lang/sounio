@@ -1,0 +1,381 @@
+diff --git a/stdlib/darwin_pbpk/release/biomaterial_release.sio b/stdlib/darwin_pbpk/release/biomaterial_release.sio
+index a65e3884f..d6d796ddb 100644
+--- a/stdlib/darwin_pbpk/release/biomaterial_release.sio
++++ b/stdlib/darwin_pbpk/release/biomaterial_release.sio
+@@ -27,21 +27,16 @@
+ // Author: Demetrios Chiuratto Agourakis
+ 
+ use darwin_pbpk::tsit5_pbpk14::*
++use math::pure::{exp}
+ 
+ // ============================================================================
+-// MATH HELPERS
++// MATH HELPERS — canonical stdlib/math/pure.sio exp
+ // ============================================================================
+-
+-fn rel_exp(x: f64) -> f64 with Mut, Div {
+-    // exp(x) via (1 + x/1024)^1024 — relative error < 0.01% for |x| < 10
+-    var r = 1.0 + x / 1024.0
+-    var i = 0
+-    while i < 10 {
+-        r = r * r
+-        i = i + 1
+-    }
+-    return r
+-}
++// The former local rel_exp was (1 + x/1024)^1024. Its relative error is about
++// -x^2/2048, not "< 0.01% for |x| < 10": -4.8% at x = -10 and -5.8e-3 at the
++// first-order stent's own k_r * 1545 h, so Q(1545 h)/D printed 0.968779 instead
++// of 0.968595. pure.sio range-reduces.
++// Evidence: docs/audit/DARWIN_PBPK_LOCAL_EXP_LN_ACCURACY_DISPATCH_2026-09-26.md
+ 
+ fn rel_finite(x: f64) -> bool {
+     if x != x { return false }
+@@ -94,7 +89,7 @@ pub fn release_cumulative(rel: ReleaseModel, t: f64) -> f64 with Mut, Div, Panic
+     }
+     if rel.model == 2 {
+         // First-order: Q(t) = Q_tot * (1 - exp(-k_r * t))
+-        q = rel.total_dose * (1.0 - rel_exp(0.0 - rel.k_rate * t))
++        q = rel.total_dose * (1.0 - exp(0.0 - rel.k_rate * t))
+     }
+     if rel.model == 3 {
+         // Higuchi: Q(t) = K_H * sqrt(t)
+@@ -119,7 +114,7 @@ pub fn release_rate(rel: ReleaseModel, t: f64) -> f64 with Mut, Div, Panic {
+         return rel.k_rate
+     }
+     if rel.model == 2 {
+-        return rel.total_dose * rel.k_rate * rel_exp(0.0 - rel.k_rate * t)
++        return rel.total_dose * rel.k_rate * exp(0.0 - rel.k_rate * t)
+     }
+     if rel.model == 3 {
+         // Higuchi: dQ/dt = K_H / (2*sqrt(t))
+diff --git a/stdlib/darwin_pbpk/validation/pbpk28_rapamycin_clinical.sio b/stdlib/darwin_pbpk/validation/pbpk28_rapamycin_clinical.sio
+index 322396233..f6e09cb6f 100644
+--- a/stdlib/darwin_pbpk/validation/pbpk28_rapamycin_clinical.sio
++++ b/stdlib/darwin_pbpk/validation/pbpk28_rapamycin_clinical.sio
+@@ -40,6 +40,7 @@
+ 
+ use darwin_pbpk::core::pbpk28_params::*
+ use darwin_pbpk::tsit5_pbpk28::*
++use math::pure::{exp, ln}
+ // FULL explicit ontology test wiring for PBPK28 (ChEBI compounds + GO enzymatic)
+ use chemistry::ontology
+ 
+@@ -52,8 +53,12 @@ use plot::epistemic::{ErrorBarEntry, error_bar_entry, error_bar_chart}
+ fn scale_for_plot(v: f64) -> f64 { v * 1000000.0 }  // to ug/L scale demo (no underscore separators in literals — E200)
+ 
+ // ============================================================================
+-// MATH HELPERS (native compiler has no stdlib transcendentals here)
++// MATH HELPERS — ln / exp are canonical stdlib/math/pure.sio
+ // ============================================================================
++// The former local exp was (1 + x/1024)^1024 (relative error ~ -x^2/2048: GMFE
++// read low by 2.3e-4 at GMFE = 2) and the local ln a 5-term artanh after
++// e-scaling (absolute error up to 1.13e-6). pure.sio range-reduces both.
++// Evidence: docs/audit/DARWIN_PBPK_LOCAL_EXP_LN_ACCURACY_DISPATCH_2026-09-26.md
+ 
+ fn pv_abs(x: f64) -> f64 {
+     if x < 0.0 { return 0.0 - x }
+@@ -65,43 +70,6 @@ fn pv_finite(x: f64) -> bool {
+     return pv_abs(x) < 1.0e12
+ }
+ 
+-// exp via repeated squaring (matches rapamycin_clinical.sio cv_exp)
+-fn pv_exp(x: f64) -> f64 with Mut {
+-    var r = 1.0 + x / 1024.0
+-    var i: i32 = 0
+-    while i < 10 {
+-        r = r * r
+-        i = i + (1 as i32)
+-    }
+-    return r
+-}
+-
+-fn pv_ln(x: f64) -> f64 with Mut, Div, Panic {
+-    if x <= 0.0 { return 0.0 - 999999.0 }
+-    var sx = x
+-    var scale: i32 = 0
+-    while sx > 2.0 {
+-        sx = sx / 2.718281828459045
+-        scale = scale + (1 as i32)
+-    }
+-    while sx < 0.5 {
+-        sx = sx * 2.718281828459045
+-        scale = scale - (1 as i32)
+-    }
+-    let u = (sx - 1.0) / (sx + 1.0)
+-    let u2 = u * u
+-    let result = 2.0 * (u + u * u2 / 3.0 + u * u2 * u2 / 5.0
+-                       + u * u2 * u2 * u2 / 7.0 + u * u2 * u2 * u2 * u2 / 9.0)
+-    var sf = 0.0
+-    var si: i32 = 0
+-    if scale > 0 {
+-        while si < scale { sf = sf + 1.0; si = si + (1 as i32) }
+-    } else {
+-        while si < (0 - scale) { sf = sf - 1.0; si = si + (1 as i32) }
+-    }
+-    return result + sf
+-}
+-
+ // FE = max(pred/obs, obs/pred), always >= 1.0
+ fn pv_fold_error(pred: f64, obs: f64) -> f64 {
+     if obs <= 0.0 || pred <= 0.0 { return 999.0 }
+@@ -289,7 +257,7 @@ fn main() -> i32 with IO, Mut, Div, Panic {
+             let cm = cn[m]
+             if cm > 1.0e-9 && pv_finite(cm) {
+                 let xx = grid[m]
+-                let yy = pv_ln(cm)
++                let yy = ln(cm)
+                 sx = sx + xx
+                 sy = sy + yy
+                 sxx = sxx + xx * xx
+@@ -384,13 +352,13 @@ fn main() -> i32 with IO, Mut, Div, Panic {
+         println(cobs)
+         println(cpred)
+         println(fe)
+-        sum_ln_fe = sum_ln_fe + pv_ln(fe)
++        sum_ln_fe = sum_ln_fe + ln(fe)
+         if fe <= 2.0 { within2 = within2 + (1 as i32) }
+         nf = nf + 1.0
+         i = i + (1 as i32)
+     }
+ 
+-    let gmfe = pv_exp(sum_ln_fe / nf)
++    let gmfe = exp(sum_ln_fe / nf)
+     var pct2 = 0.0
+     var w: i32 = 0
+     var wf = 0.0
+diff --git a/stdlib/darwin_pbpk/validation/pbpk28_semaglutide_clinical.sio b/stdlib/darwin_pbpk/validation/pbpk28_semaglutide_clinical.sio
+index d3d7d2748..c2b47e90d 100644
+--- a/stdlib/darwin_pbpk/validation/pbpk28_semaglutide_clinical.sio
++++ b/stdlib/darwin_pbpk/validation/pbpk28_semaglutide_clinical.sio
+@@ -31,10 +31,15 @@
+ 
+ use darwin_pbpk::core::pbpk28_params::*
+ use darwin_pbpk::tsit5_pbpk28::*
++use math::pure::{exp, ln}
+ 
+ // ============================================================================
+-// MATH HELPERS (native compiler has no stdlib transcendentals here)
++// MATH HELPERS — ln / exp are canonical stdlib/math/pure.sio
+ // ============================================================================
++// The former local exp was (1 + x/1024)^1024 (relative error ~ -x^2/2048: GMFE
++// read low by 2.3e-4 at GMFE = 2) and the local ln a 5-term artanh after
++// e-scaling (absolute error up to 1.13e-6). pure.sio range-reduces both.
++// Evidence: docs/audit/DARWIN_PBPK_LOCAL_EXP_LN_ACCURACY_DISPATCH_2026-09-26.md
+ 
+ fn sv_abs(x: f64) -> f64 {
+     if x < 0.0 { return 0.0 - x }
+@@ -46,42 +51,6 @@ fn sv_finite(x: f64) -> bool {
+     return sv_abs(x) < 1.0e12
+ }
+ 
+-fn sv_exp(x: f64) -> f64 with Mut {
+-    var r = 1.0 + x / 1024.0
+-    var i = 0
+-    while i < 10 {
+-        r = r * r
+-        i = i + 1
+-    }
+-    return r
+-}
+-
+-fn sv_ln(x: f64) -> f64 with Mut, Div, Panic {
+-    if x <= 0.0 { return 0.0 - 999999.0 }
+-    var sx = x
+-    var scale = 0
+-    while sx > 2.0 {
+-        sx = sx / 2.718281828459045
+-        scale = scale + 1
+-    }
+-    while sx < 0.5 {
+-        sx = sx * 2.718281828459045
+-        scale = scale - 1
+-    }
+-    let u = (sx - 1.0) / (sx + 1.0)
+-    let u2 = u * u
+-    let result = 2.0 * (u + u * u2 / 3.0 + u * u2 * u2 / 5.0
+-                       + u * u2 * u2 * u2 / 7.0 + u * u2 * u2 * u2 * u2 / 9.0)
+-    var sf = 0.0
+-    var si = 0
+-    if scale > 0 {
+-        while si < scale { sf = sf + 1.0; si = si + 1 }
+-    } else {
+-        while si < (0 - scale) { sf = sf - 1.0; si = si + 1 }
+-    }
+-    return result + sf
+-}
+-
+ fn sv_fold_error(pred: f64, obs: f64) -> f64 {
+     if obs <= 0.0 || pred <= 0.0 { return 999.0 }
+     let r = pred / obs
+@@ -202,7 +171,7 @@ fn main() -> i32 with IO, Mut, Div, Panic {
+             let cm = cn[m]
+             if cm > 1.0e-9 && sv_finite(cm) {
+                 let xx = grid[m]
+-                let yy = sv_ln(cm)
++                let yy = ln(cm)
+                 sx = sx + xx
+                 sy = sy + yy
+                 sxx = sxx + xx * xx
+@@ -249,13 +218,13 @@ fn main() -> i32 with IO, Mut, Div, Panic {
+         println(cobs)
+         println(cpred)
+         println(fe)
+-        sum_ln_fe = sum_ln_fe + sv_ln(fe)
++        sum_ln_fe = sum_ln_fe + ln(fe)
+         if fe <= 2.0 { within2 = within2 + 1 }
+         nf = nf + 1.0
+         i = i + 1
+     }
+ 
+-    let gmfe = sv_exp(sum_ln_fe / nf)
++    let gmfe = exp(sum_ln_fe / nf)
+     var pct2 = 0.0
+     var w = 0
+     var wf = 0.0
+diff --git a/stdlib/darwin_pbpk/validation/rapamycin_clinical.sio b/stdlib/darwin_pbpk/validation/rapamycin_clinical.sio
+index af0a32fb5..c28d7266d 100644
+--- a/stdlib/darwin_pbpk/validation/rapamycin_clinical.sio
++++ b/stdlib/darwin_pbpk/validation/rapamycin_clinical.sio
+@@ -26,10 +26,15 @@
+ // Author: Demetrios Chiuratto Agourakis
+ 
+ use darwin_pbpk::tsit5_pbpk14::*
++use math::pure::{exp, ln}
+ 
+ // ============================================================================
+-// MATH HELPERS
++// MATH HELPERS — ln / exp are canonical stdlib/math/pure.sio
+ // ============================================================================
++// The former local exp was (1 + x/1024)^1024 (relative error ~ -x^2/2048: GMFE
++// read low by 2.3e-4 at GMFE = 2) and the local ln a 5-term artanh after
++// e-scaling (absolute error up to 1.13e-6). pure.sio range-reduces both.
++// Evidence: docs/audit/DARWIN_PBPK_LOCAL_EXP_LN_ACCURACY_DISPATCH_2026-09-26.md
+ 
+ fn cv_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+     if x <= 0.0 { return 0.0 }
+@@ -47,44 +52,6 @@ fn cv_abs(x: f64) -> f64 {
+     return x
+ }
+ 
+-fn cv_ln(x: f64) -> f64 with Mut, Div, Panic {
+-    if x <= 0.0 { return 0.0 - 999999.0 }
+-    // ln via series: ln(x) = 2 * sum_{k=0}^{N} [(x-1)/(x+1)]^(2k+1) / (2k+1)
+-    // Scale to [0.5, 2.0] range
+-    var sx = x
+-    var scale = 0
+-    while sx > 2.0 {
+-        sx = sx / 2.718281828459045
+-        scale = scale + 1
+-    }
+-    while sx < 0.5 {
+-        sx = sx * 2.718281828459045
+-        scale = scale - 1
+-    }
+-    let u = (sx - 1.0) / (sx + 1.0)
+-    let u2 = u * u
+-    let result = 2.0 * (u + u * u2 / 3.0 + u * u2 * u2 / 5.0
+-                       + u * u2 * u2 * u2 / 7.0 + u * u2 * u2 * u2 * u2 / 9.0)
+-    var sf = 0.0
+-    var si = 0
+-    if scale > 0 {
+-        while si < scale { sf = sf + 1.0; si = si + 1 }
+-    } else {
+-        while si < (0 - scale) { sf = sf - 1.0; si = si + 1 }
+-    }
+-    return result + sf
+-}
+-
+-fn cv_exp(x: f64) -> f64 with Mut {
+-    var r = 1.0 + x / 1024.0
+-    var i = 0
+-    while i < 10 {
+-        r = r * r
+-        i = i + 1
+-    }
+-    return r
+-}
+-
+ fn cv_finite(x: f64) -> bool {
+     if x != x { return false }
+     return cv_abs(x) < 1.0e12
+@@ -105,13 +72,13 @@ fn gmfe_from_fes(fes: [f64; 16], n: i32) -> f64 with Mut, Div, Panic {
+     var sum_ln = 0.0
+     var i = 0
+     while i < n {
+-        sum_ln = sum_ln + cv_ln(fes[i])
++        sum_ln = sum_ln + ln(fes[i])
+         i = i + 1
+     }
+     var nf = 0.0
+     var j = 0
+     while j < n { nf = nf + 1.0; j = j + 1 }
+-    return cv_exp(sum_ln / nf)
++    return exp(sum_ln / nf)
+ }
+ 
+ // ============================================================================
+diff --git a/stdlib/darwin_pbpk/validation/tacrolimus_oral_pbpk.sio b/stdlib/darwin_pbpk/validation/tacrolimus_oral_pbpk.sio
+index 81e8f275c..8e1d909ef 100644
+--- a/stdlib/darwin_pbpk/validation/tacrolimus_oral_pbpk.sio
++++ b/stdlib/darwin_pbpk/validation/tacrolimus_oral_pbpk.sio
+@@ -35,10 +35,15 @@
+ 
+ use darwin_pbpk::tsit5_pbpk14::*
+ use darwin_pbpk::drugs::tacrolimus::{tacrolimus_fullvd_params}
++use math::pure::{exp, ln}
+ 
+ // ============================================================================
+-// MATH HELPERS
++// MATH HELPERS — ln / exp are canonical stdlib/math/pure.sio
+ // ============================================================================
++// The former local tco_ln was a 5-term artanh after e-scaling (absolute error
++// up to 1.13e-6) and TEST 7 computed exp(ln_avg) inline as (1 + x/1024)^1024
++// (relative error ~ -x^2/2048: GMFE read low by 5.9e-4 at the 3.0 gate).
++// Evidence: docs/audit/DARWIN_PBPK_LOCAL_EXP_LN_ACCURACY_DISPATCH_2026-09-26.md
+ 
+ fn tco_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+     if x <= 0.0 { return 0.0 }
+@@ -53,26 +58,6 @@ fn tco_abs(x: f64) -> f64 {
+     return x
+ }
+ 
+-fn tco_ln(x: f64) -> f64 with Mut, Div, Panic {
+-    if x <= 0.0 { return 0.0 - 999999.0 }
+-    var sx = x
+-    var scale = 0
+-    while sx > 2.0 { sx = sx / 2.718281828459045; scale = scale + 1 }
+-    while sx < 0.5 { sx = sx * 2.718281828459045; scale = scale - 1 }
+-    let u = (sx - 1.0) / (sx + 1.0)
+-    let u2 = u * u
+-    let result = 2.0 * (u + u * u2 / 3.0 + u * u2 * u2 / 5.0
+-                       + u * u2 * u2 * u2 / 7.0 + u * u2 * u2 * u2 * u2 / 9.0)
+-    var sf = 0.0
+-    var si = 0
+-    if scale > 0 {
+-        while si < scale { sf = sf + 1.0; si = si + 1 }
+-    } else {
+-        while si < (0 - scale) { sf = sf - 1.0; si = si + 1 }
+-    }
+-    return result + sf
+-}
+-
+ fn tco_finite(x: f64) -> bool {
+     if x != x { return false }
+     return tco_abs(x) < 1.0e12
+@@ -351,13 +336,8 @@ fn main() -> i32 with IO, Mut, Div, Panic {
+     print("  FE(t½)         = "); println(fe_thalf)
+     print("  FE(Vd,ss)       = "); println(fe_vd)
+     // GMFE = exp(mean ln FE)
+-    let ln_avg = (tco_ln(fe_bpr) + tco_ln(fe_thalf) + tco_ln(fe_vd)) / 3.0
+-    var gmfe = 1.0
+-    // Newton's method to compute exp(ln_avg)
+-    var y = 1.0 + ln_avg / 1024.0
+-    var it = 0
+-    while it < 10 { y = y * y; it = it + 1 }
+-    gmfe = y
++    let ln_avg = (ln(fe_bpr) + ln(fe_thalf) + ln(fe_vd)) / 3.0
++    let gmfe = exp(ln_avg)
+     print("  GMFE            = "); println(gmfe)
+     if gmfe <= 3.0 {
+         println("  [PASS] within relaxed FDA/EMA acceptance band")

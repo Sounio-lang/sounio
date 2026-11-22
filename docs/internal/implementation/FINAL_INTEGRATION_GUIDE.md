@@ -2,8 +2,8 @@
 topic_id: repo.docs.internal.implementation.final-integration-guide
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.implementation.final-integration-guide
 -->
 
@@ -275,4 +275,4 @@ O sistema de otimização MIR do Sounio agora possui:
 - **ML-guided optimization** com predição
 - **Arquitetura extensível** para novos passes
 
-**Status final: 85% production-ready** com capacidades state-of-the-art que rivalizam LLVM/GCC, mas com funcionalidades únicas para o ecossistema epistêmico do Sounio.
+**Fecho histórico desta nota, não o status atual do projeto.** Status: research language (pre-1.0). APIs may change; not recommended for production use. O parágrafo acima descreve o trabalho de MIR; ele não autoriza uso em produção.

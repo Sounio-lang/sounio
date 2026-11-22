@@ -1,0 +1,133 @@
+# sporos-stage0: the loader of the Sporos interpreter (root S, stage 0).
+# Written by hand, byte by byte. Format A: a byte is two lowercase hex digits;
+# whitespace separates pairs; `#` starts a comment to end of line.
+#
+# What it does: opens the file named in argv[1], mmaps a region, reads the
+# whole file into it (growing with mremap: double when full), writes it to
+# stdout. Exit 0 done, 1 refused/failed read or short write, 2 kernel refused
+# memory. No fixed ceiling (decision 35); fail closed (decisions 31, 49).
+#
+# Registers: rbx base, r12 capacity, r13 held, r14 fd.
+# Machine state at entry: only rsp is used, as given by the kernel.
+# Registers used: rax rdi rsi rdx r10 r8 r9 rbx r12 r13 r14 (set before use).
+#
+# Layout: one ELF64 header (0x00-0x3f), one program header (0x40-0x77),
+# code (0x78-0x144). Loaded at 0x400000; file offset X is address 0x400000+X.
+# Total 325 bytes.
+
+# ------------------------------ ELF header
+7f 45 4c 46 02 01 01 00 00 00 00 00 00 00 00 00   # 0   e_ident: ELF64 LE v1 SysV
+02 00 3e 00 01 00 00 00                            # 10   e_type EXEC, e_machine X86-64, e_version
+78 00 40 00 00 00 00 00                            # 18   e_entry = 0x400078 (start of code)
+40 00 00 00 00 00 00 00                            # 20   e_phoff = 0x40
+00 00 00 00 00 00 00 00                            # 28   e_shoff
+00 00 00 00                                        # 30   e_flags
+40 00                                              # 34   e_ehsize = 64
+38 00                                              # 36   e_phentsize = 56
+01 00                                              # 38   e_phnum = 1
+00 00                                              # 3a   e_shentsize
+00 00                                              # 3c   e_shnum
+00 00                                              # 3e   e_shstrndx
+
+# --------------------------- program header
+01 00 00 00                                        # 40   p_type = PT_LOAD
+05 00 00 00                                        # 44   p_flags = R+X
+00 00 00 00 00 00 00 00                            # 48   p_offset = 0
+00 00 40 00 00 00 00 00                            # 50   p_vaddr = 0x400000
+00 00 40 00 00 00 00 00                            # 58   p_paddr
+55 01 00 00 00 00 00 00                            # 60   p_filesz = 341
+55 01 00 00 00 00 00 00                            # 68   p_memsz = 341
+00 10 00 00 00 00 00 00                            # 70   p_align = 0x1000
+
+# ----------------------------------- code
+# start
+58                                                 # 78   pop rax: argc
+48 83 f8 02                                        # 79   cmp rax, 2
+7d 05                                              # 7d   jge over E9: argc >= 2, keep going
+e9 c1 00 00 00                                     # 7f   jmp fail1 (0x145): no program, refuse
+5e                                                 # 84   pop rsi: argv[0], discard
+5e                                                 # 85   pop rsi: argv[1], the path
+b8 02 00 00 00                                     # 86   mov eax, 2: open
+48 89 f7                                           # 8b   mov rdi, rsi: path
+31 f6                                              # 8e   xor esi, esi: O_RDONLY
+31 d2                                              # 90   xor edx, edx: mode unused, must be 0
+0f 05                                              # 92   syscall
+48 85 c0                                           # 94   test rax, rax
+79 05                                              # 97   jns over E9: fd ok, keep going
+e9 a7 00 00 00                                     # 99   jmp fail1 (0x145): -errno
+49 89 c6                                           # 9e   mov r14, rax: fd
+b8 09 00 00 00                                     # a1   mov eax, 9: mmap
+31 ff                                              # a6   xor edi, edi: addr 0
+be 00 00 01 00                                     # a8   mov esi, 0x10000: 64 KiB first region
+ba 03 00 00 00                                     # ad   mov edx, 3: PROT_READ|PROT_WRITE
+41 ba 22 00 00 00                                  # b2   mov r10d, 0x22: MAP_PRIVATE|MAP_ANONYMOUS
+6a ff                                              # b8   push -1
+41 58                                              # ba   pop r8: fd -1
+4d 31 c9                                           # bc   xor r9d, r9d: offset 0
+0f 05                                              # bf   syscall
+48 85 c0                                           # c1   test rax, rax
+79 05                                              # c4   jns over E9: mapping ok, keep going
+e9 82 00 00 00                                     # c6   jmp fail2 (0x14d): -ENOMEM, exit 2
+48 89 c3                                           # cb   mov rbx, rax: base
+41 bc 00 00 01 00                                  # ce   mov r12d, 0x10000: capacity
+4d 31 ed                                           # d4   xor r13d, r13d: held 0
+
+# readloop: read(fd, base+held, cap-held). Entered by fall-through from init.
+48 89 de                                           # d7   mov rsi, rbx
+4c 01 ee                                           # da   add rsi, r13
+4c 89 e2                                           # dd   mov rdx, r12
+4c 29 ea                                           # e0   sub rdx, r13: remaining
+31 c0                                              # e3   xor eax, eax: read
+44 89 f7                                           # e5   mov edi, r14d: fd
+0f 05                                              # e8   syscall
+48 85 c0                                           # ea   test rax, rax
+78 56                                              # ed   js fail1 (0x145): failed read
+74 31                                              # ef   jz done (0x122): EOF
+49 01 c5                                           # f1   add r13, rax: held += n
+4c 89 e2                                           # f4   mov rdx, r12
+4c 29 ea                                           # f7   sub rdx, r13: remaining
+75 db                                              # fa   jnz readloop (0xd7): room left
+# grow: mremap(base, cap, 2*cap, MREMAP_MAYMOVE)
+b8 19 00 00 00                                     # fc   mov eax, 25: mremap
+48 89 df                                           # 101  mov rdi, rbx: old base
+4c 89 e6                                           # 104  mov rsi, r12: old len
+4c 89 e2                                           # 107  mov rdx, r12
+48 01 d2                                           # 10a  add rdx, rdx: new len = 2*cap
+41 ba 01 00 00 00                                  # 10d   mov r10d, 1: MREMAP_MAYMOVE
+0f 05                                              # 113  syscall
+48 85 c0                                           # 115  test rax, rax
+78 33                                              # 118   js fail2 (0x14d): -ENOMEM
+48 89 c3                                           # 11a  mov rbx, rax: new base
+49 89 d4                                           # 11d  mov r12, rdx: new capacity
+eb b5                                              # 120   jmp readloop (0xd7)
+
+# done: write(1, base, held), length-checked
+b8 01 00 00 00                                     # 122  mov eax, 1: write
+bf 01 00 00 00                                     # 127  mov edi, 1: stdout
+48 89 de                                           # 12c  mov rsi, rbx
+4c 89 ea                                           # 12f  mov rdx, r13
+0f 05                                              # 132  syscall
+48 85 c0                                           # 134  test rax, rax
+78 0c                                              # 137   js fail1 (0x145): failed write
+49 29 c5                                           # 139  sub r13, rax: held - written
+75 07                                              # 13c   jnz fail1 (0x145): short write, discard
+6a 3c                                              # 13e  push 60
+58                                                 # 140  pop rax: exit
+31 ff                                              # 141  xor edi, edi: status 0
+0f 05                                              # 143  syscall
+
+# fail1: refuse or failed read/write, exit 1. Reached only by forward jumps.
+6a 3c                                              # 145   push 60
+58                                                 # 147   pop rax: exit
+6a 01                                              # 148   push 1
+5f                                                 # 14a   pop rdi: status 1
+0f 05                                              # 14b   syscall
+
+# fail2: kernel refused memory, exit 2. Reached only by forward jumps.
+6a 3c                                              # 14d   push 60
+58                                                 # 14f   pop rax: exit
+6a 02                                              # 150   push 2
+5f                                                 # 152   pop rdi: status 2
+0f 05                                              # 153   syscall
+
+# end of file

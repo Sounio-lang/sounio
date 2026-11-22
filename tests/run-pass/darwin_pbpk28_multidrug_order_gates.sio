@@ -1,0 +1,167 @@
+//@ run-pass
+//@ expect-stdout-contains: PBPK28_MULTIDRUG_ORDER_GATES_PASS
+//@ timeout: 240
+
+// Runtime (2026-09-27): 22.2 s on lean_single (souc-stage2 engine, this
+// workspace pod, run only). CI job 108525867166 put the Full Test Suite
+// runner at 2.65-4.3x slower than the pod (hepatic 11.3 s timed out at
+// 30 s; calibration 42 s passed within 180 s), so the timeout is about
+// 2x the worst projected CI time, 4.3 x 22.2 s.
+//
+// Coupling-order gate for stdlib/darwin_pbpk/ddi/multidrug28.sio (default
+// TR-BDF2 transport). The other driver gates are in
+// tests/run-pass/darwin_pbpk28_multidrug_gates.sio.
+//
+// V5  Convergence order of the COUPLING, isolated from transport error
+//     (moved here from darwin_pbpk28_multidrug_gates.sio on 2026-09-27 so
+//     that each file has an honest runtime). A plain
+//     self-convergence ratio mixes the O(dt^2) TR-BDF2 transport error with the
+//     coupling error. Instead each scheme is compared with the coupling
+//     iterated to its fixed point (midpoint-coefficient coupling, which is
+//     transport-neutral; see the driver header) at the SAME dt with the SAME
+//     transport discretization. This does not cancel the transport
+//     truncation error exactly (Copilot review, PR #2695, 2026-10-01):
+//     Lie, PC and the iterated scheme walk different coefficient histories
+//     and trajectories, so the same discretization applied along different
+//     trajectories does not generally produce identical transport error.
+//     What the comparison does give is a difference, D(dt), between each
+//     scheme's AUC and the iterated-reference AUC at matched dt and matched
+//     transport; the asserted scaling (D(dt)/D(dt/2) ~ 2 for Lie, ~4 for PC)
+//     is the coupling scheme's own formal order measured against that
+//     reference, which the ratios below confirm empirically rather than by
+//     an exact-cancellation argument:
+//       D_Lie(dt) = AUC_Lie - AUC_iter = O(dt)    -> D(dt)/D(dt/2) ~ 2
+//       D_PC(dt)  = AUC_PC  - AUC_iter = O(dt^2)  -> D(dt)/D(dt/2) ~ 4
+//     Fixture: physiological transport (rapamycin profile, s = 1), victim ka
+//     1.5, perpetrator ka 0.2, mutual Ki 0.2, perpetrator dose 10 mg, victim AUC
+//     0..4 h. How small dt must be before the ratios settle is set by the
+//     strength of the interaction nonlinearity, not by transport stiffness:
+//     with the perpetrator at 100 mg (C_u/Ki ~ 20) D_PC changes sign near
+//     dt = 0.03 h and the PC ratios settle only below dt ~ 0.003 h (3.54, 3.78,
+//     3.89 at 0.0025 -> 0.000625), whereas backward-Euler transport or a 100x
+//     smaller lung PS leave them unchanged (adversarial review 2026-09-26; an
+//     earlier version of this gate blamed CN order reduction and verified on a
+//     transport scaled by 0.01 -- that diagnosis was wrong).
+//     V5a (order vs the iterated reference) at dt = 0.02, 0.01, 0.005: the
+//     finest ratio must lie inside the theoretical band (Lie [1.7, 2.3], PC
+//     [3.5, 4.5]) and be closer to the formal value than the coarser one; the
+//     reference must agree with 16 sweeps to 1e-12. That check is made at the
+//     COARSEST dt (0.02): the sweep is a fixed-point iteration whose
+//     contraction factor grows with dt, so dt = 0.02 converges slowest and
+//     is the stricter case (measured 2026-09-27, both engines: 8, 12 and 16
+//     sweeps give bit-identical AUCs at dt = 0.02, 0.01 and 0.005). It used
+//     to be made at dt/4.
+//     V5c (the fixed point is second order). V5a cannot tell whether the fixed
+//     point itself is second order: closing the coupling at the end-of-step
+//     factor f* instead of (f_n + f*)/2 still passes V5a. V5c requires the PC
+//     scheme (the default) to SELF-converge at second order, transport and
+//     coupling together: (A(dt)-A(dt/2))/(A(dt/2)-A(dt/4)) at dt = 0.01,
+//     0.005, 0.0025, 0.00125 (measured on the default TR-BDF2 transport 3.67,
+//     3.82; same band and trend rule). The PC runs at 0.01 and 0.005 are the
+//     ones V5a already made; they are shared, not recomputed.
+//     V5b (strong inhibition, perpetrator 100 mg, dt = 0.02 h, pre-asymptotic).
+//     No order is claimed; regression guard for the accuracy claim in the
+//     driver docs: the PC coupling error is at least ten times smaller than
+//     Lie's (measured ~500 times on TR-BDF2, ~1e3 on the legacy CN path).
+//
+//
+// Transport parameters are the rapamycin PBPK28 profile with synthetic CLint and
+// Ki values: kernel/driver correctness fixtures, not drug claims.
+
+use darwin_pbpk::core::pbpk28_params::*
+use darwin_pbpk::ddi::multidrug28::*
+
+fn g_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+// Same fixture with a chosen absorption rate constant.
+fn add_victim_ka(md: &!MultiDrug28, cl_c: f64, ka: f64) -> i32 with Mut, Panic {
+    var p = pbpk28_params_rapamycin()
+    p.cl_central = cl_c
+    let i = md_add_drug(md, p, 0.1, 0.95, ka)
+    md_set_fu_site(md, i, md_site_gut(), 1.0)
+    md_set_clint(md, i, md_site_liver(), md_cyp3a4(), 200.0)
+    md_set_clint(md, i, md_site_gut(), md_cyp3a4(), 30.0)
+    return i
+}
+
+// V5 --------------------------------------------------------------------------
+fn coupled_victim_auc(dt: f64, iters: i32, dose_b: f64) -> f64 with Mut, Div, Panic {
+    var md = md_new(true)
+    md.iters = iters
+    let a = add_victim_ka(&!md, 1.5, 1.5)
+    let b = add_victim_ka(&!md, 0.5, 0.2)
+    md_set_ki(&!md, a, md_cyp3a4(), 0.2)
+    md_set_ki(&!md, b, md_cyp3a4(), 0.2)
+    md_dose_oral(&!md, a, 5.0)
+    md_dose_oral(&!md, b, dose_b)
+    md_run_to(&!md, 4.0, dt)
+    return md.auc_b[a]
+}
+
+fn e_sci(x: f64) -> i64 { return (x * 1.0e15) as i64 }
+
+fn ratio_ok(coarse: f64, fine: f64, formal: f64, lo: f64, hi: f64) -> bool {
+    return fine > lo && fine < hi && g_abs(fine - formal) < g_abs(coarse - formal)
+}
+
+fn gate_v5() -> bool with Mut, Div, Panic, IO {
+    let h = 0.02
+    let r0 = coupled_victim_auc(h, 12, 10.0)
+    let r1 = coupled_victim_auc(0.5 * h, 12, 10.0)
+    let r2 = coupled_victim_auc(0.25 * h, 12, 10.0)
+    let conv = g_abs(coupled_victim_auc(h, 16, 10.0) - r0) / r0
+    print("V5a iterated reference converged at dt = 0.02 (12 vs 16 sweeps, rel x1e15) = ") println(e_sci(conv))
+
+    let l0 = g_abs(coupled_victim_auc(h, 0, 10.0) - r0)
+    let l1 = g_abs(coupled_victim_auc(0.5 * h, 0, 10.0) - r1)
+    let l2 = g_abs(coupled_victim_auc(0.25 * h, 0, 10.0) - r2)
+    println("V5a Lie vs iterated:")
+    print("    D(dt), D(dt/2), D(dt/4) (x1e15) = ") print(e_sci(l0)) print("  ") print(e_sci(l1)) print("  ") println(e_sci(l2))
+    let l_c = l0 / l1
+    let l_f = l1 / l2
+    print("V5a Lie ratios coarse, fine (expect -> 2, order 1) = ") print(l_c) print("  ") println(l_f)
+
+    // PC runs, shared with V5c (dt 0.01 and 0.005).
+    let pc0 = coupled_victim_auc(h, 1, 10.0)
+    let pc1 = coupled_victim_auc(0.5 * h, 1, 10.0)
+    let pc2 = coupled_victim_auc(0.25 * h, 1, 10.0)
+    let p0 = g_abs(pc0 - r0)
+    let p1 = g_abs(pc1 - r1)
+    let p2 = g_abs(pc2 - r2)
+    println("V5a predictor-corrector vs iterated:")
+    print("    D(dt), D(dt/2), D(dt/4) (x1e15) = ") print(e_sci(p0)) print("  ") print(e_sci(p1)) print("  ") println(e_sci(p2))
+    let p_c = p0 / p1
+    let p_f = p1 / p2
+    print("V5a PC ratios coarse, fine (expect -> 4, order 2) = ") print(p_c) print("  ") println(p_f)
+    let lie_ok = ratio_ok(l_c, l_f, 2.0, 1.7, 2.3)
+    let pc_ok = ratio_ok(p_c, p_f, 4.0, 3.5, 4.5)
+
+    // V5c: self-convergence of the default PC scheme at 0.01 .. 0.00125.
+    let a0 = pc1
+    let a1 = pc2
+    let a2 = coupled_victim_auc(0.0025, 1, 10.0)
+    let a3 = coupled_victim_auc(0.00125, 1, 10.0)
+    let q_c = (a0 - a1) / (a1 - a2)
+    let q_f = (a1 - a2) / (a2 - a3)
+    print("V5c PC self-convergence ratios coarse, fine (expect -> 4) = ") print(q_c) print("  ") println(q_f)
+    let self_ok = ratio_ok(q_c, q_f, 4.0, 3.5, 4.5)
+
+    // V5b: strong inhibition at the production step.
+    let rp = coupled_victim_auc(0.02, 12, 100.0)
+    let dpc = g_abs(coupled_victim_auc(0.02, 1, 100.0) - rp)
+    let dlie = g_abs(coupled_victim_auc(0.02, 0, 100.0) - rp)
+    print("V5b strong inhibition, dt = 0.02: D_PC, D_Lie (x1e15) = ") print(e_sci(dpc)) print("  ") println(e_sci(dlie))
+    let strong_ok = dpc < 0.1 * dlie
+    return conv < 1.0e-12 && lie_ok && pc_ok && self_ok && strong_ok
+}
+
+fn main() -> i32 with Mut, Div, Panic, IO {
+    let v5 = gate_v5()
+    if v5 {
+        println("V5 PASS")
+        println("PBPK28_MULTIDRUG_ORDER_GATES_PASS")
+        return 0
+    }
+    println("V5 FAIL")
+    return 1
+}

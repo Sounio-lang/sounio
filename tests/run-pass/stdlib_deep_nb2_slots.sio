@@ -1,0 +1,86 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: STDLIB_DEEP_NB2_SLOTS_PASS
+use stats::regression::nb2_deviance::{nb2_deviance,nb2_deviance_slot,nb2_deviance_into,nb2_deviance_snapshot,nb2_deviance_slot_reset,nb2_deviance_slot_status,nb2_deviance_slot_deviance_status,nb2_deviance_slot_deviance,nb2_deviance_slot_residual,nb2_deviance_slot_poisson_limit}
+use stats::regression::nb2_likelihood::{nb2_log_probability,nb2_likelihood_slot,nb2_log_probability_into,nb2_likelihood_snapshot,nb2_likelihood_slot_reset,nb2_likelihood_slot_status,nb2_likelihood_slot_log_probability,nb2_likelihood_slot_normalizer_status,nb2_likelihood_slot_residual_status,nb2_likelihood_slot_deviance_status}
+use io::sci_print::{println_f64_sci}
+fn main()->i32 with IO,Mut,Div,Panic {
+ var ds=nb2_deviance_slot()
+ var ls=nb2_likelihood_slot()
+ let counts:[i64;8]=[0,1,7,8,40,9007199254740992,-1,9007199254740993]
+ let means:[f64;6]=[1.0,8.0,40.0,1e-308,1e308,-1.0]
+ let tiny_alpha:f64=2.2250738585072014e-308/4503599627370496.0
+ assert(tiny_alpha>0.0)
+ let alphas:[f64;6]=[0.0,0.01,1.0,10.0,tiny_alpha,-1.0]
+ var i:i64=0
+ while i<8 {
+  var j:i64=0
+  while j<6 {
+   var k:i64=0
+   while k<6 {
+    let count:i64=counts[i as usize];let mean:f64=means[j as usize];let alpha:f64=alphas[k as usize]
+    let oldd=nb2_deviance(count,mean,alpha)
+    let dc=nb2_deviance_into(count,mean,alpha,&!ds)
+    let d=nb2_deviance_snapshot(&ds)
+    assert(dc==oldd.status && d.status==oldd.status && d.deviance_status==oldd.deviance_status)
+    assert(d.deviance==oldd.deviance && d.residual==oldd.residual && d.poisson_limit==oldd.poisson_limit)
+    let oldl=nb2_log_probability(count,mean,alpha)
+    let lc=nb2_log_probability_into(count,mean,alpha,&!ls)
+    let l=nb2_likelihood_snapshot(&ls)
+    assert(lc==oldl.status && l.status==oldl.status && l.count==oldl.count)
+    assert(l.log_probability==oldl.log_probability && l.normalizer_status==oldl.normalizer_status)
+    assert(l.saturated_log_probability==oldl.saturated_log_probability && l.residual_status==oldl.residual_status)
+    assert(l.residual==oldl.residual && l.deviance_status==oldl.deviance_status && l.deviance==oldl.deviance)
+    assert(l.poisson_limit==oldl.poisson_limit && l.stirling_used==oldl.stirling_used)
+    assert(l.normalizer_remainder_estimate==oldl.normalizer_remainder_estimate)
+    assert(l.remainder_estimate_available==oldl.remainder_estimate_available && !l.assumptions_assessed)
+    k=k+1
+   }
+   j=j+1
+  }
+  i=i+1
+ }
+ // Detached rich snapshots must survive slot reuse and explicit resets.
+ let dcode=nb2_deviance_into(0,1.0,0.0,&!ds)
+ let frozen_d=nb2_deviance_snapshot(&ds)
+ let saved_d:f64=frozen_d.deviance;let saved_r:f64=frozen_d.residual
+ let lcode=nb2_log_probability_into(0,1.0,0.0,&!ls)
+ let frozen_l=nb2_likelihood_snapshot(&ls)
+ let saved_log:f64=frozen_l.log_probability
+ assert(dcode==0 && lcode==0 && frozen_l.log_probability==saved_log)
+ let overwrite_d=nb2_deviance_into(8,8.0,1.0,&!ds)
+ let overwrite_l=nb2_log_probability_into(8,8.0,1.0,&!ls)
+ nb2_deviance_slot_reset(&!ds);nb2_likelihood_slot_reset(&!ls)
+ assert(frozen_d.status==0 && frozen_d.deviance==saved_d && frozen_d.residual==saved_r && frozen_d.poisson_limit)
+ assert(frozen_l.status==0 && frozen_l.count==0 && frozen_l.log_probability==saved_log && frozen_l.poisson_limit)
+ assert(nb2_deviance_slot_status(&ds)==5 && nb2_deviance_slot_deviance_status(&ds)==2)
+ assert(nb2_deviance_slot_deviance(&ds)==0.0 && nb2_deviance_slot_residual(&ds)==0.0 && !nb2_deviance_slot_poisson_limit(&ds))
+ let clear=nb2_likelihood_snapshot(&ls)
+ assert(clear.status==5 && clear.count==0 && clear.log_probability==0.0 && clear.normalizer_status==2)
+ assert(clear.saturated_log_probability==0.0 && clear.residual_status==2 && clear.residual==0.0)
+ assert(clear.deviance_status==2 && clear.deviance==0.0 && !clear.poisson_limit && !clear.stirling_used)
+ assert(clear.normalizer_remainder_estimate==0.0 && !clear.remainder_estimate_available && !clear.assumptions_assessed)
+ // Independent payload availability is preserved rather than collapsed.
+ let overflow=nb2_log_probability_into(0,1e308,0.0,&!ls)
+ assert(overflow==0 && nb2_likelihood_slot_residual_status(&ls)==0 && nb2_likelihood_slot_deviance_status(&ls)==1)
+ assert(nb2_likelihood_slot_log_probability(&ls)<0.0)
+ let reciprocal=nb2_log_probability_into(8,8.0,tiny_alpha,&!ls)
+ assert(reciprocal==5 && nb2_likelihood_slot_normalizer_status(&ls)==5 && nb2_likelihood_slot_residual_status(&ls)==0)
+ // Actual slot scalar payloads consumed by an independent C++ analytic oracle.
+ i=0
+ while i<8 {
+  let available=nb2_log_probability_into(i,1.0,1.0,&!ls)
+  assert(available==0)
+  let report=nb2_likelihood_snapshot(&ls)
+  println("NB2_SLOT_ROW")
+  println(i)
+  println_f64_sci(report.log_probability,15)
+  println_f64_sci(report.residual,15)
+  println_f64_sci(report.deviance,15)
+  i=i+1
+ }
+ println("NB2_SLOT_POISSON")
+ println_f64_sci(saved_log,15)
+ println("STDLIB_DEEP_NB2_SLOTS_PASS")
+ 0
+}

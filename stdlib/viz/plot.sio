@@ -1,0 +1,73 @@
+// Atomic creation of two automatic linear axes bound to one clipped line.
+// Binding is a snapshot. Rebind/rebuild after changing data or chart geometry.
+use viz::nice_axis::{axis_nice_cover}
+use viz::ir::{VizScene,VizStyle,VizLayout,viz_layout_rect,viz_add_axis,
+    viz_line_set_viewport,VIZ_NODE_CHART_LINE,VIZ_FLAG_CLIP_PLOT}
+pub struct PlotAxes { pub status:i64, pub x_axis:i64, pub y_axis:i64 }
+// status 0=available, 1=invalid chart/geometry, 2=capacity, 3=unavailable x plan,
+// 4=unavailable y plan, 5=unexpected construction failure.
+pub fn viz_auto_plot_axes(scene: &!VizScene, chart:i64, style:VizStyle) -> PlotAxes with Mut, Div {
+    var out=PlotAxes{status:1,x_axis:-1,y_axis:-1}
+    if chart < 0 || chart >= scene.node_count { return out }
+    let kind:i64=scene.nodes[chart as usize].kind
+    let stroke:i64=scene.nodes[chart as usize].style.stroke_width
+    let scaled_flags:i64=scene.nodes[chart as usize].flags
+    if (scaled_flags & 7680) != 0 { return out }
+    let slot:i64=scene.nodes[chart as usize].data_slot
+    let rect:VizLayout=scene.nodes[chart as usize].layout
+    if kind != VIZ_NODE_CHART_LINE || stroke != 1 || slot < 0 || slot >= scene.series_count { return out }
+    let count:i64=scene.series[slot as usize].n
+    if count < 2 || count > 1024 { return out }
+    if rect.x < -999982 || rect.x > 1000000 || rect.y < -1000000 || rect.y > 999982 { return out }
+    if rect.w < 112 || rect.w > 1000000 || rect.h < 24 || rect.h > 1000000 { return out }
+    if rect.x > 1000000-rect.w || rect.y > 999982-rect.h { return out }
+    if scene.node_count < 0 || scene.node_count > 62 { out.status=2;return out }
+    var nx:i64=rect.w/112
+    var ny:i64=rect.h/24
+    if nx > 8 { nx=8 }
+    if ny > 8 { ny=8 }
+    let xmin:f64=scene.series[slot as usize].x_min
+    let xmax:f64=scene.series[slot as usize].x_max
+    let ymin:f64=scene.series[slot as usize].y_min
+    let ymax:f64=scene.series[slot as usize].y_max
+    let xp=axis_nice_cover(xmin,xmax,nx)
+    if xp.status != 0 { out.status=3;return out }
+    let yp=axis_nice_cover(ymin,ymax,ny)
+    if yp.status != 0 { out.status=4;return out }
+    let old_count:i64=scene.node_count
+    let old_id:i64=scene.next_node_id
+    let xa=viz_add_axis(scene,xp.lo,xp.hi,xp.intervals,false,
+        viz_layout_rect(rect.x,rect.y+rect.h+18,rect.w,1),style)
+    let ya=viz_add_axis(scene,yp.lo,yp.hi,yp.intervals,true,
+        viz_layout_rect(rect.x-18,rect.y,1,rect.h),style)
+    if xa < 0 || ya < 0 {
+        scene.node_count=old_count;scene.next_node_id=old_id
+        out.status=5;return out
+    }
+    if !viz_line_set_viewport(scene,chart,xp.lo,xp.hi,yp.lo,yp.hi) {
+        scene.node_count=old_count;scene.next_node_id=old_id
+        out.status=5;return out
+    }
+    out.status=0;out.x_axis=xa;out.y_axis=ya
+    out
+}
+// Reuse the source line's exact bounds, on the same plot rectangle. Does not
+// consume another series or axis slot, or change limits when validation fails.
+pub fn viz_plot_share_domain(scene: &!VizScene, source:i64, target:i64) -> bool with Mut {
+    if source < 0 || source >= scene.node_count || target < 0 || target >= scene.node_count { return false }
+    let sk:i64=scene.nodes[source as usize].kind
+    let sf:i64=scene.nodes[source as usize].flags
+    let tf:i64=scene.nodes[target as usize].flags
+    if ((sf | tf) & 7680) != 0 { return false }
+    let slot:i64=scene.nodes[source as usize].data_slot
+    let a:VizLayout=scene.nodes[source as usize].layout
+    let b:VizLayout=scene.nodes[target as usize].layout
+    if sk != VIZ_NODE_CHART_LINE || (sf & VIZ_FLAG_CLIP_PLOT) == 0 { return false }
+    if slot < 0 || slot >= scene.series_count { return false }
+    if a.x != b.x || a.y != b.y || a.w != b.w || a.h != b.h { return false }
+    let xmin:f64=scene.series[slot as usize].x_min
+    let xmax:f64=scene.series[slot as usize].x_max
+    let ymin:f64=scene.series[slot as usize].y_min
+    let ymax:f64=scene.series[slot as usize].y_max
+    viz_line_set_viewport(scene,target,xmin,xmax,ymin,ymax)
+}

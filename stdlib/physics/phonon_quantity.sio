@@ -1,0 +1,516 @@
+// stdlib/physics/phonon_quantity.sio
+//
+// 1D lattice model of drug transport along a liver sinusoid, on dimensioned
+// quantities (units::lib::Quantity) in coherent SI units.
+//
+// Same transport model and discretisation as stdlib/physics/phonon.sio, which
+// works on a flat [f64; 64] in ng/mL. Here every parameter is a Quantity with
+// its dimension checked, and concentrations are mass concentrations in kg/m^3
+// (1 ng/mL = 1e-6 kg/m^3). The model is linear in concentration, so the two
+// modules give the same profile up to that factor
+// (tests/stdlib/physics/test_phonon_quantity_parity.sio).
+//
+// Model. N = 64 sites of spacing dx (one red-cell diameter; 64 x 3.9 um ~ the
+// 250 um sinusoid), site 0 at the inlet, site N-1 at the central-vein outlet:
+//
+//   dC_i/dt = - (v/dx) (C_i - C_{i-1})                   upwind advection (v > 0)
+//             + (D/dx^2) (C_{i-1} - 2 C_i + C_{i+1})     axial dispersion
+//             - k_rel (C_i - C_tissue / Kp)              exchange with hepatocytes
+//             - CL_site z_i fu C_i                       CYP3A4 metabolism
+//
+// with C_{-1} = c_in(t) at the inlet, a zero-flux outlet
+// ((D/dx^2)(C_{N-2} - C_{N-1}) at i = N-1), and the zonation factor
+// z_i = 2/(Z+1) (1 + (Z-1) i/(N-1)) (mean 1 over the lattice; z_i = 1 for
+// Z <= 1.01). The inlet mixes portal and arterial blood 3:1, each pulsatile
+// at the heart rate f:
+//
+//   c_in(t) = 0.75 c_portal (1 + a_portal sin(w t))
+//           + 0.25 c_ha     (1 + a_ha     sin(w t + phi_ha)),   w = 2 pi f.
+//
+// Integration: classical RK4 at the step of cfl_dt_q (diffusion number 0.4,
+// Courant number 0.8, capped at 1e-4 s); a concentration driven below zero by
+// a step is set to zero, as in phonon.sio.
+//
+// Uncertainty: first-order GUM by forward sensitivities. The model is linear
+// in C, so dC/dtheta obeys the same equation with the inputs replaced by their
+// derivatives, integrated in the same RK4 stages as C itself. Four sources are
+// carried, which keeps the correlation that a variance-only scheme loses:
+//
+//   0  the initial lattice state. The variances present when a lattice first
+//      steps are read as ONE uncertain initial concentration shared by every
+//      site (fully correlated), which is what lattice64_init(c, var) describes:
+//      a uniform state whose common value is known to var.
+//   1  c_portal,  2  c_ha,  3  c_tissue: their Quantity uncertainties.
+//
+// After each step, variances[i] = s0_i^2 + sum_k (dC_i/dc_k u(c_k))^2. A
+// variance written into `variances` after the lattice has stepped is
+// overwritten by the next step. The transport and kinetic constants (D, dx,
+// k_rel, CL_site, fu, Kp, f, a_portal, a_ha, phi_ha, v, Z) are not propagated:
+// a step whose parameters give one of them a non-zero uncertainty panics
+// instead of reporting an uncertainty that leaves it out.
+//
+// phonon.sio's own variance channel is not the GUM law: it integrates sums of
+// squared rate coefficients times variances as if they were dVar/dt, which is
+// dimensionally s^-2 * Var, and for the rapamycin defaults it overflows to inf
+// within one 10-cycle run. Do not compare variances between the two modules.
+//
+// References: Teutsch (2005), sinusoid morphometry; McNaughton & Abu-Yousef
+// (1998), portal Doppler pulsatility; Taylor (1953), dispersion in tubes;
+// JCGM 100:2008 (GUM) section 5.1.
+
+module physics::phonon_quantity
+
+use units::lib::*
+use math::pure::{sin, sqrt}
+
+pub const PQ_N: i64 = 64
+// Rows of the sensitivity block: initial state, c_portal, c_ha, c_tissue.
+pub const PQ_NSENS: i64 = 4
+
+// pi as a function, not a module-level `let`: an imported f64 global read
+// inside this module's functions does not hold its value on Madaros (measured
+// 2026-10-30: sin(2 * PQ_PI * f * t) never returned).
+fn pq_pi() -> f64 { 3.141592653589793 }
+
+// ============================================================================
+// PARAMETERS
+// ============================================================================
+
+pub struct PhononParams {
+    pub d_eff: Quantity,      // effective axial dispersion        m^2/s
+    pub dx: Quantity,         // site spacing                      m
+    pub k_release: Quantity,  // blood <-> tissue exchange rate    1/s
+    pub cl_site: Quantity,    // per-site metabolic clearance      1/s
+    pub fu: Quantity,         // fraction unbound                  1
+    pub kp: Quantity,         // tissue:plasma partition           1
+    pub c_portal: Quantity,   // mean portal concentration         kg/m^3
+    pub c_ha: Quantity,       // mean hepatic-artery concentration kg/m^3
+    pub f_heart: Quantity,    // heart rate                        1/s (Hz)
+    pub a_portal: Quantity,   // portal pulsatility amplitude      1
+    pub a_ha: Quantity,       // arterial pulsatility amplitude    1
+    pub phi_ha: Quantity,     // arterial phase offset             1 (rad)
+    pub c_tissue: Quantity,   // hepatocyte concentration          kg/m^3
+    pub v_blood: Quantity,    // sinusoidal blood velocity         m/s
+    pub zonation: Quantity,   // pericentral:periportal CL ratio   1
+}
+
+// Rapamycin defaults, the values of phonon.sio's rapamycin_phonon_params in SI.
+// The three concentrations carry a 10% relative standard uncertainty (the
+// coefficient of variation phonon.sio assumed for its boundary); the transport
+// and kinetic constants carry none.
+pub fn rapamycin_phonon_params_q() -> PhononParams {
+    PhononParams {
+        d_eff:     quantity_new(1.0e-9, 0.0, dim_diffusion()),
+        dx:        q_length(3.9e-6, 0.0),
+        k_release: quantity_new(0.1, 0.0, dim_rate()),
+        cl_site:   quantity_new(0.003, 0.0, dim_rate()),
+        fu:        q_dimensionless(0.075, 0.0),
+        kp:        q_dimensionless(5.0, 0.0),
+        c_portal:  q_concentration_mass(1.0e-5, 1.0e-6),    // 10 ng/mL
+        c_ha:      q_concentration_mass(8.0e-6, 8.0e-7),    // 8 ng/mL
+        f_heart:   quantity_new(1.2, 0.0, dim_rate()),       // 72 bpm
+        a_portal:  q_dimensionless(0.05, 0.0),
+        a_ha:      q_dimensionless(0.30, 0.0),
+        phi_ha:    q_dimensionless(0.785, 0.0),
+        c_tissue:  q_concentration_mass(2.0e-6, 2.0e-7),    // 2 ng/mL
+        v_blood:   q_velocity(3.0e-4, 0.0),                  // 300 um/s
+        zonation:  q_dimensionless(1.0, 0.0),
+    }
+}
+
+fn pq_require(q: &Quantity, d: UnitDim, exact: bool, what: string) with Panic {
+    if !dim_eq(q.dim, d) {
+        panic(what)
+    }
+    if exact && q.uncertainty != 0.0 {
+        panic(what)
+    }
+}
+
+// Dimension of every field, and zero uncertainty on the constants that are
+// not propagated (see the header). Panics on the first violation.
+pub fn phonon_params_validate(p: &PhononParams) with Panic {
+    pq_require(&p.d_eff, dim_diffusion(), true, "phonon_quantity: d_eff must be m^2/s, uncertainty not propagated")
+    pq_require(&p.dx, dim_length(), true, "phonon_quantity: dx must be a length, uncertainty not propagated")
+    pq_require(&p.k_release, dim_rate(), true, "phonon_quantity: k_release must be 1/s, uncertainty not propagated")
+    pq_require(&p.cl_site, dim_rate(), true, "phonon_quantity: cl_site must be 1/s, uncertainty not propagated")
+    pq_require(&p.fu, dim_dimensionless(), true, "phonon_quantity: fu must be dimensionless, uncertainty not propagated")
+    pq_require(&p.kp, dim_dimensionless(), true, "phonon_quantity: kp must be dimensionless, uncertainty not propagated")
+    pq_require(&p.c_portal, dim_concentration(), false, "phonon_quantity: c_portal must be kg/m^3")
+    pq_require(&p.c_ha, dim_concentration(), false, "phonon_quantity: c_ha must be kg/m^3")
+    pq_require(&p.f_heart, dim_rate(), true, "phonon_quantity: f_heart must be 1/s, uncertainty not propagated")
+    pq_require(&p.a_portal, dim_dimensionless(), true, "phonon_quantity: a_portal must be dimensionless, uncertainty not propagated")
+    pq_require(&p.a_ha, dim_dimensionless(), true, "phonon_quantity: a_ha must be dimensionless, uncertainty not propagated")
+    pq_require(&p.phi_ha, dim_dimensionless(), true, "phonon_quantity: phi_ha must be dimensionless, uncertainty not propagated")
+    pq_require(&p.c_tissue, dim_concentration(), false, "phonon_quantity: c_tissue must be kg/m^3")
+    pq_require(&p.v_blood, dim_velocity(), true, "phonon_quantity: v_blood must be m/s, uncertainty not propagated")
+    pq_require(&p.zonation, dim_dimensionless(), true, "phonon_quantity: zonation must be dimensionless, uncertainty not propagated")
+    if p.dx.value <= 0.0 { panic("phonon_quantity: dx must be positive") }
+    if p.kp.value <= 0.0 { panic("phonon_quantity: kp must be positive") }
+}
+
+// ============================================================================
+// BOUNDARY
+// ============================================================================
+
+// d c_in / d c_portal and d c_in / d c_ha at time t.
+fn pq_dcin_dportal(t: f64, p: &PhononParams) -> f64 with Mut, Div, Panic {
+    let w = 2.0 * pq_pi() * p.f_heart.value
+    0.75 * (1.0 + p.a_portal.value * sin(w * t))
+}
+
+fn pq_dcin_dha(t: f64, p: &PhononParams) -> f64 with Mut, Div, Panic {
+    let w = 2.0 * pq_pi() * p.f_heart.value
+    0.25 * (1.0 + p.a_ha.value * sin(w * t + p.phi_ha.value))
+}
+
+// Inlet concentration c_in(t) as a Quantity (kg/m^3). Its uncertainty is the
+// first-order combination of u(c_portal) and u(c_ha), taken as uncorrelated.
+pub fn pulsatile_input_q(t: f64, p: &PhononParams) -> Quantity with Mut, Div, Panic {
+    let gp = pq_dcin_dportal(t, p)
+    let gh = pq_dcin_dha(t, p)
+    let value = gp * p.c_portal.value + gh * p.c_ha.value
+    let up = gp * p.c_portal.uncertainty
+    let uh = gh * p.c_ha.uncertainty
+    quantity_new(value, sqrt(up * up + uh * uh), dim_concentration())
+}
+
+// RK4 step for this model: diffusion number D dt/dx^2 <= 0.4, Courant number
+// v dt/dx <= 0.8, and never more than 1e-4 s (1/8333 of a cardiac cycle).
+fn pq_cfl(dx: f64, d: f64, v: f64) -> f64 with Div {
+    let dt_diff = if d > 0.0 { 0.4 * dx * dx / d } else { 1.0e-4 }
+    let dt_adv = if v > 0.0 { 0.8 * dx / v } else { 1.0e-4 }
+    let dt_cfl = if dt_diff < dt_adv { dt_diff } else { dt_adv }
+    if dt_cfl < 1.0e-4 { dt_cfl } else { 1.0e-4 }
+}
+
+pub fn cfl_dt_q(p: &PhononParams) -> f64 with Div {
+    pq_cfl(p.dx.value, p.d_eff.value, p.v_blood.value)
+}
+
+// ============================================================================
+// LATTICE
+// ============================================================================
+
+pub struct Lattice64 {
+    pub values: [f64; 64],      // concentration per site, kg/m^3
+    pub variances: [f64; 64],   // GUM variance per site, (kg/m^3)^2
+    pub n: i64,                 // active sites, 1..64
+    // dC_i / d(source k), row-major k * 64 + i: row 0 is already scaled by the
+    // initial standard uncertainty, rows 1..3 are per unit of c_portal, c_ha,
+    // c_tissue.
+    pub sens: [f64; 256],
+    // false until the first step reads `variances` into sensitivity row 0.
+    pub seeded: bool,
+    // 1 for each sensitivity row that is integrated. Fixed at the first step:
+    // row 0 if any initial variance is non-zero, row k if source k had a
+    // non-zero uncertainty then. Rows that stay 0 cost nothing.
+    pub live: [i64; 4],
+}
+
+pub fn lattice64_zero() -> Lattice64 {
+    Lattice64 { values: [0.0; 64], variances: [0.0; 64], n: PQ_N, sens: [0.0; 256], seeded: false, live: [0; 4] }
+}
+
+// Uniform state: every site at concentration c (kg/m^3), the common value
+// known to variance var.
+pub fn lattice64_init(c: f64, var: f64) -> Lattice64 with Mut {
+    var s = lattice64_zero()
+    var i: i64 = 0
+    while i < PQ_N {
+        s.values[i] = c
+        s.variances[i] = var
+        i = i + 1
+    }
+    s
+}
+
+pub fn lattice64_spatial_average(s: &Lattice64) -> f64 with Mut, Panic {
+    if s.n < 1 || s.n > PQ_N { panic("lattice64: n must be in 1..64") }
+    var sum: f64 = 0.0
+    var i: i64 = 0
+    while i < s.n {
+        sum = sum + s.values[i]
+        i = i + 1
+    }
+    sum / (s.n as f64)
+}
+
+pub fn lattice64_spatial_variance(s: &Lattice64) -> f64 with Mut, Panic {
+    let mean = lattice64_spatial_average(s)
+    var sum_sq: f64 = 0.0
+    var i: i64 = 0
+    while i < s.n {
+        let d = s.values[i] - mean
+        sum_sq = sum_sq + d * d
+        i = i + 1
+    }
+    sum_sq / (s.n as f64)
+}
+
+pub fn lattice64_mean_variance(s: &Lattice64) -> f64 with Mut, Panic {
+    if s.n < 1 || s.n > PQ_N { panic("lattice64: n must be in 1..64") }
+    var sum: f64 = 0.0
+    var i: i64 = 0
+    while i < s.n {
+        sum = sum + s.variances[i]
+        i = i + 1
+    }
+    sum / (s.n as f64)
+}
+
+// Venous (outlet) concentration: the last active site.
+pub fn lattice64_outflow_concentration(s: &Lattice64) -> f64 with Panic {
+    if s.n < 1 || s.n > PQ_N { panic("lattice64: n must be in 1..64") }
+    s.values[s.n - 1]
+}
+
+pub fn lattice64_outflow_variance(s: &Lattice64) -> f64 with Panic {
+    if s.n < 1 || s.n > PQ_N { panic("lattice64: n must be in 1..64") }
+    s.variances[s.n - 1]
+}
+
+// ============================================================================
+// RK4 ON STATE + SENSITIVITIES
+// ============================================================================
+
+// Combined state: row 0 = C, rows 1..4 = sensitivity rows 0..3 (5 x 64).
+struct PqVec {
+    v: [f64; 320],
+}
+
+fn pq_vec_zero() -> PqVec {
+    PqVec { v: [0.0; 320] }
+}
+
+// Step-invariant coefficients.
+struct PqCoef {
+    n: i64,
+    adv: f64,          // v/dx, 0 when v <= 0 (no upwind term, as phonon.sio)
+    dif: f64,          // D/dx^2
+    krel: f64,
+    src: f64,          // k_rel * c_tissue / Kp
+    dsrc_dct: f64,     // k_rel / Kp
+    met: [f64; 64],    // CL_site * z_i * fu
+    rows: [i64; 5],    // 1 = row integrated (row 0, C, always)
+}
+
+fn pq_coef(p: &PhononParams, n: i64) -> PqCoef with Mut, Div, Panic {
+    var c = PqCoef { n: n, adv: 0.0, dif: 0.0, krel: 0.0, src: 0.0, dsrc_dct: 0.0, met: [0.0; 64], rows: [1, 0, 0, 0, 0] }
+    let dx = p.dx.value
+    if p.v_blood.value > 0.0 { c.adv = p.v_blood.value / dx }
+    c.dif = p.d_eff.value / (dx * dx)
+    c.krel = p.k_release.value
+    c.dsrc_dct = p.k_release.value / p.kp.value
+    c.src = c.dsrc_dct * p.c_tissue.value
+    let z = p.zonation.value
+    var i: i64 = 0
+    while i < n {
+        var factor = 1.0
+        if z > 1.01 && n > 1 {
+            let frac = (i as f64) / ((n - 1) as f64)
+            factor = 2.0 / (z + 1.0) * (1.0 + (z - 1.0) * frac)
+        }
+        c.met[i] = p.cl_site.value * factor * p.fu.value
+        i = i + 1
+    }
+    c
+}
+
+// Derivative of the combined state y at time t into out.
+// Row r = 0 is the concentration: inlet c_in(t), source k_rel c_tissue / Kp.
+// Rows r = 1..4 are sensitivities: the same linear operator, with the inlet
+// replaced by d c_in / d theta and the source by d source / d theta.
+fn pq_rhs(t: f64, y: &PqVec, c: &PqCoef, p: &PhononParams, out: &!PqVec) with Mut, Div, Panic {
+    let n = c.n
+    let g_portal = pq_dcin_dportal(t, p)
+    let g_ha = pq_dcin_dha(t, p)
+    let c_in = g_portal * p.c_portal.value + g_ha * p.c_ha.value
+    var r: i64 = 0
+    while r < 5 {
+      if c.rows[r] == 1 {
+        let base = r * 64
+        var inlet = 0.0
+        var source = 0.0
+        if r == 0 { inlet = c_in; source = c.src }
+        if r == 2 { inlet = g_portal }
+        if r == 3 { inlet = g_ha }
+        if r == 4 { source = c.dsrc_dct }
+        var i: i64 = 0
+        while i < n {
+            let ci = y.v[base + i]
+            let up = if i == 0 { inlet } else { y.v[base + i - 1] }
+            var d = 0.0 - c.adv * (ci - up)
+            if i == 0 {
+                let right = if n > 1 { y.v[base + 1] } else { ci }
+                d = d + c.dif * (inlet - 2.0 * ci + right)
+            } else if i == n - 1 {
+                d = d + c.dif * (y.v[base + i - 1] - ci)
+            } else {
+                d = d + c.dif * (y.v[base + i - 1] - 2.0 * ci + y.v[base + i + 1])
+            }
+            d = d - c.krel * ci + source - c.met[i] * ci
+            out.v[base + i] = d
+            i = i + 1
+        }
+      }
+        r = r + 1
+    }
+}
+
+fn pq_axpy(y: &PqVec, h: f64, k: &PqVec, c: &PqCoef, out: &!PqVec) with Mut {
+    let n = c.n
+    var r: i64 = 0
+    while r < 5 {
+        if c.rows[r] == 1 {
+            let base = r * 64
+            var i: i64 = 0
+            while i < n {
+                out.v[base + i] = y.v[base + i] + h * k.v[base + i]
+                i = i + 1
+            }
+        }
+        r = r + 1
+    }
+}
+
+// Seed sensitivity row 0 from the variances of a lattice that has not stepped.
+fn pq_seed(s: &!Lattice64, p: &PhononParams) with Mut, Div, Panic {
+    if s.seeded { return }
+    var k: i64 = 0
+    while k < 256 {
+        s.sens[k] = 0.0
+        k = k + 1
+    }
+    var any: i64 = 0
+    var i: i64 = 0
+    while i < s.n {
+        let v = s.variances[i]
+        if v < 0.0 { panic("lattice64: negative variance") }
+        s.sens[i] = sqrt(v)
+        if v > 0.0 { any = 1 }
+        i = i + 1
+    }
+    s.live[0] = any
+    s.live[1] = if p.c_portal.uncertainty != 0.0 { 1 } else { 0 }
+    s.live[2] = if p.c_ha.uncertainty != 0.0 { 1 } else { 0 }
+    s.live[3] = if p.c_tissue.uncertainty != 0.0 { 1 } else { 0 }
+    s.seeded = true
+}
+
+// A source whose uncertainty is non-zero now but was zero when the lattice
+// started has no tracked sensitivity for the time already integrated: refuse.
+fn pq_check_live(s: &Lattice64, p: &PhononParams) with Panic {
+    if p.c_portal.uncertainty != 0.0 && s.live[1] == 0 {
+        panic("phonon_quantity: u(c_portal) became non-zero after the lattice started; reset it")
+    }
+    if p.c_ha.uncertainty != 0.0 && s.live[2] == 0 {
+        panic("phonon_quantity: u(c_ha) became non-zero after the lattice started; reset it")
+    }
+    if p.c_tissue.uncertainty != 0.0 && s.live[3] == 0 {
+        panic("phonon_quantity: u(c_tissue) became non-zero after the lattice started; reset it")
+    }
+}
+
+// Recompute variances from the sensitivities and the parameter uncertainties.
+fn pq_variances(s: &!Lattice64, p: &PhononParams) with Mut {
+    let up = p.c_portal.uncertainty
+    let uh = p.c_ha.uncertainty
+    let ut = p.c_tissue.uncertainty
+    var i: i64 = 0
+    while i < s.n {
+        let a = s.sens[i]
+        let b = s.sens[64 + i] * up
+        let c = s.sens[128 + i] * uh
+        let d = s.sens[192 + i] * ut
+        s.variances[i] = a * a + b * b + c * c + d * d
+        i = i + 1
+    }
+}
+
+// One RK4 step of length dt from time t, carrying the sensitivities.
+pub fn phonon_rk4_step_q(t: f64, s: &!Lattice64, p: &PhononParams, dt: f64) with Mut, Div, Panic {
+    if s.n < 1 || s.n > PQ_N { panic("lattice64: n must be in 1..64") }
+    phonon_params_validate(p)
+    pq_seed(s, p)
+    pq_check_live(s, p)
+    let n = s.n
+    var c = pq_coef(p, n)
+    c.rows[1] = s.live[0]
+    c.rows[2] = s.live[1]
+    c.rows[3] = s.live[2]
+    c.rows[4] = s.live[3]
+
+    var y = pq_vec_zero()
+    var i: i64 = 0
+    while i < n {
+        y.v[i] = s.values[i]
+        y.v[64 + i] = s.sens[i]
+        y.v[128 + i] = s.sens[64 + i]
+        y.v[192 + i] = s.sens[128 + i]
+        y.v[256 + i] = s.sens[192 + i]
+        i = i + 1
+    }
+
+    var k1 = pq_vec_zero()
+    var k2 = pq_vec_zero()
+    var k3 = pq_vec_zero()
+    var k4 = pq_vec_zero()
+    var tmp = pq_vec_zero()
+    pq_rhs(t, &y, &c, p, &!k1)
+    pq_axpy(&y, 0.5 * dt, &k1, &c, &!tmp)
+    pq_rhs(t + 0.5 * dt, &tmp, &c, p, &!k2)
+    pq_axpy(&y, 0.5 * dt, &k2, &c, &!tmp)
+    pq_rhs(t + 0.5 * dt, &tmp, &c, p, &!k3)
+    pq_axpy(&y, dt, &k3, &c, &!tmp)
+    pq_rhs(t + dt, &tmp, &c, p, &!k4)
+
+    let w = dt / 6.0
+    i = 0
+    while i < n {
+        var r: i64 = 0
+        while r < 5 {
+            if c.rows[r] == 1 {
+                let j = r * 64 + i
+                y.v[j] = y.v[j] + w * (k1.v[j] + 2.0 * k2.v[j] + 2.0 * k3.v[j] + k4.v[j])
+            }
+            r = r + 1
+        }
+        // A concentration cannot be negative: clamp it, and with it its
+        // derivatives (d max(0, C) / d theta = 0 where the clamp acts).
+        if y.v[i] < 0.0 {
+            y.v[i] = 0.0
+            y.v[64 + i] = 0.0
+            y.v[128 + i] = 0.0
+            y.v[192 + i] = 0.0
+            y.v[256 + i] = 0.0
+        }
+        s.values[i] = y.v[i]
+        s.sens[i] = y.v[64 + i]
+        s.sens[64 + i] = y.v[128 + i]
+        s.sens[128 + i] = y.v[192 + i]
+        s.sens[192 + i] = y.v[256 + i]
+        i = i + 1
+    }
+    pq_variances(s, p)
+}
+
+// Integrate from t_start to t_end at cfl_dt_q (the last step is shortened to
+// land on t_end). Returns the number of steps taken.
+pub fn phonon_simulate_q(s: &!Lattice64, p: &PhononParams, t_start: f64, t_end: f64) -> i64 with Mut, Div, Panic {
+    // Scalar arguments, not cfl_dt_q(p): on Madaros, calling cfl_dt_q(p) and
+    // then passing p on to phonon_rk4_step_q traps at run time (measured
+    // 2026-10-30, illegal instruction).
+    let dt = pq_cfl(p.dx.value, p.d_eff.value, p.v_blood.value)
+    var t = t_start
+    var steps: i64 = 0
+    while t < t_end {
+        let step_dt = if t + dt > t_end { t_end - t } else { dt }
+        phonon_rk4_step_q(t, s, p, step_dt)
+        t = t + step_dt
+        steps = steps + 1
+    }
+    steps
+}
+
+

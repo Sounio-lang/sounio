@@ -1,0 +1,2 @@
+L speculative greedy decode on L4 (job 20555, ExitCode 0:0, SPECDONE PASS): verify/rollback over stacked row logits is bit-exact vs plain greedy; oracle draft decodes 16 tokens in 4 singles + 3 verifies (12 accepted), echo draft exercises the reject path (15 singles + 1 verify, 1 accepted). GPU forward counts identical to CPU.
+No regression on Plan I/J/K receipts in the same run (SERVJPARAMS PASS, CHATTPL PASS, CHATBODY PASS, SERVEDONE PASS parity=1, BATCHDONE PASS cpu 1 gpu 1, OVERLAP-OK, CHAT-OK, ALLDONE).

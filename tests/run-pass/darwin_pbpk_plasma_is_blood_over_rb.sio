@@ -1,0 +1,125 @@
+//@ run-pass
+//@ timeout: 300
+//@ expect-stdout: PLASMA_IS_BLOOD_OVER_RB_OK
+//@ description: The PBPK-BBB couplings report plasma as whole blood / rb_ratio and drive the BBB with it (#2816)
+// PBPKState14.blood is a whole-blood concentration (pbpk_ode forms
+// c_plasma = c_blood / rb_ratio). The coupled runners used to store it as
+// "plasma", multiply it by the plasma unbound fraction and drive the BBB
+// with it, so for sirolimus (rb_ratio 0.58 mean model, 36 full-Vd model) the
+// reported plasma and the brain exposure were off by rb_ratio (#2816).
+//
+// Known case: an IV bolus into the blood compartment starts at
+// C_blood(0) = dose / V_blood exactly, so C_plasma(0) = dose / V_blood / rb.
+// At every later checkpoint the runner now also records whole blood, and
+// plasma must equal it divided by rb_ratio; the unbound plasma AUC must
+// equal fu_plasma * AUC(blood) / rb_ratio.
+
+use darwin_pbpk::tsit5_pbpk14::{PBPKParams14}
+use darwin_pbpk::bbb::bbb_coupled::*
+use darwin_pbpk::bbb::bbb_rapamycin::{bbb_rapamycin_params}
+use darwin_pbpk::drugs::rapamycin::{rapamycin_mean_params, rapamycin_fullvd_params}
+use darwin_pbpk::absorption::{rapamycin_absorption_params}
+use darwin_pbpk::scenarios::oral_rapamycin_bbb::*
+use darwin_pbpk::scenarios::steady_state_runner::*
+
+fn pib_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+// |a - b| <= 1e-12 * max(|a|, |b|), and both finite and non-negative.
+fn pib_rel_eq(a: f64, b: f64) -> bool {
+    let m = if pib_abs(a) > pib_abs(b) { pib_abs(a) } else { pib_abs(b) }
+    (pib_abs(a - b) <= 1.0e-12 * m) && a >= 0.0 && b >= 0.0
+}
+
+fn pib_checkpoints() -> [f64; 32] with Mut {
+    var cp: [f64; 32] = [0.0; 32]
+    cp[0] = 0.0
+    cp[1] = 0.5
+    cp[2] = 1.0
+    cp[3] = 2.0
+    cp[4] = 4.0
+    cp[5] = 8.0
+    cp[6] = 12.0
+    cp[7] = 24.0
+    cp
+}
+
+// IV bolus through bbb_coupled_run: exact start value and plasma = blood / rb.
+fn pib_check_bolus(prm: PBPKParams14, base: i32) -> i32 with IO, Mut, Div, Panic {
+    let dose = 5.0
+    let n = 8
+    let tr = bbb_coupled_run(prm, bbb_rapamycin_params(), dose, pib_checkpoints(), n, 0.01)
+    let rb = prm.rb_ratio
+    if pib_rel_eq(tr.plasma[0], dose / prm.v_blood / rb) == false { return base + 1 }
+    if pib_rel_eq(tr.blood[0], dose / prm.v_blood) == false { return base + 2 }
+    var i: i32 = 0
+    while i < n {
+        let ix = i as usize
+        if pib_rel_eq(tr.plasma[ix] * rb, tr.blood[ix]) == false { return base + 3 }
+        i = i + 1
+    }
+    // The drug was given and is still circulating at 24 h.
+    if (tr.blood[7] > 0.0) == false { return base + 4 }
+    0
+}
+
+// Oral single dose through oral_bbb_run.
+fn pib_check_oral(prm: PBPKParams14, base: i32) -> i32 with IO, Mut, Div, Panic {
+    let n = 8
+    let bbb = bbb_rapamycin_params()
+    let tr = oral_bbb_run(prm, bbb, rapamycin_absorption_params(), 2.0, pib_checkpoints(), n, 0.01)
+    if tr.success == false { return base + 1 }
+    let rb = prm.rb_ratio
+    var i: i32 = 0
+    while i < n {
+        let ix = i as usize
+        if pib_rel_eq(tr.plasma[ix] * rb, tr.blood[ix]) == false { return base + 2 }
+        i = i + 1
+    }
+    if (tr.auc_blood > 0.0) == false { return base + 3 }
+    // Both AUCs are trapezoids on the same grid, so the identity is exact
+    // up to rounding.
+    if pib_abs(tr.auc_plasma_u - bbb.fu_plasma * tr.auc_blood / rb) > 1.0e-12 * tr.auc_plasma_u { return base + 4 }
+    0
+}
+
+// Two doses through the steady-state runner: per-dose C_max and unbound
+// AUC_tau against the whole-blood counterparts.
+fn pib_check_multidose(prm: PBPKParams14, base: i32) -> i32 with IO, Mut, Div, Panic {
+    let bbb = bbb_rapamycin_params()
+    let r = run_oral_multidose(prm, bbb, rapamycin_absorption_params(), rapamycin_qd_regimen(2), 0.02)
+    if r.success == false { return base + 1 }
+    let rb = prm.rb_ratio
+    var d: i32 = 0
+    while d < 2 {
+        let dx = d as usize
+        if (r.auc_tau_blood_per_dose[dx] > 0.0) == false { return base + 2 }
+        if pib_rel_eq(r.c_max_per_dose[dx] * rb, r.c_max_blood_per_dose[dx]) == false { return base + 3 }
+        let want = bbb.fu_plasma * r.auc_tau_blood_per_dose[dx] / rb
+        if pib_abs(r.auc_tau_per_dose[dx] - want) > 1.0e-12 * want { return base + 4 }
+        d = d + 1
+    }
+    0
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let mean = rapamycin_mean_params()
+    let fullvd = rapamycin_fullvd_params()
+    // The two parameter sets the issue names; neither ratio is 1, so a
+    // runner that reports blood as plasma fails every identity below.
+    if mean.rb_ratio != 0.58 { return 1 }
+    if fullvd.rb_ratio != 36.0 { return 2 }
+
+    let a = pib_check_bolus(mean, 10)
+    if a != 0 { return a }
+    let b = pib_check_bolus(fullvd, 20)
+    if b != 0 { return b }
+    let c = pib_check_oral(mean, 30)
+    if c != 0 { return c }
+    let e = pib_check_multidose(mean, 40)
+    if e != 0 { return e }
+
+    println("PLASMA_IS_BLOOD_OVER_RB_OK")
+    0
+}

@@ -2,8 +2,8 @@
 topic_id: repo.docs.compiler.incremental-query-opt-p0
 authority: historical
 audience: contributors
-last_validated: 2026-03-07
-validated_by: A4
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.compiler.incremental-query-opt-p0
 -->
 

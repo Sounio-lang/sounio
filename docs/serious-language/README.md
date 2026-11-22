@@ -2,8 +2,8 @@
 topic_id: repo.docs.serious-language.readme
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: unvalidated
+validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.serious-language.readme
 -->
 
@@ -88,7 +88,7 @@ The safe real-world line is:
 Do not use this package to imply:
 
 - all stdlib modules are callable;
-- GPU runtime paths are generally production-ready;
+- GPU runtime paths are ready for production use;
 - every Lean theorem is axiom-free or sorry-free;
 - the modular compiler tree is already the source used to build the checked binary;
 - scaffolded research modules are user-ready features.

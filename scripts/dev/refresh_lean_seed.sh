@@ -43,8 +43,8 @@
 # not a step log. See docs/ops/LEAN_SINGLE_SEED_REFRESH.md §2.5b and
 # docs/ops/SEED_RECEIPT.schema.json.
 #
-# DO NOT use sbatch. Use scripts/dev/slurm_srun_minimal.sh (srun). See
-# docs/ops/SLURM_LAUNCH_REPAIR_2026-08-17.md — sbatch is held for this submitter;
+# DO NOT use sbatch. Use scripts/dev/slurm_srun_minimal.sh (srun).
+# sbatch is held for this submitter;
 # cluster hardware is up; held jobs are corpses, not capacity.
 set -euo pipefail
 

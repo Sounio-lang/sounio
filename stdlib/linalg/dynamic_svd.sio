@@ -1,0 +1,326 @@
+// Direct dynamic one-sided Jacobi SVD. No normal equations, owner copies or allocation.
+// Singular values are ALWAYS scaled: actual_sigma = sigma_scale * sigma_scaled.
+// See DYNAMIC_SVD.md for finite-range limits and transactional public outputs.
+use collections::numeric_buffer::{NumericBuffer,NumericMatrix,numeric_buffer_status,numeric_buffer_len,numeric_buffer_at,numeric_buffer_set,numeric_matrix_status,numeric_matrix_rows,numeric_matrix_cols,numeric_matrix_get}
+use math::pure::{is_finite,sqrt}
+pub struct DynamicSvdWorkspace {
+ pub status:i64,pub rows:i64,pub cols:i64,pub work_len:i64,
+ pub u_len:i64,pub v_len:i64,pub sigma_len:i64,
+}
+pub struct DynamicSvdResult {
+ pub status:i64,pub rows:i64,pub cols:i64,pub rank:i64,pub sweeps:i64,
+ pub sigma_scale:f64,pub rcond_used:f64,pub max_column_correlation:f64,
+ pub orthogonality_error:f64,pub transposed:bool,
+}
+fn sv_abs(x:f64)->f64 {if x<0.0 {-x} else {x}}
+fn sv_min(a:i64,b:i64)->i64 {if a<b {a} else {b}}
+fn sv_max(a:i64,b:i64)->i64 {if a>b {a} else {b}}
+fn sv_empty(rows:i64,cols:i64)->DynamicSvdResult {
+ DynamicSvdResult{status:1,rows:rows,cols:cols,rank:0,sweeps:0,sigma_scale:0.0,rcond_used:0.0,max_column_correlation:0.0,orthogonality_error:0.0,transposed:rows<cols}
+}
+pub fn dynamic_svd_workspace(rows:i64,cols:i64)->DynamicSvdWorkspace with Mut,Div {
+ var r=DynamicSvdWorkspace{status:1,rows:rows,cols:cols,work_len:0,u_len:0,v_len:0,sigma_len:0}
+ if rows<1 || cols<1 {return r}
+ let limit=9223372036854771704/8
+ if rows>limit/cols {return r}
+ let cells=rows*cols
+ let k=sv_min(rows,cols)
+ let remaining=limit-cells
+ if k>remaining/k {return r}
+ let square=k*k
+ if k>(remaining-square)/2 {return r}
+ r.work_len=cells+square+2*k
+ r.u_len=rows*k;r.v_len=cols*k;r.sigma_len=k;r.status=0
+ r
+}
+fn sv_norm(b:&NumericBuffer,offset:i64,rows:i64,stride:i64,col:i64)->f64 with Mut,Div,Panic {
+ var scale:f64=0.0
+ var ssq:f64=1.0
+ var i:i64=0
+ while i<rows {
+  let value=sv_abs(numeric_buffer_at(b,offset+i*stride+col))
+  if !is_finite(value) {return value}
+  if value!=0.0 {
+   if scale<value {let ratio=scale/value;ssq=1.0+ssq*ratio*ratio;scale=value}
+   else {let ratio=value/scale;ssq=ssq+ratio*ratio}
+  }
+  i=i+1
+ }
+ if scale==0.0 {return 0.0}
+ scale*sqrt(ssq)
+}
+fn sv_dot(b:&NumericBuffer,offset:i64,rows:i64,stride:i64,p:i64,q:i64,np:f64,nq:f64)->f64 with Mut,Div,Panic {
+ var sum:f64=0.0
+ var correction:f64=0.0
+ var i:i64=0
+ while i<rows {
+  let term=(numeric_buffer_at(b,offset+i*stride+p)/np)*(numeric_buffer_at(b,offset+i*stride+q)/nq)
+  let adjusted=term-correction
+  let next=sum+adjusted
+  correction=(next-sum)-adjusted
+  sum=next;i=i+1
+ }
+ sum
+}
+fn sv_hypot(a:f64,b:f64)->f64 with Mut,Div,Panic {
+ let aa=sv_abs(a);let bb=sv_abs(b)
+ let largest=if aa>bb {aa} else {bb}
+ if largest==0.0 {return 0.0}
+ let x=a/largest;let y=b/largest
+ largest*sqrt(x*x+y*y)
+}
+// Returns max normalized offdiagonal correlation; negative means arithmetic failure.
+fn sv_correlation(work:&NumericBuffer,m:i64,k:i64)->f64 with Mut,Div,Panic {
+ var maximum:f64=0.0
+ var p:i64=0
+ while p<k {
+  let np=sv_norm(work,0,m,k,p)
+  if !is_finite(np) {return -1.0}
+  var q=p+1
+  while q<k {
+   let nq=sv_norm(work,0,m,k,q)
+   if !is_finite(nq) {return -1.0}
+   if np>0.0 && nq>0.0 {
+    let rho=sv_abs(sv_dot(work,0,m,k,p,q,np,nq))
+    if !is_finite(rho) {return -1.0}
+    if rho>maximum {maximum=rho}
+   }
+   q=q+1
+  }
+  p=p+1
+ }
+ maximum
+}
+// Deterministic two-pass MGS completion ONLY for exact zero singular columns.
+// A canonical residual must exceed half the trace-based 1/sqrt(m) lower bound.
+fn sv_complete(work:&!NumericBuffer,m:i64,k:i64,col:i64)->bool with Mut,Div,Panic {
+ let minimum=0.5/sqrt(m as f64)
+ var basis:i64=0
+ while basis<m {
+  var row:i64=0
+  while row<m {numeric_buffer_set(work,row*k+col,if row==basis {1.0} else {0.0});row=row+1}
+  var pass:i64=0
+  while pass<2 {
+   var q:i64=0
+   while q<col {
+    let dot=sv_dot(work,0,m,k,col,q,1.0,1.0)
+    if !is_finite(dot) {return false}
+    row=0
+    while row<m {
+     let value=numeric_buffer_at(work,row*k+col)-dot*numeric_buffer_at(work,row*k+q)
+     if !is_finite(value) {return false}
+     numeric_buffer_set(work,row*k+col,value);row=row+1
+    }
+    q=q+1
+   }
+   pass=pass+1
+  }
+  let norm=sv_norm(work,0,m,k,col)
+  if !is_finite(norm) {return false}
+  if norm>minimum {
+   row=0
+   while row<m {
+    let value=numeric_buffer_at(work,row*k+col)/norm
+    numeric_buffer_set(work,row*k+col,value);row=row+1
+   }
+   return true
+  }
+  basis=basis+1
+ }
+ false
+}
+pub fn dynamic_svd(
+ a:&NumericBuffer,layout:&NumericMatrix,u:&!NumericBuffer,v:&!NumericBuffer,
+ sigma_scaled:&!NumericBuffer,work:&!NumericBuffer,
+ max_sweeps:i64,tolerance:f64,rcond:f64
+)->DynamicSvdResult with Mut,Div,Panic {
+ let rows=numeric_matrix_rows(layout);let cols=numeric_matrix_cols(layout)
+ var out=sv_empty(rows,cols)
+ let requested=dynamic_svd_workspace(rows,cols)
+ if requested.status!=0 || numeric_matrix_status(layout)!=0 || numeric_buffer_status(a)!=0 ||
+ numeric_buffer_status(u)!=0 || numeric_buffer_status(v)!=0 || numeric_buffer_status(sigma_scaled)!=0 || numeric_buffer_status(work)!=0 ||
+ numeric_buffer_len(u)<requested.u_len || numeric_buffer_len(v)<requested.v_len ||
+ numeric_buffer_len(sigma_scaled)<requested.sigma_len || numeric_buffer_len(work)<requested.work_len {return out}
+ if !is_finite(tolerance) || tolerance<1.7763568394002505e-15 || tolerance>0.25 ||
+ !is_finite(rcond) || rcond<0.0 || rcond>=1.0 || max_sweeps<1 || max_sweeps>10000 {return out}
+ let m=sv_max(rows,cols);let k=sv_min(rows,cols)
+ let cutoff=if rcond==0.0 {(m as f64)*2.2204460492503131e-16} else {rcond}
+ if !is_finite(cutoff) || cutoff>=1.0 {return out}
+ out.rcond_used=cutoff
+ var magnitude:f64=0.0
+ var i:i64=0
+ while i<rows {
+  var j:i64=0
+  while j<cols {
+   let entry=numeric_matrix_get(a,layout,i,j)
+   if entry.status!=0 {return out}
+   if !is_finite(entry.value) {out.status=2;return out}
+   let value=sv_abs(entry.value)
+   if value>magnitude {magnitude=value}
+   j=j+1
+  }
+  i=i+1
+ }
+ if magnitude==0.0 {magnitude=1.0}
+ out.sigma_scale=magnitude
+ let v_offset=m*k
+ let s_offset=v_offset+k*k
+ i=0
+ while i<m {
+  var j:i64=0
+  while j<k {
+   let entry=if rows<cols {numeric_matrix_get(a,layout,j,i)} else {numeric_matrix_get(a,layout,i,j)}
+   if entry.status!=0 {return out}
+   let value=entry.value/magnitude
+   if !is_finite(value) || (entry.value!=0.0 && value==0.0) {out.status=4;return out}
+   numeric_buffer_set(work,i*k+j,value)
+   j=j+1
+  }
+  i=i+1
+ }
+ i=0
+ while i<k {
+  var j:i64=0
+  while j<k {numeric_buffer_set(work,v_offset+i*k+j,if i==j {1.0} else {0.0});j=j+1}
+  i=i+1
+ }
+ var converged=false
+ while out.sweeps<max_sweeps && !converged {
+  var p:i64=0
+  while p<k {
+   var q=p+1
+   while q<k {
+    let np=sv_norm(work,0,m,k,p);let nq=sv_norm(work,0,m,k,q)
+    if !is_finite(np) || !is_finite(nq) {out.status=4;return out}
+    if np>0.0 && nq>0.0 {
+     let rho=sv_dot(work,0,m,k,p,q,np,nq)
+     if !is_finite(rho) {out.status=4;return out}
+     if sv_abs(rho)>tolerance {
+      let ratio=if np>=nq {nq/np} else {np/nq}
+      // Reject extremely subnormal rotation ratios; never claim convergence by dropping them.
+      if ratio<2.2250738585072014e-308 {out.status=4;return out}
+      let delta=if np>=nq {ratio*ratio-1.0} else {1.0-ratio*ratio}
+      let coupling=2.0*ratio*rho
+      if coupling==0.0 || !is_finite(coupling) {out.status=4;return out}
+      let hypotenuse=sv_hypot(delta,coupling)
+      let denominator=if delta<0.0 {delta-hypotenuse} else {delta+hypotenuse}
+      if denominator==0.0 || !is_finite(denominator) {out.status=4;return out}
+      let tangent=coupling/denominator
+      let cosine=1.0/sqrt(1.0+tangent*tangent)
+      let sine=tangent*cosine
+      if !is_finite(cosine) || !is_finite(sine) {out.status=4;return out}
+      i=0
+      while i<m {
+       let old_p=numeric_buffer_at(work,i*k+p);let old_q=numeric_buffer_at(work,i*k+q)
+       let new_p=cosine*old_p-sine*old_q;let new_q=sine*old_p+cosine*old_q
+       if !is_finite(new_p) || !is_finite(new_q) {out.status=4;return out}
+       numeric_buffer_set(work,i*k+p,new_p);numeric_buffer_set(work,i*k+q,new_q)
+       i=i+1
+      }
+      i=0
+      while i<k {
+       let old_p=numeric_buffer_at(work,v_offset+i*k+p);let old_q=numeric_buffer_at(work,v_offset+i*k+q)
+       let new_p=cosine*old_p-sine*old_q;let new_q=sine*old_p+cosine*old_q
+       if !is_finite(new_p) || !is_finite(new_q) {out.status=4;return out}
+       numeric_buffer_set(work,v_offset+i*k+p,new_p);numeric_buffer_set(work,v_offset+i*k+q,new_q)
+       i=i+1
+      }
+     }
+    }
+    q=q+1
+   }
+   p=p+1
+  }
+  out.sweeps=out.sweeps+1
+  let correlation=sv_correlation(work,m,k)
+  if correlation<0.0 {out.status=4;return out}
+  out.max_column_correlation=correlation
+  converged=correlation<=tolerance
+ }
+ if !converged {out.status=3;return out}
+ i=0
+ while i<k {let norm=sv_norm(work,0,m,k,i);numeric_buffer_set(work,s_offset+i,norm);i=i+1}
+ // Descending sort swaps B and V columns together, without matrix copies.
+ var p:i64=0
+ while p<k {
+  var best=p;var q=p+1
+  while q<k {if numeric_buffer_at(work,s_offset+q)>numeric_buffer_at(work,s_offset+best) {best=q};q=q+1}
+  if best!=p {
+   let sigma_p=numeric_buffer_at(work,s_offset+p);let sigma_q=numeric_buffer_at(work,s_offset+best)
+   numeric_buffer_set(work,s_offset+p,sigma_q);numeric_buffer_set(work,s_offset+best,sigma_p)
+   i=0
+   while i<m {
+    let old=numeric_buffer_at(work,i*k+p);let replacement=numeric_buffer_at(work,i*k+best)
+    numeric_buffer_set(work,i*k+p,replacement);numeric_buffer_set(work,i*k+best,old);i=i+1
+   }
+   i=0
+   while i<k {
+    let old=numeric_buffer_at(work,v_offset+i*k+p);let replacement=numeric_buffer_at(work,v_offset+i*k+best)
+    numeric_buffer_set(work,v_offset+i*k+p,replacement);numeric_buffer_set(work,v_offset+i*k+best,old);i=i+1
+   }
+  }
+  p=p+1
+ }
+ let maximum=numeric_buffer_at(work,s_offset)
+ p=0
+ while p<k {
+  let sigma=numeric_buffer_at(work,s_offset+p)
+  if !is_finite(sigma) {out.status=4;return out}
+  if sigma>0.0 {
+   if sigma/maximum>cutoff {out.rank=out.rank+1}
+   i=0
+   while i<m {let value=numeric_buffer_at(work,i*k+p)/sigma;numeric_buffer_set(work,i*k+p,value);i=i+1}
+  } else {
+   if !sv_complete(work,m,k,p) {out.status=6;return out}
+  }
+  p=p+1
+ }
+ // Verify BOTH thin orthogonal factors, including zero-singular-value completion.
+ var factor:i64=0
+ while factor<2 {
+  let offset=if factor==0 {0} else {v_offset}
+  let height=if factor==0 {m} else {k}
+  p=0
+  while p<k {
+   let np=sv_norm(work,offset,height,k,p)
+   if !is_finite(np) || np<=0.0 {out.status=6;return out}
+   let error=sv_abs(np-1.0)*(np+1.0)
+   if error>out.orthogonality_error {out.orthogonality_error=error}
+   var q=p+1
+   while q<k {
+    let nq=sv_norm(work,offset,height,k,q)
+    if !is_finite(nq) || nq<=0.0 {out.status=6;return out}
+    let dot=sv_abs(sv_dot(work,offset,height,k,p,q,np,nq))*np*nq
+    if !is_finite(dot) {out.status=6;return out}
+    if dot>out.orthogonality_error {out.orthogonality_error=dot}
+    q=q+1
+   }
+   p=p+1
+  }
+  factor=factor+1
+ }
+ if out.orthogonality_error>tolerance {out.status=6;return out}
+ // Public output transaction begins only after every algorithmic check has passed.
+ i=0
+ while i<rows {
+  var j:i64=0
+  while j<k {
+   let offset=if rows<cols {v_offset} else {0}
+   numeric_buffer_set(u,i*k+j,numeric_buffer_at(work,offset+i*k+j));j=j+1
+  }
+  i=i+1
+ }
+ i=0
+ while i<cols {
+  var j:i64=0
+  while j<k {
+   let offset=if rows<cols {0} else {v_offset}
+   numeric_buffer_set(v,i*k+j,numeric_buffer_at(work,offset+i*k+j));j=j+1
+  }
+  i=i+1
+ }
+ i=0
+ while i<k {numeric_buffer_set(sigma_scaled,i,numeric_buffer_at(work,s_offset+i));i=i+1}
+ out.status=0
+ out
+}
