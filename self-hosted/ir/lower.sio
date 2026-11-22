@@ -9800,9 +9800,14 @@ fn lowerer_lower_fn_params_mut(
                 }
                 lowerer_bind_local_struct_type_mut(lo, (*list).head.name, lower_param_struct_type_name(&(*list).head.ty))
                 // #2820: an array-of-struct parameter records its ELEMENT struct.
+                // A `[string; N]` / `&[string; N]` parameter records `string` the
+                // same way, as `let names: [string; N]` does: without it
+                // `print(names[i])` and `print((*names)[i])` had no string
+                // evidence and printed the element's pointer word as an integer.
                 let param_elem_struct = lower_param_array_elem_struct_name(&(*list).head.ty)
                 if param_elem_struct.len > 0 && !ir_name_is_box(param_elem_struct)
-                    && lower_struct_layout_index_of(&(*(*lo).struct_layouts), param_elem_struct) >= 0 {
+                    && (lower_struct_layout_index_of(&(*(*lo).struct_layouts), param_elem_struct) >= 0
+                        || lower_name_is_string_type(param_elem_struct)) {
                     lowerer_bind_local_array_elem_struct_type_mut(lo, (*list).head.name, param_elem_struct)
                 }
                 // #2504: a `k: Knowledge<i64>` parameter's `.value` is an i64 word.
@@ -32989,8 +32994,23 @@ impl Lowerer {
         var base_name = ir_empty_name()
         match (*e).left {
             Some(b) => {
-                if (*b).kind != ExprKind::ExprIdent { return false }
-                base_name = (*b).name
+                if (*b).kind == ExprKind::ExprIdent {
+                    base_name = (*b).name
+                } else if (*b).kind == ExprKind::ExprUnary && (*b).un_op == UnaryOp::OpDeref {
+                    // `(*names)[i]` with `names: &[string; N]` / `&![string; N]`:
+                    // the reference local carries the element type, exactly as
+                    // the array local does.
+                    match (*b).left {
+                        Some(inner) => {
+                            if (*inner).kind != ExprKind::ExprIdent { return false }
+                            if !self.lookup_local_is_ref((*inner).name) { return false }
+                            base_name = (*inner).name
+                        }
+                        None => { return false }
+                    }
+                } else {
+                    return false
+                }
             }
             None => { return false }
         }
@@ -35725,8 +35745,11 @@ impl Lowerer {
                         // #2820: an array-of-struct parameter records its ELEMENT struct
                         // (see lower_param_array_elem_struct_name).
                         let slot_elem_struct = lower_param_array_elem_struct_name(&(*list).head.ty)
+                        // A `[string; N]` / `&[string; N]` parameter records `string`
+                        // too (see path A).
                         if slot_elem_struct.len > 0 && !ir_name_is_box(slot_elem_struct)
-                            && lower_struct_layout_index_of(&(*lo.struct_layouts), slot_elem_struct) >= 0 {
+                            && (lower_struct_layout_index_of(&(*lo.struct_layouts), slot_elem_struct) >= 0
+                                || lower_name_is_string_type(slot_elem_struct)) {
                             (*(*locals).struct_types).values[idx as usize] = slot_elem_struct
                             (*(*locals).struct_type_is_array_elem).values[idx as usize] = 1
                         }
@@ -37882,6 +37905,31 @@ impl Lowerer {
                 // #1702: `let r: &!S = ...` names a registered struct pointee; record
                 // it as a `r: &!S` parameter does, so `(*r).f` resolves against S.
                 lo = lo.bind_local_struct_type(s.name, pointee_name, false)
+            }
+            // `let r = &names` / `&!names` with `names: [string; N]`: the reference
+            // records the ELEMENT type exactly as the array local (and a
+            // `&[string; N]` parameter) does, so `(*r)[i]` prints as a string. Only
+            // string elements: a struct element keeps the rule above (an array is
+            // not a struct pointee).
+            match s.expr {
+                Some(rhs_sa) => {
+                    if (*rhs_sa).kind == ExprKind::ExprUnary
+                        && ((*rhs_sa).un_op == UnaryOp::OpRef || (*rhs_sa).un_op == UnaryOp::OpRefMut) {
+                        match (*rhs_sa).left {
+                            Some(sa_target) => {
+                                if (*sa_target).kind == ExprKind::ExprIdent
+                                    && !ir_name_eq((*sa_target).name, s.name)
+                                    && lo.lookup_local_struct_type_is_array_elem((*sa_target).name)
+                                    && lower_name_is_string_type(lo.lookup_local_struct_type((*sa_target).name)) {
+                                    let sa_elem = lo.lookup_local_struct_type((*sa_target).name)
+                                    lowerer_bind_local_array_elem_struct_type_mut(&! lo, s.name, sa_elem)
+                                }
+                            }
+                            None => {}
+                        }
+                    }
+                }
+                None => {}
             }
         }
         // `let p = heap_alloc(n) as *mut Buf` has no annotation. A parameter
