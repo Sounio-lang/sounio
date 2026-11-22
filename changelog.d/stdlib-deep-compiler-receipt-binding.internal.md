@@ -1,0 +1,1 @@
+`scripts/ci/stdlib_deep_compiler_receipt.sh` now binds the compiler it uses to its build inputs (source revision, closure hashes, engine, target, bootstrap hash and toolchain) and verifies that receipt before running the compiler. No user-visible change.
