@@ -96,6 +96,11 @@ use gpu::kaxi_to_ptx::*
 use compiler::codegen::hardware::fpga_emit::{fpga_emit_file}
 use gpu::metal::*
 use gpu::cuda_tile::*
+use gpu::kaxi_backend::{kaxi_asm_to_string}
+use io::env::{read_env}
+use io::trace::{io_write_bytes_to_file}
+use ir::lower::{lower_program_to_ir_probe_callsite}
+use parser::parser::{parser_reset_last_errors}
 
 // ============================================================================
 // STRING UTILITIES
@@ -1703,6 +1708,13 @@ fn compiler_soir_unrepresentable(module: &IrModule) -> string with Mut, Panic, D
         if f.name.len < 0 || f.name.len > 128 { return "fn name longer than 128 bytes" }
         let nm = str_from_bytes(f.name.buf, f.name.len)
         if f.compile_strategy == 99 { return "BSS global `" + nm + "`" }
+        // The wide-integer call ABI (iN/uN, N > 64) lives in IrFunction fields the
+        // SOIR v6 writer does not carry: a round trip would drop them and decode a
+        // function whose wide params read one word and whose wide return lost its
+        // hidden out-array. Named here so the refusal says why, whatever else the
+        // function also carries.
+        if f.wide_param_limbs != 0 { return "fn `" + nm + "`: wide_param_limbs (iN/uN > 64-bit params, limb-array ABI)" }
+        if f.wide_return_bits != 0 { return "fn `" + nm + "`: wide_return_bits (iN/uN > 64-bit return, hidden out-array param)" }
         if f.returns_float != 0 { return "fn `" + nm + "`: returns_float (f64 return)" }
         if f.return_struct_name.len != 0 { return "fn `" + nm + "`: return_struct_name (named return type)" }
         if f.return_fixed_array_len != 0 - 1 { return "fn `" + nm + "`: return_fixed_array_len" }
@@ -1743,6 +1755,28 @@ fn lobl_append(buf: [i8; 65536], pos: i64, s: string) -> ([i8; 65536], i64) with
         i = i + 1
     }
     (out, p)
+}
+
+// ADR-015 row 12: list the documentation comments of a file with the token each one
+// documents. One `DOC ...` line per comment (see lexer_print_docs).
+fn run_emit_docs_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    if flag_index + 1 >= args.len {
+        print("usage: --emit-docs <src.sio>\n")
+        return
+    }
+    let src = arg_list_get(args, flag_index + 1)
+    if !file_exists(src) {
+        print("--emit-docs: cannot read ")
+        print(src)
+        print("\n")
+        return
+    }
+    let tc = lex_file_to_globals(src)
+    if tc < 0 {
+        print("--emit-docs: the file could not be lexed\n")
+        return
+    }
+    lexer_print_docs(tc)
 }
 
 fn run_emit_lean_obligations(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
@@ -1801,8 +1835,8 @@ fn compiler_visibility_preflight(source_path: string) -> bool with IO, Mut, Pani
     ast_named_item_terminal_reset()
     var closure = ModuleClosure {
         paths: [""; 256],
-        edge_callers: [""; 512],
-        edge_dependencies: [""; 512],
+        edge_callers: [""; 1024],
+        edge_dependencies: [""; 1024],
         unresolved_callers: [""; 256],
         unresolved_imports: [""; 256],
         unresolved_paths: [""; 256],
@@ -1993,8 +2027,8 @@ fn run_science_boundary_closure_report(
     let source_path = compiler_mode_source_arg(args, flag_index, "--science-boundary-closure")
     var closure = ModuleClosure {
         paths: [""; 256],
-        edge_callers: [""; 512],
-        edge_dependencies: [""; 512],
+        edge_callers: [""; 1024],
+        edge_dependencies: [""; 1024],
         unresolved_callers: [""; 256],
         unresolved_imports: [""; 256],
         unresolved_paths: [""; 256],
@@ -2009,6 +2043,10 @@ fn run_science_boundary_closure_report(
     println("SOUNIO_BOUNDARY_CLOSURE_V1")
     if complete { println("status\tcomplete") } else { println("status\tincomplete") }
     print("capacity\t256\n")
+    // Edges have their own bound (ModuleClosure.edge_callers); the verdict used
+    // to assume it was twice the node capacity, so raising one silently moved
+    // the other. The compiler states it and the verdict reads it.
+    print("edge_capacity\t1024\n")
     print("saturated\t")
     if closure.saturated { println("true") } else { println("false") }
     print("parse_failed\t")
@@ -2733,7 +2771,7 @@ fn ir_return_sret(src: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: base.name_id,
+        name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -2754,7 +2792,7 @@ fn ir_call_sret(dst: i64, dest_reg: i64, fn_name: Name, fn_id: i64, arg0: i64, e
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: ir_intern_name(fn_name),
+        name_id: ir_intern_name(fn_name), src_site: 0,
         call_args: base.call_args,
         arg_count: explicit_arg_count,
     }
@@ -3155,12 +3193,6 @@ fn compiler_try_default_native_v2_single(opts: CompilerOptions) -> bool with IO,
         return false
     }
 
-    let early_frontend_preflight = preflight_multimodule_frontend(opts.input_file)
-    let early_preflight_parse_errors = parser_last_error_count()
-    if !early_frontend_preflight.ok || early_preflight_parse_errors > 0 {
-        return false
-    }
-
     let main_prog = load_module_file(opts.input_file)
     let main_imports = extract_imports_from_ast(main_prog)
     if main_imports.count > 0 {
@@ -3169,6 +3201,12 @@ fn compiler_try_default_native_v2_single(opts: CompilerOptions) -> bool with IO,
 
     let requested_target_spec = native_resolve_target(opts.target, "auto", false)
     if requested_target_spec.arch_id != ARCH_X86_64() || requested_target_spec.os_id != OS_LINUX() {
+        return false
+    }
+
+    let early_frontend_preflight = preflight_multimodule_frontend(opts.input_file)
+    let early_preflight_parse_errors = parser_last_error_count()
+    if !early_frontend_preflight.ok || early_preflight_parse_errors > 0 {
         return false
     }
 
@@ -5206,19 +5244,6 @@ fn compile(opts: CompilerOptions) -> CompileResult with IO, Mut, Panic, Div, All
         }
     }
 
-    let early_frontend_preflight = preflight_multimodule_frontend(opts.input_file)
-    let early_preflight_parse_errors = parser_last_error_count()
-    if !early_frontend_preflight.ok || early_preflight_parse_errors > 0 {
-        compiler_print_ir_preflight_failure(early_frontend_preflight.error_msg)
-        var early_type_errors = compile_errors_new()
-        early_type_errors = compile_errors_push(early_type_errors, "error: type checking preflight failed")
-        return CompileResult {
-            success: false,
-            errors: early_type_errors,
-            output: "",
-        }
-    }
-
     let main_prog = load_module_file(opts.input_file)
     let main_imports = extract_imports_from_ast(main_prog)
     let requested_target_spec = native_resolve_target(opts.target, "auto", false)
@@ -5255,6 +5280,28 @@ fn compile(opts: CompilerOptions) -> CompileResult with IO, Mut, Panic, Div, All
         return CompileResult {
             success: false,
             errors: thin_errors,
+            output: "",
+        }
+    }
+
+    compile_after_multimodule_dispatch(opts, main_prog, main_imports, requested_target_spec)
+}
+
+fn compile_after_multimodule_dispatch(
+    opts: CompilerOptions,
+    main_prog: Program,
+    main_imports: ImportList,
+    requested_target_spec: NativeTargetSpec
+) -> CompileResult with IO, Mut, Panic, Div, Alloc {
+    let early_frontend_preflight = preflight_multimodule_frontend(opts.input_file)
+    let early_preflight_parse_errors = parser_last_error_count()
+    if !early_frontend_preflight.ok || early_preflight_parse_errors > 0 {
+        compiler_print_ir_preflight_failure(early_frontend_preflight.error_msg)
+        var early_type_errors = compile_errors_new()
+        early_type_errors = compile_errors_push(early_type_errors, "error: type checking preflight failed")
+        return CompileResult {
+            success: false,
+            errors: early_type_errors,
             output: "",
         }
     }
@@ -20883,10 +20930,10 @@ fn compiler_main_test_ey_no_fold_and_outer() -> bool with Mut, Div, Panic {
         && IR_A_SRC1[(ir_region_slot_r(opt.region, (2))) as usize] == 3
 }
 
-// Sprint 247: GUM-guided epistemic e-graph rewriting (T1148-T1157)
+// Sprint 247: GUM-guided epistemic e-graph rewriting (T1148-T1157c)
 // ocp_egraph_epistemic_pass guard/activation tests.
-// Scientific novelty: first analytically GUM-guided FP rewriting in any compiler.
-// SOTA: Panchekha et al. PLDI 2015 (Herbie/sampling); Sounio uses GUM §5.1.2 analytically.
+// Propagation is exact (integer variances, observation identity), so equivalent
+// bracketings carry the same measurement uncertainty and are never reordered on it.
 
 fn compiler_main_test_ge_standard_passthrough() -> bool with Mut, Div, Panic {
     // Guard: IR_STRATEGY_STANDARD → epistemic pass returns function unchanged
@@ -21072,15 +21119,19 @@ fn compiler_main_test_ge_observed_reassoc_chain() -> bool with Mut, Div, Panic {
     var func = cp_make_test_func(instrs, 30)
     func.compile_strategy = IR_STRATEGY_PRECISION_PRESERVING
     let opt = ocp_egraph_epistemic_pass(func)
-    opt.instr_count == 31
+    // u = 3, 3, 5 nanounits. Both bracketings have variance 9 + 9 + 25 = 43, so
+    // neither has a lower measurement uncertainty and the f64 sum keeps its order.
+    // (Before exact propagation, per-node floor(sqrt) gave (a+b)+c = 6 and
+    // a+(b+c) = 5, and the pass reassociated on that rounding artefact alone.)
+    opt.instr_count == 30
+        && (IR_A_OP[(ir_region_slot_r(opt.region, (27))) as usize] as IrOpcode) == IrOpcode::IrBinOp
+        && IR_A_DST[(ir_region_slot_r(opt.region, (27))) as usize] == 18
+        && IR_A_SRC1[(ir_region_slot_r(opt.region, (27))) as usize] == 5
+        && IR_A_SRC2[(ir_region_slot_r(opt.region, (27))) as usize] == 11
         && (IR_A_OP[(ir_region_slot_r(opt.region, (28))) as usize] as IrOpcode) == IrOpcode::IrBinOp
-        && IR_A_DST[(ir_region_slot_r(opt.region, (28))) as usize] == 40
-        && IR_A_SRC1[(ir_region_slot_r(opt.region, (28))) as usize] == 11
+        && IR_A_DST[(ir_region_slot_r(opt.region, (28))) as usize] == 19
+        && IR_A_SRC1[(ir_region_slot_r(opt.region, (28))) as usize] == 18
         && IR_A_SRC2[(ir_region_slot_r(opt.region, (28))) as usize] == 17
-        && (IR_A_OP[(ir_region_slot_r(opt.region, (29))) as usize] as IrOpcode) == IrOpcode::IrBinOp
-        && IR_A_DST[(ir_region_slot_r(opt.region, (29))) as usize] == 19
-        && IR_A_SRC1[(ir_region_slot_r(opt.region, (29))) as usize] == 5
-        && IR_A_SRC2[(ir_region_slot_r(opt.region, (29))) as usize] == 40
 }
 
 // Sprint 246 Block FD: XOR decomposition fold — (~x&y)^(x&~y) → x^y (T1142-T1147)
@@ -28914,8 +28965,16 @@ fn compiler_main_self_tests_part_09(passed_in: i64) -> i64 with IO, Mut, Panic, 
     } else { compiler_main_selftest_fail("  FAIL: T1156") }
     if compiler_main_test_ge_observed_reassoc_chain() {
         passed = passed + 1
-        println("  T1157 OK: Sprint 247 GUM egraph: observed add chain is reassociated via synthesized temp")
+        println("  T1157 OK: Sprint 247 GUM egraph: observed add chain keeps its order (variance 43 in both bracketings)")
     } else { compiler_main_selftest_fail("  FAIL: T1157") }
+    if test_eg_small_epistemic_bracketing_invariant() {
+        passed = passed + 1
+        println("  T1157b OK: GUM egraph: exact variance is invariant across the bracketings of one e-class")
+    } else { compiler_main_selftest_fail("  FAIL: T1157b") }
+    if test_eg_small_epistemic_shared_leaf_refused() {
+        passed = passed + 1
+        println("  T1157c OK: GUM egraph: operands sharing an observation are refused, not given independent RSS")
+    } else { compiler_main_selftest_fail("  FAIL: T1157c") }
 
     // Sprint 246 Block FD: XOR decomposition fold (T1142-T1147)
     if compiler_main_test_fd_xor_decomp_basic() {
@@ -30523,6 +30582,9 @@ fn main() with IO, Mut, Panic, Div, Alloc {
             return
         } else if mode == "emit-lean-obligations" || mode == "--emit-lean-obligations" {
             run_emit_lean_obligations(args, arg_idx)
+            return
+        } else if mode == "--emit-docs" {
+            run_emit_docs_mode(args, arg_idx)
             return
         } else if mode == "build" {
             run_native_v2_compile_mode(args, arg_idx)

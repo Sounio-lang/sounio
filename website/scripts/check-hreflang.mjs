@@ -13,6 +13,8 @@ import {
   canonicalPathname,
   hreflangLinks,
   htmlLang,
+  indexableLocales,
+  isIndexableUrl,
   isRedirectPath,
   localeFromPath,
 } from '../src/lib/seo-locales.mjs';
@@ -24,35 +26,133 @@ const ALLOWED_CODES = new Set([...Object.values(HREFLANG), 'x-default']);
 function assertExamples() {
   const errors = [];
   const packages = canonicalPathname('/es/packages/');
-  if (packages !== '/packages/') errors.push(`expected /es/packages/ to canonicalize to /packages/, got ${packages}`);
+  if (packages !== '/es/packages/') errors.push(`expected /es/packages/ to self-canonicalize, got ${packages}`);
+  if (isIndexableUrl('/es/packages/')) errors.push('/es/packages/ is not a Spanish translation and must be noindex');
   const effect = canonicalPathname('/zh/learn/compiler/effect-system/');
   if (effect !== '/zh/learn/compiler/effect-system/') {
     errors.push(`expected zh effect-system to self-canonicalize, got ${effect}`);
   }
-  const units = canonicalPathname('/zh-hk/learn/language/units-and-uncertainty/');
-  if (units !== '/learn/language/units-and-uncertainty/') {
-    errors.push(`expected zh-hk units page to canonicalize to English, got ${units}`);
+  if (isIndexableUrl('/zh/learn/compiler/effect-system/')) {
+    errors.push('zh effect-system stub is not a translation of the checker page');
   }
-  const effectCodes = hreflangLinks('/zh/learn/compiler/effect-system/').map((link) => link.hreflang);
-  if (!effectCodes.includes('zh-CN') || !effectCodes.includes('x-default') || effectCodes.includes('zh')) {
+  const units = canonicalPathname('/zh-hk/learn/language/units-and-uncertainty/');
+  if (units !== '/zh-hk/learn/language/units-and-uncertainty/') {
+    errors.push(`expected zh-hk units page to self-canonicalize, got ${units}`);
+  }
+  if (isIndexableUrl('/zh-hk/learn/language/units-and-uncertainty/')) {
+    errors.push('zh-hk units page is not a translation');
+  }
+  const effectCodes = hreflangLinks('/learn/compiler/effect-system/').map((link) => link.hreflang);
+  const effectDefault = hreflangLinks('/learn/compiler/effect-system/').find((link) => link.hreflang === 'x-default');
+  if (effectCodes.includes('zh-CN') || effectCodes.includes('zh') || !effectCodes.includes('en') || effectDefault?.href !== absoluteUrl('/learn/compiler/effect-system/')) {
     errors.push(`effect-system hreflang codes drifted: ${effectCodes.join(',')}`);
   }
-  const packageCodes = hreflangLinks('/es/packages/').map((link) => link.hreflang);
+  const effectsDefault = hreflangLinks('/learn/effects/').find((link) => link.hreflang === 'x-default');
+  if (indexableLocales('/learn/effects/').some((locale) => locale !== 'en') || effectsDefault?.href !== absoluteUrl('/learn/effects/')) {
+    errors.push(`effects hreflang still lists stale locales: ${indexableLocales('/learn/effects/').join(',')}`);
+  }
+  const packageCodes = hreflangLinks('/packages/').map((link) => link.hreflang);
   if (packageCodes.includes('es') || packageCodes.includes('pt-BR')) {
     errors.push(`packages hreflang still lists untranslated locales: ${packageCodes.join(',')}`);
   }
   const aboutPt = canonicalPathname('/pt/about/');
-  if (aboutPt !== '/pt/about/') errors.push(`expected /pt/about/ to self-canonicalize, got ${aboutPt}`);
+  if (aboutPt !== '/pt/about/' || !isIndexableUrl('/pt/about/')) errors.push(`expected /pt/about/ to stay indexable, got ${aboutPt}`);
   const aboutEl = canonicalPathname('/el/about/');
-  if (aboutEl !== '/about/') errors.push(`expected /el/about/ to canonicalize to English, got ${aboutEl}`);
+  if (aboutEl !== '/el/about/' || isIndexableUrl('/el/about/')) {
+    errors.push(`expected /el/about/ to self-canonicalize and stay out of the index, got ${aboutEl}`);
+  }
   const roadmapPt = canonicalPathname('/pt/about/roadmap/');
-  if (roadmapPt !== '/about/roadmap/') {
-    errors.push(`expected /pt/about/roadmap/ to canonicalize to English, got ${roadmapPt}`);
+  if (roadmapPt !== '/pt/about/roadmap/' || isIndexableUrl('/pt/about/roadmap/')) {
+    errors.push(`expected /pt/about/roadmap/ to self-canonicalize and stay out of the index, got ${roadmapPt}`);
   }
   const aboutCodes = hreflangLinks('/about/').map((link) => link.hreflang);
   const aboutExpected = ['en', 'pt-BR', 'x-default'];
   if (aboutCodes.length !== aboutExpected.length || aboutExpected.some((code) => !aboutCodes.includes(code))) {
     errors.push(`about hreflang codes drifted: ${aboutCodes.join(',')}`);
+  }
+  const expandedCodes = hreflangLinks('/learn/epistemic/expanded-uncertainty/').map((link) => link.hreflang);
+  const expandedExpected = ['en', 'ja', 'x-default'];
+  if (
+    expandedCodes.length !== expandedExpected.length
+    || expandedExpected.some((code) => !expandedCodes.includes(code))
+    || expandedCodes.includes('pt-BR')
+    || expandedCodes.includes('zh-CN')
+  ) {
+    errors.push(`expanded-uncertainty hreflang drifted: ${expandedCodes.join(',')}`);
+  }
+  const expandedJa = canonicalPathname('/ja/learn/epistemic/expanded-uncertainty/');
+  if (expandedJa !== '/ja/learn/epistemic/expanded-uncertainty/') {
+    errors.push(`expected ja expanded-uncertainty to self-canonicalize, got ${expandedJa}`);
+  }
+  const expandedPt = canonicalPathname('/pt/learn/epistemic/expanded-uncertainty/');
+  if (expandedPt !== '/pt/learn/epistemic/expanded-uncertainty/' || isIndexableUrl('/pt/learn/epistemic/expanded-uncertainty/')) {
+    errors.push(`expected pt expanded-uncertainty to self-canonicalize and stay out of the index, got ${expandedPt}`);
+  }
+  const expandedDefault = hreflangLinks('/ja/learn/epistemic/expanded-uncertainty/').find((link) => link.hreflang === 'x-default');
+  if (expandedDefault?.href !== absoluteUrl('/learn/epistemic/expanded-uncertainty/')) {
+    errors.push(`expanded-uncertainty x-default is ${expandedDefault?.href ?? '(missing)'}`);
+  }
+  const homeDefault = hreflangLinks('/').find((link) => link.hreflang === 'x-default');
+  if (homeDefault?.href !== `${SITE}/`) errors.push(`home x-default is ${homeDefault?.href}`);
+  const esHome = canonicalPathname('/es/');
+  if (esHome !== '/es/' || !isIndexableUrl('/es/')) errors.push(`expected /es/ to stay an indexable self-canonical home, got ${esHome}`);
+  const esLanguage = canonicalPathname('/es/language/');
+  if (esLanguage !== '/es/language/' || isIndexableUrl('/es/language/')) {
+    errors.push(`expected /es/language/ to self-canonicalize and stay out of the index, got ${esLanguage}`);
+  }
+  errors.push(...assertNoindexSitemapFixture());
+  return errors;
+}
+
+/**
+ * A self-canonical noindex URL must not be accepted as a sitemap row, even
+ * when its xhtml:link set is the English cluster the old checker expected.
+ */
+export function sitemapListingErrors(loc, page) {
+  const errors = [];
+  let pathname = '';
+  try {
+    pathname = new URL(loc).pathname;
+  } catch {
+    return [`sitemap loc is not a URL: ${loc}`];
+  }
+  if (!isIndexableUrl(pathname)) {
+    errors.push(`sitemap lists ${loc} which is not an indexable translation`);
+  }
+  if (page?.head?.noindex) {
+    errors.push(`sitemap lists ${loc} whose HTML is noindex`);
+  }
+  return errors;
+}
+
+function assertNoindexSitemapFixture() {
+  const loc = absoluteUrl('/es/packages/');
+  const englishCluster = hreflangLinks('/es/packages/');
+  const accepted = sitemapListingErrors(loc, {
+    head: {
+      canonicals: [loc],
+      noindex: true,
+      alternates: englishCluster,
+    },
+  });
+  const errors = [];
+  if (accepted.length === 0) {
+    errors.push('negative fixture: noindex /es/packages/ sitemap row was accepted');
+  }
+  if (!accepted.some((error) => error.includes('noindex'))) {
+    errors.push('negative fixture: noindex /es/packages/ was not rejected for noindex');
+  }
+  if (!accepted.some((error) => error.includes('not an indexable translation'))) {
+    errors.push('negative fixture: noindex /es/packages/ was not rejected as non-indexable');
+  }
+  const unmarked = sitemapListingErrors(loc, { head: { canonicals: [loc], noindex: false, alternates: englishCluster } });
+  if (!unmarked.some((error) => error.includes('not an indexable translation'))) {
+    errors.push('negative fixture: non-indexable /es/packages/ sitemap row was accepted');
+  }
+  const home = absoluteUrl('/');
+  const homeErrors = sitemapListingErrors(home, { head: { canonicals: [home], noindex: false } });
+  if (homeErrors.length > 0) {
+    errors.push(`negative fixture: indexable home was rejected: ${homeErrors.join('; ')}`);
   }
   return errors;
 }
@@ -91,6 +191,7 @@ function parseHead(html) {
   }
   return {
     htmlLang: htmlLangMatch?.[1] ?? '',
+    robots: robots?.[1] ?? '',
     noindex: Boolean(robots?.[1]?.includes('noindex')),
     refresh,
     canonicals: links.filter((link) => link.rel === 'canonical').map((link) => link.href),
@@ -165,7 +266,13 @@ async function run() {
       errors.push(`${page.rel}: canonical is missing a trailing slash`);
     }
 
+    if (!isIndexableUrl(page.pathname)) {
+      if (!page.head.noindex) errors.push(`${page.rel}: untranslated page is missing noindex`);
+      if (page.head.alternates.length > 0) errors.push(`${page.rel}: untranslated page emits hreflang`);
+      continue;
+    }
     if (page.head.noindex) {
+      errors.push(`${page.rel}: indexable page is noindex`);
       if (page.head.alternates.length > 0) errors.push(`${page.rel}: noindex page emits hreflang`);
       continue;
     }
@@ -212,11 +319,45 @@ async function run() {
     if (page.head.canonicals[0] !== entry.loc) {
       errors.push(`sitemap lists ${entry.loc} but its canonical is ${page.head.canonicals[0]}`);
     }
+    errors.push(...sitemapListingErrors(entry.loc, page));
     if (isRedirectPath(new URL(entry.loc).pathname)) errors.push(`sitemap lists redirect ${entry.loc}`);
     const expected = hreflangLinks(new URL(entry.loc).pathname).map((link) => `${link.hreflang} ${link.href}`);
     const actual = entry.alternates.map((link) => `${link.hreflang} ${link.href}`);
     if (!sameSet(actual, expected)) {
       errors.push(`sitemap alternates for ${entry.loc} mismatch\n  actual: ${actual.join(' | ')}\n  expected: ${expected.join(' | ')}`);
+    }
+  }
+
+  const effectsLoc = absoluteUrl('/learn/effects/');
+  if (!sitemapLocs.some((entry) => entry.loc === effectsLoc)) {
+    errors.push(`sitemap missing ${effectsLoc}`);
+  }
+
+  const ptExpanded = absoluteUrl('/pt/learn/epistemic/expanded-uncertainty/');
+  const ptPage = pages.get(ptExpanded);
+  if (!ptPage) {
+    errors.push(`missing pt expanded-uncertainty stub ${ptExpanded}`);
+  } else {
+    if (ptPage.head.robots !== 'noindex, follow') {
+      errors.push(`pt expanded-uncertainty robots ${ptPage.head.robots || '(missing)'} != noindex, follow`);
+    }
+    if (ptPage.head.alternates.length > 0) {
+      errors.push('pt expanded-uncertainty stub emits hreflang');
+    }
+    if (ptPage.head.canonicals[0] !== ptExpanded) {
+      errors.push(`pt expanded-uncertainty canonical ${ptPage.head.canonicals[0]} != ${ptExpanded}`);
+    }
+    if (!ptPage.head.noindex) {
+      errors.push('pt expanded-uncertainty stub is indexable');
+    }
+  }
+  if (sitemapLocs.some((entry) => entry.loc === ptExpanded)) {
+    errors.push(`sitemap lists noindex pt expanded-uncertainty stub ${ptExpanded}`);
+  }
+  for (const [url, page] of pages) {
+    if (!url.includes('/pt/') || page.head.noindex) continue;
+    if (new URL(url).pathname.includes('/learn/epistemic/expanded-uncertainty/')) {
+      errors.push(`${page.rel}: indexable dist/pt expanded-uncertainty page`);
     }
   }
 

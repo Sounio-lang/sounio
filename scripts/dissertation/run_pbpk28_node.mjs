@@ -113,7 +113,7 @@ if (DRUG === 'tirzepatide') {
  else if (DRUG === 'olanzapine-smoker') {
   baseParams = {
     ...DEFAULT_PARAMS_OLANZAPINE,
-    clHep: 50.0,
+    clHep: 13.02,
     bolusMg: 0.0,
     stentActive: true,
   };

@@ -40,6 +40,7 @@ count() {  # count <name> -> number of lines whose first tab-field is <name>
 
 status=$(field status)
 capacity=$(field capacity)
+edge_capacity=$(field edge_capacity)
 saturated=$(field saturated)
 parse_failed=$(field parse_failed)
 failed_path=$(field failed_path)
@@ -49,6 +50,7 @@ failed_path=$(field failed_path)
 # `saturated` would silently satisfy a naive `!= true` test.
 [[ -n "$status"       ]] || reject "no 'status' field — the report format changed and this verdict is no longer reading what it claims to"
 [[ -n "$capacity"     ]] || reject "no 'capacity' field — cannot check headroom against an unknown bound"
+[[ -n "$edge_capacity" ]] || reject "no 'edge_capacity' field — cannot check edge headroom against an unknown bound"
 [[ -n "$saturated"    ]] || reject "no 'saturated' field"
 [[ -n "$parse_failed" ]] || reject "no 'parse_failed' field"
 
@@ -80,13 +82,14 @@ fi
 [[ "$nodes" -ge 2 ]] \
   || reject "only $nodes node(s) — nothing meaningful was walked"
 
-# Headroom. ModuleClosure is fixed-capacity (module_frontend.sio:2403 area:
-# paths [String;256], edges [String;512]); on overflow the walker sets
-# `saturated` and returns false. Measured 2026-08-04: 340 of 512 edges, 66%.
+# Headroom. ModuleClosure is fixed-capacity (module_frontend.sio, struct
+# ModuleClosure: paths [string;256], edges [string;1024]); on overflow the
+# walker sets `saturated` and returns false. Measured 2026-08-04: 340 of 512
+# edges, 66%; 2026-11-17: 439 of 512 (86%), which raised the edge bound to 1024.
 # Asserting at 80% turns the day it approaches the cap into a red PR instead of
 # a mystery truncation.
 node_cap="$capacity"
-edge_cap=$(( capacity * 2 ))
+edge_cap="$edge_capacity"
 node_limit=$(( node_cap * 80 / 100 ))
 edge_limit=$(( edge_cap * 80 / 100 ))
 
