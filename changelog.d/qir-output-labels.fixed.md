@@ -1,0 +1,1 @@
+Quantum tape QIR export now supplies unique, non-null tuple and result labels, marks measurement declarations irreversible and emits QIR version and static resource-management module flags. Focused tests cover empty output and multiple results, including two-digit labels.

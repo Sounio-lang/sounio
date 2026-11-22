@@ -27,66 +27,72 @@ pub fn least_squares_restore(value: f64, factor: f64, divisor: f64) -> LeastSqua
     LeastSquaresNumber { status: 4, value: 0.0 }
 }
 
-struct LeastSquaresScaleParts {
-    mantissa: f64,
-    exponent: i64,
+// Balanced six-factor scaling into one caller-owned reusable scalar slot.
+// Arithmetic order/availability match the legacy wrapper exactly. There are no
+// returned Parts records or aggregate constructors in this hot path.
+pub fn least_squares_scaled_product_into(value:f64,multiplier1:f64,multiplier2:f64,
+ divisor1:f64,divisor2:f64,divisor3:f64,out:&!LeastSquaresNumber)->i64 with Mut,Div,Panic {
+ out.status=4
+ out.value=0.0
+ if !is_finite(value) || !is_finite(multiplier1) || !is_finite(multiplier2) ||
+ !is_finite(divisor1) || !is_finite(divisor2) || !is_finite(divisor3) {return 4}
+ if multiplier1<0.0 || multiplier2<0.0 || divisor1<=0.0 || divisor2<=0.0 || divisor3<=0.0 {return 4}
+ if value==0.0 || multiplier1==0.0 || multiplier2==0.0 {out.status=0;return 0}
+ var v_m:f64=least_squares_scale_abs(value)
+ var v_e:i64=0
+ while v_m>=2.0 {v_m=v_m*0.5;v_e=v_e+1}
+ while v_m<1.0 {v_m=v_m*2.0;v_e=v_e-1}
+ var a_m:f64=least_squares_scale_abs(multiplier1)
+ var a_e:i64=0
+ while a_m>=2.0 {a_m=a_m*0.5;a_e=a_e+1}
+ while a_m<1.0 {a_m=a_m*2.0;a_e=a_e-1}
+ var b_m:f64=least_squares_scale_abs(multiplier2)
+ var b_e:i64=0
+ while b_m>=2.0 {b_m=b_m*0.5;b_e=b_e+1}
+ while b_m<1.0 {b_m=b_m*2.0;b_e=b_e-1}
+ var c_m:f64=least_squares_scale_abs(divisor1)
+ var c_e:i64=0
+ while c_m>=2.0 {c_m=c_m*0.5;c_e=c_e+1}
+ while c_m<1.0 {c_m=c_m*2.0;c_e=c_e-1}
+ var d_m:f64=least_squares_scale_abs(divisor2)
+ var d_e:i64=0
+ while d_m>=2.0 {d_m=d_m*0.5;d_e=d_e+1}
+ while d_m<1.0 {d_m=d_m*2.0;d_e=d_e-1}
+ var f_m:f64=least_squares_scale_abs(divisor3)
+ var f_e:i64=0
+ while f_m>=2.0 {f_m=f_m*0.5;f_e=f_e+1}
+ while f_m<1.0 {f_m=f_m*2.0;f_e=f_e-1}
+ var mantissa=((v_m*a_m)*b_m)/((c_m*d_m)*f_m)
+ var exponent:i64=v_e+a_e+b_e-c_e-d_e-f_e
+ while mantissa>=2.0 {mantissa=mantissa*0.5;exponent=exponent+1}
+ while mantissa<1.0 {mantissa=mantissa*2.0;exponent=exponent-1}
+ if exponent>1023 {return 4}
+ if exponent< -1075 {out.status=0;return 0}
+ var factor:f64=1.0
+ var result:f64=0.0
+ var j:i64=0
+ if exponent< -1022 {
+  let normal=mantissa*2.2250738585072014e-308
+  let shift:i64=0-(exponent+1022)
+  while j<shift {factor=factor*0.5;j=j+1}
+  result=normal*factor
+ } else {
+  if exponent>=0 {while j<exponent {factor=factor*2.0;j=j+1}} else {
+   while j<(0-exponent) {factor=factor*0.5;j=j+1}
+  }
+  result=mantissa*factor
+ }
+ if !is_finite(result) {return 4}
+ if value<0.0 {result= -result}
+ out.status=0
+ out.value=result
+ return 0
 }
-// Nonzero finite input. Exact binary power scaling, without logarithms.
-fn least_squares_scale_parts(value: f64) -> LeastSquaresScaleParts with Mut, Div, Panic {
-    var mantissa = least_squares_scale_abs(value)
-    var exponent: i64 = 0
-    while mantissa >= 2.0 { mantissa = mantissa * 0.5; exponent = exponent + 1 }
-    while mantissa < 1.0 { mantissa = mantissa * 2.0; exponent = exponent - 1 }
-    LeastSquaresScaleParts { mantissa: mantissa, exponent: exponent }
-}
-// Balanced six-factor scaling. Final IEEE underflow to zero is allowed;
-// callers decide whether such a zero makes their own output unavailable.
-pub fn least_squares_scaled_product(value: f64, multiplier1: f64, multiplier2: f64,
-    divisor1: f64, divisor2: f64, divisor3: f64) -> LeastSquaresNumber with Mut, Div, Panic {
-    if !is_finite(value) || !is_finite(multiplier1) || !is_finite(multiplier2) ||
-       !is_finite(divisor1) || !is_finite(divisor2) || !is_finite(divisor3) {
-        return LeastSquaresNumber { status: 4, value: 0.0 }
-    }
-    if multiplier1 < 0.0 || multiplier2 < 0.0 ||
-       divisor1 <= 0.0 || divisor2 <= 0.0 || divisor3 <= 0.0 {
-        return LeastSquaresNumber { status: 4, value: 0.0 }
-    }
-    if value == 0.0 || multiplier1 == 0.0 || multiplier2 == 0.0 {
-        return LeastSquaresNumber { status: 0, value: 0.0 }
-    }
-    let v = least_squares_scale_parts(value)
-    let a = least_squares_scale_parts(multiplier1)
-    let b = least_squares_scale_parts(multiplier2)
-    let c = least_squares_scale_parts(divisor1)
-    let d = least_squares_scale_parts(divisor2)
-    let f = least_squares_scale_parts(divisor3)
-    var mantissa = ((v.mantissa * a.mantissa) * b.mantissa) /
-        ((c.mantissa * d.mantissa) * f.mantissa)
-    var exponent: i64 = v.exponent + a.exponent + b.exponent -
-        c.exponent - d.exponent - f.exponent
-    while mantissa >= 2.0 { mantissa = mantissa * 0.5; exponent = exponent + 1 }
-    while mantissa < 1.0 { mantissa = mantissa * 2.0; exponent = exponent - 1 }
-    if exponent > 1023 { return LeastSquaresNumber { status: 4, value: 0.0 } }
-    if exponent < -1075 { return LeastSquaresNumber { status: 0, value: 0.0 } }
-    var factor: f64 = 1.0
-    var result: f64 = 0.0
-    var j: i64 = 0
-    if exponent < -1022 {
-        // First product remains normal and exact; only the final multiply
-        // rounds into the subnormal range, including the half-minimum tie.
-        let normal = mantissa * 2.2250738585072014e-308
-        let shift: i64 = 0 - (exponent + 1022)
-        while j < shift { factor = factor * 0.5; j = j + 1 }
-        result = normal * factor
-    } else {
-        if exponent >= 0 {
-            while j < exponent { factor = factor * 2.0; j = j + 1 }
-        } else {
-            while j < (0 - exponent) { factor = factor * 0.5; j = j + 1 }
-        }
-        result = mantissa * factor
-    }
-    if !is_finite(result) { return LeastSquaresNumber { status: 4, value: 0.0 } }
-    if value < 0.0 { result = -result }
-    LeastSquaresNumber { status: 0, value: result }
+// By-value compatibility wrapper: one fresh result, no per-factor records.
+// Hot callers retain a slot and call the scalar-status into API directly.
+pub fn least_squares_scaled_product(value:f64,multiplier1:f64,multiplier2:f64,
+ divisor1:f64,divisor2:f64,divisor3:f64)->LeastSquaresNumber with Mut,Div,Panic {
+ var out=LeastSquaresNumber{status:4,value:0.0}
+ let ignored=least_squares_scaled_product_into(value,multiplier1,multiplier2,divisor1,divisor2,divisor3,&!out)
+ return out
 }

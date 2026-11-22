@@ -1,0 +1,143 @@
+// Dynamic explicit-edge histograms. No automatic bins or discarded observations.
+// All active values finite. Bins are [edge_i,edge_i+1), last includes right edge.
+// Integer counts are exact; output is transactional and scratch is caller-owned.
+use collections::numeric_buffer::{NumericBuffer,numeric_buffer_status,numeric_buffer_len,numeric_buffer_at,numeric_buffer_set}
+use collections::integer_buffer::{IntegerBuffer,integer_buffer_status,integer_buffer_len,integer_buffer_at,integer_buffer_set}
+use math::pure::{is_finite}
+use linalg::least_squares_scale::{least_squares_scaled_product}
+pub struct DynamicHistogram {
+    pub status:i64,pub observations:i64,pub available:i64,pub bins:i64,
+    pub in_range:i64,pub below:i64,pub above:i64,
+}
+pub fn dynamic_histogram_counts(values:&NumericBuffer,available:&IntegerBuffer,
+    edges:&NumericBuffer,counts:&!IntegerBuffer,work:&!IntegerBuffer)
+    ->DynamicHistogram with Mut,Div,Panic {
+    let n=numeric_buffer_len(values)
+    let bins=numeric_buffer_len(edges)-1
+    var out=DynamicHistogram{status:1,observations:n,available:0,bins:bins,
+        in_range:0,below:0,above:0}
+    if numeric_buffer_status(values)!=0 || integer_buffer_status(available)!=0 ||
+       numeric_buffer_status(edges)!=0 || integer_buffer_status(counts)!=0 ||
+       integer_buffer_status(work)!=0 || bins<1 {return out}
+    if integer_buffer_len(available)!=n || integer_buffer_len(counts)!=bins ||
+       integer_buffer_len(work)<bins {return out}
+    var i:i64=0
+    while i<=bins {
+        let edge=numeric_buffer_at(edges,i)
+        if !is_finite(edge) {out.status=3;return out}
+        if i>0 {
+            if edge<=numeric_buffer_at(edges,i-1) {out.status=4;return out}
+        }
+        i=i+1
+    }
+    i=0
+    while i<n {
+        let flag=integer_buffer_at(available,i)
+        if flag!=0 && flag!=1 {out.status=2;return out}
+        if flag==1 {
+            if !is_finite(numeric_buffer_at(values,i)) {out.status=3;return out}
+        }
+        i=i+1
+    }
+    i=0
+    while i<bins {integer_buffer_set(work,i,0);i=i+1}
+    let first=numeric_buffer_at(edges,0)
+    let last=numeric_buffer_at(edges,bins)
+    i=0
+    while i<n {
+        if integer_buffer_at(available,i)==1 {
+            out.available=out.available+1
+            let value=numeric_buffer_at(values,i)
+            if value<first {out.below=out.below+1}
+            else if value>last {out.above=out.above+1}
+            else {
+                var bin=bins-1
+                if value<last {
+                    var lo:i64=0
+                    var hi=bins
+                    while lo<hi {
+                        let middle=lo+(hi-lo)/2
+                        if value>=numeric_buffer_at(edges,middle+1) {lo=middle+1}
+                        else {hi=middle}
+                    }
+                    bin=lo
+                }
+                let old=integer_buffer_at(work,bin)
+                integer_buffer_set(work,bin,old+1)
+                out.in_range=out.in_range+1
+            }
+        }
+        i=i+1
+    }
+    i=0
+    while i<bins {
+        let value=integer_buffer_at(work,i)
+        integer_buffer_set(counts,i,value)
+        i=i+1
+    }
+    out.status=0
+    return out
+}
+pub struct HistogramDensity {
+    pub status:i64,pub bins:i64,pub normalizer:i64,pub in_range:i64,
+    pub integrated_mass:f64,pub first_unavailable:i64,
+}
+// normalizer is explicit: choose histogram.available for unconditional density,
+// histogram.in_range for conditional density. A zero denominator is unavailable.
+// Exact integer counts remain a separate result if density is unrepresentable.
+pub fn dynamic_histogram_density(counts:&IntegerBuffer,edges:&NumericBuffer,
+    normalizer:i64,density:&!NumericBuffer,work:&!NumericBuffer)
+    ->HistogramDensity with Mut,Div,Panic {
+    let bins=integer_buffer_len(counts)
+    var out=HistogramDensity{status:1,bins:bins,normalizer:normalizer,in_range:0,
+        integrated_mass:0.0,first_unavailable:-1}
+    if bins<1 || normalizer<1 || integer_buffer_status(counts)!=0 ||
+       numeric_buffer_status(edges)!=0 || numeric_buffer_status(density)!=0 ||
+       numeric_buffer_status(work)!=0 {return out}
+    if numeric_buffer_len(edges)!=bins+1 || numeric_buffer_len(density)!=bins ||
+       numeric_buffer_len(work)<bins {return out}
+    if normalizer>9007199254740992 {out.status=5;return out}
+    var i:i64=0
+    while i<=bins {
+        let edge=numeric_buffer_at(edges,i)
+        if !is_finite(edge) {out.status=3;return out}
+        if i>0 {if edge<=numeric_buffer_at(edges,i-1) {out.status=2;return out}}
+        i=i+1
+    }
+    i=0
+    var total:i64=0
+    while i<bins {
+        let count=integer_buffer_at(counts,i)
+        if count<0 || count>normalizer-total {out.status=6;return out}
+        total=total+count
+        i=i+1
+    }
+    i=0
+    while i<bins {
+        let lower=numeric_buffer_at(edges,i)
+        let upper=numeric_buffer_at(edges,i+1)
+        var width=upper-lower
+        var factor=1.0
+        if !is_finite(width) {width=0.5*upper-0.5*lower;factor=2.0}
+        if width<=0.0 || !is_finite(width) {out.status=4;out.first_unavailable=i;return out}
+        let count=integer_buffer_at(counts,i)
+        let value=least_squares_scaled_product(count as f64,1.0,1.0,
+            normalizer as f64,width,factor)
+        if value.status!=0 || !is_finite(value.value) || value.value<0.0 {
+            out.status=4;out.first_unavailable=i;return out
+        }
+        if count>0 && value.value==0.0 {out.status=4;out.first_unavailable=i;return out}
+        numeric_buffer_set(work,i,value.value)
+        i=i+1
+    }
+    i=0
+    while i<bins {
+        let value=numeric_buffer_at(work,i)
+        numeric_buffer_set(density,i,value)
+        i=i+1
+    }
+    out.status=0
+    out.in_range=total
+    out.integrated_mass=(total as f64)/(normalizer as f64)
+    return out
+}

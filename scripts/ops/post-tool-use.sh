@@ -31,11 +31,12 @@ if [[ -x "$LINT" ]]; then
 fi
 
 # 2. Type-check with souc (if available)
-RESOLVE="$SCRIPT_DIR/resolve-souc.sh"
-if [[ -x "$RESOLVE" ]]; then
-    SOUC_PATH=$("$RESOLVE" 2>/dev/null) || true
-    if [[ -n "$SOUC_PATH" ]] && [[ -x "$SOUC_PATH" ]]; then
-        CHECK_OUT=$("$SOUC_PATH" check "$FILE_PATH" 2>&1) || true
+# shellcheck source=../lib/resolve_souc.sh
+RESOLVE="$SCRIPT_DIR/../lib/resolve_souc.sh"
+if [[ -f "$RESOLVE" ]]; then
+    source "$RESOLVE" || true
+    if [[ -n "${SOUC_BIN:-}" ]] && [[ -x "$SOUC_BIN" ]]; then
+        CHECK_OUT=$("$SOUC_BIN" check "$FILE_PATH" 2>&1) || true
         if [[ -n "$CHECK_OUT" ]]; then
             echo "=== souc check ==="
             echo "$CHECK_OUT" | head -20

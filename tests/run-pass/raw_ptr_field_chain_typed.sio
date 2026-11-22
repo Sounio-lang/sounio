@@ -1,0 +1,76 @@
+//@ run-pass
+//@ expect-stdout: RAW_PTR_FIELD_CHAIN_OK
+// A chunked table in heap_alloc memory, the shape of check/defs.sio FnSigTable.
+// `var cur = (*t).head` must take Chunk from the field declared `*mut Chunk`;
+// untyped, `(*cur).next` used the field index (1) while the typed
+// `(*chunk).entries[i]` stores used the raw payload offset, so entries[1]
+// overwrote `next` and the walk to chunk 2 stored through a handle
+// (gen3 SIGSEGV in fn_sig_table_add, #2966).
+struct Nm { buf: [i8; 16], len: i64 }
+struct Te { kind: i64, nm: Nm }
+struct Sig { name: Nm, count: i64, ret: Te, effects: [i64; 4], ec: i64 }
+struct Chunk { entries: [Sig; 8], next: *mut Chunk }
+struct Tab { head: *mut Chunk, count: i64 }
+
+fn chunk_alloc() -> *mut Chunk with Alloc { heap_alloc(65536) as *mut Chunk }
+fn tab_alloc() -> *mut Tab with Alloc { heap_alloc(64) as *mut Tab }
+
+fn chunk_for(t: *mut Tab, gi: i64) -> *mut Chunk with Mut, Panic, Div, Alloc {
+    if (*t).head == (0 as *mut Chunk) {
+        (*t).head = chunk_alloc()
+    }
+    let chunk_no = gi / 8
+    var cur = (*t).head
+    var n: i64 = 0
+    while n < chunk_no {
+        if (*cur).next == (0 as *mut Chunk) {
+            (*cur).next = chunk_alloc()
+        }
+        cur = (*cur).next
+        n = n + 1
+    }
+    cur
+}
+
+fn tab_add(t: *mut Tab, sig: Sig) -> i64 with Mut, Panic, Div, Alloc {
+    let idx = (*t).count
+    let chunk = chunk_for(t, idx)
+    (*chunk).entries[(idx % 8) as usize] = sig
+    (*t).count = idx + 1
+    idx
+}
+
+fn tab_get(t: *mut Tab, idx: i64) -> Sig with Mut, Panic, Div {
+    let chunk_no = idx / 8
+    var cur = (*t).head
+    var n: i64 = 0
+    while n < chunk_no {
+        cur = (*cur).next
+        n = n + 1
+    }
+    (*cur).entries[(idx % 8) as usize]
+}
+
+fn mk(i: i64) -> Sig with Mut, Panic, Div {
+    var nb: [i8; 16] = [0; 16]
+    nb[0] = (65 + i) as i8
+    Sig { name: Nm { buf: nb, len: 1 }, count: i, ret: Te { kind: i * 2, nm: Nm { buf: nb, len: 1 } }, effects: [i, i + 1, 0, 0], ec: 2 }
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
+    let t = tab_alloc()
+    var i: i64 = 0
+    while i < 20 {
+        tab_add(t, mk(i))
+        i = i + 1
+    }
+    var acc: i64 = 0
+    i = 0
+    while i < 20 {
+        let s = tab_get(t, i)
+        acc = acc + s.count + s.ret.kind + s.effects[1] + s.name.buf[0] as i64 + s.ret.nm.len
+        i = i + 1
+    }
+    if acc == 2290 { println("RAW_PTR_FIELD_CHAIN_OK") } else { println(acc) }
+    return 0
+}

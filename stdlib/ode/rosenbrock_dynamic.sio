@@ -1,0 +1,429 @@
+// Rosenbrock4 stage equations/coefficient data adapted from Boost.Odeint1.83.
+// Copyright 2011-2013 Karsten Ahnert
+// Copyright 2011-2012 Mario Mulansky
+// Copyright 2012 Christoph Koke
+// Distributed under the Boost Software License, Version 1.0.
+// See accompanying BOOST_LICENSE_1_0.txt.
+// Header SHA256 db74ad85477f90c69791b3aa31488dde537c4c3e4318bbe30eae47f98d51fa91.
+// d4 sign corrected against WRF/KPP RODAS4 (Boost1.83 default has +d4).
+// WRF commit06d4240ae989cc3e50af412bb472df3d9048783c, rosenbrock.f90:1056.
+// Source SHA25644eb88bcbd91ab2f12f37ba71d314038d6a771f1a8750f5f8b8c2b317940fa2a.
+// Equivalent system M=I-gamma*h*J avoids reciprocal timestep. No FD Jacobian.
+use collections::numeric_buffer::{NumericBuffer,numeric_buffer_status,numeric_buffer_len,numeric_buffer_at,numeric_buffer_set,numeric_matrix}
+use collections::integer_buffer::{IntegerBuffer,integer_buffer_status,integer_buffer_len}
+use linalg::dynamic_factorize::{dynamic_factor_workspace,dynamic_lu,dynamic_lu_solve}
+use linalg::least_squares_scale::{LeastSquaresNumber,least_squares_scaled_product}
+use ode::solver::{ODEOptions}
+use math::pure::{is_finite,sqrt,ln_checked,exp}
+pub struct Ros4Workspace {
+ pub status:i64,pub n:i64,pub vector_len:i64,pub stages_len:i64,pub matrix_len:i64,
+ pub factor_len:i64,pub factor_work_len:i64,pub pivot_len:i64,pub total_payload_bytes:i64,
+}
+pub struct Ros4StepResult {
+ pub status:i64,pub n:i64,pub nfeval:i64,pub njev:i64,pub nlinear:i64,
+ pub nfactorizations:i64,pub callback_status:i64,pub callback_kind:i64,pub linear_status:i64,pub failed_stage:i64,
+}
+pub struct RosenbrockResult {
+ pub status:i64,pub n:i64,pub t_final:f64,pub target:f64,pub next_step:f64,
+ pub steps:i64,pub attempts:i64,pub nfeval:i64,pub njev:i64,pub nlinear:i64,
+ pub nfactorizations:i64,pub nreject:i64,pub observer_calls:i64,
+ pub callback_status:i64,pub callback_kind:i64,pub linear_status:i64,pub failed_stage:i64,pub last_error:f64,
+}
+fn ro_abs(x:f64)->f64 {if x<0.0 {-x} else {x}}
+fn ro_min(a:f64,b:f64)->f64 {if a<b {a} else {b}}
+fn ro_max(a:f64,b:f64)->f64 {if a>b {a} else {b}}
+pub fn ros4_workspace(n:i64)->Ros4Workspace with Mut,Div {
+ var out=Ros4Workspace{status:1,n:n,vector_len:0,stages_len:0,matrix_len:0,factor_len:0,factor_work_len:0,pivot_len:0,total_payload_bytes:0}
+ let base=dynamic_factor_workspace(n)
+ if base.status!=0 {return out}
+ let limit=9223372036854771704/8
+ if n>limit/14 {return out}
+ let vectors=14*n
+ if base.factor_len>(limit-vectors)/2 {return out}
+ let left=limit-vectors-2*base.factor_len
+ let work=if base.factor_len>base.lu_solve_work {base.factor_len} else {base.lu_solve_work}
+ if work>left {return out}
+ out.vector_len=n;out.stages_len=8*n;out.matrix_len=base.factor_len
+ out.factor_len=base.factor_len;out.factor_work_len=work;out.pivot_len=n
+ out.total_payload_bytes=(vectors+2*base.factor_len+work)*8;out.status=0
+ out
+}
+fn ro_step_empty(n:i64)->Ros4StepResult {
+ Ros4StepResult{status:3,n:n,nfeval:0,njev:0,nlinear:0,nfactorizations:0,callback_status:0,callback_kind:0,linear_status:0,failed_stage:0}
+}
+fn ro_empty(n:i64)->RosenbrockResult {
+ RosenbrockResult{status:3,n:n,t_final:0.0,target:0.0,next_step:0.0,steps:0,attempts:0,nfeval:0,njev:0,nlinear:0,nfactorizations:0,nreject:0,observer_calls:0,callback_status:0,callback_kind:0,linear_status:0,failed_stage:0,last_error:0.0}
+}
+fn ro_finite(b:&NumericBuffer,n:i64)->bool with Panic {
+ var i:i64=0
+ while i<n {if !is_finite(numeric_buffer_at(b,i)) {return false};i=i+1}
+ true
+}
+fn ro_poison(b:&!NumericBuffer,n:i64) with Mut,Div {
+ var i:i64=0
+ while i<n {numeric_buffer_set(b,i,0.0/0.0);i=i+1}
+}
+fn ro_buffers(state:&NumericBuffer,trial:&NumericBuffer,error:&NumericBuffer,derivative:&NumericBuffer,
+ stages:&NumericBuffer,matrix:&NumericBuffer,factor:&NumericBuffer,factorwork:&NumericBuffer,
+ pivots:&IntegerBuffer,pivotwork:&IntegerBuffer)->bool with Mut,Div {
+ let n=numeric_buffer_len(state)
+ let shape=ros4_workspace(n)
+ if shape.status!=0 {return false}
+ if numeric_buffer_status(state)!=0 || numeric_buffer_status(trial)!=0 || numeric_buffer_status(error)!=0 ||
+ numeric_buffer_status(derivative)!=0 || numeric_buffer_status(stages)!=0 || numeric_buffer_status(matrix)!=0 ||
+ numeric_buffer_status(factor)!=0 || numeric_buffer_status(factorwork)!=0 ||
+ integer_buffer_status(pivots)!=0 || integer_buffer_status(pivotwork)!=0 {return false}
+ if numeric_buffer_len(trial)!=n || numeric_buffer_len(error)!=n || numeric_buffer_len(derivative)!=n {return false}
+ if numeric_buffer_len(stages)<shape.stages_len || numeric_buffer_len(matrix)!=shape.matrix_len ||
+ numeric_buffer_len(factor)<shape.factor_len || numeric_buffer_len(factorwork)<shape.factor_work_len {return false}
+ if integer_buffer_len(pivots)<n || integer_buffer_len(pivotwork)<n {return false}
+ true
+}
+fn ro_options(o:&ODEOptions)->bool {
+ is_finite(o.rtol) && o.rtol>=0.0 && is_finite(o.atol) && o.atol>0.0 &&
+ is_finite(o.dt_init) && o.dt_init>=0.0 && is_finite(o.dt_min) && o.dt_min>0.0 &&
+ is_finite(o.dt_max) && o.dt_max>=o.dt_min && o.max_steps>=1 && o.max_steps<=1000000 &&
+ is_finite(o.safety) && o.safety>0.0 && o.safety<1.0 &&
+ is_finite(o.min_shrink) && o.min_shrink>0.0 && o.min_shrink<1.0 &&
+ is_finite(o.max_growth) && o.max_growth>=1.0
+}
+fn ro_product(value:f64,m1:f64,m2:f64,divisor:f64,negative:bool)->LeastSquaresNumber with Mut,Div,Panic {
+ var answer=least_squares_scaled_product(value,m1,m2,divisor,1.0,1.0)
+ if answer.status!=0 {return answer}
+ if value!=0.0 {if answer.value==0.0 {return LeastSquaresNumber{status:4,value:0.0}}}
+ if negative {answer.value=-answer.value}
+ answer
+}
+fn ro_copy_stage(error:&NumericBuffer,stages:&!NumericBuffer,n:i64,row:i64) with Mut,Panic {
+ var i:i64=0
+ while i<n {let value=numeric_buffer_at(error,i);numeric_buffer_set(stages,row*n+i,value);i=i+1}
+}
+fn ro_state(state:&NumericBuffer,stages:&NumericBuffer,trial:&!NumericBuffer,n:i64,a:&[f64;5],count:i64)->i64 with Mut,Div,Panic {
+ if count<0 || count>5 {return 3}
+ var i:i64=0
+ while i<n {
+  var sum=numeric_buffer_at(state,i)
+  var correction:f64=0.0
+  var j:i64=0
+  while j<count {
+   let coefficient=a[j as usize]
+   let term=ro_product(numeric_buffer_at(stages,(j+2)*n+i),ro_abs(coefficient),1.0,1.0,coefficient<0.0)
+   if term.status!=0 {return 4}
+   let adjusted=term.value-correction
+   let next=sum+adjusted;correction=(next-sum)-adjusted;sum=next;j=j+1
+  }
+  if !is_finite(sum) {return 4}
+  numeric_buffer_set(trial,i,sum);i=i+1
+ }
+ 0
+}
+fn ro_rhs(derivative:&!NumericBuffer,stages:&NumericBuffer,n:i64,h:f64,d:f64,c:&[f64;5],count:i64)->i64 with Mut,Div,Panic {
+ if count<0 || count>5 {return 3}
+ var i:i64=0
+ while i<n {
+  let raw=numeric_buffer_at(derivative,i)
+  let base=ro_product(raw,ro_abs(h),0.25,1.0,h<0.0)
+  if base.status!=0 {return 4}
+  var sum=base.value
+  var correction:f64=0.0
+  if d!=0.0 {
+   let coefficient=ro_abs(0.25*d)
+   if !is_finite(coefficient) || coefficient==0.0 {return 4}
+   let time_term=ro_product(numeric_buffer_at(stages,n+i),ro_abs(h),ro_abs(h),1.0/coefficient,d<0.0)
+   if time_term.status!=0 {return 4}
+   let adjusted=time_term.value-correction
+   let next=sum+adjusted;correction=(next-sum)-adjusted;sum=next
+  }
+  var j:i64=0
+  while j<count {
+   let coefficient=0.25*c[j as usize]
+   let term=ro_product(numeric_buffer_at(stages,(j+2)*n+i),ro_abs(coefficient),1.0,1.0,coefficient<0.0)
+   if term.status!=0 {return 4}
+   let adjusted=term.value-correction
+   let next=sum+adjusted;correction=(next-sum)-adjusted;sum=next;j=j+1
+  }
+  if !is_finite(sum) {return 4}
+  numeric_buffer_set(derivative,i,sum);i=i+1
+ }
+ 0
+}
+fn ro_add(trial:&!NumericBuffer,increment:&NumericBuffer,n:i64)->bool with Mut,Panic {
+ var i:i64=0
+ while i<n {
+  let value=numeric_buffer_at(trial,i)+numeric_buffer_at(increment,i)
+  if !is_finite(value) {return false}
+  numeric_buffer_set(trial,i,value);i=i+1
+ }
+ true
+}
+// Trial/error scratch valid ONLY on status0; state never mutated.
+fn ro_step_into(
+ rhs:fn(f64,&NumericBuffer,&!NumericBuffer)->i64 with Mut,Div,Panic,
+ jacobian:fn(f64,&NumericBuffer,&!NumericBuffer,&!NumericBuffer)->i64 with Mut,Div,Panic,
+ state:&NumericBuffer,trial:&!NumericBuffer,error:&!NumericBuffer,derivative:&!NumericBuffer,
+ stages:&!NumericBuffer,matrix:&!NumericBuffer,factor:&!NumericBuffer,factorwork:&!NumericBuffer,
+ pivots:&!IntegerBuffer,pivotwork:&!IntegerBuffer,t:f64,h:f64,rcond:f64,validated:bool,out:&!Ros4StepResult,a:&![f64;5],c:&![f64;5]
+)->i64 with Mut,Div,Panic {
+ let n=numeric_buffer_len(state)
+ out.status=3;out.n=n;out.nfeval=0;out.njev=0;out.nlinear=0
+ out.nfactorizations=0;out.callback_status=0;out.callback_kind=0;out.linear_status=0;out.failed_stage=0
+ if !validated {if !ro_buffers(state,trial,error,derivative,stages,matrix,factor,factorwork,pivots,pivotwork) {return out.status}}
+ if !is_finite(t) || !is_finite(h) || h==0.0 || !is_finite(rcond) || rcond<0.0 || rcond>=1.0 {return out.status}
+ if !ro_finite(state,n) {return out.status}
+ let next=t+h
+ if !is_finite(next) {out.status=4;return out.status}
+ if next==t {out.status=2;return out.status}
+ if 0.25*h==0.0 {out.status=4;return out.status}
+ out.failed_stage=1
+ ro_poison(derivative,n)
+ let code_rhs=rhs(t,state,derivative);out.nfeval=1
+ if code_rhs!=0 {out.status=6;out.callback_kind=1;out.callback_status=code_rhs;return out.status}
+ if !ro_finite(derivative,n) {out.status=4;return out.status}
+ ro_copy_stage(derivative,stages,n,0)
+ out.failed_stage=2
+ ro_poison(matrix,n*n);ro_poison(derivative,n)
+ let code_jac=jacobian(t,state,matrix,derivative);out.njev=1
+ if code_jac!=0 {out.status=6;out.callback_kind=2;out.callback_status=code_jac;return out.status}
+ if !ro_finite(matrix,n*n) || !ro_finite(derivative,n) {out.status=4;return out.status}
+ ro_copy_stage(derivative,stages,n,1)
+ var i:i64=0
+ while i<n {
+  var j:i64=0
+  while j<n {
+   let raw=numeric_buffer_at(matrix,i*n+j)
+   let product=ro_product(raw,ro_abs(h),0.25,1.0,h<0.0)
+   if product.status!=0 {out.status=4;return out.status}
+   let value=if i==j {1.0-product.value} else {-product.value}
+   if !is_finite(value) {out.status=4;return out.status}
+   numeric_buffer_set(matrix,i*n+j,value);j=j+1
+  }
+  i=i+1
+ }
+ out.failed_stage=3
+ let layout=numeric_matrix(n*n,n,n,n,1,0)
+ out.nfactorizations=1
+ let fit=dynamic_lu(matrix,&layout,factor,pivots,factorwork,pivotwork,rcond)
+ if fit.status!=0 {out.status=8;out.linear_status=fit.status;return out.status}
+ i=0
+ while i<n {let value=numeric_buffer_at(stages,i);numeric_buffer_set(derivative,i,value);i=i+1}
+ let first_rhs=ro_rhs(derivative,stages,n,h,0.25,c,0)
+ if first_rhs!=0 {out.status=first_rhs;return out.status}
+ out.failed_stage=4;out.nlinear=1
+ let first=dynamic_lu_solve(factor,pivots,&fit,derivative,error,factorwork)
+ if first.status!=0 {out.status=8;out.linear_status=first.status;return out.status}
+ ro_copy_stage(error,stages,n,2)
+ var stage:i64=2
+ while stage<=5 {
+  out.failed_stage=stage+3
+  var fraction:f64=1.0
+  var d:f64=0.0
+  if stage==2 {
+   fraction=0.386;d=-0.1043
+   a[0]=0.1544000000000000e+01
+   c[0]=-0.5668800000000000e+01
+  } else if stage==3 {
+   fraction=0.21;d=0.1035
+   a[0]=0.9466785280815826e+00;a[1]=0.2557011698983284e+00
+   c[0]=-0.2430093356833875e+01;c[1]=-0.2063599157091915e+00
+  } else if stage==4 {
+   fraction=0.63;d=-0.3620000000000023e-01
+   a[0]=0.3314825187068521e+01;a[1]=0.2896124015972201e+01;a[2]=0.9986419139977817e+00
+   c[0]=-0.1073529058151375e+00;c[1]=-0.9594562251023355e+01;c[2]=-0.2047028614809616e+02
+  } else {
+   a[0]=0.1221224509226641e+01;a[1]=0.6019134481288629e+01;a[2]=0.1253708332932087e+02;a[3]=-0.6878860361058950e+00
+   c[0]=0.7496443313967647e+01;c[1]=-0.1024680431464352e+02;c[2]=-0.3399990352819905e+02;c[3]=0.1170890893206160e+02
+  }
+  let prepared=ro_state(state,stages,trial,n,a,stage-1)
+  if prepared!=0 {out.status=prepared;return out.status}
+  let sample_time=t+fraction*h
+  if !is_finite(sample_time) {out.status=4;return out.status}
+  ro_poison(derivative,n)
+  let code=rhs(sample_time,trial,derivative);out.nfeval=out.nfeval+1
+  if code!=0 {out.status=6;out.callback_kind=1;out.callback_status=code;return out.status}
+  if !ro_finite(derivative,n) {out.status=4;return out.status}
+  let prepared_rhs=ro_rhs(derivative,stages,n,h,d,c,stage-1)
+  if prepared_rhs!=0 {out.status=prepared_rhs;return out.status}
+  out.nlinear=out.nlinear+1
+  let solved=dynamic_lu_solve(factor,pivots,&fit,derivative,error,factorwork)
+  if solved.status!=0 {out.status=8;out.linear_status=solved.status;return out.status}
+  ro_copy_stage(error,stages,n,stage+1)
+  stage=stage+1
+ }
+ out.failed_stage=9
+ if !ro_add(trial,error,n) {out.status=4;return out.status}
+ ro_poison(derivative,n)
+ let final_callback=rhs(next,trial,derivative);out.nfeval=out.nfeval+1
+ if final_callback!=0 {out.status=6;out.callback_kind=1;out.callback_status=final_callback;return out.status}
+ if !ro_finite(derivative,n) {out.status=4;return out.status}
+ c[0]=0.8083246795921522e+01;c[1]=-0.7981132988064893e+01;c[2]=-0.3152159432874371e+02;c[3]=0.1631930543123136e+02;c[4]=-0.6058818238834054e+01
+ let error_rhs=ro_rhs(derivative,stages,n,h,0.0,c,5)
+ if error_rhs!=0 {out.status=error_rhs;return out.status}
+ out.nlinear=out.nlinear+1
+ let solved_error=dynamic_lu_solve(factor,pivots,&fit,derivative,error,factorwork)
+ if solved_error.status!=0 {out.status=8;out.linear_status=solved_error.status;return out.status}
+ ro_copy_stage(error,stages,n,7)
+ if !ro_add(trial,error,n) {out.status=4;return out.status}
+ out.failed_stage=0;out.status=0
+ out.status
+}
+
+pub fn ros4_step_dynamic(
+ rhs:fn(f64,&NumericBuffer,&!NumericBuffer)->i64 with Mut,Div,Panic,
+ jacobian:fn(f64,&NumericBuffer,&!NumericBuffer,&!NumericBuffer)->i64 with Mut,Div,Panic,
+ state:&NumericBuffer,trial:&!NumericBuffer,error:&!NumericBuffer,derivative:&!NumericBuffer,
+ stages:&!NumericBuffer,matrix:&!NumericBuffer,factor:&!NumericBuffer,factorwork:&!NumericBuffer,
+ pivots:&!IntegerBuffer,pivotwork:&!IntegerBuffer,t:f64,h:f64,rcond:f64
+)->Ros4StepResult with Mut,Div,Panic {
+ var out=ro_step_empty(numeric_buffer_len(state))
+ var a:[f64;5]=[0.0;5]
+ var c:[f64;5]=[0.0;5]
+ ro_step_into(rhs,jacobian,state,trial,error,derivative,stages,matrix,factor,factorwork,pivots,pivotwork,t,h,rcond,false,&!out,&!a,&!c)
+ out
+}
+
+fn ro_initialize(state:&!NumericBuffer,trial:&!NumericBuffer,error:&!NumericBuffer,derivative:&!NumericBuffer,
+ stages:&!NumericBuffer,matrix:&!NumericBuffer,factor:&!NumericBuffer,factorwork:&!NumericBuffer,
+ pivots:&!IntegerBuffer,pivotwork:&!IntegerBuffer,
+ t0:f64,t_end:f64,opts:&ODEOptions,rcond:f64)->RosenbrockResult with Mut,Div,Panic {
+ let n=numeric_buffer_len(state)
+ var out=ro_empty(n)
+ if !ro_buffers(state,trial,error,derivative,stages,matrix,factor,factorwork,pivots,pivotwork) {return out}
+ if !ro_options(opts) || !is_finite(t0) || !is_finite(t_end) || !is_finite(rcond) || rcond<0.0 || rcond>=1.0 {return out}
+ if !ro_finite(state,n) {return out}
+ out.t_final=t0;out.target=t_end
+ let span=t_end-t0
+ if !is_finite(span) {out.status=4;return out}
+ if span!=0.0 {
+  var step=opts.dt_init
+  if step==0.0 {step=ro_abs(span)*0.01}
+  out.next_step=ro_max(opts.dt_min,ro_min(opts.dt_max,step))
+ }
+ out.status=0
+ out
+}
+fn ro_error(state:&NumericBuffer,trial:&NumericBuffer,error:&NumericBuffer,n:i64,opts:&ODEOptions)->LeastSquaresNumber with Mut,Div,Panic {
+ var scale:f64=0.0
+ var ssq:f64=1.0
+ var i:i64=0
+ while i<n {
+  let denominator=opts.atol+opts.rtol*ro_max(ro_abs(numeric_buffer_at(state,i)),ro_abs(numeric_buffer_at(trial,i)))
+  if !is_finite(denominator) || denominator<=0.0 {return LeastSquaresNumber{status:4,value:0.0}}
+  let value=ro_abs(numeric_buffer_at(error,i))/denominator
+  if !is_finite(value) {return LeastSquaresNumber{status:4,value:0.0}}
+  if value!=0.0 {
+   if scale<value {let ratio=scale/value;ssq=1.0+ssq*ratio*ratio;scale=value}
+   else {let ratio=value/scale;ssq=ssq+ratio*ratio}
+  }
+  i=i+1
+ }
+ if scale==0.0 {return LeastSquaresNumber{status:0,value:0.0}}
+ let result=scale*sqrt(ssq/(n as f64))
+ if !is_finite(result) {return LeastSquaresNumber{status:4,value:0.0}}
+ LeastSquaresNumber{status:0,value:result}
+}
+// One accepted step or an explicit failure. Rejected trials remain private scratch.
+fn ro_advance(rhs:fn(f64,&NumericBuffer,&!NumericBuffer)->i64 with Mut,Div,Panic,
+ jacobian:fn(f64,&NumericBuffer,&!NumericBuffer,&!NumericBuffer)->i64 with Mut,Div,Panic,state:&!NumericBuffer,trial:&!NumericBuffer,error:&!NumericBuffer,derivative:&!NumericBuffer,
+ stages:&!NumericBuffer,matrix:&!NumericBuffer,factor:&!NumericBuffer,factorwork:&!NumericBuffer,
+ pivots:&!IntegerBuffer,pivotwork:&!IntegerBuffer,out:&!RosenbrockResult,opts:&ODEOptions,rcond:f64,step:&!Ros4StepResult,a:&![f64;5],c:&![f64;5])->i64 with Mut,Div,Panic {
+ let direction=if out.target>out.t_final {1.0} else {-1.0}
+ while out.t_final!=out.target && out.attempts<opts.max_steps {
+  let remaining=ro_abs(out.target-out.t_final)
+  let magnitude=ro_min(remaining,out.next_step)
+  let h=direction*magnitude
+  let next=out.t_final+h
+  if !is_finite(next) || !is_finite(h) {return 4}
+  if direction>0.0 {if next<=out.t_final {return 2}}
+  else {if next>=out.t_final {return 2}}
+  // Never label a rounded t+h as an endpoint different from that callback time.
+  if magnitude==remaining {if next!=out.target {return 2}}
+  out.attempts=out.attempts+1
+  ro_step_into(rhs,jacobian,state,trial,error,derivative,stages,matrix,factor,factorwork,pivots,pivotwork,out.t_final,h,rcond,true,step,a,c)
+  out.nfeval=out.nfeval+step.nfeval;out.njev=out.njev+step.njev
+  out.nlinear=out.nlinear+step.nlinear;out.nfactorizations=out.nfactorizations+step.nfactorizations
+  if step.status!=0 {
+   out.callback_status=step.callback_status;out.callback_kind=step.callback_kind
+   out.linear_status=step.linear_status;out.failed_stage=step.failed_stage
+   return step.status
+  }
+  let measured=ro_error(state,trial,error,out.n,opts)
+  if measured.status!=0 {return measured.status}
+  out.last_error=measured.value
+  var multiplier=opts.max_growth
+  if measured.value>0.0 {
+   let logged=ln_checked(measured.value)
+   if logged.status!=0 {return 4}
+   multiplier=opts.safety*exp(-0.25*logged.value)
+  }
+  if !is_finite(multiplier) || multiplier<=0.0 {return 4}
+  multiplier=ro_max(opts.min_shrink,ro_min(opts.max_growth,multiplier))
+  if measured.value<=1.0 {
+   var i:i64=0
+   while i<out.n {let value=numeric_buffer_at(trial,i);numeric_buffer_set(state,i,value);i=i+1}
+   out.t_final=next;out.steps=out.steps+1
+   let proposal=magnitude*multiplier
+   out.next_step=if is_finite(proposal) {ro_max(opts.dt_min,ro_min(opts.dt_max,proposal))} else {opts.dt_max}
+   return 0
+  }
+  out.nreject=out.nreject+1
+  multiplier=ro_min(0.9,multiplier)
+  if magnitude<=opts.dt_min {return 2}
+  let proposal=magnitude*multiplier
+  if !is_finite(proposal) || proposal<=0.0 {return 2}
+  out.next_step=ro_max(opts.dt_min,ro_min(opts.dt_max,proposal))
+  if out.next_step>=magnitude {return 2}
+ }
+ if out.t_final!=out.target {return 1}
+ 0
+}
+pub fn solve_rosenbrock4_dynamic(rhs:fn(f64,&NumericBuffer,&!NumericBuffer)->i64 with Mut,Div,Panic,
+ jacobian:fn(f64,&NumericBuffer,&!NumericBuffer,&!NumericBuffer)->i64 with Mut,Div,Panic,state:&!NumericBuffer,trial:&!NumericBuffer,error:&!NumericBuffer,derivative:&!NumericBuffer,
+ stages:&!NumericBuffer,matrix:&!NumericBuffer,factor:&!NumericBuffer,factorwork:&!NumericBuffer,
+ pivots:&!IntegerBuffer,pivotwork:&!IntegerBuffer,
+ t0:f64,t_end:f64,opts:ODEOptions,rcond:f64)->RosenbrockResult with Mut,Div,Panic {
+ var out=ro_initialize(state,trial,error,derivative,stages,matrix,factor,factorwork,pivots,pivotwork,t0,t_end,&opts,rcond)
+ if out.status!=0 {return out}
+ var step=ro_step_empty(numeric_buffer_len(state))
+ var a:[f64;5]=[0.0;5]
+ var c:[f64;5]=[0.0;5]
+ while out.t_final!=out.target {
+  let code=ro_advance(rhs,jacobian,state,trial,error,derivative,stages,matrix,factor,factorwork,pivots,pivotwork,&!out,&opts,rcond,&!step,&!a,&!c)
+  if code!=0 {out.status=code;return out}
+ }
+ out
+}
+// Observer sees immutable accepted state and a caller-owned mutable context.
+// 0continue,positive stop7(unless endpoint already reached),negative failure6.
+pub fn solve_rosenbrock4_observed(rhs:fn(f64,&NumericBuffer,&!NumericBuffer)->i64 with Mut,Div,Panic,
+ jacobian:fn(f64,&NumericBuffer,&!NumericBuffer,&!NumericBuffer)->i64 with Mut,Div,Panic,
+ observer:fn(f64,&NumericBuffer,&!NumericBuffer)->i64 with IO,Mut,Div,Panic,
+ state:&!NumericBuffer,trial:&!NumericBuffer,error:&!NumericBuffer,derivative:&!NumericBuffer,
+ stages:&!NumericBuffer,matrix:&!NumericBuffer,factor:&!NumericBuffer,factorwork:&!NumericBuffer,
+ pivots:&!IntegerBuffer,pivotwork:&!IntegerBuffer,context:&!NumericBuffer,
+ t0:f64,t_end:f64,opts:ODEOptions,rcond:f64)->RosenbrockResult with IO,Mut,Div,Panic {
+ var out=ro_initialize(state,trial,error,derivative,stages,matrix,factor,factorwork,pivots,pivotwork,t0,t_end,&opts,rcond)
+ if out.status!=0 {return out}
+ if numeric_buffer_status(context)!=0 {out.status=3;return out}
+ var step=ro_step_empty(numeric_buffer_len(state))
+ var a:[f64;5]=[0.0;5]
+ var c:[f64;5]=[0.0;5]
+ var code=observer(out.t_final,state,context)
+ out.observer_calls=1
+ if code!=0 {
+  out.callback_kind=3;out.callback_status=code
+  if code<0 {out.status=6} else if out.t_final!=out.target {out.status=7}
+  return out
+ }
+ while out.t_final!=out.target {
+  let progress=ro_advance(rhs,jacobian,state,trial,error,derivative,stages,matrix,factor,factorwork,pivots,pivotwork,&!out,&opts,rcond,&!step,&!a,&!c)
+  if progress!=0 {out.status=progress;return out}
+  code=observer(out.t_final,state,context)
+  out.observer_calls=out.observer_calls+1
+  if code!=0 {
+   out.callback_kind=3;out.callback_status=code
+   if code<0 {out.status=6} else if out.t_final!=out.target {out.status=7}
+   return out
+  }
+ }
+ out
+}

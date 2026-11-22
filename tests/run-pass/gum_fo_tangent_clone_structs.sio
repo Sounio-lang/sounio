@@ -1,0 +1,126 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: GUM_FO_TANGENT_CLONE_STRUCTS_OK
+//@ description: First-order GUM through calls whose tangents include the scalar f64 fields of struct parameters and of the receiver: a struct by value and by reference, a method on `self` by value and `self: &T`, a method calling another method on self, and the correlation between two different calls of the same inputs. Bodies loop, so the #1706 re-lowering refuses them; before this, every one read variance 0 on Madaros. Expected values: tests/oracles/gum_fo_tangent_clone_structs.cpp.
+
+struct LJ { eps: f64, sig: f64 }
+
+fn shells(p: LJ, r: f64) -> f64 with Mut, Div {
+    var acc = 0.0
+    var i: i64 = 1
+    while i <= 3 {
+        let q = p.sig / ((i as f64) * r)
+        var q6 = 1.0
+        var j: i64 = 0
+        while j < 6 {
+            q6 = q6 * q
+            j = j + 1
+        }
+        acc = acc + 4.0 * p.eps * (q6 * q6 - q6)
+        i = i + 1
+    }
+    acc
+}
+
+fn shells_ref(p: &LJ, r: f64) -> f64 with Mut, Div {
+    var acc = 0.0
+    var i: i64 = 1
+    while i <= 3 {
+        let q = (*p).sig / ((i as f64) * r)
+        var q6 = 1.0
+        var j: i64 = 0
+        while j < 6 {
+            q6 = q6 * q
+            j = j + 1
+        }
+        acc = acc + 4.0 * p.eps * (q6 * q6 - q6)
+        i = i + 1
+    }
+    acc
+}
+
+impl LJ {
+    fn energy_val(self, r: f64) -> f64 with Mut, Div {
+        var acc = 0.0
+        var i: i64 = 1
+        while i <= 3 {
+            let q = self.sig / ((i as f64) * r)
+            var q6 = 1.0
+            var j: i64 = 0
+            while j < 6 {
+                q6 = q6 * q
+                j = j + 1
+            }
+            acc = acc + 4.0 * self.eps * (q6 * q6 - q6)
+            i = i + 1
+        }
+        acc
+    }
+
+    fn energy(self: &LJ, r: f64) -> f64 with Mut, Div {
+        var acc = 0.0
+        var i: i64 = 1
+        while i <= 3 {
+            let q = self.sig / ((i as f64) * r)
+            var q6 = 1.0
+            var j: i64 = 0
+            while j < 6 {
+                q6 = q6 * q
+                j = j + 1
+            }
+            acc = acc + 4.0 * self.eps * (q6 * q6 - q6)
+            i = i + 1
+        }
+        acc
+    }
+
+    fn total(self: &LJ, r: f64) -> f64 with Mut, Div {
+        self.energy(r) + self.energy(2.0 * r)
+    }
+}
+
+fn close(got: f64, want: f64) -> bool with Mut, Div {
+    var d = got - want
+    if d < 0.0 { d = 0.0 - d }
+    var w = want
+    if w < 0.0 { w = 0.0 - w }
+    d <= 1.0e-12 + 1.0e-12 * w
+}
+
+fn report(name: string, got: f64, want: f64) -> i64 with IO, Mut, Div {
+    print(name)
+    print(" ")
+    print_f64(got * 1000000.0)
+    print("e-6")
+    if close(got, want) {
+        print(" ok\n")
+        return 0
+    }
+    print(" FAIL\n")
+    1
+}
+
+fn main() -> i32 with IO, Mut, Div, Epistemic {
+    var bad: i64 = 0
+    let ep = measure(0.997, uncertainty: 0.02)
+    let rk = measure(1.12, uncertainty: 0.01)
+    let r: f64 = rk.value
+    let p = LJ { eps: ep.value, sig: 1.0 }
+    let a = shells(p, r)
+    bad = bad + report("struct_by_value", variance_of(a), 0.00042781780426466852)
+    let b = shells_ref(&p, r)
+    bad = bad + report("struct_by_ref", variance_of(b), 0.00042781780426466852)
+    let c = p.energy_val(r)
+    bad = bad + report("self_by_value", variance_of(c), 0.00042781780426466852)
+    let d = p.energy(r)
+    bad = bad + report("self_by_ref", variance_of(d), 0.00042781780426466852)
+    let e = a - d
+    bad = bad + report("corr", variance_of(e), 0.0)
+    let t = p.total(r)
+    bad = bad + report("nested_method", variance_of(t), 0.00045880152443354401)
+    if bad == 0 {
+        print("GUM_FO_TANGENT_CLONE_STRUCTS_OK\n")
+        return 0
+    }
+    1
+}

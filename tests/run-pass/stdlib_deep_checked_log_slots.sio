@@ -1,0 +1,93 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: STDLIB_DEEP_CHECKED_LOG_SLOTS_PASS
+use math::pure::{CheckedLog,ln_checked,ln_checked_into,is_finite}
+use math::logarithmic::{log1p_checked,log1pmx_checked,log1p_phi_checked,log1p_checked_into,log1pmx_checked_into,log1p_phi_checked_into}
+use io::sci_print::{println_f64_sci}
+fn log_bits(x:f64)->i64 with Alloc,Mut,Panic {
+ let pointer=heap_alloc(8) as *mut f64
+ assert((pointer as i64)>0)
+ write_f64(pointer,0,x)
+ let result:i64=read_i64(pointer as *mut i64,0)
+ heap_free(pointer as *mut i8)
+ result
+}
+fn main()->i32 with IO,Alloc,Mut,Div,Panic {
+ let quantum:f64=2.2250738585072014e-308/4503599627370496.0
+ let minus_zero:f64= -1.0/(1.0/0.0)
+ assert(quantum>0.0)
+ let minus_bits:i64=log_bits(minus_zero)
+ assert(minus_bits<0)
+ let inputs:[f64;16]=[-1.0,-0.9999999999999999,-0.5,-0.25,minus_zero,0.0,quantum,-quantum,1e-160,-1e-160,1e-16,0.25,0.5,1.0,1e308,1.0/0.0]
+ var slot=CheckedLog{status:99,value:123.0}
+ var i:i64=0
+ while i<16 {
+  let x:f64=inputs[i as usize]
+  var kind:i64=0
+  while kind<4 {
+   slot.status=99;slot.value=123.0
+   var status:i64=0
+   if kind==0 {status=ln_checked_into(x,&!slot)}
+   else if kind==1 {status=log1p_checked_into(x,&!slot)}
+   else if kind==2 {status=log1pmx_checked_into(x,&!slot)}
+   else {status=log1p_phi_checked_into(x,&!slot)}
+   let actual_status:i64=slot.status;let actual_value:f64=slot.value
+   assert(status==actual_status)
+   if status!=0 {assert(log_bits(actual_value)==0)}
+   var legacy_status:i64=0;var legacy_value:f64=0.0
+   if kind==0 {let old_ln=ln_checked(x);legacy_status=old_ln.status;legacy_value=old_ln.value}
+   else if kind==1 {let old_log1p=log1p_checked(x);legacy_status=old_log1p.status;legacy_value=old_log1p.value}
+   else if kind==2 {let old_mx=log1pmx_checked(x);legacy_status=old_mx.status;legacy_value=old_mx.value}
+   else {let old_phi=log1p_phi_checked(x);legacy_status=old_phi.status;legacy_value=old_phi.value}
+   assert(legacy_status==actual_status && log_bits(legacy_value)==log_bits(actual_value))
+   let input_bits:i64=log_bits(x);let value_bits:i64=log_bits(actual_value)
+   print("CHECKED_LOG_ROW ");print(kind);print(" ");print(input_bits);print(" ");print(actual_status);print(" ");println(value_bits)
+   kind=kind+1
+  }
+  i=i+1
+ }
+ // A nested successful logarithm cannot leave its value available on outer failure.
+ let warm=log1p_checked_into(2.0,&!slot)
+ assert(warm==0 && slot.value>0.0)
+ let overflow=log1p_phi_checked_into(1e308,&!slot)
+ assert(overflow==2 && slot.status==2 && log_bits(slot.value)==0)
+ let nan=ln_checked_into(0.0/0.0,&!slot)
+ assert(nan==2 && slot.status==2 && log_bits(slot.value)==0)
+ let domain=log1pmx_checked_into(-1.0,&!slot)
+ assert(domain==1 && slot.status==1 && log_bits(slot.value)==0)
+ let zero=log1p_checked_into(minus_zero,&!slot)
+ assert(zero==0 && log_bits(slot.value)==minus_bits)
+ let quadratic=log1pmx_checked_into(minus_zero,&!slot)
+ assert(quadratic==0 && log_bits(slot.value)==0)
+ let phi_zero=log1p_phi_checked_into(minus_zero,&!slot)
+ assert(phi_zero==0 && log_bits(slot.value)==0)
+ // Each legacy local result belongs only to that invocation.
+ let first=log1p_checked(2.0);let saved:f64=first.value
+ let second=log1p_checked(-0.75)
+ assert(second.status==0 && first.status==0 && first.value==saved)
+ let first_phi=log1p_phi_checked(0.5);let saved_phi:f64=first_phi.value
+ let failed_phi=log1p_phi_checked(1e308)
+ assert(failed_phi.status==2 && first_phi.status==0 && first_phi.value==saved_phi)
+ let first_ln=ln_checked(2.0);let saved_ln:f64=first_ln.value
+ let failed_ln=ln_checked(-1.0)
+ assert(failed_ln.status==1 && first_ln.status==0 && first_ln.value==saved_ln)
+ // Four million checked calls reuse ONE result; no constructor/bit probe in loop.
+ var sum:f64=0.0;var correction:f64=0.0
+ i=0
+ while i<1000000 {
+  let x:f64=if i%2==0 {2.0}else{-0.75}
+  let a=ln_checked_into(1.0+x,&!slot);let av:f64=slot.value
+  let b=log1p_checked_into(x,&!slot);let bv:f64=slot.value
+  let c=log1pmx_checked_into(x,&!slot);let cv:f64=slot.value
+  let d=log1p_phi_checked_into(x,&!slot);let dv:f64=slot.value
+  assert(a==0 && b==0 && c==0 && d==0 && is_finite(dv))
+  let contribution=((av+bv)+cv)+dv
+  let adjusted=contribution-correction
+  let next=sum+adjusted
+  correction=(next-sum)-adjusted;sum=next
+  i=i+1
+ }
+ println("CHECKED_LOG_MILLION");println(i);println_f64_sci(sum,15)
+ println("STDLIB_DEEP_CHECKED_LOG_SLOTS_PASS")
+ 0
+}

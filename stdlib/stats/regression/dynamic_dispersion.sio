@@ -1,0 +1,623 @@
+// Dynamic full-likelihood log-dispersion profile / log-coordinate MAP.
+// No allocation. Explicit search bracket, initial beta and evaluation budget.
+// Global optimality and inferential calibration are never certified here.
+use collections::numeric_buffer::{NumericBuffer,NumericMatrix,numeric_buffer_status,numeric_buffer_len,numeric_buffer_at,numeric_buffer_set,numeric_matrix,numeric_matrix_status,numeric_matrix_rows,numeric_matrix_cols,numeric_matrix_get}
+use collections::integer_buffer::{IntegerBuffer,integer_buffer_status,integer_buffer_len,integer_buffer_at}
+use linalg::dynamic_least_squares::{dynamic_qr_factorize}
+use linalg::least_squares_scale::{least_squares_scaled_product}
+use stats::regression::dynamic_count_glm::{dynamic_count_workspace,dynamic_count_fit}
+use stats::regression::nb2_likelihood::{Nb2LikelihoodDifferenceSlot,nb2_likelihood_difference_slot,nb2_log_probability_mean_difference_into,nb2_likelihood_difference_value,Nb2LikelihoodSlot,nb2_likelihood_slot,nb2_log_probability_into,nb2_likelihood_slot_log_probability}
+use math::pure::{is_finite,ln_checked,exp,sqrt}
+pub struct DispersionSearchOptions {
+ pub method:i64, pub log_alpha_lower:f64, pub log_alpha_upper:f64,
+ pub outer_tolerance:f64, pub max_outer_evaluations:i64,
+ pub rcond:f64, pub inner_iterations:i64, pub inner_tolerance:f64,
+ pub prior_active:bool, pub prior_center:f64, pub prior_variance:f64,
+ pub compute_curvature:bool,
+}
+pub struct DynamicDispersionWorkspace {
+ pub status:i64, pub count_design_elements:i64, pub response_elements:i64,
+ pub step_elements:i64, pub qr_elements:i64, pub count_stage_elements:i64,
+ pub factor_r_elements:i64, pub factor_scale_elements:i64,
+ pub permutation_elements:i64, pub numeric_elements:i64,
+ pub integer_elements:i64, pub payload_bytes:i64,
+}
+pub fn dynamic_dispersion_workspace(n:i64,p:i64,method:i64)->DynamicDispersionWorkspace with Div {
+ let bad=DynamicDispersionWorkspace{status:1,count_design_elements:0,response_elements:0,
+ step_elements:0,qr_elements:0,count_stage_elements:0,factor_r_elements:0,
+ factor_scale_elements:0,permutation_elements:0,numeric_elements:0,
+ integer_elements:0,payload_bytes:0}
+ if n<=p || method<0 || method>1 {return bad}
+ let base=dynamic_count_workspace(n,p)
+ if base.status!=0 {return bad}
+ let limit=9223372036854771704/8
+ var total=base.total_elements
+ if n>(limit-total)/4 {return bad}
+ total=total+n*4
+ if p>(limit-total)/2 {return bad}
+ total=total+p*2
+ var r_elements:i64=0
+ var scales:i64=0
+ var permutation:i64=0
+ if method==1 {
+  if p>9223372036854775807/p {return bad}
+  r_elements=p*p
+  if r_elements>limit-total {return bad}
+  total=total+r_elements
+  if p>(limit-total)/2 {return bad}
+  total=total+p*2
+  scales=p
+  permutation=p
+ }
+ DynamicDispersionWorkspace{status:0,count_design_elements:base.design_elements,
+ response_elements:n,step_elements:p,qr_elements:base.qr_elements,
+ count_stage_elements:base.stage_elements,factor_r_elements:r_elements,
+ factor_scale_elements:scales,permutation_elements:permutation,
+ numeric_elements:total-permutation,integer_elements:permutation,
+ payload_bytes:total*8}
+}
+pub struct DynamicDispersionFit {
+ pub status:i64, pub rows:i64, pub columns:i64, pub method:i64,
+ pub profile_status:i64, pub evaluations:i64, pub inner_status:i64,
+ pub failure_stage:i64, pub point_available:bool, pub alpha:f64,
+ pub log_alpha:f64, pub log_alpha_available:bool,
+ pub objective_mean:f64, pub full_log_likelihood_mean:f64,
+ pub cox_reid_logdet:f64, pub prior_active:bool, pub poisson_selected:bool,
+ pub boundary_candidate:bool, pub left_censored:bool, pub right_censored:bool,
+ pub curvature_status:i64, pub curvature_h:f64, pub curvature_half_h:f64,
+ pub log_alpha_variance:f64, pub local_curvature_available:bool,
+ pub inference_eligible:bool, pub global_optimality_assessed:bool,
+ pub assumptions_assessed:bool, pub workspace_payload_bytes:i64,
+}
+struct DPObjective {status:i64,inner_status:i64,failure_stage:i64,objective:f64,full_mean:f64,logdet:f64}
+fn dp_empty(status:i64,n:i64,p:i64,method:i64)->DynamicDispersionFit {
+ DynamicDispersionFit{status:status,rows:n,columns:p,method:method,profile_status: -1,
+ evaluations:0,inner_status:0,failure_stage:0,point_available:false,alpha:0.0,
+ log_alpha:0.0,log_alpha_available:false,objective_mean:0.0,
+ full_log_likelihood_mean:0.0,cox_reid_logdet:0.0,prior_active:false,
+ poisson_selected:false,boundary_candidate:false,left_censored:false,right_censored:false,
+ curvature_status:1,curvature_h:0.0,curvature_half_h:0.0,log_alpha_variance:0.0,
+ local_curvature_available:false,inference_eligible:false,global_optimality_assessed:false,
+ assumptions_assessed:false,workspace_payload_bytes:0}
+}
+fn dp_bad(stage:i64,inner:i64)->DPObjective {
+ DPObjective{status:3,inner_status:inner,failure_stage:stage,objective:0.0,full_mean:0.0,logdet:0.0}
+}
+fn dp_abs(x:f64)->f64 {if x<0.0 {-x}else{x}}
+fn dp_copy(source:&NumericBuffer,target:&!NumericBuffer,n:i64) with Mut,Panic {
+ var i:i64=0
+ while i<n {let value=numeric_buffer_at(source,i);numeric_buffer_set(target,i,value);i=i+1}
+}
+fn dp_weight(mu:f64,alpha:f64)->f64 with Div {
+ if alpha==0.0 {return mu}
+ if mu>=1.0 {return 1.0/(alpha+1.0/mu)}
+ mu/(1.0+alpha*mu)
+}
+// Candidate outputs are scratch, never the public final coefficients/means/eta.
+fn dp_evaluate(a:&NumericBuffer,layout:&NumericMatrix,counts:&IntegerBuffer,
+ offsets:&NumericBuffer,initial:&NumericBuffer,options:&DispersionSearchOptions,
+ alpha:f64,log_alpha:f64,candidate_coefficients:&!NumericBuffer,
+ candidate_means:&!NumericBuffer,candidate_eta:&!NumericBuffer,
+ weighted:&!NumericBuffer,response:&!NumericBuffer,step:&!NumericBuffer,
+ qr_work:&!NumericBuffer,count_stage:&!NumericBuffer,factor_r:&!NumericBuffer,
+ factor_scales:&!NumericBuffer,permutation:&!IntegerBuffer,pmf_work:&!Nb2LikelihoodSlot)->DPObjective with Mut,Div,Panic {
+ let n=numeric_matrix_rows(layout)
+ let p=numeric_matrix_cols(layout)
+ let fitted=dynamic_count_fit(a,layout,counts,offsets,initial,alpha,options.rcond,
+ options.inner_iterations,options.inner_tolerance,candidate_coefficients,
+ candidate_means,candidate_eta,weighted,response,step,qr_work,count_stage)
+ if fitted.status!=0 {return dp_bad(1,fitted.status)}
+ // Scaled compensated nonnegative sum of -logP. Do not form an overflowing
+ // total or use a recursively rounded mean that can freeze at subnormal values.
+ var scale:f64=0.0
+ var sum:f64=0.0
+ var correction:f64=0.0
+ var i:i64=0
+ while i<n {
+  let pmf_status=nb2_log_probability_into(integer_buffer_at(counts,i),numeric_buffer_at(candidate_means,i),alpha,pmf_work)
+  if pmf_status!=0 {return dp_bad(2,pmf_status)}
+  let log_probability=nb2_likelihood_slot_log_probability(pmf_work)
+  if !is_finite(log_probability) || log_probability>0.0 {return dp_bad(4,0)}
+  let magnitude= -log_probability
+  if magnitude>scale {
+   let ratio=if scale==0.0 {0.0}else{scale/magnitude}
+   sum=sum*ratio
+   correction=correction*ratio
+   scale=magnitude
+  }
+  if magnitude>0.0 {
+   let term=magnitude/scale-correction
+   let next=sum+term
+   correction=(next-sum)-term
+   sum=next
+  }
+  i=i+1
+ }
+ var full:f64=0.0
+ if scale>0.0 {
+  full= -(scale*(sum/(n as f64)))
+  if !is_finite(full) || full==0.0 {return dp_bad(4,0)}
+ }
+ var logdet:f64=0.0
+ if options.method==1 {
+  var max_weight:f64=0.0
+  i=0
+  while i<n {
+   let weight=dp_weight(numeric_buffer_at(candidate_means,i),alpha)
+   if !is_finite(weight) || weight<=0.0 {return dp_bad(4,0)}
+   if weight>max_weight {max_weight=weight}
+   i=i+1
+  }
+  let root=sqrt(max_weight)
+  if !is_finite(root) || root<=0.0 {return dp_bad(4,0)}
+  var j:i64=0
+  while j<p {
+   var column_scale:f64=0.0
+   i=0
+   while i<n {
+    let entry=numeric_matrix_get(a,layout,i,j)
+    if entry.status!=0 {return dp_bad(4,0)}
+    if dp_abs(entry.value)>column_scale {column_scale=dp_abs(entry.value)}
+    i=i+1
+   }
+   if !is_finite(column_scale) || column_scale<=0.0 {return dp_bad(4,0)}
+   // The count step buffer is reusable scratch after that fit has completed.
+   numeric_buffer_set(step,j,column_scale)
+   i=0
+   while i<n {
+    let entry=numeric_matrix_get(a,layout,i,j)
+    let coordinate=entry.value/column_scale
+    if entry.value!=0.0 {if coordinate==0.0 {return dp_bad(4,0)}}
+    let weight=dp_weight(numeric_buffer_at(candidate_means,i),alpha)
+    let factor=sqrt(weight)/root
+    if !is_finite(factor) || factor<=0.0 || factor>1.0 {return dp_bad(4,0)}
+    let normalized=coordinate*factor
+    if coordinate!=0.0 {if normalized==0.0 {return dp_bad(4,0)}}
+    numeric_buffer_set(weighted,i*p+j,normalized)
+    i=i+1
+   }
+   j=j+1
+  }
+  let b_layout=numeric_matrix(n*p,n,p,p,1,0)
+  let factored=dynamic_qr_factorize(weighted,&b_layout,response,qr_work,factor_r,
+  factor_scales,permutation,options.rcond)
+  if factored.status!=0 {return dp_bad(3,factored.status)}
+  let lw=ln_checked(max_weight)
+  if lw.status!=0 {return dp_bad(4,0)}
+  logdet=(p as f64)*lw.value
+  correction=0.0
+  j=0
+  while j<p {
+   let diagonal=dp_abs(numeric_buffer_at(factor_r,j*p+j))
+   let d=ln_checked(diagonal)
+   let s=ln_checked(numeric_buffer_at(factor_scales,j))
+   let c=ln_checked(numeric_buffer_at(step,j))
+   if d.status!=0 || s.status!=0 || c.status!=0 {return dp_bad(4,0)}
+   let term=2.0*((d.value+s.value)+c.value)-correction
+   let next=logdet+term
+   correction=(next-logdet)-term
+   logdet=next
+   j=j+1
+  }
+  if !is_finite(logdet) {return dp_bad(4,0)}
+ }
+ var objective=full-(0.5*(logdet/(n as f64)))
+ if options.prior_active {
+  let distance=dp_abs(log_alpha-options.prior_center)
+  if !is_finite(distance) {return dp_bad(4,0)}
+  let penalty=least_squares_scaled_product(distance,distance,0.5,
+  options.prior_variance,n as f64,1.0)
+  if penalty.status!=0 {return dp_bad(4,0)}
+  if distance!=0.0 {if penalty.value==0.0 {return dp_bad(4,0)}}
+  objective=objective-penalty.value
+ }
+ if !is_finite(objective) {return dp_bad(4,0)}
+ DPObjective{status:0,inner_status:0,failure_stage:0,objective:objective,full_mean:full,logdet:logdet}
+}
+
+
+// Main status0 publishes a selected point, not a certified global MLE/MAP.
+// 1shape/buffer,2controls,3candidate failure,4arithmetic/resolution,5search budget.
+// profile_status:0interior,1Poisson,2left edge,3right edge,4both range edges.
+// Curvature status:0available,1not requested,2boundary/resolution,3budget,
+// 4evaluation failure,5nonpositive,6inconsistent,7arithmetic.
+fn dp_evaluate_warm(a:&NumericBuffer,layout:&NumericMatrix,counts:&IntegerBuffer,
+ offsets:&NumericBuffer,initial:&NumericBuffer,warm:&NumericBuffer,use_warm:bool,options:&DispersionSearchOptions,
+ alpha:f64,log_alpha:f64,candidate_coefficients:&!NumericBuffer,
+ candidate_means:&!NumericBuffer,candidate_eta:&!NumericBuffer,
+ weighted:&!NumericBuffer,response:&!NumericBuffer,step:&!NumericBuffer,
+ qr_work:&!NumericBuffer,count_stage:&!NumericBuffer,factor_r:&!NumericBuffer,
+ factor_scales:&!NumericBuffer,permutation:&!IntegerBuffer,pmf_work:&!Nb2LikelihoodSlot)->DPObjective with Mut,Div,Panic {
+ if use_warm {return dp_evaluate(a,layout,counts,offsets,warm,options,alpha,log_alpha,candidate_coefficients,candidate_means,candidate_eta,weighted,response,step,qr_work,count_stage,factor_r,factor_scales,permutation,pmf_work)}
+ dp_evaluate(a,layout,counts,offsets,initial,options,alpha,log_alpha,candidate_coefficients,candidate_means,candidate_eta,weighted,response,step,qr_work,count_stage,factor_r,factor_scales,permutation,pmf_work)
+}
+fn dp_candidate_rank(seeded:bool,prefer_equal:bool,objective:f64,best_objective:f64,
+ counts:&IntegerBuffer,best:&NumericBuffer,best_alpha:f64,candidate:&NumericBuffer,alpha:f64,
+ n:i64,work:&!Nb2LikelihoodDifferenceSlot)->i64 with Mut,Div,Panic {
+ if !seeded {
+  if prefer_equal {if objective>=best_objective {return 1}} else {if objective>best_objective {return 1}}
+  return 0
+ }
+ let status=nb2_log_probability_mean_difference_into(counts,best,best_alpha,candidate,alpha,n,work)
+ let gain:f64=nb2_likelihood_difference_value(work)
+ if status!=0 {return -1}
+ if gain>0.0 {return 1}
+ if prefer_equal {if gain==0.0 {return 1}}
+ return 0
+}
+fn dp_rank_failed(n:i64,p:i64,method:i64,used:i64)->DynamicDispersionFit {
+ var out=dp_empty(3,n,p,method)
+ out.evaluations=used;out.failure_stage=6;out.inner_status=5
+ out
+}
+fn dp_fit_engine(a:&NumericBuffer,layout:&NumericMatrix,
+ counts:&IntegerBuffer,offsets:&NumericBuffer,initial:&NumericBuffer,
+ options:&DispersionSearchOptions,coefficients:&!NumericBuffer,
+ means:&!NumericBuffer,eta:&!NumericBuffer,
+ candidate_coefficients:&!NumericBuffer,candidate_means:&!NumericBuffer,
+ candidate_eta:&!NumericBuffer,best_coefficients:&!NumericBuffer,
+ best_means:&!NumericBuffer,best_eta:&!NumericBuffer,
+ weighted:&!NumericBuffer,response:&!NumericBuffer,step:&!NumericBuffer,
+ qr_work:&!NumericBuffer,count_stage:&!NumericBuffer,factor_r:&!NumericBuffer,
+ factor_scales:&!NumericBuffer,permutation:&!IntegerBuffer,seed_active:bool,seed_alpha:f64)->DynamicDispersionFit with Mut,Div,Panic {
+ let n=numeric_matrix_rows(layout)
+ let p=numeric_matrix_cols(layout)
+ if n<=p || p<1 {return dp_empty(1,n,p,options.method)}
+ let span=options.log_alpha_upper-options.log_alpha_lower
+ if options.method<0 || options.method>1 || !is_finite(options.log_alpha_lower) ||
+ !is_finite(options.log_alpha_upper) || !is_finite(span) || span<=0.0 ||
+ !is_finite(options.outer_tolerance) || options.outer_tolerance<=0.0 ||
+ options.max_outer_evaluations<1 || !is_finite(options.rcond) ||
+ options.rcond<0.0 || options.rcond>=1.0 || options.inner_iterations<1 ||
+ options.inner_iterations>100 || !is_finite(options.inner_tolerance) ||
+ options.inner_tolerance<1e-12 || options.inner_tolerance>1e-4 {return dp_empty(2,n,p,options.method)}
+ if options.prior_active {
+  if !is_finite(options.prior_center) || !is_finite(options.prior_variance) ||
+  options.prior_variance<=0.0 {return dp_empty(2,n,p,options.method)}
+ }
+ let lower_alpha=exp(options.log_alpha_lower)
+ let upper_alpha=exp(options.log_alpha_upper)
+ if !is_finite(lower_alpha) || !is_finite(upper_alpha) ||
+ lower_alpha<=0.0 || upper_alpha<=0.0 {return dp_empty(2,n,p,options.method)}
+ let plan=dynamic_dispersion_workspace(n,p,options.method)
+ if plan.status!=0 || numeric_matrix_status(layout)!=0 || numeric_buffer_status(a)!=0 ||
+ integer_buffer_status(counts)!=0 || numeric_buffer_status(offsets)!=0 ||
+ numeric_buffer_status(initial)!=0 || numeric_buffer_status(coefficients)!=0 ||
+ numeric_buffer_status(means)!=0 || numeric_buffer_status(eta)!=0 ||
+ numeric_buffer_status(candidate_coefficients)!=0 || numeric_buffer_status(candidate_means)!=0 ||
+ numeric_buffer_status(candidate_eta)!=0 || numeric_buffer_status(best_coefficients)!=0 ||
+ numeric_buffer_status(best_means)!=0 || numeric_buffer_status(best_eta)!=0 ||
+ numeric_buffer_status(weighted)!=0 || numeric_buffer_status(response)!=0 ||
+ numeric_buffer_status(step)!=0 || numeric_buffer_status(qr_work)!=0 ||
+ numeric_buffer_status(count_stage)!=0 || numeric_buffer_status(factor_r)!=0 ||
+ numeric_buffer_status(factor_scales)!=0 || integer_buffer_status(permutation)!=0 {return dp_empty(1,n,p,options.method)}
+ if integer_buffer_len(counts)!=n || numeric_buffer_len(offsets)!=n ||
+ numeric_buffer_len(initial)!=p || numeric_buffer_len(coefficients)!=p ||
+ numeric_buffer_len(means)!=n || numeric_buffer_len(eta)!=n ||
+ numeric_buffer_len(candidate_coefficients)!=p || numeric_buffer_len(candidate_means)!=n ||
+ numeric_buffer_len(candidate_eta)!=n || numeric_buffer_len(best_coefficients)!=p ||
+ numeric_buffer_len(best_means)!=n || numeric_buffer_len(best_eta)!=n ||
+ numeric_buffer_len(weighted)!=plan.count_design_elements || numeric_buffer_len(response)!=n ||
+ numeric_buffer_len(step)!=p || numeric_buffer_len(qr_work)<plan.qr_elements ||
+ numeric_buffer_len(count_stage)<plan.count_stage_elements ||
+ numeric_buffer_len(factor_r)!=plan.factor_r_elements ||
+ numeric_buffer_len(factor_scales)!=plan.factor_scale_elements ||
+ integer_buffer_len(permutation)!=plan.permutation_elements {return dp_empty(1,n,p,options.method)}
+ if seed_active {
+  if options.method!=0 || options.prior_active || options.compute_curvature {return dp_empty(2,n,p,options.method)}
+  if !is_finite(seed_alpha) || seed_alpha<0.0 {return dp_empty(2,n,p,options.method)}
+  if seed_alpha>0.0 {if seed_alpha<lower_alpha || seed_alpha>upper_alpha {return dp_empty(2,n,p,options.method)}}
+ }
+ let initial_cost=(if options.prior_active {9}else{10})+(if seed_active {1}else{0})
+ if options.max_outer_evaluations<initial_cost {return dp_empty(5,n,p,options.method)}
+ var pmf_work=nb2_likelihood_slot()
+ var pair_work=nb2_likelihood_difference_slot()
+ var used:i64=0
+ var best_objective:f64=0.0
+ var best_full:f64=0.0
+ var best_logdet:f64=0.0
+ var best_alpha:f64=0.0
+ var best_log:f64=0.0
+ var best_poisson=false
+ var positive_best:f64=0.0
+ var positive_index:i64=0
+ var grid:[f64;9]=[0.0;9]
+ if seed_active {
+  var seed_log:f64=0.0
+  if seed_alpha>0.0 {
+   let logged=ln_checked(seed_alpha)
+   if logged.status!=0 {return dp_empty(4,n,p,options.method)}
+   seed_log=logged.value
+  }
+  used=used+1
+  let seed=dp_evaluate(a,layout,counts,offsets,initial,options,seed_alpha,seed_log,candidate_coefficients,candidate_means,candidate_eta,weighted,response,step,qr_work,count_stage,factor_r,factor_scales,permutation,&!pmf_work)
+  if seed.status!=0 {var failed=dp_empty(3,n,p,options.method);failed.evaluations=used;failed.inner_status=seed.inner_status;failed.failure_stage=seed.failure_stage;return failed}
+  best_objective=seed.objective;best_full=seed.full_mean;best_logdet=seed.logdet
+  best_alpha=seed_alpha;best_log=seed_log;best_poisson=seed_alpha==0.0
+  dp_copy(candidate_coefficients,best_coefficients,p)
+  dp_copy(candidate_means,best_means,n);dp_copy(candidate_eta,best_eta,n)
+ }
+ var i:i64=0
+ while i<9 {
+  var t=options.log_alpha_lower+(span/8.0)*(i as f64)
+  if i==8 {t=options.log_alpha_upper}
+  grid[i as usize]=t
+  let alpha=exp(t)
+  used=used+1
+  let candidate=dp_evaluate_warm(a,layout,counts,offsets,initial,best_coefficients,seed_active,options,alpha,t,
+ candidate_coefficients,candidate_means,candidate_eta,weighted,response,step,
+ qr_work,count_stage,factor_r,factor_scales,permutation,&!pmf_work)
+  if candidate.status!=0 {
+    var failed=dp_empty(3,n,p,options.method)
+    failed.evaluations=used
+    failed.inner_status=candidate.inner_status
+    failed.failure_stage=candidate.failure_stage
+    return failed
+   }
+  if i==0 {positive_best=candidate.objective;positive_index=0} else {
+   if candidate.objective>positive_best {positive_best=candidate.objective;positive_index=i}
+  }
+  var candidate_rank:i64=1
+  if i!=0 || seed_active {
+   candidate_rank=dp_candidate_rank(seed_active,false,candidate.objective,best_objective,counts,best_means,best_alpha,candidate_means,alpha,n,&!pair_work)
+   if candidate_rank<0 {return dp_rank_failed(n,p,options.method,used)}
+  }
+  if candidate_rank==1 {
+   best_objective=candidate.objective;best_full=candidate.full_mean;best_logdet=candidate.logdet
+   best_alpha=alpha;best_log=t;best_poisson=false
+   dp_copy(candidate_coefficients,best_coefficients,p)
+   dp_copy(candidate_means,best_means,n);dp_copy(candidate_eta,best_eta,n)
+  }
+  i=i+1
+ }
+ if !options.prior_active {
+  used=used+1
+  let poisson=dp_evaluate_warm(a,layout,counts,offsets,initial,best_coefficients,seed_active,options,0.0,0.0,
+ candidate_coefficients,candidate_means,candidate_eta,weighted,response,step,
+ qr_work,count_stage,factor_r,factor_scales,permutation,&!pmf_work)
+  if poisson.status!=0 {
+    var failed=dp_empty(3,n,p,options.method)
+    failed.evaluations=used
+    failed.inner_status=poisson.inner_status
+    failed.failure_stage=poisson.failure_stage
+    return failed
+   }
+  // Exact ties prefer the explicit Poisson candidate, never a hidden alpha floor.
+  let poisson_rank=dp_candidate_rank(seed_active,true,poisson.objective,best_objective,counts,best_means,best_alpha,candidate_means,0.0,n,&!pair_work)
+  if poisson_rank<0 {return dp_rank_failed(n,p,options.method,used)}
+  if poisson_rank==1 {
+   best_objective=poisson.objective;best_full=poisson.full_mean;best_logdet=poisson.logdet
+   best_alpha=0.0;best_log=0.0;best_poisson=true
+   dp_copy(candidate_coefficients,best_coefficients,p)
+   dp_copy(candidate_means,best_means,n)
+   dp_copy(candidate_eta,best_eta,n)
+  }
+ }
+ var left=grid[0]
+ var right=grid[1]
+ if positive_index>0 {
+  left=grid[(positive_index-1) as usize]
+  right=grid[positive_index as usize]
+  if positive_index<8 {right=grid[(positive_index+1) as usize]}
+ }
+ if seed_active {if best_alpha==seed_alpha {if seed_alpha>0.0 {
+  var index:i64=0
+  while index<8 {
+   if best_log>=grid[index as usize] && best_log<=grid[(index+1) as usize] {left=grid[index as usize];right=grid[(index+1) as usize];break}
+   index=index+1
+  }
+ }}}
+ let ratio:f64=0.6180339887498948482
+ if right-left>options.outer_tolerance {
+  var x1=right-ratio*(right-left)
+  var x2=left+ratio*(right-left)
+  if used>=options.max_outer_evaluations {
+    var exhausted=dp_empty(5,n,p,options.method)
+    exhausted.evaluations=used
+    return exhausted
+   }
+  used=used+1
+  let first=dp_evaluate_warm(a,layout,counts,offsets,initial,best_coefficients,seed_active,options,exp(x1),x1,
+ candidate_coefficients,candidate_means,candidate_eta,weighted,response,step,
+ qr_work,count_stage,factor_r,factor_scales,permutation,&!pmf_work)
+  if first.status!=0 {
+    var failed=dp_empty(3,n,p,options.method)
+    failed.evaluations=used
+    failed.inner_status=first.inner_status
+    failed.failure_stage=first.failure_stage
+    return failed
+   }
+  var f1=first.objective
+  let first_rank=dp_candidate_rank(seed_active,false,f1,best_objective,counts,best_means,best_alpha,candidate_means,exp(x1),n,&!pair_work)
+  if first_rank<0 {return dp_rank_failed(n,p,options.method,used)}
+  if first_rank==1 {
+   best_objective=f1;best_full=first.full_mean;best_logdet=first.logdet
+   best_alpha=exp(x1);best_log=x1;best_poisson=false
+   dp_copy(candidate_coefficients,best_coefficients,p)
+   dp_copy(candidate_means,best_means,n)
+   dp_copy(candidate_eta,best_eta,n)
+  }
+  if used>=options.max_outer_evaluations {
+    var exhausted=dp_empty(5,n,p,options.method)
+    exhausted.evaluations=used
+    return exhausted
+   }
+  used=used+1
+  let second=dp_evaluate_warm(a,layout,counts,offsets,initial,best_coefficients,seed_active,options,exp(x2),x2,
+ candidate_coefficients,candidate_means,candidate_eta,weighted,response,step,
+ qr_work,count_stage,factor_r,factor_scales,permutation,&!pmf_work)
+  if second.status!=0 {
+    var failed=dp_empty(3,n,p,options.method)
+    failed.evaluations=used
+    failed.inner_status=second.inner_status
+    failed.failure_stage=second.failure_stage
+    return failed
+   }
+  var f2=second.objective
+  let second_rank=dp_candidate_rank(seed_active,false,f2,best_objective,counts,best_means,best_alpha,candidate_means,exp(x2),n,&!pair_work)
+  if second_rank<0 {return dp_rank_failed(n,p,options.method,used)}
+  if second_rank==1 {
+   best_objective=f2;best_full=second.full_mean;best_logdet=second.logdet
+   best_alpha=exp(x2);best_log=x2;best_poisson=false
+   dp_copy(candidate_coefficients,best_coefficients,p)
+   dp_copy(candidate_means,best_means,n)
+   dp_copy(candidate_eta,best_eta,n)
+  }
+  while right-left>options.outer_tolerance {
+   var next:f64=0.0
+   var replace_first=false
+   if f1<f2 {
+    left=x1;x1=x2;f1=f2
+    next=left+ratio*(right-left)
+   } else {
+    right=x2;x2=x1;f2=f1
+    next=right-ratio*(right-left)
+    replace_first=true
+   }
+   if next<=left || next>=right {return dp_empty(4,n,p,options.method)}
+   if used>=options.max_outer_evaluations {
+    var exhausted=dp_empty(5,n,p,options.method)
+    exhausted.evaluations=used
+    return exhausted
+   }
+   used=used+1
+   let candidate=dp_evaluate_warm(a,layout,counts,offsets,initial,best_coefficients,seed_active,options,exp(next),next,
+ candidate_coefficients,candidate_means,candidate_eta,weighted,response,step,
+ qr_work,count_stage,factor_r,factor_scales,permutation,&!pmf_work)
+   if candidate.status!=0 {
+    var failed=dp_empty(3,n,p,options.method)
+    failed.evaluations=used
+    failed.inner_status=candidate.inner_status
+    failed.failure_stage=candidate.failure_stage
+    return failed
+   }
+   if replace_first {x1=next;f1=candidate.objective} else {x2=next;f2=candidate.objective}
+   let next_rank=dp_candidate_rank(seed_active,false,candidate.objective,best_objective,counts,best_means,best_alpha,candidate_means,exp(next),n,&!pair_work)
+  if next_rank<0 {return dp_rank_failed(n,p,options.method,used)}
+  if next_rank==1 {
+    best_objective=candidate.objective;best_full=candidate.full_mean;best_logdet=candidate.logdet
+    best_alpha=exp(next);best_log=next;best_poisson=false
+    dp_copy(candidate_coefficients,best_coefficients,p)
+   dp_copy(candidate_means,best_means,n)
+   dp_copy(candidate_eta,best_eta,n)
+   }
+  }
+ }
+ var out=dp_empty(0,n,p,options.method)
+ out.point_available=true
+ out.profile_status=0
+ out.alpha=best_alpha
+ out.log_alpha=best_log
+ out.log_alpha_available= !best_poisson
+ out.objective_mean=best_objective
+ out.full_log_likelihood_mean=best_full
+ out.cox_reid_logdet=best_logdet
+ out.prior_active=options.prior_active
+ out.poisson_selected=best_poisson
+ if best_poisson {
+  out.profile_status=1
+  out.boundary_candidate=true
+  out.left_censored=true
+ } else {
+  out.left_censored=best_log-options.log_alpha_lower<=options.outer_tolerance
+  out.right_censored=options.log_alpha_upper-best_log<=options.outer_tolerance
+  if out.left_censored {out.profile_status=2;out.boundary_candidate=true}
+  if out.right_censored {out.profile_status=3;out.boundary_candidate=true}
+  if out.left_censored && out.right_censored {out.profile_status=4}
+ }
+ if options.compute_curvature {
+  out.curvature_status=2
+  if !out.boundary_candidate {
+   var h:f64=0.00390625
+   let distance_left=best_log-options.log_alpha_lower
+   let distance_right=options.log_alpha_upper-best_log
+   if h>distance_left*0.5 {h=distance_left*0.5}
+   if h>distance_right*0.5 {h=distance_right*0.5}
+   let half_h=h*0.5
+   if h>0.0 && best_log+half_h>best_log && best_log-half_h<best_log {
+    out.curvature_status=3
+    if options.max_outer_evaluations-used>=4 {
+     var values:[f64;4]=[0.0;4]
+     var index:i64=0
+     var okay=true
+     while index<4 && okay {
+      var displacement=h
+      if index==1 {displacement= -h}
+      if index==2 {displacement=half_h}
+      if index==3 {displacement= -half_h}
+      let point=best_log+displacement
+      used=used+1
+      let trial=dp_evaluate_warm(a,layout,counts,offsets,initial,best_coefficients,seed_active,options,exp(point),point,
+       candidate_coefficients,candidate_means,candidate_eta,weighted,response,step,
+       qr_work,count_stage,factor_r,factor_scales,permutation,&!pmf_work)
+      if trial.status!=0 {
+       out.curvature_status=4
+       out.inner_status=trial.inner_status
+       out.failure_stage=trial.failure_stage
+       okay=false
+      } else {values[index as usize]=trial.objective}
+      index=index+1
+     }
+     if okay {
+      let k1=(((best_objective-values[0])+(best_objective-values[1]))/h)/h
+      let k2=(((best_objective-values[2])+(best_objective-values[3]))/half_h)/half_h
+      out.curvature_status=7
+      if is_finite(k1) && is_finite(k2) {
+       out.curvature_status=5
+       if k1>0.0 && k2>0.0 {
+        var magnitude=k1
+        if k2>magnitude {magnitude=k2}
+        out.curvature_status=6
+        if dp_abs(k1-k2)<=0.1*magnitude {
+         let variance=least_squares_scaled_product(1.0,1.0,1.0,n as f64,k2,1.0)
+         out.curvature_status=7
+         if variance.status==0 && variance.value>0.0 {
+          out.curvature_status=0
+          // Curvatures of the mean criterion; variance restores the n factor.
+          out.curvature_h=k1
+          out.curvature_half_h=k2
+          out.log_alpha_variance=variance.value
+          out.local_curvature_available=true
+         }
+        }
+       }
+      }
+     }
+    }
+   }
+  }
+ }
+ out.evaluations=used
+ out.workspace_payload_bytes=plan.payload_bytes
+ // Public outputs are committed only after the selected point is resolved.
+ dp_copy(best_coefficients,coefficients,p)
+ dp_copy(best_means,means,n)
+ dp_copy(best_eta,eta,n)
+ out
+}
+pub fn dynamic_dispersion_fit(a:&NumericBuffer,layout:&NumericMatrix,
+ counts:&IntegerBuffer,offsets:&NumericBuffer,initial:&NumericBuffer,
+ options:&DispersionSearchOptions,coefficients:&!NumericBuffer,
+ means:&!NumericBuffer,eta:&!NumericBuffer,
+ candidate_coefficients:&!NumericBuffer,candidate_means:&!NumericBuffer,
+ candidate_eta:&!NumericBuffer,best_coefficients:&!NumericBuffer,
+ best_means:&!NumericBuffer,best_eta:&!NumericBuffer,
+ weighted:&!NumericBuffer,response:&!NumericBuffer,step:&!NumericBuffer,
+ qr_work:&!NumericBuffer,count_stage:&!NumericBuffer,factor_r:&!NumericBuffer,
+ factor_scales:&!NumericBuffer,permutation:&!IntegerBuffer)->DynamicDispersionFit with Mut,Div,Panic {
+ dp_fit_engine(a,layout,counts,offsets,initial,options,coefficients,means,eta,candidate_coefficients,candidate_means,candidate_eta,best_coefficients,best_means,best_eta,weighted,response,step,qr_work,count_stage,factor_r,factor_scales,permutation,false,0.0)
+}
+
+// Opt-in ML seed, paired candidate ranking and validated warm starts. No global optimum certificate.
+pub fn dynamic_dispersion_fit_seeded(a:&NumericBuffer,layout:&NumericMatrix,
+ counts:&IntegerBuffer,offsets:&NumericBuffer,initial:&NumericBuffer,
+ options:&DispersionSearchOptions,coefficients:&!NumericBuffer,
+ means:&!NumericBuffer,eta:&!NumericBuffer,
+ candidate_coefficients:&!NumericBuffer,candidate_means:&!NumericBuffer,
+ candidate_eta:&!NumericBuffer,best_coefficients:&!NumericBuffer,
+ best_means:&!NumericBuffer,best_eta:&!NumericBuffer,
+ weighted:&!NumericBuffer,response:&!NumericBuffer,step:&!NumericBuffer,
+ qr_work:&!NumericBuffer,count_stage:&!NumericBuffer,factor_r:&!NumericBuffer,
+ factor_scales:&!NumericBuffer,permutation:&!IntegerBuffer,seed_alpha:f64)->DynamicDispersionFit with Mut,Div,Panic {
+ dp_fit_engine(a,layout,counts,offsets,initial,options,coefficients,means,eta,candidate_coefficients,candidate_means,candidate_eta,best_coefficients,best_means,best_eta,weighted,response,step,qr_work,count_stage,factor_r,factor_scales,permutation,true,seed_alpha)
+}

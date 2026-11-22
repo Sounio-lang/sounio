@@ -1,0 +1,106 @@
+// Finite dynamic heapsort; in-place, O(n log n), no allocation.
+use collections::numeric_buffer::{NumericBuffer,numeric_buffer_status,numeric_buffer_len,numeric_buffer_at,numeric_buffer_set}
+use math::pure::{is_finite}
+fn order_swap(a:&!NumericBuffer,i:i64,j:i64) with Mut,Panic {
+    let x=numeric_buffer_at(a,i)
+    let y=numeric_buffer_at(a,j)
+    numeric_buffer_set(a,i,y)
+    numeric_buffer_set(a,j,x)
+}
+fn order_sift(a:&!NumericBuffer,root:i64,n:i64) with Mut,Div,Panic {
+    var at=root
+    while n>1 && at<=(n-2)/2 {
+        var child=at*2+1
+        if child+1<n {
+            if numeric_buffer_at(a,child)<numeric_buffer_at(a,child+1) {child=child+1}
+        }
+        if numeric_buffer_at(a,at)>=numeric_buffer_at(a,child) {break}
+        order_swap(a,at,child)
+        at=child
+    }
+}
+pub fn numeric_heapsort(a:&!NumericBuffer,n:i64)->i64 with Mut,Div,Panic {
+    if numeric_buffer_status(a)!=0 || n<0 || n>numeric_buffer_len(a) {return 1}
+    var i:i64=0
+    while i<n {if !is_finite(numeric_buffer_at(a,i)) {return 2};i=i+1}
+    i=n/2
+    while i>0 {i=i-1;order_sift(a,i,n)}
+    var end=n
+    while end>1 {end=end-1;order_swap(a,0,end);order_sift(a,0,end)}
+    return 0
+}
+
+pub struct NumericSelection {
+    pub status:i64,
+    pub value:f64,
+    pub partition_work:i64,
+    pub partitions:i64,
+    pub fallback:bool,
+}
+// Finite values only. The pivot is copied from an existing element.
+fn order_median3(x:f64,y:f64,z:f64)->f64 {
+    if x<y {
+        if y<z {return y}
+        if x<z {return z}
+        return x
+    }
+    if x<z {return x}
+    if y<z {return z}
+    return y
+}
+// Exact order statistic, k zero-based. In-place permutation after full preflight.
+// Partition budget counts visited items, not pivot reads or fallback sort work.
+pub fn numeric_select(a:&!NumericBuffer,n:i64,k:i64,partition_budget:i64)->NumericSelection with Mut,Div,Panic {
+    var out=NumericSelection{status:1,value:0.0,partition_work:0,partitions:0,fallback:false}
+    if numeric_buffer_status(a)!=0 {return out}
+    if n<1 || n>numeric_buffer_len(a) {return out}
+    if k<0 || k>=n || partition_budget<0 {return out}
+    var i:i64=0
+    while i<n {
+        if !is_finite(numeric_buffer_at(a,i)) {out.status=2;return out}
+        i=i+1
+    }
+    var left:i64=0
+    var right=n
+    while right-left>1 {
+        let width=right-left
+        // partition_work<=budget is maintained; subtraction cannot underflow.
+        if width>partition_budget-out.partition_work {
+            out.fallback=true
+            let status=numeric_heapsort(a,n)
+            if status!=0 {out.status=status;return out}
+            out.value=numeric_buffer_at(a,k);out.status=0
+            return out
+        }
+        let first=numeric_buffer_at(a,left)
+        let middle=numeric_buffer_at(a,left+width/2)
+        let last=numeric_buffer_at(a,right-1)
+        let pivot=order_median3(first,middle,last)
+        var low=left
+        var scan=left
+        var high=right
+        // Each iteration visits one item and shrinks [scan,high) by exactly1.
+        while scan<high {
+            let value=numeric_buffer_at(a,scan)
+            if value<pivot {
+                order_swap(a,low,scan)
+                low=low+1;scan=scan+1
+            } else if value>pivot {
+                high=high-1
+                order_swap(a,scan,high)
+            } else {
+                scan=scan+1
+            }
+        }
+        out.partition_work=out.partition_work+width
+        out.partitions=out.partitions+1
+        if k<low {right=low}
+        else if k>=high {left=high}
+        else {
+            out.value=numeric_buffer_at(a,k);out.status=0
+            return out
+        }
+    }
+    out.value=numeric_buffer_at(a,k);out.status=0
+    out
+}

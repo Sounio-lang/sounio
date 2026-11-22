@@ -1,0 +1,234 @@
+// Borrowed two-panel scientific documents. See SCIENTIFIC_DOCUMENT.md.
+use collections::numeric_buffer::{NumericBuffer}
+use collections::integer_buffer::{IntegerBuffer,integer_buffer_status,integer_buffer_len,integer_buffer_at}
+use display::canvas::{Canvas,canvas_fill_rect,canvas_draw_char,canvas_draw_line}
+use viz::scatter::{scatter_project}
+use viz::dynamic_plot::{DynamicPlotSpec}
+use viz::dynamic_fields::{dynamic_scatter_validate,dynamic_scatter_canvas,dynamic_scatter_svg}
+use viz::axis::{axis_label,axis_ticks,axis_offset}
+use viz::axis_layout::{axis_fit_labels}
+use viz::scale::{ScaleSpec}
+use math::pure::{is_finite}
+use io::sci_print::{print_f64_sci}
+pub struct ScientificDocumentText {
+ pub title_start:i64,pub title_len:i64,pub left_start:i64,pub left_len:i64,
+ pub right_start:i64,pub right_len:i64,pub footer_start:i64,pub footer_len:i64,
+}
+pub struct ScientificDocumentPlan {
+ pub status:i64,pub width:i64,pub height:i64,pub left:DynamicPlotSpec,pub right:DynamicPlotSpec,
+ pub left_x_intervals:i64,pub left_y_intervals:i64,pub right_x_intervals:i64,pub right_y_intervals:i64,
+ pub identity_left:bool,pub zero_right:bool,pub count_diagnostic:bool,pub alpha:f64,pub unavailable:i64,
+}
+pub struct ScientificDocumentResult {pub status:i64,pub stage:i64,pub left_painted:i64,pub right_painted:i64}
+fn sd_spec(xmin:f64,xmax:f64,ymin:f64,ymax:f64,r:i64,g:i64,b:i64)->DynamicPlotSpec {
+ DynamicPlotSpec{x:0,y:0,w:0,h:0,xmin:xmin,xmax:xmax,ymin:ymin,ymax:ymax,r:r,g:g,b:b,interval_kind:0,level:0.0}
+}
+fn sd_domain(lo:f64,hi:f64)->bool {is_finite(lo) && is_finite(hi) && hi>lo && is_finite(hi-lo)}
+fn sd_label_width(lo:f64,hi:f64)->i64 with Mut,Div {
+ var ticks=axis_ticks(lo,hi,4)
+ var budget:i64=3
+ while ticks.status!=0 && budget>=1 {ticks=axis_ticks(lo,hi,budget);budget=budget-1}
+ if ticks.status!=0 {return -1}
+ var width:i64=0;var i:i64=0
+ while i<ticks.n {
+  let label=axis_label(ticks.values[i as usize])
+  if label.n<1 || label.n>32 {return -1}
+  if label.n*8>width {width=label.n*8}
+  i=i+1
+ }
+ width
+}
+// Status1 dimensions/domain,2 labels/axis fit. Strict finite nonconstant domains.
+// Shared geometric margins account for the actual canonical labels of both panels.
+pub fn scientific_two_panel_plan(width:i64,height:i64,xmin0:f64,xmax0:f64,ymin0:f64,ymax0:f64,
+ xmin1:f64,xmax1:f64,ymin1:f64,ymax1:f64)->ScientificDocumentPlan with Mut,Div {
+ var out=ScientificDocumentPlan{status:1,width:width,height:height,
+ left:sd_spec(xmin0,xmax0,ymin0,ymax0,70,180,235),right:sd_spec(xmin1,xmax1,ymin1,ymax1,235,130,70),
+ left_x_intervals:0,left_y_intervals:0,right_x_intervals:0,right_y_intervals:0,
+ identity_left:false,zero_right:false,count_diagnostic:false,alpha:0.0,unavailable:0}
+ if width<640 || width>1000000 || height<360 || height>1000000 {return out}
+ if !sd_domain(xmin0,xmax0) || !sd_domain(ymin0,ymax0) || !sd_domain(xmin1,xmax1) || !sd_domain(ymin1,ymax1) {return out}
+ out.status=2
+ let a=sd_label_width(ymin0,ymax0);let b=sd_label_width(ymin1,ymax1)
+ let d=sd_label_width(xmin0,xmax0);let e=sd_label_width(xmin1,xmax1)
+ if a<0 || b<0 || d<0 || e<0 {return out}
+ let yw=if a>b {a}else{b};let xw=if d>e {d}else{e}
+ let half=width/2;let local_x=24+yw;let right_margin=24+xw/2
+ let w=half-local_x-right_margin;let h=height-240
+ if w<1 || h<1 {return out}
+ let linear_scale=ScaleSpec{mode:0,constant:1.0}
+ let ax=axis_fit_labels(xmin0,xmax0,4,false,local_x,100+h,w,half,height,&linear_scale)
+ let ay=axis_fit_labels(ymin0,ymax0,4,true,local_x,100,h,half,height,&linear_scale)
+ let bx=axis_fit_labels(xmin1,xmax1,4,false,local_x,100+h,w,half,height,&linear_scale)
+ let by=axis_fit_labels(ymin1,ymax1,4,true,local_x,100,h,half,height,&linear_scale)
+ if ax.status!=0 || ay.status!=0 || bx.status!=0 || by.status!=0 {return out}
+ out.left.x=local_x;out.left.y=100;out.left.w=w;out.left.h=h
+ out.right.x=half+local_x;out.right.y=100;out.right.w=w;out.right.h=h
+ out.left_x_intervals=ax.intervals;out.left_y_intervals=ay.intervals
+ out.right_x_intervals=bx.intervals;out.right_y_intervals=by.intervals
+ out.status=0;out
+}
+fn sd_same(a:&DynamicPlotSpec,b:&DynamicPlotSpec)->bool {
+ a.x==b.x && a.y==b.y && a.w==b.w && a.h==b.h && a.xmin==b.xmin && a.xmax==b.xmax &&
+ a.ymin==b.ymin && a.ymax==b.ymax && a.r==b.r && a.g==b.g && a.b==b.b && a.interval_kind==b.interval_kind && a.level==b.level
+}
+fn sd_plan_valid(p:&ScientificDocumentPlan)->bool with Mut,Div {
+ if p.status!=0 {return false}
+ if p.identity_left {if p.left.xmin!=p.left.ymin || p.left.xmax!=p.left.ymax {return false}}
+ if p.zero_right {if p.right.ymin>0.0 || p.right.ymax<0.0 {return false}}
+ if !is_finite(p.alpha) || p.alpha<0.0 || p.unavailable<0 {return false}
+ let rebuilt=scientific_two_panel_plan(p.width,p.height,p.left.xmin,p.left.xmax,p.left.ymin,p.left.ymax,
+ p.right.xmin,p.right.xmax,p.right.ymin,p.right.ymax)
+ rebuilt.status==0 && sd_same(&p.left,&rebuilt.left) && sd_same(&p.right,&rebuilt.right) &&
+ p.left_x_intervals==rebuilt.left_x_intervals && p.left_y_intervals==rebuilt.left_y_intervals &&
+ p.right_x_intervals==rebuilt.right_x_intervals && p.right_y_intervals==rebuilt.right_y_intervals
+}
+fn sd_text_valid(bytes:&IntegerBuffer,start:i64,n:i64,capacity:i64)->bool with Mut,Panic {
+ if start<0 || n<1 || n>capacity {return false}
+ let size=integer_buffer_len(bytes)
+ if start>size {return false}
+ if n>size-start {return false}
+ var i:i64=0
+ while i<n {let ch=integer_buffer_at(bytes,start+i);if ch<32 || ch>126 {return false};i=i+1}
+ true
+}
+pub fn scientific_document_validate(p:&ScientificDocumentPlan,t:&ScientificDocumentText,bytes:&IntegerBuffer,
+ x0:&NumericBuffer,y0:&NumericBuffer,a0:&IntegerBuffer,x1:&NumericBuffer,y1:&NumericBuffer,a1:&IntegerBuffer)->i64 with Mut,Div,Panic {
+ if !sd_plan_valid(p) {return 1}
+ if integer_buffer_status(bytes)!=0 {return 2}
+ if !sd_text_valid(bytes,t.title_start,t.title_len,(p.width-32)/8) ||
+ !sd_text_valid(bytes,t.left_start,t.left_len,(p.width/2-32)/8) ||
+ !sd_text_valid(bytes,t.right_start,t.right_len,(p.width/2-32)/8) ||
+ !sd_text_valid(bytes,t.footer_start,t.footer_len,(p.width-32)/8) {return 2}
+ let left=dynamic_scatter_validate(&p.left,x0,y0,a0)
+ if left!=0 {return 10+left}
+ let right=dynamic_scatter_validate(&p.right,x1,y1,a1)
+ if right!=0 {return 20+right}
+ 0
+}
+fn sd_xml_char(ch:i64) with IO {
+ if ch==38 {print("&amp;")} else if ch==60 {print("&lt;")} else if ch==62 {print("&gt;")}
+ else if ch==34 {print("&quot;")} else if ch==39 {print("&apos;")} else {print_char(ch)}
+}
+fn sd_svg_text(bytes:&IntegerBuffer,start:i64,n:i64,x:i64,y:i64) with IO,Mut,Panic {
+ print("<text data-document-text=\"1\" x=\"");print(x);print("\" y=\"");print(y+7)
+ print("\" font-family=\"monospace\" font-size=\"8\" textLength=\"");print(n*8)
+ print("\" lengthAdjust=\"spacingAndGlyphs\" fill=\"rgb(220,225,235)\">")
+ var i:i64=0
+ while i<n {sd_xml_char(integer_buffer_at(bytes,start+i));i=i+1}
+ println("</text>")
+}
+fn sd_canvas_text(c:&!Canvas,bytes:&IntegerBuffer,start:i64,n:i64,x:i64,y:i64) with Mut,Panic {
+ var i:i64=0
+ while i<n {canvas_draw_char(c,integer_buffer_at(bytes,start+i),x+i*8,y,220,225,235);i=i+1}
+}
+fn sd_svg_rect(x:i64,y:i64,w:i64,h:i64) with IO {
+ let px:f64=(x as f64)-0.5;let py:f64=(y as f64)-0.5
+ print("<rect data-document-axis=\"1\" x=\"");print(px);print("\" y=\"");print(py)
+ print("\" width=\"");print(w);print("\" height=\"");print(h);println("\" fill=\"rgb(150,160,180)\"/>")
+}
+fn sd_references_svg(p:&ScientificDocumentPlan) with IO,Mut,Div {
+ if p.identity_left {
+  let x0:i64=p.left.x;let x1:i64=x0+p.left.w;let y0:i64=p.left.y+p.left.h;let y1:i64=p.left.y
+  print("<line data-document-reference=\"identity\" x1=\"");print(x0);print("\" y1=\"");print(y0)
+  print("\" x2=\"");print(x1);print("\" y2=\"");print(y1);println("\" stroke=\"rgb(100,110,130)\" stroke-width=\"1\"/>")
+ }
+ if p.zero_right {
+  let z=scatter_project(p.right.xmin,0.0,p.right.xmin,p.right.xmax,p.right.ymin,p.right.ymax,p.right.x,p.right.y,p.right.w,p.right.h,true)
+  sd_svg_rect(p.right.x,z.y,p.right.w+1,1)
+ }
+}
+fn sd_references_canvas(c:&!Canvas,p:&ScientificDocumentPlan) with Mut,Div {
+ if p.identity_left {canvas_draw_line(c,p.left.x,p.left.y+p.left.h,p.left.x+p.left.w,p.left.y,100,110,130)}
+ if p.zero_right {
+  let z=scatter_project(p.right.xmin,0.0,p.right.xmin,p.right.xmax,p.right.ymin,p.right.ymax,p.right.x,p.right.y,p.right.w,p.right.h,true)
+  canvas_fill_rect(c,p.right.x,z.y,p.right.w+1,1,150,160,180)
+ }
+}
+fn sd_axis_svg(s:&DynamicPlotSpec,vertical:bool,intervals:i64) with IO,Mut,Div,Panic {
+ let ticks=axis_ticks(if vertical {s.ymin}else{s.xmin},if vertical {s.ymax}else{s.xmax},intervals)
+ let y:i64=if vertical {s.y}else{s.y+s.h}
+ if vertical {sd_svg_rect(s.x,y,1,s.h+1)} else {sd_svg_rect(s.x,y,s.w+1,1)}
+ var i:i64=0
+ while i<ticks.n {
+  let label=axis_label(ticks.values[i as usize])
+  let offset:i64=axis_offset(i,intervals,if vertical {s.h}else{s.w})
+  let px:i64=if vertical {s.x}else{s.x+offset};let py:i64=if vertical {s.y+s.h-offset}else{y}
+  let tx:i64=if vertical {px-8-label.n*8}else{px-label.n*4};let ty:i64=if vertical {py-4}else{py+8}
+  let text_width:i64=label.n*8
+  if vertical {sd_svg_rect(px-4,py,5,1)} else {sd_svg_rect(px,py,1,5)}
+  print("<text data-document-tick=\"1\" x=\"");print(tx);print("\" y=\"");print(ty+7)
+  print("\" font-family=\"monospace\" font-size=\"8\" textLength=\"");print(text_width)
+  print("\" lengthAdjust=\"spacingAndGlyphs\" fill=\"rgb(220,225,235)\">")
+  var j:i64=0
+  while j<label.n {sd_xml_char(label.text[j as usize] as i64);j=j+1}
+  println("</text>");i=i+1
+ }
+}
+fn sd_axis_canvas(c:&!Canvas,s:&DynamicPlotSpec,vertical:bool,intervals:i64) with Mut,Div,Panic {
+ let ticks=axis_ticks(if vertical {s.ymin}else{s.xmin},if vertical {s.ymax}else{s.xmax},intervals)
+ let y=if vertical {s.y}else{s.y+s.h}
+ if vertical {canvas_fill_rect(c,s.x,y,1,s.h+1,150,160,180)} else {canvas_fill_rect(c,s.x,y,s.w+1,1,150,160,180)}
+ var i:i64=0
+ while i<ticks.n {
+  let label=axis_label(ticks.values[i as usize])
+  let offset=axis_offset(i,intervals,if vertical {s.h}else{s.w})
+  let px=if vertical {s.x}else{s.x+offset};let py=if vertical {s.y+s.h-offset}else{y}
+  let tx=if vertical {px-8-label.n*8}else{px-label.n*4};let ty=if vertical {py-4}else{py+8}
+  if vertical {canvas_fill_rect(c,px-4,py,5,1,150,160,180)} else {canvas_fill_rect(c,px,py,1,5,150,160,180)}
+  var j:i64=0
+  while j<label.n {canvas_draw_char(c,label.text[j as usize] as i64,tx+j*8,ty,220,225,235);j=j+1}
+  i=i+1
+ }
+}
+pub fn scientific_document_svg(p:&ScientificDocumentPlan,t:&ScientificDocumentText,bytes:&IntegerBuffer,
+ x0:&NumericBuffer,y0:&NumericBuffer,a0:&IntegerBuffer,x1:&NumericBuffer,y1:&NumericBuffer,a1:&IntegerBuffer)->ScientificDocumentResult with IO,Mut,Div,Panic {
+ let status=scientific_document_validate(p,t,bytes,x0,y0,a0,x1,y1,a1)
+ var result=ScientificDocumentResult{status:status,stage:0,left_painted:0,right_painted:0}
+ if status!=0 {return result}
+ let document_width:i64=p.width;let document_height:i64=p.height
+ print("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"");print(document_width);print("\" height=\"");print(document_height)
+ print("\" viewBox=\"0 0 ");print(document_width);print(" ");print(document_height);println("\">")
+ print("<rect width=\"");print(document_width);print("\" height=\"");print(document_height);println("\" fill=\"rgb(22,28,36)\"/>")
+ println("<metadata data-scientific-document=\"two-panel-scatter\" data-interval-kind=\"none\"/>")
+ if p.count_diagnostic {
+  let alpha:f64=p.alpha;let missing:i64=p.unavailable
+  print("<metadata data-count-diagnostic=\"supplied-alpha-signed-deviance\" data-assumptions-assessed=\"false\" data-inference-available=\"false\" data-unavailable-residuals=\"");print(missing)
+  print("\" data-alpha=\"");print_f64_sci(alpha,15);println("\"/>")
+ }
+ sd_svg_text(bytes,t.title_start,t.title_len,16,16)
+ sd_svg_text(bytes,t.left_start,t.left_len,16,64);sd_svg_text(bytes,t.right_start,t.right_len,p.width/2+16,64)
+ sd_axis_svg(&p.left,false,p.left_x_intervals);sd_axis_svg(&p.left,true,p.left_y_intervals)
+ sd_axis_svg(&p.right,false,p.right_x_intervals);sd_axis_svg(&p.right,true,p.right_y_intervals)
+ sd_references_svg(p)
+ println("<g id=\"scientific-panel-0\">")
+ let left=dynamic_scatter_svg(&p.left,x0,y0,a0);println("</g>")
+ println("<g id=\"scientific-panel-1\">")
+ let right=dynamic_scatter_svg(&p.right,x1,y1,a1);println("</g>")
+ sd_svg_text(bytes,t.footer_start,t.footer_len,16,p.height-40)
+ let li:i64=left.input_count;let lm:i64=left.masked;let lo:i64=left.outside
+ let ri:i64=right.input_count;let rm:i64=right.masked;let ro:i64=right.outside
+ print("<metadata data-scientific-document-complete=\"true\" data-left-input=\"");print(li)
+ print("\" data-left-masked=\"");print(lm);print("\" data-left-outside=\"");print(lo)
+ print("\" data-right-input=\"");print(ri);print("\" data-right-masked=\"");print(rm)
+ print("\" data-right-outside=\"");print(ro);println("\"/>")
+ println("</svg>")
+ result.status=0;result.left_painted=left.painted;result.right_painted=right.painted;result
+}
+pub fn scientific_document_canvas(c:&!Canvas,p:&ScientificDocumentPlan,t:&ScientificDocumentText,bytes:&IntegerBuffer,
+ x0:&NumericBuffer,y0:&NumericBuffer,a0:&IntegerBuffer,x1:&NumericBuffer,y1:&NumericBuffer,a1:&IntegerBuffer)->ScientificDocumentResult with Mut,Div,Panic {
+ let status=scientific_document_validate(p,t,bytes,x0,y0,a0,x1,y1,a1)
+ var result=ScientificDocumentResult{status:status,stage:0,left_painted:0,right_painted:0}
+ if status!=0 {return result}
+ if c.width!=p.width || c.height!=p.height || (c.pixels as i64)<=0 {result.status=3;return result}
+ canvas_fill_rect(c,0,0,p.width,p.height,22,28,36)
+ sd_canvas_text(c,bytes,t.title_start,t.title_len,16,16)
+ sd_canvas_text(c,bytes,t.left_start,t.left_len,16,64);sd_canvas_text(c,bytes,t.right_start,t.right_len,p.width/2+16,64)
+ sd_axis_canvas(c,&p.left,false,p.left_x_intervals);sd_axis_canvas(c,&p.left,true,p.left_y_intervals)
+ sd_axis_canvas(c,&p.right,false,p.right_x_intervals);sd_axis_canvas(c,&p.right,true,p.right_y_intervals)
+ sd_references_canvas(c,p)
+ let left=dynamic_scatter_canvas(c,&p.left,x0,y0,a0)
+ let right=dynamic_scatter_canvas(c,&p.right,x1,y1,a1)
+ sd_canvas_text(c,bytes,t.footer_start,t.footer_len,16,p.height-40)
+ result.status=0;result.left_painted=left.painted;result.right_painted=right.painted;result
+}

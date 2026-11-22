@@ -1,0 +1,1 @@
+Q4_K fused MoE gate+up+SiLU super-kernel (`moe_gate_up_silu_q4k_f32`) wired into `moe_ffn_q4k` with dual-mmid fallback; GGUF v3 reader, tiny Mixtral fixture GGUF, `llama_load_gguf`, and L4 demos for hetero FFN smoke plus llama prefill at ntok 1 and 4. Q5_K SiLU fusion deferred (Plan E mmid path unchanged).

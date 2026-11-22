@@ -37,6 +37,10 @@ const ACTIVE_RESEARCH_DOCS = new Set([
   'docs/research/vancomycin-uncertainty.md',
   'docs/research/rna_cayley_dickson_confirmatory_preregistration_2026-08-09.md',
   'docs/research/cd-tower-automorphism-freeze.md',
+  // Open research lines with kill tests still to run, indexed by
+  // docs/planning/LANGUAGE_BACKLOG_2026-10-22.md; not lineage yet.
+  'docs/research/EPISTEMIC_REASONING_AND_METACOGNITION_2026-10-22.md',
+  'docs/research/ONTOLOGY_ALGEBRA_AND_COMPILER_TOWER_2026-10-22.md',
 ]);
 
 const WEBSITE_DOC_OVERRIDES = {

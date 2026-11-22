@@ -48,6 +48,10 @@ different facts from this execution receipt.
 The [preparation and review receipt](2026-10/17-preparation-and-review-receipt.md)
 records the separate editorial/provider-review and preparation boundaries;
 those activities do not certify all language contracts or scientific results.
+The [lexical execution receipt](2026-10/18-lexical-execution-receipt.md) runs
+125 probe programs against chapter 01's `LEX` rules on both engines and on a
+Madaros built from source (2026-10-22). It records which rules execution
+confirms or contradicts and does not change any rule's standing.
 
 Navigation has two numbering systems: files `00` through `10` are the book's
 subject chapters; the central thematic sections 1 through 17 retain the

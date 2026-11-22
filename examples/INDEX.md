@@ -15,13 +15,13 @@ Quarantined examples (stubs, pre-module legacy syntax) are in [`_attic/`](_attic
 
 | | count |
 |---|---:|
-| `.sio` files indexed | 980 |
-| programs (have `fn main`) | 963 |
+| `.sio` files indexed | 976 |
+| programs (have `fn main`) | 959 |
 | libraries (no `fn main`) | 17 |
 | programs passing on Madaros | 503 |
 | programs passing on lean_single | 450 |
 | programs passing on both | 378 |
-| programs passing on neither | 388 |
+| programs passing on neither | 384 |
 | timeouts (Madaros / lean_single) | 29 / 68 |
 
 Status: `pass` = exit code 0; `fail rc=N (Exxx)` = non-zero exit with the first diagnostic codes printed; `timeout` = killed after 120s; `crash (signal N)` = killed by a signal. Wall time includes compilation.
@@ -35,8 +35,6 @@ Status: `pass` = exit code 0; `fail rc=N (Exxx)` = non-zero exit with the first 
 | [`advanced_glm_optimization.sio`](advanced_glm_optimization.sio) | Advanced GLM-4.7 Optimization Demo | fail rc=1 (E043) | fail rc=1 (E200 E035 E043) | 4.6 / 0.8 |
 | [`ai_scientific_demo.sio`](ai_scientific_demo.sio) | AI Scientific Computing Demo - Sounio | fail rc=1 | fail rc=1 (E260 E035 E200) | 4.5 / 1.0 |
 | [`algebra_demo.sio`](algebra_demo.sio) | algebra_demo.sio — How a mathematician uses Sounio | pass | pass | 5.4 / 0.8 |
-| [`algo/graph_demo.sio`](algo/graph_demo.sio) | Graph Algorithms Demonstration | fail rc=1 | fail rc=1 (E035 E001 E006) | 5.0 / 1.0 |
-| [`algo/sorting_demo.sio`](algo/sorting_demo.sio) | Sorting Algorithms Demonstration | fail rc=1 | fail rc=1 (E001 E035 E200) | 4.4 / 0.8 |
 | [`algorithms/complex_native_demo.sio`](algorithms/complex_native_demo.sio) | COMPLEX DEMO: Quicksort + Sieve + GCD + Fibonacci + Collatz | pass | pass | 6.5 / 0.7 |
 | [`algorithms/mandelbrot.sio`](algorithms/mandelbrot.sio) | Mandelbrot Set: ASCII render at 80×40 resolution | pass | fail rc=1 (E035) | 5.7 / 0.7 |
 | [`algorithms/matrix_mul.sio`](algorithms/matrix_mul.sio) | Dense Matrix Multiplication: 64×64 matrices (262,144 multiply-add ops) | pass | pass | 4.9 / 0.7 |
@@ -915,8 +913,6 @@ Status: `pass` = exit code 0; `fail rc=N (Exxx)` = non-zero exit with the first 
 | [`sounio_science_flex/main.sio`](sounio_science_flex/main.sio) | examples/sounio_science_flex/main.sio | pass | pass | 8.1 / 1.4 |
 | [`special/erf_report.sio`](special/erf_report.sio) | Error-function / normal-tail report using stdlib special::erf. | pass | pass | 5.4 / 0.6 |
 | [`special/gamma_report.sio`](special/gamma_report.sio) | Gamma / log-gamma / digamma report using stdlib special::gamma. | pass | pass | 4.3 / 0.5 |
-| [`src/autodiff/mod_demo.sio`](src/autodiff/mod_demo.sio) | Demo for stdlib/src/autodiff/mod.sio | fail rc=1 (E137) | fail rc=1 (E200) | 3.1 / 0.5 |
-| [`src/linalg/matrix_demo.sio`](src/linalg/matrix_demo.sio) | Demo for stdlib/src/linalg/matrix.sio | fail rc=1 (E137 E015) | fail rc=1 (E200) | 3.1 / 0.5 |
 | [`stats/box_plot.sio`](stats/box_plot.sio) | examples/stats/box_plot.sio | pass | crash (signal 11) | 57.7 / 2.4 |
 | [`stats/descriptive_demo.sio`](stats/descriptive_demo.sio) | Demo for stdlib/stats/descriptive.sio | fail rc=1 | fail rc=1 (E200) | 3.0 / 0.5 |
 | [`stats/effect_sizes_demo.sio`](stats/effect_sizes_demo.sio) | Effect Size Calculations Demo | fail rc=1 | fail rc=1 (E200 E006 E035) | 2.9 / 0.6 |

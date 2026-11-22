@@ -408,7 +408,7 @@ Ensure all HLIR type variants are handled in:
 
 ## Related Documentation
 
-- [Installation Guide](../INSTALL.md) - LLVM setup
+- [Installation Guide](../guide/installation.md) - LLVM setup
 - [Feature Flags](../FEATURE_FLAGS.md) - Build configuration
 - [Epistemic API](../reference/EPISTEMIC_API.md) - Knowledge<T> usage
 - [GPU Runtime](../features/GPU_RUNTIME.md) - GPU backend

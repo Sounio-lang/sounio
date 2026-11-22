@@ -172,6 +172,18 @@ for i, line in enumerate(lines):
         emitted.setdefault(n, set()).add(cand.strip())
         break
 
+# Registry constructors are another emission mechanism: diag_use_after_move
+# builds a Diagnostic with diag_error(E288), rather than printing a literal tag.
+# Include registry-only identities without replacing the live checker's message.
+registry = open('self-hosted/diagnostics/mod.sio').read()
+for m in re.finditer(r'\bdiag_error\(E(\d+)\)', registry):
+    n = int(m.group(1))
+    if n in emitted:
+        continue
+    meaning = re.search(rf'^let E{n:03d}: i64 = {n}\s+// ([a-z_]+)$', registry, re.MULTILINE)
+    if meaning:
+        emitted.setdefault(n, set()).add(meaning.group(1).replace('_', ' '))
+
 documented = {}
 for line in open(cat, errors='replace'):
     m = re.match(r'^\|\s*E(\d+)\s*\|[^|]*\|[^|]*\|\s*([^|]+?)\s*\|', line)
@@ -261,5 +273,6 @@ fi
 if [[ $rc -ne 0 ]]; then
   gate_fail "a diagnostic-identity ratchet moved the wrong way (see the lines above)"
 fi
+bash scripts/ci/diagnostic_e041_meaning_gate.sh || gate_fail "E041 meaning contract failed"
 gate_pass "no ratchet moved; artifact at $ART"
 exit 0

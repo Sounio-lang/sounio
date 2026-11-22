@@ -1,5 +1,19 @@
 # Sounio Viz
 
+## Complete borrowed scientific documents
+
+[Scientific documents](SCIENTIFIC_DOCUMENT.md) plan and validate two panels,
+canonical axes, borrowed text and all payloads before SVG output or Canvas
+painting. They extend the dynamic renderers without copying data into the
+fixed-capacity Visual IR. Layout insufficiency is explicit.
+
+[Count diagnostics](COUNT_DIAGNOSTICS.md) connects actual CountGLM means and
+raw counts to observed-versus-fitted and signed deviance residual panels.
+See the runnable [count workflow](../../examples/viz_dynamic_count_workflow.sio)
+and [ODE diagnostics](../../examples/viz_dynamic_ode_diagnostics.sio).
+Labels distinguish computational diagnostics from calibrated inference.
+
+
 ## Declared correlation and physical standard uncertainty
 
 viz_entropy_covariance computes five supplied-rho physical cases through
