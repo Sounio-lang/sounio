@@ -1,0 +1,43 @@
+use collections::integer_buffer::{integer_buffer_new,integer_buffer_set,integer_buffer_at,integer_buffer_close}
+use collections::numeric_buffer::{numeric_buffer_new,numeric_buffer_set,numeric_buffer_at,numeric_buffer_close}
+use genomics::count_csr::{count_csr_build,count_csr_status,count_csr_nnz,count_csr_at,count_csr_close,count_csr_size_factors_into}
+use genomics::dynamic_normalization::{dynamic_size_factors_slot,dynamic_size_factors_snapshot,dynamic_median_ratio_size_factors_into,dynamic_median_ratio_size_factors_workspace}
+use io::sci_print::{println_f64_sci}
+fn main() with Alloc,Mut,Div,Panic,IO {
+ var offsets=integer_buffer_new(4,32);var columns=integer_buffer_new(6,48);var values=integer_buffer_new(6,48)
+ let rp:[i64;4]=[0,3,4,6];let ci:[i64;6]=[0,0,2,1,0,2];let vv:[i64;6]=[2,3,0,7,4,6]
+ var i:i64=0
+ while i<4 {integer_buffer_set(&!offsets,i,rp[i as usize]);i=i+1}
+ i=0;while i<6 {integer_buffer_set(&!columns,i,ci[i as usize]);integer_buffer_set(&!values,i,vv[i as usize]);i=i+1}
+ let csr=count_csr_build(3,3,6,offsets,columns,values,1)
+ assert(count_csr_status(&csr)==0 && count_csr_nnz(&csr)==4)
+ let packed:[i64;9]=[5,0,0,0,7,0,4,0,6]
+ var dense=integer_buffer_new(9,72)
+ i=0;while i<9 {integer_buffer_set(&!dense,i,packed[i as usize]);assert(count_csr_at(&csr,i/3,i%3)==packed[i as usize]);i=i+1}
+ let plan=dynamic_median_ratio_size_factors_workspace(3,3)
+ var anchors=integer_buffer_new(3,24);var work=numeric_buffer_new(plan.numeric_elements,plan.numeric_elements*8)
+ var factors=numeric_buffer_new(3,24);var logs=numeric_buffer_new(3,24)
+ var df=numeric_buffer_new(3,24);var dl=numeric_buffer_new(3,24)
+ var slot=dynamic_size_factors_slot();var dense_slot=dynamic_size_factors_slot()
+ var mode:i64=0
+ while mode<2 {
+  i=0;while i<3 {numeric_buffer_set(&!factors,i,7.0);numeric_buffer_set(&!logs,i,8.0);numeric_buffer_set(&!df,i,7.0);numeric_buffer_set(&!dl,i,8.0);i=i+1}
+  let a=count_csr_size_factors_into(&csr,mode,&!factors,&!logs,&!work,&!anchors,&!slot)
+  let b=dynamic_median_ratio_size_factors_into(&dense,3,3,3,1,0,mode,&!df,&!dl,&!work,&!anchors,&!dense_slot)
+  let sa=dynamic_size_factors_snapshot(&slot);let sb=dynamic_size_factors_snapshot(&dense_slot)
+  assert(a==b && sa.status==sb.status && sa.genes_used==sb.genes_used && sa.genes_excluded==sb.genes_excluded)
+  let used:i64=sa.genes_used;let excluded:i64=sa.genes_excluded
+  println("CSR_STATUS {} {} {} {}",mode,a,used,excluded)
+  i=0
+  while i<3 {
+   let f=numeric_buffer_at(&factors,i);let l=numeric_buffer_at(&logs,i)
+   assert(f64_to_bits(f)==f64_to_bits(numeric_buffer_at(&df,i)) && f64_to_bits(l)==f64_to_bits(numeric_buffer_at(&dl,i)))
+   if mode==0 {assert(f==7.0 && l==8.0)}
+   let fb:i64=f64_to_bits(f);let lb:i64=f64_to_bits(l)
+   println("CSR_FACTOR {} {} {} {}",mode,i,fb,lb);i=i+1
+  }
+  mode=mode+1
+ }
+ count_csr_close(csr);integer_buffer_close(dense);integer_buffer_close(anchors);numeric_buffer_close(work);numeric_buffer_close(factors);numeric_buffer_close(logs);numeric_buffer_close(df);numeric_buffer_close(dl)
+ println("CSR_SMOKE_PASS")
+}
