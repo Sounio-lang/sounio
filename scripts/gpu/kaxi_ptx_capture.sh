@@ -85,8 +85,9 @@ for mode_entry in "${MODES[@]}"; do
         sha_path="$mode_dir/$pattern.sha256"
         unsup_path="$mode_dir/$pattern.unsupported"
 
+        # The .ptx is the golden. A missing .sha256 must not force a recapture.
         if [[ "$FORCE" -eq 0 ]] && \
-           { [[ -f "$ptx_path" && -f "$sha_path" ]] || [[ -f "$unsup_path" ]]; }; then
+           { [[ -f "$ptx_path" ]] || [[ -f "$unsup_path" ]]; }; then
             KEPT=$((KEPT + 1))
             continue
         fi

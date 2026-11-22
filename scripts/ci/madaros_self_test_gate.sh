@@ -75,5 +75,14 @@ fi
 [[ $rc -eq 0 ]] || fail "--self-test exited rc=$rc without a FAIL line"
 read -r got want < <(sed -E 's#^compiler/main tests: ([0-9]+)/([0-9]+) passed.*#\1 \2#' <<<"$summary")
 [[ "$got" == "$want" && "$want" -gt 0 ]] || fail "summary is not N/N: $summary"
+# #2937 (Codex P2): anchor the denominator to the source tree. The runner's
+# total is dynamic (passed + COMPILER_MAIN_SELFTEST_FAILS), so a truncated or
+# fake runner can print a self-consistent small fraction (witness: "1/1
+# passed" emitted MADAROS_SELF_TEST_GATE_OK). Each self-test increments
+# `passed` exactly once inside the part_01..part_10 dispatchers, so the full
+# denominator must equal that site count. Derived, not hard-coded: the old
+# literal anchor (1162) rotted within days and would fail a full run today.
+expected="$(grep -c 'passed = passed + 1' "$ROOT/self-hosted/compiler/main.sio")"
+[[ "$want" == "$expected" ]] || fail "summary denominator $want != $expected test sites in self-hosted/compiler/main.sio (truncated run?)"
 echo "$TAG: PASS all $want self-tests"
 echo "MADAROS_SELF_TEST_GATE_OK"

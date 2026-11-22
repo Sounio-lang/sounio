@@ -1,0 +1,54 @@
+//@ run-pass
+//@ expect-stdout: heap_realloc_refusal: PASS
+//@ description: refused heap_realloc leaves HeapI64Vec and BigFrame contents in place
+
+// Page-round overflow (n > i64::MAX - 4111) returns NULL before the syscall,
+// so the old block stays addressable. Linux overcommit would make a huge mmap
+// succeed, which is why this witness uses the overflow threshold instead of
+// an rlimit.
+
+use collections::heap_vec::*
+use data::bigframe::*
+
+fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
+    var v = heap_i64_vec_new()
+    v.push(11)
+    v.push(22)
+    v.push(33)
+    let cap0 = v.cap()
+    let huge = (1 << 60) - 513
+    if v.try_reserve(huge) {
+        print("heap_realloc_refusal: FAIL reserve succeeded\n")
+        return 1
+    }
+    if v.get(0) != 11 || v.get(1) != 22 || v.get(2) != 33 {
+        print("heap_realloc_refusal: FAIL contents\n")
+        return 1
+    }
+    if v.len() != 3 || v.cap() != cap0 {
+        print("heap_realloc_refusal: FAIL cap\n")
+        return 1
+    }
+
+    var bf = bf_new(2, 4)
+    var row: [f64; 64] = [0.0; 64]
+    row[0] = 3.0
+    row[1] = 5.0
+    bf_push_row(&!bf, &row, 2)
+    let bcap = bf_cap_rows(&bf)
+    if bf_try_reserve_rows(&!bf, huge) {
+        print("heap_realloc_refusal: FAIL frame reserve succeeded\n")
+        return 1
+    }
+    if bf_nrows(&bf) != 1 || bf_cap_rows(&bf) != bcap {
+        print("heap_realloc_refusal: FAIL frame cap\n")
+        return 1
+    }
+    if bf_get(&bf, 0, 0) != 3.0 || bf_get(&bf, 0, 1) != 5.0 {
+        print("heap_realloc_refusal: FAIL frame contents\n")
+        return 1
+    }
+
+    print("heap_realloc_refusal: PASS\n")
+    0
+}

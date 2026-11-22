@@ -1,0 +1,1 @@
+Correct the documentation for linear GUM covariance propagation, compile-time unit metadata and runtime `Quantity` checks, and the self-hosted lexer. Monte Carlo sampling is documented separately in `stdlib/epistemic/montecarlo.sio`; unimplemented unit APIs are labelled as proposals. No compiler or numerical behavior changes (#3553).

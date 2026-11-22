@@ -1,0 +1,80 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: UNINIT_NESTED_STRUCT_OK
+//@ description: `var x: T` with no initializer allocates storage for nested struct fields (and their array fields), locally and for module globals
+//
+// Madaros lays a struct out one word per field, and a field of struct or
+// fixed-array type holds a HANDLE. `var x: T` with no initializer allocated
+// the outer struct and its array fields, but left every nested STRUCT field at
+// handle 0. The first write through it (`l.v.b = 2`, or `out.bias.values[1] =
+// 2.0` through `&!layer` in stdlib/nn/epistemic_layer.sio) resolved handle 0,
+// the handle-table lookup came back null and the native binary trapped on ud2
+// (SIGILL). An uninitialized module global `var G: S` allocated the outer
+// struct only, so its array fields hit the same wall.
+
+struct Pair { a: i64, b: i64 }
+struct Vec3 { values: [f64; 3], weights: [f64; 3] }
+struct Layer { w: [f64; 4], v: Vec3, p: Pair, act: i64 }
+struct Deep { layer: Layer, tag: i64 }
+
+var GL: Layer
+
+fn set_inner(out: &!Layer) with Mut, Panic {
+    out.v.values[1] = 2.5
+    out.p.b = 7
+    out.act = 3
+}
+
+fn set_deep(out: &!Deep) with Mut, Panic {
+    out.layer.v.weights[2] = 0.25
+    out.layer.p.a = 11
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    var bad = 0
+
+    // Direct nested writes on an uninitialized local.
+    var l0: Layer
+    l0.p.b = 2
+    l0.v.weights[0] = 1.5
+    if l0.p.b != 2 { bad = bad + 1 }
+    if l0.v.weights[0] != 1.5 { bad = bad + 1 }
+    // Untouched slots read as zero.
+    if l0.p.a != 0 || l0.act != 0 { bad = bad + 1 }
+    if l0.v.values[2] != 0.0 || l0.w[3] != 0.0 { bad = bad + 1 }
+
+    // Nested writes through `&!` (the stdlib shape that trapped).
+    var l1: Layer
+    set_inner(&!l1)
+    if l1.v.values[1] != 2.5 { bad = bad + 1 }
+    if l1.p.b != 7 || l1.act != 3 { bad = bad + 1 }
+    if l1.v.values[0] + l1.v.weights[1] != 0.0 { bad = bad + 1 }
+
+    // Two levels of nesting.
+    var d: Deep
+    set_deep(&!d)
+    if d.layer.v.weights[2] * 4.0 != 1.0 { bad = bad + 1 }
+    if d.layer.p.a != 11 || d.tag != 0 { bad = bad + 1 }
+
+    // Two uninitialized locals do not share nested storage.
+    var la: Layer
+    var lb: Layer
+    la.p.a = 5
+    if lb.p.a != 0 { bad = bad + 1 }
+
+    // Uninitialized module global: array and nested fields.
+    GL.w[2] = 4.0
+    GL.p.a = 9
+    GL.v.values[0] = 0.5
+    if GL.w[2] + GL.v.values[0] != 4.5 { bad = bad + 1 }
+    if GL.p.a != 9 { bad = bad + 1 }
+
+    if bad == 0 {
+        println("UNINIT_NESTED_STRUCT_OK")
+    } else {
+        print("UNINIT_NESTED_STRUCT_BAD ")
+        print_int(bad)
+        println("")
+    }
+    bad
+}

@@ -25,6 +25,8 @@
 // `pb_project_band` for users who want to pick an operationally
 // meaningful direction.
 
+use math::pure::{sqrt}
+
 // ============================================================================
 // SCALAR HELPERS
 // ============================================================================
@@ -40,15 +42,13 @@ fn pb_clamp_conf(c: i64) -> i64 {
     c
 }
 
+// Range-reduced sqrt from math::pure. The former local Newton loop started at
+// y = x and stopped after 12 steps, so it was off by ~244x at x = 1e-12 or
+// 1e12 (it only converges for x within a few decades of 1). Nonpositive
+// input still maps to 0.
 fn pb_sqrt(x: f64) -> f64 with Mut, Div, Panic {
     if x <= 0.0 { return 0.0 }
-    var y = x
-    var i: i64 = 0
-    while i < 12 {
-        y = 0.5 * (y + x / y)
-        i = i + 1
-    }
-    y
+    sqrt(x)
 }
 
 // ============================================================================
@@ -83,6 +83,25 @@ pub fn pb_new(lo_mean: f64, hi_mean: f64, variance: f64, confidence: i64) -> PBo
 // Lift a Knowledge<f64> triple (no Knightian gap).
 pub fn pb_from_knowledge(value: f64, variance: f64, confidence: i64) -> PBox {
     pb_new(value, value, variance, confidence)
+}
+
+// Lift a Knowledge<f64> triple to its GUM expanded-uncertainty band
+// (JCGM 100:2008 §6): the mean band is value ± k·sqrt(variance) and
+// the variance moves into the band, so it is not counted twice.
+//
+// Use this when the quantity is an *input* whose spread must reach the
+// band of every downstream result (interval propagation, as in a
+// p-box ODE enclosure). pb_from_knowledge keeps a zero gap and carries
+// the variance on the side; a band built from it can only enclose the
+// nominal trajectory, never the distribution of results.
+//
+// Coverage is that of the expanded interval: for a Gaussian input,
+// 1 − 2Φ(−k) (k = 2 → 95.45 %, k = 3 → 99.73 %). Negative k or
+// variance clamp to zero, which recovers pb_from_knowledge(value, 0, c).
+pub fn pb_expanded(value: f64, variance: f64, k: f64, confidence: i64) -> PBox with Mut, Div, Panic {
+    let kk = if k < 0.0 { 0.0 } else { k }
+    let half = kk * pb_sqrt(variance)
+    pb_new(value - half, value + half, 0.0, confidence)
 }
 
 // Vacuous p-box: maximum ambiguity (-inf, +inf), no confidence.
@@ -298,7 +317,7 @@ pub fn pb_project_band(p: &PBox, q: f64) -> PBox {
 // factor is typically ~2× to ~3× the true 95%-CI width for r ≈ +0.7
 // (per math-review 2026-04-30 Q4).
 pub fn pb_apply2_monotone_inc_dec(
-        f: fn(f64, f64) -> f64,
+        f: fn(f64, f64) -> f64 with Mut, Div, Panic,
         x: &PBox, y: &PBox) -> PBox with Mut, Div, Panic {
     let lo = f(x.lo_mean, y.hi_mean)
     let hi = f(x.hi_mean, y.lo_mean)
@@ -312,7 +331,7 @@ pub fn pb_apply2_monotone_inc_dec(
 // Symmetric variant: f INCREASING in x AND y. Sharp under co-monotonic
 // copula. Useful for sums-of-uncertain-positives.
 pub fn pb_apply2_monotone_inc_inc(
-        f: fn(f64, f64) -> f64,
+        f: fn(f64, f64) -> f64 with Mut, Div, Panic,
         x: &PBox, y: &PBox) -> PBox with Mut, Div, Panic {
     let lo = f(x.lo_mean, y.lo_mean)
     let hi = f(x.hi_mean, y.hi_mean)
@@ -324,7 +343,7 @@ pub fn pb_apply2_monotone_inc_inc(
 // Symmetric variant: f DECREASING in x AND y. Sharp under co-monotonic
 // copula on the reversed orientation.
 pub fn pb_apply2_monotone_dec_dec(
-        f: fn(f64, f64) -> f64,
+        f: fn(f64, f64) -> f64 with Mut, Div, Panic,
         x: &PBox, y: &PBox) -> PBox with Mut, Div, Panic {
     let lo = f(x.hi_mean, y.hi_mean)
     let hi = f(x.lo_mean, y.lo_mean)

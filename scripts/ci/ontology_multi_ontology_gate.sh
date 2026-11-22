@@ -323,7 +323,7 @@ collect_verdicts() {
 }
 
 run_drivers() {
-    local jobs active=0 worker_failed=0 rel name data_rc
+    local jobs active=0 worker_failed=0 rel name data_rc pid
     jobs="$(resolve_jobs)" || return $?
     PREPARED_DRIVERS=()
     PREP_FAIL=0
@@ -346,18 +346,24 @@ run_drivers() {
         esac
     done
 
+    # Wait on explicit worker PIDs, oldest first. A bare `wait -n` can also
+    # reap the process substitutions left by collect_verdicts, or return 127
+    # once a worker was reaped before it was called, and then reports a
+    # worker failure even though every verdict is PASS.
+    local -a pids=()
     printf '[ontology-multi] workers=%s\n' "$jobs"
     for rel in "${PREPARED_DRIVERS[@]}"; do
         gate_file "$rel" &
+        pids+=("$!")
         active=$((active + 1))
         if (( active >= jobs )); then
-            if ! wait -n; then worker_failed=1; fi
+            if ! wait "${pids[0]}"; then worker_failed=1; fi
+            pids=("${pids[@]:1}")
             active=$((active - 1))
         fi
     done
-    while (( active > 0 )); do
-        if ! wait -n; then worker_failed=1; fi
-        active=$((active - 1))
+    for pid in "${pids[@]}"; do
+        if ! wait "$pid"; then worker_failed=1; fi
     done
     collect_verdicts || true
     (( worker_failed == 0 )) || echo "[ontology-multi] at least one worker exited unsuccessfully" >&2

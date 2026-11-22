@@ -1,0 +1,3 @@
+Run independent research and ontology checks in a parallel required Contracts matrix shard, preserving every gate and its original impact predicate. Persist the existing content-addressed Madaros cache between CI runs while retaining unconditional build validation and fresh checkout receipts. Only restore an exact transport key including build recipe inputs; never fall back to a broad cache prefix.
+
+Partition Full Test Suite using its canonical --list-tests interface across four required shards, with two effective workers per runner and dynamic expansion disabled. Preserve the default per-case budgets and run the qd128 accuracy replay once. Retain per-shard lists, compiler/source identity and JUnit receipts with retry-safe artifact names.

@@ -1,0 +1,1 @@
+Separate Lean toolchains from exact-source build caches, preserving all proof builds, mutant checks and axiom audits on cache hits. Key both formal toolchains and both build trees so immutable toolchain caches no longer pin obsolete proof snapshots.

@@ -1,0 +1,1 @@
+ADR-021 records the oracle stack for the future Sounio-to-FPGA backend (Futhark verified_foreign_reference under ADR-009) and classifies the existing FPGA/K-AXI/U250 gates; documentation only, no compiler behaviour change.

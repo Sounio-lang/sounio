@@ -307,7 +307,7 @@ const status = {
     core: {
       label: "Lexer / Parser / Type Checker",
       level: "verified",
-      reason: "Verified (gate pass); pre-1.0",
+      reason: "Verified (gate pass); Sounio 3.0 (pre-release)",
       artifact: "docs/compiler/KNOWN_LIMITATIONS.md",
     },
     nativeBackend: {
@@ -329,7 +329,7 @@ const status = {
     cranelift: {
       label: "Cranelift JIT (retired)",
       level: "stub",
-      reason: "No longer shipped since 2.1.0 (CHANGELOG.md). Madaros native x86-64 is the only shipped engine.",
+      reason: "No longer shipped (see the changelog). Madaros native x86-64 is the only shipped engine.",
       artifact: "CHANGELOG.md",
     },
     lsp: {

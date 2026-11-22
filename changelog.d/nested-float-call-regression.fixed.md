@@ -1,0 +1,1 @@
+Pins the SIO-574 repro: a nested float-returning call `g(f(*p + 1.0))` over a raw pointer checks, compiles and prints 103. The rc=139 compiler segfault is gone on main as a side effect of the SIO-556 float-ness fix (direct `*mut f64` derefs resolve instead of taking the deep path that overflowed the default 8 MiB stack); no compiler change in this commit.
