@@ -53,6 +53,18 @@ lean_lib Bootstrap where
     .one `Bootstrap.Refine,
     .one `Bootstrap.SeedData,
     .one `Bootstrap.Seeds,
+    .one `Bootstrap.SporosCheckBin,
+    .one `Bootstrap.SporosCheckBinCode,
+    .one `Bootstrap.SporosCheckBinCore,
+    .one `Bootstrap.SporosCheckBinData,
+    .one `Bootstrap.SporosCheckBinExec,
+    .one `Bootstrap.SporosCheckBinFault,
+    .one `Bootstrap.SporosCheckBinLoops,
+    .one `Bootstrap.SporosCheckBinPass,
+    .one `Bootstrap.SporosCheckBinSpec,
+    .one `Bootstrap.SporosCheckBinTail,
+    .one `Bootstrap.SporosCheckDiff,
+    .one `Bootstrap.SporosCheckFlat,
     .one `Bootstrap.SporosX1,
     .one `Bootstrap.SporosX1Comp,
     .one `Bootstrap.SporosX1Image,
@@ -66,12 +78,21 @@ lean_lib Bootstrap where
     .one `Bootstrap.X86Env,
     .one `Bootstrap.X86Int,
     .one `Bootstrap.X86Min,
+    .one `Bootstrap.X86Uni,
+    .one `Bootstrap.AArch64Min,
+    .one `Bootstrap.FormatsC,
+    .one `Bootstrap.SeedC,
+    .one `Bootstrap.TMRMemExposure,
+    .one `Bootstrap.TMRBurst,
+    .one `Bootstrap.TMRBurstCheck,
     .submodules `Sporos]
 
--- The two seeds on every listing (about 20 minutes of kernel time, the two in parallel); built by
--- bootstrap/model/seed_proofs.sh and the nightly job, not on every pull request.
+-- The two seeds on every listing (about 20 minutes of kernel time, the two in parallel), and
+-- their lifting to the unified machine X86Uni (SeedUniBridge, which imports both); built by
+-- bootstrap/model/seed_proofs.sh (run by hand or on the lab cluster; no CI workflow runs it),
+-- not on every pull request.
 lean_lib BootstrapSeeds where
-  roots := #[`Bootstrap.SeedA, `Bootstrap.SeedB]
+  roots := #[`Bootstrap.SeedA, `Bootstrap.SeedB, `Bootstrap.SeedUniBridge]
 
 -- Sporos stage-1 final correctness proofs (loader + parser + checker accept/refuse
 -- biconditional, cubic step bound, and ENOMEM exit 2); SporosX1FinalRefuse peaks at
@@ -111,3 +132,15 @@ lean_exe «x86dec-fuzz» where
 
 lean_exe «tmr-bound-check» where
   root := `Bootstrap.TMRBoundCheck
+
+lean_exe «x86uni-diff» where
+  root := `Bootstrap.X86UniDiffModel
+
+lean_exe aarch64run where
+  root := `Bootstrap.RunAArch64
+
+lean_exe «aarch64-diff» where
+  root := `Bootstrap.AArch64DiffModel
+
+lean_exe «tmr-burst-check» where
+  root := `Bootstrap.TMRBurstCheck
