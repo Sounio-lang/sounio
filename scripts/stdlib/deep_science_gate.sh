@@ -579,6 +579,12 @@ MADAROS_RAW_BIN="$MADAROS_RAW_BIN" SEED_RAW_BIN="${SEED_RAW_BIN:-$repo/bin/souc-
 record focused-gate genomics-count-identities "$rc"
 }
 
+# Both partitions remain mandatory in CI; standalone all preserves the original order.
+if [[ "$group" == all || "$group" == core ]]; then run_core; fi
+if [[ "$group" == all || "$group" == integration ]]; then run_integration; fi
+if [[ "$group" == reference-controls ]]; then run_reference_controls; fi
+printf '%s\n' "$group" > "$out/GROUP"
+
 rc=0
 sha256sum -c "$out/INPUTS.sha256" > "$out/INPUTS.verify.txt" 2>&1 || rc=$?
 record input-hashes unchanged "$rc"
