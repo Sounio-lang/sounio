@@ -496,6 +496,7 @@ page is not a fresh execution receipt.
 | E286 | type-checker/ontology | error | ontology subsumption could not be verified | [E286.md](explanations/E286.md) |
 | E287 | parser/compat | error | Sounio uses `&!T` for exclusive references, not `&mut T` | [E287.md](explanations/E287.md) |
 | E288 | diagnostics/ownership | error | use after move (registry constructor) | [E288.md](explanations/E288.md) |
+| E289 | lexer (Madaros) | error | malformed binary or octal literal: no digit after `0b`/`0o`, a decimal digit outside the base (`0b102`, `0o8`), or a float suffix (`0b1f32`) | ADR-015 row 5. `0b101`, `0o17`, `0b1010_0101` and `0b1111u8` are accepted; an out-of-range value is E276. |
 | E290 | type-checker/effects | error | unknown effect in handle/perform (SIO-417) | — |
 | E291 | type-checker/effects | error | unknown operation for effect (SIO-417) | — |
 | E292 | type-checker/effects | error | perform of effect not declared or handled here (SIO-417) | — |
