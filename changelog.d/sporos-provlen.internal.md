@@ -1,0 +1,1 @@
+Add `SporosProvLen`: under `noPhys`, the Sporos reference interpreter is observationally equal to a machine that tracks provenance only by a 64-bit length, the representation `sporos_fast.cpp` uses (`formal/Bootstrap/SporosProvLen.lean`), with a differential and mutation gate in the Lean job (`bootstrap/model/sporos_provlen_gate.sh`).

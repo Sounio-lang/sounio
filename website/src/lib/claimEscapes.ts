@@ -101,12 +101,15 @@ export function escapeFullSuiteInline(): string {
   });
 }
 
+/** The only public status label. No compiler build string is printed. */
+export const STATUS_LABEL = 'Sounio 3.0 (pre-release)';
+
 export function escapeCheckedArtifact(): string {
   return claimEscape({
     id: 'checked-artifact-version',
     class: 'version',
-    reason: 'Compiler launcher version string from the public contract. Identity, not a green-count.',
-    text: publicContract.versions.checkedArtifact,
+    reason: 'Public status label. The site does not print a compiler build string.',
+    text: STATUS_LABEL,
   });
 }
 
@@ -114,8 +117,8 @@ export function escapeReadmeBadge(): string {
   return claimEscape({
     id: 'readme-badge-version',
     class: 'version',
-    reason: 'README badge string. Identity during release reconciliation, not a green-count.',
-    text: publicContract.versions.readmeBadge ?? '',
+    reason: 'Public status label. The site does not print a separate release string.',
+    text: STATUS_LABEL,
   });
 }
 
@@ -123,8 +126,8 @@ export function escapeReleaseVersion(): string {
   return claimEscape({
     id: 'release-provenance-version',
     class: 'version',
-    reason: 'Release provenance version from proofData. Identity, not a gate numeral.',
-    text: `v${getProofData().release.version}`,
+    reason: 'Public status label. The site does not print a release number.',
+    text: STATUS_LABEL,
   });
 }
 

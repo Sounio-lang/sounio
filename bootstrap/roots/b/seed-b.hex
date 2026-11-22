@@ -1,0 +1,166 @@
+# Cross-check listing: seed-b (bootstrap/roots/b) rendered in format A, so that
+# seed-a can assemble it. The bytes are the same as seed-b.oct; the comments
+# below are seed-b.oct's, verbatim, and describe seed-b and its format B.
+#
+# seed-b: the first loader of bootstrap root B. Written by hand, byte by byte,
+# separately from seed-a, in its own format.
+#
+# What it does: reads a listing from standard input and writes the bytes it
+# describes to standard output.
+#
+# Format B, the format of this file:
+#   - a byte is a group of exactly three octal digits, 000 to 377: digits
+#     0-7, and the first digit of a group only 0-3;
+#   - the three digits of a group are contiguous: nothing may stand between
+#     them;
+#   - between groups: space (040), tab (011), newline (012), or ';', which
+#     starts a comment that runs to the end of the line.
+# Anything else is refused: the digits 8 and 9, any letter, carriage return
+# (015), a separator or ';' inside a group, a first digit above 3, and an
+# incomplete group at the end of input.
+#
+# Exit status: 0 when the whole input was valid and every byte was written;
+# 1 on a refused input, a failed read or a short write. Output is written as
+# it is decoded, so on exit 1 the bytes already written must be discarded.
+#
+# Self-reproduction: `seed-b < seed-b.oct` writes exactly the bytes of `seed-b`.
+# Cross-check: `seed-b < ../a/seed-a.oct` writes exactly the bytes of seed-a.
+#
+# Layout: one ELF64 header (000-077), one program header (100-167), code
+# (170-432). The file is loaded at virtual address 0x400000. Every offset in
+# this file is octal; a jump's target is the offset of the next instruction
+# plus or minus its displacement, also in octal. Total 283 bytes (0433).
+#
+# How it differs from seed-a, on purpose: base 8, not 16; fixed three-digit
+# groups, not free pairs; separators only at group boundaries; ';' comments,
+# not '#'; the accumulator starts at 0 with a separate digit counter (r13)
+# instead of a sentinel bit; the fail exit sits in the middle of the code,
+# and the loop is closed by a near jump.
+#
+# Machine state at entry: only rsp is used as given by the kernel. r12, r13
+# and r14 are set first; eax, edi, esi, edx are written before they are read.
+#   r12  accumulator of the current group
+#   r13  digits read in the current group (0-2; 3 means "write it")
+#   r14  1 inside a comment, 0 outside
+#   [rsp] one-byte buffer for read and for write
+
+# ELF header
+7f 45 4c 46                 # 000 e_ident: magic 0x7f 'E' 'L' 'F'
+02                          # 004 EI_CLASS   = ELFCLASS64
+01                          # 005 EI_DATA    = little endian
+01                          # 006 EI_VERSION = 1
+00                          # 007 EI_OSABI   = System V
+00 00 00 00 00 00 00 00     # 010 EI_ABIVERSION and padding
+02 00                       # 020 e_type      = ET_EXEC
+3e 00                       # 022 e_machine   = EM_X86_64
+01 00 00 00                 # 024 e_version   = 1
+78 00 40 00 00 00 00 00     # 030 e_entry     = 0x400078 (start of the code)
+40 00 00 00 00 00 00 00     # 040 e_phoff     = 0x40
+00 00 00 00 00 00 00 00     # 050 e_shoff     = 0 (no section headers)
+00 00 00 00                 # 060 e_flags     = 0
+40 00                       # 064 e_ehsize    = 64
+38 00                       # 066 e_phentsize = 56
+01 00                       # 070 e_phnum     = 1
+00 00                       # 072 e_shentsize = 0
+00 00                       # 074 e_shnum     = 0
+00 00                       # 076 e_shstrndx  = 0
+
+# program header
+01 00 00 00                 # 100 p_type   = PT_LOAD
+05 00 00 00                 # 104 p_flags  = PF_R | PF_X
+00 00 00 00 00 00 00 00     # 110 p_offset = 0
+00 00 40 00 00 00 00 00     # 120 p_vaddr  = 0x400000
+00 00 40 00 00 00 00 00     # 130 p_paddr  = 0x400000
+1b 01 00 00 00 00 00 00     # 140 p_filesz = 0x11b = 283 (the whole file)
+1b 01 00 00 00 00 00 00     # 150 p_memsz  = 0x11b
+00 10 00 00 00 00 00 00     # 160 p_align  = 0x1000
+
+# start
+45 31 e4                    # 170 xor r12d, r12d       accumulator = 0
+45 31 ed                    # 173 xor r13d, r13d       digits in the current group = 0
+45 31 f6                    # 176 xor r14d, r14d       not in a comment
+
+# loop: read one byte into [rsp]
+31 c0                       # 201 xor eax, eax         syscall 0 = read
+31 ff                       # 203 xor edi, edi         fd 0 = stdin
+48 89 e6                    # 205 mov rsi, rsp         buffer
+6a 01                       # 210 push 1
+5a                          # 212 pop rdx              count = 1
+0f 05                       # 213 syscall
+48 85 c0                    # 215 test rax, rax
+78 35                       # 220 js fail              222 + 065 = 307: read failed
+74 7b                       # 222 jz eof               224 + 173 = 417: end of input
+0f b6 04 24                 # 224 movzx eax, byte [rsp]
+
+# inside a comment: skip everything up to and including the newline
+45 85 f6                    # 230 test r14d, r14d
+74 09                       # 233 jz notc              235 + 011 = 246
+3c 0a                       # 235 cmp al, 012 (newline)
+75 e0                       # 237 jne loop             241 - 040 = 201
+45 31 f6                    # 241 xor r14d, r14d       the newline ends the comment
+eb db                       # 244 jmp loop             246 - 045 = 201
+
+# notc: a separator (';' space newline tab) is allowed only between groups
+3c 3b                       # 246 cmp al, ';'
+74 0c                       # 250 je issep             252 + 014 = 266
+3c 20                       # 252 cmp al, ' '
+74 08                       # 254 je issep             256 + 010 = 266
+3c 0a                       # 256 cmp al, 012 (newline)
+74 04                       # 260 je issep             262 + 004 = 266
+3c 09                       # 262 cmp al, 011 (tab)
+75 19                       # 264 jne digit            266 + 031 = 317
+
+# issep
+45 85 ed                    # 266 test r13d, r13d
+75 0c                       # 271 jnz fail             273 + 014 = 307 (separator inside a group)
+3c 3b                       # 273 cmp al, ';'
+75 c2                       # 275 jne loop             277 - 076 = 201
+41 be 01 00 00 00           # 277 mov r14d, 1          ';' opens a comment
+eb ba                       # 305 jmp loop             307 - 106 = 201
+
+# fail (placed here so that every jump to it is short)
+6a 3c                       # 307 push 60
+58                          # 311 pop rax              syscall 60 = exit
+6a 01                       # 312 push 1
+5f                          # 314 pop rdi              status 1
+0f 05                       # 315 syscall
+
+# digit: '0'-'7' only; the first digit of a group only '0'-'3'
+2c 30                       # 317 sub al, '0'
+3c 07                       # 321 cmp al, 7
+77 f2                       # 323 ja fail              325 - 016 = 307 (not an octal digit)
+45 85 ed                    # 325 test r13d, r13d
+75 04                       # 330 jnz notfirst         332 + 004 = 336
+3c 03                       # 332 cmp al, 3
+77 e9                       # 334 ja fail              336 - 027 = 307 (group above 377)
+
+# notfirst: shift the digit into the accumulator
+41 c1 e4 03                 # 336 shl r12d, 3
+41 09 c4                    # 342 or r12d, eax
+41 ff c5                    # 345 inc r13d
+41 83 fd 03                 # 350 cmp r13d, 3
+72 93                       # 354 jb loop              356 - 155 = 201 (group not complete)
+
+# third digit: write the accumulator as one byte
+44 88 24 24                 # 356 mov [rsp], r12b
+6a 01                       # 362 push 1
+58                          # 364 pop rax              syscall 1 = write
+89 c7                       # 365 mov edi, eax         fd 1 = stdout
+48 89 e6                    # 367 mov rsi, rsp         buffer
+89 c2                       # 372 mov edx, eax         count = 1
+0f 05                       # 374 syscall
+48 83 f8 01                 # 376 cmp rax, 1
+75 c3                       # 402 jne fail             404 - 075 = 307 (write failed)
+45 31 e4                    # 404 xor r12d, r12d
+45 31 ed                    # 407 xor r13d, r13d
+e9 72 ff ff ff              # 412 jmp loop             417 - 216 = 201 (near jump: too far for 8 bits)
+
+# eof: accept only on a group boundary
+45 85 ed                    # 417 test r13d, r13d
+75 b3                       # 422 jnz fail             424 - 115 = 307 (incomplete group)
+6a 3c                       # 424 push 60
+58                          # 426 pop rax              syscall 60 = exit
+31 ff                       # 427 xor edi, edi         status 0
+0f 05                       # 431 syscall
+
+# end                        | 433 end of file (0x11b = 283 bytes)

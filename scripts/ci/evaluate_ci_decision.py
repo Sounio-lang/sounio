@@ -68,6 +68,7 @@ def main() -> int:
         ),
         "sounio-lint": any(truthy(impact.get(key)) for key in ("compiler", "stdlib", "tests", "sio", "full")),
         "lean-proofs": truthy(impact.get("lean")) or truthy(impact.get("full")),
+        "bootstrap-proofs": truthy(impact.get("bootstrap")) or truthy(impact.get("full")),
         "website": truthy(impact.get("website")) or truthy(impact.get("full")),
         # #2392 follow-up. R6 is selected by the EVENT, not by impact
         # classification: it is nightly-only, so `skipped` is the correct
