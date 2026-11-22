@@ -11,23 +11,46 @@ use ir::opt_cleanup::{OcpCleanupModuleReceipt, opt_cleanup_module_inplace, OCP_S
 use io::env::{read_env}
 use io::trace::{io_trace_i64_string}
 use check::mod::{check_items_verdict_boot4, check_items_verdict_boot4_with_module_map, check_items_verdict_boot4_with_ontocache_sidecar, check_modules_verdict_boot4, check_program_epistemic_into, check_program_with_artifacts, checker_to_ir_epistemic_into, checker_apply_ir_metadata, checker_apply_ir_ontology_parameter_links_from_items}
-use ir::lower::{lower_hard_error_report, lower_program_to_ir_trace, lower_program_to_ir_with_epistemic_trace, lower_program_to_ir_summary_flat_owned_with_epistemic_ref, lower_program_bodies_from_summary_flat_with_epistemic_ref, lower_program_bodies_from_summary_with_epistemic_boxed_owned, lower_dep_program_items_into_acc_with_externs, lower_hard_error_reset, lower_compile_error_scope_begin, lower_compile_error_scope_end, lower_hard_error_pending, ir_instr_census_report, fo_preregister_program_items_multipass, fo_xfer_global_reset, lower_use_module_reset, lower_set_current_module_id, lower_set_skip_use_recollect_for_merged, lower_fn_tuple_arr_reset, lower_fn_tuple_f64_arrays_collect}
+use ir::lower::{lower_hard_error_report, lower_program_to_ir_trace, lower_program_to_ir_with_epistemic_trace, lower_program_to_ir_summary_flat_owned_with_epistemic_ref, lower_program_bodies_from_summary_flat_with_epistemic_ref, lower_program_bodies_from_summary_with_epistemic_boxed_owned, lower_dep_program_items_into_acc_with_externs, lower_hard_error_reset, lower_compile_error_scope_begin, lower_compile_error_scope_end, lower_hard_error_pending, lower_note_merge_fn_overflow, lower_merge_fn_overflowed, lower_merge_state_reset, lower_rgn_merge_check, lower_rgn_merge_vetoed, lower_rgn_veto_regions, ir_instr_census_report, fo_preregister_program_items_multipass, fo_xfer_global_reset, lower_use_module_reset, lower_set_current_module_id, lower_set_skip_use_recollect_for_merged, lower_fn_tuple_arr_reset, lower_fn_tuple_f64_arrays_collect}
 use native::codegen_x86_linux::{compile_native_v2_preview_to_file, native_resolve_target, native_v2_builtin_id_for_name, native_v2_builtin_returns_float, ARCH_X86_64, OS_LINUX, ARCH_AARCH64, OS_MACOS}
 use check::knowledge_context::{knowledge_context_validate_items, knowledge_context_validate_items_values_only}
 use check::check::{checker_swap_darwin_math}
-use ir::lower::{lower_swap_native_closure_envs}
+use ir::lower::{lower_swap_native_closure_envs, lower_untyped_field_trace_init, lower_untyped_field_trace_dump}
 use gpu::native_metal::{native_metal_begin, native_metal_collect_program, native_metal_failed}
 use resolve::mod::{resolve_modules}
 use module_parse::{extract_imports_from_ast, file_exists, file_path_to_module_path, load_module_file}
 use private_fn_identity::{private_fn_identity_apply, module_struct_identity_check, pfi_use_map_reset, pfi_use_map_module_begin, pfi_use_map_note}
 use check::specializer::{specialize_generics, specialize_generics_multi, spec_last_instantiated, spec_mono_marker_count, spec_append_item_lists, spec_dce_unreachable_item_fns, spec_dce_mark_across_programs, spec_dce_filter_with_global_marks, spec_dce_live_item_fns, spec_report_any_specializer_failure, spec_program_mentions_f128}
+use check::mod::{check_items_verdict_boot4_with_module_path}
+use ir::lower::{lower_program_to_ir_summary_box_with_epistemic_ref, lower_program_to_ir_summary_box_with_externs_ref}
+
+// TEST-ONLY: SOUNIO_IR_NAME_POOL_LIMIT=<n> lowers the IR name-id pool's id cap to
+// min(n, IR_NAME_POOL_MAX) so scripts/ci/madaros_name_pool_overflow_gate.sh can
+// force the overflow refusal with a tiny program. Unset, empty, non-numeric or
+// non-positive values leave the limit at 0 (use the full pool). Read once at
+// compile start, before any lowering interns a name.
+fn module_frontend_apply_name_pool_limit() with IO, Mut, Panic, Div {
+    let raw = read_env("SOUNIO_IR_NAME_POOL_LIMIT")
+    let len = str_len(raw)
+    if len <= 0 || len > 9 { return }
+    var i: i64 = 0
+    var v: i64 = 0
+    while i < len {
+        let c = str_char_at(raw, i)
+        if c < 48 || c > 57 { return }
+        v = v * 10 + (c - 48)
+        i = i + 1
+    }
+    if v > 0 { ir_name_pool_set_limit(v) }
+}
 
 // Multi-module parse accumulates every module's GLOBAL_VAR_INIT_* side-table
 // entries so imported f64/i64 BSS constants survive to lower time. Without
 // suppress, each load_module_file → parse_items_preloaded reset wipes earlier
 // modules and imported constants read as zero (Defect A / stats lognormal_pdf).
 // Bracket every multi-mod load+lower path; restore suppress=0 for isolation.
-fn module_frontend_global_init_compile_begin() with Mut {
+fn module_frontend_global_init_compile_begin() with IO, Mut, Panic, Div {
+    module_frontend_apply_name_pool_limit()
     OCP_RESEARCH_EXACT_INTEGRAL_CENTER = 0
     ast_reset_global_var_inits()
     GLOBAL_VAR_INIT_SUPPRESS_RESET = 1
@@ -36,6 +59,7 @@ fn module_frontend_global_init_compile_begin() with Mut {
     // intermediate one may be discarded, which is precisely how the flag used to
     // get lost.
     lower_hard_error_reset()
+    lower_merge_state_reset()
     lower_compile_error_scope_begin()
     // Copilot review (PR #2515): LOWER_USE_MODULE_OVERFLOWED is durable for the
     // same reason IR_LOWER_HARD_ERROR is (see lower_use_module_reset's own
@@ -1797,6 +1821,17 @@ fn ir_merge_modules_into(dst: &! IrModule, src: &IrModule) with Mut, Panic, Div 
     // Wave11: relocate src BSS past dst BSS (same residual as lower_array path).
     let bss_offset_delta = (*dst).bss_total_size
 
+    // The copy below stops at IR_MAX_FUNCS. Anything past it would be a
+    // program missing functions (calls into slots that hold someone else's
+    // body), so a merge that does not fit refuses the compile instead
+    // (lower_note_merge_fn_overflow, a durable hard error).
+    if (*dst).fn_count + (*src).fn_count > IR_MAX_FUNCS {
+        lower_note_merge_fn_overflow((*dst).fn_count + (*src).fn_count, IR_MAX_FUNCS)
+    }
+    // A side lowered without room for the region cast hook vetoes every region
+    // of the merged program (ir/lower.sio lower_rgn_merge_check).
+    let _rgn_veto = lower_rgn_merge_check(&(*dst), src)
+
     var fi: i64 = 0
     while fi < (*src).fn_count && (*dst).fn_count < IR_MAX_FUNCS {
         var func = ir_fn_get(&(*src), fi)
@@ -1868,6 +1903,7 @@ fn ir_merge_modules_into(dst: &! IrModule, src: &IrModule) with Mut, Panic, Div 
     }
 
     ir_merge_sections_into_module(dst, src)
+    if lower_rgn_merge_vetoed() { let _vetoed = lower_rgn_veto_regions(&(*dst)) }
 }
 
 // Compatibility wrapper: only for call sites that still own both modules by
@@ -1900,7 +1936,7 @@ fn ir_merge_prepare_function_with_remap_from_func(
     src: &IrModule,
     dst: &IrModule,
     dep_fn_count: i64,
-    fn_remap: &[i64; 2048],
+    fn_remap: &[i64; 16384],
     contest_offset: i64,
     robust_offset: i64,
     decision_offset: i64,
@@ -1956,7 +1992,7 @@ fn ir_merge_prepare_function_with_remap(
     src: &IrModule,
     src_fi: i64,
     dep_fn_count: i64,
-    fn_remap: &[i64; 2048],
+    fn_remap: &[i64; 16384],
     contest_offset: i64,
     robust_offset: i64,
     decision_offset: i64,
@@ -1989,14 +2025,101 @@ fn ir_merge_prepare_function_with_remap(
     )
 }
 
-// Resolve a merged-module fn_id by symbol name. Prefer a lowered body (instr_count>0)
-// over import stubs so dependency functions keep calling real implementations.
-fn ir_merge_find_function_name_index(module: &IrModule, name: Name) -> i64 with Mut, Div, Panic {
+// Stage B of docs/audit/MADAROS_SELF_COMPILE_PROFILE_DISPATCH_2026-09-27.md, merge
+// lookups only. ir_merge_find_function_name_index scans every fn_id per call
+// target; inside ir_module_finalize_merged_calls that is O(call_sites x fn_count)
+// (518 s of the 54-minute self-compile in that profile).
+//
+// The index is a chain per hash bucket, holding EVERY fn_id whose name hashes
+// there, in ascending fn_id order. A lookup runs the unchanged selection loop
+// (full in-place name compare, live instr_count) over that chain instead of over
+// 0..fn_count. Every id with the looked-up name is in the chain and in the same
+// order, and other names are rejected by the full compare, so the result equals
+// the linear scan by construction: last id with a body, else first stub.
+//
+// Scope: built at the start of the call-rebinding passes of
+// ir_module_finalize_merged_calls and dropped at their end. Those passes rewrite
+// only IR_A_FN_ID entries of existing functions; no name, slot or fn_count
+// changes there. A lookup on a module whose fn_count differs from the stamp, or
+// outside that scope, takes the linear scan.
+//
+// SOUNIO_IR_FN_INDEX_VERIFY=1 runs both lookups side by side and uses the linear
+// answer. A divergence is counted; ir_module_finalize_merged_calls prints the
+// first one and refuses (returns false). The lookup itself stays free of IO, so
+// none of its callers changes its effect row.
+var MERGE_FN_INDEX_HEAD: [i64; 16384] = [0; 16384]
+var MERGE_FN_INDEX_TAIL: [i64; 16384] = [0; 16384]
+var MERGE_FN_INDEX_NEXT: [i64; 16384] = [0; 16384]
+var MERGE_FN_INDEX_ON: i64 = 0
+var MERGE_FN_INDEX_STAMP: i64 = 0 - 1
+var MERGE_FN_INDEX_DIVERGED: i64 = 0
+var MERGE_FN_INDEX_FIRST_FAST: i64 = 0
+var MERGE_FN_INDEX_FIRST_SLOW: i64 = 0
+var MERGE_FN_INDEX_VERIFY: i64 = 0
+var MERGE_FN_INDEX_VERIFY_ON: i64 = 0
+var MERGE_FN_INDEX_VERIFY_CHECKED: i64 = 0
+
+fn merge_fn_index_verify_enabled() -> bool with IO, Mut, Panic, Div {
+    if MERGE_FN_INDEX_VERIFY_CHECKED == 0 {
+        MERGE_FN_INDEX_VERIFY_CHECKED = 1
+        if str_eq(read_env("SOUNIO_IR_FN_INDEX_VERIFY"), "1") {
+            MERGE_FN_INDEX_VERIFY_ON = 1
+        }
+    }
+    MERGE_FN_INDEX_VERIFY_ON == 1
+}
+
+// Bucket of a name. Bounded arithmetic (no reliance on overflow wrapping); bytes
+// are shifted by 128 so a negative i8 cannot make the sum negative.
+fn merge_fn_index_bucket(name: &Name) -> i64 with Mut, Panic, Div {
+    var h: i64 = 5381
+    var k: i64 = 0
+    while k < (*name).len && k < 384 {
+        h = (h * 33 + ((*name).buf[k] as i64) + 128) % 2147483647
+        k = k + 1
+    }
+    h % 16384
+}
+
+fn merge_fn_index_build(module: &IrModule) with Mut, Panic, Div {
+    MERGE_FN_INDEX_ON = 0
+    MERGE_FN_INDEX_STAMP = 0 - 1
+    let n = (*module).fn_count
+    if n < 0 || n > 16384 { return }
+    var b: i64 = 0
+    while b < 16384 {
+        MERGE_FN_INDEX_HEAD[b as usize] = 0
+        MERGE_FN_INDEX_TAIL[b as usize] = 0
+        b = b + 1
+    }
+    var fi: i64 = 0
+    while fi < n {
+        var nm = ir_function_name_at(module, fi as usize)
+        let bk = merge_fn_index_bucket(&nm)
+        MERGE_FN_INDEX_NEXT[fi as usize] = 0
+        if MERGE_FN_INDEX_HEAD[bk as usize] == 0 {
+            MERGE_FN_INDEX_HEAD[bk as usize] = fi + 1
+        } else {
+            MERGE_FN_INDEX_NEXT[(MERGE_FN_INDEX_TAIL[bk as usize] - 1) as usize] = fi + 1
+        }
+        MERGE_FN_INDEX_TAIL[bk as usize] = fi + 1
+        fi = fi + 1
+    }
+    MERGE_FN_INDEX_STAMP = n
+    MERGE_FN_INDEX_ON = 1
+}
+
+fn merge_fn_index_drop() with Mut, Panic, Div {
+    MERGE_FN_INDEX_ON = 0
+    MERGE_FN_INDEX_STAMP = 0 - 1
+}
+
+fn ir_merge_find_function_name_index_linear(module: &IrModule, name: &Name) -> i64 with Mut, Div, Panic {
     var fi: i64 = 0
     var found: i64 = 0 - 1
     var found_stub: i64 = 0 - 1
     while fi < (*module).fn_count {
-        if ir_fn_name_eq_at(module, fi, &name) {
+        if ir_fn_name_eq_at(module, fi, name) {
             if ir_fn_instr_count(module, fi as usize) > 0 {
                 found = fi
             } else if found_stub < 0 {
@@ -2006,6 +2129,45 @@ fn ir_merge_find_function_name_index(module: &IrModule, name: Name) -> i64 with 
         fi = fi + 1
     }
     if found >= 0 { found } else { found_stub }
+}
+
+fn ir_merge_find_function_name_index_indexed(module: &IrModule, name: &Name) -> i64 with Mut, Div, Panic {
+    var found: i64 = 0 - 1
+    var found_stub: i64 = 0 - 1
+    var cur = MERGE_FN_INDEX_HEAD[merge_fn_index_bucket(name) as usize]
+    while cur > 0 {
+        let fi = cur - 1
+        if ir_fn_name_eq_at(module, fi, name) {
+            if ir_fn_instr_count(module, fi as usize) > 0 {
+                found = fi
+            } else if found_stub < 0 {
+                found_stub = fi
+            }
+        }
+        cur = MERGE_FN_INDEX_NEXT[fi as usize]
+    }
+    if found >= 0 { found } else { found_stub }
+}
+
+// Resolve a merged-module fn_id by symbol name. Prefer a lowered body (instr_count>0)
+// over import stubs so dependency functions keep calling real implementations.
+fn ir_merge_find_function_name_index(module: &IrModule, name: Name) -> i64 with Mut, Div, Panic {
+    if MERGE_FN_INDEX_ON == 1 && (*module).fn_count == MERGE_FN_INDEX_STAMP {
+        let fast = ir_merge_find_function_name_index_indexed(module, &name)
+        if MERGE_FN_INDEX_VERIFY == 1 {
+            let slow = ir_merge_find_function_name_index_linear(module, &name)
+            if slow != fast {
+                if MERGE_FN_INDEX_DIVERGED == 0 {
+                    MERGE_FN_INDEX_FIRST_FAST = fast
+                    MERGE_FN_INDEX_FIRST_SLOW = slow
+                }
+                MERGE_FN_INDEX_DIVERGED = MERGE_FN_INDEX_DIVERGED + 1
+                return slow
+            }
+        }
+        return fast
+    }
+    ir_merge_find_function_name_index_linear(module, &name)
 }
 
 // After stub replacement, remap in-function IrCall/IrCallSret targets from the
@@ -2049,7 +2211,7 @@ fn ir_merge_place_and_remap_function(
     src_fi: i64,
     dst_fi: i64,
     dep_fn_count: i64,
-    fn_remap: &[i64; 2048],
+    fn_remap: &[i64; 16384],
     contest_offset: i64,
     robust_offset: i64,
     decision_offset: i64,
@@ -2528,8 +2690,8 @@ fn ir_module_dump_merge_calls(module: &IrModule) with IO, Mut, Div, Panic {
     while fi < (*module).fn_count {
         let fname = ir_fn_get(&(*module), fi as usize).name
         if ir_name_eq(fname, watch_pb) || ir_name_eq(fname, watch_pred) || ir_name_eq(fname, watch_main)
-            || ir_name_eq(fname, make_name("pb_new")) || ir_name_eq(fname, make_name("pb_lo_mean"))
-            || ir_name_eq(fname, make_name("vp_vc_to_pbox")) || ir_name_eq(fname, make_name("vp_default")) {
+            || ir_name_eq_lit(fname, "pb_new") || ir_name_eq_lit(fname, "pb_lo_mean")
+            || ir_name_eq_lit(fname, "vp_vc_to_pbox") || ir_name_eq_lit(fname, "vp_default") {
             print("MERGE_DUMP: sym[")
             print_int(fi)
             print("] ")
@@ -2542,7 +2704,7 @@ fn ir_module_dump_merge_calls(module: &IrModule) with IO, Mut, Div, Panic {
     }
     var vfi: i64 = 0
     while vfi < (*module).fn_count {
-        if ir_name_eq(ir_fn_get(&(*module), vfi as usize).name, make_name("vp_vc_to_pbox")) {
+        if ir_name_eq_lit(ir_fn_get(&(*module), vfi as usize).name, "vp_vc_to_pbox") {
             if ir_fn_get(&(*module), vfi as usize).instr_count > 0 {
                 print("MERGE_DUMP: vp_vc_to_pbox calls\n")
                 var ii: i64 = 0
@@ -2957,6 +3119,10 @@ fn ir_module_finalize_merged_calls(module: &! IrModule) -> bool with Mut, Div, P
     if !ir_module_promote_canonical_into_stub_slots(module) { return false }
     // Two passes after promotion: duplicate import stubs (ic=0) can alias lowered
     // bodies under the same name at higher fn_id; promotion fills stub slots first.
+    MERGE_FN_INDEX_DIVERGED = 0
+    MERGE_FN_INDEX_VERIFY = 0
+    if merge_fn_index_verify_enabled() { MERGE_FN_INDEX_VERIFY = 1 }
+    merge_fn_index_build(&(*module))
     var pass: i64 = 0
     while pass < 2 {
         var fi: i64 = 0
@@ -2985,6 +3151,17 @@ fn ir_module_finalize_merged_calls(module: &! IrModule) -> bool with Mut, Div, P
             fi = fi + 1
         }
         pass = pass + 1
+    }
+    merge_fn_index_drop()
+    if MERGE_FN_INDEX_DIVERGED != 0 {
+        print("error: SOUNIO_IR_FN_INDEX_VERIFY: the merge fn index disagreed with the linear scan on ")
+        print_int(MERGE_FN_INDEX_DIVERGED)
+        print(" lookup(s); first: index ")
+        print_int(MERGE_FN_INDEX_FIRST_FAST)
+        print(", linear ")
+        print_int(MERGE_FN_INDEX_FIRST_SLOW)
+        print("\n")
+        return false
     }
     ir_module_ensure_builtin_call_targets(module)
     true
@@ -3120,8 +3297,8 @@ fn visited_contains(visited: [string; 256], count: i64, path: string) -> bool wi
 // Missing imports and capacity saturation are data, never implicit success.
 pub struct ModuleClosure {
     pub paths: [string; 256],
-    pub edge_callers: [string; 512],
-    pub edge_dependencies: [string; 512],
+    pub edge_callers: [string; 1024],
+    pub edge_dependencies: [string; 1024],
     pub unresolved_callers: [string; 256],
     pub unresolved_imports: [string; 256],
     pub unresolved_paths: [string; 256],
@@ -3237,7 +3414,7 @@ pub fn module_frontend_collect_ast_closure_into(
         var i: i64 = 0
         while i < imports.count && !(*out).parse_failed {
             let dependency_path = resolve_import_file_path(imports.paths[i], cur_dir)
-            if (*out).edge_count < 512 {
+            if (*out).edge_count < 1024 {
                 let edge_index = (*out).edge_count
                 (*out).edge_callers[edge_index] = caller_path
                 (*out).edge_dependencies[edge_index] = dependency_path
@@ -6063,6 +6240,10 @@ pub fn module_frontend_check_imported_modules_verdict(main_path: string) -> i64 
 // Therefore a dep reset must NOT rebuild argument lists (which would duplicate
 // the flat pool and could overflow it). Validate pool intervals before reclaim.
 var MF_AREBOX_COUNT: i64 = 0
+// Place+remap dependency lane: dependency fn id -> accumulator fn id.
+var MF_PLACE_FN_REMAP: [i64; 16384] = [0; 16384]
+// 1 where the dependency function fills a preseeded stub below acc_fn_before.
+var MF_PLACE_FILL: [i64; 16384] = [0; 16384]
 var MF_AREBOX_RESET_OK: i64 = 0
 var MF_AREBOX_RESET_SKIP: i64 = 0
 var MF_AREBOX_SITES_RECLAIMED: i64 = 0
@@ -6397,7 +6578,14 @@ fn module_frontend_lower_programs_array_direct_box_multi(
                             let rollback_certificate_offset = (*acc_box).epistemic.rollback_certificate_count
                             let bss_offset_delta = (*acc_box).bss_total_size
                             let acc_fn_before = (*acc_box).fn_count
-                            var fn_remap: [i64; 2048] = [-1; 2048]
+                            // Sized to the whole function table: a dependency can hold up to
+                            // IR_MAX_FUNCS functions (was 2048 on the stack, indexed past its end).
+                            var rfc: i64 = 0
+                            while rfc < dep_fn_count {
+                                MF_PLACE_FN_REMAP[rfc as usize] = 0 - 1
+                                MF_PLACE_FILL[rfc as usize] = 0
+                                rfc = rfc + 1
+                            }
                             var append_count: i64 = 0
                             var rfi: i64 = 0
                             while rfi < dep_fn_count {
@@ -6427,37 +6615,47 @@ fn module_frontend_lower_programs_array_direct_box_multi(
                                     sfi = sfi + 1
                                 }
                                 if existing_body_idx >= 0 {
-                                    fn_remap[rfi as usize] = existing_body_idx
-                                } else if stub_idx >= 0 && dep_ic > 0 {
-                                    let planned_idx = (*acc_box).fn_count + append_count
-                                    if planned_idx < IR_MAX_FUNCS {
-                                        fn_remap[rfi as usize] = planned_idx
-                                        append_count = append_count + 1
-                                    }
+                                    MF_PLACE_FN_REMAP[rfi as usize] = existing_body_idx
+                                } else if stub_idx >= 0 {
+                                    // The seed preseeded this name as a body-less stub: the
+                                    // dependency.s body fills it in place (nothing to place when
+                                    // the dependency has no body either). Appending instead left
+                                    // the stub dead and spent a second slot on every imported
+                                    // function, halving what the lane could hold.
+                                    MF_PLACE_FN_REMAP[rfi as usize] = stub_idx
+                                    if dep_ic > 0 { MF_PLACE_FILL[rfi as usize] = 1 }
                                 } else {
-                                    let planned_idx = (*acc_box).fn_count + append_count
-                                    if planned_idx < IR_MAX_FUNCS {
-                                        fn_remap[rfi as usize] = planned_idx
-                                        append_count = append_count + 1
-                                    }
+                                    // A new function: one more slot. Counted unconditionally;
+                                    // the table bound is checked below instead of dropping
+                                    // whatever does not fit.
+                                    MF_PLACE_FN_REMAP[rfi as usize] = (*acc_box).fn_count + append_count
+                                    append_count = append_count + 1
                                 }
                                 rfi = rfi + 1
                             }
+                            if (*acc_box).fn_count + append_count > IR_MAX_FUNCS {
+                                lower_note_merge_fn_overflow((*acc_box).fn_count + append_count, IR_MAX_FUNCS)
+                                lower_hard_error_report()
+                                return module_frontend_lower_direct_box_error("ir_merge_fn_overflow")
+                            }
+                            // dep_box was lowered with its own function table (see
+                            // ir/lower.sio lower_rgn_merge_check).
+                            let _rgn_veto = lower_rgn_merge_check(&(*acc_box), &(*dep_box))
 
                             // Wave13: when seed preseeded dep BSS, DEDUP skips those slots —
                             // only grow acc BSS by non-deduped dep BSS size (not full dep total).
                             var bss_grow: i64 = 0
                             var mfi: i64 = 0
                             while mfi < dep_fn_count {
-                                let dst_fi = fn_remap[mfi as usize]
-                                if dst_fi >= acc_fn_before {
+                                let dst_fi = MF_PLACE_FN_REMAP[mfi as usize]
+                                if dst_fi >= acc_fn_before || MF_PLACE_FILL[mfi as usize] == 1 {
                                     ir_merge_place_and_remap_function(
                                         &! (*acc_box),
                                         &(*dep_box),
                                         mfi,
                                         dst_fi,
                                         dep_fn_count,
-                                        &fn_remap,
+                                        &MF_PLACE_FN_REMAP,
                                         contest_offset,
                                         robust_offset,
                                         decision_offset,
@@ -6567,6 +6765,13 @@ fn module_frontend_lower_programs_array_direct_box_multi(
                 ir_fn_set(&! (*acc_box), seed_main_idx as usize, seed_user_main)
             }
 
+            // Last, after the main restore above: the snapshot predates the merges.
+            if lower_rgn_merge_vetoed() {
+                let vetoed = lower_rgn_veto_regions(&(*acc_box))
+                print("lower_array: region veto (a module was lowered without the region cast hook) rewrote ")
+                print_int(vetoed)
+                print(" region entries\n")
+            }
             trace.last_stage = "done"
             print("lower_array: final_fn_count ")
             print_int((*acc_box).fn_count)
@@ -6651,6 +6856,7 @@ fn bridge_lower_single_module_box_scoped(main_path: string, trace: &! LoadMultim
     // a prior compile's durable LOWER_USE_MODULE_OVERFLOWED (and IR_LOWER_HARD_ERROR)
     // would otherwise still be set here and fail a compile whose own source never
     // overflowed. Reset both at this top-level entry too.
+    module_frontend_apply_name_pool_limit()
     lower_hard_error_reset()
     lower_use_module_reset()
     // Copilot review (PR #2515), round 2: AST_PATH_RANGE_NAME_OVERFLOWED
@@ -6827,7 +7033,7 @@ fn module_frontend_without_top_level_main(
         Some(list) => {
             let item = (*list).head
             let rest = module_frontend_without_top_level_main((*list).tail)
-            if item.kind == ItemKind::ItemFn && ir_name_eq(item.name, make_name("main")) {
+            if item.kind == ItemKind::ItemFn && ir_name_eq_lit(item.name, "main") {
                 rest
             } else {
                 Some(Box::new(ItemList { head: item, tail: rest }))
@@ -7650,6 +7856,7 @@ fn module_frontend_compile_imported_to_file_target_impl(
 
     trace.last_stage = "lower_merge"
     print("imported_compile: lower_begin\n")
+    lower_untyped_field_trace_init()
     var used_specialized: bool = false
     var lowered: ModuleFrontendLowerDirectBoxResult = module_frontend_lower_direct_box_error("uninitialized")
     if use_collapse {
@@ -7666,6 +7873,7 @@ fn module_frontend_compile_imported_to_file_target_impl(
         lowered = module_frontend_lower_programs_array_direct_box(&! programs, loaded, &! trace)
     }
     print("imported_compile: lower_done\n")
+    lower_untyped_field_trace_dump()
     if !lowered.ok {
         print("IR lowering failed during merge: ")
         print(lowered.error_msg)
@@ -7942,7 +8150,7 @@ fn module_frontend_source_name_hash_at(data: string, start: i64, size: i64) -> i
            ch == (10 as i8) || ch == (13 as i8) {
             return hash
         }
-        hash = (hash * 33) + (ch as i64)
+        hash = wrapping_add(wrapping_mul(hash, 33), ch as i64)
         i = i + 1
     }
     hash
@@ -7952,7 +8160,7 @@ fn module_frontend_name_hash(name: Name) -> i64 {
     var hash: i64 = 5381
     var i: i64 = 0
     while i < name.len {
-        hash = (hash * 33) + (name.buf[i as usize] as i64)
+        hash = wrapping_add(wrapping_mul(hash, 33), name.buf[i as usize] as i64)
         i = i + 1
     }
     hash
@@ -9282,6 +9490,7 @@ fn module_frontend_summary_module(prog: Program) -> IrModule with IO, Mut, Div, 
 }
 
 pub fn load_multimodule_ir_probe_summary_traced(main_path: string, trace: &! LoadMultimoduleIrTrace) -> MultiModuleIrResult with IO, Mut, Div, Panic, Alloc {
+    lower_merge_state_reset()
     let main_prog = load_module_file(main_path)
     var programs: [Program; 256] = [mf_empty_program(); 256]
     var file_paths: [string; 256] = [""; 256]
@@ -9398,6 +9607,10 @@ pub fn load_multimodule_ir_probe_summary_traced(main_path: string, trace: &! Loa
     print_int(merged_module.fn_count)
     print(" functions\n")
 
+    if lower_merge_fn_overflowed() {
+        lower_hard_error_report()
+        return multimodule_ir_error("ir_merge_fn_overflow")
+    }
     if merged_module.fn_count <= 0 {
         print("IR lowering produced empty module\n")
         return multimodule_ir_error("ir_lowering_empty_module")

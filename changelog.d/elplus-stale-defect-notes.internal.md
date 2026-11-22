@@ -1,0 +1,1 @@
+`stdlib/ontology/elplus.sio` no longer documents compiler defects that do not reproduce on the current compiler. These were imported calls with more than eight parameters outside `main`, module arrays passed through `&!`, the qualified import form, and arrays of structs or without splat initialisation. Four run-pass witnesses now pin the correct behaviour.

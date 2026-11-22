@@ -425,15 +425,23 @@ Inference across function boundaries exists only as an opt-in experiment
 
 ### Can I write custom effects?
 
-Not yet. An `effect Name { ... }` declaration parses, but the default compiler
-(Madaros) does not register it (EFF-021 in `docs/spec/2026-10/03-evidence.tsv`).
-Using it in a `with` clause is refused with E246 ("not a declared user
-effect"). A few names on a temporary hold list (`effect_name_is_held` in
-`self-hosted/check/effects.sio`; for example `Choice`, `Counter`, `Fail`) are
-accepted and then dropped without a diagnostic, so a program that compiles with
-one of them is not evidence that user effects work. Generic effects such as
-`effect State<S>` do not parse, and `handle` has no execution semantics (see
-`docs/spec/S07_EFFECT_HANDLERS.md`).
+Yes, within Madaros's current handler limits. Declare operations with
+`effect Name { fn op() -> i64 }`, invoke them with `perform Name.op()`, and
+handle them with `handle<Name> { ... } with { on op() -> resume(value) }`.
+Madaros implements deep handlers with linear one-shot continuations; a clause
+may also return without resuming. See the existing executable examples
+[`fx2b_op_args.sio`](../tests/run-pass/fx2b_op_args.sio) and
+[`fx5_zero_resume.sio`](../tests/run-pass/fx5_zero_resume.sio).
+
+The first implementation supports scalar `i64` operations and handler answers,
+with no captured locals in clauses and no `perform` across a function boundary.
+Generic declarations such as `effect State<S>` are not supported. The
+[handler specification](spec/S07_EFFECT_HANDLERS.md#status-2026-11-06-sio-417-p5-merged)
+records the argument, clause and nesting limits and their diagnostics.
+Undeclared effect names and a ninth distinct effect in a function signature
+produce E246. Names on the temporary hold list (`effect_name_is_held` in
+`self-hosted/check/effects.sio`) remain an exception: acceptance alone does not
+prove that such a name denotes a working effect.
 
 ### Are refinement types fully supported?
 

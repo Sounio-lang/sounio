@@ -7,7 +7,8 @@
 module native::codegen_x86_linux
 
 use parser::ast::{Name}
-use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IR_MAX_FUNCS, IR_MAX_STRINGS, IR_MAX_VREGS, IR_FLOAT_REG_MARKER_FLAG, IR_BOX_ALLOC_FLAG, IR_XOR_TWIST_CAYLEY_DICKSON_SIGN, IR_XOR_CANDIDATE_AUTO, ir_reg_count_is_valid, ir_function_regs_are_valid, IR_VALIDATE_FAIL_INSTR, IR_VALIDATE_FAIL_OP, IR_VALIDATE_FAIL_DST, IR_VALIDATE_FAIL_SRC1, IR_VALIDATE_FAIL_SRC2, ir_xor_convolution_s, ir_name_eq, BSS_BASE_LINUX, IR_STRATEGY_BSS_GLOBAL, BSS_INIT_STRING_MAGIC}
+use lexer::span::{srcmap_line, srcmap_col, srcmap_path_len, srcmap_path_byte}
+use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IR_A_SRC_SITE, IR_MAX_FUNCS, IR_MAX_STRINGS, IR_MAX_VREGS, IR_FLOAT_REG_MARKER_FLAG, IR_BOX_ALLOC_FLAG, IR_ALLOC_PACKED_I8, IR_ALLOC_PACKED_U8, IR_ALLOC_LIKE_SOURCE, IR_XOR_TWIST_CAYLEY_DICKSON_SIGN, IR_XOR_CANDIDATE_AUTO, ir_reg_count_is_valid, ir_function_regs_are_valid, ir_xor_convolution_s, ir_name_eq, BSS_BASE_LINUX, IR_STRATEGY_BSS_GLOBAL, BSS_INIT_STRING_MAGIC, ir_bss_packed_header_needed, IR_VALIDATE_FAIL_DST, IR_VALIDATE_FAIL_INSTR, IR_VALIDATE_FAIL_OP, IR_VALIDATE_FAIL_SRC1, IR_VALIDATE_FAIL_SRC2}
 use native::encode::*
 use native::elf::*
 use native::aarch64::*
@@ -38,6 +39,9 @@ use ir::opt_strategy::{ir_opt_apply_strategy}
 // with the 18 native:: module imports already present here (~2000+ symbols).
 use io::trace::{io_trace_append_byte, io_trace_append_string, io_trace_append_json_string, io_trace_bool_string, io_trace_i64_string, io_write_bytes_to_file}
 use io::env::{read_env}
+use ir::ir::{ir_arena_arg_at, ir_arena_load, ir_arena_name, ir_arena_report_violation, ir_arena_store, ir_binop, ir_call, ir_float_bits_capacity, ir_float_bits_get, ir_fn_get, ir_function_name_at, ir_instr_new, ir_intern_name, ir_load_imm, ir_name_at, ir_name_from_bytes, ir_reg_list_single, ir_region_slot_r, ir_region_slot_w, ir_return}
+use native::lower_ir::{emit_evex_pd_rr_full}
+use parser::ast::{empty_name, make_name, name_eq, name_eq_lit}
 // Note: native::avx512 EVEX emitters are available in native/avx512.sio.
 // They will be wired into the lowering pass in Horizon 3.2 (vector IR ops).
 
@@ -111,13 +115,13 @@ fn nc_note_label_overflow(nc: &! NativeCompiler) with Mut, Panic {
 // for large programs (isa ELF ~700KB, evm ~2.1MB) and itself a large-stack-frame
 // hazard. This module-global BSS array (demand-paged, ~0 RSS until touched) holds
 // the assembled ELF image. Written INLINE only (direct NC_BIG_ELF[i]).
-var NC_BIG_ELF: [i8; 201326592] = [0; 201326592]
+var NC_BIG_ELF: [i8; 234881024] = [0; 234881024]
 // Single source of truth for the NC_BIG_ELF bound. The DECLARATION above must
 // stay a literal; every bound CHECK calls this accessor. NOTE: this value must
 // never be confused with the ELF LOAD BASE ADDRESS 0x400000 (4194304), which is
 // passed as the `base_addr` argument at several call sites and is unrelated to
 // buffer capacity. Pinned by scripts/ci/native_capacity_tiers_gate.sh.
-fn nc_elf_capacity_bytes() -> i64 { 201326592 }
+fn nc_elf_capacity_bytes() -> i64 { 234881024 }
 // Scratch IR functions for the sret witness. These are module-scope to avoid
 // putting IrFunction-sized temporaries on the Madaros runtime stack.
 var NV2_SRET_MAIN_FN: IrFunction = ir_empty_function()
@@ -1127,12 +1131,28 @@ fn name_is___sounio_seq_push(n: Name) -> bool with Mut, Panic, Div {
 }
 
 fn name_is___sounio_seq_push_scalar(n: Name) -> bool with Mut, Panic, Div {
-    name_eq(n, make_name("__sounio_seq_push_scalar"))
+    name_eq_lit(n, "__sounio_seq_push_scalar")
+}
+
+fn name_is_int_overflow(n: Name) -> bool with Mut, Panic, Div {
+    name_eq(n, make_name("__int_overflow"))
+}
+
+fn name_is_wrapping_add(n: Name) -> bool with Mut, Panic, Div {
+    name_eq(n, make_name("wrapping_add"))
+}
+
+fn name_is_wrapping_sub(n: Name) -> bool with Mut, Panic, Div {
+    name_eq(n, make_name("wrapping_sub"))
+}
+
+fn name_is_wrapping_mul(n: Name) -> bool with Mut, Panic, Div {
+    name_eq(n, make_name("wrapping_mul"))
 }
 
 fn name_is___sounio_seq_get(n: Name) -> bool with Mut, Panic, Div {
     if n.len != 16 { return false }
-    name_eq(n, make_name("__sounio_seq_get"))
+    name_eq_lit(n, "__sounio_seq_get")
 }
 
 fn name_is___sounio_fx_install(n: Name) -> bool with Mut, Panic, Div {
@@ -1153,7 +1173,7 @@ fn name_is___sounio_fx_body_done(n: Name) -> bool with Mut, Panic, Div {
 
 fn name_is___sounio_seq_set(n: Name) -> bool with Mut, Panic, Div {
     if n.len != 16 { return false }
-    name_eq(n, make_name("__sounio_seq_set"))
+    name_eq_lit(n, "__sounio_seq_set")
 }
 
 // ── Track A: extern "C" FFI intrinsics ────────────────────────────────
@@ -1432,10 +1452,113 @@ fn name_ref_is_print(n: &Name) -> bool with Mut, Panic, Div {
     true
 }
 
-// Bytes the bump heap may use: the 2 GiB mapping minus the runtime context,
-// the handle table, and the region record stack carved off its top
-// (native/gc.sio, "Region reclamation").
-fn nc_heap_arena_bytes() -> i64 {
+// Handle-table capacity of the generated program. 2^22 by default
+// (native/gc.sio). An x86-64 Linux compile can raise it with
+// SOUNIO_NV2_HANDLE_LOG2 = 22 .. 28 (nc_configure_handles_from_env).
+//
+// A struct-base word below the capacity is a handle id; at or above it, a raw
+// pointer (gc.sio, native_v2_handle_raw_ptr_threshold). Raw pointers are heap
+// and stack addresses, BSS addresses (from BSS_BASE_LINUX = 0x20000000) and
+// ELF image addresses (from the load base). The load base was 0x400000, which
+// is exactly 2^22, so the handle range could not grow. A larger capacity
+// therefore moves the load base to the capacity itself: ids stay below every
+// raw pointer, and with LOG2 = 22 the ELF is byte-identical. LOG2 stops at 28
+// so the image (base .. base + text + rodata + data) still ends below
+// BSS_BASE_LINUX; native_v2_write_min_elf64_to_file refuses an image that
+// would not. Madaros compiling itself needs this: gen3 filled the 4,194,304
+// handles after parsing about 3 MB of its own 28 MB of source (#2966).
+var NC_HANDLE_CAPACITY: i64 = 4194304
+var NC_HANDLE_ENV_CHECKED: i64 = 0
+
+fn nc_handle_capacity() -> i64 with Mut { NC_HANDLE_CAPACITY }
+
+fn nc_handle_table_bytes() -> i64 with Mut { native_v2_handle_entry_size() * NC_HANDLE_CAPACITY }
+
+// ELF load base of a Linux image: the handle capacity (0x400000 by default).
+fn nc_elf_base_addr() -> i64 with Mut { NC_HANDLE_CAPACITY }
+
+// The AArch64 preview keeps the fixed 0x400000 base: its runtime has no
+// configurable handle table (SIO-32).
+fn nc_a64_preview_elf_base_addr() -> i64 { 4194304 }
+
+fn nc_configure_handles_from_env() with IO, Mut, Panic, Div {
+    if NC_HANDLE_ENV_CHECKED == 1 { return }
+    NC_HANDLE_ENV_CHECKED = 1
+    NC_HANDLE_CAPACITY = 4194304
+    let v = read_env("SOUNIO_NV2_HANDLE_LOG2")
+    if str_len(v) == 0 { return }
+    var cap: i64 = 0
+    if str_eq(v, "22") { cap = 4194304 }
+    if str_eq(v, "23") { cap = 8388608 }
+    if str_eq(v, "24") { cap = 16777216 }
+    if str_eq(v, "25") { cap = 33554432 }
+    if str_eq(v, "26") { cap = 67108864 }
+    if str_eq(v, "27") { cap = 134217728 }
+    if str_eq(v, "28") { cap = 268435456 }
+    if cap == 0 {
+        print("warning: SOUNIO_NV2_HANDLE_LOG2=")
+        print(v)
+        print(" is not one of 22 .. 28; using 22\n")
+        return
+    }
+    // The table is carved from the heap reservation, whose minimum and floor
+    // scale with it (nc_heap_reserve_min / nc_heap_reserve_floor).
+    NC_HANDLE_CAPACITY = cap
+}
+
+// Runtime heap mapping (Linux): reserve, then let the kernel commit on touch.
+//
+// The entry trampoline maps [runtime context | handle table | bump heap |
+// region record stack] as ONE anonymous MAP_NORESERVE mapping. Its length is
+// decided at program start, not at compile time:
+//   want  = min(NC_HEAP_RESERVE_MAX, (totalram + totalswap) * mem_unit)   (sysinfo)
+//   want  = max(want, NC_HEAP_RESERVE_MIN)
+//   then mmap(want); on refusal (RLIMIT_AS, strict overcommit) halve and retry
+//   down to NC_HEAP_RESERVE_FLOOR; below that, exit 184.
+// Physical pages are committed only when the bump cursor touches them, so a
+// large reservation costs no RSS. The arena is full when the program has used
+// what this machine can back (RAM + swap), not at an arbitrary 2 GiB, and no
+// environment variable sizes it (ADR-028 / ADR-026: size belongs to the
+// runtime and to phases, not to a process knob). heap_limit is written from
+// the length actually mapped. The prior art is the reserve/commit split of
+// V8's virtual-memory cages, Go's heap arenas and .NET GC regions.
+fn nc_heap_reserve_max() -> i64 { 1099511627776 }      // 1 TiB of address space
+
+// Fixed carve-outs of the mapping: runtime context, handle table, region stack.
+// The handle table grows with SOUNIO_NV2_HANDLE_LOG2 (48 B x 2^28 = 12 GiB), so
+// the minimum and the floor are stated relative to it: the minimum keeps at
+// least three quarters of the mapping for the heap, the floor at least half.
+fn nc_heap_reserve_carve_bytes() -> i64 with Mut {
+    runtime_context_size() + nc_handle_table_bytes() + native_v2_region_stack_bytes()
+}
+
+// Never below the old 2 GiB.
+fn nc_heap_reserve_min() -> i64 with Mut {
+    let scaled = 4 * nc_heap_reserve_carve_bytes()
+    if scaled > 2147483648 { scaled } else { 2147483648 }
+}
+
+// 256 MiB at the default table: give up below this.
+fn nc_heap_reserve_floor() -> i64 with Mut {
+    let scaled = 2 * nc_heap_reserve_carve_bytes()
+    if scaled > 268435456 { scaled } else { 268435456 }
+}
+
+// Upper bound on bump-heap bytes (largest possible mapping minus the fixed
+// carve-outs). Used only to reject impossible single allocations at compile
+// time; the runtime check against heap_limit decides the real wall.
+fn nc_heap_arena_bytes() -> i64 with Mut {
+    nc_heap_reserve_max() - nc_heap_reserve_carve_bytes()
+}
+
+// Windows and macOS keep their fixed 2 GiB reservation; their heap_limit is
+// heap_base plus this, never the Linux upper bound above.
+fn nc_heap_arena_bytes_fixed_2gib() -> i64 {
+    2147483648 - runtime_context_size() - native_v2_handle_table_bytes() - native_v2_region_stack_bytes()
+}
+
+// The Box pool keeps its own fixed-size lazy mapping (unchanged).
+fn nc_box_heap_arena_bytes() -> i64 {
     2147483648 - runtime_context_size() - native_v2_handle_table_bytes() - native_v2_region_stack_bytes()
 }
 
@@ -1443,22 +1566,35 @@ fn nc_heap_arena_bytes() -> i64 {
 // eight; codegen itself calls __rgn_barrier and __rgn_mark_all.
 fn native_v2_region_builtin_id(n: Name) -> i64 with Mut, Panic, Div {
     if n.len < 9 { return 0 }
-    if name_eq(n, make_name("__rgn_enter")) { return 60 }
-    if name_eq(n, make_name("__rgn_leave")) { return 61 }
-    if name_eq(n, make_name("__rgn_escaped")) { return 62 }
-    if name_eq(n, make_name("__rgn_young")) { return 63 }
-    if name_eq(n, make_name("__rgn_cursor")) { return 64 }
-    if name_eq(n, make_name("__rgn_count")) { return 65 }
-    if name_eq(n, make_name("__rgn_reset_fits")) { return 66 }
-    if name_eq(n, make_name("__rgn_exit_scalar")) { return 67 }
-    if name_eq(n, make_name("__rgn_barrier")) { return 68 }
-    if name_eq(n, make_name("__rgn_mark_all")) { return 69 }
+    if name_eq_lit(n, "__rgn_enter") { return 60 }
+    if name_eq_lit(n, "__rgn_leave") { return 61 }
+    if name_eq_lit(n, "__rgn_escaped") { return 62 }
+    if name_eq_lit(n, "__rgn_young") { return 63 }
+    if name_eq_lit(n, "__rgn_cursor") { return 64 }
+    if name_eq_lit(n, "__rgn_count") { return 65 }
+    if name_eq_lit(n, "__rgn_reset_fits") { return 66 }
+    if name_eq_lit(n, "__rgn_exit_scalar") { return 67 }
+    if name_eq_lit(n, "__rgn_barrier") { return 68 }
+    if name_eq_lit(n, "__rgn_mark_all") { return 69 }
+    // 74 and 75: loop-iteration regions (ir/lower.sio LOWER_LOOP_RGN_*).
+    if name_eq_lit(n, "__rgn_reset") { return 74 }
+    if name_eq_lit(n, "__rgn_settle") { return 75 }
+    // 84: 76..80 belong to the effect and print builtins (fx_install is 76),
+    // 80..82 to wrapping_add/sub/mul (SIO-207) and 83 to print_u64; this id
+    // was 81 until SIO-207 took it;
+    // the dispatch is a flat `builtin_id == N` chain, so a shared id runs the
+    // first emitter that matches. scripts/ci/madaros_loop_region_gate.sh
+    // checks every id in that chain is distinct.
+    if name_eq_lit(n, "__rgn_copy_payload") { return 84 }
+    // 73, not 72: main took 72 for array_concat (SIO-389); sharing it sent
+    // `v as *mut T` to the array_concat emitter (SIGILL, #2966 merge).
+    if name_eq_lit(n, "__ptr_of_ref") { return 73 }
     0
 }
 
 fn native_v2_builtin_id_for_name_ref(name: &Name) -> i64 with Mut, Panic, Div {
     if name_ref_is_print_int(name) { return 1 }
-    if name_ref_is_print_u64(name) { return 80 }
+    if name_ref_is_print_u64(name) { return 83 }
     if name_ref_is_print_char(name) { return 2 }
     if name_ref_is_print(name) { return 3 }
     if name_is_assert(*name) { return 21 }
@@ -1472,6 +1608,12 @@ fn native_v2_builtin_id_for_name_ref(name: &Name) -> i64 with Mut, Panic, Div {
     if rgn_id_n != 0 { return rgn_id_n }
     if name_is_arena_reset(*name) { return 57 }
     if name_is_panic(*name) { return 58 }
+    if name_is_wrapping_add(*name) { return 80 }
+    if name_is_int_overflow(*name) { return 85 }
+    if name_is_wrapping_sub(*name) { return 81 }
+    if name_is_wrapping_mul(*name) { return 82 }
+    // 83 is print_u64 (SIO-399); keep builtin ids unique -- a duplicate id
+    // silently miscompiles both builtins (first match wins).
     if name_is_untracked_counter(*name) { return 59 }
     if name_is_read_byte(*name) { return 55 }
     if name_is_getpid(*name) { return 28 }
@@ -1555,7 +1697,7 @@ fn native_v2_builtin_id_for_func_ref(func: &IrFunction) -> i64 with Mut, Panic, 
         return 0
     }
     if native_v2_func_name_is_print_int(func) { return 1 }
-    if native_v2_func_name_is_print_u64(func) { return 80 }
+    if native_v2_func_name_is_print_u64(func) { return 83 }
     if native_v2_func_name_is_print_char(func) { return 2 }
     if native_v2_func_name_is_print(func) { return 3 }
     if name_is_get_arg_count((*func).name) { return 4 }
@@ -1628,6 +1770,10 @@ fn native_v2_builtin_id_for_func_ref(func: &IrFunction) -> i64 with Mut, Panic, 
     if name_is___sounio_fx_perform((*func).name) { return 77 }
     if name_is___sounio_fx_resume((*func).name) { return 78 }
     if name_is___sounio_fx_body_done((*func).name) { return 79 }
+    if name_is_wrapping_add((*func).name) { return 80 }
+    if name_is_int_overflow((*func).name) { return 85 }
+    if name_is_wrapping_sub((*func).name) { return 81 }
+    if name_is_wrapping_mul((*func).name) { return 82 }
         if name_is_ffi_free((*func).name) { return 44 }
         if name_is_ffi_system((*func).name) { return 45 }
         if name_is_ffi_sqrt((*func).name) { return 46 }
@@ -2018,20 +2164,20 @@ fn nc_emit_unimplemented_extern_trap_into(nc: &! NativeCompiler) with Mut, Panic
 // KL-14b/c/d: names resolved via DT_NEEDED + GOT (not ffi_* builtins).
 // Cap is the dyn ELF emitter's unique-symbol table (see native_v2_dynlink_*).
 fn name_is_dynlink_extern(n: Name) -> bool with Mut, Panic, Div {
-    if name_eq(n, make_name("kl14b_add")) { return true }
-    if name_eq(n, make_name("kl14c_add")) { return true }
-    if name_eq(n, make_name("kl14c_mul")) { return true }
-    if name_eq(n, make_name("kl14c_neg")) { return true }
-    if name_eq(n, make_name("kl14d_a")) { return true }
-    if name_eq(n, make_name("kl14d_b")) { return true }
-    if name_eq(n, make_name("kl14d_align_probe")) { return true }
-    if name_eq(n, make_name("ZSTD_compress")) { return true }
-    if name_eq(n, make_name("ZSTD_decompress")) { return true }
-    if name_eq(n, make_name("ZSTD_isError")) { return true }
-    if name_eq(n, make_name("dlopen")) { return true }
-    if name_eq(n, make_name("dlsym")) { return true }
-    if name_eq(n, make_name("dlclose")) { return true }
-    if name_eq(n, make_name("dlerror")) { return true }
+    if name_eq_lit(n, "kl14b_add") { return true }
+    if name_eq_lit(n, "kl14c_add") { return true }
+    if name_eq_lit(n, "kl14c_mul") { return true }
+    if name_eq_lit(n, "kl14c_neg") { return true }
+    if name_eq_lit(n, "kl14d_a") { return true }
+    if name_eq_lit(n, "kl14d_b") { return true }
+    if name_eq_lit(n, "kl14d_align_probe") { return true }
+    if name_eq_lit(n, "ZSTD_compress") { return true }
+    if name_eq_lit(n, "ZSTD_decompress") { return true }
+    if name_eq_lit(n, "ZSTD_isError") { return true }
+    if name_eq_lit(n, "dlopen") { return true }
+    if name_eq_lit(n, "dlsym") { return true }
+    if name_eq_lit(n, "dlclose") { return true }
+    if name_eq_lit(n, "dlerror") { return true }
     false
 }
 
@@ -2781,6 +2927,239 @@ fn nc_emit_jz_rel32(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_u32_le(nc, 0)
 }
 
+fn nc_emit_jo_rel32(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x0f)
+    nc_emit_byte(nc, 0x80)
+    nc_emit_u32_le(nc, 0)
+}
+
+// SIO-207 phase 1: fail closed on signed integer overflow. Emit immediately
+// after a flags-setting add/sub/imul/neg (nothing may clobber OF in
+// between); jumps to the per-function trap stub (exit 1, same shape as
+// builtin panic) defined at fn end. OpAdd/OpSub/OpMul are
+// signedness-agnostic in the IR, so this traps the signed-overflow bit
+// pattern; exact unsigned semantics wait for IR signedness variants.
+fn nc_emit_overflow_guard(nc: &! NativeCompiler, kind: i64) with Mut, Panic, Div {
+    let jo_pos = (*nc).code.len
+    nc_emit_jo_rel32(nc)
+    nc_record_overflow_site(nc, jo_pos + 2, kind)
+}
+
+// ADR-031 R1: each guard jumps to a stub that names what overflowed. The
+// stubs are per function and per kind (at most NC_OVF_KIND_COUNT), so the cost
+// is a few stubs per function, not one per site. A site past the table falls
+// back to the shared bare exit(1) stub, which stays correct, only less loud.
+fn nc_record_overflow_site(nc: &! NativeCompiler, patch_pos: i64, kind: i64) with Mut, Panic, Div {
+    if kind >= 0 && kind < NC_OVF_KIND_COUNT && NC_OVF_PATCH_N < NC_OVF_PATCH_CAP {
+        NC_OVF_PATCH_POS[NC_OVF_PATCH_N as usize] = patch_pos
+        NC_OVF_PATCH_KIND[NC_OVF_PATCH_N as usize] = kind
+        NC_OVF_PATCH_SITE[NC_OVF_PATCH_N as usize] = NC_CUR_SRC_SITE
+        NC_OVF_PATCH_N = NC_OVF_PATCH_N + 1
+        NC_CUR_SRC_SITE = 0
+    } else {
+        NC_CUR_SRC_SITE = 0
+        NC_V2_OVERFLOW_GUARD_USED = 1
+        nc_add_label_patch(nc, patch_pos, nc_v2_overflow_trap_label())
+    }
+}
+
+fn nc_overflow_kind_text(kind: i64) -> string {
+    if kind == 0 { "i64 +" }
+    else if kind == 1 { "i64 -" }
+    else if kind == 2 { "i64 *" }
+    else if kind == 3 { "i64 unary -" }
+    else if kind == 4 { "u64 +" }
+    else if kind == 5 { "u64 -" }
+    else if kind == 6 { "u64 *" }
+    else if kind == 7 { "i64 /" }
+    else if kind == 8 { "i64 %" }
+    else if kind == 9 { "i64 /" }
+    else if kind == 10 { "i64 %" }
+    else if kind == 11 { "u64 /" }
+    else { "u64 %" }
+}
+
+// Kinds 0-8 are overflows; 9-12 are a zero divisor (ADR-031 R2).
+fn nc_overflow_prefix(kind: i64) -> string {
+    if kind >= 9 { "sounio: division by zero (" } else { "sounio: integer overflow (" }
+}
+
+// The message for one kind, interned once per compile in the flat rodata.
+fn nc_intern_overflow_message(nc: &! NativeCompiler, kind: i64) with Mut, Panic, Div {
+    if NC_OVF_MSG_OFF[kind as usize] >= 0 { return }
+    let off = native_v2_rodata_len_into(nc)
+    nc_alloc_diag_append_ascii_into(nc, nc_overflow_prefix(kind))
+    nc_alloc_diag_append_ascii_into(nc, nc_overflow_kind_text(kind))
+    nc_alloc_diag_append_ascii_into(nc, ")\n")
+    NC_OVF_MSG_OFF[kind as usize] = off
+    NC_OVF_MSG_LEN[kind as usize] = native_v2_rodata_len_into(nc) - off
+}
+
+// Emit this function's overflow stubs and patch every recorded guard to its
+// stub. Unreachable except through a guard: callers place it after the
+// function's final ret.
+fn nc_emit_ascii_inline(nc: &! NativeCompiler, text: string) with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < str_len(text) { nc_emit_byte(nc, str_char_at(text, i) as i64)  i = i + 1 }
+}
+
+fn nc_emit_decimal_inline(nc: &! NativeCompiler, v: i64) with Mut, Panic, Div {
+    if v <= 0 { nc_emit_byte(nc, 48)  return }
+    var div: i64 = 1
+    while div <= v / 10 { div = div * 10 }
+    while div > 0 { nc_emit_byte(nc, 48 + (v / div) % 10)  div = div / 10 }
+}
+
+fn nc_decimal_len(v: i64) -> i64 with Div {
+    if v <= 0 { return 1 }
+    var n: i64 = 0
+    var x = v
+    while x > 0 { n = n + 1  x = x / 10 }
+    n
+}
+
+// One stub for a located guard: the whole line, including "at path:line:col",
+// travels inline behind a `call` that pushes its address, so a site costs code
+// bytes but no rodata (the flat rodata is 2 MiB and the self-compile has tens
+// of thousands of guards). Returns false when the site cannot be resolved; the
+// caller then uses the per-kind stub without a location.
+fn nc_emit_located_overflow_stub(nc: &! NativeCompiler, kind: i64, site: i64) -> bool with Mut, Panic, Div {
+    let fid = site >> 32
+    let off = site & 4294967295
+    let line = srcmap_line(fid, off)
+    let col = srcmap_col(fid, off)
+    let plen = srcmap_path_len(fid)
+    if line <= 0 || col <= 0 || plen <= 0 { return false }
+    let kind_text = nc_overflow_kind_text(kind)
+    let prefix = nc_overflow_prefix(kind)
+    let n = str_len(prefix) + str_len(kind_text) + 5 + plen + 1 + nc_decimal_len(line) + 1 + nc_decimal_len(col) + 1
+    nc_emit_byte(nc, 0xe8)
+    nc_emit_u32_le(nc, n)                     // call over the message
+    nc_emit_ascii_inline(nc, prefix)
+    nc_emit_ascii_inline(nc, kind_text)
+    nc_emit_ascii_inline(nc, ") at ")
+    var pi: i64 = 0
+    while pi < plen { nc_emit_byte(nc, srcmap_path_byte(fid, pi))  pi = pi + 1 }
+    nc_emit_byte(nc, 58)
+    nc_emit_decimal_inline(nc, line)
+    nc_emit_byte(nc, 58)
+    nc_emit_decimal_inline(nc, col)
+    nc_emit_byte(nc, 10)
+    nc_emit_byte(nc, 0x5e)                    // pop rsi
+    nc_emit_mov_reg_imm(nc, 2, n)             // rdx = n
+    nc_emit_mov_rdi_imm(nc, 2)                // stderr
+    nc_emit_mov_rax_imm(nc, 1)                // write
+    nc_emit_syscall(nc)
+    nc_emit_exit_code(nc, 1)
+    true
+}
+
+fn nc_emit_overflow_stubs(nc: &! NativeCompiler) with Mut, Panic, Div {
+    if NC_OVF_PATCH_N == 0 { return }
+    var stub_at: [i64; 16] = [-1; 16]
+    var i: i64 = 0
+    while i < NC_OVF_PATCH_N {
+        let kind = NC_OVF_PATCH_KIND[i as usize]
+        let site = NC_OVF_PATCH_SITE[i as usize]
+        if site != 0 {
+            // Same (kind, site) earlier in this function shares its stub.
+            var j: i64 = i - 1
+            var shared: i64 = 0 - 1
+            while j >= 0 && shared < 0 {
+                if NC_OVF_PATCH_SITE[j as usize] == site && NC_OVF_PATCH_KIND[j as usize] == kind && NC_OVF_STUB_OFF[j as usize] >= 0 {
+                    shared = NC_OVF_STUB_OFF[j as usize]
+                }
+                j = j - 1
+            }
+            if shared < 0 {
+                let here = (*nc).code.len
+                if nc_emit_located_overflow_stub(nc, kind, site) { shared = here }
+            }
+            NC_OVF_STUB_OFF[i as usize] = shared
+            if shared >= 0 {
+                let lpos = NC_OVF_PATCH_POS[i as usize]
+                nc_patch_u32_le(nc, lpos, shared - (lpos + 4))
+                i = i + 1
+                continue
+            }
+        } else {
+            NC_OVF_STUB_OFF[i as usize] = 0 - 1
+        }
+        if stub_at[kind as usize] < 0 {
+            nc_intern_overflow_message(nc, kind)
+            stub_at[kind as usize] = (*nc).code.len
+            nc_core_emit_write_stderr_rodata_into(nc, NC_OVF_MSG_OFF[kind as usize], NC_OVF_MSG_LEN[kind as usize])
+            nc_emit_exit_code(nc, 1)
+        }
+        let pos = NC_OVF_PATCH_POS[i as usize]
+        nc_patch_u32_le(nc, pos, stub_at[kind as usize] - (pos + 4))
+        i = i + 1
+    }
+    NC_OVF_PATCH_N = 0
+}
+
+// JC rel32 (0F 82): taken when CF is set.
+fn nc_emit_jc_rel32(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x0f)
+    nc_emit_byte(nc, 0x82)
+    nc_emit_u32_le(nc, 0)
+}
+
+// ADR-031 R1, unsigned half: fail closed on unsigned overflow. Emit
+// immediately after the flags-setting add/sub/mul (nothing may clobber CF in
+// between); jumps to the same per-function trap stub as the signed guard.
+fn nc_emit_carry_guard(nc: &! NativeCompiler, kind: i64) with Mut, Panic, Div {
+    let jc_pos = (*nc).code.len
+    nc_emit_jc_rel32(nc)
+    nc_record_overflow_site(nc, jc_pos + 2, kind)
+}
+
+// ADR-031 R2: integer division and remainder fail on a zero divisor and,
+// for signed operands, on the one quotient that does not fit (MIN / -1).
+// Emit with the divisor in rcx and the dividend in rax, before cqo or
+// `xor rdx, rdx` (the MIN check uses rdx as scratch). Both failures jump to
+// the same per-function trap stub as the SIO-207 overflow guard, so they
+// exit through the panic shape instead of the CPU's #DE (SIGFPE).
+//   test rcx, rcx        48 85 C9
+//   jz   trap            0F 84 rel32
+// signed only:
+//   cmp  rcx, -1         48 83 F9 FF
+//   jne  +12             75 0C          (skips the next 12 bytes)
+//   mov  rdx, rax        48 89 C2
+//   neg  rdx             48 F7 DA       (OF set iff rax == i64::MIN)
+//   jo   trap            0F 80 rel32
+fn nc_emit_div_guard(nc: &! NativeCompiler, is_signed: bool, kind: i64) with Mut, Panic, Div {
+    // kind: 7 i64 /, 8 i64 %, 11 u64 /, 12 u64 %. A zero divisor reports as
+    // kind 9-12 ("division by zero"), MIN / -1 as kind 7 or 8 ("integer
+    // overflow"); both guards share the operation's source location.
+    let site = NC_CUR_SRC_SITE
+    let zero_kind = if is_signed { kind + 2 } else { kind }
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x85)
+    nc_emit_byte(nc, 0xc9)
+    let jz_pos = (*nc).code.len
+    nc_emit_jz_rel32(nc)
+    nc_record_overflow_site(nc, jz_pos + 2, zero_kind)
+    NC_CUR_SRC_SITE = site
+    if is_signed {
+        nc_emit_byte(nc, 0x48)
+        nc_emit_byte(nc, 0x83)
+        nc_emit_byte(nc, 0xf9)
+        nc_emit_byte(nc, 0xff)
+        nc_emit_byte(nc, 0x75)
+        nc_emit_byte(nc, 0x0c)
+        nc_emit_byte(nc, 0x48)
+        nc_emit_byte(nc, 0x89)
+        nc_emit_byte(nc, 0xc2)
+        nc_emit_byte(nc, 0x48)
+        nc_emit_byte(nc, 0xf7)
+        nc_emit_byte(nc, 0xda)
+        // MIN / -1 and MIN % -1: the same located overflow stub as + - *,
+        // naming the operation (kind 7 = i64 /, 8 = i64 %).
+        nc_emit_overflow_guard(nc, kind)
+    }
+}
+
 // CMP RAX, RBX  (sets flags for lhs=rax, rhs=rbx)
 fn nc_emit_cmp_rax_rbx(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_byte(nc, 0x48)
@@ -2872,6 +3251,8 @@ fn nc_v2_reset_label_state() with Mut, Panic {
     }
     NC_V2_LABEL_PATCH_COUNT = 0
     NC_V2_NEXT_CMP_LABEL = 210
+    NC_V2_OVERFLOW_GUARD_USED = 0
+    NC_OVF_PATCH_N = 0
 }
 
 
@@ -3104,7 +3485,8 @@ fn nc_emit_imul_rax_rbx(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_byte(nc, 0xc3)
 }
 
-// mul rbx → rdx:rax = rax * rbx (unsigned). 48 F7 E3.
+// mul rbx → rdx:rax = rax * rbx (unsigned). 48 F7 E3. CF = OF = 1 iff
+// rdx != 0, i.e. iff the product does not fit 64 bits (ADR-031 R1 guard).
 fn nc_emit_mul_rbx(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_byte(nc, 0x48)
     nc_emit_byte(nc, 0xf7)
@@ -3850,7 +4232,7 @@ fn native_v2_emit_gc_empty_frame_reset(nc: NativeCompiler) -> NativeCompiler wit
 fn native_v2_resolve_handle_to_object_base_rax(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
     c.code = emit_mov_rbx_rax(c.code)
-    c.code = emit_mov_rax_imm(c.code, native_v2_handle_raw_ptr_threshold())
+    c.code = emit_mov_rax_imm(c.code, nc_handle_capacity())
     c.code = emit_cmp_rbx_rax(c.code)
     c.code = emit_setae_al(c.code)
     c.code = emit_movzx_rax_al(c.code)
@@ -3895,7 +4277,7 @@ fn native_v2_resolve_handle_to_object_base_rax(nc: NativeCompiler) -> NativeComp
 
 fn native_v2_resolve_handle_to_object_base_rax_into(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_mov_rbx_rax(nc)
-    nc_emit_mov_rax_imm(nc, native_v2_handle_raw_ptr_threshold())
+    nc_emit_mov_rax_imm(nc, nc_handle_capacity())
     nc_emit_cmp_rbx_rax(nc)
     nc_emit_setae_al(nc)
     nc_emit_movzx_rax_al(nc)
@@ -3942,7 +4324,7 @@ fn native_v2_resolve_handle_to_object_base_rax_into(nc: &! NativeCompiler) with 
 // no slot; loading payload word 0 of that null base is the 0x20 SIGSEGV.
 fn native_v2_resolve_handle_to_object_base_or_zero_into(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_mov_rbx_rax(nc)
-    nc_emit_mov_rax_imm(nc, native_v2_handle_raw_ptr_threshold())
+    nc_emit_mov_rax_imm(nc, nc_handle_capacity())
     nc_emit_cmp_rbx_rax(nc)
     nc_emit_setae_al(nc)
     nc_emit_movzx_rax_al(nc)
@@ -4210,7 +4592,7 @@ pub fn native_v2_emit_runtime_metadata_into(nc: &! NativeCompiler) with Mut, Pan
     nc_flat_data_add_u64_into(nc, 0)
     nc_flat_data_add_u64_into(nc, 0)
     nc_flat_data_add_u64_into(nc, 0)
-    nc_flat_data_add_u64_into(nc, native_v2_handle_table_capacity_default())
+    nc_flat_data_add_u64_into(nc, nc_handle_capacity())
     nc_flat_data_add_u64_into(nc, (*nc).descriptor_data_offset)
     nc_flat_data_add_u64_into(nc, (*nc).descriptor_count)
     nc_flat_data_add_u64_into(nc, 0)
@@ -5257,13 +5639,12 @@ fn nc_core_intern_alloc_fail_explain_into(nc: &! NativeCompiler, fail_code: i64)
             return
         }
         let off = native_v2_rodata_len_into(nc)
-        nc_alloc_diag_append_ascii_into(nc, "  the generated program's runtime heap is one fixed ~2 GiB bump arena that is\n")
-        nc_alloc_diag_append_ascii_into(nc, "  never reclaimed: every aggregate value created or copied by value (struct\n")
-        nc_alloc_diag_append_ascii_into(nc, "  literal, by-value array/struct argument or return, x = matnm_set(x, ...))\n")
-        nc_alloc_diag_append_ascii_into(nc, "  takes fresh arena space for the life of the process. A loop that does so\n")
-        nc_alloc_diag_append_ascii_into(nc, "  per iteration exhausts it. Fix: hoist buffers out of the loop and write\n")
-        nc_alloc_diag_append_ascii_into(nc, "  through &! references (see stdlib/chemistry/catalysis.sio and\n")
-        nc_alloc_diag_append_ascii_into(nc, "  simulate_general_epistemic in stdlib/chemistry/kinetics.sio).\n")
+        nc_alloc_diag_append_ascii_into(nc, "  the generated program's runtime heap is one bump arena, reserved at start up\n")
+        nc_alloc_diag_append_ascii_into(nc, "  to this machine's RAM + swap (never below 2 GiB), and it is full. Region\n")
+        nc_alloc_diag_append_ascii_into(nc, "  reclamation hands back what a function or a loop iteration made once it\n")
+        nc_alloc_diag_append_ascii_into(nc, "  returns or ends, so this much is either reachable at once or was kept by\n")
+        nc_alloc_diag_append_ascii_into(nc, "  a region that could not reset because a value made in it escaped (a store\n")
+        nc_alloc_diag_append_ascii_into(nc, "  into older memory, an extern call, a reference cast to a number).\n")
         (*nc).alloc_fail_arena_explain_off = off
         (*nc).alloc_fail_arena_explain_len = native_v2_rodata_len_into(nc) - off
         return
@@ -5276,11 +5657,12 @@ fn nc_core_intern_alloc_fail_explain_into(nc: &! NativeCompiler, fail_code: i64)
     // native_capacity_tiers_check.py counts every 4194304 in this file as the
     // ELF load address 0x400000 and requires exactly seven argument-form hits.
     nc_alloc_diag_append_ascii_into(nc, "  the generated program's handle table (")
-    nc_alloc_diag_append_decimal_into(nc, native_v2_handle_table_capacity_default())
-    nc_alloc_diag_append_ascii_into(nc, " managed objects, never\n")
-    nc_alloc_diag_append_ascii_into(nc, "  reclaimed) is exhausted: every aggregate over 16 bytes created or copied\n")
-    nc_alloc_diag_append_ascii_into(nc, "  by value takes a handle for the life of the process. Fix: hoist buffers\n")
-    nc_alloc_diag_append_ascii_into(nc, "  out of the loop and write through &! references.\n")
+    nc_alloc_diag_append_decimal_into(nc, nc_handle_capacity())
+    nc_alloc_diag_append_ascii_into(nc, " managed objects) is full: that many\n")
+    nc_alloc_diag_append_ascii_into(nc, "  objects over 16 bytes are reachable at once, or were kept by a region that\n")
+    nc_alloc_diag_append_ascii_into(nc, "  could not reset because a value made in it escaped. What a function or a\n")
+    nc_alloc_diag_append_ascii_into(nc, "  loop iteration makes and drops is reclaimed when it returns or ends.\n")
+    nc_alloc_diag_append_ascii_into(nc, "  Compile with SOUNIO_NV2_HANDLE_LOG2=23..28 for a table of 2^23..2^28.\n")
     (*nc).alloc_fail_handles_explain_off = off
     (*nc).alloc_fail_handles_explain_len = native_v2_rodata_len_into(nc) - off
 }
@@ -5643,21 +6025,21 @@ fn emit_builtin_syscall6_into(nc: &! NativeCompiler) with Mut, Panic, Div {
 // emits inline. Without a backend they reached a body-less function and were
 // refused with ud2 -- including __arena_mark/__arena_reset, which are the
 // module pipeline's ONLY memory reclamation.
-fn name_is_arena_mark(n: Name) -> bool with Mut, Panic, Div { name_eq(n, make_name("__arena_mark")) }
-fn name_is_arena_reset(n: Name) -> bool with Mut, Panic, Div { name_eq(n, make_name("__arena_reset")) }
-fn name_is_panic(n: Name) -> bool with Mut, Panic, Div { name_eq(n, make_name("panic")) }
+fn name_is_arena_mark(n: Name) -> bool with Mut, Panic, Div { name_eq_lit(n, "__arena_mark") }
+fn name_is_arena_reset(n: Name) -> bool with Mut, Panic, Div { name_eq_lit(n, "__arena_reset") }
+fn name_is_panic(n: Name) -> bool with Mut, Panic, Div { name_eq_lit(n, "panic") }
 
 // Counters Madaros does not keep. Its arena never refills (hitting heap_limit
 // requests a GC) and it tracks no mmap tally, so there is no honest number to
 // return -- see emit_builtin_untracked_counter_into for why the answer is -1
 // and not 0.
 fn name_is_untracked_counter(n: Name) -> bool with Mut, Panic, Div {
-    if name_eq(n, make_name("__arena_refill_bytes")) { return true }
-    if name_eq(n, make_name("__arena_unmap_bytes")) { return true }
-    if name_eq(n, make_name("__pool_mark")) { return true }
-    if name_eq(n, make_name("__pool_refill_bytes")) { return true }
-    if name_eq(n, make_name("__rtmmap_count")) { return true }
-    if name_eq(n, make_name("__rtmmap_bytes")) { return true }
+    if name_eq_lit(n, "__arena_refill_bytes") { return true }
+    if name_eq_lit(n, "__arena_unmap_bytes") { return true }
+    if name_eq_lit(n, "__pool_mark") { return true }
+    if name_eq_lit(n, "__pool_refill_bytes") { return true }
+    if name_eq_lit(n, "__rtmmap_count") { return true }
+    if name_eq_lit(n, "__rtmmap_bytes") { return true }
     false
 }
 
@@ -6321,8 +6703,13 @@ fn emit_builtin_rgn_reset_fits_into(nc: &! NativeCompiler) with Mut, Panic, Div 
 }
 
 // __rgn_exit_scalar(tok, v): close a region whose function returns a scalar,
-// resetting it unless it escaped or v itself refers to a young heap object
-// (an integer carrying a reference is not something lowering can rule out).
+// resetting it unless it escaped. v (the result, kept in the IR shape that
+// opt_cleanup's ocp_center_frame and lower.sio's HOF-transparency probe
+// read) is not classified: a scalar result carries a young reference only
+// through a word-keeping conversion, and every such conversion has already
+// marked the region escaped (numeric provenance, ADR-010 section 5). Classifying
+// it read counters, indices and enum tags in the handle-id range
+// 1..handle_count as young references and kept the region forever.
 fn emit_builtin_rgn_exit_scalar_into(nc: &! NativeCompiler) with Mut, Panic, Div {
     rgn_emit_alu(nc, 0x85, 7, 7)
     let none = rgn_emit_jcc(nc, 0x84)
@@ -6331,19 +6718,106 @@ fn emit_builtin_rgn_exit_scalar_into(nc: &! NativeCompiler) with Mut, Panic, Div
     rgn_emit_load(nc, 0, 11, native_v2_region_record_field_escaped())
     rgn_emit_alu(nc, 0x85, 0, 0)
     let escaped = rgn_emit_jcc(nc, 0x85)
-    rgn_emit_classify(nc, 6, 8, 9, 10, 0 - 1, 0 - 1)
-    rgn_emit_load(nc, 10, 11, native_v2_region_record_field_heap_start())
-    rgn_emit_alu(nc, 0x39, 9, 10)
-    let young = rgn_emit_jcc(nc, 0x83)
-    rgn_patch_not_ref_exits(nc)
     rgn_emit_load(nc, 9, 11, native_v2_region_record_field_heap_start())
     rgn_emit_load(nc, 10, 8, runtime_context_field_heap_cursor())
     rgn_emit_zero_range(nc, 9, 10, 8, true)
     rgn_emit_reset_bumps(nc, 11, 8)
     rgn_patch(nc, escaped)
-    rgn_patch(nc, young)
     rgn_emit_pop_to(nc, 11, 8)
     rgn_patch(nc, none)
+    nc_emit_ret(nc)
+}
+
+// __rgn_reset(tok) -> 1 after resetting the region at tok IN PLACE (it stays
+// open, its start unchanged), 0 when it escaped and must not reset. Loop
+// regions (ir/lower.sio LOWER_LOOP_RGN_*) span the whole loop and call this at
+// every iteration end that carries no aggregate. tok 0 (no region) answers 1:
+// there is nothing to keep and nothing to restart.
+fn emit_builtin_rgn_reset_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    rgn_emit_mov_imm(nc, 0, 1)
+    rgn_emit_alu(nc, 0x85, 7, 7)
+    let none = rgn_emit_jcc(nc, 0x84)
+    rgn_emit_load_ctx(nc, 8)
+    rgn_emit_mov(nc, 11, 7)
+    rgn_emit_load(nc, 0, 11, native_v2_region_record_field_escaped())
+    rgn_emit_alu(nc, 0x85, 0, 0)
+    let escaped = rgn_emit_jcc(nc, 0x85)
+    rgn_emit_load(nc, 9, 11, native_v2_region_record_field_heap_start())
+    rgn_emit_load(nc, 10, 8, runtime_context_field_heap_cursor())
+    rgn_emit_zero_range(nc, 9, 10, 8, true)
+    rgn_emit_reset_bumps(nc, 11, 8)
+    rgn_emit_mov_imm(nc, 2, 0)
+    rgn_emit_store(nc, 11, native_v2_region_record_field_zero_to(), 2)
+    rgn_emit_store(nc, 11, native_v2_region_record_field_handles_to(), 2)
+    rgn_emit_mov_imm(nc, 0, 1)
+    nc_emit_ret(nc)
+    rgn_patch(nc, escaped)
+    rgn_emit_alu(nc, 0x31, 0, 0)
+    rgn_patch(nc, none)
+    nc_emit_ret(nc)
+}
+
+// __rgn_settle(tok): after __rgn_reset_fits and the second copies, keep the
+// region at tok open and finish what __rgn_leave would: zero the first copies
+// (between the cursor and zero_to) and clear the widened live bounds, so the
+// next iteration starts from fresh zero bytes and exact bounds.
+fn emit_builtin_rgn_settle_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    rgn_emit_alu(nc, 0x85, 7, 7)
+    let none = rgn_emit_jcc(nc, 0x84)
+    rgn_emit_load_ctx(nc, 8)
+    rgn_emit_mov(nc, 11, 7)
+    rgn_emit_load(nc, 10, 11, native_v2_region_record_field_zero_to())
+    rgn_emit_load(nc, 9, 8, runtime_context_field_heap_cursor())
+    rgn_emit_alu(nc, 0x39, 9, 10)
+    let nothing_above = rgn_emit_jcc(nc, 0x83)
+    rgn_emit_zero_range(nc, 9, 10, 8, true)
+    rgn_patch(nc, nothing_above)
+    rgn_emit_mov_imm(nc, 2, 0)
+    rgn_emit_store(nc, 11, native_v2_region_record_field_zero_to(), 2)
+    rgn_emit_store(nc, 11, native_v2_region_record_field_handles_to(), 2)
+    rgn_patch(nc, none)
+    nc_emit_ret(nc)
+}
+
+// w := object base of the array word in w, resolved as an element access
+// resolves it (native_v2_resolve_handle_to_object_base_rax_into): below the
+// handle capacity a handle id, otherwise a raw base. `c` holds the context,
+// `t` is scratch.
+fn rgn_emit_resolve_base(nc: &! NativeCompiler, w: i64, c: i64, t: i64) with Mut, Panic, Div {
+    rgn_emit_mov_imm(nc, t, nc_handle_capacity())
+    rgn_emit_alu(nc, 0x39, w, t)
+    let raw = rgn_emit_jcc(nc, 0x83)
+    rgn_emit_imul_imm(nc, w, w, native_v2_handle_entry_size())
+    rgn_emit_load(nc, t, c, runtime_context_field_handle_table_base())
+    rgn_emit_alu(nc, 0x01, w, t)
+    rgn_emit_load(nc, w, w, native_v2_handle_entry_field_object_base())
+    rgn_patch(nc, raw)
+}
+
+// __rgn_copy_payload(dst, src): the young-array copy of the region protocol
+// (ir/lower.sio rgn_emit_young_array_copy). dst was just allocated like src
+// (IR_ALLOC_LIKE_SOURCE: same descriptor, same element count, so the same
+// payload size); copy min(dst, src) payload bytes, rounded up to whole words,
+// with one rep movsq. Taking the minimum means the copy can never run past
+// dst whatever the two headers say. No barrier: dst is the youngest object.
+fn emit_builtin_rgn_copy_payload_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    rgn_emit_load_ctx(nc, 8)
+    rgn_emit_resolve_base(nc, 7, 8, 9)
+    rgn_emit_resolve_base(nc, 6, 8, 9)
+    rgn_emit_load(nc, 1, 7, native_v2_object_header_field_payload_size())
+    rgn_emit_load(nc, 2, 6, native_v2_object_header_field_payload_size())
+    rgn_emit_alu(nc, 0x39, 1, 2)
+    let fits = rgn_emit_jcc(nc, 0x86)
+    rgn_emit_mov(nc, 1, 2)
+    rgn_patch(nc, fits)
+    rgn_emit_alu_imm(nc, 0, 1, 7)
+    rgn_emit_shr_imm(nc, 1, 3)
+    rgn_emit_alu_imm(nc, 0, 7, native_v2_object_header_size())
+    rgn_emit_alu_imm(nc, 0, 6, native_v2_object_header_size())
+    nc_emit_byte(nc, 0xf3)  // rep movsq
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0xa5)
+    rgn_emit_alu(nc, 0x31, 0, 0)
     nc_emit_ret(nc)
 }
 
@@ -6598,6 +7072,57 @@ fn rgn_emit_builtin_barrier(nc: &! NativeCompiler, w_reg: i64, t_reg: i64) with 
 // Madaros equivalent is the failure half of emit_builtin_assert_into: exit(1).
 fn emit_builtin_panic_into(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_exit_code(nc, 1)
+}
+
+// ADR-031 R1: the narrow-width (i32/u32) overflow panic. rdi = narrow kind * 8
+// + op (see lower_narrow32_check_reg). Writes the message for that code to
+// stderr and exits 1; an unknown code still exits 1, without a message.
+fn emit_builtin_int_overflow_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    var code: i64 = 8
+    while code < 21 {
+        let opk = code % 8
+        let narrow = code / 8
+        if opk <= 4 && !(narrow == 2 && opk == 3) {
+            let off = native_v2_rodata_len_into(nc)
+            nc_alloc_diag_append_ascii_into(nc, "sounio: integer overflow (")
+            let ty_text = if narrow == 1 { "i32 " } else { "u32 " }
+            let op_text = if opk == 0 { "+" } else if opk == 1 { "-" } else if opk == 2 { "*" } else if opk == 3 { "unary -" } else { "argument" }
+            nc_alloc_diag_append_ascii_into(nc, ty_text)
+            nc_alloc_diag_append_ascii_into(nc, op_text)
+            nc_alloc_diag_append_ascii_into(nc, ")\n")
+            let len = native_v2_rodata_len_into(nc) - off
+            nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x83); nc_emit_byte(nc, 0xff); nc_emit_byte(nc, code)  // cmp rdi, imm8
+            nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x85)                                                // jne rel32
+            let skip = (*nc).code.len
+            nc_emit_u32_le(nc, 0)
+            nc_core_emit_write_stderr_rodata_into(nc, off, len)
+            nc_emit_exit_code(nc, 1)
+            nc_patch_u32_le(nc, skip, (*nc).code.len - (skip + 4))
+        }
+        code = code + 1
+    }
+    nc_emit_exit_code(nc, 1)
+}
+
+// SIO-207: explicit two's-complement wrapping arithmetic (the opt-in escape
+// from the default overflow trap). Bit-identical to the pre-trap +,-,* so
+// hash/RNG state evolution is unchanged. Args rdi, rsi -> rax.
+fn emit_builtin_wrapping_add_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x89); nc_emit_byte(nc, 0xf8)  // mov rax, rdi
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x01); nc_emit_byte(nc, 0xf0)  // add rax, rsi
+    nc_emit_ret(nc)
+}
+
+fn emit_builtin_wrapping_sub_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x89); nc_emit_byte(nc, 0xf8)  // mov rax, rdi
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x29); nc_emit_byte(nc, 0xf0)  // sub rax, rsi
+    nc_emit_ret(nc)
+}
+
+fn emit_builtin_wrapping_mul_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x89); nc_emit_byte(nc, 0xf8)  // mov rax, rdi
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0xaf); nc_emit_byte(nc, 0xc6)  // imul rax, rsi
+    nc_emit_ret(nc)
 }
 
 // A counter this runtime does not keep answers -1, not 0.
@@ -7117,6 +7642,252 @@ fn emit_builtin_str_slice3(nc: NativeCompiler) -> NativeCompiler with Mut, Panic
     c
 }
 
+// __ptr_of_ref(v) -> raw pointer (lowering emits it for `v as *mut T` /
+// `v as *const T`). A raw pointer is dereferenced as plain memory: field i of
+// `*p` is the word at p + 8*i, which is how heap_alloc'd structs (the checker's
+// `*mut Checker`) are laid out. A managed reference (a Box payload, a struct
+// value) is a handle id below the handle capacity, whose fields start one
+// object header past its object base. Casting the handle itself made
+// `(*p).f` read the handle number as an address. So a handle becomes
+// object base + header; 0 and every word at or above the capacity (heap_alloc
+// results, stack cells, BSS and image addresses) pass through unchanged.
+// pfi_itemlist_ptr / pfi_itemlist_next in private_fn_identity.sio walk the AST
+// this way, and gen3 crashed in pfi_items (#2966).
+fn emit_builtin_ptr_of_ref_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_mov_reg_reg(nc, 0, 7)                         // rax = v
+    nc_emit_test_rax_rax(nc)
+    let j_zero = (*nc).code.len
+    nc_emit_jz_rel32(nc)                                  // 0 -> 0
+    nc_emit_mov_rbx_rax(nc)
+    nc_emit_mov_rax_imm(nc, nc_handle_capacity())
+    nc_emit_cmp_rbx_rax(nc)
+    nc_emit_setae_al(nc)
+    nc_emit_movzx_rax_al(nc)
+    nc_emit_test_rax_rax(nc)
+    let j_raw = (*nc).code.len
+    nc_emit_jnz_rel32(nc)                                 // v >= capacity -> raw base
+    nc_emit_mov_rax_rbx(nc)
+    native_v2_resolve_handle_to_object_base_rax_into(nc)  // rax = object base
+    nc_emit_mov_reg_imm(nc, 1, native_v2_object_header_size())
+    nc_emit_add_reg_reg(nc, 0, 1)                         // rax = base + header
+    nc_emit_ret(nc)
+    // v >= capacity: an unboxed object (arena, region or BSS) is addressed by
+    // its base, as the field loads read it ([v + 8*(4 + i)]), so it takes the
+    // same header step. The lowerer only calls this for a managed source.
+    let l_raw = (*nc).code.len
+    nc_patch_u32_le(nc, j_raw + 2, l_raw - (j_raw + 6))
+    nc_emit_mov_reg_reg(nc, 0, 7)                         // rax = v
+    nc_emit_mov_reg_imm(nc, 1, native_v2_object_header_size())
+    nc_emit_add_reg_reg(nc, 0, 1)                         // rax = v + header
+    nc_emit_ret(nc)
+    let l_pass = (*nc).code.len
+    nc_patch_u32_le(nc, j_zero + 2, l_pass - (j_zero + 6))
+    nc_emit_mov_reg_reg(nc, 0, 7)                         // rax = v
+    nc_emit_ret(nc)
+}
+
+// ============================================================================
+// Packed byte arrays (#2966)
+// ============================================================================
+// An array literal whose IrAlloc carries IR_ALLOC_PACKED_I8 / _U8 is allocated
+// with one byte per element instead of one word, and its object header's
+// descriptor word holds one of the two tags below. Every element access and
+// every builtin that walks an array reads that word and takes the byte path
+// for a tagged object, the word path otherwise. Arrays from any other alloc
+// (or from a lane that ignores the label) keep the word layout, so both
+// layouts coexist and a missed label costs memory, not correctness.
+//
+// The tags are 64-bit ASCII patterns ("PACKED8i", "PACKED8u"), not small ids:
+// the ref-array path also resolves a raw BSS address to base = V - header, and
+// the word it then reads is whatever precedes that global. A small id could
+// collide with ordinary data there; these patterns cannot plausibly occur.
+fn native_v2_packed_i8_descriptor() -> i64 { 0x5041434B45443869 }
+fn native_v2_packed_u8_descriptor() -> i64 { 0x5041434B45443875 }
+
+fn native_v2_packed_array_payload_bytes(elem_count: i64) -> i64 {
+    if elem_count <= 8 { return 8 }
+    ((elem_count + 7) / 8) * 8
+}
+
+// A global array's reference is its BSS address V and the array paths take
+// base = V - header, so the descriptor word they read for the packed tag sits
+// before the global. For the first global that word lies below BSS_BASE_LINUX,
+// in the unmapped gap after the image (stdlib_deep_eigen: SIGSEGV reading
+// 0xfffffe0). A packed byte-array global has its own header inside BSS
+// (ir_bss_packed_header_needed, emit_packed_global_headers_into), so a base in
+// [BSS_BASE_LINUX - header, BSS_BASE_LINUX) is never packed and takes the word
+// path without the read. Emits lea <scratch>, [<base> + d]; cmp <scratch>, header; jb word and
+// returns the jb position to patch. modrm_lea: 0x82 = rax<-[rdx+d32],
+// 0x88 = rcx<-[rax+d32]; cmp_modrm: 0xf8 = rax, 0xf9 = rcx.
+fn nc_packed_tag_guard_disp() -> i64 { native_v2_object_header_size() - BSS_BASE_LINUX }
+
+fn nc_emit_packed_tag_guard_into(nc: &! NativeCompiler, modrm_lea: i64, cmp_modrm: i64) -> i64 with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x8d); nc_emit_byte(nc, modrm_lea)
+    nc_emit_u32_le(nc, nc_packed_tag_guard_disp() & 0xFFFFFFFF)
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x83); nc_emit_byte(nc, cmp_modrm)
+    nc_emit_byte(nc, native_v2_object_header_size())
+    nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x82)
+    let j = (*nc).code.len - 2
+    nc_emit_u32_le(nc, 0)
+    j
+}
+
+// rdx = object base, rbx = element index. rax = element: the sign- or
+// zero-extended byte of a packed array, the word otherwise. Clobbers rcx.
+fn nc_emit_tagged_array_load_rdx_rbx_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    let j_guard = nc_emit_packed_tag_guard_into(nc, 0x82, 0xf8)
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x8b); nc_emit_byte(nc, 0x0a)   // mov rcx, [rdx]
+    nc_emit_mov_rax_imm(nc, native_v2_packed_i8_descriptor())
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x39); nc_emit_byte(nc, 0xc1)   // cmp rcx, rax
+    let j_i8 = (*nc).code.len
+    nc_emit_jz_rel32(nc)
+    nc_emit_mov_rax_imm(nc, native_v2_packed_u8_descriptor())
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x39); nc_emit_byte(nc, 0xc1)   // cmp rcx, rax
+    let j_u8 = (*nc).code.len
+    nc_emit_jz_rel32(nc)
+    let l_word = (*nc).code.len
+    nc_patch_u32_le(nc, j_guard + 2, l_word - (j_guard + 6))
+    nc_emit_mov_reg_imm(nc, 1, native_v2_object_header_size() / 8)
+    nc_emit_add_reg_reg(nc, 3, 1)
+    nc_emit_load_rax_mem_rdx_rbx8(nc)
+    let j_done_word = (*nc).code.len
+    nc_emit_jmp_rel32(nc)
+    let l_i8 = (*nc).code.len
+    nc_patch_u32_le(nc, j_i8 + 2, l_i8 - (j_i8 + 6))
+    // movsx rax, byte [rdx + rbx + header]
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0xbe)
+    nc_emit_byte(nc, 0x44); nc_emit_byte(nc, 0x1a); nc_emit_byte(nc, native_v2_object_header_size())
+    let j_done_i8 = (*nc).code.len
+    nc_emit_jmp_rel32(nc)
+    let l_u8 = (*nc).code.len
+    nc_patch_u32_le(nc, j_u8 + 2, l_u8 - (j_u8 + 6))
+    // movzx rax, byte [rdx + rbx + header]
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0xb6)
+    nc_emit_byte(nc, 0x44); nc_emit_byte(nc, 0x1a); nc_emit_byte(nc, native_v2_object_header_size())
+    let done = (*nc).code.len
+    nc_patch_u32_le(nc, j_done_word + 1, done - (j_done_word + 5))
+    nc_patch_u32_le(nc, j_done_i8 + 1, done - (j_done_i8 + 5))
+}
+
+// rdx = object base, rbx = element index; stores temp `src` as a byte into a
+// packed array, as a word otherwise. Clobbers rax and rcx.
+fn nc_emit_tagged_array_store_rdx_rbx_into(nc: &! NativeCompiler, src: i64) with Mut, Panic, Div {
+    let j_guard = nc_emit_packed_tag_guard_into(nc, 0x82, 0xf8)
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x8b); nc_emit_byte(nc, 0x0a)   // mov rcx, [rdx]
+    nc_emit_mov_rax_imm(nc, native_v2_packed_i8_descriptor())
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x39); nc_emit_byte(nc, 0xc1)   // cmp rcx, rax
+    let j_b1 = (*nc).code.len
+    nc_emit_jz_rel32(nc)
+    nc_emit_mov_rax_imm(nc, native_v2_packed_u8_descriptor())
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x39); nc_emit_byte(nc, 0xc1)   // cmp rcx, rax
+    let j_b2 = (*nc).code.len
+    nc_emit_jz_rel32(nc)
+    let l_word = (*nc).code.len
+    nc_patch_u32_le(nc, j_guard + 2, l_word - (j_guard + 6))
+    nc_emit_mov_reg_imm(nc, 1, native_v2_object_header_size() / 8)
+    nc_emit_add_reg_reg(nc, 3, 1)
+    nc_core_load_temp_to_rax(nc, src)
+    nc_emit_store_rax_mem_rdx_rbx8(nc)
+    let j_done = (*nc).code.len
+    nc_emit_jmp_rel32(nc)
+    let l_b = (*nc).code.len
+    nc_patch_u32_le(nc, j_b1 + 2, l_b - (j_b1 + 6))
+    nc_patch_u32_le(nc, j_b2 + 2, l_b - (j_b2 + 6))
+    nc_core_load_temp_to_rax(nc, src)
+    // mov byte [rdx + rbx + header], al
+    nc_emit_byte(nc, 0x88); nc_emit_byte(nc, 0x44); nc_emit_byte(nc, 0x1a)
+    nc_emit_byte(nc, native_v2_object_header_size())
+    let done = (*nc).code.len
+    nc_patch_u32_le(nc, j_done + 1, done - (j_done + 5))
+}
+
+// Byte copy loop shared by str_from_bytes and write_file. On entry rdx = array
+// object base, rsi = destination, rcx = element count. Copies the low byte of
+// each element (word layout) or each byte (packed layout) to [rsi..], leaving
+// rsi one past the last byte written. Clobbers rax and rbx.
+fn emit_array_bytes_copy_loop(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    var b = c.code
+    // nc_emit_packed_tag_guard_into, value form: rcx holds the count here, so
+    // the scratch is rax (lea rax, [rdx + d]; cmp rax, header; jb word).
+    b = emit_byte(b, 0x48); b = emit_byte(b, 0x8d); b = emit_byte(b, 0x82)
+    let gd = nc_packed_tag_guard_disp() & 0xFFFFFFFF
+    b = emit_byte(b, gd & 0xFF); b = emit_byte(b, (gd >> 8) & 0xFF)
+    b = emit_byte(b, (gd >> 16) & 0xFF); b = emit_byte(b, (gd >> 24) & 0xFF)
+    b = emit_byte(b, 0x48); b = emit_byte(b, 0x83); b = emit_byte(b, 0xf8)
+    b = emit_byte(b, native_v2_object_header_size())
+    let j_guard = b.len
+    b = emit_byte(b, 0x0f); b = emit_byte(b, 0x82)
+    b = emit_byte(b, 0); b = emit_byte(b, 0); b = emit_byte(b, 0); b = emit_byte(b, 0)   // jb word
+    b = emit_byte(b, 0x48); b = emit_byte(b, 0x8b); b = emit_byte(b, 0x02)   // mov rax, [rdx]
+    c.code = b
+    c.code = emit_mov_reg_imm(c.code, 3, native_v2_packed_i8_descriptor())   // rbx = tag
+    b = c.code
+    b = emit_byte(b, 0x48); b = emit_byte(b, 0x39); b = emit_byte(b, 0xd8)   // cmp rax, rbx
+    c.code = b
+    let j_p1 = c.code.len
+    b = c.code
+    b = emit_byte(b, 0x0f); b = emit_byte(b, 0x84)
+    b = emit_byte(b, 0); b = emit_byte(b, 0); b = emit_byte(b, 0); b = emit_byte(b, 0)   // jz packed
+    c.code = b
+    c.code = emit_mov_reg_imm(c.code, 3, native_v2_packed_u8_descriptor())
+    b = c.code
+    b = emit_byte(b, 0x48); b = emit_byte(b, 0x39); b = emit_byte(b, 0xd8)   // cmp rax, rbx
+    c.code = b
+    let j_p2 = c.code.len
+    b = c.code
+    b = emit_byte(b, 0x0f); b = emit_byte(b, 0x84)
+    b = emit_byte(b, 0); b = emit_byte(b, 0); b = emit_byte(b, 0); b = emit_byte(b, 0)   // jz packed
+    c.code = b
+    // word layout: rbx = header words, load [rdx + rbx*8]
+    c.code = patch_u32_le(c.code, j_guard + 2, c.code.len - (j_guard + 6))
+    c.code = emit_mov_reg_imm(c.code, 3, native_v2_object_header_size() / 8)
+    c = emit_array_bytes_copy_loop_body(c, false)
+    let j_done = c.code.len
+    b = c.code
+    b = emit_byte(b, 0xe9)
+    b = emit_byte(b, 0); b = emit_byte(b, 0); b = emit_byte(b, 0); b = emit_byte(b, 0)   // jmp done
+    c.code = b
+    let l_packed = c.code.len
+    c.code = patch_u32_le(c.code, j_p1 + 2, l_packed - (j_p1 + 6))
+    c.code = patch_u32_le(c.code, j_p2 + 2, l_packed - (j_p2 + 6))
+    // packed layout: rbx = header bytes, load byte [rdx + rbx]
+    c.code = emit_mov_reg_imm(c.code, 3, native_v2_object_header_size())
+    c = emit_array_bytes_copy_loop_body(c, true)
+    let done = c.code.len
+    c.code = patch_u32_le(c.code, j_done + 1, done - (j_done + 5))
+    c
+}
+
+// copy_loop: (byte offsets from loop top)
+//   0:  test rcx, rcx                         3 bytes
+//   3:  jz done_copy                          2 bytes (+17)
+//   5:  mov rax, [rdx+rbx*8]  (word)          4 bytes
+//       movzx eax, byte [rdx+rbx]  (packed)   4 bytes
+//   9:  mov [rsi], al                         2 bytes
+//   11: inc rbx / 14: inc rsi / 17: dec rcx   3 bytes each
+//   20: jmp copy_loop                         2 bytes (-22)
+fn emit_array_bytes_copy_loop_body(nc: NativeCompiler, packed: bool) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    var lb = c.code
+    lb = emit_byte(lb, 0x48); lb = emit_byte(lb, 0x85); lb = emit_byte(lb, 0xc9)   // test rcx, rcx
+    c.code = lb
+    c.code = emit_jz_rel8(c.code, 17)
+    lb = c.code
+    if packed {
+        lb = emit_byte(lb, 0x0f); lb = emit_byte(lb, 0xb6); lb = emit_byte(lb, 0x04); lb = emit_byte(lb, 0x1a)
+    } else {
+        lb = emit_byte(lb, 0x48); lb = emit_byte(lb, 0x8b); lb = emit_byte(lb, 0x04); lb = emit_byte(lb, 0xda)
+    }
+    lb = emit_byte(lb, 0x88); lb = emit_byte(lb, 0x06)                         // mov [rsi], al
+    lb = emit_byte(lb, 0x48); lb = emit_byte(lb, 0xff); lb = emit_byte(lb, 0xc3) // inc rbx
+    lb = emit_byte(lb, 0x48); lb = emit_byte(lb, 0xff); lb = emit_byte(lb, 0xc6) // inc rsi
+    lb = emit_byte(lb, 0x48); lb = emit_byte(lb, 0xff); lb = emit_byte(lb, 0xc9) // dec rcx
+    c.code = lb
+    c.code = emit_jmp_rel8(c.code, -22)
+    c
+}
+
 // str_from_bytes(buf, len) -> string. Matches lean_single semantics
 // (lean_single.sio: "Returns the address of the byte buffer as a string pointer").
 //
@@ -7172,48 +7943,11 @@ fn emit_builtin_str_from_bytes(nc: NativeCompiler) -> NativeCompiler with Mut, P
     //   rcx = remaining element count (countdown from len)
     c.code = emit_load_rbp_disp32_rax(c.code, -16)      // rax = object base
     c.code = emit_mov_reg_reg(c.code, 2, 0)             // rdx = object base
-    c.code = emit_mov_reg_imm(c.code, 3, native_v2_object_header_size() / 8)  // rbx = header_words
     c.code = emit_load_rbp_disp32_rax(c.code, -24)      // rax = result ptr
     c.code = emit_mov_reg_reg(c.code, 6, 0)             // rsi = result ptr
     c.code = emit_load_rbp_disp32_rax(c.code, -8)       // rax = len
     c.code = emit_mov_reg_reg(c.code, 1, 0)             // rcx = len
-
-    // copy_loop: (byte offsets from loop top)
-    //   0:  test rcx, rcx           — 3 bytes (48 85 c9)
-    //   3:  jz done_copy            — 2 bytes (rel8, skip 4+2+3+3+3+2 = 17)
-    //   5:  mov rax, [rdx+rbx*8]    — 4 bytes (48 8b 04 da) — unpack boxed element
-    //   9:  mov [rsi], al          — 2 bytes (88 06)         — store its low byte
-    //   11: inc rbx                — 3 bytes (48 ff c3)
-    //   14: inc rsi                — 3 bytes (48 ff c6)
-    //   17: dec rcx                — 3 bytes (48 ff c9)
-    //   20: jmp copy_loop          — 2 bytes (rel8, back 22 bytes to offset 0)
-    //   22: done_copy:
-    var lb = c.code
-    lb = emit_byte(lb, 0x48)
-    lb = emit_byte(lb, 0x85)
-    lb = emit_byte(lb, 0xc9)                             // test rcx, rcx
-    c.code = lb
-    c.code = emit_jz_rel8(c.code, 17)                    // jz done_copy
-
-    lb = c.code
-    lb = emit_byte(lb, 0x48)
-    lb = emit_byte(lb, 0x8b)
-    lb = emit_byte(lb, 0x04)
-    lb = emit_byte(lb, 0xda)                             // mov rax, [rdx+rbx*8]
-    lb = emit_byte(lb, 0x88)
-    lb = emit_byte(lb, 0x06)                             // mov [rsi], al
-    lb = emit_byte(lb, 0x48)
-    lb = emit_byte(lb, 0xff)
-    lb = emit_byte(lb, 0xc3)                             // inc rbx
-    lb = emit_byte(lb, 0x48)
-    lb = emit_byte(lb, 0xff)
-    lb = emit_byte(lb, 0xc6)                             // inc rsi
-    lb = emit_byte(lb, 0x48)
-    lb = emit_byte(lb, 0xff)
-    lb = emit_byte(lb, 0xc9)                             // dec rcx
-    c.code = lb
-    c.code = emit_jmp_rel8(c.code, -22)                  // jmp copy_loop
-    // done_copy:
+    c = emit_array_bytes_copy_loop(c)                    // word or packed layout
 
     // Null-terminate + return result pointer
     c.code = emit_mov_byte_mem_rsi_imm8(c.code, 0)      // mov byte [rsi], 0
@@ -7770,47 +8504,11 @@ fn emit_builtin_write_file(nc: NativeCompiler) -> NativeCompiler with Mut, Panic
     //   rcx = remaining element count (countdown from len)
     c.code = emit_load_rbp_disp32_rax(c.code, -32)      // rax = object base
     c.code = emit_mov_reg_reg(c.code, 2, 0)             // rdx = object base
-    c.code = emit_mov_reg_imm(c.code, 3, native_v2_object_header_size() / 8)  // rbx = header_words
     c.code = emit_load_rbp_disp32_rax(c.code, -40)      // rax = packed ptr
     c.code = emit_mov_reg_reg(c.code, 6, 0)             // rsi = packed ptr
     c.code = emit_load_rbp_disp32_rax(c.code, -24)      // rax = len
     c.code = emit_mov_reg_reg(c.code, 1, 0)             // rcx = len
-
-    // copy_loop: (byte offsets from loop top) — identical body to str_from_bytes
-    //   0:  test rcx, rcx           — 3 bytes
-    //   3:  jz done_copy            — 2 bytes (rel8 +17)
-    //   5:  mov rax, [rdx+rbx*8]    — 4 bytes (unpack boxed element)
-    //   9:  mov [rsi], al          — 2 bytes (store low byte)
-    //   11: inc rbx                — 3 bytes
-    //   14: inc rsi                — 3 bytes
-    //   17: dec rcx                — 3 bytes
-    //   20: jmp copy_loop          — 2 bytes (rel8 -22)
-    //   22: done_copy:
-    var lb = c.code
-    lb = emit_byte(lb, 0x48)
-    lb = emit_byte(lb, 0x85)
-    lb = emit_byte(lb, 0xc9)                             // test rcx, rcx
-    c.code = lb
-    c.code = emit_jz_rel8(c.code, 17)                    // jz done_copy
-
-    lb = c.code
-    lb = emit_byte(lb, 0x48)
-    lb = emit_byte(lb, 0x8b)
-    lb = emit_byte(lb, 0x04)
-    lb = emit_byte(lb, 0xda)                             // mov rax, [rdx+rbx*8]
-    lb = emit_byte(lb, 0x88)
-    lb = emit_byte(lb, 0x06)                             // mov [rsi], al
-    lb = emit_byte(lb, 0x48)
-    lb = emit_byte(lb, 0xff)
-    lb = emit_byte(lb, 0xc3)                             // inc rbx
-    lb = emit_byte(lb, 0x48)
-    lb = emit_byte(lb, 0xff)
-    lb = emit_byte(lb, 0xc6)                             // inc rsi
-    lb = emit_byte(lb, 0x48)
-    lb = emit_byte(lb, 0xff)
-    lb = emit_byte(lb, 0xc9)                             // dec rcx
-    c.code = lb
-    c.code = emit_jmp_rel8(c.code, -22)                  // jmp copy_loop
+    c = emit_array_bytes_copy_loop(c)                    // word or packed layout
     // done_copy:
 
     // open(path, O_WRONLY|O_CREAT|O_TRUNC=577, 0755=493)
@@ -7990,9 +8688,10 @@ fn emit_horner_step(nc: NativeCompiler, v_slot: i64, acc_slot: i64, coeff_off: i
 // Constants are generated, not typed. Hand-typing is how a constant ends up
 // right to 15 digits and wrong in the 16th.
 //
-// UNCHANGED, and still wrong at the edges: the 2^n scaling is a raw
-// `bits + (n << 52)`, which neither produces a denormal on underflow nor
-// saturates to infinity on overflow.
+// Edges: NaN returns x, x above 709.78 returns +inf, x at or below -745.13
+// returns +0, and the 2^n scaling goes through a normal intermediate and one
+// rounding multiply where a raw `bits + (n << 52)` would leave the exponent
+// field (denormal results, and n = 1024 just below the overflow threshold).
 //
 // Stack: [rbp-8]=x  [rbp-16]=r  [rbp-24]=n_f64  [rbp-32]=n  [rbp-40]=acc
 //        [rbp-48]=scratch  [rbp-56]=result bits
@@ -8005,6 +8704,14 @@ pub(crate) fn emit_builtin_exp(nc: NativeCompiler) -> NativeCompiler with Mut, P
     let ln2_hi_off = c.rodata.last_offset
     c.rodata = data_section_add_f64(c.rodata, 0x3D53DE6AF278ECE6)   // ln2 - ln2_hi
     let ln2_lo_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x40862E42FEFA39EF)   // 709.782712893383973
+    let exp_max_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0xC0874910D52D3052)   // -745.133219101941217
+    let exp_min_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x4000000000000000)   // 2
+    let two_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x0170000000000000)   // 2^-1000
+    let two_m1000_off = c.rodata.last_offset
 
     // 1/k! for k = 0..13, indexed by k.
     var cf: [i64; 14] = [0; 14]
@@ -8044,6 +8751,27 @@ pub(crate) fn emit_builtin_exp(nc: NativeCompiler) -> NativeCompiler with Mut, P
     c.code = emit_mov_reg_reg(c.code, 0, 7)          // rax = rdi = bits(x)
     c.code = emit_movq_xmm0_rax(c.code)
     c.code = emit_movsd_rbp_disp8_xmm0(c.code, 0 - 8)
+
+    // Out-of-range x, before the range reduction ever sees it: cvtsd2si of a
+    // huge quotient is the integer indefinite 0x8000000000000000, which the
+    // exponent add then turned into -9.2e18 for exp(-1e19).
+    //   NaN                      -> x
+    //   x > 709.782712893383973   -> +inf  (the largest x with exp(x) finite)
+    //   x <= -745.133219101941217 -> +0    (exp(x) <= 2^-1075, rounds to 0)
+    let p_max = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, p_max + 4, exp_max_off)
+    c.code = emit_ucomisd_xmm0_xmm1(c.code)
+    let jp_nan = c.code.len
+    c.code = exp_emit_jcc_rel32(c.code, 0xA)        // jp  -> NaN
+    let ja_inf = c.code.len
+    c.code = exp_emit_jcc_rel32(c.code, 0x7)        // ja  -> +inf
+    let p_min = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, p_min + 4, exp_min_off)
+    c.code = emit_ucomisd_xmm0_xmm1(c.code)
+    let jbe_zero = c.code.len
+    c.code = exp_emit_jcc_rel32(c.code, 0x6)        // jbe -> +0
 
     // n = round(x / ln2) -- ROUND, not truncate: this alone halves |r|.
     let p_inv = c.code.len
@@ -8087,19 +8815,100 @@ pub(crate) fn emit_builtin_exp(nc: NativeCompiler) -> NativeCompiler with Mut, P
         k = k - 1
     }
 
-    // result = poly * 2^n, by adding n to the exponent field
+    // result = poly * 2^n. poly is in [0.707, 1.415], so adding n to the
+    // exponent field is exact only while poly * 2^n stays a normal number:
+    // poly < 1 has biased exponent 1022, so n >= -1021. In-range x give
+    // n in [-1075, 1024].
+    //   n > 1023   poly * 2^(n-1) * 2         (n = 1024 overflows the field)
+    //   n < -1021  poly * 2^(n+1000) * 2^-1000, the one multiply rounding to
+    //              the denormal (poly * 2^(n+1000) is exact and normal)
     c.code = emit_movsd_xmm0_rbp_disp8(c.code, 0 - 40)
     c.code = emit_movq_rax_xmm0(c.code)
     c.code = emit_store_rax_rbp_disp32(c.code, 0 - 56)
     c.code = emit_load_rbp_disp32_rax(c.code, 0 - 32)
+    c.code = emit_mov_reg_imm(c.code, 3, 1023)
+    c.code = emit_cmp_rbx_rax(c.code)               // 1023 - n
+    let jl_big = c.code.len
+    c.code = exp_emit_jcc_rel32(c.code, 0xC)        // jl: n > 1023
+    c.code = emit_mov_reg_imm(c.code, 3, 0 - 1021)
+    c.code = emit_cmp_rbx_rax(c.code)               // -1021 - n
+    let jg_small = c.code.len
+    c.code = exp_emit_jcc_rel32(c.code, 0xF)        // jg: n < -1021
+    c = exp_emit_scale(c, 0, 0 - 1)
+    let jmp_done1 = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+
+    let big_at = c.code.len
+    c.code = patch_u32_le(c.code, jl_big + 2, big_at - (jl_big + 6))
+    c = exp_emit_scale(c, 0 - 1, two_off)
+    let jmp_done2 = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+
+    let small_at = c.code.len
+    c.code = patch_u32_le(c.code, jg_small + 2, small_at - (jg_small + 6))
+    c = exp_emit_scale(c, 1000, two_m1000_off)
+    let jmp_done3 = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+
+    let nan_at = c.code.len
+    c.code = patch_u32_le(c.code, jp_nan + 2, nan_at - (jp_nan + 6))
+    c.code = emit_mov_reg_reg(c.code, 0, 7)          // rax = bits(x)
+    let jmp_done4 = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+
+    let inf_at = c.code.len
+    c.code = patch_u32_le(c.code, ja_inf + 2, inf_at - (ja_inf + 6))
+    c.code = emit_mov_reg_imm(c.code, 0, 0x7FF0000000000000)
+    let jmp_done5 = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+
+    let zero_at = c.code.len
+    c.code = patch_u32_le(c.code, jbe_zero + 2, zero_at - (jbe_zero + 6))
+    c.code = emit_mov_reg_imm(c.code, 0, 0)
+
+    let done_at = c.code.len
+    c.code = patch_u32_le(c.code, jmp_done1 + 1, done_at - (jmp_done1 + 5))
+    c.code = patch_u32_le(c.code, jmp_done2 + 1, done_at - (jmp_done2 + 5))
+    c.code = patch_u32_le(c.code, jmp_done3 + 1, done_at - (jmp_done3 + 5))
+    c.code = patch_u32_le(c.code, jmp_done4 + 1, done_at - (jmp_done4 + 5))
+    c.code = patch_u32_le(c.code, jmp_done5 + 1, done_at - (jmp_done5 + 5))
+    c.code = emit_add_rsp_imm32(c.code, 128)
+    c.code = emit_pop_rbp(c.code)
+    c.code = emit_ret(c.code)
+    c
+}
+
+// 0F 80+cc <rel32>, displacement left 0 for patch_u32_le at +2.
+fn exp_emit_jcc_rel32(buf: CodeBuffer, cc: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x0F)
+    b = emit_byte(b, 0x80 + cc)
+    b = emit_u32_le(b, 0)
+    b
+}
+
+// rax = bits(poly * 2^(n + bias)) from [rbp-56] = bits(poly), [rbp-32] = n;
+// then, when factor_off >= 0, rax = bits(that * rodata[factor_off]).
+fn exp_emit_scale(nc: NativeCompiler, bias: i64, factor_off: i64) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    c.code = emit_load_rbp_disp32_rax(c.code, 0 - 32)
+    if bias != 0 {
+        c.code = emit_mov_reg_imm(c.code, 3, bias)
+        c.code = emit_add_rax_rbx(c.code)
+    }
     c.code = emit_mov_reg_imm(c.code, 1, 52)
     c.code = emit_shl_rax_cl(c.code)
     c.code = emit_mov_reg_reg(c.code, 3, 0)
     c.code = emit_load_rbp_disp32_rax(c.code, 0 - 56)
     c.code = emit_add_rax_rbx(c.code)
-    c.code = emit_add_rsp_imm32(c.code, 128)
-    c.code = emit_pop_rbp(c.code)
-    c.code = emit_ret(c.code)
+    if factor_off >= 0 {
+        c.code = emit_movq_xmm0_rax(c.code)
+        let p = c.code.len
+        c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+        c.relocs = add_rip_reloc(c.relocs, p + 4, factor_off)
+        c.code = emit_mulsd_xmm0_xmm1(c.code)
+        c.code = emit_movq_rax_xmm0(c.code)
+    }
     c
 }
 
@@ -8294,141 +9103,134 @@ pub(crate) fn emit_builtin_log(nc: NativeCompiler) -> NativeCompiler with Mut, P
     c
 }
 
-// Sprint 121: sin builtin — range reduction + degree-7 minimax polynomial
-// Algorithm: sin(x) ≈ x(1 - x²(1/6 - x²(1/120 - x²/5040)))
-// Range reduction: n = round(x/(2π)), r = x - n*2π
-// Stack layout: [rbp-8]=r, [rbp-16]=r², [rbp-24]=scratch
-pub(crate) fn emit_builtin_sin(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
+// sin / cos builtins (ids 18, 19), to double precision.
+//
+// WHY. These were Taylor series through r^13 / r^12 on the reduced range
+// [-pi, pi], with the reduction done against a single-double 2 pi. Their error
+// at |r| near pi was 2e-5 (sin) and 1e-4 (cos): measured cos(3.0) =
+// -0.98993963 against -0.98999250, so every structure factor
+// sum_j q_j cos(k . r_j) of an Ewald sum (stdlib/molecular/ewald.sio), every
+// rotation and every Fourier term built on the builtin carried a 1e-4 error
+// that no test of identities could see.
+//
+// NOW. Cody-Waite reduction r = (x - n 2pi_hi) - n 2pi_lo, n = round(x / 2pi),
+// with 2pi_hi = (float)(2 pi) (24 bits, so n 2pi_hi is exact for |n| < 2^29)
+// and 2pi_lo the long-double remainder; then the Taylor series through r^27
+// (sin) / r^28 (cos), whose truncation error at |r| = pi is 3e-17 / 3e-18,
+// Horner in r^2 with signed coefficients (-1)^j / k! rounded from long double.
+// Coefficients and split: self-hosted/native/oracles/trig_coeffs.cpp.
+// Measured against glibc in tests/run-pass/builtin_trig_double_precision.sio.
+fn trig_coeff_bits(is_cos: bool, j: i64) -> i64 {
+    // j = 0 is the innermost (highest-order) coefficient.
+    if is_cos {
+        if j == 0 { return 0x39D0A18A2635085D }   //  1/28!
+        if j == 1 { return 0xBA688E85FC6A4E5A }   // -1/26!
+        if j == 2 { return 0x3AFF2CF01972F578 }   //  1/24!
+        if j == 3 { return 0xBB90CE396DB7F853 }   // -1/22!
+        if j == 4 { return 0x3C1E542BA4020225 }   //  1/20!
+        if j == 5 { return 0xBCA6827863B97D97 }   // -1/18!
+        if j == 6 { return 0x3D2AE7F3E733B81F }   //  1/16!
+        if j == 7 { return 0xBDA93974A8C07C9D }   // -1/14!
+        if j == 8 { return 0x3E21EED8EFF8D898 }   //  1/12!
+        if j == 9 { return 0xBE927E4FB7789F5C }   // -1/10!
+        if j == 10 { return 0x3EFA01A01A01A01A }  //  1/8!
+        if j == 11 { return 0xBF56C16C16C16C17 }  // -1/6!
+        if j == 12 { return 0x3FA5555555555555 }  //  1/4!
+        if j == 13 { return 0xBFE0000000000000 }  // -1/2!
+        return 0x3FF0000000000000                 //  1
+    }
+    if j == 0 { return 0xBA1D1AB1C2DCCEA3 }       // -1/27!
+    if j == 1 { return 0x3AB3F3CCDD165FA9 }       //  1/25!
+    if j == 2 { return 0xBB4761B41316381A }       // -1/23!
+    if j == 3 { return 0x3BD71B8EF6DCF572 }       //  1/21!
+    if j == 4 { return 0xBC62F49B46814157 }       // -1/19!
+    if j == 5 { return 0x3CE952C77030AD4A }       //  1/17!
+    if j == 6 { return 0xBD6AE7F3E733B81F }       // -1/15!
+    if j == 7 { return 0x3DE6124613A86D09 }       //  1/13!
+    if j == 8 { return 0xBE5AE64567F544E4 }       // -1/11!
+    if j == 9 { return 0x3EC71DE3A556C734 }       //  1/9!
+    if j == 10 { return 0xBF2A01A01A01A01A }      // -1/7!
+    if j == 11 { return 0x3F81111111111111 }      //  1/5!
+    if j == 12 { return 0xBFC5555555555555 }      // -1/3!
+    if j == 13 { return 0x3FF0000000000000 }      //  1
+    0x3FF0000000000000
+}
 
-    // .rodata constants
-    c.rodata = data_section_add_f64(c.rodata, 0x401921FB54442D18)   // 2π
-    let two_pi_off = c.rodata.last_offset
-    c.rodata = data_section_add_f64(c.rodata, 0x3FC45F306DC9C883)   // 1/(2π)
-    let inv_two_pi_off = c.rodata.last_offset
-    c.rodata = data_section_add_f64(c.rodata, 0x3FF0000000000000)   // 1.0
-    let one_off = c.rodata.last_offset
-    c.rodata = data_section_add_f64(c.rodata, 0x3FC5555555555555)   // 1/6
-    let c3_off = c.rodata.last_offset
-    c.rodata = data_section_add_f64(c.rodata, 0x3F81111111111111)   // 1/120
-    let c5_off = c.rodata.last_offset
-    c.rodata = data_section_add_f64(c.rodata, 0x3F2A01A01A01A01A)   // 1/5040
-    let c7_off = c.rodata.last_offset
-    // Terms through x^13. The series previously stopped at x^7, which is accurate
-    // near zero and badly wrong at the ends of the reduced range: after reduction
-    // r lies in [-pi, pi], and at r = pi the x^7 truncation error is 7.5e-2. That
-    // is what made cos(3.0) return -1.1375 — outside [-1, 1] — and sin(3.0) return
-    // 0.091071 against a truth of 0.141120 (#1551).
-    //
-    // Worst-case truncation error at r = pi, by order: x^7 7.5e-2, x^9 6.9e-3,
-    // x^11 4.5e-4, x^13 2.1e-5. Three more terms buy three and a half decimal
-    // digits across the whole reduced range and cost three multiply-adds.
-    c.rodata = data_section_add_f64(c.rodata, 0x3EC71DE3A556C734)   // 1/362880   (9!)
-    let c9_off = c.rodata.last_offset
-    c.rodata = data_section_add_f64(c.rodata, 0x3E5AE64567F544E4)   // 1/39916800 (11!)
-    let c11_off = c.rodata.last_offset
-    c.rodata = data_section_add_f64(c.rodata, 0x3DE6124613A86D09)   // 1/6227020800 (13!)
-    let c13_off = c.rodata.last_offset
+// Stack layout: [rbp-8] = r, [rbp-16] = r^2, [rbp-24] = x, [rbp-32] = n.
+fn emit_builtin_trig(nc: NativeCompiler, is_cos: bool) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    c.rodata = data_section_add_f64(c.rodata, 0x3FC45F306DC9C883)   // 1/(2 pi)
+    let inv_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x401921FB60000000)   // 2 pi hi (24 bits)
+    let hi_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0xBE8777A5CF72C000)   // 2 pi - hi
+    let lo_off = c.rodata.last_offset
+    // 15 coefficients for cos (r^28 .. r^0), 14 for sin (r^27 .. r^1, times r).
+    let ncoef: i64 = if is_cos { 15 } else { 14 }
+    var offs: [i64; 16] = [0; 16]
+    var j: i64 = 0
+    while j < ncoef {
+        c.rodata = data_section_add_f64(c.rodata, trig_coeff_bits(is_cos, j))
+        offs[j as usize] = c.rodata.last_offset
+        j = j + 1
+    }
 
     c.code = emit_push_rbp(c.code)
     c.code = emit_mov_rbp_rsp(c.code)
     c.code = emit_sub_rsp_imm32(c.code, 48)
-
-    // rdi = f64 bit pattern of x
-    c.code = emit_mov_reg_reg(c.code, 0, 7)           // mov rax, rdi
+    c.code = emit_mov_reg_reg(c.code, 0, 7)           // mov rax, rdi (bits of x)
     c.code = emit_movq_xmm0_rax(c.code)               // xmm0 = x
-
-    // Step 1: Range reduction — n = round(x/(2π)), r = x - n*2π
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // [rbp-24] = x (save)
-    let sin_inv2pi = c.code.len
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // [rbp-24] = x
+    // n = round(x / 2 pi)
+    let p_inv = c.code.len
     c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, sin_inv2pi + 4, inv_two_pi_off)
-    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = x/(2π)
-    c.code = emit_cvtsd2si_rax_xmm0(c.code)           // rax = round(x/(2π))
-    c.code = emit_cvtsi2sd_xmm0_rax(c.code)           // xmm0 = n (as f64)
-    let sin_2pi = c.code.len
+    c.relocs = add_rip_reloc(c.relocs, p_inv + 4, inv_off)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    c.code = emit_cvtsd2si_rax_xmm0(c.code)           // round to nearest (MXCSR)
+    c.code = emit_cvtsi2sd_xmm0_rax(c.code)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -32)   // [rbp-32] = n
+    // r = x - n hi  (exact)
+    let p_hi = c.code.len
     c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, sin_2pi + 4, two_pi_off)
-    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = n*2π
-    // r = x - n*2π
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -32)   // [rbp-32] = n*2π
-    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -24)   // xmm0 = x
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -32)   // xmm1 = n*2π
-    c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = r = x - n*2π
-
-    // Store r and compute r²
+    c.relocs = add_rip_reloc(c.relocs, p_hi + 4, hi_off)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = n hi
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -16)   // scratch
+    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -24)   // x
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)
+    c.code = emit_subsd_xmm0_xmm1(c.code)             // x - n hi
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -8)
+    // r = r - n lo
+    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -32)   // n
+    let p_lo = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, p_lo + 4, lo_off)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)             // n lo
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -16)
+    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -8)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)
+    c.code = emit_subsd_xmm0_xmm1(c.code)             // r
     c.code = emit_movsd_rbp_disp8_xmm0(c.code, -8)    // [rbp-8] = r
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // [rbp-24] = r (copy for mul)
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)   // xmm1 = r
-    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = r²
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -16)   // [rbp-16] = r²
-
-    // Step 2: Horner —
-    //   sin(x) = r(1 - r²(1/6 - r²(1/120 - r²(1/5040 - r²(1/9!
-    //                - r²(1/11! - r²/13!))))))
-    // Innermost: s = 1/13!
-    let sin_c13 = c.code.len
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -8)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)             // r^2
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -16)   // [rbp-16] = r^2
+    // Horner in r^2: s = c0; s = s r^2 + c_j
+    let p_c0 = c.code.len
     c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, sin_c13 + 4, c13_off)
-    // s = 1/11! - r² * s
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
-    c.code = emit_mulsd_xmm0_xmm1(c.code)
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
-    let sin_c11 = c.code.len
-    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, sin_c11 + 4, c11_off)
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)
-    c.code = emit_subsd_xmm0_xmm1(c.code)
-    // s = 1/9! - r² * s
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
-    c.code = emit_mulsd_xmm0_xmm1(c.code)
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
-    let sin_c9 = c.code.len
-    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, sin_c9 + 4, c9_off)
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)
-    c.code = emit_subsd_xmm0_xmm1(c.code)
-    // s = 1/5040 - r² * s
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
-    c.code = emit_mulsd_xmm0_xmm1(c.code)
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
-    let sin_c7 = c.code.len
-    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, sin_c7 + 4, c7_off)
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)
-    c.code = emit_subsd_xmm0_xmm1(c.code)
-    // s = 1/120 - r² * s
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
-    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = r²/5040
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
-    let sin_c5 = c.code.len
-    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, sin_c5 + 4, c5_off)
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)   // xmm1 = r²/5040
-    c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = 1/120 - r²/5040
-    // s = 1/6 - r² * s
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
-    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = r²*(1/120 - r²/5040)
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
-    let sin_c3 = c.code.len
-    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, sin_c3 + 4, c3_off)
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)   // xmm1 = r²*(...)
-    c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = 1/6 - r²*(...)
-    // s = 1 - r² * s
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
-    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = r²*(1/6 - ...)
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
-    let sin_one = c.code.len
-    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, sin_one + 4, one_off)
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)   // xmm1 = r²*(...)
-    c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = 1 - r²*(...)
-    // result = r * s
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -8)    // xmm1 = r
-    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = sin(x)
-
-    // Return as bit pattern in rax
+    c.relocs = add_rip_reloc(c.relocs, p_c0 + 4, offs[0])
+    var k: i64 = 1
+    while k < ncoef {
+        c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)
+        c.code = emit_mulsd_xmm0_xmm1(c.code)
+        let p_ck = c.code.len
+        c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+        c.relocs = add_rip_reloc(c.relocs, p_ck + 4, offs[k as usize])
+        c.code = emit_addsd_xmm0_xmm1(c.code)
+        k = k + 1
+    }
+    if !is_cos {
+        c.code = emit_movsd_xmm1_rbp_disp8(c.code, -8)
+        c.code = emit_mulsd_xmm0_xmm1(c.code)         // sin = r * s
+    }
     c.code = emit_movq_rax_xmm0(c.code)
     c.code = emit_add_rsp_imm32(c.code, 48)
     c.code = emit_pop_rbp(c.code)
@@ -8436,135 +9238,12 @@ pub(crate) fn emit_builtin_sin(nc: NativeCompiler) -> NativeCompiler with Mut, P
     c
 }
 
-// Sprint 121: cos builtin — range reduction + degree-6 minimax polynomial
-// Algorithm: cos(x) ≈ 1 - x²(1/2 - x²(1/24 - x²/720))
-// Same range reduction as sin, same stack layout
+pub(crate) fn emit_builtin_sin(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
+    emit_builtin_trig(nc, false)
+}
+
 pub(crate) fn emit_builtin_cos(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
-
-    // .rodata constants
-    c.rodata = data_section_add_f64(c.rodata, 0x401921FB54442D18)   // 2π
-    let cos_two_pi_off = c.rodata.last_offset
-    c.rodata = data_section_add_f64(c.rodata, 0x3FC45F306DC9C883)   // 1/(2π)
-    let cos_inv_two_pi_off = c.rodata.last_offset
-    c.rodata = data_section_add_f64(c.rodata, 0x3FF0000000000000)   // 1.0
-    let cos_one_off = c.rodata.last_offset
-    c.rodata = data_section_add_f64(c.rodata, 0x3FE0000000000000)   // 1/2
-    let cos_c2_off = c.rodata.last_offset
-    c.rodata = data_section_add_f64(c.rodata, 0x3FA5555555555555)   // 1/24
-    let cos_c4_off = c.rodata.last_offset
-    c.rodata = data_section_add_f64(c.rodata, 0x3F56C16C16C16C17)   // 1/720
-    let cos_c6_off = c.rodata.last_offset
-    // Terms through x^12, for the same reason as sin: the series stopped at x^6,
-    // whose truncation error at the end of the reduced range (r = pi) is 2.1e-1.
-    // That is what made cos(3.0) return -1.1375 — outside [-1, 1] (#1551).
-    // By order at r = pi: x^6 2.1e-1, x^8 2.4e-2, x^10 1.8e-3, x^12 1.0e-4.
-    c.rodata = data_section_add_f64(c.rodata, 0x3EFA01A01A01A01A)   // 1/40320      (8!)
-    let cos_c8_off = c.rodata.last_offset
-    c.rodata = data_section_add_f64(c.rodata, 0x3E927E4FB7789F5C)   // 1/3628800    (10!)
-    let cos_c10_off = c.rodata.last_offset
-    c.rodata = data_section_add_f64(c.rodata, 0x3E21EED8EFF8D898)   // 1/479001600  (12!)
-    let cos_c12_off = c.rodata.last_offset
-
-    c.code = emit_push_rbp(c.code)
-    c.code = emit_mov_rbp_rsp(c.code)
-    c.code = emit_sub_rsp_imm32(c.code, 48)
-
-    // rdi = f64 bit pattern of x
-    c.code = emit_mov_reg_reg(c.code, 0, 7)           // mov rax, rdi
-    c.code = emit_movq_xmm0_rax(c.code)               // xmm0 = x
-
-    // Step 1: Range reduction (same as sin)
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // [rbp-24] = x
-    let cos_inv2pi = c.code.len
-    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, cos_inv2pi + 4, cos_inv_two_pi_off)
-    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = x/(2π)
-    c.code = emit_cvtsd2si_rax_xmm0(c.code)           // rax = round(x/(2π))
-    c.code = emit_cvtsi2sd_xmm0_rax(c.code)           // xmm0 = n
-    let cos_2pi = c.code.len
-    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, cos_2pi + 4, cos_two_pi_off)
-    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = n*2π
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -32)   // [rbp-32] = n*2π
-    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -24)   // xmm0 = x
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -32)   // xmm1 = n*2π
-    c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = r
-
-    // Compute r²
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -8)    // [rbp-8] = r
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // copy for mul
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)   // xmm1 = r
-    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = r²
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -16)   // [rbp-16] = r²
-
-    // Step 2: Horner —
-    //   cos(x) = 1 - r²(1/2 - r²(1/24 - r²(1/720 - r²(1/8! - r²(1/10! - r²/12!)))))
-    // Innermost: s = 1/12!
-    let cos_c12 = c.code.len
-    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, cos_c12 + 4, cos_c12_off)
-    // s = 1/10! - r² * s
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
-    c.code = emit_mulsd_xmm0_xmm1(c.code)
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
-    let cos_c10 = c.code.len
-    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, cos_c10 + 4, cos_c10_off)
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)
-    c.code = emit_subsd_xmm0_xmm1(c.code)
-    // s = 1/8! - r² * s
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
-    c.code = emit_mulsd_xmm0_xmm1(c.code)
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
-    let cos_c8 = c.code.len
-    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, cos_c8 + 4, cos_c8_off)
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)
-    c.code = emit_subsd_xmm0_xmm1(c.code)
-    // s = 1/720 - r² * s
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
-    c.code = emit_mulsd_xmm0_xmm1(c.code)
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
-    let cos_c6 = c.code.len
-    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, cos_c6 + 4, cos_c6_off)
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)
-    c.code = emit_subsd_xmm0_xmm1(c.code)
-    // s = 1/24 - r² * s
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
-    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = r²/720
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
-    let cos_c4 = c.code.len
-    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, cos_c4 + 4, cos_c4_off)
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)
-    c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = 1/24 - r²/720
-    // s = 1/2 - r² * s
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
-    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = r²*(1/24 - r²/720)
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
-    let cos_c2 = c.code.len
-    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, cos_c2 + 4, cos_c2_off)
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)
-    c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = 1/2 - r²*(...)
-    // result = 1 - r² * s
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
-    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = r²*(1/2 - ...)
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
-    let cos_one = c.code.len
-    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, cos_one + 4, cos_one_off)
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)
-    c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = cos(x)
-
-    // Return as bit pattern in rax
-    c.code = emit_movq_rax_xmm0(c.code)
-    c.code = emit_add_rsp_imm32(c.code, 48)
-    c.code = emit_pop_rbp(c.code)
-    c.code = emit_ret(c.code)
-    c
+    emit_builtin_trig(nc, true)
 }
 
 // Epilogue shared by print_f64 special-value exits (#2389).
@@ -10318,7 +10997,7 @@ fn emit_builtin_ffi_system_into(nc: &! NativeCompiler) with Mut, Panic, Div {
 
 pub fn native_v2_builtin_id_for_name(name: Name) -> i64 with Mut, Panic, Div {
     if name_is_print_int(name) { return 1 }
-    if name_is_print_u64(name) { return 80 }
+    if name_is_print_u64(name) { return 83 }
     if name_is_print_char(name) { return 2 }
     if name_is_print(name) { return 3 }
     if name_is_get_arg_count(name) { return 4 }
@@ -10349,6 +11028,10 @@ pub fn native_v2_builtin_id_for_name(name: Name) -> i64 with Mut, Panic, Div {
     if name_is___sounio_seq_push_scalar(name) { return 70 }
     if name_is___sounio_seq_get(name) { return 52 }
     if name_is___sounio_seq_set(name) { return 53 }
+    if name_is_wrapping_add(name) { return 80 }
+    if name_is_int_overflow(name) { return 85 }
+    if name_is_wrapping_sub(name) { return 81 }
+    if name_is_wrapping_mul(name) { return 82 }
     if name_is_syscall6(name) { return 27 }
     // P0-F allowlisted POSIX externs. malloc/free alias the heap ids so they
     // reuse the mmap emitters; getpid/getppid/exit/abort/system get 28-32.
@@ -10438,7 +11121,7 @@ fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) wit
     if builtin_id == 53 { emit_builtin_native_seq_set_into(nc); return }
     if builtin_id == 1 { emit_builtin_print_int_into(nc); return }
     // SIO-399: unsigned word printer shares the print_int ABI (one word in rdi).
-    if builtin_id == 80 { emit_builtin_print_u64_into(nc); return }
+    if builtin_id == 83 { emit_builtin_print_u64_into(nc); return }
     if builtin_id == 2 { emit_builtin_print_char_into(nc); return }
     if builtin_id == 3 {
         emit_builtin_print_str_into(nc)
@@ -10489,8 +11172,16 @@ fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) wit
     if builtin_id == 67 { emit_builtin_rgn_exit_scalar_into(nc); return }
     if builtin_id == 68 { emit_builtin_rgn_barrier_into(nc); return }
     if builtin_id == 69 { emit_builtin_rgn_mark_all_into(nc); return }
+    if builtin_id == 74 { emit_builtin_rgn_reset_into(nc); return }
+    if builtin_id == 75 { emit_builtin_rgn_settle_into(nc); return }
+    if builtin_id == 84 { emit_builtin_rgn_copy_payload_into(nc); return }
+    if builtin_id == 73 { emit_builtin_ptr_of_ref_into(nc); return }
     if builtin_id == 57 { emit_builtin_arena_reset_into(nc); return }
     if builtin_id == 58 { emit_builtin_panic_into(nc); return }
+    if builtin_id == 80 { emit_builtin_wrapping_add_into(nc); return }
+    if builtin_id == 85 { emit_builtin_int_overflow_into(nc); return }
+    if builtin_id == 81 { emit_builtin_wrapping_sub_into(nc); return }
+    if builtin_id == 82 { emit_builtin_wrapping_mul_into(nc); return }
     if builtin_id == 59 { emit_builtin_untracked_counter_into(nc); return }
     if builtin_id == 55 { emit_builtin_read_byte_into(nc); return }
     if builtin_id == 28 { emit_builtin_getpid_into(nc); return }
@@ -11079,7 +11770,7 @@ fn nc_core_emit_alloc_fail_into(nc: &! NativeCompiler, slow_jnz: i64, fail_code:
 }
 
 fn nc_core_emit_alloc_into(nc: &! NativeCompiler, dst: i64, type_tag: i64, elem_count: i64) -> bool with Mut, Panic, Div {
-    nc_core_emit_alloc_kind_into(nc, dst, type_tag, elem_count, false, false)
+    nc_core_emit_alloc_desc_into(nc, dst, type_tag, elem_count, 0 - 1, false, false)
 }
 
 // `is_array` marks an array-literal allocation (ir_alloc_array). An array is
@@ -11089,13 +11780,55 @@ fn nc_core_emit_alloc_into(nc: &! NativeCompiler, dst: i64, type_tag: i64, elem_
 // array by retargeting its handle entry, so a raw base sent the growth path
 // through a garbage handle entry and segfaulted on the first push past the
 // initial capacity.
+fn nc_core_emit_alloc_kind_into(nc: &! NativeCompiler, dst: i64, type_tag: i64, elem_count: i64, is_array: bool, force_managed: bool) -> bool with Mut, Panic, Div {
+    nc_core_emit_alloc_desc_into(nc, dst, type_tag, elem_count, 0 - 1, is_array, force_managed)
+}
+
+// Array copy: allocate dst with the layout of the array held in temp `src`
+// (IR_ALLOC_LIKE_SOURCE). The tag is read at run time, because the copy site
+// does not know statically whether its source was allocated packed.
+fn nc_core_emit_alloc_like_source_into(nc: &! NativeCompiler, dst: i64, type_tag: i64, elem_count: i64, src: i64) -> bool with Mut, Panic, Div {
+    nc_core_load_temp_to_rax(nc, src)
+    native_v2_resolve_handle_to_object_base_rax_into(nc)
+    let j_guard = nc_emit_packed_tag_guard_into(nc, 0x88, 0xf9)
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x8b); nc_emit_byte(nc, 0x08)   // mov rcx, [rax]
+    nc_emit_mov_rax_imm(nc, native_v2_packed_i8_descriptor())
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x39); nc_emit_byte(nc, 0xc1)   // cmp rcx, rax
+    let j_i8 = (*nc).code.len
+    nc_emit_jz_rel32(nc)
+    nc_emit_mov_rax_imm(nc, native_v2_packed_u8_descriptor())
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x39); nc_emit_byte(nc, 0xc1)   // cmp rcx, rax
+    let j_u8 = (*nc).code.len
+    nc_emit_jz_rel32(nc)
+    let l_word = (*nc).code.len
+    nc_patch_u32_le(nc, j_guard + 2, l_word - (j_guard + 6))
+    if !nc_core_emit_alloc_into(nc, dst, type_tag, elem_count) { return false }
+    let j_done_word = (*nc).code.len
+    nc_emit_jmp_rel32(nc)
+    let l_i8 = (*nc).code.len
+    nc_patch_u32_le(nc, j_i8 + 2, l_i8 - (j_i8 + 6))
+    if !nc_core_emit_alloc_desc_into(nc, dst, native_v2_packed_array_payload_bytes(elem_count), elem_count, native_v2_packed_i8_descriptor(), true, false) { return false }
+    let j_done_i8 = (*nc).code.len
+    nc_emit_jmp_rel32(nc)
+    let l_u8 = (*nc).code.len
+    nc_patch_u32_le(nc, j_u8 + 2, l_u8 - (j_u8 + 6))
+    if !nc_core_emit_alloc_desc_into(nc, dst, native_v2_packed_array_payload_bytes(elem_count), elem_count, native_v2_packed_u8_descriptor(), true, false) { return false }
+    let done = (*nc).code.len
+    nc_patch_u32_le(nc, j_done_word + 1, done - (j_done_word + 5))
+    nc_patch_u32_le(nc, j_done_i8 + 1, done - (j_done_i8 + 5))
+    true
+}
+
+// descriptor_override < 0 derives the descriptor from the tag; a packed byte
+// array passes its tag (native_v2_packed_i8_descriptor / _u8). is_array: see
+// nc_core_emit_alloc_kind_into.
 // `force_managed` is the Box path. Tag 8 is a small-value tag, and the unboxed
 // emitter stamps handle_id 0 and creates no table slot. (*box).field then
 // resolves handle 0 and reads address 0x20.
-fn nc_core_emit_alloc_kind_into(nc: &! NativeCompiler, dst: i64, type_tag: i64, elem_count: i64, is_array: bool, force_managed: bool) -> bool with Mut, Panic, Div {
+fn nc_core_emit_alloc_desc_into(nc: &! NativeCompiler, dst: i64, type_tag: i64, elem_count: i64, descriptor_override: i64, is_array: bool, force_managed: bool) -> bool with Mut, Panic, Div {
     let payload_size = native_v2_alloc_size_from_tag(type_tag)
     let total_size = payload_size + native_v2_object_header_size()
-    let descriptor_id = native_v2_alloc_descriptor_from_tag(type_tag)
+    let descriptor_id = if descriptor_override < 0 { native_v2_alloc_descriptor_from_tag(type_tag) } else { descriptor_override }
     let max_heap_payload = nc_heap_arena_bytes()
     if dst < 0 || total_size <= 0 || total_size > max_heap_payload {
         return false
@@ -11225,7 +11958,7 @@ fn nc_core_emit_box_alloc_into(nc: &! NativeCompiler, dst: i64, type_tag: i64, e
     nc_emit_jnz_rel32(nc)
     nc_emit_mov_rax_imm(nc, 9)
     nc_emit_mov_rdi_imm(nc, 0)
-    nc_emit_mov_reg_imm(nc, 6, nc_heap_arena_bytes())
+    nc_emit_mov_reg_imm(nc, 6, nc_box_heap_arena_bytes())
     nc_emit_mov_reg_imm(nc, 2, 3)
     nc_emit_mov_r10_imm32(nc, 34)
     nc_emit_mov_r8_imm32(nc, -1)
@@ -11242,7 +11975,7 @@ fn nc_core_emit_box_alloc_into(nc: &! NativeCompiler, dst: i64, type_tag: i64, e
     nc_emit_mov_reg_reg(nc, 0, 2)
     emit_store_rax_runtime_context_field_into(nc, runtime_context_field_box_heap_base())
     emit_store_rax_runtime_context_field_into(nc, runtime_context_field_box_heap_cursor())
-    nc_emit_mov_reg_imm(nc, 1, nc_heap_arena_bytes())
+    nc_emit_mov_reg_imm(nc, 1, nc_box_heap_arena_bytes())
     nc_emit_add_reg_reg(nc, 0, 1)
     emit_store_rax_runtime_context_field_into(nc, runtime_context_field_box_heap_limit())
     nc_patch_u32_le(nc, initialized + 2, (*nc).code.len - (initialized + 6))
@@ -11305,6 +12038,7 @@ fn nc_rodata_add_name_value(nc: &! NativeCompiler, name: Name) -> i64 with Mut, 
 }
 
 fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64) -> bool with Mut, Panic, Div {
+    NC_CUR_SRC_SITE = IR_A_SRC_SITE[(ir_region_slot_r((*func).region, (instr_index))) as usize]
     let lhs = IR_A_SRC1[(ir_region_slot_r((*func).region, (instr_index))) as usize]
     let rhs = IR_A_SRC2[(ir_region_slot_r((*func).region, (instr_index))) as usize]
     let dst = IR_A_DST[(ir_region_slot_r((*func).region, (instr_index))) as usize]
@@ -11371,6 +12105,7 @@ fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64
         nc_core_load_temp_to_rax(nc, rhs)
         nc_emit_pop_rbx(nc)
         nc_emit_add_rax_rbx(nc)
+        nc_emit_overflow_guard(nc, 0)
         nc_core_store_rax_to_temp(nc, dst)
         nc_core_mark_int_reg(nc, dst)
         return true
@@ -11381,6 +12116,7 @@ fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64
         nc_core_load_temp_to_rax(nc, lhs)
         nc_emit_pop_rbx(nc)
         nc_emit_sub_rax_rbx(nc)
+        nc_emit_overflow_guard(nc, 1)
         nc_core_store_rax_to_temp(nc, dst)
         nc_core_mark_int_reg(nc, dst)
         return true
@@ -11391,6 +12127,50 @@ fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64
         nc_core_load_temp_to_rax(nc, rhs)
         nc_emit_pop_rbx(nc)
         nc_emit_imul_rax_rbx(nc)
+        nc_emit_overflow_guard(nc, 2)
+        nc_core_store_rax_to_temp(nc, dst)
+        nc_core_mark_int_reg(nc, dst)
+        return true
+    }
+    // SIO-588 / ADR-031 R1: unsigned add/sub/mul fail on overflow, like the
+    // signed arms above, but on the unsigned condition. add and sub set CF on
+    // carry out of bit 63 and on borrow; unsigned multiply uses MUL (rdx:rax =
+    // rax * rbx), which sets CF (and OF) exactly when the high half is
+    // nonzero, i.e. when the product does not fit 64 bits. IMUL's flags
+    // describe signed overflow and would be wrong here. The `jc` goes to the
+    // same per-function trap stub as the SIO-207 `jo`. rdx is scratch in this
+    // emitter (OpDiv clobbers it with cqo/idiv). The lowerer emits these only
+    // for u8/u16/u32/u64/usize-typed operands (or literals paired with one);
+    // a narrower result is range-checked by the lowerer, not masked.
+    if op == BinaryOp::OpUAdd {
+        nc_core_load_temp_to_rax(nc, lhs)
+        nc_emit_push_rax(nc)
+        nc_core_load_temp_to_rax(nc, rhs)
+        nc_emit_pop_rbx(nc)
+        nc_emit_add_rax_rbx(nc)
+        nc_emit_carry_guard(nc, 4)
+        nc_core_store_rax_to_temp(nc, dst)
+        nc_core_mark_int_reg(nc, dst)
+        return true
+    }
+    if op == BinaryOp::OpUSub {
+        nc_core_load_temp_to_rax(nc, rhs)
+        nc_emit_push_rax(nc)
+        nc_core_load_temp_to_rax(nc, lhs)
+        nc_emit_pop_rbx(nc)
+        nc_emit_sub_rax_rbx(nc)
+        nc_emit_carry_guard(nc, 5)
+        nc_core_store_rax_to_temp(nc, dst)
+        nc_core_mark_int_reg(nc, dst)
+        return true
+    }
+    if op == BinaryOp::OpUMul {
+        nc_core_load_temp_to_rax(nc, lhs)
+        nc_emit_push_rax(nc)
+        nc_core_load_temp_to_rax(nc, rhs)
+        nc_emit_pop_rbx(nc)
+        nc_emit_mul_rbx(nc)
+        nc_emit_carry_guard(nc, 6)
         nc_core_store_rax_to_temp(nc, dst)
         nc_core_mark_int_reg(nc, dst)
         return true
@@ -11399,6 +12179,7 @@ fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64
         nc_core_load_temp_to_rax(nc, rhs)
         nc_emit_mov_reg_reg(nc, 1, 0)
         nc_core_load_temp_to_rax(nc, lhs)
+        nc_emit_div_guard(nc, true, 7)
         nc_emit_cqo(nc)
         nc_emit_idiv_rcx(nc)
         nc_core_store_rax_to_temp(nc, dst)
@@ -11412,6 +12193,7 @@ fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64
         nc_core_load_temp_to_rax(nc, rhs)
         nc_emit_mov_reg_reg(nc, 1, 0)
         nc_core_load_temp_to_rax(nc, lhs)
+        nc_emit_div_guard(nc, false, 11)
         nc_emit_xor_rdx_rdx(nc)   // rdx = 0
         nc_emit_div_rcx(nc)                 // div rcx: rax = quotient, rdx = remainder
         nc_core_store_rax_to_temp(nc, dst)
@@ -11422,6 +12204,7 @@ fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64
         nc_core_load_temp_to_rax(nc, rhs)
         nc_emit_mov_reg_reg(nc, 1, 0)
         nc_core_load_temp_to_rax(nc, lhs)
+        nc_emit_div_guard(nc, true, 8)
         nc_emit_cqo(nc)
         nc_emit_idiv_rcx(nc)
         nc_emit_mov_rax_rdx(nc)
@@ -11437,6 +12220,7 @@ fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64
         nc_core_load_temp_to_rax(nc, rhs)
         nc_emit_mov_reg_reg(nc, 1, 0)
         nc_core_load_temp_to_rax(nc, lhs)
+        nc_emit_div_guard(nc, false, 12)
         nc_emit_xor_rdx_rdx(nc)   // rdx = 0
         nc_emit_div_rcx(nc)                 // rdx = lhs % rhs (unsigned)
         nc_emit_mov_rax_rdx(nc)
@@ -12647,6 +13431,8 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
                 } else {
                     nc_core_load_temp_to_rax(nc, src1)
                     nc_emit_neg_rax(nc)
+                    NC_CUR_SRC_SITE = IR_A_SRC_SITE[(ir_region_slot_r((*func).region, (i))) as usize]
+                    nc_emit_overflow_guard(nc, 3)
                     nc_core_store_rax_to_temp(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
                     nc_core_mark_int_reg(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
                 }
@@ -12742,8 +13528,15 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
             let alloc_elem_count_raw = IR_A_FIELD_IDX[(ir_region_slot_r((*func).region, (i))) as usize]
             let alloc_elem_count = if alloc_elem_count_raw < 0 { 0 } else { alloc_elem_count_raw }
             let alloc_slot = ir_region_slot_r((*func).region, i)
+            let alloc_label = IR_A_LABEL_ID[alloc_slot as usize]
             if IR_A_IMM_FLAGS[alloc_slot as usize] == IR_BOX_ALLOC_FLAG {
                 if !nc_core_emit_box_alloc_into(nc, IR_A_DST[alloc_slot as usize], IR_A_IMM_I64[alloc_slot as usize], alloc_elem_count) { return false }
+            } else if alloc_elem_count > 0 && alloc_label == IR_ALLOC_LIKE_SOURCE && IR_A_SRC1[alloc_slot as usize] >= 0 {
+                if !nc_core_emit_alloc_like_source_into(nc, IR_A_DST[alloc_slot as usize], IR_A_IMM_I64[alloc_slot as usize], alloc_elem_count, IR_A_SRC1[alloc_slot as usize]) { return false }
+            } else if alloc_elem_count > 0 && (alloc_label == IR_ALLOC_PACKED_I8 || alloc_label == IR_ALLOC_PACKED_U8) {
+                // Packed byte array: one byte per element, tagged header.
+                let packed_desc = if alloc_label == IR_ALLOC_PACKED_I8 { native_v2_packed_i8_descriptor() } else { native_v2_packed_u8_descriptor() }
+                if !nc_core_emit_alloc_desc_into(nc, IR_A_DST[alloc_slot as usize], native_v2_packed_array_payload_bytes(alloc_elem_count), alloc_elem_count, packed_desc, true, false) { return false }
             } else {
                 if !nc_core_emit_alloc_kind_into(nc, IR_A_DST[alloc_slot as usize], IR_A_IMM_I64[alloc_slot as usize], alloc_elem_count, alloc_elem_count_raw >= 0, false) { return false }
             }
@@ -13039,6 +13832,16 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
         nc_emit_ret(nc)
     }
 
+    // SIO-207: shared signed-overflow trap for this function (exit 1, the
+    // builtin-panic shape). Emitted only when a guard referenced it; the
+    // synthetic epilogue above ends in ret, so this is unreachable except
+    // through the guards' jo.
+    if NC_V2_OVERFLOW_GUARD_USED != 0 {
+        nc_define_label(nc, nc_v2_overflow_trap_label())
+        nc_emit_exit_code(nc, 1)
+    }
+    nc_emit_overflow_stubs(nc)
+
     patch_label_forwards_mut(nc)
     if native_v2_capacity_trace_enabled() {
         print("nv2cap fn=")
@@ -13107,6 +13910,7 @@ pub fn native_v2_core_emit_binop_code_into(nc: &! NativeCompiler, dst: i64, lhs:
         nc_core_load_temp_to_rax(nc, rhs)
         nc_emit_pop_rbx(nc)
         nc_emit_add_rax_rbx(nc)
+        nc_emit_overflow_guard(nc, 0)
         nc_core_store_rax_to_temp(nc, dst)
         return true
     }
@@ -13116,6 +13920,7 @@ pub fn native_v2_core_emit_binop_code_into(nc: &! NativeCompiler, dst: i64, lhs:
         nc_core_load_temp_to_rax(nc, lhs)
         nc_emit_pop_rbx(nc)
         nc_emit_sub_rax_rbx(nc)
+        nc_emit_overflow_guard(nc, 1)
         nc_core_store_rax_to_temp(nc, dst)
         return true
     }
@@ -13125,6 +13930,7 @@ pub fn native_v2_core_emit_binop_code_into(nc: &! NativeCompiler, dst: i64, lhs:
         nc_core_load_temp_to_rax(nc, rhs)
         nc_emit_pop_rbx(nc)
         nc_emit_imul_rax_rbx(nc)
+        nc_emit_overflow_guard(nc, 2)
         nc_core_store_rax_to_temp(nc, dst)
         return true
     }
@@ -13132,6 +13938,7 @@ pub fn native_v2_core_emit_binop_code_into(nc: &! NativeCompiler, dst: i64, lhs:
         nc_core_load_temp_to_rax(nc, rhs)
         nc_emit_mov_reg_reg(nc, 1, 0)
         nc_core_load_temp_to_rax(nc, lhs)
+        nc_emit_div_guard(nc, true, 7)
         nc_emit_cqo(nc)
         nc_emit_idiv_rcx(nc)
         nc_core_store_rax_to_temp(nc, dst)
@@ -13351,7 +14158,7 @@ fn native_v2_ir_alloc(dst: i64, type_id: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: base.name_id,
+        name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -13372,7 +14179,7 @@ fn native_v2_ir_field_get(dst: i64, base_reg: i64, field_idx: i64, field_name: N
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: ir_intern_name(field_name),
+        name_id: ir_intern_name(field_name), src_site: 0,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -13393,7 +14200,7 @@ fn native_v2_ir_field_set(base_reg: i64, field_idx: i64, src: i64, field_name: N
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: ir_intern_name(field_name),
+        name_id: ir_intern_name(field_name), src_site: 0,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -13414,7 +14221,7 @@ fn native_v2_ir_return_sret(src: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: base.name_id,
+        name_id: base.name_id, src_site: base.src_site,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -13435,7 +14242,7 @@ fn native_v2_ir_call_sret(dst: i64, dest_reg: i64, fn_name: Name, fn_id: i64, ar
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name_id: ir_intern_name(fn_name),
+        name_id: ir_intern_name(fn_name), src_site: 0,
         call_args: base.call_args,
         arg_count: explicit_arg_count,
     }
@@ -13586,7 +14393,7 @@ pub fn compile_native_v2_sret_witness_to_file(output_path: string, plain_call: b
     let reloc_eff_rodata = if nc.flat_rodata_len > 0 { nc.flat_rodata_len } else { nc.rodata.len }
     let reloc_data_off = align_page(reloc_rodata_off + reloc_eff_rodata)
     apply_relocations_into(&! nc, reloc_rodata_off, reloc_data_off)
-    native_v2_write_min_elf64_to_file(output_path, &! nc, nc.entry_offset, 4194304)
+    native_v2_write_min_elf64_to_file(output_path, &! nc, nc.entry_offset, nc_elf_base_addr())
 }
 
 // Relocation-shape witness: --native-v2-emit-reloc-shape <shape> <out_path>.
@@ -13661,7 +14468,7 @@ pub fn compile_native_v2_reloc_shape_witness_to_file(output_path: string, shape:
     let reloc_eff_rodata = if nc.flat_rodata_len > 0 { nc.flat_rodata_len } else { nc.rodata.len }
     let reloc_data_off = align_page(reloc_rodata_off + reloc_eff_rodata)
     apply_relocations_into(&! nc, reloc_rodata_off, reloc_data_off)
-    native_v2_write_min_elf64_to_file(output_path, &! nc, nc.entry_offset, 4194304)
+    native_v2_write_min_elf64_to_file(output_path, &! nc, nc.entry_offset, nc_elf_base_addr())
 }
 
 // Map MachineOperand to a scheduler register ID for dependency tracking.
@@ -14037,6 +14844,7 @@ pub fn native_v2_core_emit_any_binop_into(nc: &! NativeCompiler, dst: i64, lhs: 
         nc_core_load_temp_to_rax(nc, rhs)
         nc_emit_pop_rbx(nc)
         nc_emit_add_rax_rbx(nc)
+        nc_emit_overflow_guard(nc, 0)
         nc_core_store_rax_to_temp(nc, dst)
         return true
     }
@@ -14046,6 +14854,7 @@ pub fn native_v2_core_emit_any_binop_into(nc: &! NativeCompiler, dst: i64, lhs: 
         nc_core_load_temp_to_rax(nc, lhs)
         nc_emit_pop_rbx(nc)
         nc_emit_sub_rax_rbx(nc)
+        nc_emit_overflow_guard(nc, 1)
         nc_core_store_rax_to_temp(nc, dst)
         return true
     }
@@ -14055,6 +14864,7 @@ pub fn native_v2_core_emit_any_binop_into(nc: &! NativeCompiler, dst: i64, lhs: 
         nc_core_load_temp_to_rax(nc, rhs)
         nc_emit_pop_rbx(nc)
         nc_emit_imul_rax_rbx(nc)
+        nc_emit_overflow_guard(nc, 2)
         nc_core_store_rax_to_temp(nc, dst)
         return true
     }
@@ -14062,6 +14872,7 @@ pub fn native_v2_core_emit_any_binop_into(nc: &! NativeCompiler, dst: i64, lhs: 
         nc_core_load_temp_to_rax(nc, rhs)
         nc_emit_mov_reg_reg(nc, 1, 0)
         nc_core_load_temp_to_rax(nc, lhs)
+        nc_emit_div_guard(nc, true, 7)
         nc_emit_cqo(nc)
         nc_emit_idiv_rcx(nc)
         nc_core_store_rax_to_temp(nc, dst)
@@ -14108,6 +14919,12 @@ pub fn native_v2_core_emit_branch_false_to_label_into(nc: &! NativeCompiler, con
 }
 
 pub fn native_v2_core_patch_labels_into(nc: &! NativeCompiler) with IO, Mut, Panic, Div {
+    // SIO-207: overflow trap stub for the driver path (mirrors the core_ir fn end).
+    if NC_V2_OVERFLOW_GUARD_USED != 0 {
+        nc_define_label(nc, nc_v2_overflow_trap_label())
+        nc_emit_exit_code(nc, 1)
+    }
+    nc_emit_overflow_stubs(nc)
     patch_label_forwards_mut(nc)
 }
 
@@ -14225,9 +15042,7 @@ pub fn native_v2_core_emit_local_array_load_into(nc: &! NativeCompiler, dst: i64
     nc_core_load_temp_to_rax(nc, idx_reg)
     nc_emit_mov_reg_reg(nc, 3, 0)
     if NC_BOUNDS_CHECK == 1 { nc_emit_index_bounds_check(nc) }
-    nc_emit_mov_reg_imm(nc, 1, native_v2_object_header_size() / 8)
-    nc_emit_add_reg_reg(nc, 3, 1)
-    nc_emit_load_rax_mem_rdx_rbx8(nc)
+    nc_emit_tagged_array_load_rdx_rbx_into(nc)
     nc_core_store_rax_to_temp(nc, dst)
 }
 
@@ -14239,10 +15054,7 @@ pub fn native_v2_core_emit_local_array_store_into(nc: &! NativeCompiler, base_re
     nc_core_load_temp_to_rax(nc, idx_reg)
     nc_emit_mov_reg_reg(nc, 3, 0)
     if NC_BOUNDS_CHECK == 1 { nc_emit_index_bounds_check(nc) }
-    nc_emit_mov_reg_imm(nc, 1, native_v2_object_header_size() / 8)
-    nc_emit_add_reg_reg(nc, 3, 1)
-    nc_core_load_temp_to_rax(nc, src)
-    nc_emit_store_rax_mem_rdx_rbx8(nc)
+    nc_emit_tagged_array_store_rdx_rbx_into(nc, src)
 }
 
 pub fn native_v2_core_emit_param_array_load_into(nc: &! NativeCompiler, dst: i64, base_reg: i64, idx_reg: i64) with Mut, Panic, Div {
@@ -14253,9 +15065,7 @@ pub fn native_v2_core_emit_param_array_load_into(nc: &! NativeCompiler, dst: i64
     nc_core_load_temp_to_rax(nc, idx_reg)
     nc_emit_mov_reg_reg(nc, 3, 0)
     if NC_BOUNDS_CHECK == 1 { nc_emit_index_bounds_check(nc) }
-    nc_emit_mov_reg_imm(nc, 1, native_v2_object_header_size() / 8)
-    nc_emit_add_reg_reg(nc, 3, 1)
-    nc_emit_load_rax_mem_rdx_rbx8(nc)
+    nc_emit_tagged_array_load_rdx_rbx_into(nc)
     nc_core_store_rax_to_temp(nc, dst)
 }
 
@@ -14267,10 +15077,7 @@ pub fn native_v2_core_emit_param_array_store_into(nc: &! NativeCompiler, base_re
     nc_core_load_temp_to_rax(nc, idx_reg)
     nc_emit_mov_reg_reg(nc, 3, 0)
     if NC_BOUNDS_CHECK == 1 { nc_emit_index_bounds_check(nc) }
-    nc_emit_mov_reg_imm(nc, 1, native_v2_object_header_size() / 8)
-    nc_emit_add_reg_reg(nc, 3, 1)
-    nc_core_load_temp_to_rax(nc, src)
-    nc_emit_store_rax_mem_rdx_rbx8(nc)
+    nc_emit_tagged_array_store_rdx_rbx_into(nc, src)
 }
 
 pub fn native_v2_core_emit_raw_array_load_into(nc: &! NativeCompiler, dst: i64, base_reg: i64, idx_reg: i64) with Mut, Panic, Div {
@@ -14338,7 +15145,7 @@ fn native_v2_ref_array_bss_window_end() -> i64 { 2147483648 }
 fn native_v2_ref_array_resolve_base_rax_into(nc: &! NativeCompiler, base_ref: i64) with Mut, Panic, Div {
     nc_core_load_temp_to_rax(nc, base_ref)
     nc_emit_mov_rbx_rax(nc)                                  // rbx = V
-    nc_emit_mov_rax_imm(nc, native_v2_handle_raw_ptr_threshold())
+    nc_emit_mov_rax_imm(nc, nc_handle_capacity())
     nc_emit_cmp_rbx_rax(nc)
     nc_emit_setae_al(nc)
     nc_emit_movzx_rax_al(nc)
@@ -14394,7 +15201,7 @@ fn native_v2_ref_array_resolve_base_rax_into(nc: &! NativeCompiler, base_ref: i6
 fn native_v2_ref_field_resolve_base_rax_into(nc: &! NativeCompiler, base_ref: i64) with Mut, Panic, Div {
     nc_core_load_temp_to_rax(nc, base_ref)
     nc_emit_mov_rbx_rax(nc)
-    nc_emit_mov_rax_imm(nc, native_v2_handle_raw_ptr_threshold())
+    nc_emit_mov_rax_imm(nc, nc_handle_capacity())
     nc_emit_cmp_rbx_rax(nc)
     nc_emit_setae_al(nc)
     nc_emit_movzx_rax_al(nc)
@@ -14463,9 +15270,7 @@ pub fn native_v2_core_emit_ref_array_load_into(nc: &! NativeCompiler, dst: i64, 
     nc_emit_mov_reg_reg(nc, 2, 0)
     nc_core_load_temp_to_rax(nc, idx_reg)
     nc_emit_mov_reg_reg(nc, 3, 0)
-    nc_emit_mov_reg_imm(nc, 1, native_v2_object_header_size() / 8)
-    nc_emit_add_reg_reg(nc, 3, 1)
-    nc_emit_load_rax_mem_rdx_rbx8(nc)
+    nc_emit_tagged_array_load_rdx_rbx_into(nc)
     nc_core_store_rax_to_temp(nc, dst)
 }
 
@@ -14476,10 +15281,7 @@ pub fn native_v2_core_emit_ref_array_store_into(nc: &! NativeCompiler, base_ref:
     nc_emit_mov_reg_reg(nc, 2, 0)
     nc_core_load_temp_to_rax(nc, idx_reg)
     nc_emit_mov_reg_reg(nc, 3, 0)
-    nc_emit_mov_reg_imm(nc, 1, native_v2_object_header_size() / 8)
-    nc_emit_add_reg_reg(nc, 3, 1)
-    nc_core_load_temp_to_rax(nc, src)
-    nc_emit_store_rax_mem_rdx_rbx8(nc)
+    nc_emit_tagged_array_store_rdx_rbx_into(nc, src)
 }
 
 // ============================================================================
@@ -14879,18 +15681,115 @@ fn emit_entry_trampoline_mmap_into(nc: &! NativeCompiler) with Mut, Panic, Div {
     (*nc).entry_offset = (*nc).code.len
 
     nc_emit_mov_r14_rsp(nc)
-    nc_emit_mov_rax_imm(nc, 9)
-    nc_emit_mov_rdi_imm(nc, 0)
-    nc_emit_mov_reg_imm(nc, 6, 2147483648)
-    nc_emit_mov_reg_imm(nc, 2, 3)
-    nc_emit_mov_r10_imm32(nc, 34)
-    nc_emit_mov_r8_imm32(nc, -1)
-    nc_emit_mov_r9_imm32(nc, 0)
-    nc_emit_syscall(nc)
+    emit_entry_heap_reserve_into(nc)
 
     let ctx_slot_disp = (*nc).code.len + 3
     nc_emit_mov_rip_disp32_rax(nc, 0)
     nc_add_data_section_reloc(nc, ctx_slot_disp, (*nc).runtime_context_slot_offset)
+}
+
+// See nc_heap_reserve_max. On exit: rax = mapping base (runtime context),
+// rsi = mapping length, and heap_limit is already stored in the context.
+// Clobbers rcx, rdx, rdi, r8, r9, r10, r11.
+fn emit_entry_heap_reserve_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    // sysinfo(&buf) into a 128-byte stack buffer.
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x81)
+    nc_emit_byte(nc, 0xec)
+    nc_emit_u32_le(nc, 128)                                                         // sub rsp, 128 (no probe: rbp is not a frame yet)
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x89)
+    nc_emit_byte(nc, 0xe7)  // mov rdi, rsp
+    nc_emit_mov_rax_imm(nc, 99)
+    nc_emit_syscall(nc)
+    // rsi = (totalram + totalswap) * mem_unit
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x8b)
+    nc_emit_byte(nc, 0x74)
+    nc_emit_byte(nc, 0x24)
+    nc_emit_byte(nc, 0x20)  // mov rsi, [rsp+32]
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x03)
+    nc_emit_byte(nc, 0x74)
+    nc_emit_byte(nc, 0x24)
+    nc_emit_byte(nc, 0x40)  // add rsi, [rsp+64]
+    nc_emit_byte(nc, 0x8b)
+    nc_emit_byte(nc, 0x4c)
+    nc_emit_byte(nc, 0x24)
+    nc_emit_byte(nc, 0x68)  // mov ecx, [rsp+104]
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x0f)
+    nc_emit_byte(nc, 0xaf)
+    nc_emit_byte(nc, 0xf1)  // imul rsi, rcx
+    nc_emit_add_rsp_imm32(nc, 128)
+    // rsi = min(rsi, MAX); rsi = max(rsi, MIN)
+    nc_emit_mov_reg_imm(nc, 2, nc_heap_reserve_max())
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x39)
+    nc_emit_byte(nc, 0xd6)  // cmp rsi, rdx
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x0f)
+    nc_emit_byte(nc, 0x47)
+    nc_emit_byte(nc, 0xf2)  // cmova rsi, rdx
+    nc_emit_mov_reg_imm(nc, 2, nc_heap_reserve_min())
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x39)
+    nc_emit_byte(nc, 0xd6)  // cmp rsi, rdx
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x0f)
+    nc_emit_byte(nc, 0x42)
+    nc_emit_byte(nc, 0xf2)  // cmovb rsi, rdx
+
+    // mmap(0, rsi, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE, -1, 0)
+    let retry = (*nc).code.len
+    nc_emit_mov_rax_imm(nc, 9)
+    nc_emit_mov_rdi_imm(nc, 0)
+    nc_emit_mov_reg_imm(nc, 2, 3)
+    nc_emit_mov_r10_imm32(nc, 16418)
+    nc_emit_mov_r8_imm32(nc, -1)
+    nc_emit_mov_r9_imm32(nc, 0)
+    nc_emit_syscall(nc)
+    // cmp rax, -4095 ; jb mapped (unsigned: success)
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x3d)
+    nc_emit_u32_le(nc, -4095)
+    let jb_mapped = (*nc).code.len
+    nc_emit_byte(nc, 0x0f)
+    nc_emit_byte(nc, 0x82)
+    nc_emit_u32_le(nc, 0)
+    // refused: halve and retry while rsi >= FLOOR
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0xd1)
+    nc_emit_byte(nc, 0xee)  // shr rsi, 1
+    nc_emit_mov_reg_imm(nc, 2, nc_heap_reserve_floor())
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x39)
+    nc_emit_byte(nc, 0xd6)  // cmp rsi, rdx
+    let jae_retry = (*nc).code.len
+    nc_emit_byte(nc, 0x0f)
+    nc_emit_byte(nc, 0x83)
+    nc_emit_u32_le(nc, 0)
+    nc_patch_u32_le(nc, jae_retry + 2, retry - (jae_retry + 6))
+    // no mapping at all: exit(184)
+    nc_emit_mov_rax_imm(nc, 60)
+    nc_emit_mov_rdi_imm(nc, 184)
+    nc_emit_syscall(nc)
+    nc_emit_ud2(nc)
+
+    nc_patch_u32_le(nc, jb_mapped + 2, (*nc).code.len - (jb_mapped + 6))
+    // heap_limit = base + length - region_stack_bytes, stored at [rax + heap_limit]
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x8d)
+    nc_emit_byte(nc, 0x0c)
+    nc_emit_byte(nc, 0x30)  // lea rcx, [rax + rsi]
+    nc_emit_mov_reg_imm(nc, 2, native_v2_region_stack_bytes())
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x29)
+    nc_emit_byte(nc, 0xd1)  // sub rcx, rdx
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x89)
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, runtime_context_field_heap_limit())  // mov [rax + disp8], rcx
 }
 
 fn emit_entry_trampoline_context_into(nc: &! NativeCompiler) with Mut, Panic, Div {
@@ -14899,25 +15798,22 @@ fn emit_entry_trampoline_context_into(nc: &! NativeCompiler) with Mut, Panic, Di
     emit_store_rax_runtime_context_field_into(nc, runtime_context_field_handle_table_base())
     emit_store_runtime_context_imm_into(nc, runtime_context_field_handle_count(), 0)
     emit_store_runtime_context_imm_into(nc, runtime_context_field_region_top(), 0)
-    emit_store_runtime_context_imm_into(nc, runtime_context_field_handle_capacity(), native_v2_handle_table_capacity_default())
+    emit_store_runtime_context_imm_into(nc, runtime_context_field_handle_capacity(), nc_handle_capacity())
     emit_store_runtime_context_imm_into(nc, runtime_context_field_pin_registry(), runtime_context_pin_registry_unwired())
     emit_store_runtime_context_imm_into(nc, runtime_context_field_pin_count(), runtime_context_pin_count_unwired())
     emit_store_runtime_context_imm_into(nc, runtime_context_field_collector_epoch(), 0)
     emit_store_runtime_context_imm_into(nc, runtime_context_field_last_gc_stats(), 0)
 
     emit_load_runtime_context_field_rax_into(nc, runtime_context_field_handle_table_base())
-    nc_emit_mov_reg_imm(nc, 1, native_v2_handle_table_bytes())
+    nc_emit_mov_reg_imm(nc, 1, nc_handle_table_bytes())
     nc_emit_add_reg_reg(nc, 0, 1)
     emit_store_rax_runtime_context_field_into(nc, runtime_context_field_heap_base())
     emit_store_rax_runtime_context_field_into(nc, runtime_context_field_heap_cursor())
 }
 
 fn emit_entry_trampoline_heap_args_into(nc: &! NativeCompiler) with Mut, Panic, Div {
-    emit_load_runtime_context_field_rax_into(nc, runtime_context_field_heap_base())
-    nc_emit_mov_reg_imm(nc, 1, nc_heap_arena_bytes())
-    nc_emit_add_reg_reg(nc, 0, 1)
-    emit_store_rax_runtime_context_field_into(nc, runtime_context_field_heap_limit())
-
+    // heap_limit was written by emit_entry_heap_reserve_into from the length
+    // actually mapped.
     nc_emit_mov_rax_mem_r14(nc)
     nc_emit_sub_rax_imm8(nc, 1)
     emit_store_rax_runtime_context_field_into(nc, runtime_context_field_argc())
@@ -15123,11 +16019,34 @@ fn emit_global_var_inits_into(nc: &! NativeCompiler, module: &IrModule) with Mut
     }
 }
 
+// Stamp the object header lowering reserved in front of each packed byte-array
+// global (ir_bss_packed_header_needed): descriptor, payload size, flags 0,
+// handle 0. BSS is zero at entry, so only the first two words are written.
+// With it a global read through V - header (callees, write_file,
+// str_from_bytes) takes the byte path, as a packed heap array does.
+fn emit_packed_global_headers_into(nc: &! NativeCompiler, module: &IrModule) with Mut, Panic, Div {
+    var fi: i64 = 0
+    while fi < (*module).fn_count {
+        let func = ir_fn_get(&(*module), fi as usize)
+        if func.compile_strategy == IR_STRATEGY_BSS_GLOBAL && ir_bss_packed_header_needed(func.hyper_algebra_kind, func.bss_size) {
+            let header_addr = BSS_BASE_LINUX + func.param_count - native_v2_object_header_size()
+            let desc = if func.hyper_algebra_kind == 17 { native_v2_packed_i8_descriptor() } else { native_v2_packed_u8_descriptor() }
+            nc_emit_mov_reg_imm(nc, 3, header_addr)
+            nc_emit_mov_rax_imm(nc, desc)
+            nc_emit_store_rax_mem_rbx_disp32(nc, native_v2_object_header_field_descriptor_id())
+            nc_emit_mov_rax_imm(nc, ((func.bss_size + 7) / 8) * 8)
+            nc_emit_store_rax_mem_rbx_disp32(nc, native_v2_object_header_field_payload_size())
+        }
+        fi = fi + 1
+    }
+}
+
 fn emit_entry_trampoline_with_global_inits_into(nc: &! NativeCompiler, module: &IrModule, main_fn_index: i64) with Mut, Panic, Div {
     emit_entry_trampoline_mmap_into(nc)
     emit_entry_trampoline_context_into(nc)
     emit_entry_trampoline_heap_args_into(nc)
     emit_entry_trampoline_avx_metadata_into(nc)
+    emit_packed_global_headers_into(nc, module)
     emit_global_var_inits_into(nc, module)
     emit_entry_trampoline_call_exit_into(nc, main_fn_index)
 }
@@ -15137,14 +16056,9 @@ pub fn emit_entry_trampoline_into(nc: &! NativeCompiler, main_fn_index: i64) wit
 
     (*nc).code = emit_mov_r14_rsp((*nc).code)
 
-    (*nc).code = emit_mov_rax_imm((*nc).code, 9)
-    (*nc).code = emit_mov_rdi_imm((*nc).code, 0)
-    (*nc).code = emit_mov_reg_imm((*nc).code, 6, 2147483648)
-    (*nc).code = emit_mov_reg_imm((*nc).code, 2, 3)
-    (*nc).code = emit_mov_r10_imm32((*nc).code, 34)
-    (*nc).code = emit_mov_r8_imm32((*nc).code, -1)
-    (*nc).code = emit_mov_r9_imm32((*nc).code, 0)
-    (*nc).code = emit_syscall((*nc).code)
+    // Same reserve-then-commit mapping as emit_entry_trampoline_mmap_into;
+    // it also writes heap_limit from the length actually mapped.
+    emit_entry_heap_reserve_into(nc)
 
     let ctx_slot_disp = (*nc).code.len + 3
     (*nc).code = emit_mov_rip_disp32_rax((*nc).code, 0)
@@ -15155,22 +16069,19 @@ pub fn emit_entry_trampoline_into(nc: &! NativeCompiler, main_fn_index: i64) wit
     emit_store_rax_runtime_context_field_into(nc, runtime_context_field_handle_table_base())
     emit_store_runtime_context_imm_into(nc, runtime_context_field_handle_count(), 0)
     emit_store_runtime_context_imm_into(nc, runtime_context_field_region_top(), 0)
-    emit_store_runtime_context_imm_into(nc, runtime_context_field_handle_capacity(), native_v2_handle_table_capacity_default())
+    emit_store_runtime_context_imm_into(nc, runtime_context_field_handle_capacity(), nc_handle_capacity())
     emit_store_runtime_context_imm_into(nc, runtime_context_field_pin_registry(), runtime_context_pin_registry_unwired())
     emit_store_runtime_context_imm_into(nc, runtime_context_field_pin_count(), runtime_context_pin_count_unwired())
     emit_store_runtime_context_imm_into(nc, runtime_context_field_collector_epoch(), 0)
     emit_store_runtime_context_imm_into(nc, runtime_context_field_last_gc_stats(), 0)
 
     emit_load_runtime_context_field_rax_into(nc, runtime_context_field_handle_table_base())
-    (*nc).code = emit_mov_reg_imm((*nc).code, 1, native_v2_handle_table_bytes())
+    (*nc).code = emit_mov_reg_imm((*nc).code, 1, nc_handle_table_bytes())
     (*nc).code = emit_add_reg_reg((*nc).code, 0, 1)
     emit_store_rax_runtime_context_field_into(nc, runtime_context_field_heap_base())
     emit_store_rax_runtime_context_field_into(nc, runtime_context_field_heap_cursor())
 
-    emit_load_runtime_context_field_rax_into(nc, runtime_context_field_heap_base())
-    (*nc).code = emit_mov_reg_imm((*nc).code, 1, nc_heap_arena_bytes())
-    (*nc).code = emit_add_reg_reg((*nc).code, 0, 1)
-    emit_store_rax_runtime_context_field_into(nc, runtime_context_field_heap_limit())
+    // heap_limit: written by emit_entry_heap_reserve_into.
 
     (*nc).code = emit_mov_rax_mem_r14((*nc).code)
     (*nc).code = emit_sub_rax_imm8((*nc).code, 1)
@@ -15301,7 +16212,7 @@ fn emit_entry_trampoline_windows_x86(nc: NativeCompiler, main_fn_index: i64) -> 
     c = emit_store_rax_runtime_context_field(c, runtime_context_field_handle_table_base())
     c = emit_store_runtime_context_imm(c, runtime_context_field_handle_count(), 0)
     c = emit_store_runtime_context_imm(c, runtime_context_field_region_top(), 0)
-    c = emit_store_runtime_context_imm(c, runtime_context_field_handle_capacity(), native_v2_handle_table_capacity_default())
+    c = emit_store_runtime_context_imm(c, runtime_context_field_handle_capacity(), nc_handle_capacity())
     c = emit_store_runtime_context_imm(c, runtime_context_field_pin_registry(), runtime_context_pin_registry_unwired())
     c = emit_store_runtime_context_imm(c, runtime_context_field_pin_count(), runtime_context_pin_count_unwired())
     c = emit_store_runtime_context_imm(c, runtime_context_field_collector_epoch(), 0)
@@ -15309,14 +16220,14 @@ fn emit_entry_trampoline_windows_x86(nc: NativeCompiler, main_fn_index: i64) -> 
 
     // Heap allocation starts after the RuntimeContext and fixed-capacity handle table.
     c = emit_load_runtime_context_field_rax(c, runtime_context_field_handle_table_base())
-    c.code = emit_mov_reg_imm(c.code, 1, native_v2_handle_table_bytes())
+    c.code = emit_mov_reg_imm(c.code, 1, nc_handle_table_bytes())
     c.code = emit_add_reg_reg(c.code, 0, 1)
     c = emit_store_rax_runtime_context_field(c, runtime_context_field_heap_base())
     c = emit_store_rax_runtime_context_field(c, runtime_context_field_heap_cursor())
 
     // heap_limit = heap_base + (alloc_size - runtime_context_size - handle_table_bytes)
     c = emit_load_runtime_context_field_rax(c, runtime_context_field_heap_base())
-    c.code = emit_mov_reg_imm(c.code, 1, nc_heap_arena_bytes())
+    c.code = emit_mov_reg_imm(c.code, 1, nc_heap_arena_bytes_fixed_2gib())
     c.code = emit_add_reg_reg(c.code, 0, 1)
     c = emit_store_rax_runtime_context_field(c, runtime_context_field_heap_limit())
 
@@ -15425,18 +16336,18 @@ fn emit_entry_trampoline_macos_x86(nc: NativeCompiler, main_fn_index: i64) -> Na
     c = emit_store_rax_runtime_context_field(c, runtime_context_field_handle_table_base())
     c = emit_store_runtime_context_imm(c, runtime_context_field_handle_count(), 0)
     c = emit_store_runtime_context_imm(c, runtime_context_field_region_top(), 0)
-    c = emit_store_runtime_context_imm(c, runtime_context_field_handle_capacity(), native_v2_handle_table_capacity_default())
+    c = emit_store_runtime_context_imm(c, runtime_context_field_handle_capacity(), nc_handle_capacity())
     c = emit_store_runtime_context_imm(c, runtime_context_field_pin_registry(), runtime_context_pin_registry_unwired())
     c = emit_store_runtime_context_imm(c, runtime_context_field_pin_count(), runtime_context_pin_count_unwired())
     c = emit_store_runtime_context_imm(c, runtime_context_field_collector_epoch(), 0)
     c = emit_store_runtime_context_imm(c, runtime_context_field_last_gc_stats(), 0)
     c = emit_load_runtime_context_field_rax(c, runtime_context_field_handle_table_base())
-    c.code = emit_mov_reg_imm(c.code, 1, native_v2_handle_table_bytes())
+    c.code = emit_mov_reg_imm(c.code, 1, nc_handle_table_bytes())
     c.code = emit_add_reg_reg(c.code, 0, 1)
     c = emit_store_rax_runtime_context_field(c, runtime_context_field_heap_base())
     c = emit_store_rax_runtime_context_field(c, runtime_context_field_heap_cursor())
     c = emit_load_runtime_context_field_rax(c, runtime_context_field_heap_base())
-    c.code = emit_mov_reg_imm(c.code, 1, nc_heap_arena_bytes())
+    c.code = emit_mov_reg_imm(c.code, 1, nc_heap_arena_bytes_fixed_2gib())
     c.code = emit_add_reg_reg(c.code, 0, 1)
     c = emit_store_rax_runtime_context_field(c, runtime_context_field_heap_limit())
     c.code = emit_mov_rax_mem_r14(c.code)
@@ -15778,6 +16689,10 @@ fn a64_preview_binop_name(op: BinaryOp) -> string {
     if op == BinaryOp::OpAdd { return "add" }
     if op == BinaryOp::OpSub { return "sub" }
     if op == BinaryOp::OpMul { return "mul" }
+    // SIO-588: unsigned add/sub/mul names for aarch64 refusal diagnostics.
+    if op == BinaryOp::OpUAdd { return "uadd" }
+    if op == BinaryOp::OpUSub { return "usub" }
+    if op == BinaryOp::OpUMul { return "umul" }
     if op == BinaryOp::OpDiv { return "div" }
     if op == BinaryOp::OpRem { return "rem" }
     if op == BinaryOp::OpEq { return "eq" }
@@ -16003,9 +16918,18 @@ fn a64_preview_emit_machine_instr(c: A64PreviewCompiler, instr: MachineInstr) ->
         out.code = a64_preview_emit_load_slot(out.code, A64_X10, instr.src1.value)
         if instr.bin_op == BinaryOp::OpAdd {
             out.code = a64_emit_add(out.code, A64_X9, A64_X9, A64_X10)
+        } else if instr.bin_op == BinaryOp::OpUAdd {
+            // SIO-588: unsigned add is the same instruction (no trap exists
+            // in this preview backend); the U-variant only suppresses the
+            // x86 overflow guard, which has no aarch64 counterpart.
+            out.code = a64_emit_add(out.code, A64_X9, A64_X9, A64_X10)
         } else if instr.bin_op == BinaryOp::OpSub {
             out.code = a64_emit_sub(out.code, A64_X9, A64_X9, A64_X10)
+        } else if instr.bin_op == BinaryOp::OpUSub {
+            out.code = a64_emit_sub(out.code, A64_X9, A64_X9, A64_X10)
         } else if instr.bin_op == BinaryOp::OpMul {
+            out.code = a64_emit_mul(out.code, A64_X9, A64_X9, A64_X10)
+        } else if instr.bin_op == BinaryOp::OpUMul {
             out.code = a64_emit_mul(out.code, A64_X9, A64_X9, A64_X10)
         } else if instr.bin_op == BinaryOp::OpDiv {
             out.code = a64_emit_sdiv(out.code, A64_X9, A64_X9, A64_X10)
@@ -16454,6 +17378,20 @@ fn native_v2_write_min_elf64_to_file(output_path: string, nc: &! NativeCompiler,
     let text_vaddr = base_addr + text_offset
     let rodata_vaddr = base_addr + rodata_offset
     let data_vaddr = base_addr + data_offset
+    // The image must end below the BSS window. A load base raised with
+    // SOUNIO_NV2_HANDLE_LOG2 (nc_configure_handles_from_env) moves it up, and
+    // an overlap would map data over BSS globals.
+    let image_end = if data_payload > 0 { data_vaddr + data_payload } else { rodata_vaddr + rodata_len }
+    if image_end > BSS_BASE_LINUX {
+        print("error: ELF image at load base ")
+        print_int(base_addr)
+        print(" ends at ")
+        print_int(image_end)
+        print(", past the BSS base ")
+        print_int(BSS_BASE_LINUX)
+        print("; lower SOUNIO_NV2_HANDLE_LOG2\n")
+        return 29
+    }
 
     let interp_off: i64 = 512
     let interp_len: i64 = 28
@@ -16562,7 +17500,7 @@ fn native_v2_build_elf_image_into(nc: &! NativeCompiler, base_addr: i64, entry_o
         phoff = phoff + 56
     }
     if (*nc).bss_total_size > 0 {
-        native_v2_file_emit_phdr(phoff, 1, 6, 0, 268435456, 0, (*nc).bss_total_size, 4096)
+        native_v2_file_emit_phdr(phoff, 1, 6, 0, BSS_BASE_LINUX, 0, (*nc).bss_total_size, 4096)
         phoff = phoff + 56
     }
     native_v2_file_emit_phdr(phoff, 0x6474e551, 6, 0, 0, 0, 0, 16)
@@ -16882,6 +17820,7 @@ pub fn compile_native_v2_preview_to_file(module: &IrModule, target_spec: NativeT
         return 11
     }
 
+    nc_configure_handles_from_env()
     native_v2_trace_module_ir_ref(module)
 
     var nc = compiler_new()
@@ -17081,7 +18020,66 @@ pub fn compile_native_v2_preview_to_file(module: &IrModule, target_spec: NativeT
         print(" (raise nc_flat_rodata_capacity)\n")
         return 23
     }
-    native_v2_write_min_elf64_to_file(output_path, &! nc, entry, 4194304)
+    let elf_rc = native_v2_write_min_elf64_to_file(output_path, &! nc, entry, nc_elf_base_addr())
+    if elf_rc == 0 {
+        let map_path = read_env("SOUNIO_NV2_SYMBOL_MAP")
+        if str_len(map_path) > 0 {
+            if !native_v2_write_symbol_map(map_path, module, nc.fn_count) {
+                print("warning: SOUNIO_NV2_SYMBOL_MAP: could not write ")
+                print(map_path)
+                print("\n")
+            }
+        }
+    }
+    elf_rc
+}
+
+// SOUNIO_NV2_SYMBOL_MAP=<path>: after a successful x86-64 Linux build, write
+// one line per function, `<entry vaddr in hex> <name>`, sorted by IR index.
+// The native ELF has no section headers, so without this a crash address in a
+// Madaros-built program (gen2 in the gen3 rung, #2966) names no function. The
+// ELF itself is unchanged. NC_BIG_ELF is reused as the buffer once the ELF is
+// on disk.
+fn native_v2_write_symbol_map(path: string, module: &IrModule, fn_count: i64) -> bool with IO, Mut, Panic, Div {
+    let text_vaddr: i64 = nc_elf_base_addr() + 4096
+    let cap: i64 = nc_elf_capacity_bytes()
+    var pos: i64 = 0
+    var fi: i64 = 0
+    while fi < fn_count && fi < (*module).fn_count {
+        let off = NC_FN_OFFSETS[fi as usize]
+        if off >= 0 {
+            if pos + 420 > cap { return false }
+            let addr = text_vaddr + off
+            var shift: i64 = 28
+            var started = false
+            while shift >= 0 {
+                let nib = (addr >> shift) & 15
+                if nib != 0 || started || shift == 0 {
+                    started = true
+                    if nib < 10 {
+                        NC_BIG_ELF[pos as usize] = (48 + nib) as i8
+                    } else {
+                        NC_BIG_ELF[pos as usize] = (87 + nib) as i8
+                    }
+                    pos = pos + 1
+                }
+                shift = shift - 4
+            }
+            NC_BIG_ELF[pos as usize] = 32 as i8
+            pos = pos + 1
+            let f = ir_fn_get(&(*module), fi as usize)
+            var ci: i64 = 0
+            while ci < f.name.len && ci < 384 {
+                NC_BIG_ELF[pos as usize] = f.name.buf[ci as usize]
+                pos = pos + 1
+                ci = ci + 1
+            }
+            NC_BIG_ELF[pos as usize] = 10 as i8
+            pos = pos + 1
+        }
+        fi = fi + 1
+    }
+    write_file(path, NC_BIG_ELF, pos) >= 0
 }
 
 // SIO-32: aarch64-linux ELF emission. Local twin of the shared preview
@@ -17124,8 +18122,8 @@ fn compile_to_elf_aarch64_preview(module: &IrModule) -> NativeCompileResult with
     // base+4096, rodata at base+align_page(4096 + code.len), so the target
     // of every adrp/add pair is computable; words are rewritten in place
     // and the code length never changes here.
-    let text_vaddr = 4194304 + 4096
-    let rodata_vaddr = 4194304 + align_page(4096 + c.code.len)
+    let text_vaddr = nc_a64_preview_elf_base_addr() + 4096
+    let rodata_vaddr = nc_a64_preview_elf_base_addr() + align_page(4096 + c.code.len)
     var di: i64 = 0
     while di < c.data_patch_count {
         let at = c.data_patch_offsets[di as usize]
@@ -17154,7 +18152,7 @@ fn compile_to_elf_aarch64_preview(module: &IrModule) -> NativeCompileResult with
         c.rodata,
         data,
         c.entry_offset,
-        4194304,
+        nc_a64_preview_elf_base_addr(),
         elf_machine_aarch64(),
         symbols,
         fn_offsets_wide,
@@ -17256,7 +18254,7 @@ pub fn compile_native_v2_preview(module: &IrModule, target_spec: NativeTargetSpe
     }
 
     if target_spec.arch_id == ARCH_X86_64() && target_spec.os_id == OS_LINUX() {
-        return compile_to_elf_v2(module, 4194304)
+        return compile_to_elf_v2(module, nc_elf_base_addr())
     }
 
     if target_spec.arch_id == ARCH_X86_64() && target_spec.os_id == OS_MACOS() {
@@ -17300,11 +18298,11 @@ pub fn compile_native(module: &IrModule, target_spec: NativeTargetSpec) -> Nativ
     }
 
     if target_spec.arch_id == ARCH_X86_64() && target_spec.os_id == OS_LINUX() {
-        let preview = compile_to_elf_v2(module, 4194304)
+        let preview = compile_to_elf_v2(module, nc_elf_base_addr())
         if preview.ok || !native_should_fallback_to_legacy(preview) {
             return preview
         }
-        let base_addr: i64 = 4194304  // 0x400000
+        let base_addr: i64 = nc_elf_base_addr()
         let elf = compile_to_elf(module, base_addr)
         return native_compile_result_ok_elf(elf.bytes, elf.len, FORMAT_ELF64())
     }
@@ -17611,6 +18609,7 @@ fn x86_print_ir_validate_fail_site() with IO, Mut, Panic, Div {
 }
 
 pub fn compile_native_x86_linux_to_file(module: &IrModule, output_path: string) -> i32 with IO, Mut, Panic, Div, Alloc {
+    nc_configure_handles_from_env()
     var nc = compiler_new()
     x86_compile_module_streaming_begin_into(&! nc, module)
     var fi: i64 = 0
@@ -17661,7 +18660,7 @@ pub fn compile_native_x86_linux_to_file(module: &IrModule, output_path: string) 
     let reloc_eff_rodata = if nc.flat_rodata_len > 0 { nc.flat_rodata_len } else { nc.rodata.len }
     let reloc_data_off = if reloc_eff_data > 0 { align_page(reloc_rodata_off + reloc_eff_rodata) } else { 0 }
     apply_relocations_into(&! nc, reloc_rodata_off, reloc_data_off)
-    compile_native_finalize_and_write_ref(&! nc, 4194304, output_path)
+    compile_native_finalize_and_write_ref(&! nc, nc_elf_base_addr(), output_path)
 }
 
 fn compile_to_elf(module: &IrModule, base_addr: i64) -> Elf64Binary with Mut, Panic, Div, Alloc {
