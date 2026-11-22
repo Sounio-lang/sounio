@@ -98,9 +98,11 @@ ERROR_CATALOG: dict[str, ErrorEntry] = {
     ),
     "E041": ErrorEntry(
         "Unit mismatch",
-        "Dimensional units are incompatible in arithmetic or a function call.",
+        "Madaros found incompatible units in arithmetic, comparison or a function call. "
+        "The legacy lean_single engine instead uses E041 for Rust &mut syntax; "
+        "a unit mismatch in a legacy let binding uses E001.",
         ("Convert units explicitly.", "Keep API annotations in the same unit family."),
-        ("self-hosted/check/check.sio:10721", "self-hosted/check/check.sio:10742"),
+        ("tests/compile-fail/diagnostic_e041_unit_meaning.sio", "docs/llm-guide/explanations/E041.md"),
     ),
     "E042": ErrorEntry(
         "Refinement violation",
@@ -202,43 +204,62 @@ ERROR_CATALOG: dict[str, ErrorEntry] = {
         "ExactlyPrivate<T> requires ZD",
         "The privacy capability requires the `ZD` effect.",
         ("Add `with ZD` when the operation is justified.", "Move capability-bearing parameters to a ZD-aware boundary."),
-        ("self-hosted/compiler/lean_single.sio:23296", "tests/parity/golden/exactly_private_requires_zd.stderr:15"),
+        ("self-hosted/compiler/lean_single.sio:23296", "tests/compile-fail/exactly_private_requires_zd.sio:2"),
     ),
     "E202": ErrorEntry(
         "Editable<T> requires ZD",
         "`Editable<T>` parameters require the `ZD` effect.",
         ("Declare `with ZD`.", "Use non-editable data at pure boundaries."),
-        ("self-hosted/compiler/lean_single.sio:23302", "tests/parity/golden/editable_requires_zd.stderr:15"),
+        ("self-hosted/compiler/lean_single.sio:23302", "tests/compile-fail/editable_requires_zd.sio:2"),
     ),
     "E203": ErrorEntry(
         "CapabilityGated<T> requires ZD",
         "`CapabilityGated<T>` parameters require the `ZD` effect.",
         ("Declare `with ZD`.", "Separate gated-capability logic from pure helpers."),
-        ("self-hosted/compiler/lean_single.sio:23308", "tests/parity/golden/capability_gated_requires_zd.stderr:15"),
+        ("self-hosted/compiler/lean_single.sio:23308", "tests/compile-fail/capability_gated_requires_zd.sio:2"),
     ),
     "E204": ErrorEntry(
         "Composable<T> requires ZD",
         "`Composable<T>` parameters require the `ZD` effect.",
         ("Declare `with ZD`.", "Keep compositional capability work in a ZD effect row."),
-        ("self-hosted/compiler/lean_single.sio:23314", "tests/parity/golden/composable_requires_zd.stderr:15"),
+        ("self-hosted/compiler/lean_single.sio:23314", "tests/compile-fail/composable_requires_zd.sio:2"),
     ),
     "E205": ErrorEntry(
         "Audited<T> requires ZD and Witness",
         "`Audited<T>` parameters require both `ZD` and `Witness` effects.",
         ("Declare `with ZD, Witness`.", "Attach a witness before crossing the audited boundary."),
-        ("self-hosted/compiler/lean_single.sio:23321", "tests/parity/golden/audited_requires_witness.stderr:15"),
+        ("self-hosted/compiler/lean_single.sio:23321", "tests/compile-fail/audited_requires_witness.sio:2"),
     ),
     "E206": ErrorEntry(
         "Revivable<T> requires ZD and Temporal",
         "`Revivable<T>` parameters require `ZD` and `Temporal` effects.",
         ("Declare `with ZD, Temporal`.", "Keep temporal revival logic explicit."),
-        ("self-hosted/compiler/lean_single.sio:23329", "tests/parity/golden/revivable_requires_temporal.stderr:15"),
+        ("self-hosted/compiler/lean_single.sio:23329", "tests/compile-fail/revivable_requires_temporal.sio:2"),
     ),
     "E207": ErrorEntry(
         "Interpretable<T> requires ZD",
         "`Interpretable<T>` parameters require the `ZD` effect.",
         ("Declare `with ZD`.", "Move interpretable capability work to a ZD-aware function."),
         ("self-hosted/compiler/lean_single.sio:23336",),
+    ),
+    "E286": ErrorEntry(
+        "Ontology subsumption could not be verified",
+        "A Madaros subclass property constraint does not imply its parent constraint.",
+        ("Strengthen the child property so it implies the parent constraint.",),
+        ("tests/compile-fail/diagnostic_e286_ontology_meaning.sio",),
+    ),
+    "E287": ErrorEntry(
+        "Rust &mut reference syntax",
+        "Madaros uses &!T for exclusive references, not &mut T. The legacy lean_single engine uses E041 here.",
+        ("Write &!T for the reference type and &!value at the call site.",),
+        ("tests/compile-fail/diagnostic_e287_mut_ref.sio",),
+    ),
+    "E288": ErrorEntry(
+        "Use after move",
+        "The diagnostic registry's diag_use_after_move constructor reports E288. "
+        "The checker retains its separate E039 linear-use diagnostic.",
+        ("Avoid reusing a value after transferring it.",),
+        ("self-hosted/diagnostics/mod.sio",),
     ),
 }
 

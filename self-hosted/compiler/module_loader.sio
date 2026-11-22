@@ -21,7 +21,7 @@ use io::file_write::{io_write_bytes_to_file, io_write_huge_binary, io_write_nati
 use io::trace::{io_trace_append_byte, io_trace_append_json_string, io_trace_append_string, io_trace_bool_string, io_trace_i64_string}
 use compiler::ontology::cache::{ontology_default_home, ontology_default_mode, ontology_default_cache_dir}
 use ir::lower::{IrProgramSummary, IrProgramSummaryResult, IrProgramSummaryBoxResult, IrProgramSummaryFlat, IrProgramSummaryFlatResult, IrFunctionBodyResult, IrLowerBoxResult, lower_program_to_ir_trace, lower_program_to_ir_probe_summary, lower_program_to_ir_probe_summary_box_ref, lower_program_to_ir_with_epistemic_trace, lower_program_to_ir_summary_with_epistemic, lower_program_function_body_from_summary_with_epistemic, ir_empty_program_summary}
-use ir::lower::{lower_program_to_ir_with_epistemic_ref, lower_program_to_ir_ordered_boxed_trace, lower_program_to_ir_ordered_with_epistemic_boxed_trace_ref, lower_program_to_ir_with_epistemic_boxed_trace_ref}
+use ir::lower::{lower_note_merge_fn_overflow, lower_rgn_merge_check, lower_rgn_merge_vetoed, lower_rgn_veto_regions, lower_merge_fn_overflowed, lower_hard_error_report, lower_program_to_ir_with_epistemic_ref, lower_program_to_ir_ordered_boxed_trace, lower_program_to_ir_ordered_with_epistemic_boxed_trace_ref, lower_program_to_ir_with_epistemic_boxed_trace_ref}
 use ir::lower::{lower_program_function_body_from_program_with_epistemic_ref}
 use ir::lower::{lower_fn_tuple_arr_reset, lower_fn_tuple_f64_arrays_collect_one_named, lower_fn_tuple_f64_arrays_collect_owner_priority}
 use ir::serialize::{serialize_ir_module, deserialize_ir_module}
@@ -1010,6 +1010,12 @@ fn ir_merge_modules(dst: IrModule, src: IrModule) -> IrModule with Alloc, Mut, P
     let observed_transition_offset = dst.epistemic.observed_transition_count
     let rollback_certificate_offset = dst.epistemic.rollback_certificate_count
 
+    // A merge that does not fit refuses the compile instead of dropping the
+    // functions past IR_MAX_FUNCS (lower_note_merge_fn_overflow).
+    if dst.fn_count + src.fn_count > IR_MAX_FUNCS {
+        lower_note_merge_fn_overflow(dst.fn_count + src.fn_count, IR_MAX_FUNCS)
+    }
+    let _rgn_veto = lower_rgn_merge_check(&dst, &src)
     // Copy functions
     var fi: i64 = 0
     while fi < src.fn_count && merged.fn_count < IR_MAX_FUNCS {
@@ -1057,6 +1063,7 @@ fn ir_merge_modules(dst: IrModule, src: IrModule) -> IrModule with Alloc, Mut, P
     merged.epistemic = ir_merge_epistemic_sections(merged.epistemic, src.epistemic)
     merged.algebras = ir_merge_algebra_tables(merged.algebras, src.algebras)
 
+    if lower_rgn_merge_vetoed() { let _vetoed = lower_rgn_veto_regions(&merged) }
     merged
 }
 
@@ -1494,6 +1501,10 @@ pub fn load_multimodule_ir_traced(main_path: string, trace: &! LoadMultimoduleIr
     print_int(merged_module.fn_count)
     print(" functions\n")
 
+    if lower_merge_fn_overflowed() {
+        lower_hard_error_report()
+        return multimodule_ir_error("ir_merge_fn_overflow")
+    }
     if merged_module.fn_count <= 0 {
         print("IR lowering produced empty module\n")
         return multimodule_ir_error("ir_lowering_empty_module")
@@ -1624,6 +1635,10 @@ pub fn load_multimodule_ir_probe_summary_traced(main_path: string, trace: &! Loa
     print_int(merged_module.fn_count)
     print(" functions\n")
 
+    if lower_merge_fn_overflowed() {
+        lower_hard_error_report()
+        return multimodule_ir_error("ir_merge_fn_overflow")
+    }
     if merged_module.fn_count <= 0 {
         print("IR lowering produced empty module\n")
         return multimodule_ir_error("ir_lowering_empty_module")

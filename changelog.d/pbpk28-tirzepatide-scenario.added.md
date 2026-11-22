@@ -1,0 +1,1 @@
+Tirzepatide PBPK-28 scenario with cross-engine parity: new SC-depot profile (ka 0.0164/h, F 0.80, CL 0.061 L/h per Urva 2022; no renal clearance of parent per Martin 2024), stdlib scenario, Node runner drug arm, parity ref test, and parity-gate case 20 (14/14 organs within 1% RMSE, 12/12 mass samples within [0, released]).

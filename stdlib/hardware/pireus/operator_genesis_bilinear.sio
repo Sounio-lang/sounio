@@ -6,7 +6,7 @@
 use algebra::cayley_dickson::cd_sigma
 use crypto::sha256::{
     SHA256State,
-    sha256_init, sha256_update, sha256_finalize, sha256_digest_byte,
+    sha256_init, sha256_update_be64, sha256_finalize, sha256_digest_byte,
 }
 
 pub const PIREUS_BILINEAR_SCHEMA: i64 = 722000
@@ -84,11 +84,16 @@ struct BilinearMatrixUniverse {
     sorted_unique: bool,
 }
 
-struct BilinearFamilyDelta {
-    valid: bool,
-    quadratic_code: i64,
-    normalized_nonzero: i64,
-}
+// A family delta is packed into one i64: (normalized_nonzero << 10) |
+// quadratic_code (quadratic_code_from_values builds 10 bits, so 0..1023).
+// #2820: as a struct (bool + two i64) it was an integer-bearing aggregate, so
+// displacement_family_delta / bilinear_family_delta opened no reclaiming
+// region and every call (65,536 + 5 * 40,320 per evaluation) left its result
+// and both [i64; 16] locals as live Madaros handles for the life of the
+// process. An i64 result gets a region; the locals are reclaimed at return.
+fn family_delta_pack(nonzero: i64, code: i64) -> i64 { (nonzero << 10) | code }
+fn family_delta_valid(packed: i64) -> bool { (packed >> 10) == 0 }
+fn family_delta_code(packed: i64) -> i64 { packed & 1023 }
 
 pub struct BilinearGrammarCertificate {
     pub matrices_scanned: i64,
@@ -349,31 +354,28 @@ struct BilinearSearchWork {
     selected_digest: BilinearGenesisDigest,
 }
 
-fn digest_add_i64(state: SHA256State, value: i64) -> SHA256State
+// #2820: in place. The by-value form (sha256_update over a fresh [u8; 256],
+// returning a new SHA256State) left ~3 KB of never-reclaimed Madaros arena per
+// absorbed word: SHA256State is an integer-bearing aggregate, so neither this
+// helper nor sha256_update opens a reclaiming region. sha256_update_be64 gives
+// byte-for-byte the same digest.
+fn digest_add_i64(state: &!SHA256State, value: i64)
 with Mut, Panic, Div {
-    var bytes: [u8; 256] = [0; 256]
-    var index: i64 = 0
-    while index < 8 {
-        bytes[index] = ((value >> ((7 - index) * 8)) & 255) as u8
-        index = index + 1
-    }
-    sha256_update(state, bytes, 8)
+    sha256_update_be64(state, value)
 }
 
-fn digest_add_bool(state: SHA256State, value: bool) -> SHA256State
+fn digest_add_bool(state: &!SHA256State, value: bool)
 with Mut, Panic, Div {
     digest_add_i64(state, if value { 1 } else { 0 })
 }
 
-fn digest_add_digest(state: SHA256State, digest: &BilinearGenesisDigest)
-    -> SHA256State with Mut, Panic, Div {
-    var next = state
+fn digest_add_digest(state: &!SHA256State, digest: &BilinearGenesisDigest)
+    with Mut, Panic, Div {
     var word: i64 = 0
     while word < 8 {
-        next = digest_add_i64(next, digest.words[word])
+        digest_add_i64(state, digest.words[word])
         word = word + 1
     }
-    next
 }
 
 fn digest_finish(state: SHA256State) -> BilinearGenesisDigest
@@ -797,7 +799,7 @@ fn displacement_family_delta(
     target: &BilinearSignTable,
     matrix: i64,
     swap: bool,
-) -> BilinearFamilyDelta with Mut, Panic {
+) -> i64 with Mut, Panic {
     var values: [i64; 16] = [0; 16]
     var vector: i64 = 0
     while vector < 16 {
@@ -835,15 +837,11 @@ fn displacement_family_delta(
         }
         i = i + 1
     }
-    BilinearFamilyDelta {
-        valid: nonzero == 0,
-        quadratic_code: code,
-        normalized_nonzero: nonzero,
-    }
+    family_delta_pack(nonzero, code)
 }
 
 // T[i][j] = bilinear_bit(matrix, i, j).
-fn bilinear_family_delta(matrix: i64) -> BilinearFamilyDelta with Mut, Panic {
+fn bilinear_family_delta(matrix: i64) -> i64 with Mut, Panic {
     var values: [i64; 16] = [0; 16]
     var vector: i64 = 0
     while vector < 16 {
@@ -878,11 +876,7 @@ fn bilinear_family_delta(matrix: i64) -> BilinearFamilyDelta with Mut, Panic {
         }
         i = i + 1
     }
-    BilinearFamilyDelta {
-        valid: nonzero == 0,
-        quadratic_code: code,
-        normalized_nonzero: nonzero,
-    }
+    family_delta_pack(nonzero, code)
 }
 
 fn affine_apply(code: i64, matrix: i64, delta: i64)
@@ -940,7 +934,7 @@ with Mut, Panic {
     matrix = 0
     while matrix < PIREUS_BILINEAR_RAW_COUNT {
         let delta = bilinear_family_delta(matrix)
-        if !delta.valid || delta.quadratic_code !=
+        if !family_delta_valid(delta) || family_delta_code(delta) !=
             quadratic_code_from_matrix(matrix) {
             gauge_fiber_failures = gauge_fiber_failures + 1
         }
@@ -990,7 +984,7 @@ fn build_stabilizer(
     universe: &BilinearMatrixUniverse,
 ) -> BilinearStabilizerWork with Mut, Panic, Div, Epistemic {
     var state = sha256_init()
-    state = digest_add_i64(state, PIREUS_BILINEAR_ACTION_COUNT)
+    digest_add_i64(&! state, PIREUS_BILINEAR_ACTION_COUNT)
     var admitted: i64 = 0
     var no_swap: i64 = 0
     var with_swap: i64 = 0
@@ -1007,19 +1001,19 @@ fn build_stabilizer(
         while swap_index < 2 {
             let swap = swap_index == 1
             let delta = displacement_family_delta(base, base, matrix, swap)
-            if delta.valid {
+            if family_delta_valid(delta) {
                 admitted = admitted + 1
                 if swap { with_swap = with_swap + 1 }
                 else { no_swap = no_swap + 1 }
-                if matrix == 33825 && !swap && delta.quadratic_code == 0 {
+                if matrix == 33825 && !swap && family_delta_code(delta) == 0 {
                     identity_present = true
                 }
-                state = digest_add_i64(state, matrix * 2 + swap_index)
-                state = digest_add_i64(state, delta.quadratic_code)
+                digest_add_i64(&! state, matrix * 2 + swap_index)
+                digest_add_i64(&! state, family_delta_code(delta))
                 let inverse_delta =
                     displacement_family_delta(base, base, inverse, swap)
                 inverse_checks = inverse_checks + 1
-                if !inverse_delta.valid ||
+                if !family_delta_valid(inverse_delta) ||
                     matrix_compose(matrix, inverse) != 33825 ||
                     matrix_compose(inverse, matrix) != 33825 {
                     inverse_failures = inverse_failures + 1
@@ -1027,9 +1021,9 @@ fn build_stabilizer(
                     var q_code: i64 = 0
                     while q_code < PIREUS_BILINEAR_QUADRATIC_COUNT {
                         let forward = affine_apply(
-                            q_code, matrix, delta.quadratic_code)
+                            q_code, matrix, family_delta_code(delta))
                         let restored = affine_apply(
-                            forward, inverse, inverse_delta.quadratic_code)
+                            forward, inverse, family_delta_code(inverse_delta))
                         affine_checks = affine_checks + 1
                         if restored != q_code {
                             affine_failures = affine_failures + 1
@@ -1042,14 +1036,14 @@ fn build_stabilizer(
         }
         matrix_index = matrix_index + 1
     }
-    state = digest_add_i64(state, admitted)
-    state = digest_add_i64(state, no_swap)
-    state = digest_add_i64(state, with_swap)
-    state = digest_add_bool(state, identity_present)
-    state = digest_add_i64(state, inverse_checks)
-    state = digest_add_i64(state, inverse_failures)
-    state = digest_add_i64(state, affine_checks)
-    state = digest_add_i64(state, affine_failures)
+    digest_add_i64(&! state, admitted)
+    digest_add_i64(&! state, no_swap)
+    digest_add_i64(&! state, with_swap)
+    digest_add_bool(&! state, identity_present)
+    digest_add_i64(&! state, inverse_checks)
+    digest_add_i64(&! state, inverse_failures)
+    digest_add_i64(&! state, affine_checks)
+    digest_add_i64(&! state, affine_failures)
     let complete = admitted > 0 && admitted == no_swap + with_swap &&
         identity_present && inverse_checks == admitted &&
         inverse_failures == 0 && affine_checks == admitted * 1024 &&
@@ -1131,12 +1125,12 @@ fn build_partition(
         while swap_index < 2 {
             let delta = displacement_family_delta(
                 base, base, matrix, swap_index == 1)
-            if delta.valid {
+            if family_delta_valid(delta) {
                 stabilizer_recount = stabilizer_recount + 1
                 q_code = 0
                 while q_code < PIREUS_BILINEAR_QUADRATIC_COUNT {
                     let image = affine_apply(
-                        q_code, matrix, delta.quadratic_code)
+                        q_code, matrix, family_delta_code(delta))
                     equivalence_edges = equivalence_edges + 1
                     if image < orbit_minimum[q_code] {
                         orbit_minimum[q_code] = image
@@ -1248,31 +1242,31 @@ fn build_partition(
     }
 
     var state = sha256_init()
-    state = digest_add_i64(state, class_count)
+    digest_add_i64(&! state, class_count)
     q_code = 0
     while q_code < PIREUS_BILINEAR_QUADRATIC_COUNT {
-        state = digest_add_i64(state, q_code)
-        state = digest_add_i64(state, q_class_ids[q_code])
+        digest_add_i64(&! state, q_code)
+        digest_add_i64(&! state, q_class_ids[q_code])
         q_code = q_code + 1
     }
     var class_id: i64 = 0
     while class_id < class_count {
-        state = digest_add_i64(state, class_representative_q[class_id])
-        state = digest_add_i64(state, class_minimum_matrix[class_id])
-        state = digest_add_i64(state, class_quadratic_sizes[class_id])
-        state = digest_add_i64(state, class_raw_sizes[class_id])
-        state = digest_add_i64(state, class_square_negatives[class_id])
-        state = digest_add_i64(state, class_commutator_defects[class_id])
-        state = digest_add_i64(state, class_associator_defects[class_id])
-        state = digest_add_bool(state, class_v1_represented[class_id])
+        digest_add_i64(&! state, class_representative_q[class_id])
+        digest_add_i64(&! state, class_minimum_matrix[class_id])
+        digest_add_i64(&! state, class_quadratic_sizes[class_id])
+        digest_add_i64(&! state, class_raw_sizes[class_id])
+        digest_add_i64(&! state, class_square_negatives[class_id])
+        digest_add_i64(&! state, class_commutator_defects[class_id])
+        digest_add_i64(&! state, class_associator_defects[class_id])
+        digest_add_bool(&! state, class_v1_represented[class_id])
         class_id = class_id + 1
     }
-    state = digest_add_i64(state, equivalence_edges)
-    state = digest_add_i64(state, stabilizer_recount)
-    state = digest_add_i64(state, signature_checks)
-    state = digest_add_i64(state, signature_failures)
-    state = digest_add_i64(state, associator_checks)
-    state = digest_add_i64(state, associator_failures)
+    digest_add_i64(&! state, equivalence_edges)
+    digest_add_i64(&! state, stabilizer_recount)
+    digest_add_i64(&! state, signature_checks)
+    digest_add_i64(&! state, signature_failures)
+    digest_add_i64(&! state, associator_checks)
+    digest_add_i64(&! state, associator_failures)
 
     let complete = class_count > 0 && orbit_failures == 0 &&
         quadratic_total == PIREUS_BILINEAR_QUADRATIC_COUNT &&
@@ -1342,11 +1336,11 @@ fn build_corpus(
                 let delta = displacement_family_delta(
                     base, &target, matrix, swap_index == 1)
                 action_checks = action_checks + 1
-                if delta.valid {
+                if family_delta_valid(delta) {
                     membership_hits[corpus_id - 1] =
                         membership_hits[corpus_id - 1] + 1
                     let required_q = quadratic_pullback(
-                        delta.quadratic_code, inverse)
+                        family_delta_code(delta), inverse)
                     q_masks[required_q] = q_masks[required_q] |
                         (1 << (corpus_id - 1))
                 }
@@ -1395,27 +1389,27 @@ fn build_corpus(
     }
 
     var state = sha256_init()
-    state = digest_add_i64(state, action_checks)
+    digest_add_i64(&! state, action_checks)
     q_code = 0
     while q_code < PIREUS_BILINEAR_QUADRATIC_COUNT {
-        state = digest_add_i64(state, q_code)
-        state = digest_add_i64(state, q_masks[q_code])
+        digest_add_i64(&! state, q_code)
+        digest_add_i64(&! state, q_masks[q_code])
         q_code = q_code + 1
     }
     corpus_id = 1
     while corpus_id <= PIREUS_BILINEAR_CORPUS_COUNT {
-        state = digest_add_i64(state, membership_hits[corpus_id - 1])
-        state = digest_add_i64(
-            state, incident_quadratic_codes[corpus_id - 1])
-        state = digest_add_i64(state, incident_classes[corpus_id - 1])
-        state = digest_add_i64(state, square_negatives[corpus_id - 1])
-        state = digest_add_i64(
-            state, commutator_defects[corpus_id - 1])
-        state = digest_add_i64(
-            state, associator_defects[corpus_id - 1])
+        digest_add_i64(&! state, membership_hits[corpus_id - 1])
+        digest_add_i64(
+            &! state, incident_quadratic_codes[corpus_id - 1])
+        digest_add_i64(&! state, incident_classes[corpus_id - 1])
+        digest_add_i64(&! state, square_negatives[corpus_id - 1])
+        digest_add_i64(
+            &! state, commutator_defects[corpus_id - 1])
+        digest_add_i64(
+            &! state, associator_defects[corpus_id - 1])
         corpus_id = corpus_id + 1
     }
-    state = digest_add_i64(state, incidence_failures)
+    digest_add_i64(&! state, incidence_failures)
     let complete = action_checks == PIREUS_BILINEAR_CORPUS_COUNT *
         PIREUS_BILINEAR_ACTION_COUNT && incidence_failures == 0
     BilinearCorpusWork {
@@ -1620,52 +1614,52 @@ fn run_search(
     }
 
     var search_state = sha256_init()
-    search_state = digest_add_i64(search_state, candidates)
+    digest_add_i64(&! search_state, candidates)
     class_id = 0
     while class_id < classes.class_count {
         if classes.class_corpus_masks[class_id] == 0 &&
             !classes.class_v1_represented[class_id] {
-            search_state = digest_add_i64(search_state, class_id)
-            search_state = digest_add_i64(
-                search_state, classes.class_minimum_matrix[class_id])
-            search_state = digest_add_i64(
-                search_state, classes.class_square_negatives[class_id])
-            search_state = digest_add_i64(
-                search_state, classes.class_commutator_defects[class_id])
-            search_state = digest_add_i64(
-                search_state, classes.class_associator_defects[class_id])
+            digest_add_i64(&! search_state, class_id)
+            digest_add_i64(
+                &! search_state, classes.class_minimum_matrix[class_id])
+            digest_add_i64(
+                &! search_state, classes.class_square_negatives[class_id])
+            digest_add_i64(
+                &! search_state, classes.class_commutator_defects[class_id])
+            digest_add_i64(
+                &! search_state, classes.class_associator_defects[class_id])
         }
         class_id = class_id + 1
     }
     var selected_state = sha256_init()
-    selected_state = digest_add_bool(selected_state, selected.present)
-    selected_state = digest_add_i64(selected_state, selected.class_id)
-    selected_state = digest_add_i64(selected_state, selected.quadratic_code)
-    selected_state = digest_add_i64(selected_state, selected.bilinear_matrix)
-    selected_state = digest_add_i64(
-        selected_state, selected.class_quadratic_size)
-    selected_state = digest_add_i64(selected_state, selected.class_raw_size)
-    selected_state = digest_add_i64(
-        selected_state, selected.square_negatives)
-    selected_state = digest_add_i64(
-        selected_state, selected.commutator_defects)
-    selected_state = digest_add_i64(
-        selected_state, selected.associator_defects)
-    selected_state = digest_add_i64(
-        selected_state, selected.nearest_corpus_id)
-    selected_state = digest_add_i64(
-        selected_state, selected.associator_delta)
-    selected_state = digest_add_i64(selected_state, selected.commutator_delta)
-    selected_state = digest_add_i64(selected_state, selected.square_delta)
-    selected_state = digest_add_bool(
-        selected_state, selected.represented_in_v1)
-    selected_state = digest_add_bool(
-        selected_state, selected.equivalent_to_corpus)
-    selected_state = digest_add_bool(selected_state, witness.present)
-    selected_state = digest_add_i64(selected_state, witness.corpus_id)
-    selected_state = digest_add_i64(selected_state, witness.component)
-    selected_state = digest_add_i64(selected_state, witness.candidate_value)
-    selected_state = digest_add_i64(selected_state, witness.corpus_value)
+    digest_add_bool(&! selected_state, selected.present)
+    digest_add_i64(&! selected_state, selected.class_id)
+    digest_add_i64(&! selected_state, selected.quadratic_code)
+    digest_add_i64(&! selected_state, selected.bilinear_matrix)
+    digest_add_i64(
+        &! selected_state, selected.class_quadratic_size)
+    digest_add_i64(&! selected_state, selected.class_raw_size)
+    digest_add_i64(
+        &! selected_state, selected.square_negatives)
+    digest_add_i64(
+        &! selected_state, selected.commutator_defects)
+    digest_add_i64(
+        &! selected_state, selected.associator_defects)
+    digest_add_i64(
+        &! selected_state, selected.nearest_corpus_id)
+    digest_add_i64(
+        &! selected_state, selected.associator_delta)
+    digest_add_i64(&! selected_state, selected.commutator_delta)
+    digest_add_i64(&! selected_state, selected.square_delta)
+    digest_add_bool(
+        &! selected_state, selected.represented_in_v1)
+    digest_add_bool(
+        &! selected_state, selected.equivalent_to_corpus)
+    digest_add_bool(&! selected_state, witness.present)
+    digest_add_i64(&! selected_state, witness.corpus_id)
+    digest_add_i64(&! selected_state, witness.component)
+    digest_add_i64(&! selected_state, witness.candidate_value)
+    digest_add_i64(&! selected_state, witness.corpus_value)
     BilinearSearchWork {
         selected: selected,
         witness: witness,
@@ -1932,41 +1926,41 @@ fn create_receipt(
 fn digest_grammar(grammar: &BilinearGrammarCertificate)
     -> BilinearGenesisDigest with Mut, Panic, Div, Epistemic {
     var state = sha256_init()
-    state = digest_add_i64(state, grammar.matrices_scanned)
+    digest_add_i64(&! state, grammar.matrices_scanned)
     var matrix: i64 = 0
     while matrix < PIREUS_BILINEAR_RAW_COUNT {
-        state = digest_add_i64(state, matrix)
-        state = digest_add_i64(
-            state, quadratic_code_from_matrix(matrix))
+        digest_add_i64(&! state, matrix)
+        digest_add_i64(
+            &! state, quadratic_code_from_matrix(matrix))
         matrix = matrix + 1
     }
-    state = digest_add_i64(state, grammar.quadratic_codes)
-    state = digest_add_i64(state, grammar.expected_bucket_size)
-    state = digest_add_i64(state, grammar.minimum_bucket_size)
-    state = digest_add_i64(state, grammar.maximum_bucket_size)
-    state = digest_add_i64(state, grammar.bucket_failures)
-    state = digest_add_i64(state, grammar.reconstruction_failures)
-    state = digest_add_i64(state, grammar.gauge_fiber_checks)
-    state = digest_add_i64(state, grammar.gauge_fiber_failures)
-    state = digest_add_i64(state, grammar.cocycle_failures)
-    state = digest_add_bool(state, grammar.complete)
+    digest_add_i64(&! state, grammar.quadratic_codes)
+    digest_add_i64(&! state, grammar.expected_bucket_size)
+    digest_add_i64(&! state, grammar.minimum_bucket_size)
+    digest_add_i64(&! state, grammar.maximum_bucket_size)
+    digest_add_i64(&! state, grammar.bucket_failures)
+    digest_add_i64(&! state, grammar.reconstruction_failures)
+    digest_add_i64(&! state, grammar.gauge_fiber_checks)
+    digest_add_i64(&! state, grammar.gauge_fiber_failures)
+    digest_add_i64(&! state, grammar.cocycle_failures)
+    digest_add_bool(&! state, grammar.complete)
     digest_finish(state)
 }
 
 fn digest_quotient(grammar: &BilinearGrammarCertificate)
     -> BilinearGenesisDigest with Mut, Panic, Div, Epistemic {
     var state = sha256_init()
-    state = digest_add_i64(state, PIREUS_BILINEAR_GAUGE_COUNT)
-    state = digest_add_i64(state, PIREUS_BILINEAR_GAUGE_KERNEL)
-    state = digest_add_i64(state, PIREUS_BILINEAR_GAUGE_ACTIONS)
-    state = digest_add_i64(state, PIREUS_BILINEAR_QUADRATIC_COUNT)
+    digest_add_i64(&! state, PIREUS_BILINEAR_GAUGE_COUNT)
+    digest_add_i64(&! state, PIREUS_BILINEAR_GAUGE_KERNEL)
+    digest_add_i64(&! state, PIREUS_BILINEAR_GAUGE_ACTIONS)
+    digest_add_i64(&! state, PIREUS_BILINEAR_QUADRATIC_COUNT)
     var code: i64 = 0
     while code < PIREUS_BILINEAR_QUADRATIC_COUNT {
-        state = digest_add_i64(state, code)
-        state = digest_add_i64(state, grammar.bucket_counts[code])
-        state = digest_add_i64(
-            state, grammar.minimum_matrix_by_code[code])
-        state = digest_add_i64(state, representative_matrix(code))
+        digest_add_i64(&! state, code)
+        digest_add_i64(&! state, grammar.bucket_counts[code])
+        digest_add_i64(
+            &! state, grammar.minimum_matrix_by_code[code])
+        digest_add_i64(&! state, representative_matrix(code))
         code = code + 1
     }
     digest_finish(state)
@@ -1977,20 +1971,20 @@ fn digest_matrix_universe(
     group: &BilinearGroupCertificate,
 ) -> BilinearGenesisDigest with Mut, Panic, Div, Epistemic {
     var state = sha256_init()
-    state = digest_add_i64(state, universe.encodings_scanned)
-    state = digest_add_i64(state, universe.matrix_count)
+    digest_add_i64(&! state, universe.encodings_scanned)
+    digest_add_i64(&! state, universe.matrix_count)
     var index: i64 = 0
     while index < universe.matrix_count {
-        state = digest_add_i64(state, universe.codes[index])
+        digest_add_i64(&! state, universe.codes[index])
         index = index + 1
     }
-    state = digest_add_i64(state, group.bfs_count)
-    state = digest_add_i64(state, group.set_mismatches)
-    state = digest_add_i64(state, group.bfs_noninvertible)
-    state = digest_add_bool(state, group.bfs_overflow)
-    state = digest_add_bool(state, group.identity_present)
-    state = digest_add_bool(state, group.sorted_unique)
-    state = digest_add_bool(state, group.complete)
+    digest_add_i64(&! state, group.bfs_count)
+    digest_add_i64(&! state, group.set_mismatches)
+    digest_add_i64(&! state, group.bfs_noninvertible)
+    digest_add_bool(&! state, group.bfs_overflow)
+    digest_add_bool(&! state, group.identity_present)
+    digest_add_bool(&! state, group.sorted_unique)
+    digest_add_bool(&! state, group.complete)
     digest_finish(state)
 }
 
@@ -1999,17 +1993,17 @@ fn digest_final_partition(
     initial: &BilinearGenesisDigest,
 ) -> BilinearGenesisDigest with Mut, Panic, Div, Epistemic {
     var state = sha256_init()
-    state = digest_add_digest(state, initial)
-    state = digest_add_i64(state, classes.class_count)
+    digest_add_digest(&! state, initial)
+    digest_add_i64(&! state, classes.class_count)
     var class_id: i64 = 0
     while class_id < classes.class_count {
-        state = digest_add_i64(state, class_id)
-        state = digest_add_i64(
-            state, classes.class_corpus_masks[class_id])
+        digest_add_i64(&! state, class_id)
+        digest_add_i64(
+            &! state, classes.class_corpus_masks[class_id])
         class_id = class_id + 1
     }
-    state = digest_add_i64(state, classes.corpus_incidence_failures)
-    state = digest_add_bool(state, classes.complete)
+    digest_add_i64(&! state, classes.corpus_incidence_failures)
+    digest_add_bool(&! state, classes.complete)
     digest_finish(state)
 }
 
@@ -2025,52 +2019,52 @@ fn digest_receipt(
     selected_digest: &BilinearGenesisDigest,
 ) -> BilinearGenesisDigest with Mut, Panic, Div, Epistemic {
     var state = sha256_init()
-    state = digest_add_i64(state, receipt.schema)
-    state = digest_add_i64(state, receipt.producer_language)
-    state = digest_add_i64(state, receipt.producer_role)
-    state = digest_add_i64(state, receipt.stage)
-    state = digest_add_bool(
-        state, receipt.expanded_bilinear_grammar_exhausted)
-    state = digest_add_bool(
-        state, receipt.bilinear_gauge_quotient_exact)
-    state = digest_add_bool(
-        state, receipt.declared_family_equivalence_exact)
-    state = digest_add_bool(state, receipt.corpus_incidence_exact)
-    state = digest_add_bool(state, receipt.v1_incidence_exact)
-    state = digest_add_bool(
-        state, receipt.invariant_signature_verified)
-    state = digest_add_bool(state, receipt.relative_semantic_novelty)
-    state = digest_add_bool(
-        state, receipt.relative_grammar_extension_novelty)
-    state = digest_add_bool(state, receipt.relative_algebraic_novelty)
-    state = digest_add_bool(state, receipt.algebra_isomorphism_complete)
-    state = digest_add_bool(state, receipt.all_sign_tables_exhausted)
-    state = digest_add_bool(state, receipt.base_twist_assumed)
-    state = digest_add_bool(state, receipt.orbit_hamming_distance)
-    state = digest_add_bool(state, receipt.algorithmic_novelty)
-    state = digest_add_bool(state, receipt.material_novelty)
-    state = digest_add_bool(state, receipt.scientific_novelty)
-    state = digest_add_bool(state, receipt.global_novelty)
-    state = digest_add_bool(state, receipt.historical_novelty)
-    state = digest_add_bool(state, receipt.priority_claim)
-    state = digest_add_bool(state, receipt.external_prior_art_complete)
-    state = digest_add_bool(state, receipt.source_hash_bound)
-    state = digest_add_bool(state, receipt.semantics_hash_bound)
-    state = digest_add_bool(state, receipt.receipt_frozen)
-    state = digest_add_bool(state, receipt.receipt_admitted)
-    state = digest_add_bool(state, receipt.formal_parity_open)
-    state = digest_add_bool(state, receipt.effect_parity_open)
-    state = digest_add_i64(state, receipt.material_parity_count)
-    state = digest_add_bool(state, receipt.parity_open)
-    state = digest_add_bool(state, receipt.claim_ready)
-    state = digest_add_digest(state, grammar_digest)
-    state = digest_add_digest(state, quotient_digest)
-    state = digest_add_digest(state, matrix_digest)
-    state = digest_add_digest(state, stabilizer_digest)
-    state = digest_add_digest(state, partition_digest)
-    state = digest_add_digest(state, corpus_digest)
-    state = digest_add_digest(state, search_digest)
-    state = digest_add_digest(state, selected_digest)
+    digest_add_i64(&! state, receipt.schema)
+    digest_add_i64(&! state, receipt.producer_language)
+    digest_add_i64(&! state, receipt.producer_role)
+    digest_add_i64(&! state, receipt.stage)
+    digest_add_bool(
+        &! state, receipt.expanded_bilinear_grammar_exhausted)
+    digest_add_bool(
+        &! state, receipt.bilinear_gauge_quotient_exact)
+    digest_add_bool(
+        &! state, receipt.declared_family_equivalence_exact)
+    digest_add_bool(&! state, receipt.corpus_incidence_exact)
+    digest_add_bool(&! state, receipt.v1_incidence_exact)
+    digest_add_bool(
+        &! state, receipt.invariant_signature_verified)
+    digest_add_bool(&! state, receipt.relative_semantic_novelty)
+    digest_add_bool(
+        &! state, receipt.relative_grammar_extension_novelty)
+    digest_add_bool(&! state, receipt.relative_algebraic_novelty)
+    digest_add_bool(&! state, receipt.algebra_isomorphism_complete)
+    digest_add_bool(&! state, receipt.all_sign_tables_exhausted)
+    digest_add_bool(&! state, receipt.base_twist_assumed)
+    digest_add_bool(&! state, receipt.orbit_hamming_distance)
+    digest_add_bool(&! state, receipt.algorithmic_novelty)
+    digest_add_bool(&! state, receipt.material_novelty)
+    digest_add_bool(&! state, receipt.scientific_novelty)
+    digest_add_bool(&! state, receipt.global_novelty)
+    digest_add_bool(&! state, receipt.historical_novelty)
+    digest_add_bool(&! state, receipt.priority_claim)
+    digest_add_bool(&! state, receipt.external_prior_art_complete)
+    digest_add_bool(&! state, receipt.source_hash_bound)
+    digest_add_bool(&! state, receipt.semantics_hash_bound)
+    digest_add_bool(&! state, receipt.receipt_frozen)
+    digest_add_bool(&! state, receipt.receipt_admitted)
+    digest_add_bool(&! state, receipt.formal_parity_open)
+    digest_add_bool(&! state, receipt.effect_parity_open)
+    digest_add_i64(&! state, receipt.material_parity_count)
+    digest_add_bool(&! state, receipt.parity_open)
+    digest_add_bool(&! state, receipt.claim_ready)
+    digest_add_digest(&! state, grammar_digest)
+    digest_add_digest(&! state, quotient_digest)
+    digest_add_digest(&! state, matrix_digest)
+    digest_add_digest(&! state, stabilizer_digest)
+    digest_add_digest(&! state, partition_digest)
+    digest_add_digest(&! state, corpus_digest)
+    digest_add_digest(&! state, search_digest)
+    digest_add_digest(&! state, selected_digest)
     digest_finish(state)
 }
 

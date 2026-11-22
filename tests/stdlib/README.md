@@ -22,18 +22,11 @@ tests/stdlib/
 ## Running Tests
 
 ```bash
-# From compiler/ directory:
-cd /path/to/sounio/compiler
+# The suite picks up tests/stdlib/*/test_*.sio
+bash scripts/run_sio_test_suite.sh
 
-# Run all stdlib tests
-cargo test --test stdlib_tests
-
-# Run tests for a specific module
-souc run ../tests/stdlib/causal/test_core.sio
-souc run ../tests/stdlib/epistemic/test_stats.sio
-
-# Run with output
-souc run ../tests/stdlib/graph/test_graph.sio --nocapture
+# Fast preflight
+bash scripts/dev/fast_gate.sh
 ```
 
 ## Writing New Tests

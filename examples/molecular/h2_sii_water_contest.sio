@@ -1,0 +1,83 @@
+// examples/molecular/h2_sii_water_contest.sio -- three water models of the sII
+// hydrate as an ADR-016 contest.
+//
+// H2 per cell at 200 K, 300 MPa from the C++ GCMC of molecular::host_guest's model
+// (the predictions quoted in h2_sii_epistemic.sio, 4e6 trials), with each run's
+// Monte Carlo error and its fluctuation sensitivities to the H2 Lennard-Jones
+// parameters. The H2 parameters are the same for every water model, so they enter
+// all three as the same two latent channels z1, z2 (covariance of four published
+// one-site sets, centred on Buch); each run's Monte Carlo error is its own channel.
+//
+// Shared channels make the models almost one source: rho = 0.993 to 0.995, and
+// n_eff = 1.004. Their differences are resolved (E_n = 9.0, 3.6, 4.4 at k = 2,
+// from the GUM covariance), but treated as independent the same numbers give
+// E_n = 0.64, 0.26, 0.37, and meet would fuse them to 32.41 +- 0.41 -- narrower
+// than any one model (about 0.70). With the covariance, the GLS weights are
+// 2.57 / -0.52 / -1.05 and the fusion, 30.6, falls outside all three: meet
+// refuses (Peelle; tests/epistemic-meet/refuse_peelle*.sio), whatever the policy.
+// The models stay a contest. Retracting TIP4P/Ice -- the one force field fitted
+// to the ice phases rather than to liquid water -- leaves SPC/E and TIP5P, which
+// still disagree (E_n = 3.6) and still cannot be fused (weight of TIP5P -1.20).
+//
+// Every number printed is checked against tests/oracles/epistemic_meet/
+// h2_water_models.cpp (long double) at 1e-9 relative; the GUM covariance is the
+// one the compiler reads from the channels, never an input.
+
+fn close_rel(got: f64, want: f64) -> bool with Mut, Div {
+    var d = got - want
+    if d < 0.0 { d = 0.0 - d }
+    var w = want
+    if w < 0.0 { w = 0.0 - w }
+    d <= 1.0e-12 + 1.0e-9 * w
+}
+
+fn report(name: string, got: f64, want: f64) -> i64 with IO, Mut, Div {
+    print(name)
+    print(" ")
+    print_f64(got)
+    if close_rel(got, want) {
+        print("  ok\n")
+        return 0
+    }
+    print("  FAIL (oracle ")
+    print_f64(want)
+    print(")\n")
+    1
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic, Epistemic {
+    // the shared H2 channels (Cholesky of the four-set covariance)
+    let ca = 2.23364425696364341
+    let cb = 0.0 - 2.52912550826065453e-02
+    let cd = 1.12653584638716957e-03
+    let kz1 = measure(0.0, uncertainty: 1.0)
+    let kz2 = measure(0.0, uncertainty: 1.0)
+    let z1 = kz1.value
+    let z2 = kz2.value
+    // each run's Monte Carlo error
+    let km0 = measure(0.0, uncertainty: 0.038)
+    let km1 = measure(0.0, uncertainty: 0.058)
+    let km2 = measure(0.0, uncertainty: 0.061)
+    // N + dN/deps_H d eps_H + dN/dsig_H d sig_H
+    let spce = 31.820 + km0.value + (0.0950 * ca + (0.0 - 19.059) * cb) * z1 + (0.0 - 19.059) * cd * z2
+    let tip4 = 33.080 + km1.value + (0.0813 * ca + (0.0 - 20.585) * cb) * z1 + (0.0 - 20.585) * cd * z2
+    let tip5 = 32.345 + km2.value + (0.0907 * ca + (0.0 - 19.881) * cb) * z1 + (0.0 - 19.881) * cd * z2
+    var bad: i64 = 0
+    bad = bad + report("u(SPC/E)        ", sqrt(variance_of(spce)), 0.695592912759)
+    bad = bad + report("u(TIP4P/Ice)    ", sqrt(variance_of(tip4)), 0.704988470277)
+    bad = bad + report("u(TIP5P)        ", sqrt(variance_of(tip5)), 0.708393684826)
+    let waters = contest(spce, tip4, tip5)
+    bad = bad + report("n_eff           ", neff_of(waters), 1.00390385946)
+    bad = bad + report("Birge ratio     ", birge_of(waters), 12.8275621044)
+    bad = bad + report("E_n TIP4P/Ice-SPC/E", en_of(tip4, spce), 9.02318457745)
+    bad = bad + report("E_n TIP5P-SPC/E    ", en_of(tip5, spce), 3.6087951905)
+    bad = bad + report("E_n TIP4P/Ice-TIP5P", en_of(tip4, tip5), 4.36270922528)
+    let liquid = retract(waters, tip4, because: "TIP4P/Ice is fitted to the ice phases, not to liquid water")
+    bad = bad + report("E_n after retract  ", en_of(liquid), 3.6087951905)
+    bad = bad + report("Birge after retract", birge_of(liquid), 3.6087951905 * 2.0)
+    if bad == 0 {
+        print("H2_SII_WATER_CONTEST_OK\n")
+        return 0
+    }
+    1
+}

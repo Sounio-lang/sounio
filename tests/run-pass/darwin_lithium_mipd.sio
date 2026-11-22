@@ -1,0 +1,281 @@
+//@ run-pass
+//@ expect-stdout-contains: LITHIUM_MIPD_PASS
+//@ timeout: 300
+//
+// Gates for scenarios/lithium_mipd.sio: lithium carbonate q12h to steady
+// state on PBPK28 (TR-BDF2, exact absorbed-mass input), the 12-h trough with
+// its uncertainty, and the Bayesian (MAP + Laplace) update of one patient's
+// renal clearance from one measured trough.
+//
+// G1  Mass identity: body + eliminated − administered = 0 to the rounding
+//     budget of theta_pbpk28 (pbpk28_mass_tol_rel), no booked negative mass.
+// G2  Steady state reached: the last two troughs agree to 1e-4 (relative).
+// G3  Analytic oracle: over the last interval C_avg,ss = F·D/(CL·τ) (linear
+//     model, mass balance), to 2e-3.
+// G4  Time step: the trough at dt = 0.1 h and 0.05 h agree to 1e-3.
+// G5  Uncertainty: lo95 < median < hi95; the exact 95 % interval and the
+//     first-order GUM interval (median ± 1.96·u) are both printed. The
+//     elasticity ∂lnC_trough/∂lnCL is PREDICTED, not bounded by eye: for a
+//     one-compartment approximation with V = the PBPK28 steady-state
+//     distribution volume (V_b + Σ V_i·(f_v,i + (1 − f_v,i)·Kp_i)) and
+//     k = CL/V, C_min = (F·D/V)·e^(−kτ)/(1 − e^(−kτ)), so
+//         ∂lnC_min/∂lnCL = −kτ/(1 − e^(−kτ)).
+//     The PBPK28 value must match it to 5 % (distribution is fast against
+//     τ = 12 h for a body-water ion). Note |e| > 1: CL sets both the level
+//     and the within-interval decay.
+// G6  Null update: a measured trough equal to the population prediction
+//     leaves η at 0 (|η| < 1e-3) and shrinks the SD below ω.
+// G7  High trough (1.25 mEq/L on 600 mg q12h): η < 0 (lower CL), the fit
+//     lies between the prior prediction and the observation (shrinkage),
+//     and the dose search returns a lower daily dose than 1200 mg.
+// G8  Low trough (0.40 mEq/L on 600 mg q12h): η > 0 and the dose search
+//     returns a higher daily dose than 1200 mg.
+// G9  Polypharmacy, thiazide (Finley 1995: +25-40 % lithium). Patient A at
+//     CL_MAP on the recommended dose; a thiazide starts on day 14 (CL ×
+//     exp(−m), m = median ln effect). PREDICTED by the one-compartment
+//     closed forms with V = V_ss of PBPK28, k = CL/V:
+//       trough ratio  R = [e^(−k₂τ)/(1−e^(−k₂τ))] / [e^(−k₁τ)/(1−e^(−k₁τ))]
+//       time to 90 % of the change after the switch  t90 = ln 10 / k₂.
+//     Gates: mass identity on the switched run; |R_model/R_pred − 1| < 3 %;
+//     |t90_model − t90_pred| <= 1.5 τ (troughs are sampled once per τ).
+//     The new dose search uses SD(ln C) = |e|·√(SD(η)² + s_ix²) and must
+//     return a lower dose than before the thiazide.
+// G10 NSAID / ACE inhibitor: no sourced magnitude, so the model must refuse
+//     a quantitative prediction (lim_interaction_known = false).
+//
+// Parameters, sources and declared limitations: header of
+// stdlib/darwin_pbpk/scenarios/lithium_mipd.sio. Decision-support
+// demonstration, not a dosing tool.
+
+use darwin_pbpk::theta_pbpk28::*
+use darwin_pbpk::scenarios::lithium_oral::*
+use darwin_pbpk::scenarios::lithium_mipd::*
+use math::pure::{exp, ln, sqrt}
+
+fn t_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn regimen(daily_carbonate_mg: f64) -> LiRegimen with Div {
+    LiRegimen { dose_carbonate_mg: daily_carbonate_mg / 2.0, tau_h: 12.0, n_doses: 28 }
+}
+
+fn show(label: string, x: f64) with IO {
+    print(label)
+    println(x)
+}
+
+// Best daily dose (600..1800 mg Li2CO3, step 300, q12h) by probability that
+// the true trough lies in the target band, given the patient's posterior.
+// Linear in dose: trough(D) = (D/D0)·f(η_MAP); interval width does not
+// depend on D (ln-scale), so one elasticity serves every candidate.
+fn best_daily_dose(d0_daily: f64, post: LiPosterior, elasticity: f64) -> f64 with IO, Mut, Div, Panic {
+    return best_dose_from(d0_daily, post.fitted_meq, t_abs(elasticity) * post.sd_eta)
+}
+
+// Same search from any (dose, median trough, SD of ln trough).
+fn best_dose_from(d0_daily: f64, c0_meq: f64, sd_ln_c: f64) -> f64 with IO, Mut, Div, Panic {
+    var best_d = 0.0
+    var best_p = -1.0
+    var d = 600.0
+    while d < 1800.5 {
+        let m = c0_meq * d / d0_daily
+        let pr = lim_prob_in_band(m, sd_ln_c, lim_target_lo_meq(), lim_target_hi_meq())
+        let lo = m * exp(0.0 - lim_z95() * sd_ln_c)
+        let hi = m * exp(lim_z95() * sd_ln_c)
+        print("    ")
+        print(d)
+        print(" mg/dia -> vale ")
+        print(m)
+        print(" mEq/L  [")
+        print(lo)
+        print(", ")
+        print(hi)
+        print("]  P(0,6-1,0) = ")
+        println(pr)
+        if pr > best_p {
+            best_p = pr
+            best_d = d
+        }
+        d = d + 300.0
+    }
+    show("    dose recomendada (mg/dia): ", best_d)
+    show("    P(vale na faixa) com ela: ", best_p)
+    return best_d
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("LITHIUM_MIPD v1 — PBPK28, TR-BDF2, q12h x 28 doses")
+    var ok = true
+    let dt = 0.1
+    let reg = regimen(1200.0)
+    let cl = lim_cl_pop()
+
+    // G1–G3 ---------------------------------------------------------------
+    let r = lim_simulate(reg, cl, dt)
+    let tol = pbpk28_mass_tol_rel(r.steps) * r.administered
+    println("G1 mass identity")
+    show("  administered (mg Li+): ", r.administered)
+    show("  |residual| / bound: ", t_abs(r.residual_mg) / tol)
+    show("  booked negative mass (mg): ", r.neg_mass)
+    if t_abs(r.residual_mg) > tol || r.neg_mass > pbpk28_neg_mass_bound_mg() {
+        println("  G1 FAIL")
+        ok = false
+    }
+
+    println("G2 steady state")
+    let ss_rel = t_abs(r.trough_mg_l - r.prev_trough_mg_l) / r.trough_mg_l
+    show("  trough (mEq/L): ", r.trough_mg_l / lim_mg_per_meq())
+    show("  previous trough (mEq/L): ", r.prev_trough_mg_l / lim_mg_per_meq())
+    show("  peak last interval (mEq/L): ", r.peak_mg_l / lim_mg_per_meq())
+    show("  relative change: ", ss_rel)
+    if ss_rel > 1.0e-4 { println("  G2 FAIL"); ok = false }
+
+    println("G3 C_avg,ss = F*D/(CL*tau)")
+    let oracle = li_f() * lim_li_from_carbonate(reg.dose_carbonate_mg) / (cl * reg.tau_h)
+    let o_rel = t_abs(r.cavg_mg_l - oracle) / oracle
+    show("  model C_avg (mg/L): ", r.cavg_mg_l)
+    show("  oracle (mg/L): ", oracle)
+    show("  relative error: ", o_rel)
+    if o_rel > 2.0e-3 { println("  G3 FAIL"); ok = false }
+
+    // G4 -------------------------------------------------------------------
+    println("G4 dt convergence")
+    let c_fine = lim_trough_meq(reg, cl, 0.05)
+    let c_coarse = r.trough_mg_l / lim_mg_per_meq()
+    let dt_rel = t_abs(c_fine - c_coarse) / c_fine
+    show("  trough dt=0.05 (mEq/L): ", c_fine)
+    show("  relative difference: ", dt_rel)
+    if dt_rel > 1.0e-3 { println("  G4 FAIL"); ok = false }
+
+    // G5 -------------------------------------------------------------------
+    println("G5 population prediction, 1200 mg/dia (600 mg q12h)")
+    let pr = lim_predict(reg, ln(cl), lim_omega_cl(), dt)
+    show("  median (mEq/L): ", pr.median_meq)
+    show("  exact 95% lo: ", pr.lo95_meq)
+    show("  exact 95% hi: ", pr.hi95_meq)
+    show("  GUM u (mEq/L): ", pr.gum_u_meq)
+    show("  GUM 95% lo: ", pr.median_meq - lim_z95() * pr.gum_u_meq)
+    show("  GUM 95% hi: ", pr.median_meq + lim_z95() * pr.gum_u_meq)
+    show("  elasticity dlnC/dlnCL: ", pr.dlnc_dlncl)
+    let p_band = lim_prob_in_band(pr.median_meq, t_abs(pr.dlnc_dlncl) * lim_omega_cl(),
+                                  lim_target_lo_meq(), lim_target_hi_meq())
+    show("  P(0,6-1,0) before any level: ", p_band)
+    if !(pr.lo95_meq < pr.median_meq && pr.median_meq < pr.hi95_meq) { println("  G5 FAIL order"); ok = false }
+    let pp = li_pbpk28_params()
+    var vd = pp.v_ref[0]
+    var i = 1
+    while i < 14 {
+        let vf = pp.vasc_frac[i]
+        vd = vd + pp.v_ref[i] * (vf + (1.0 - vf) * pp.kp[i])
+        i = i + 1
+    }
+    let kt = cl / vd * reg.tau_h
+    let e_pred = 0.0 - kt / (1.0 - exp(0.0 - kt))
+    let e_rel = t_abs(pr.dlnc_dlncl - e_pred) / t_abs(e_pred)
+    show("  V_ss from PBPK28 (L): ", vd)
+    show("  predicted elasticity -k*tau/(1-exp(-k*tau)): ", e_pred)
+    show("  relative difference: ", e_rel)
+    if e_rel > 0.05 { println("  G5 FAIL elasticity"); ok = false }
+
+    // G6 -------------------------------------------------------------------
+    println("G6 null update")
+    let p0 = lim_update(reg, pr.median_meq, dt)
+    show("  eta_MAP: ", p0.eta_map)
+    show("  posterior SD(eta): ", p0.sd_eta)
+    if t_abs(p0.eta_map) > 1.0e-3 || !(p0.sd_eta < lim_omega_cl()) { println("  G6 FAIL"); ok = false }
+
+    // G7 -------------------------------------------------------------------
+    println("G7 patient A: trough 1.25 mEq/L on 1200 mg/dia")
+    let pa = lim_update(reg, 1.25, dt)
+    show("  iterations: ", pa.iterations as f64)
+    show("  eta_MAP: ", pa.eta_map)
+    show("  CL_MAP (L/h): ", pa.cl_map)
+    show("  posterior SD(eta): ", pa.sd_eta)
+    show("  fitted trough (mEq/L): ", pa.fitted_meq)
+    let da = best_daily_dose(1200.0, pa, pr.dlnc_dlncl)
+    if !(pa.eta_map < 0.0) { println("  G7 FAIL eta"); ok = false }
+    if !(pa.fitted_meq > pr.median_meq && pa.fitted_meq < 1.25) { println("  G7 FAIL shrinkage"); ok = false }
+    if !(da < 1200.0) { println("  G7 FAIL dose"); ok = false }
+
+    // G8 -------------------------------------------------------------------
+    println("G8 patient B: trough 0.40 mEq/L on 1200 mg/dia")
+    let pb = lim_update(reg, 0.40, dt)
+    show("  eta_MAP: ", pb.eta_map)
+    show("  CL_MAP (L/h): ", pb.cl_map)
+    show("  fitted trough (mEq/L): ", pb.fitted_meq)
+    let db = best_daily_dose(1200.0, pb, pr.dlnc_dlncl)
+    if !(pb.eta_map > 0.0) { println("  G8 FAIL eta"); ok = false }
+    if !(db > 1200.0) { println("  G8 FAIL dose"); ok = false }
+
+    // G9 -------------------------------------------------------------------
+    println("G9 patient A on the new dose, thiazide started on day 14")
+    let reg9 = LiRegimen { dose_carbonate_mg: da / 2.0, tau_h: 12.0, n_doses: 56 }
+    let m_ix = lim_ix_ln_effect_median(lim_ix_thiazide())
+    let s_ix = lim_ix_ln_effect_sd(lim_ix_thiazide())
+    let cl1 = pa.cl_map
+    let cl2 = pa.cl_map * exp(0.0 - m_ix)
+    let t_sw = 14.0 * 24.0
+    let tr = lim_simulate_switch(reg9, cl1, cl2, t_sw, dt)
+    let tol9 = pbpk28_mass_tol_rel(tr.steps) * tr.administered
+    show("  daily dose (mg Li2CO3): ", da)
+    show("  CL before / after (L/h): ", cl1)
+    show("                          ", cl2)
+    show("  |residual| / bound: ", t_abs(tr.residual_mg) / tol9)
+    if t_abs(tr.residual_mg) > tol9 { println("  G9 FAIL mass"); ok = false }
+    let i_pre = 27            // trough at 336 h = end of interval 28 (index 27)
+    let c_pre = tr.trough_meq[i_pre]
+    let c_post = tr.trough_meq[tr.n - 1]
+    println("  trough by day after the switch (mEq/L):")
+    var j = i_pre
+    while j < tr.n {
+        if (j - i_pre) % 2 == 0 {
+            print("    dia ")
+            print(((j - i_pre) / 2) as f64)
+            print(": ")
+            println(tr.trough_meq[j])
+        }
+        j = j + 1
+    }
+    let k1 = cl1 / vd
+    let k2 = cl2 / vd
+    let tau = reg9.tau_h
+    let r_pred = (exp(0.0 - k2 * tau) / (1.0 - exp(0.0 - k2 * tau))) /
+                 (exp(0.0 - k1 * tau) / (1.0 - exp(0.0 - k1 * tau)))
+    let r_model = c_post / c_pre
+    show("  trough ratio, model: ", r_model)
+    show("  trough ratio, predicted: ", r_pred)
+    show("  C_avg ratio (= CL ratio): ", cl1 / cl2)
+    if t_abs(r_model / r_pred - 1.0) > 0.03 { println("  G9 FAIL ratio"); ok = false }
+    var i90 = i_pre
+    var found = false
+    while i90 < tr.n && !found {
+        if (tr.trough_meq[i90] - c_pre) >= 0.9 * (c_post - c_pre) { found = true } else { i90 = i90 + 1 }
+    }
+    let t90_model = ((i90 - i_pre) as f64) * tau
+    let t90_pred = ln(10.0) / k2
+    show("  t90 model (h): ", t90_model)
+    show("  t90 predicted (h): ", t90_pred)
+    if !found || t_abs(t90_model - t90_pred) > 1.5 * tau { println("  G9 FAIL t90"); ok = false }
+    let sd9 = t_abs(pr.dlnc_dlncl) * sqrt(pa.sd_eta * pa.sd_eta + s_ix * s_ix)
+    show("  SD(ln trough) with thiazide: ", sd9)
+    show("  P(0,6-1,0) on the old dose with thiazide: ",
+         lim_prob_in_band(c_post, sd9, lim_target_lo_meq(), lim_target_hi_meq()))
+    let d9 = best_dose_from(da, c_post, sd9)
+    if !(d9 < da) { println("  G9 FAIL dose"); ok = false }
+
+    // G10 ------------------------------------------------------------------
+    println("G10 NSAID and ACE inhibitor")
+    if lim_interaction_known(lim_ix_nsaid()) || lim_interaction_known(lim_ix_acei()) {
+        println("  G10 FAIL: an unsourced interaction produced a number")
+        ok = false
+    } else {
+        println("  no sourced magnitude: model refuses the prediction;")
+        println("  measure a level every 4-5 days until the effect is known (Ragheb 1990)")
+    }
+
+    if ok {
+        println("LITHIUM_MIPD_PASS")
+        return 0
+    }
+    println("LITHIUM_MIPD_FAIL")
+    return 1
+}

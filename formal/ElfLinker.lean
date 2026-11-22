@@ -312,7 +312,7 @@ theorem layout_monotone (start : Nat) (secs : List Section)
     have h3 : ((layoutSections start secs).get ⟨i + k + 1, hmid⟩).offset +
         ((layoutSections start secs).get ⟨i + k + 1, hmid⟩).sec.size
         ≤ ((layoutSections start secs).get ⟨i + k + 2, hj⟩).offset :=
-          layout_end_le_next_start start secs (i + k + 1) (by simpa using hj)
+          layout_end_le_next_start start secs (i + k + 1) (by omega)
     exact Nat.le_trans (Nat.le_trans h1 h2) h3
 
 /-- Non-overlapping follows from monotone layout. -/

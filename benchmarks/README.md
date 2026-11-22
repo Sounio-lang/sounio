@@ -6,7 +6,7 @@ Production-quality benchmarks demonstrating epistemic types and causal programmi
 
 | Benchmark | Status | Entry Point | Key Result |
 |-----------|--------|-------------|------------|
-| GPU Epistemic GEMM (L4) | **Verified** | `scripts/archive/gpu_test_runner.sh` | Median 5.3 TFLOPS at 4096^3 (17.3% peak) |
+| GPU Epistemic GEMM (L4) | **Verified** | [`results/l4_gemm_summary.md`](results/l4_gemm_summary.md) | Median 5.3 TFLOPS at 4096^3 (17.3% peak) |
 | External Baselines | **Frozen** | `independence/adapters/` | Geomean 1.2077x vs CUTLASS/Triton/Inductor |
 | Cross-Language Comparison | Runnable | `comparison/run_all.sh` | ODE/LA/Uncertainty vs Python/Julia |
 | Cl(4,4) vs Octonion | Runnable | `cl44_vs_octonion.sio` | Algebraic product microbenchmark |

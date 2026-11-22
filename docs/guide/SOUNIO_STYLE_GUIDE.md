@@ -16,7 +16,6 @@ Sounio looks like Rust but has DIFFERENT syntax and semantics. This guide covers
 ## 1. Basic Syntax
 
 ```sio
-// Variables (NO semicolons)
 let x = 42
 var y: i32 = 10
 
@@ -32,12 +31,10 @@ var buffer: [u8; 256] = [0; 256]
 
 ### What NOT to Write (Rust-isms)
 ```
-let x = 42;              // ❌ semicolons
 let mut x = 5;            // ❌ use 'var'
 fn foo(x: &mut i32) {}    // ❌ use '&!'
 assert!(x == 5);          // ❌ use 'assert()'
 println!("hi");           // ❌ use 'println()'
-let neg = -42;            // ❌ use '0 - 42'
 ```
 
 ## 2. Effects System
@@ -283,7 +280,6 @@ Annotations: `//@ run-pass`, `//@ compile-fail`, `//@ error-pattern: <text>`, `/
 
 ## 11. Checklist
 
-1. No semicolons
 2. `&!` not `&mut`, `var` not `let mut`
 3. Effects: `with IO, Mut, Div, Panic` as needed
 4. No Rust macros: `assert()` not `assert!()`, `println()` not `println!()`

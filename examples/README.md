@@ -31,7 +31,6 @@ This directory contains comprehensive examples demonstrating Sounio's features.
 ### Language Basics
 - `arithmetic.sio` - Basic operations
 - `collections/` - Data structures
-- `algo/` - Algorithms
 
 ### Type System
 - Epistemic types - `epistemic_bmi.sio`
@@ -48,7 +47,6 @@ This directory contains comprehensive examples demonstrating Sounio's features.
 - `signal/` - Signal processing
 - `stats/` - Statistics
 - `bayes/` - Bayesian inference
-- `monte_carlo/` - Monte Carlo methods
 - `optimize/` - Optimization algorithms
 
 ### Domain-Specific
@@ -72,7 +70,6 @@ This directory contains comprehensive examples demonstrating Sounio's features.
 - `network/` - Network programming
 - `csv/` - CSV processing
 - `serialization/` - Data serialization
-- `data_pipeline/` - Data processing
 
 ### Advanced Examples
 - `advanced_glm_optimization.sio` - ML-guided optimization
@@ -98,11 +95,11 @@ $SOUC check examples/arithmetic.sio
 $SOUC run examples/hello.sio
 
 # Compile to native ELF
-$SOUC compile examples/autodiff/gradient.sio -o gradient.elf
+$SOUC compile examples/autodiff/grad_demo.sio -o gradient.elf
 
 # With GPU support (requires souc-linux-x86_64-gpu binary)
 SOUC_GPU=./artifacts/omega/souc-bin/souc-linux-x86_64-gpu
-$SOUC_GPU run examples/gpu/matrix_mul.sio
+$SOUC_GPU run examples/algorithms/matrix_mul.sio
 ```
 
 > **For curated scientific examples by research domain**, see [SCIENTIFIC_INDEX.md](SCIENTIFIC_INDEX.md).
