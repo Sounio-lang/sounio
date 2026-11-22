@@ -35,6 +35,7 @@ var IMPORT_RESOLUTION_FAILED: i64 = 0
 var LMR_USE_MOD: [i64; 16384] = [0; 16384]
 var LMR_USE_TGT: [i64; 16384] = [0; 16384]
 var LMR_USE_LINE: [i64; 16384] = [0; 16384]
+var LMR_USE_TOK_ALL: [i64; 16384] = [0; 16384]
 var LMR_USE_COUNT: i64 = 0
 var LMR_USE_OVERFLOW: i64 = 0
 // SRC offset where the extern stubs and native prelude start (set by
@@ -571,6 +572,10 @@ var EPIST_KNOW_SUBTYPE_VIOLATIONS: i64 = 0  // where src conf < dst conf
 var EPIST_EFFECT_VIOLATIONS: i64 = 0
 // Gen 17 D2: Parameterized EpistemicComplete — per-function minimum confidence
 var FN_EPISTEMIC_MIN: [i64; 65536] = [0; 65536]  // 0 = unset (use GATE_THRESHOLD)
+var FN_WIDE_INT_REACH: [i64; 65536] = [0; 65536]
+var FN_WIDE_INT_Q: [i64; 65536] = [0; 65536]
+var TC_WIDE_INT_ACTIVE_FN: i64 = -1
+var TC_WIDE_INT_SIG_PASS: i64 = 0
 // Gen 15 (Option B): epistemic certificate (.econf) support
 // Gen 17 D6: --emit-proof-obligations — Lean 4 proof goals for PLATINUM bindings
 var CLI_EMIT_PROOFS: i64 = 0
@@ -3638,7 +3643,35 @@ fn bind_struct_local_zeroinit_a64(ns: i64, ne: i64, ty_hash: i64) with Mut, Pani
 
 fn copy_struct_into_local_slot_a64(slot: i64, ty_hash: i64) with Mut, Panic, Div {
     let si = st_find(ty_hash)
-    if si < 0 && knowledge_hash_is(ty_hash) == false { emit_store_var_a64(slot); return }
+    if si < 0 && knowledge_hash_is(ty_hash) == false {
+        // A synthetic tuple (no registered struct) arrives as a pointer to the
+        // ONE global return buffer (stabilize_return_agg_a64). Storing that
+        // pointer made the variable an alias of every later aggregate return:
+        // `lp = f(a); rp = f(b)` left lp reading rp's value. Copy the words into
+        // slots of this assignment instead, as materialize_aggregate_expr_a64
+        // does for a struct. (x86 returns into the caller's SRET slot, so its
+        // pointer is stable there.)
+        let tup_n = struct_like_nslots(ty_hash)
+        if tup_n > 0 && tup_cache_lookup(ty_hash) >= 0 {
+            em32(0xAA0003EA)  // mov x10, x0 (src ptr)
+            if tup_n * 8 >= local_bss_spill_bytes() {
+                let tup_tmp = GL_BSS_BASE + a64_stmt_temp_alloc(tup_n * 8)
+                emit_image_addr_a64(tup_tmp)
+                em32(0xAA0003EB)  // mov x11, x0 (dst ptr)
+                emit_copy_words_x10_x11_a64(tup_n)
+                emit_image_addr_a64(tup_tmp)
+            } else {
+                let tup_base = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + tup_n
+                emit_lea_var_a64(tup_base + tup_n - 1)
+                em32(0xAA0003EB)  // mov x11, x0 (dst ptr)
+                emit_copy_words_x10_x11_a64(tup_n)
+                emit_lea_var_a64(tup_base + tup_n - 1)
+            }
+        }
+        emit_store_var_a64(slot)
+        return
+    }
     let nslots = struct_like_nslots(ty_hash)
     em32(0xAA0003EA)  // mov x10, x0 (src ptr)
     emit_load_var_a64(slot)
@@ -4140,6 +4173,44 @@ fn tc_wide_float_refused(tok: i64) -> i64 with IO, Mut, Panic {
     // `f256`) as f64. Refuse the spelling fail-closed instead of emitting a
     // binary with f64 arithmetic under a binary256 type name.
     tc_error_hard(tok, "f256 is not implemented on lean_single; refuse rather than lower as f64")
+}
+
+fn name_is_wide_int_spelling(ns: i64, ne: i64) -> bool with Panic, Mut {
+    if src_match(ns, ne - ns, "i128") { return true }
+    if src_match(ns, ne - ns, "u128") { return true }
+    if src_match(ns, ne - ns, "i256") { return true }
+    if src_match(ns, ne - ns, "u256") { return true }
+    if src_match(ns, ne - ns, "i512") { return true }
+    if src_match(ns, ne - ns, "u512") { return true }
+    return false
+}
+
+fn tok_is_in_main_file(tok: i64) -> bool with Panic, Mut {
+    if tok < 0 || tok >= TC { return false }
+    let pos = TS[tok as usize]
+    if pos < 0 || pos >= SRC_LEN { return false }
+    if LMR_PRELUDE_SRC_START >= 0 && pos >= LMR_PRELUDE_SRC_START { return false }
+    if SRC[0 as usize] as i64 == 1 { return false }
+    return src_file_marker_start(pos) == 0
+}
+
+fn tc_wide_int_refused(tok: i64) -> i64 with IO, Mut, Panic {
+    // KL-9 wide-int counterpart: lean_single used to greenwash unknown
+    // lowercase names (including `i128`/`u128`/`i256`/`u256`/`i512`/`u512`)
+    // as unit-typed f64, silently rounding wide integer arithmetic through
+    // binary64 when paired with `as i256` casts. Refuse fail-closed for any
+    // spelling in <main> or in an imported function reachable from <main>,
+    // without poisoning unused stdlib sibling helpers (e.g. div_witness).
+    let in_main = tok_is_in_main_file(tok)
+    var active_reach: bool = false
+    if TC_WIDE_INT_SIG_PASS != 0 { active_reach = true }
+    if TC_WIDE_INT_ACTIVE_FN >= 0 && TC_WIDE_INT_ACTIVE_FN < FN_COUNT {
+        if FN_WIDE_INT_REACH[TC_WIDE_INT_ACTIVE_FN as usize] != 0 { active_reach = true }
+    }
+    if !in_main && !active_reach { return 0 }
+    tc_error_hard(tok, "wide integer types (i128/u128/i256/u256/i512/u512) are not implemented on lean_single; refuse rather than lower as f64")
+    TYPECHECK_FAILED = 1
+    return 0
 }
 
 fn name_is_lower(ns: i64, ne: i64) -> bool with Panic, Mut {
@@ -8086,6 +8157,13 @@ fn scan_type(p0: i64) with IO, Mut, Panic, Div {
             SCAN_TY_NEXT = p + 1
             return
         }
+        if name_is_wide_int_spelling(ns, ne) && st_find(gl_name_hash(ns, ne)) < 0 && en_find(gl_name_hash(ns, ne)) < 0 {
+            tc_wide_int_refused(p)
+            SCAN_TY = 0
+            SCAN_TY_HASH = 0
+            SCAN_TY_NEXT = p + 1
+            return
+        }
         if src_match(ns, ne - ns, "chan") {
             SCAN_TY = 0
             SCAN_TY_HASH = 0
@@ -8917,7 +8995,7 @@ fn lex_all() with IO, Mut, Panic, Div {
                             continue
                         }
                     }
-                    if esc != 110 && esc != 116 && esc != 48 && esc != 92 && esc != 34 {
+                    if esc != 110 && esc != 114 && esc != 116 && esc != 48 && esc != 92 && esc != 34 && esc != 39 {
                         if LEX_ERROR_LINE == 0 {
                             LEX_ERROR_LINE = cur_line
                             LEX_ERROR_KIND = 2
@@ -12995,6 +13073,7 @@ fn emit_print_src(tok: i64, ss: i64, se: i64, braces: i64) with IO, Mut, Panic, 
                 }
             } else {
                 if c2 == 110 { byte = 10 }
+                else if c2 == 114 { byte = 13 }
                 else if c2 == 116 { byte = 9 }
                 else if c2 == 48 { byte = 0 }
                 else { byte = c2 }
@@ -18834,6 +18913,7 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     }
                 } else {
                     if c2 == 110 { byte = 10 }
+                    else if c2 == 114 { byte = 13 }
                     else if c2 == 116 { byte = 9 }
                     else if c2 == 48 { byte = 0 }
                     else { byte = c2 }
@@ -24266,6 +24346,8 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
             var cast_hash = SCAN_TY_HASH
             if cast_ty == 0 && name_is_wide_float_spelling(tns, tne) {
                 tc_wide_float_refused(tp)
+            } else if cast_ty == 0 && name_is_wide_int_spelling(tns, tne) {
+                tc_wide_int_refused(tp)
             } else if cast_ty == 0 && name_is_lower(tns, tne) {
                 cast_ty = 2
                 cast_hash = gl_name_hash(tns, tne)
@@ -32198,6 +32280,8 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 }
                 if decl_ty == 0 && name_is_wide_float_spelling(ann_ns, ann_ne) {
                     tc_wide_float_refused(EP)
+                } else if decl_ty == 0 && name_is_wide_int_spelling(ann_ns, ann_ne) {
+                    tc_wide_int_refused(EP)
                 } else if decl_ty == 0 && name_is_lower(ann_ns, ann_ne) {
                     decl_ty = 2
                     decl_ty_hash = gl_name_hash(ann_ns, ann_ne)
@@ -37771,11 +37855,85 @@ fn call_sh_restore(b: i64, a: i64) with Mut {
     }
 }
 
+fn mark_wide_int_reachable_fns() with IO, Mut, Panic, Div {
+    fn_lookup_index_sync()
+    var i: i64 = 0
+    var qh: i64 = 0
+    var qt: i64 = 0
+    while i < FN_COUNT {
+        FN_WIDE_INT_REACH[i as usize] = 0
+        let ntk = FN_NAME_TOK[i as usize]
+        if tok_is_in_main_file(ntk) {
+            FN_WIDE_INT_REACH[i as usize] = 1
+            FN_WIDE_INT_Q[qt as usize] = i
+            qt = qt + 1
+        }
+        i = i + 1
+    }
+    while qh < qt {
+        let fi = FN_WIDE_INT_Q[qh as usize]
+        qh = qh + 1
+        let bo = FN_BODY_OPEN[fi as usize]
+        let bc = FN_BODY_CLOSE[fi as usize]
+        if bo > 0 && bc > bo && bc <= TC {
+            var t: i64 = bo
+            while t < bc {
+                if TK[t as usize] == 3 {
+                    let ns = TS[t as usize]
+                    let ne = TE[t as usize]
+                    let h = gl_name_hash(ns, ne)
+                    var entry = FN_LOOKUP_HEAD[(h & 65535) as usize]
+                    while entry != 0 {
+                        let ci = entry - 1
+                        if FN_LOOKUP_HASH[ci as usize] == h && name_eq(FN_NS[ci as usize], FN_NE[ci as usize], ns, ne) {
+                            if FN_WIDE_INT_REACH[ci as usize] == 0 {
+                                FN_WIDE_INT_REACH[ci as usize] = 1
+                                if qt < 65536 {
+                                    FN_WIDE_INT_Q[qt as usize] = ci
+                                    qt = qt + 1
+                                }
+                            }
+                        }
+                        entry = FN_LOOKUP_NEXT[ci as usize]
+                    }
+                }
+                t = t + 1
+            }
+        }
+    }
+    TC_WIDE_INT_SIG_PASS = 1
+    i = 0
+    while i < FN_COUNT {
+        let ntk = FN_NAME_TOK[i as usize]
+        if FN_WIDE_INT_REACH[i as usize] != 0 && !tok_is_in_main_file(ntk) && ntk > 0 && ntk < TC {
+            var q: i64 = ntk + 1
+            if TK[q as usize] == 6 { q = q + 1 }
+            while q < TC && TK[q as usize] != 7 && TK[q as usize] != 0 {
+                if TK[q as usize] == 43 {
+                    q = q + 1
+                    scan_type(q)
+                    q = SCAN_TY_NEXT
+                } else {
+                    q = q + 1
+                }
+            }
+            let rtk = FN_RET_TY_TOK[i as usize]
+            if rtk >= 0 && rtk < TC {
+                scan_type(rtk)
+            }
+        }
+        i = i + 1
+    }
+    TC_WIDE_INT_SIG_PASS = 0
+}
+
 fn compile_all() -> i64 with IO, Mut, Panic, Div {
     CL = 0
     POOL_ALLOC_ROUTINE_CL = 0 - 1
     FN_COUNT = 0
     fn_lookup_index_reset()
+    TC_WIDE_INT_ACTIVE_FN = 0 - 1
+    TC_WIDE_INT_SIG_PASS = 0
     PATCH_COUNT = 0
     FNSIG_COUNT = 1
     GL_COUNT = 0
@@ -39382,12 +39540,14 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     epistemic_infer_pass()
     // Gen 16 Track B: abort if any EpistemicComplete violations detected
     if EPIST_EFFECT_VIOLATIONS > 0 { return 1 }
+    mark_wide_int_reachable_fns()
     if TARGET_ARCH == 1 { return 0 }
 
     // Pass 2: compile each function
     p = 0
     var fn_idx: i64 = 0
     while fn_idx < FN_COUNT {
+        TC_WIDE_INT_ACTIVE_FN = fn_idx
         p = FN_NAME_TOK[fn_idx as usize]
         let is_kernel_fn = FN_IS_KERNEL[fn_idx as usize]
         let body_open = FN_BODY_OPEN[fn_idx as usize]
@@ -39969,6 +40129,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
 
         fn_idx = fn_idx + 1
     }
+    TC_WIDE_INT_ACTIVE_FN = 0 - 1
 
     if fn_idx != FN_COUNT {
         print("error: function pass mismatch compiled=")
@@ -40827,6 +40988,7 @@ fn emit_print_a64_src(tok: i64, ss: i64, se: i64, braces: i64) with IO, Mut, Pan
                 }
             } else {
                 if c2 == 110 { byte = 10 }
+                else if c2 == 114 { byte = 13 }
                 else if c2 == 116 { byte = 9 }
                 else if c2 == 48 { byte = 0 }
                 else { byte = c2 }
@@ -43599,6 +43761,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     }
                 } else {
                     if c2 == 110 { byte = 10 }
+                    else if c2 == 114 { byte = 13 }
                     else if c2 == 116 { byte = 9 }
                     else if c2 == 48 { byte = 0 }
                     else { byte = c2 }
@@ -46234,6 +46397,8 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
             var cast_hash = SCAN_TY_HASH
             if cast_ty == 0 && name_is_wide_float_spelling(tns, tne) {
                 tc_wide_float_refused(tp)
+            } else if cast_ty == 0 && name_is_wide_int_spelling(tns, tne) {
+                tc_wide_int_refused(tp)
             } else if cast_ty == 0 && name_is_lower(tns, tne) {
                 cast_ty = 2
                 cast_hash = gl_name_hash(tns, tne)
@@ -48434,6 +48599,8 @@ fn compile_stmt_a64_body() with IO, Mut, Panic, Div {
                 }
                 if decl_ty == 0 && name_is_wide_float_spelling(ann_ns, ann_ne) {
                     tc_wide_float_refused(EP)
+                } else if decl_ty == 0 && name_is_wide_int_spelling(ann_ns, ann_ne) {
+                    tc_wide_int_refused(EP)
                 } else if decl_ty == 0 && name_is_lower(ann_ns, ann_ne) {
                     decl_ty = 2
                     decl_ty_hash = gl_name_hash(ann_ns, ann_ne)
@@ -50632,6 +50799,7 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
     var p: i64 = 0
     var fn_idx: i64 = 0
     while fn_idx < FN_COUNT {
+        TC_WIDE_INT_ACTIVE_FN = fn_idx
         p = FN_NAME_TOK[fn_idx as usize]
         let body_open = FN_BODY_OPEN[fn_idx as usize]
         let body_close = FN_BODY_CLOSE[fn_idx as usize]
@@ -51020,6 +51188,7 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
         }
         fn_idx = fn_idx + 1
     }
+    TC_WIDE_INT_ACTIVE_FN = 0 - 1
 
     // Every diagnostic the arm64 pass raised above set TYPECHECK_FAILED through
     // tc_mark_failed, and nothing read it: this function emitted the binary and
@@ -51549,12 +51718,17 @@ fn lmr_print_mod(m: i64) with IO, Mut, Panic {
     }
 }
 
-// Is token t the start of a top-level `use` line of its module? (`use` lexes
-// as an ordinary identifier.)
+// Is token t the `use` keyword of a top-level `use` or `pub use` line of its
+// module? (`use` lexes as an ordinary identifier.)
 fn lmr_is_use_tok(t: i64) -> bool with Panic, Mut {
     if TK[t as usize] != 3 { return false }
     if !src_match(TS[t as usize], TE[t as usize] - TS[t as usize], "use") { return false }
-    if TS[t as usize] > 0 && SRC[(TS[t as usize] - 1) as usize] as i64 != 10 && SRC[(TS[t as usize] - 1) as usize] as i64 != 2 { return false }
+    var line_start_tok: i64 = t
+    if t > 0 && TK[(t - 1) as usize] == 49 && TL[(t - 1) as usize] == TL[t as usize] {
+        line_start_tok = t - 1
+    }
+    let s = TS[line_start_tok as usize]
+    if s > 0 && SRC[(s - 1) as usize] as i64 != 10 && SRC[(s - 1) as usize] as i64 != 2 { return false }
     return true
 }
 
@@ -51605,6 +51779,62 @@ fn lmr_use_is_glob(t: i64, e: i64) -> bool with Panic, Mut {
     return false
 }
 
+fn lmr_use_has_brace(t: i64, e: i64) -> bool with Panic, Mut {
+    var q: i64 = t + 1
+    while q < e {
+        if TK[q as usize] == 8 { return true }
+        q = q + 1
+    }
+    return false
+}
+
+fn lmr_mod_is_braced_only(d: i64) -> bool with Panic, Mut {
+    if d <= 0 { return false }
+    var saw_pub_use: i64 = 0
+    var ri: i64 = 0
+    while ri < LMR_USE_COUNT {
+        if LMR_USE_TGT[ri as usize] == d {
+            let ut = LMR_USE_TOK_ALL[ri as usize]
+            if ut <= 0 { return false }
+            if TK[(ut - 1) as usize] != 49 || TL[(ut - 1) as usize] != TL[ut as usize] { return false }
+            let ue = lmr_use_end(ut)
+            if !lmr_use_has_brace(ut, ue) { return false }
+            saw_pub_use = 1
+        }
+        ri = ri + 1
+    }
+    return saw_pub_use == 1
+}
+
+// Returns the defining module (>= 0) if module m exports a top-level free fn
+// named like token n — either directly (`pub fn`) or via `pub use` re-export —
+// or -1 if not exported, or -2 if re-exported ambiguously from two definers.
+fn lmr_mod_export_owner(m: i64, n: i64, depth: i64) -> i64 with Panic, Mut {
+    if lmr_mod_exports(m, n) { return m }
+    if depth >= 8 { return -1 }
+    var owner: i64 = -1
+    var ri: i64 = 0
+    while ri < LMR_USE_COUNT {
+        if LMR_USE_MOD[ri as usize] == m {
+            let ut = LMR_USE_TOK_ALL[ri as usize]
+            let tgt = LMR_USE_TGT[ri as usize]
+            if ut > 0 && TK[(ut - 1) as usize] == 49 && TL[(ut - 1) as usize] == TL[ut as usize] && tgt >= 0 && tgt != m {
+                let ue = lmr_use_end(ut)
+                if lmr_use_names(ut, ue, n) || lmr_use_is_glob(ut, ue) {
+                    let sub = lmr_mod_export_owner(tgt, n, depth + 1)
+                    if sub == -2 { return -2 }
+                    if sub >= 0 {
+                        if owner >= 0 && owner != sub { return -2 }
+                        owner = sub
+                    }
+                }
+            }
+        }
+        ri = ri + 1
+    }
+    return owner
+}
+
 // Which definer does module x mean by collision name c? -1: no import (keep
 // the old binding), -2: refused (diagnostic printed).
 fn lmr_resolve_in_module(x: i64, c: i64) -> i64 with IO, Mut, Panic {
@@ -51619,10 +51849,25 @@ fn lmr_resolve_in_module(x: i64, c: i64) -> i64 with IO, Mut, Panic {
     while k < LMR_MOD_USE_N {
         let tgt = LMR_MOD_USE_TGT[k as usize]
         let ut = LMR_MOD_USE_TOK[k as usize]
-        if tgt >= 0 && ut >= 0 && lmr_mod_exports(tgt, n) {
+        var exp_mod: i64 = -1
+        if tgt >= 0 && ut >= 0 { exp_mod = lmr_mod_export_owner(tgt, n, 0) }
+        if exp_mod == -2 {
+            let ue_amb = lmr_use_end(ut)
+            if lmr_use_names(ut, ue_amb, n) || lmr_use_is_glob(ut, ue_amb) {
+                print("error[module_name_resolution]: `")
+                lmr_print_tok(n)
+                print("` in module ")
+                lmr_print_mod(x)
+                print("\n  is re-exported ambiguously via `pub use` in module ")
+                lmr_print_mod(tgt)
+                print(".\n")
+                return -2
+            }
+        }
+        if exp_mod >= 0 {
             let ue = lmr_use_end(ut)
             if lmr_use_names(ut, ue, n) {
-                if explicit >= 0 && explicit != tgt {
+                if explicit >= 0 && explicit != exp_mod {
                     print("error[module_name_resolution]: `")
                     lmr_print_tok(n)
                     print("` in module ")
@@ -51630,24 +51875,34 @@ fn lmr_resolve_in_module(x: i64, c: i64) -> i64 with IO, Mut, Panic {
                     print("\n  is imported by name from two modules that each define it:\n  ")
                     lmr_print_mod(explicit)
                     print(" and ")
-                    lmr_print_mod(tgt)
+                    lmr_print_mod(exp_mod)
                     print(".\n  Import it from one of them only.\n")
                     return -2
                 }
-                explicit = tgt
+                explicit = exp_mod
             } else if lmr_use_is_glob(ut, ue) {
-                if tgt == d1 { glob_has_d1 = 1 }
+                if exp_mod == d1 { glob_has_d1 = 1 }
                 if glob1 < 0 {
-                    glob1 = tgt
-                } else if glob1 != tgt && glob2 < 0 {
-                    glob2 = tgt
+                    glob1 = exp_mod
+                } else if glob1 != exp_mod && glob2 < 0 {
+                    glob2 = exp_mod
                 }
             }
         }
         k = k + 1
     }
     if explicit >= 0 { return explicit }
-    if glob1 < 0 { return -1 }
+    if glob1 < 0 {
+        if d1 < 0 {
+            let def_mod = LMR_DEF_MOD[LMR_C_DEF[c as usize] as usize]
+            var kd: i64 = 0
+            while kd < LMR_MOD_USE_N {
+                if LMR_MOD_USE_TGT[kd as usize] == def_mod { return def_mod }
+                kd = kd + 1
+            }
+        }
+        return -1
+    }
     if glob2 < 0 { return glob1 }
     if glob_has_d1 == 1 {
         print("warning[module_name_resolution]: `")
@@ -51723,10 +51978,13 @@ fn lmr_arrow_follows_on_line(t: i64) -> bool with Panic, Mut {
     return false
 }
 
-// Is token t on a top-level `use` line (an import-list entry)?
+// Is token t on a top-level `use` or `pub use` line (an import-list entry)?
 fn lmr_is_use_line_tok(t: i64) -> bool with Panic, Mut {
     var q: i64 = t
     while q > 0 && TL[(q - 1) as usize] == TL[t as usize] && TK[(q - 1) as usize] != 77 && TK[(q - 1) as usize] != 27 { q = q - 1 }
+    if TK[q as usize] == 49 && q + 1 <= t && TL[(q + 1) as usize] == TL[t as usize] {
+        return lmr_is_use_tok(q + 1)
+    }
     return lmr_is_use_tok(q)
 }
 
@@ -51872,7 +52130,41 @@ fn lmr_resolve() with IO, Mut, Panic, Div {
         }
         t = t + 1
     }
-    // 3. collision names: defined in two or more modules
+    if LMR_USE_OVERFLOW != 0 {
+        print("error[module_name_resolution]: more than 16384 `use` items; cannot resolve same-named functions\n")
+        LMR_FAILED = 1
+        return
+    }
+    var ri0: i64 = 0
+    while ri0 < LMR_USE_COUNT {
+        LMR_USE_TOK_ALL[ri0 as usize] = -1
+        ri0 = ri0 + 1
+    }
+    var ms0: i64 = 0
+    var mx0: i64 = 0
+    while mx0 < LMR_MOD_COUNT {
+        var me0: i64 = ms0
+        while me0 < TC && TK[me0 as usize] != 77 && TK[me0 as usize] != 0 && LMR_TOK_MOD[me0 as usize] == mx0 { me0 = me0 + 1 }
+        var q0: i64 = ms0
+        while q0 < me0 {
+            if lmr_is_use_tok(q0) {
+                var rj: i64 = 0
+                while rj < LMR_USE_COUNT {
+                    if LMR_USE_MOD[rj as usize] == mx0 && LMR_USE_LINE[rj as usize] == TL[q0 as usize] && LMR_USE_TOK_ALL[rj as usize] < 0 {
+                        LMR_USE_TOK_ALL[rj as usize] = q0
+                        rj = LMR_USE_COUNT
+                    }
+                    rj = rj + 1
+                }
+            }
+            q0 = q0 + 1
+        }
+        ms0 = me0
+        if ms0 < TC && TK[ms0 as usize] == 77 { ms0 = ms0 + 1 }
+        mx0 = mx0 + 1
+    }
+    // 3. collision names (defined in two or more modules) and symbols in
+    // modules reached exclusively via braced `{...}` selective imports.
     LMR_C_COUNT = 0
     var i: i64 = 0
     while i < LMR_DEF_COUNT {
@@ -51900,16 +52192,15 @@ fn lmr_resolve() with IO, Mut, Panic, Div {
                 print("  here rather than bind a call to another module's function.\n")
                 LMR_FAILED = 1
                 return
+            } else if lmr_mod_is_braced_only(LMR_DEF_MOD[i as usize]) && LMR_C_COUNT < 4096 {
+                LMR_C_DEF[LMR_C_COUNT as usize] = i
+                LMR_C_D1[LMR_C_COUNT as usize] = -1
+                LMR_C_COUNT = LMR_C_COUNT + 1
             }
         }
         i = i + 1
     }
     if LMR_C_COUNT == 0 { return }
-    if LMR_USE_OVERFLOW != 0 {
-        print("error[module_name_resolution]: more than 16384 `use` items; cannot resolve same-named functions\n")
-        LMR_FAILED = 1
-        return
-    }
     // 4. per module: resolve each collision name, then rewrite its tokens.
     var mstart: i64 = 0
     var x: i64 = 0
@@ -51922,16 +52213,7 @@ fn lmr_resolve() with IO, Mut, Panic, Div {
         while ri < LMR_USE_COUNT {
             if LMR_USE_MOD[ri as usize] == x && LMR_MOD_USE_N < 1024 {
                 LMR_MOD_USE_TGT[LMR_MOD_USE_N as usize] = LMR_USE_TGT[ri as usize]
-                LMR_MOD_USE_TOK[LMR_MOD_USE_N as usize] = -1
-                // the token of the `use` on that line of this module
-                var q: i64 = mstart
-                while q < mend {
-                    if lmr_is_use_tok(q) && TL[q as usize] == LMR_USE_LINE[ri as usize] {
-                        LMR_MOD_USE_TOK[LMR_MOD_USE_N as usize] = q
-                        q = mend
-                    }
-                    q = q + 1
-                }
+                LMR_MOD_USE_TOK[LMR_MOD_USE_N as usize] = LMR_USE_TOK_ALL[ri as usize]
                 LMR_MOD_USE_N = LMR_MOD_USE_N + 1
             }
             ri = ri + 1
@@ -51974,8 +52256,17 @@ fn lmr_resolve() with IO, Mut, Panic, Div {
                                     }
                                     if last >= 0 && lmr_tok_name_eq(last, q - 2) {
                                         let tg = LMR_MOD_USE_TGT[k2 as usize]
-                                        if tg >= 0 && lmr_mod_exports(tg, n) {
-                                            if qt >= 0 && qt != tg {
+                                        var exp_tg: i64 = -1
+                                        if tg >= 0 { exp_tg = lmr_mod_export_owner(tg, n, 0) }
+                                        if exp_tg == -2 {
+                                            print("error[module_name_resolution]: a module-qualified call in module ")
+                                            lmr_print_mod(x)
+                                            print("\n  names a qualifier that re-exports `")
+                                            lmr_print_tok(n)
+                                            print("` ambiguously.\n")
+                                            LMR_FAILED = 1
+                                        } else if exp_tg >= 0 {
+                                            if qt >= 0 && qt != exp_tg {
                                                 print("error[module_name_resolution]: a module-qualified call in module ")
                                                 lmr_print_mod(x)
                                                 print("\n  names a qualifier that resolves to two modules defining `")
@@ -51983,7 +52274,7 @@ fn lmr_resolve() with IO, Mut, Panic, Div {
                                                 print("`.\n")
                                                 LMR_FAILED = 1
                                             }
-                                            qt = tg
+                                            qt = exp_tg
                                         }
                                     }
                                 }
@@ -52285,59 +52576,55 @@ fn append_native_prelude() with Mut, Panic, Div {
     append_src_lit("    out\n")
     append_src_lit("}\n\n")
 
+    // sin / cos to double precision (#3639). The kernels were Taylor through
+    // u^13 / u^12 on |u| <= pi/4 and the reduction subtracted a single-double
+    // 2 pi and pi, so |x| <= 10 lost about 4e-13 (measured against glibc sinl
+    // in tests/run-pass/builtin_trig_double_precision.sio). Now: Cody-Waite
+    // r = (x - n hi) - n lo with n = round(x / (pi/2)), hi = (float)(pi/2)
+    // (exact n*hi for |n| < 2^29), and kernels through u^17 / u^18 on
+    // |r| <= pi/4, truncation below 1e-19. Same method as the Madaros native
+    // builtin (codegen_x86_linux.sio, emit_builtin_trig).
     append_src_lit("fn __native_cos_kernel(u: f64) -> f64 with Mut, Div, Panic {\n")
-    append_src_lit("    let u2 = u * u\n")
-    append_src_lit("    let u4 = u2 * u2\n")
-    append_src_lit("    let u6 = u4 * u2\n")
-    append_src_lit("    let u8 = u6 * u2\n")
-    append_src_lit("    let u10 = u8 * u2\n")
-    append_src_lit("    let u12 = u10 * u2\n")
-    append_src_lit("    1.0 - u2/2.0 + u4/24.0 - u6/720.0 + u8/40320.0 - u10/3628800.0 + u12/479001600.0\n")
+    append_src_lit("    let z = u * u\n")
+    append_src_lit("    let c8 = 4.7794773323873853e-14 + z * (-1.5619206968586225e-16)\n")
+    append_src_lit("    let c6 = 2.0876756987868099e-09 + z * (-1.1470745597729725e-11 + z * c8)\n")
+    append_src_lit("    let c4 = 2.4801587301587302e-05 + z * (-2.7557319223985888e-07 + z * c6)\n")
+    append_src_lit("    1.0 + z * (-0.5 + z * (0.041666666666666664 + z * (-0.0013888888888888889 + z * c4)))\n")
     append_src_lit("}\n\n")
 
     append_src_lit("fn __native_sin_kernel(u: f64) -> f64 with Mut, Div, Panic {\n")
-    append_src_lit("    let u2 = u * u\n")
-    append_src_lit("    let u3 = u * u2\n")
-    append_src_lit("    let u5 = u3 * u2\n")
-    append_src_lit("    let u7 = u5 * u2\n")
-    append_src_lit("    let u9 = u7 * u2\n")
-    append_src_lit("    let u11 = u9 * u2\n")
-    append_src_lit("    let u13 = u11 * u2\n")
-    append_src_lit("    u - u3/6.0 + u5/120.0 - u7/5040.0 + u9/362880.0 - u11/39916800.0 + u13/6227020800.0\n")
+    append_src_lit("    let z = u * u\n")
+    append_src_lit("    let s7 = 1.6059043836821613e-10 + z * (-7.6471637318198164e-13 + z * 2.8114572543455206e-15)\n")
+    append_src_lit("    let s5 = 2.7557319223985893e-06 + z * (-2.505210838544172e-08 + z * s7)\n")
+    append_src_lit("    u + u * z * (-0.16666666666666666 + z * (0.0083333333333333332 + z * (-0.00019841269841269841 + z * s5)))\n")
     append_src_lit("}\n\n")
 
     append_src_lit("fn __native_sin_f64(x: f64) -> f64 with Mut, Div, Panic {\n")
-    append_src_lit("    let pi = 3.14159265358979323846\n")
-    append_src_lit("    let two_pi = 6.28318530717958647692\n")
-    append_src_lit("    let half_pi = 1.57079632679489661923\n")
-    append_src_lit("    let qtr_pi = 0.78539816339744830962\n")
-    append_src_lit("    var t = x\n")
-    append_src_lit("    var sign: f64 = 1.0\n")
-    append_src_lit("    while t > pi { t = t - two_pi }\n")
-    append_src_lit("    while t < 0.0 - pi { t = t + two_pi }\n")
-    append_src_lit("    if t < 0.0 { t = 0.0 - t; sign = 0.0 - 1.0 }\n")
-    append_src_lit("    if t > half_pi { t = pi - t }\n")
-    append_src_lit("    if t > qtr_pi {\n")
-    append_src_lit("        return sign * __native_cos_kernel(half_pi - t)\n")
-    append_src_lit("    }\n")
-    append_src_lit("    sign * __native_sin_kernel(t)\n")
+    append_src_lit("    let q = x * 0.63661977236758138\n")
+    append_src_lit("    var n: i64 = 0\n")
+    append_src_lit("    if q >= 0.0 { n = (q + 0.5) as i64 } else { n = 0 - ((0.5 - q) as i64) }\n")
+    append_src_lit("    let nf = n as f64\n")
+    append_src_lit("    let r = (x - nf * 1.5707963705062866) - nf * (-4.3711390001837346e-08)\n")
+    append_src_lit("    var k = n % 4\n")
+    append_src_lit("    if k < 0 { k = k + 4 }\n")
+    append_src_lit("    if k == 0 { return __native_sin_kernel(r) }\n")
+    append_src_lit("    if k == 1 { return __native_cos_kernel(r) }\n")
+    append_src_lit("    if k == 2 { return 0.0 - __native_sin_kernel(r) }\n")
+    append_src_lit("    0.0 - __native_cos_kernel(r)\n")
     append_src_lit("}\n\n")
 
     append_src_lit("fn __native_cos_f64(x: f64) -> f64 with Mut, Div, Panic {\n")
-    append_src_lit("    let pi = 3.14159265358979323846\n")
-    append_src_lit("    let two_pi = 6.28318530717958647692\n")
-    append_src_lit("    let half_pi = 1.57079632679489661923\n")
-    append_src_lit("    let qtr_pi = 0.78539816339744830962\n")
-    append_src_lit("    var t = x\n")
-    append_src_lit("    var negate: f64 = 1.0\n")
-    append_src_lit("    while t > pi { t = t - two_pi }\n")
-    append_src_lit("    while t < 0.0 - pi { t = t + two_pi }\n")
-    append_src_lit("    if t < 0.0 { t = 0.0 - t }\n")
-    append_src_lit("    if t > half_pi { t = pi - t; negate = 0.0 - 1.0 }\n")
-    append_src_lit("    if t > qtr_pi {\n")
-    append_src_lit("        return negate * __native_sin_kernel(half_pi - t)\n")
-    append_src_lit("    }\n")
-    append_src_lit("    negate * __native_cos_kernel(t)\n")
+    append_src_lit("    let q = x * 0.63661977236758138\n")
+    append_src_lit("    var n: i64 = 0\n")
+    append_src_lit("    if q >= 0.0 { n = (q + 0.5) as i64 } else { n = 0 - ((0.5 - q) as i64) }\n")
+    append_src_lit("    let nf = n as f64\n")
+    append_src_lit("    let r = (x - nf * 1.5707963705062866) - nf * (-4.3711390001837346e-08)\n")
+    append_src_lit("    var k = n % 4\n")
+    append_src_lit("    if k < 0 { k = k + 4 }\n")
+    append_src_lit("    if k == 0 { return __native_cos_kernel(r) }\n")
+    append_src_lit("    if k == 1 { return 0.0 - __native_sin_kernel(r) }\n")
+    append_src_lit("    if k == 2 { return 0.0 - __native_cos_kernel(r) }\n")
+    append_src_lit("    __native_sin_kernel(r)\n")
     append_src_lit("}\n\n")
 
     append_src_lit("fn __native_atan_f64(x: f64) -> f64 with Mut, Div, Panic {\n")
@@ -52658,9 +52945,15 @@ fn resolve_imports() with IO, Mut, Panic, Div {
                 continue
             }
         }
-        // Check for "use " at line start (117=u, 115=s, 101=e, 32=space)
+        // Check for "use " or "pub use " at line start
+        var use_prefix_len: i64 = 0
         if pos + 4 < SRC_LEN && sb(pos) == 117 && sb(pos+1) == 115 && sb(pos+2) == 101 && sb(pos+3) == 32 {
-            pos = pos + 4  // skip "use "
+            use_prefix_len = 4
+        } else if pos + 8 < SRC_LEN && sb(pos) == 112 && sb(pos+1) == 117 && sb(pos+2) == 98 && sb(pos+3) == 32 && sb(pos+4) == 117 && sb(pos+5) == 115 && sb(pos+6) == 101 && sb(pos+7) == 32 {
+            use_prefix_len = 8
+        }
+        if use_prefix_len > 0 {
+            pos = pos + use_prefix_len  // skip "use " or "pub use "
             // #2773: this use's record; its target is filled in below once known.
             var lmr_rec: i64 = -1
             if LMR_USE_COUNT < 16384 {

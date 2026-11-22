@@ -180,7 +180,10 @@ if [ "$_rc" -ne 0 ]; then
   exit 0
 fi
 chmod +x "$elf" 2>/dev/null
-out="$("$WORK/timeout_run.sh" "$elf")" || { echo "$name run"; exit 0; }
+# A test may state its own run bound (`//@ timeout: SECONDS`, as the stdlib and
+# run-pass harnesses honour); the default stays 30 s.
+tmo="$(sed -n 's|^//@[[:space:]]*timeout:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*$|\1|p' "$src" | head -1)"
+out="$("$WORK/timeout_run.sh" "$elf" "${tmo:-30}")" || { echo "$name run"; exit 0; }
 
 # If the test declares an expected marker, assert it. Exit status alone is not
 # evidence: a CPC 2026 receipt was found compiling, exiting 0 and printing ZERO
@@ -200,7 +203,7 @@ chmod +x "$WORK/run_one.sh"
 
 cat > "$WORK/timeout_run.sh" <<'TR'
 #!/usr/bin/env bash
-timeout 30 "$1" 2>/dev/null
+timeout "${2:-30}" "$1" 2>/dev/null
 TR
 chmod +x "$WORK/timeout_run.sh"
 export MADAROS WORK
@@ -325,7 +328,8 @@ if [[ "$NEW_COUNT" -gt 0 ]]; then
       "$MADAROS" compile "$_src" -o "$_elf" 2>&1 | tail -n 15 | cut -c1-300 | sed 's/^/    | /' >&2
       echo "    | compiler exit status: ${PIPESTATUS[0]}" >&2
     else
-      timeout 30 "$_elf" 2>&1 | tail -n 15 | cut -c1-300 | sed 's/^/    | /' >&2
+      _tmo="$(sed -n 's|^//@[[:space:]]*timeout:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*$|\1|p' "$_src" | head -1)"
+      timeout "${_tmo:-30}" "$_elf" 2>&1 | tail -n 15 | cut -c1-300 | sed 's/^/    | /' >&2
       echo "    | program exit status: ${PIPESTATUS[0]}" >&2
       echo "    | expected marker: $(sed -n 's|^//@ expect-stdout:[[:space:]]*||p' "$_src" | head -1)" >&2
     fi

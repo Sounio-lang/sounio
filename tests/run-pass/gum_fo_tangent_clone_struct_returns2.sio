@@ -1,0 +1,164 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: GUM_FO_TANGENT_CLONE_STRUCT_RETURNS2_OK
+//@ description: First- and second-order GUM through calls that return a struct, beyond gum_fo_tangent_clone_struct_returns.sio: a returned struct that holds a struct field (Site { pos: Vec3, e }, read as r.pos.x), a struct result that is not bound by a let (f(x).e, f(x).pos.x inside variance_of and inside arithmetic, and g(f(x)) with g taking the struct by value), a measurement inside the call that feeds two output fields (their covariance), and, in a function that calls hessian_of / second_order_mean, a hyper-dual struct clone with one Hessian block per output field. Bodies loop, so the #1706 re-lowering refuses them. Expected values: tests/oracles/gum_fo_tangent_clone_struct_returns2.cpp (1e-12 relative at first order, 1e-10 at second).
+
+struct Vec3 { x: f64, y: f64, z: f64 }
+struct Site { pos: Vec3, e: f64 }
+struct EF { energy: f64, force: f64 }
+struct UW { u: f64, w: f64 }
+
+fn make_site(a: f64, b: f64) -> Site with Mut, Div {
+    let b2 = b * b
+    var sum = 0.0
+    var i: i64 = 1
+    while i <= 3 {
+        sum = sum + 1.0 / ((i as f64) + b2)
+        i = i + 1
+    }
+    let s = a * sum
+    Site { pos: Vec3 { x: a * b, y: s, z: b - a }, e: s * s + a }
+}
+
+fn site_energy(s: Site) -> f64 with Mut, Div {
+    var acc = 0.0
+    var i: i64 = 1
+    while i <= 3 {
+        acc = acc + (s.e * s.pos.x + s.pos.z) / (i as f64)
+        i = i + 1
+    }
+    acc + s.pos.y * s.pos.y
+}
+
+fn lj_shell(eps: f64, r: f64) -> EF with Mut, Div {
+    var e = 0.0
+    var f = 0.0
+    var i: i64 = 1
+    while i <= 3 {
+        let q = 1.0 / ((i as f64) * r)
+        var q6 = 1.0
+        var j: i64 = 0
+        while j < 6 {
+            q6 = q6 * q
+            j = j + 1
+        }
+        e = e + 4.0 * eps * (q6 * q6 - q6)
+        f = f + 4.0 * eps * (12.0 * q6 * q6 - 6.0 * q6) / r
+        i = i + 1
+    }
+    EF { energy: e, force: f }
+}
+
+fn noisy_uw(eps: f64) -> UW with Mut, Div, Epistemic {
+    let m = measure(0.5, uncertainty: 0.05)
+    UW { u: eps * m.value, w: m.value }
+}
+
+fn close_rel(got: f64, want: f64, rel: f64) -> bool with Mut, Div {
+    var d = got - want
+    if d < 0.0 { d = 0.0 - d }
+    var w = want
+    if w < 0.0 { w = 0.0 - w }
+    d <= 1.0e-14 + rel * w
+}
+
+fn report(name: string, got: f64, want: f64, rel: f64) -> i64 with IO, Mut, Div {
+    print(name)
+    print(" ")
+    print_f64(got * 1000000.0)
+    print("e-6")
+    if close_rel(got, want, rel) {
+        print(" ok\n")
+        return 0
+    }
+    print(" FAIL\n")
+    1
+}
+
+fn check_nested() -> i64 with IO, Mut, Div, Epistemic {
+    var bad: i64 = 0
+    let ma = measure(0.8, uncertainty: 0.01)
+    let mb = measure(1.3, uncertainty: 0.02)
+    let a: f64 = ma.value
+    let b: f64 = mb.value
+    let r = make_site(a, b)
+    bad = bad + report("nested_x_var", variance_of(r.pos.x), 0.00042500000000000003, 1.0e-12)
+    bad = bad + report("nested_y_var", variance_of(r.pos.y), 0.00018766005658125653, 1.0e-12)
+    bad = bad + report("nested_z_var", variance_of(r.pos.z), 0.00050000000000000001, 1.0e-12)
+    bad = bad + report("nested_e_var", variance_of(r.e), 0.00068644729359488644, 1.0e-12)
+    bad = bad + report("nested_x_minus_y_var", variance_of(r.pos.x - r.pos.y), 0.0007323609119052342, 1.0e-12)
+    bad = bad + report("nested_e_minus_y2_var", variance_of(r.e - r.pos.y * r.pos.y), 0.0001, 1.0e-12)
+    // no let: the call is read directly
+    bad = bad + report("direct_e_var", variance_of(make_site(a, b).e), 0.00068644729359488644, 1.0e-12)
+    bad = bad + report("direct_x_var", variance_of(make_site(a, b).pos.x), 0.00042500000000000003, 1.0e-12)
+    let yz = make_site(a, b).pos.y + make_site(a, b).pos.z
+    bad = bad + report("direct_y_plus_z_var", variance_of(yz), 8.864997990924096e-05, 1.0e-12)
+    bad = bad + report("direct_e_minus_let_e_var", variance_of(make_site(a, b).e - r.e), 0.0, 1.0e-12)
+    // a struct-by-value parameter fed by a call
+    let en = site_energy(make_site(a, b))
+    bad = bad + report("composed_var", variance_of(en), 0.0052119957178069654, 1.0e-12)
+    bad = bad + report("composed_direct_var", variance_of(site_energy(make_site(a, b))), 0.0052119957178069654, 1.0e-12)
+    bad
+}
+
+fn check_shared() -> i64 with IO, Mut, Div, Epistemic {
+    var bad: i64 = 0
+    let me = measure(0.997, uncertainty: 0.02)
+    let eps: f64 = me.value
+    let p = noisy_uw(eps)
+    bad = bad + report("shared_u_var", variance_of(p.u), 0.0025850225000000004, 1.0e-12)
+    bad = bad + report("shared_w_var", variance_of(p.w), 0.0025000000000000005, 1.0e-12)
+    bad = bad + report("shared_u_minus_w_var", variance_of(p.u - p.w), 0.00010002250000000001, 1.0e-12)
+    bad = bad + report("shared_u_plus_w_var", variance_of(p.u + p.w), 0.010070022499999999, 1.0e-12)
+    bad
+}
+
+fn check_so_site() -> i64 with IO, Mut, Div, Epistemic {
+    var bad: i64 = 0
+    let ma = measure(0.8, uncertainty: 0.01)
+    let mb = measure(1.3, uncertainty: 0.02)
+    let a: f64 = ma.value
+    let b: f64 = mb.value
+    let r = make_site(a, b)
+    bad = bad + report("so_e_00", hessian_of(r.e, 0, 0), 1.465367700405102, 1.0e-10)
+    bad = bad + report("so_e_01", hessian_of(r.e, 0, 1), -1.8309880431113708, 1.0e-10)
+    bad = bad + report("so_e_11", hessian_of(r.e, 1, 1), 1.208000314153475, 1.0e-10)
+    bad = bad + report("so_y_11", hessian_of(r.pos.y, 1, 1), 0.46441631975282488, 1.0e-10)
+    bad = bad + report("so_x_01", hessian_of(r.pos.x, 0, 1), 1.0, 1.0e-10)
+    bad = bad + report("so_z_01", hessian_of(r.pos.z, 0, 1), 0.0, 1.0e-10)
+    bad = bad + report("so_e_mean", second_order_mean(r.e), 1.2692325325774836, 1.0e-10)
+    let en = site_energy(r)
+    bad = bad + report("so_composed_01", hessian_of(en, 0, 1), -1.5552333603635775, 1.0e-10)
+    bad = bad + report("so_composed_11", hessian_of(en, 1, 1), 1.3628949425554255, 1.0e-10)
+    bad = bad + report("so_direct_e_01", hessian_of(make_site(a, b).e, 0, 1), -1.8309880431113708, 1.0e-10)
+    bad = bad + report("so_site_e_var", variance_of(r.e), 0.00068644729359488644, 1.0e-12)
+    bad
+}
+
+fn check_so_lj() -> i64 with IO, Mut, Div, Epistemic {
+    var bad: i64 = 0
+    let ep = measure(0.997, uncertainty: 0.02)
+    let rk = measure(1.12, uncertainty: 0.01)
+    let eps: f64 = ep.value
+    let r: f64 = rk.value
+    let l = lj_shell(eps, r)
+    bad = bad + report("so_lj_energy_01", hessian_of(l.energy, 0, 1), 0.037836818682488282, 1.0e-10)
+    bad = bad + report("so_lj_energy_11", hessian_of(l.energy, 1, 1), 58.532398562926929, 1.0e-10)
+    bad = bad + report("so_lj_force_01", hessian_of(l.force, 0, 1), -58.708524135332922, 1.0e-10)
+    bad = bad + report("so_lj_force_11", hessian_of(l.force, 1, 1), 1100.2190969775568, 1.0e-10)
+    bad = bad + report("so_lj_force_var", variance_of(l.force), 0.34260474080287223, 1.0e-12)
+    bad
+}
+
+fn main() -> i32 with IO, Mut, Div, Epistemic {
+    var bad: i64 = 0
+    bad = bad + check_nested()
+    bad = bad + check_shared()
+    bad = bad + check_so_site()
+    bad = bad + check_so_lj()
+    if bad == 0 {
+        print("GUM_FO_TANGENT_CLONE_STRUCT_RETURNS2_OK\n")
+        return 0
+    }
+    1
+}

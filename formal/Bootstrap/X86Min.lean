@@ -54,7 +54,8 @@ deriving DecidableEq, Repr
 inductive Ins where
   /-- `mov r32, imm32` (B8+r): writes the register zero-extended. -/
   | movImm (dst imm : Nat)
-  /-- register-register `op r/m, r` at width 32 or 64 (31 xor, 09 or, 85 test, 89 mov). -/
+  /-- register-register `op r/m, r` at width 32 or 64
+      (01 add, 29 sub, 31 xor, 09 or, 85 test, 89 mov). -/
   | rr (op : Op) (w dst src : Nat)
   /-- `op r/m, imm` at width 8 (AL forms 04 3c 2c), 32 or 64 (81 /7, 83 /7). `imm` is
   already reduced to the operand width. -/
@@ -72,6 +73,10 @@ inductive Ins where
   | jcc (cc rel : Nat)
   /-- `jmp rel8` (EB) or `jmp rel32` (E9), sign-extended to 64 bits. -/
   | jmp (rel : Nat)
+  /-- indirect `jmp r64` (FF /4, mod 11): the dispatch jump of the Sporos
+  interpreter's 256-entry table (decision 38). The address is the register's
+  full 64-bit value; REX.W is ignored, as on the CPU. -/
+  | jmpReg (r : Nat)
   /-- `movzx r32, byte [rsp]` (0F B6 /r, SIB 24). -/
   | ldRsp8 (dst : Nat)
   /-- `mov byte [rsp], r8` (88 /r, SIB 24). -/
@@ -103,10 +108,11 @@ def decode (b : Nat → Option Nat) : Option (Ins × Nat) := do
     if w || r != 0 || x then none else
     let imm ← le b (p + 1) 4
     pure (.movImm (o - 0xb8 + bb) imm, p + 5)
-  else if o == 0x31 || o == 0x09 || o == 0x85 || o == 0x89 then
+  else if o == 0x01 || o == 0x29 || o == 0x31 || o == 0x09 || o == 0x85 || o == 0x89 then
     let m ← b (p + 1)
     if m / 64 != 3 || x then none else
-    let op := if o == 0x31 then Op.xor else if o == 0x09 then Op.or
+    let op := if o == 0x01 then Op.add else if o == 0x29 then Op.sub
+      else if o == 0x31 then Op.xor else if o == 0x09 then Op.or
       else if o == 0x85 then Op.test else Op.mov
     pure (.rr op wd (m % 8 + bb) (m / 8 % 8 + r), p + 2)
   else if o == 0x88 then
@@ -157,17 +163,21 @@ def decode (b : Nat → Option Nat) : Option (Ins × Nat) := do
     pure (.shlI 32 (m % 8 + bb) c, p + 3)
   else if o == 0x81 || o == 0x83 then
     let m ← b (p + 1)
-    if m / 64 != 3 || m / 8 % 8 != 7 || r != 0 || x then none else
+    let f := m / 8 % 8
+    if m / 64 != 3 || (f != 0 && f != 5 && f != 7) || r != 0 || x then none else
+    let op := if f == 0 then Op.add else if f == 5 then Op.sub else Op.cmp
     if o == 0x81 then
       let i ← le b (p + 2) 4
-      pure (.ri .cmp wd (m % 8 + bb) (sx32 i % pow2 wd), p + 6)
+      pure (.ri op wd (m % 8 + bb) (sx32 i % pow2 wd), p + 6)
     else
       let i ← b (p + 2)
-      pure (.ri .cmp wd (m % 8 + bb) (sx8 i % pow2 wd), p + 3)
+      pure (.ri op wd (m % 8 + bb) (sx8 i % pow2 wd), p + 3)
   else if o == 0xff then
     let m ← b (p + 1)
-    if m / 64 != 3 || m / 8 % 8 != 0 || r != 0 || x then none else
-    pure (.inc wd (m % 8 + bb), p + 2)
+    if m / 64 != 3 || r != 0 || x then none else
+    if m / 8 % 8 == 0 then pure (.inc wd (m % 8 + bb), p + 2)
+    else if m / 8 % 8 == 4 then pure (.jmpReg (m % 8 + bb), p + 2)
+    else none
   else none
 
 /-- Size of the stack window, in bytes; the window is centred on the entry rsp. -/
@@ -315,6 +325,13 @@ inductive Outcome where
   | outOfFuel
 deriving DecidableEq, Repr
 
+/-- The result of an instruction whose effect may fail: the next state, or stuck
+at `rip` with reason 1 (an undefined read or an unmodelled access). -/
+def okOf (rip : Nat) (o : Option St) : Sum St Outcome :=
+  match o with
+  | some t => .inl t
+  | none => .inr (.stuck rip 1)
+
 /-- One step: either the next state or the end of the run. -/
 def step (im : Img) (s : St) : Sum St Outcome :=
   match im.decodeAt s.rip with
@@ -323,9 +340,7 @@ def step (im : Img) (s : St) : Sum St Outcome :=
     let nx := (s.rip + len) % pow2 64
     let s1 := { s with rip := nx }
     let stuck := Sum.inr (Outcome.stuck s.rip 1)
-    let ok (o : Option St) : Sum St Outcome := match o with
-      | some t => .inl t
-      | none => stuck
+    let ok := okOf s.rip
     match ins with
     | .movImm d i => ok (s1.wr 32 d i)
     | .rr .mov w d src => ok (do let v ← s.rd w src; s1.wr w d v)
@@ -378,6 +393,9 @@ def step (im : Img) (s : St) : Sum St Outcome :=
         let v ← s.rd 8 src
         s1.wrByte sp v)
     | .jmp rel => .inl { s1 with rip := (nx + rel) % pow2 64 }
+    | .jmpReg r => ok (do
+        let v ← s.reg r
+        pure { s1 with rip := v % pow2 64 })
     | .jcc cc rel => match cond s.fl cc with
       | none => stuck
       | some true => .inl { s1 with rip := (nx + rel) % pow2 64 }

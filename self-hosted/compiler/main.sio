@@ -96,6 +96,11 @@ use gpu::kaxi_to_ptx::*
 use compiler::codegen::hardware::fpga_emit::{fpga_emit_file}
 use gpu::metal::*
 use gpu::cuda_tile::*
+use gpu::kaxi_backend::{kaxi_asm_to_string}
+use io::env::{read_env}
+use io::trace::{io_write_bytes_to_file}
+use ir::lower::{lower_program_to_ir_probe_callsite}
+use parser::parser::{parser_reset_last_errors}
 
 // ============================================================================
 // STRING UTILITIES
@@ -1830,8 +1835,8 @@ fn compiler_visibility_preflight(source_path: string) -> bool with IO, Mut, Pani
     ast_named_item_terminal_reset()
     var closure = ModuleClosure {
         paths: [""; 256],
-        edge_callers: [""; 512],
-        edge_dependencies: [""; 512],
+        edge_callers: [""; 1024],
+        edge_dependencies: [""; 1024],
         unresolved_callers: [""; 256],
         unresolved_imports: [""; 256],
         unresolved_paths: [""; 256],
@@ -2022,8 +2027,8 @@ fn run_science_boundary_closure_report(
     let source_path = compiler_mode_source_arg(args, flag_index, "--science-boundary-closure")
     var closure = ModuleClosure {
         paths: [""; 256],
-        edge_callers: [""; 512],
-        edge_dependencies: [""; 512],
+        edge_callers: [""; 1024],
+        edge_dependencies: [""; 1024],
         unresolved_callers: [""; 256],
         unresolved_imports: [""; 256],
         unresolved_paths: [""; 256],
@@ -2038,6 +2043,10 @@ fn run_science_boundary_closure_report(
     println("SOUNIO_BOUNDARY_CLOSURE_V1")
     if complete { println("status\tcomplete") } else { println("status\tincomplete") }
     print("capacity\t256\n")
+    // Edges have their own bound (ModuleClosure.edge_callers); the verdict used
+    // to assume it was twice the node capacity, so raising one silently moved
+    // the other. The compiler states it and the verdict reads it.
+    print("edge_capacity\t1024\n")
     print("saturated\t")
     if closure.saturated { println("true") } else { println("false") }
     print("parse_failed\t")
@@ -3184,12 +3193,6 @@ fn compiler_try_default_native_v2_single(opts: CompilerOptions) -> bool with IO,
         return false
     }
 
-    let early_frontend_preflight = preflight_multimodule_frontend(opts.input_file)
-    let early_preflight_parse_errors = parser_last_error_count()
-    if !early_frontend_preflight.ok || early_preflight_parse_errors > 0 {
-        return false
-    }
-
     let main_prog = load_module_file(opts.input_file)
     let main_imports = extract_imports_from_ast(main_prog)
     if main_imports.count > 0 {
@@ -3198,6 +3201,12 @@ fn compiler_try_default_native_v2_single(opts: CompilerOptions) -> bool with IO,
 
     let requested_target_spec = native_resolve_target(opts.target, "auto", false)
     if requested_target_spec.arch_id != ARCH_X86_64() || requested_target_spec.os_id != OS_LINUX() {
+        return false
+    }
+
+    let early_frontend_preflight = preflight_multimodule_frontend(opts.input_file)
+    let early_preflight_parse_errors = parser_last_error_count()
+    if !early_frontend_preflight.ok || early_preflight_parse_errors > 0 {
         return false
     }
 
@@ -5235,19 +5244,6 @@ fn compile(opts: CompilerOptions) -> CompileResult with IO, Mut, Panic, Div, All
         }
     }
 
-    let early_frontend_preflight = preflight_multimodule_frontend(opts.input_file)
-    let early_preflight_parse_errors = parser_last_error_count()
-    if !early_frontend_preflight.ok || early_preflight_parse_errors > 0 {
-        compiler_print_ir_preflight_failure(early_frontend_preflight.error_msg)
-        var early_type_errors = compile_errors_new()
-        early_type_errors = compile_errors_push(early_type_errors, "error: type checking preflight failed")
-        return CompileResult {
-            success: false,
-            errors: early_type_errors,
-            output: "",
-        }
-    }
-
     let main_prog = load_module_file(opts.input_file)
     let main_imports = extract_imports_from_ast(main_prog)
     let requested_target_spec = native_resolve_target(opts.target, "auto", false)
@@ -5284,6 +5280,28 @@ fn compile(opts: CompilerOptions) -> CompileResult with IO, Mut, Panic, Div, All
         return CompileResult {
             success: false,
             errors: thin_errors,
+            output: "",
+        }
+    }
+
+    compile_after_multimodule_dispatch(opts, main_prog, main_imports, requested_target_spec)
+}
+
+fn compile_after_multimodule_dispatch(
+    opts: CompilerOptions,
+    main_prog: Program,
+    main_imports: ImportList,
+    requested_target_spec: NativeTargetSpec
+) -> CompileResult with IO, Mut, Panic, Div, Alloc {
+    let early_frontend_preflight = preflight_multimodule_frontend(opts.input_file)
+    let early_preflight_parse_errors = parser_last_error_count()
+    if !early_frontend_preflight.ok || early_preflight_parse_errors > 0 {
+        compiler_print_ir_preflight_failure(early_frontend_preflight.error_msg)
+        var early_type_errors = compile_errors_new()
+        early_type_errors = compile_errors_push(early_type_errors, "error: type checking preflight failed")
+        return CompileResult {
+            success: false,
+            errors: early_type_errors,
             output: "",
         }
     }
