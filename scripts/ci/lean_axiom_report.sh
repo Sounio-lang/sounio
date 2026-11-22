@@ -2,7 +2,8 @@
 # lean_axiom_report.sh -- print `#print axioms` for the headline theorems.
 #
 # Runs formal/AxiomReport.lean (package formal/, toolchain formal/lean-toolchain)
-# and formal/lean4/AxiomReport.lean (package formal/lean4/). The output is the
+# and formal/lean4/AxiomReport.lean (package formal/lean4/); with --bootstrap, runs
+# formal/Bootstrap/AxiomReport.lean instead (the CI Bootstrap Proofs job). The output is the
 # authoritative list that formal/AXIOM_INVENTORY.md refers to; the inventory
 # generator (scripts/dev/gen_axiom_inventory.sh) does not run Lean.
 #
@@ -21,22 +22,30 @@ REPORT="$(mktemp)"
 trap 'rm -f "$REPORT"' EXIT
 
 run_report() {
-  local dir="$1"; shift
+  local dir="$1" report="$2"; shift 2
   local log
   log="$(mktemp)"
   echo "== ${dir#"$REPO_ROOT"/}: lake build $*"
   (cd "$dir" && lake build "$@") >"$log" 2>&1 || { cat "$log" >&2; rm -f "$log"; fail "lake build $* in $dir"; }
-  (cd "$dir" && lake env lean AxiomReport.lean) >"$log" 2>&1 || { cat "$log" >&2; rm -f "$log"; fail "lake env lean AxiomReport.lean in $dir"; }
+  (cd "$dir" && lake env lean "$report") >"$log" 2>&1 || { cat "$log" >&2; rm -f "$log"; fail "lake env lean $report in $dir"; }
   cat "$log" | tee -a "$REPORT"
   local want got
-  want="$(grep -c '^#print axioms ' "$dir/AxiomReport.lean")"
+  want="$(grep -c '^#print axioms ' "$dir/$report")"
   got="$(grep -cE "depends on axioms|does not depend on any axioms" "$log" || true)"
   rm -f "$log"
-  [[ "$want" == "$got" ]] || fail "$dir/AxiomReport.lean: $want #print axioms commands, $got results"
+  [[ "$want" == "$got" ]] || fail "$dir/$report: $want #print axioms commands, $got results"
 }
 
-run_report "$REPO_ROOT/formal" OntologyELPlusClosureComplete ElfLinker TypeChecker TrustSemiring EpistemicSafety EpistemicStat EpistemicJoint Bootstrap.SporosX1Comp
-run_report "$REPO_ROOT/formal/lean4" SounioHydrogenPbox SounioGradedModal
+case "${1:-}" in
+  --bootstrap)
+    run_report "$REPO_ROOT/formal" Bootstrap/AxiomReport.lean Bootstrap.SporosX1Comp
+    ;;
+  "")
+    run_report "$REPO_ROOT/formal" AxiomReport.lean OntologyELPlusClosureComplete ElfLinker TypeChecker TrustSemiring EpistemicSafety EpistemicStat EpistemicJoint
+    run_report "$REPO_ROOT/formal/lean4" AxiomReport.lean SounioHydrogenPbox SounioGradedModal
+    ;;
+  *) fail "usage: $0 [--bootstrap]" ;;
+esac
 
 if grep -q 'sorryAx' "$REPORT"; then
   grep 'sorryAx' "$REPORT" >&2

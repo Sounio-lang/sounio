@@ -3,7 +3,7 @@
 # `Sporos.run`, and its TMR dispatch voters) and the axiom audit of its main theorems.
 #
 # Not run by the pull-request CI: the 28 modules take about 18 minutes of kernel time
-# (12 minutes on four cores, measured 2026-11-22 on Lean 4.33.0), which the Lean Proofs
+# (12 minutes on four cores, measured 2026-11-22 on Lean 4.33.0), which the Bootstrap Proofs
 # job cannot absorb. Run it by hand or on the lab cluster.
 #
 # Every audited theorem must exist and depend on no axiom beyond propext,

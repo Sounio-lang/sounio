@@ -25,7 +25,7 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
 fi
 
 declare -A impact=()
-keys=(docs website compiler runtime stdlib tests lean math ontology clinical sio full)
+keys=(docs website compiler runtime stdlib tests lean bootstrap math ontology clinical sio full)
 for key in "${keys[@]}"; do impact["$key"]=false; done
 
 mark() { impact["$1"]=true; }
@@ -99,7 +99,13 @@ else
     case "$path" in stdlib/*) mark stdlib; recognized=true ;; esac
     # The SCO examples and their expected stdout are scientific regression fixtures.
     case "$path" in tests/*|examples/sco_corpus/*|check_sounio.sh) mark tests; recognized=true ;; esac
-    case "$path" in formal/lean4/*|formal/*.lean|formal/lakefile.lean|formal/lean-toolchain|formal/lake-manifest.json|scripts/ci/lean_axiom_report.sh|bootstrap/model/*) mark lean; recognized=true ;; esac
+    # The bootstrap chain (Bootstrap Proofs job) and the rest of formal/ (Lean Proofs job).
+    # The package files and the toolchain belong to both, as does the axiom report script.
+    case "$path" in
+      formal/Bootstrap/*|formal/Sporos/*|formal/Sporos.lean|bootstrap/model/*) mark bootstrap; recognized=true ;;
+      formal/lakefile.lean|formal/lean-toolchain|formal/lake-manifest.json|scripts/ci/lean_axiom_report.sh) mark bootstrap; mark lean; recognized=true ;;
+      formal/lean4/*|formal/*.lean) mark lean; recognized=true ;;
+    esac
     case "$path" in
       formal/lean4/*|scripts/ci/sedenion_*|scripts/ci/cd_tower_*|scripts/ci/gresnigt_*|scripts/ci/furey_*|scripts/ci/octonion_probes_gate.sh|scripts/research/sedenion_*|scripts/research/cd_tower_*|scripts/research/oct_*|scripts/research/ossm_*|scripts/ci/ade_wildgen_*|scripts/research/ade_wildgen_*)
         mark math
