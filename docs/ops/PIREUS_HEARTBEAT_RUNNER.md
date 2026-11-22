@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.ops.pireus-heartbeat-runner
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.ops.pireus-heartbeat-runner
+-->
+
 # Pireus Heartbeat Runner Setup
 
 This document describes how to configure a GitHub Actions self-hosted runner on an NVIDIA DGX Spark (GB10/sm121, ARM64) to run the Pireus Heartbeat workflow.
