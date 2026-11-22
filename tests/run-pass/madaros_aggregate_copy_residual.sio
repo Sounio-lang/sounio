@@ -1,0 +1,147 @@
+//@ run-pass
+//@ requires: madaros
+//@ known-failure: measured 2026-11-16 on Madaros (main + #3606 + the place-copy fix of madaros_aggregate_copy_variants.sio). By-value aggregate arguments and literal captures still share the source handle, and a `let` snapshot of a struct with no array of its own (or of an array element, or a nested array row) still binds the source object: a later in-place write through either side shows through the other (exit 0, wrong value).
+//@ xfail-expect: RESIDUAL_MASK=255
+//@ expect-stdout: AGGREGATE_COPY_RESIDUAL_OK
+// The aliasing classes the place-copy fix leaves open, one bit each, so the pin moves when any of them changes:
+//
+//   bit 1   `fn wrap(s: S) -> W { W { ts: s } }`: the by-value parameter is stored by handle; the caller's later write to
+//           its own `s` shows through the result
+//   bit 2   `fn ident(s: S) -> S { s }`: returning a by-value parameter returns the caller's object
+//   bit 4   `W { ts: s }` / `[s, s]` with s a local: struct and array literals store the handle of a named aggregate
+//   bit 8   `var row = mm[i]` / `mm[0] = mm[2]` on `[[f64; 4]; 3]`: no inner extent is recorded for a nested array
+//   bit 16  `let e = arr[i]` (a `let`, not a `var`), then `arr[i].a[0] = ..`: the snapshot moves
+//   bit 32  `let x = w.m` with Mid's arrays one struct down, then `w.m.s.a[0] = ..`: the snapshot moves
+//   bit 64  `let t = *p` of a scalar-only struct, then `(*p).x = ..`: the snapshot moves
+//   bit 128 `let p = &arr; var t = *p` with p a reference LOCAL (parameters are fixed): the local carries no array extent
+//
+// Why they are left: each needs a copy at a site the self-compile runs on its hottest paths (by-value `Name` and
+// `IrInstr` construction, `let n = names[i]` in every local lookup), so the fix is a choice between an eager copy and a
+// last-use analysis, not a local repair.
+
+struct P {
+    x: f64,
+    y: f64,
+}
+
+struct S {
+    a: [f64; 18],
+    n: i64,
+}
+
+struct Mid {
+    s: S,
+    p: P,
+    k: i64,
+}
+
+struct W {
+    ts: S,
+    tail: i64,
+}
+
+struct H {
+    m: Mid,
+    tail: i64,
+}
+
+fn mk(v: f64) -> S {
+    S { a: [v; 18], n: 7 }
+}
+
+fn mkmid(v: f64) -> Mid {
+    Mid { s: mk(v), p: P { x: v, y: v }, k: 3 }
+}
+
+fn wrap(s: S) -> W {
+    W { ts: s, tail: 1 }
+}
+
+fn ident(s: S) -> S {
+    s
+}
+
+fn r1() -> i64 with Mut, Div, Panic {
+    var s = mk(1.0)
+    var w = wrap(s)
+    s.a[0] = 9.0
+    if w.ts.a[0] != 1.0 { return 1 }
+    0
+}
+
+fn r2() -> i64 with Mut, Div, Panic {
+    var s = mk(1.0)
+    var r = ident(s)
+    r.a[0] = 9.0
+    if s.a[0] != 1.0 { return 2 }
+    0
+}
+
+fn r4() -> i64 with Mut, Div, Panic {
+    var s = mk(1.0)
+    var w = W { ts: s, tail: 1 }
+    var a = [s, s]
+    s.a[0] = 9.0
+    a[0].a[1] = 8.0
+    if w.ts.a[0] != 1.0 || a[1].a[1] != 1.0 { return 4 }
+    0
+}
+
+fn r8() -> i64 with Mut, Div, Panic {
+    var mm: [[f64; 4]; 3] = [[0.0; 4], [1.0; 4], [2.0; 4]]
+    var row = mm[1]
+    row[0] = 9.0
+    mm[0] = mm[2]
+    mm[0][0] = 9.0
+    if mm[1][0] != 1.0 || mm[2][0] != 2.0 { return 8 }
+    0
+}
+
+fn r16() -> i64 with Mut, Div, Panic {
+    var arr: [S; 2] = [mk(0.0), mk(1.0)]
+    let e = arr[1]
+    arr[1].a[0] = 9.0
+    if e.a[0] != 1.0 { return 16 }
+    0
+}
+
+fn r32() -> i64 with Mut, Div, Panic {
+    var h = H { m: mkmid(1.0), tail: 0 }
+    let x = h.m
+    h.m.s.a[0] = 9.0
+    if x.s.a[0] != 1.0 { return 32 }
+    0
+}
+
+fn r64_inner(p: &!P) -> i64 with Mut, Div, Panic {
+    let t = *p
+    (*p).x = 9.0
+    if t.x != 1.0 { return 64 }
+    0
+}
+
+fn r64() -> i64 with Mut, Div, Panic {
+    var p = P { x: 1.0, y: 2.0 }
+    r64_inner(&!p)
+}
+
+fn r128() -> i64 with Mut, Div, Panic {
+    var arr: [f64; 4] = [1.0; 4]
+    let p = &arr
+    var t = *p
+    t[0] = 9.0
+    if arr[0] != 1.0 { return 128 }
+    0
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let mask = r1() + r2() + r4() + r8() + r16() + r32() + r64() + r128()
+    if mask == 0 {
+        println("AGGREGATE_COPY_RESIDUAL_OK")
+        return 0
+    }
+    print("RESIDUAL_MASK=")
+    print(mask)
+    print("\n")
+    1
+}
