@@ -1,1 +1,0 @@
-`NATIVE_REFUSAL kind=malformed_ir_registers` now names where the IR register check first failed: the instruction index (`-1` for the function header), its opcode and its dst/src1/src2 registers, plus the function name on the streaming path. Before, it printed only the function's register count. It does not change which programs are refused.

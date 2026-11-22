@@ -1,1 +1,0 @@
-Normal and Beta distributions now expose checked density/log-density, CDF/SF/log-tails and quantiles with separate availability flags, work metadata and genuine support infinities. Quantile results retain an observed forward log-tail; requests that cannot meet the numerical work or representation constraints remain explicit unavailable results.
