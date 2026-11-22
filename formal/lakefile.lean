@@ -85,6 +85,7 @@ lean_lib Bootstrap where
     .one `Bootstrap.TMRMemExposure,
     .one `Bootstrap.TMRBurst,
     .one `Bootstrap.TMRBurstCheck,
+    .one `Bootstrap.SporosProvLen,
     .submodules `Sporos]
 
 -- The two seeds on every listing (about 20 minutes of kernel time, the two in parallel), and
