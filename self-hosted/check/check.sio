@@ -9680,6 +9680,70 @@ fn checker_is_knowledge_ident_add(e: Expr, left_ty: TypeEntry, right_ty: TypeEnt
     }
 }
 
+// Knowledge<f64> (x) Knowledge<f64> for + - * /: lowered by
+// lower_binary_expr_ref's Knowledge arm (GUM first-order variance, min
+// confidence). The lowering recognises its operands syntactically (a bound
+// name, a call, or a nested binary of those), so the checker admits exactly
+// those shapes and keeps refusing every other one with E245 rather than let an
+// unrecognised operand lower as a scalar pointer.
+fn checker_knowledge_binary_lowerable(e: Expr, left_ty: TypeEntry, right_ty: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
+    if !is_knowledge_type(left_ty) || !is_knowledge_type(right_ty) {
+        return false
+    }
+    if e.bin_op != BinaryOp::OpAdd && e.bin_op != BinaryOp::OpSub
+        && e.bin_op != BinaryOp::OpMul && e.bin_op != BinaryOp::OpDiv {
+        return false
+    }
+    // Payload must be f64 on at least one side; the other may be unresolved
+    // (a module-level `let` read inside a function is typed Knowledge<unknown>,
+    // and the f64 side pins the payload).
+    let lk = knowledge_inner(left_ty).kind
+    let rk = knowledge_inner(right_ty).kind
+    let l_f = lk == TypeKind::TyF64
+    let r_f = rk == TypeKind::TyF64
+    let l_u = is_error_or_unknown(knowledge_inner(left_ty))
+    let r_u = is_error_or_unknown(knowledge_inner(right_ty))
+    if !((l_f && (r_f || r_u)) || (r_f && l_u)) {
+        return false
+    }
+    match e.left {
+        Some(lbox) => {
+            match e.right {
+                Some(rbox) => {
+                    let lk = (*lbox).kind
+                    let rk = (*rbox).kind
+                    let l_ok = lk == ExprKind::ExprIdent || lk == ExprKind::ExprCall || lk == ExprKind::ExprBinary
+                    let r_ok = rk == ExprKind::ExprIdent || rk == ExprKind::ExprCall || rk == ExprKind::ExprBinary
+                    l_ok && r_ok
+                }
+                None => false,
+            }
+        }
+        None => false,
+    }
+}
+
+// RC-B backstop. The lowering recognises Knowledge operands syntactically; the
+// checker records every binary expression it ADMITTED as Knowledge (+ - * /)
+// in the hyper-expression span table under op_kind 21, so the lowerer can
+// refuse (hard error) a recorded span whose operands it failed to classify
+// instead of lowering two handles as scalars. A collision between spans of
+// different modules can only add a false refusal, never a silent miscompile.
+// Returns false when the table is full: the caller then keeps E245.
+fn checker_record_knowledge_binary_inplace(c: *mut Checker, span: Span) -> bool with Mut, Panic, Div {
+    let info = HyperExprInfo {
+        span_start: span.start,
+        span_end: span.end,
+        algebra_tag: 0,
+        op_kind: 21,
+        knowledge_wrapped: true,
+    }
+    let tbl = (*c).hyper_exprs
+    let add_result = tbl.add(info)
+    (*c).hyper_exprs = add_result.0
+    add_result.1 >= 0
+}
+
 // R6 Correlated (id 29): Knowledge binary arith reusing the same ExprIdent
 // requires `with Correlated`. Distinct from E230 anti-garbling (noise symbols).
 // SOUNIO_FORCE_CORRELATED=1 forces every Knowledge arith op (reachability).
@@ -9818,7 +9882,7 @@ fn checker_check_binary_operand_compat_inplace(c: *mut Checker, span: Span, op: 
     // neither. Found by instrumenting a source build: the site fifteen lines
     // below reported ignunits=1 and reskind=1 (not an error) for exactly the
     // operand pair this line was rejecting.
-    if !both_hyper && !either_cond_indep && !knowledge_ident_add && !is_error_or_unknown(left_ty) && !is_error_or_unknown(right_ty) && !compat_numeric_ignoring_units(left_ty, right_ty) {
+    if !both_hyper && !either_cond_indep && !knowledge_ident_add && !is_error_or_unknown(left_ty) && !is_error_or_unknown(right_ty) && !compat_knowledge_operands(left_ty, right_ty) && !compat_numeric_ignoring_units(left_ty, right_ty) {
         let is_arith = op == BinaryOp::OpAdd || op == BinaryOp::OpSub
             || op == BinaryOp::OpMul || op == BinaryOp::OpDiv || op == BinaryOp::OpRem
         let is_cmp = op == BinaryOp::OpEq || op == BinaryOp::OpNe
@@ -10073,7 +10137,11 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
     checker_check_binary_operand_compat_inplace(c, e.span, e.bin_op, left_ty, right_ty, knowledge_ident_add)
     if is_knowledge_type(left_ty) || is_knowledge_type(right_ty) {
         checker_store_binary_knowledge_hyper_inplace(c, e.span, e.bin_op, left_ty, right_ty)
-        checker_check_binary_knowledge_refusals_inplace(c, e.span, e.bin_op, left_ty, right_ty, correlated_same_slot_add, knowledge_ident_add)
+        var kk_admit = checker_knowledge_binary_lowerable(e, left_ty, right_ty)
+        if kk_admit && !checker_record_knowledge_binary_inplace(c, e.span) {
+            kk_admit = false
+        }
+        checker_check_binary_knowledge_refusals_inplace(c, e.span, e.bin_op, left_ty, right_ty, correlated_same_slot_add, knowledge_ident_add || kk_admit)
         return checker_finish_binary_knowledge_result_inplace(c, e.span, e.bin_op, left_ty, right_ty, correlated_same_slot_add)
     }
     if left_ty.kind == TypeKind::TyHyper && right_ty.kind == TypeKind::TyHyper {
@@ -10584,6 +10652,13 @@ fn checker_check_array_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
                     if elem_ok && is_epistemic_type(elem_ty) && is_epistemic_type(first_ty) {
                         elem_ok = checker_knowledge_subsumes(c, elem_ty, first_ty)
                             && checker_knowledge_subsumes(c, first_ty, elem_ty)
+                    }
+                    if !elem_ok && elem_ty.kind == TypeKind::TyKnowledge && first_ty.kind == TypeKind::TyKnowledge {
+                        let jn = checker_knowledge_epsilon_join(c, first_ty, elem_ty)
+                        if jn.0 {
+                            elem_ok = true
+                            first_ty = jn.1
+                        }
                     }
                     if !elem_ok {
                         checker_report_mismatch_inplace(c, (*list).head.span, 20, first_ty, elem_ty)
@@ -24028,6 +24103,42 @@ fn checker_knowledge_subsumes(c: *mut Checker, provided: TypeEntry, required: Ty
     provenance_subsumes(knowledge_meta_provenance(pmeta), knowledge_meta_provenance(rmeta))
 }
 
+// Array-literal element join for epistemic elements that differ ONLY in the
+// epsilon bound (`[measure(1.0, uncertainty: 0.1), measure(3.0, uncertainty:
+// 0.2)]` carries eps=10/1000 and eps=40/1000). Mutual subsumption fails on
+// that pair by construction (a tighter bound satisfies a looser one, never the
+// reverse), yet the literal is well typed: the array's element type is the
+// WEAKEST bound that every element satisfies. Validity, provenance and
+// payload must still be mutually subsumed once epsilon is neutralised, so the
+// four-axis join check of the other axes is unchanged.
+// Returns (ok, joined element type).
+fn checker_knowledge_epsilon_join(c: *mut Checker, a: TypeEntry, b: TypeEntry) -> (bool, TypeEntry) with Mut, Panic, Div, Alloc {
+    var an = a
+    var bn = b
+    an.knowledge_epsilon = 0.0 - 1.0
+    an.knowledge_epsilon_mode = 0
+    bn.knowledge_epsilon = 0.0 - 1.0
+    bn.knowledge_epsilon_mode = 0
+    if !checker_knowledge_subsumes(c, an, bn) || !checker_knowledge_subsumes(c, bn, an) {
+        return (false, a)
+    }
+    var joined = a
+    if a.knowledge_epsilon_mode == b.knowledge_epsilon_mode && a.knowledge_epsilon >= 0.0 && b.knowledge_epsilon >= 0.0 && a.knowledge_epsilon_mode != 3 {
+        if a.knowledge_epsilon_mode == 0 {
+            joined.knowledge_epsilon = if a.knowledge_epsilon > b.knowledge_epsilon { a.knowledge_epsilon } else { b.knowledge_epsilon }
+        } else if a.knowledge_epsilon_mode == 2 {
+            joined.knowledge_epsilon = if a.knowledge_epsilon < b.knowledge_epsilon { a.knowledge_epsilon } else { b.knowledge_epsilon }
+        } else if a.knowledge_epsilon != b.knowledge_epsilon {
+            joined.knowledge_epsilon = 0.0 - 1.0
+            joined.knowledge_epsilon_mode = 0
+        }
+    } else {
+        joined.knowledge_epsilon = 0.0 - 1.0
+        joined.knowledge_epsilon_mode = 0
+    }
+    (true, joined)
+}
+
 fn checker_types_compatible_inplace(c: *mut Checker, a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div, Alloc, IO {
     if types_compatible(a, b) {
         return true
@@ -30441,7 +30552,7 @@ impl Checker {
                 || e.bin_op == BinaryOp::OpMul || e.bin_op == BinaryOp::OpDiv
                 || e.bin_op == BinaryOp::OpRem
             let kk_hyper = left_inner.kind == TypeKind::TyHyper && right_inner.kind == TypeKind::TyHyper
-            if kk_both && kk_arith && !kk_hyper && !correlated_same_slot_add && !checker_is_knowledge_ident_add(e, left_ty, right_ty) {
+            if kk_both && kk_arith && !kk_hyper && !correlated_same_slot_add && !checker_is_knowledge_ident_add(e, left_ty, right_ty) && !checker_knowledge_binary_lowerable(e, left_ty, right_ty) {
                 c = c.report_error_at(e.span, 245, 0, 0, 0)
             }
             var knowledge_result = knowledge_binary_result(e.bin_op, left_ty, right_ty, c.ns_table)

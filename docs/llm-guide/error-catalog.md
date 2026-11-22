@@ -206,7 +206,11 @@ and [invalid-value E269 refusal](../../tests/compile-fail/knowledge_where_refine
 These are source-selected candidates, not calculations performed here.
 
 `E245` is a separate modular boundary for arithmetic between two
-`Knowledge<T>` values. Adding effects or repairing lineage does not supply
+`Knowledge<T>` values. `+ - * /` over two `Knowledge<f64>` operands that are
+bound names, calls or nested binaries of those now lowers on Madaros
+(first-order GUM variance, minimum confidence;
+[madaros_knowledge_binary_arith.sio](../../tests/run-pass/madaros_knowledge_binary_arith.sio)),
+so E245 remains for `%`, non-f64 payloads and every other operand shape. Adding effects or repairing lineage does not supply
 missing lowering. Inspect
 [knowledge_binary_arith_has_no_lowering.sio](../../tests/compile-fail/knowledge_binary_arith_has_no_lowering.sio)
 and its engine requirement. A seed implementation or a library struct named
