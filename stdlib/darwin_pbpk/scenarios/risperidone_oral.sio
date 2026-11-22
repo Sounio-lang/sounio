@@ -1,0 +1,185 @@
+// stdlib/darwin_pbpk/scenarios/risperidone_oral.sio — scenario library (no main)
+//
+// End-to-end dissertation scenario for risperidone + 9-OH (SIO-522):
+//
+//   - Single 2 mg oral IR tablet (bioequivalence single-dose design)
+//     → gut pool + first-order absorption (ka = 2.0/h, F = 0.70);
+//       (1 - F) destroyed as first-pass loss, total absorbed = F x dose
+//         → parent PBPK28 (tsit5_pbpk28, fully-coupled CN)
+//         → CYP2D6 formation sink on the liver (organ 1), solved implicitly
+//           inside the CN step (same construction as venlafaxine_xr:
+//           `pbpk28_full_cn_step_sink_mut`); the mass the sink removes is
+//           exactly the mass handed to 9-OH, scaled by the MW ratio
+//           (molar convention: 426.48/410.49)
+//         → 9-OH PBPK28 (second fully-coupled CN system)
+//
+// Operator splitting per step (Lie-Trotter, same pattern as venlafaxine_xr):
+//   1. Exact first-order gut absorption over [t, t+dt] (closed form per step)
+//   2. Parent PBPK28 CN step with the CYP2D6 formation sink on the liver
+//   3. 9-OH PBPK28 CN step fed formed x MW-ratio as blood input
+// Elimination audit per step: cum_elim accumulates CL x midpoint-Cb x dt
+// (same quadrature both engines), so the printed residuals
+//   parent: m1 - (m0 + absorbed - elim - formed)
+//   9-OH:   m1 - (m0 + formed*ratio - elim)
+// measure the CN mass identity two-sided (#2718 class).
+//
+// Readout: single-dose parent + 9-OH trajectories at NM (pheno 2, the parity
+// reference). Phenotype scaling lives in drugs/risperidone.sio
+// (PM 0.0 label-derived; IM/UM by CPIC activity-score logic, declared).
+// No steady-state ratio machinery: oral-only scenario, no LAI claim (card).
+//
+// Kp are assumed patterns targeting label Vd (parent ~115 L in 1-2 L/kg;
+// 9-OH ~480 L vs label 487 L, verified arithmetically); brain Kp carries
+// measured anchors (parent CNS entry; 9-OH brain/plasma 0.8-1.2). PS
+// flow-limited except brain/adipose/bone (SIO-550, CNS exception noted).
+// CL values are DERIVED from label t1/2 + Vd (see drug file). No
+// clinical-validity claim: parity only (ADR009).
+//
+// The parity ref tests/run-pass/dissertation_pbpk28_parity_ref_risperidone.sio
+// drives this scenario itself, so a scenario change not mirrored in Node
+// breaks the gate.
+//
+// This file is a library with no `main`; it is checked, not run.
+
+use darwin_pbpk::core::pbpk28_params::*
+use darwin_pbpk::tsit5_pbpk28::*
+use darwin_pbpk::drugs::risperidone::*
+use math::pure::{exp}
+
+// ─── Risperidone PBPK28 profiles (scenario-owned) ──────────────────────────
+// Kept here — not in core/pbpk28_params.sio — so this lane never churns the
+// website-pinned domain source. Standard 70 kg physiology.
+pub fn rsp_parent_params() -> PBPKParams28 {
+    PBPKParams28 {
+        v_ref:     [5.0, 1.8, 0.31, 1.45, 0.33, 1.1, 28.0, 20.0, 1.2, 3.6, 6.6, 0.18, 0.09, 3.7],
+        vasc_frac: [1.000, 0.210, 0.160, 0.037, 0.262, 0.262, 0.040, 0.050, 0.024, 0.019, 0.041, 0.282, 0.180, 0.050],
+        kp:        [1.00, 4.0, 3.0, 3.0, 2.0, 3.0, 2.0, 1.0, 3.0, 1.0, 0.5, 2.5, 2.0, 2.0],
+        ps:        [0.0, 90.0, 74.0, 10.0, 16.0, 350.0, 42.0, 5.0, 55.0, 21.0, 8.0, 10.0, 8.0, 13.0],
+        q:         [350.0, 90.0, 74.0, 44.0, 16.0, 350.0, 42.0, 10.0, 55.0, 21.0, 17.0, 10.0, 8.0, 13.0],
+        cl_central: 3.6,
+    }
+}
+
+pub fn rsp_oh9_params() -> PBPKParams28 {
+    PBPKParams28 {
+        v_ref:     [5.0, 1.8, 0.31, 1.45, 0.33, 1.1, 28.0, 20.0, 1.2, 3.6, 6.6, 0.18, 0.09, 3.7],
+        vasc_frac: [1.000, 0.210, 0.160, 0.037, 0.262, 0.262, 0.040, 0.050, 0.024, 0.019, 0.041, 0.282, 0.180, 0.050],
+        kp:        [1.00, 15.0, 10.0, 1.0, 6.0, 12.0, 10.0, 4.0, 10.0, 4.0, 1.0, 10.0, 8.0, 8.0],
+        ps:        [0.0, 90.0, 74.0, 8.0, 16.0, 350.0, 42.0, 8.0, 55.0, 21.0, 8.0, 10.0, 8.0, 13.0],
+        q:         [350.0, 90.0, 74.0, 44.0, 16.0, 350.0, 42.0, 10.0, 55.0, 21.0, 17.0, 10.0, 8.0, 13.0],
+        cl_central: 14.7,
+    }
+}
+
+// CYP2D6 formation site.
+fn rsp_liver_organ() -> i32 { return 1 }
+
+// ─── Composite scenario state ───────────────────────────────────────────────
+pub struct RisperidoneScenario {
+    pub parent: PBPKState28,
+    pub oh9: PBPKState28,
+    gut_mg: f64,
+    pheno: i32,
+    cum_absorbed_mg: f64,
+    cum_formed_mg: f64,
+    cum_elim_p_mg: f64,
+    cum_elim_o_mg: f64,
+}
+
+// Initial state: full dose in the gut, zero PBPK.
+pub fn rsp_scenario_init(pheno: i32) -> RisperidoneScenario {
+    RisperidoneScenario {
+        parent: pbpk28_state_zero(),
+        oh9: pbpk28_state_zero(),
+        gut_mg: risperidone_single_dose_mg(),
+        pheno: pheno,
+        cum_absorbed_mg: 0.0,
+        cum_formed_mg: 0.0,
+        cum_elim_p_mg: 0.0,
+        cum_elim_o_mg: 0.0,
+    }
+}
+
+// One split step over [t_start, t_start + dt].
+pub fn rsp_step(scen: RisperidoneScenario, dt: f64)
+    -> RisperidoneScenario with Mut, Div, Panic
+{
+    let pp = rsp_parent_params()
+    let op = rsp_oh9_params()
+    let ka = risperidone_ka_per_h()
+    let f_abs = risperidone_f_oral()
+    let cl_form = risperidone_cl_form(scen.pheno)
+    let mw_ratio = risperidone_mw_ratio()
+
+    // 1. Exact first-order gut absorption over the step; the gut empties a
+    // full fraction frac per step while only F of it reaches the blood —
+    // (1 - F) is destroyed as first-pass loss (same convention as the
+    // oral IR lanes: total absorbed = F x dose).
+    var gut = scen.gut_mg
+    let frac_abs = 1.0 - exp(0.0 - ka * dt)
+    let gut_frac = gut * frac_abs
+    let absorb_amt = f_abs * gut_frac
+    gut = gut - gut_frac
+    if gut < 0.0 { gut = 0.0 }
+    let parent_input = absorb_amt / dt
+
+    // 2. Parent transport + CYP2D6 formation sink on the liver, one implicit
+    // solve. Returns exactly the parent mass converted to 9-OH.
+    var out_parent = scen.parent
+    let cb_old_p = out_parent.cv[0]
+    let form_mg = pbpk28_full_cn_step_sink_mut(&!out_parent, pp, parent_input, dt, rsp_liver_organ(), cl_form)
+    let cb_new_p = out_parent.cv[0]
+
+    // 3. 9-OH receives the formed mass (molar convention) as blood input.
+    let oh9_input = form_mg * mw_ratio / dt
+    var out_oh9 = scen.oh9
+    let cb_old_o = out_oh9.cv[0]
+    out_oh9 = pbpk28_full_cn_step(out_oh9, op, oh9_input, dt)
+    let cb_new_o = out_oh9.cv[0]
+
+    RisperidoneScenario {
+        parent: out_parent,
+        oh9: out_oh9,
+        gut_mg: gut,
+        pheno: scen.pheno,
+        cum_absorbed_mg: scen.cum_absorbed_mg + absorb_amt,
+        cum_formed_mg: scen.cum_formed_mg + form_mg,
+        cum_elim_p_mg: scen.cum_elim_p_mg + pp.cl_central * 0.5 * (cb_old_p + cb_new_p) * dt,
+        cum_elim_o_mg: scen.cum_elim_o_mg + op.cl_central * 0.5 * (cb_old_o + cb_new_o) * dt,
+    }
+}
+
+pub fn rsp_integrate_to(scen: RisperidoneScenario, t_start: f64, target: f64, dt: f64)
+    -> RisperidoneScenario with Mut, Div, Panic
+{
+    var s = scen
+    var t = t_start
+    while t + dt * 0.5 < target {
+        s = rsp_step(s, dt)
+        t = t + dt
+    }
+    return s
+}
+
+// Body masses (mg).
+pub fn rsp_parent_mass(scen: RisperidoneScenario, p: PBPKParams28) -> f64 with Mut {
+    return pbpk28_total_mass(scen.parent, p)
+}
+
+pub fn rsp_oh9_mass(scen: RisperidoneScenario, p: PBPKParams28) -> f64 with Mut {
+    return pbpk28_total_mass(scen.oh9, p)
+}
+
+// Cross-module readers (struct fields are module-private).
+pub fn rsp_cum_absorbed(scen: RisperidoneScenario) -> f64 { return scen.cum_absorbed_mg }
+pub fn rsp_cum_formed(scen: RisperidoneScenario) -> f64 { return scen.cum_formed_mg }
+
+// Two-sided CN mass-identity residuals (mg). Near zero by construction;
+// printed as evidence, envelope-gated in CI.
+pub fn rsp_residual_parent(scen: RisperidoneScenario, p: PBPKParams28) -> f64 with Mut {
+    return rsp_parent_mass(scen, p) - (scen.cum_absorbed_mg - scen.cum_elim_p_mg - scen.cum_formed_mg)
+}
+
+pub fn rsp_residual_oh9(scen: RisperidoneScenario, p: PBPKParams28) -> f64 with Mut, Div {
+    return rsp_oh9_mass(scen, p) - (scen.cum_formed_mg * risperidone_mw_ratio() - scen.cum_elim_o_mg)
+}

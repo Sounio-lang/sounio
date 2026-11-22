@@ -10,8 +10,6 @@
 -- Main theorem: egc_graded_soundness
 --   EGC is a sound graded type system: confidence propagation preserves
 --   the epistemic ordering and satisfies the four modal rules.
---
--- Source: docs/proofs/graded_modal.lean (canonical reference copy)
 
 namespace SounioGradedModal
 

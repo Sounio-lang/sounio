@@ -26,6 +26,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
+# shellcheck source=../lib/classify_compile.sh
+source "$ROOT_DIR/scripts/lib/classify_compile.sh"
 
 unset SOUC_BIN SOUNIO_SOUC_BIN || true
 export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
@@ -43,6 +45,65 @@ note_pass() { PASS=$((PASS+1)); echo "PASS $1"; }
 note_fail() { FAIL=$((FAIL+1)); FAILURES+=("$1"); echo "FAIL $1" >&2; }
 
 REFUSE_SENTINEL='f128/f256 Madaros-run softfloat lowering is not implemented (V0-E.4.1 fail-closed; no f64 greenwash)'
+
+wide_float_refusal() {
+  local rc="$1"
+  local log="$2"
+  local out="$3"
+
+  # A diagnostic printed before a crash, timeout or OOM kill is not evidence
+  # that the compiler reached its fail-closed verdict (#2425).
+  sounio_expect_refusal "$rc" "$log" "$out" || return 1
+  grep -Fq "$REFUSE_SENTINEL" "$log" \
+    || grep -Eiq 'f128|f256|wide.float|softfloat|E\.4\.1' "$log" \
+    || grep -Fq 'error[E249]' "$log"
+}
+
+refusal_classifier_self_test() {
+  local valid="$TMP_DIR/self-test-valid.log"
+  local crash="$TMP_DIR/self-test-crash.log"
+  local artifact="$TMP_DIR/self-test-artifact.elf"
+
+  printf 'error: %s\n' "$REFUSE_SENTINEL" >"$valid"
+  wide_float_refusal 1 "$valid" "$TMP_DIR/self-test-no-artifact" \
+    || { echo "FAIL refusal_self_test_valid: $(sounio_refusal_reason)" >&2; exit 1; }
+
+  printf '%s\n' 'error[E249]: f256 literal is not supported' >"$TMP_DIR/self-test-e249.log"
+  wide_float_refusal 1 "$TMP_DIR/self-test-e249.log" "$TMP_DIR/self-test-no-artifact" \
+    || { echo "FAIL refusal_self_test_stale_e249: $(sounio_refusal_reason)" >&2; exit 1; }
+
+  cp "$valid" "$crash"
+  printf '%s\n' 'Segmentation fault (core dumped)' >>"$crash"
+  if wide_float_refusal 139 "$crash" "$TMP_DIR/self-test-no-artifact"; then
+    echo "FAIL refusal_self_test_crash_accepted" >&2
+    exit 1
+  fi
+  if wide_float_refusal 124 "$valid" "$TMP_DIR/self-test-no-artifact"; then
+    echo "FAIL refusal_self_test_timeout_accepted" >&2
+    exit 1
+  fi
+  if wide_float_refusal 1 "$crash" "$TMP_DIR/self-test-no-artifact"; then
+    echo "FAIL refusal_self_test_fatal_text_accepted" >&2
+    exit 1
+  fi
+  if wide_float_refusal 0 "$valid" "$TMP_DIR/self-test-no-artifact"; then
+    echo "FAIL refusal_self_test_rc0_accepted" >&2
+    exit 1
+  fi
+
+  printf 'not-an-elf\n' >"$artifact"
+  if wide_float_refusal 1 "$valid" "$artifact"; then
+    echo "FAIL refusal_self_test_artifact_accepted" >&2
+    exit 1
+  fi
+
+  echo "PASS refusal_classifier_self_test valid=2 crash=1 fatal_text=1 timeout=1 rc0=1 artifact=1"
+}
+
+refusal_classifier_self_test
+if [[ "${SOUNIO_F128_V0E41_SELF_TEST_ONLY:-0}" == "1" ]]; then
+  exit 0
+fi
 
 echo "=== madaros_f128_f256_ladder_gate stage=v0e41 ==="
 echo "slice=v0e41_fail_closed_lower"
@@ -135,21 +196,21 @@ else
   "$SOUC" compile "$LANG256" -o "$OUT" >"$TMP_DIR/compile.log" 2>&1
   c_rc=$?
   set -e
-  if grep -Fq "$REFUSE_SENTINEL" "$TMP_DIR/compile.log" && [[ ! -s "$OUT" ]]; then
-    note_pass "madaros_compile_fail_closed_sentinel"
-  elif [[ "$c_rc" -ne 0 ]] && grep -Eiq 'f128|f256|wide.float|softfloat|E\.4\.1' "$TMP_DIR/compile.log"; then
-    note_pass "madaros_compile_fail_closed_related"
+  if wide_float_refusal "$c_rc" "$TMP_DIR/compile.log" "$OUT"; then
+    if grep -Fq "$REFUSE_SENTINEL" "$TMP_DIR/compile.log"; then
+      note_pass "madaros_compile_fail_closed_sentinel"
+    elif grep -Fq 'error[E249]' "$TMP_DIR/compile.log"; then
+      # Stale souc may still E249 at parse — not a greenwash success.
+      note_pass "madaros_compile_stale_e249_not_greenwash"
+    else
+      note_pass "madaros_compile_fail_closed_related"
+    fi
   elif [[ -f "$OUT" ]] && [[ "$(head -c2 "$OUT" 2>/dev/null)" != '#!' ]]; then
     note_fail "madaros_compile_emitted_elf_greenwash_risk"
     tail -40 "$TMP_DIR/compile.log" >&2 || true
   else
-    # Stale souc may still E249 at parse — not a greenwash success
-    if grep -Fq 'error[E249]' "$TMP_DIR/compile.log"; then
-      note_pass "madaros_compile_stale_e249_not_greenwash"
-    else
-      note_fail "madaros_compile_unexpected"
-      tail -40 "$TMP_DIR/compile.log" >&2 || true
-    fi
+    note_fail "madaros_compile_not_clean_refusal $(sounio_refusal_reason)"
+    tail -40 "$TMP_DIR/compile.log" >&2 || true
   fi
 fi
 

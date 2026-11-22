@@ -1,0 +1,159 @@
+//@ run-pass
+//@ requires: madaros
+//
+// M2a batch parity: llama_forward_batch_paged matches single forwards
+// and the contiguous batch path token-for-token on tiny-random-Llama.
+// Prefill runs token-by-token through the batch path (n=2); decode
+// compares stacked rows against single-slot forwards. CPU always;
+// GPU arm runs when the runtime is ready (lane L4).
+use llm::attn_gpu::llama_sample_greedy
+use llm::llama::{KvCache, kv_new, llama_forward, llama_forward_batch_paged, llama_forward_batch_paged_rt, llama_forward_rt, llama_load, paged_kv_new_batch}
+use hetero::runtime::{Runtime, rt_open}
+use tensor2::cpu_kernel::{CpuBuf, ck_alloc, ck_get, ck_set}
+
+fn cmp_rows(a: &CpuBuf, b: &CpuBuf, n: i64) -> bool with Mut, Panic {
+    var i: i64 = 0
+    while i < n {
+        if ck_get(a, i) != ck_get(b, i) { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn main() with IO, Mut, Panic, Div, Alloc {
+    var ok = true
+    var m = llama_load("tests/fixtures/tiny-random-Llama")
+    if !m.loaded { ok = false }
+    let vocab = m.cfg.vocab
+    var ida = ck_alloc(4)
+    ck_set(&!ida, 0, 1.0)
+    ck_set(&!ida, 1, 150.0)
+    ck_set(&!ida, 2, 2700.0)
+    ck_set(&!ida, 3, 13.0)
+    var idb = ck_alloc(4)
+    ck_set(&!idb, 0, 1.0)
+    ck_set(&!idb, 1, 500.0)
+    ck_set(&!idb, 2, 9000.0)
+    ck_set(&!idb, 3, 27.0)
+    // reference: contiguous singles on slots 0/1
+    var kvs: [KvCache; 4] = [kv_new(&m, 64); 4]
+    kvs[0] = kv_new(&m, 64)
+    kvs[1] = kv_new(&m, 64)
+    kvs[2] = kv_new(&m, 64)
+    kvs[3] = kv_new(&m, 64)
+    let la = llama_forward(&!m, &!kvs[0], &ida, 4)
+    let lb = llama_forward(&!m, &!kvs[1], &idb, 4)
+    // paged: batch path on slots 2/3, prefill token by token
+    var pkk = paged_kv_new_batch(&m, 16)
+    var pkv = paged_kv_new_batch(&m, 16)
+    var slots: [i64; 4] = [0; 4]
+    slots[0] = 2
+    slots[1] = 3
+    var toks: [i64; 4] = [0; 4]
+    var t: i64 = 0
+    var pre2 = ck_alloc(1)
+    while t < 4 {
+        toks[0] = ck_get(&ida, t) as i64
+        toks[1] = ck_get(&idb, t) as i64
+        pre2 = llama_forward_batch_paged(&!m, &!pkk, &!pkv, &slots, &toks, 2)
+        t = t + 1
+    }
+    // last prefill call returns last-position rows: must match singles
+    var pla = ck_alloc(vocab)
+    var plb = ck_alloc(vocab)
+    var pv: i64 = 0
+    while pv < vocab {
+        ck_set(&!pla, pv, ck_get(&pre2, pv))
+        ck_set(&!plb, pv, ck_get(&pre2, vocab + pv))
+        pv = pv + 1
+    }
+    if !cmp_rows(&la, &pla, vocab) { ok = false }
+    if !cmp_rows(&lb, &plb, vocab) { ok = false }
+    var ta = llama_sample_greedy(&la)
+    var tb = llama_sample_greedy(&lb)
+    var step: i64 = 0
+    while step < 6 {
+        var oa = ck_alloc(1)
+        var ob = ck_alloc(1)
+        ck_set(&!oa, 0, ta as f64)
+        ck_set(&!ob, 0, tb as f64)
+        let ra = llama_forward(&!m, &!kvs[0], &oa, 1)
+        let rb = llama_forward(&!m, &!kvs[1], &ob, 1)
+        toks[0] = ta
+        toks[1] = tb
+        let batched = llama_forward_batch_paged(&!m, &!pkk, &!pkv, &slots, &toks, 2)
+        var pa = ck_alloc(vocab)
+        var pb = ck_alloc(vocab)
+        var v: i64 = 0
+        while v < vocab {
+            ck_set(&!pa, v, ck_get(&batched, v))
+            ck_set(&!pb, v, ck_get(&batched, vocab + v))
+            v = v + 1
+        }
+        if !cmp_rows(&ra, &pa, vocab) { ok = false }
+        if !cmp_rows(&rb, &pb, vocab) { ok = false }
+        let na = llama_sample_greedy(&ra)
+        let nb = llama_sample_greedy(&rb)
+        if na != llama_sample_greedy(&pa) { ok = false }
+        if nb != llama_sample_greedy(&pb) { ok = false }
+        ta = na
+        tb = nb
+        step = step + 1
+    }
+    let rt = rt_open("stdlib/hetero/kernels/gemm_tiled_f32.ptx", "gemm_tiled_f32")
+    if rt.ready {
+        var gok = true
+        var gkvs: [KvCache; 4] = [kv_new(&m, 64); 4]
+        gkvs[0] = kv_new(&m, 64)
+        gkvs[1] = kv_new(&m, 64)
+        gkvs[2] = kv_new(&m, 64)
+        gkvs[3] = kv_new(&m, 64)
+        let ga = llama_forward_rt(&!m, &!gkvs[0], &ida, 4, &rt)
+        let gb = llama_forward_rt(&!m, &!gkvs[1], &idb, 4, &rt)
+        var gpk = paged_kv_new_batch(&m, 16)
+        var gpv = paged_kv_new_batch(&m, 16)
+        var gt: i64 = 0
+        while gt < 4 {
+            toks[0] = ck_get(&ida, gt) as i64
+            toks[1] = ck_get(&idb, gt) as i64
+            let _gpre = llama_forward_batch_paged_rt(&!m, &!gpk, &!gpv, &slots, &toks, 2, &rt)
+            gt = gt + 1
+        }
+        var gta = llama_sample_greedy(&ga)
+        var gtb = llama_sample_greedy(&gb)
+        var gstep: i64 = 0
+        while gstep < 3 {
+            var goa = ck_alloc(1)
+            var gob = ck_alloc(1)
+            ck_set(&!goa, 0, gta as f64)
+            ck_set(&!gob, 0, gtb as f64)
+            let gra = llama_forward_rt(&!m, &!gkvs[0], &goa, 1, &rt)
+            let grb = llama_forward_rt(&!m, &!gkvs[1], &gob, 1, &rt)
+            toks[0] = gta
+            toks[1] = gtb
+            let gbatched = llama_forward_batch_paged_rt(&!m, &!gpk, &!gpv, &slots, &toks, 2, &rt)
+            var gpa = ck_alloc(vocab)
+            var gpb = ck_alloc(vocab)
+            var gv: i64 = 0
+            while gv < vocab {
+                ck_set(&!gpa, gv, ck_get(&gbatched, gv))
+                ck_set(&!gpb, gv, ck_get(&gbatched, vocab + gv))
+                gv = gv + 1
+            }
+            if !cmp_rows(&gra, &gpa, vocab) { gok = false }
+            if !cmp_rows(&grb, &gpb, vocab) { gok = false }
+            let gna = llama_sample_greedy(&gra)
+            let gnb = llama_sample_greedy(&grb)
+            if gna != llama_sample_greedy(&gpa) { gok = false }
+            if gnb != llama_sample_greedy(&gpb) { gok = false }
+            gta = gna
+            gtb = gnb
+            gstep = gstep + 1
+        }
+        if !gok { ok = false }
+    }
+    if ok { print("PAGEDBATCH PASS") } else { print("PAGEDBATCH FAIL") }
+    print("\n")
+    if !ok { exit(1) }
+    exit(0)
+}

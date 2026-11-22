@@ -1,0 +1,1 @@
+Add a machine-code Decision 50 exposure kernel over three page-disjoint memory arenas, with kernel-checked majority repair, refusal, single-arena-fault SDC certificate and a physical fault bound under `X86Int` (`formal/Bootstrap/TMRMemExposure.lean`), built with `lake build Bootstrap`.

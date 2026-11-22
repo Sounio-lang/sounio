@@ -1990,7 +1990,7 @@ Follow-up regression pins added after isolating those boundaries:
 - `tests/run-pass/lorenz_i256_fixed_step.sio` is an XFAIL for the full high-scale
   `i256` fixed-point Euler step. Together these pins separate "i256 type and
   smaller source arithmetic work" from "Lorenz-scale source `i256` products and
-  divisions are not production-ready."
+  divisions are not a shipped numerical surface."
 
 Current v43 addition:
 
@@ -6984,4 +6984,4 @@ checkout. Treat it as a precise resumption packet, not as accepted evidence.
 - This does not claim Sounio beats Kissat, CaDiCaL, cvc5, Bitwuzla, or Z3.
 - This does not claim a planar Hadwiger-Nelson chi >= 6 witness.
 - This does not claim f64 Lorenz simulation is rigorous.
-- This does not claim i256 is production-ready in the Sounio user language.
+- This does not claim i256 is ready for production use in the Sounio user language.

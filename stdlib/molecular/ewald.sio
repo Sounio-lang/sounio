@@ -1,0 +1,241 @@
+// stdlib/molecular/ewald.sio -- Ewald summation (tinfoil boundary) for point
+// charges in a cubic periodic cell: the potential of a fixed charge set at a
+// point, and the electrostatic energy of a set of rigid neutral molecules.
+//
+// WHY THIS EXISTS. A guest with charges in a host lattice (H2 with the Alavi
+// quadrupole in a clathrate) needs the electrostatic potential of the periodic
+// host. A cut-off Coulomb sum is not that potential: sum_j q_j / r converges
+// only conditionally, and the answer depends on the shape of the summed
+// region. Ewald splits it into a short-ranged real-space sum
+// sum_j q_j erfc(alpha r) / r and a smooth reciprocal-space sum, both
+// absolutely convergent; their sum does not depend on alpha.
+//
+// CONVENTIONS. Cubic cell of edge l, volume v = l^3. Tinfoil (conducting)
+// boundary: no surface term. The fixed charge set must be neutral (there is no
+// k = 0 term). Real space: the 27 cells around the home cell, cut at rc, so rc
+// must be below l minus the largest distance of an evaluation point outside
+// [0, l); points are wrapped into the home cell first. Reciprocal space: the
+// half-space k = 2 pi (a, b, c) / l with (a > 0) or (a = 0, b > 0) or
+// (a = b = 0, c > 0), |k| <= kc, each counted twice.
+//   phi(r) = sum_j q_j erfc(alpha |r - r_j|) / |r - r_j|           (images)
+//          + sum_{k, half} (8 pi / v) exp(-k^2 / 4 alpha^2) / k^2
+//                         * (S_c(k) cos(k.r) + S_s(k) sin(k.r))
+//   with S_c = sum_j q_j cos(k.r_j), S_s = sum_j q_j sin(k.r_j).
+// Units: e and A; multiply by ew_coulomb_kj() for kJ/mol or ew_coulomb_k()
+// for kelvin.
+//
+// ACCURACY. erfc is special::erf (1-2 ulp). With alpha rc = 5.6 and
+// kc = 2 alpha 5.6 both truncations are below 3e-14 relative.
+//
+// WHAT IS CHECKED, AND AGAINST WHAT: tests/stdlib/molecular/test_sii_charges_ewald.sio
+// against stdlib/molecular/oracles/sii_ewald_oracle.cpp, which also checks the
+// Ewald potential against the direct sum over cubic image shells (the limit it
+// must reach for a neutral guest) and its independence of alpha.
+
+module molecular::ewald
+
+use special::erf::{erfc}
+
+pub fn ew_coulomb_kj() -> f64 { 1389.35457644382 }
+pub fn ew_coulomb_k() -> f64 { 167101.0029358 }
+pub fn ew_k_max() -> i64 { 8192 }
+pub fn ew_site_max() -> i64 { 4096 }
+
+var EW_L: f64 = 0.0
+var EW_ALPHA: f64 = 0.0
+var EW_RC: f64 = 0.0
+var EW_NK: i64 = 0
+var EW_KX: [f64; 8192] = [0.0; 8192]
+var EW_KY: [f64; 8192] = [0.0; 8192]
+var EW_KZ: [f64; 8192] = [0.0; 8192]
+var EW_KF: [f64; 8192] = [0.0; 8192]
+var EW_SC: [f64; 8192] = [0.0; 8192]
+var EW_SS: [f64; 8192] = [0.0; 8192]
+
+fn ew_pi() -> f64 { 3.14159265358979323846 }
+
+fn ew_wrap(x: f64, l: f64) -> f64 {
+    var y = x
+    while y < 0.0 { y = y + l }
+    while y >= l { y = y - l }
+    y
+}
+
+// Sets up the cell, the splitting and the reciprocal half-space. Returns the
+// number of k-vectors kept, or -1 past capacity.
+pub fn ew_setup(l: f64, alpha: f64, rc: f64, kc: f64) -> i64 with Mut, Div {
+    EW_L = l
+    EW_ALPHA = alpha
+    EW_RC = rc
+    EW_NK = 0
+    let tp = 2.0 * ew_pi() / l
+    var m: i64 = 0
+    while (m as f64) * tp <= kc { m = m + 1 }
+    let pref = 8.0 * ew_pi() / (l * l * l)
+    var a: i64 = 0
+    while a <= m {
+        var b = 0 - m
+        while b <= m {
+            var c = 0 - m
+            while c <= m {
+                let half = a > 0 || (a == 0 && b > 0) || (a == 0 && b == 0 && c > 0)
+                if half {
+                    let kx = tp * (a as f64)
+                    let ky = tp * (b as f64)
+                    let kz = tp * (c as f64)
+                    let k2 = kx * kx + ky * ky + kz * kz
+                    if k2 <= kc * kc {
+                        if EW_NK >= ew_k_max() { return 0 - 1 }
+                        EW_KX[EW_NK as usize] = kx
+                        EW_KY[EW_NK as usize] = ky
+                        EW_KZ[EW_NK as usize] = kz
+                        EW_KF[EW_NK as usize] = pref * exp(0.0 - k2 / (4.0 * alpha * alpha)) / k2
+                        EW_NK = EW_NK + 1
+                    }
+                }
+                c = c + 1
+            }
+            b = b + 1
+        }
+        a = a + 1
+    }
+    EW_NK
+}
+
+// Structure factor of the fixed charges (positions Cartesian, any image).
+pub fn ew_fixed_charges(pos: &[f64; 12288], q: &[f64; 4096], n: i64) with Mut, Div {
+    var k: i64 = 0
+    while k < EW_NK {
+        var sc = 0.0
+        var ss = 0.0
+        var j: i64 = 0
+        while j < n {
+            let ph = EW_KX[k as usize] * pos[(3 * j) as usize] + EW_KY[k as usize] * pos[(3 * j + 1) as usize]
+                + EW_KZ[k as usize] * pos[(3 * j + 2) as usize]
+            sc = sc + q[j as usize] * cos(ph)
+            ss = ss + q[j as usize] * sin(ph)
+            j = j + 1
+        }
+        EW_SC[k as usize] = sc
+        EW_SS[k as usize] = ss
+        k = k + 1
+    }
+}
+
+// Ewald potential (e / A) of the fixed charges at the point (x, y, z).
+// pos must hold the home-cell positions the structure factor was built from.
+pub fn ew_phi(pos: &[f64; 12288], q: &[f64; 4096], n: i64, x: f64, y: f64, z: f64) -> f64 with Mut, Div, Panic {
+    let l = EW_L
+    let px = ew_wrap(x, l)
+    let py = ew_wrap(y, l)
+    let pz = ew_wrap(z, l)
+    let rc2 = EW_RC * EW_RC
+    var real = 0.0
+    var j: i64 = 0
+    while j < n {
+        let dx0 = px - ew_wrap(pos[(3 * j) as usize], l)
+        let dy0 = py - ew_wrap(pos[(3 * j + 1) as usize], l)
+        let dz0 = pz - ew_wrap(pos[(3 * j + 2) as usize], l)
+        var a: i64 = 0 - 1
+        while a <= 1 {
+            let dx = dx0 - (a as f64) * l
+            var b: i64 = 0 - 1
+            while b <= 1 {
+                let dy = dy0 - (b as f64) * l
+                var c: i64 = 0 - 1
+                while c <= 1 {
+                    let dz = dz0 - (c as f64) * l
+                    let r2 = dx * dx + dy * dy + dz * dz
+                    if r2 < rc2 {
+                        let r = sqrt(r2)
+                        real = real + q[j as usize] * erfc(EW_ALPHA * r) / r
+                    }
+                    c = c + 1
+                }
+                b = b + 1
+            }
+            a = a + 1
+        }
+        j = j + 1
+    }
+    var recip = 0.0
+    var k: i64 = 0
+    while k < EW_NK {
+        let ph = EW_KX[k as usize] * px + EW_KY[k as usize] * py + EW_KZ[k as usize] * pz
+        recip = recip + EW_KF[k as usize] * (EW_SC[k as usize] * cos(ph) + EW_SS[k as usize] * sin(ph))
+        k = k + 1
+    }
+    real + recip
+}
+
+// Electrostatic energy (e^2 / A) of n charged sites grouped into rigid
+// molecules (mol[i] = molecule index), with periodic images: real space over
+// the 27 cells (pairs of one molecule in the home cell excluded), reciprocal
+// space, the self term, and the removal of the intramolecular reciprocal part
+// sum_{i<j in one molecule} q_i q_j erf(alpha r_ij) / r_ij.
+pub fn ew_molecules_energy(pos: &[f64; 12288], q: &[f64; 4096], mol: &[i64; 4096], n: i64) -> f64 with Mut, Div, Panic {
+    let l = EW_L
+    let rc2 = EW_RC * EW_RC
+    var real = 0.0
+    var intra = 0.0
+    var i: i64 = 0
+    while i < n {
+        var j: i64 = 0
+        while j < n {
+            let dx0 = pos[(3 * i) as usize] - pos[(3 * j) as usize]
+            let dy0 = pos[(3 * i + 1) as usize] - pos[(3 * j + 1) as usize]
+            let dz0 = pos[(3 * i + 2) as usize] - pos[(3 * j + 2) as usize]
+            var a: i64 = 0 - 1
+            while a <= 1 {
+                var b: i64 = 0 - 1
+                while b <= 1 {
+                    var c: i64 = 0 - 1
+                    while c <= 1 {
+                        let home = a == 0 && b == 0 && c == 0
+                        if !(home && i == j) {
+                            let dx = dx0 - (a as f64) * l
+                            let dy = dy0 - (b as f64) * l
+                            let dz = dz0 - (c as f64) * l
+                            let r2 = dx * dx + dy * dy + dz * dz
+                            let r = sqrt(r2)
+                            if home && mol[i as usize] == mol[j as usize] {
+                                intra = intra + 0.5 * q[i as usize] * q[j as usize] * (1.0 - erfc(EW_ALPHA * r)) / r
+                            } else if r2 < rc2 {
+                                real = real + 0.5 * q[i as usize] * q[j as usize] * erfc(EW_ALPHA * r) / r
+                            }
+                        }
+                        c = c + 1
+                    }
+                    b = b + 1
+                }
+                a = a + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    var recip = 0.0
+    var k: i64 = 0
+    while k < EW_NK {
+        var sc = 0.0
+        var ss = 0.0
+        var s: i64 = 0
+        while s < n {
+            let ph = EW_KX[k as usize] * pos[(3 * s) as usize] + EW_KY[k as usize] * pos[(3 * s + 1) as usize]
+                + EW_KZ[k as usize] * pos[(3 * s + 2) as usize]
+            sc = sc + q[s as usize] * cos(ph)
+            ss = ss + q[s as usize] * sin(ph)
+            s = s + 1
+        }
+        recip = recip + 0.5 * EW_KF[k as usize] * (sc * sc + ss * ss)
+        k = k + 1
+    }
+    var selfe = 0.0
+    var t: i64 = 0
+    while t < n {
+        selfe = selfe + q[t as usize] * q[t as usize]
+        t = t + 1
+    }
+    selfe = 0.0 - EW_ALPHA / sqrt(ew_pi()) * selfe
+    real + recip + selfe - intra
+}

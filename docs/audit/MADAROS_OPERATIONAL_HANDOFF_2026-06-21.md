@@ -11,9 +11,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-
 
 ## Scope
 
-This is the current operational handoff for making Madaros production-ready
-without editing the active Claude compiler lane. It turns the audit state into
-an executable queue.
+This is the 2026-06-21 operational handoff for the Madaros gate, without editing the active Claude compiler lane. It turns the audit state into an executable queue. The public status remains: research language (pre-1.0). APIs may change; not recommended for production use.
 
 No compiler files were edited to produce this note.
 
@@ -175,8 +173,7 @@ Expected today:
 
 ## Close Criteria
 
-Madaros can move from handoff to production-ready only after all of these are
-true:
+This handoff is closed only after all of these are true:
 
 1. `global_read_exit4` exits `4`.
 2. `global_store_exit7` exits `7`.
