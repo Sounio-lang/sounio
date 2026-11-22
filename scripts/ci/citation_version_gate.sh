@@ -33,6 +33,12 @@ citation_version() {
   sed -n 's/^version: //p' CITATION.cff | head -n 1
 }
 
+# preferred-citation is what GitHub's "Cite this repository" and most CFF
+# consumers render, so at a release tag its version must name the release too.
+preferred_citation_version() {
+  sed -n '/^preferred-citation:/,/^[^ ]/s/^  version: //p' CITATION.cff | head -n 1
+}
+
 TOOLCHAIN="$(toolchain_version)"
 CITATION="$(citation_version)"
 [[ -n "$TOOLCHAIN" ]] || fail "no version section found in CHANGELOG.md"
@@ -59,4 +65,9 @@ TAG_VERSION="${TAG#v}"
   || fail "tag $TAG names $TAG_VERSION but the toolchain reports $TOOLCHAIN"
 [[ "$TAG_VERSION" == "$CITATION" ]] \
   || fail "tag $TAG names $TAG_VERSION but CITATION.cff records $CITATION"
-echo "[citation-version] PASS: tag=$TAG toolchain=$TOOLCHAIN citation=$CITATION"
+PREFERRED="$(preferred_citation_version)"
+if grep -q '^preferred-citation:' CITATION.cff; then
+  [[ "$TAG_VERSION" == "$PREFERRED" ]] \
+    || fail "tag $TAG names $TAG_VERSION but CITATION.cff preferred-citation records ${PREFERRED:-no version}"
+fi
+echo "[citation-version] PASS: tag=$TAG toolchain=$TOOLCHAIN citation=$CITATION preferred=${PREFERRED:-none}"
