@@ -118,10 +118,10 @@ same fragment loads, squared operands materialised at load.
 This session cannot reach the RTX 8000 (no host IP/creds, no local `ptxas`). So the
 **user is the verification loop** and the order is:
 
-1. **(this doc + reference harness)** State the derivable law; provide a
-   fragment-correct-by-construction validation harness
-   `scripts/gpu/epistemic_wmma_sm75_reference.cu` (CUDA C++ `nvcuda::wmma`, so nvcc
-   encodes the sm_75 fragment layout — no hand-rolled register vectors to get wrong).
+1. **(this doc + reference harness)** State the derivable law; provide
+   `scripts/gpu/epistemic_wmma_sm75_reference.cu`, an experimental reference kernel
+   (CUDA C++ `nvcuda::wmma`, so nvcc encodes the sm_75 fragment layout — no hand-rolled
+   register vectors to get wrong).
    It implements the §2 variance-space algorithm (3 wmma: value + 2 variance) and
    checks GPU output against a CPU GUM oracle.
 2. **(user, on the RTX 8000)**

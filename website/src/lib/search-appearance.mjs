@@ -11,9 +11,9 @@ import { UNCERTAINTY_EN } from './uncertainty-page.mjs';
  */
 export const ENGLISH_SEARCH = {
   '/': {
-    title: 'Sounio language: units, effects, and uncertainty types',
+    title: 'Sounio, a programming language: units, uncertainty',
     description:
-      'Sounio is a self-hosted systems language for uncertainty, physical units, and declared effects. Follow a program back to the compiler sources.',
+      'Metres added to seconds is refused before the program runs, and a Knowledge value carries a standard uncertainty. Sounio 3.0 (pre-release).',
   },
   '/learn/': {
     title: 'Sounio guides: effect system, units, and uncertainty',
@@ -23,7 +23,7 @@ export const ENGLISH_SEARCH = {
   '/learn/getting-started/': {
     title: 'Sounio getting started: Linux prebuilt or macOS build',
     description:
-      'Clone Sounio, then check and run a .sio program. Linux x86-64 uses the committed prebuilt; macOS ARM64 builds the compiler from source.',
+      'Open the Sounio demo Codespace, or clone and run hello.sio. Linux x86-64 uses the committed prebuilt; macOS ARM64 builds from source.',
   },
   '/learn/epistemic/': {
     title: 'Uncertainty propagation types in the Sounio language',
@@ -33,7 +33,7 @@ export const ENGLISH_SEARCH = {
   '/learn/compiler/self-hosted/': {
     title: 'Sounio self-hosted compiler: x86-64 ELF without LLVM',
     description:
-      "Sounio's compiler is written in Sounio: it type-checks, optimizes and emits static Linux x86-64 ELF binaries directly, with no LLVM or Cranelift.",
+      'The Sounio compiler runs 12 named -O passes and emits a Linux x86-64 ELF, static unless external relocations exist, with no LLVM and no Cranelift.',
   },
   '/about/roadmap/': {
     title: 'Sounio roadmap: language, runtime, and what is open',
@@ -45,16 +45,28 @@ export const ENGLISH_SEARCH = {
     description:
       'Effect system in Sounio: side effects sit in the function signature. Built-in names form a closed checked list. A caller that omits one is rejected.',
   },
+  '/learn/compiler/effect-system/': {
+    title: 'Sounio effect system: how the effect checker works',
+    description:
+      'How the Sounio compiler checks the effect system: source map of self-hosted/check/effects.sio and the effects subsystem, and what handlers do today.',
+    // last_validated on en/compiler/effect-system.mdx. Not a release version.
+    dateModified: '2026-10-29',
+  },
   '/learn/epistemic/uncertainty/': {
     title: UNCERTAINTY_EN.documentTitle,
     description: UNCERTAINTY_EN.description,
+  },
+  '/learn/examples/': {
+    title: 'Sounio examples: uncertainty and Knowledge types',
+    description:
+      'Sounio 3.0 (pre-release) examples the compiler checks: a Knowledge COVID kernel, vancomycin uncertainty, and a compile-fail that rejects low confidence.',
   },
 };
 
 /** Approved S1 copy for the English self-hosted compiler page. */
 export const SELF_HOSTED_PAGE = {
   h1: 'Sounio self-hosted compiler',
-  lede: 'The Sounio compiler is written in Sounio (.sio). It parses, type-checks, lowers to an IR, runs its optimization passes and emits a static Linux x86-64 ELF binary directly, with no LLVM or Cranelift on that path. Linux x86-64 is the default shipped target.',
+  lede: 'The Sounio compiler is written in Sounio (.sio). It parses, type-checks, lowers to IR, runs the 12 named passes of the -O cleanup listed on this page, and emits a Linux x86-64 ELF that is static unless the program has external relocations, with no LLVM and no Cranelift on that path. Linux x86-64 is the default shipped target.',
   crumbs: ['Learn', 'Compiler', 'Self-hosted compiler'],
   author: {
     '@type': 'Person',
@@ -96,16 +108,44 @@ export const EFFECTS_PAGE = {
   dateModified: '2026-11-06',
 };
 
+/**
+ * Spanish learn hub. The nav label "Aprender — Sounio" was a second result
+ * for the query "sounio", next to the homepage. The visible H1 stays the
+ * journey line; only the document title and meta description change.
+ */
+export const SPANISH_SEARCH = {
+  '/learn/': {
+    title: 'Guías de Sounio: efectos, unidades e incertidumbre',
+    description:
+      'Guías del lenguaje Sounio: unidades de medida, el sistema de efectos, tipos de refinamiento, propagación de incertidumbre y el compilador autoalojado.',
+  },
+};
+
 export function englishSearchFor(barePath, locale) {
   if (locale !== 'en') return undefined;
   return ENGLISH_SEARCH[barePath];
 }
 
+export function searchCopyFor(barePath, locale) {
+  if (locale === 'en') return ENGLISH_SEARCH[barePath];
+  if (locale === 'es') return SPANISH_SEARCH[barePath];
+  return undefined;
+}
+
 const COMPILER_VERSION = /v0\.80|v0\.99|v0\.100|v1\.0/;
 
-for (const [page, copy] of Object.entries(ENGLISH_SEARCH)) {
-  if (copy.title.length < 50 || copy.title.length > 60) {
-    throw new Error(`${page} title length ${copy.title.length} is outside 50–60`);
+const SEARCH_COPY = [
+  ...Object.entries(ENGLISH_SEARCH),
+  ...Object.entries(SPANISH_SEARCH).map(([pathName, copy]) => [`es:${pathName}`, copy]),
+];
+
+for (const [page, copy] of SEARCH_COPY) {
+  // /learn/examples/ is 48: the title has to keep the word "examples"
+  // and still name uncertainty and Knowledge. The version phrase is
+  // in the meta description. Every other page, including Spanish, stays in 50–60.
+  const titleMin = page === '/learn/examples/' ? 48 : 50;
+  if (copy.title.length < titleMin || copy.title.length > 60) {
+    throw new Error(`${page} title length ${copy.title.length} is outside ${titleMin}–60`);
   }
   if (copy.description.length < 120 || copy.description.length > 155) {
     throw new Error(`${page} description length ${copy.description.length} is outside 120–155`);

@@ -1,0 +1,1 @@
+CI: the merge queue runs the Madaros f64 lowering job on GitHub-hosted runners instead of waiting for the DARWIN pool, where it sat behind main's 1-3 h fixed-point runs (measured: 232 min of waiting for 14 min of work on #3593's queue run).

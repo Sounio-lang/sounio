@@ -21,7 +21,7 @@ mkdir -p "$OUT"
 probe=$(mktemp -d "$OUT/probe.XXXXXX")
 ln -s "$ROOT/self-hosted/ir" "$probe/ir"
 cp scripts/ci/fixtures/sco_epistemic_metadata.sio "$probe/main.sio"
-printf 'FIRST_VALID_LARGE_UNC_PASS\nMISSING_UNC_REFUSED_PASS\nREASSOC_UNC_PROPAGATED_PASS\nSUM_OVERFLOW_REFUSED_PASS\nEXACT_REASSOCIATED_SHAPE_UNC_PASS\nFSUB_REASSOCIATION_REFUSED_PASS\nNONADDITIVE_RSS_REFUSED_PASS\n' > "$OUT/expected.stdout"
+printf 'FIRST_VALID_LARGE_UNC_PASS\nMISSING_UNC_REFUSED_PASS\nREASSOC_UNC_PROPAGATED_PASS\nSUM_OVERFLOW_REFUSED_PASS\nBRACKETING_VARIANCE_INVARIANT_PASS\nSHARED_OBSERVATION_REFUSED_PASS\nEXACT_REASSOCIATED_SHAPE_UNC_PASS\nFSUB_REASSOCIATION_REFUSED_PASS\nNONADDITIVE_RSS_REFUSED_PASS\n' > "$OUT/expected.stdout"
 printf 'mode\tcompile_rc\trun_rc\tstdout_cmp_rc\n' > "$OUT/status.tsv"
 for mode in default optimized; do
  flags=(); [[ "$mode" == default ]] || flags=(-O)

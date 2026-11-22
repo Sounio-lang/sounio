@@ -41,29 +41,62 @@ use math::pure::{exp}
 
 // ─── Olanzapine PBPK28 profile (scenario-owned) ────────────────────────────
 // Kept here — not in core/pbpk28_params.sio — so this lane never churns the
-// website-pinned domain source. Standard 70 kg physiology. Kp = olanzapine
-// tissue values (drug file, Rodgers-Rowland for a basic pKa 7.48 / LogP 3.0
-// molecule, Vd ~700 L); PS assumed (flow-limited pattern, SIO-550);
-// CL = 25 L/h (Bergstrom 2006, CYP1A2 primary).
+// website-pinned domain source. Standard 70 kg physiology. PS assumed
+// (flow-limited pattern, SIO-550).
+//
+// No intravenous study of olanzapine in humans exists, so every published
+// clearance and volume is apparent (CL/F, V/F). Inputs: the population model
+// of Sun et al. 2021 (J Clin Pharmacol, doi 10.1002/jcph.1911; 601 subjects,
+// reference: 70 kg non-smoking man), CL/F = 15.5 L/h (RSE 2.85%), Vc/F +
+// Vp/F = 656 + 225 = 881 L, ka = 0.861 /h, lag 0.782 h; and F = 0.60, read
+// from the Zyprexa label ("approximately 40% of the dose metabolized before
+// reaching the systemic circulation"). Hence CL = 9.3 L/h and V = 528.6 L.
+// The tissue Kp are the drug file's pattern times one common factor,
+// 0.791439, so that the kinetic volume
+//   V_ss = v_ref[0] + sum v_ref[i]*(vasc_frac[i] + (1 - vasc_frac[i])*kp[i])
+// is 528.6 L (665.6 L unscaled).
+//
+// Until 2026-11-15 the set used cl_central = 25 L/h, the label's mean
+// apparent clearance, together with F = 0.60, so the bioavailability was
+// applied twice: for 10 mg the AUC was 238 ng.h/mL against 632.6 +/- 197.2
+// in 48 healthy non-smokers (Sun et al. 2019, doi 10.1002/cpdd.601;
+// tests/run-pass/pbpk28_olanzapine_single_dose.sio).
 pub fn olz_pbpk28_params() -> PBPKParams28 {
     PBPKParams28 {
         v_ref:     [5.0, 1.8, 0.31, 1.45, 0.33, 1.1, 28.0, 20.0, 1.2, 3.6, 6.6, 0.18, 0.09, 3.7],
         vasc_frac: [1.000, 0.210, 0.160, 0.037, 0.262, 0.262, 0.040, 0.050, 0.024, 0.019, 0.041, 0.282, 0.180, 0.050],
-        kp:        [1.00, 12.0, 5.0, 10.0, 4.0, 8.0, 15.0, 8.0, 5.0, 5.0, 4.0, 5.0, 3.5, 3.5],
+        kp:        [1.00, 9.4973, 3.9572, 7.9144, 3.1658, 6.3315, 11.8716, 6.3315, 3.9572, 3.9572, 3.1658, 3.9572, 2.7700, 2.7700],
         ps:        [0.0, 1800.0, 1110.0, 88.0, 160.0, 10500.0, 336.0, 40.0, 660.0, 126.0, 51.0, 150.0, 96.0, 78.0],
         q:         [350.0, 90.0, 74.0, 44.0, 16.0, 350.0, 42.0, 10.0, 55.0, 21.0, 17.0, 10.0, 8.0, 13.0],
-        cl_central: 25.0,
+        cl_central: 9.3,
+    }
+}
+// --- Smoker variant (CYP1A2 induction) ---
+// Full constant literal, NOT copy-then-reassign: see the value-move note on
+// olanzapine_pbpk_params_smoker in drugs/olanzapine.sio. All non-CL fields
+// mirror olz_pbpk28_params(); CL is 9.3 x 1.40 = 13.02 L/h. The Zyprexa
+// label gives a clearance about 40% higher in smokers; population models
+// give factors of 1.23 to 1.55. The earlier factor of 2.0 had no source.
+pub fn olz_pbpk28_params_smoker() -> PBPKParams28 {
+    PBPKParams28 {
+        v_ref:     [5.0, 1.8, 0.31, 1.45, 0.33, 1.1, 28.0, 20.0, 1.2, 3.6, 6.6, 0.18, 0.09, 3.7],
+        vasc_frac: [1.000, 0.210, 0.160, 0.037, 0.262, 0.262, 0.040, 0.050, 0.024, 0.019, 0.041, 0.282, 0.180, 0.050],
+        kp:        [1.00, 9.4973, 3.9572, 7.9144, 3.1658, 6.3315, 11.8716, 6.3315, 3.9572, 3.9572, 3.1658, 3.9572, 2.7700, 2.7700],
+        ps:        [0.0, 1800.0, 1110.0, 88.0, 160.0, 10500.0, 336.0, 40.0, 660.0, 126.0, 51.0, 150.0, 96.0, 78.0],
+        q:         [350.0, 90.0, 74.0, 44.0, 16.0, 350.0, 42.0, 10.0, 55.0, 21.0, 17.0, 10.0, 8.0, 13.0],
+        cl_central: 13.02,
     }
 }
 
-// ─── Oral IR input with dissolution lag ─────────────────────────────────────
+// ─── Oral IR input with absorption lag ──────────────────────────────────────
 // rate(t) = 0 for t < tlag, else F·D·ka·exp(−ka·(t−tlag)), mg/h. D = 10 mg
-// single dose (Zyprexa label 5–10 mg start; Bergstrom 2006 design);
-// ka = 0.6/h, F = 0.60, tlag = 0.25 h (tablet dissolution).
+// single dose. ka = 0.861 /h and tlag = 0.782 h (Sun et al. 2021), F = 0.60
+// (label). Scenario-owned: drugs/olanzapine.sio keeps its own absorption
+// parameters for the PBPK14 model.
 pub fn olz_dose_mg() -> f64 { return olanzapine_single_dose_mg() }
-pub fn olz_ka() -> f64      { return olanzapine_ka_per_h() }
-pub fn olz_f() -> f64       { return olanzapine_f_oral_val() }
-pub fn olz_tlag() -> f64    { return olanzapine_tlag_h() }
+pub fn olz_ka() -> f64      { return 0.861 }
+pub fn olz_f() -> f64       { return 0.60 }
+pub fn olz_tlag() -> f64    { return 0.782 }
 
 pub fn olz_release_rate_at(t: f64) -> f64 with Mut, Div {
     var te = t - olz_tlag()
