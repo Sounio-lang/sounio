@@ -1,0 +1,100 @@
+// stdlib/darwin_pbpk/scenarios/everolimus_des.sio — scenario library (no main)
+//
+// End-to-end dissertation scenario for everolimus (SIO-524):
+//
+//   - XIENCE V drug-eluting stent (100 ug/cm^2, 0.088 mg on 3.0 x 18 mm)
+//     → Higuchi diffusion release, KH fit to 80% at 30 days
+//       → blood input (operator-split source term)
+//         → 14-compartment PBPK28 (tsit5_pbpk28, fully-coupled CN)
+//
+// Mold: scenarios/des_sirolimus.sio (same mechanism, first-gen DES) and
+// scenarios/tirzepatide_sc_depot.sio (scenario-owned profile pattern).
+// Unlike des_sirolimus (PBPK14 + GUM showcase), this scenario runs the
+// PBPK28 CN transport so the parity gate covers it.
+//
+// Formulation (Xience V, Abbott; SPIRIT FIRST; TAXCO review):
+//   durable fluoropolymer, no topcoat, 100 ug/cm^2, ~80% eluted by 30 d,
+//   remainder by ~4 months. Canonical load 0.088 mg (see drugs/everolimus).
+// Release law: Q(t) = KH*sqrt(t), KH = 0.00262 mg/h^1/2 (80% of 0.088 mg
+// at t = 720 h). Singular at t = 0; both engines clip t < 0.1 h, following
+// the website/src/lib/pbpk28_core.mjs releaseRateAt convention.
+//
+// Systemic sink: CL = 8.8 L/h (transplant popPK, FDA label). Kp/PS mirror
+// the rapamycin vector (same mTOR class, MW 958 vs 914 Da) — assumed,
+// pending SIO-550. sqrt is Newton (des_sirolimus pattern); release input
+// is smooth, so last-ulp Newton-vs-hardware differences cannot move RMSE.
+//
+// Declared limitation: arterial-wall concentration (therapeutic site) is
+// NOT modeled. Local fate + neointimal PD are SIO-524 follow-up.
+//
+// The parity ref tests/run-pass/dissertation_pbpk28_parity_ref_everolimus.sio
+// drives this scenario itself, so a scenario change not mirrored in Node
+// breaks the gate.
+//
+// This file is a library with no `main`; it is checked, not run.
+
+use darwin_pbpk::core::pbpk28_params::*
+use darwin_pbpk::tsit5_pbpk28::*
+use darwin_pbpk::drugs::everolimus::*
+
+// ─── Newton sqrt (des_sirolimus pattern) ────────────────────────────────────
+fn evr_sqrt(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 15 {
+        y = (y + x / y) * 0.5
+        i = i + 1
+    }
+    return y
+}
+
+// ─── Everolimus PBPK28 profile (scenario-owned) ─────────────────────────────
+// Kept here — not in core/pbpk28_params.sio — so this lane never churns the
+// website-pinned domain source. Standard 70 kg physiology (same vectors as
+// every profile); Kp/PS = rapamycin analog (assumed, SIO-550); CL 8.8 L/h
+// (transplant popPK, FDA Zortress label 2024).
+pub fn evr_pbpk28_params() -> PBPKParams28 {
+    PBPKParams28 {
+        v_ref:     [5.0, 1.8, 0.31, 1.45, 0.33, 1.1, 28.0, 20.0, 1.2, 3.6, 6.6, 0.18, 0.09, 3.7],
+        vasc_frac: [1.000, 0.210, 0.160, 0.037, 0.262, 0.262, 0.040, 0.050, 0.024, 0.019, 0.041, 0.282, 0.180, 0.050],
+        kp:        [1.00, 5.40, 4.20, 0.10, 2.30, 3.10, 0.50, 0.30, 2.60, 0.80, 0.20, 2.10, 1.80, 0.40],
+        ps:        [0.0, 1800.0, 1110.0, 88.0, 160.0, 10500.0, 336.0, 40.0, 660.0, 126.0, 51.0, 150.0, 96.0, 78.0],
+        q:         [350.0, 90.0, 74.0, 44.0, 16.0, 350.0, 42.0, 10.0, 55.0, 21.0, 17.0, 10.0, 8.0, 13.0],
+        cl_central: 8.8,
+    }
+}
+
+// ─── Higuchi stent release ──────────────────────────────────────────────────
+// rate(t) = KH / (2*sqrt(max(t, 0.1))), mg/h. Cumulative over [0, 720 h]
+// is 80% of the 0.088 mg device load by construction of KH.
+pub fn evr_dose_mg() -> f64 { return everolimus_device_dose_mg() }
+pub fn evr_kh() -> f64       { return everolimus_kh_mg_per_sqrt_h() }
+
+pub fn evr_release_rate_at(t: f64) -> f64 with Mut, Div {
+    var tc = t
+    if tc < 0.1 { tc = 0.1 }
+    return evr_kh() / (2.0 * evr_sqrt(tc))
+}
+
+// ─── Composite scenario state ───────────────────────────────────────────────
+pub struct EverolimusScenario {
+    pub pbpk: PBPKState28,
+}
+
+// Initial state: zero PBPK (drug enters via stent release).
+pub fn evr_scenario_init() -> EverolimusScenario {
+    EverolimusScenario {
+        pbpk: pbpk28_state_zero(),
+    }
+}
+
+// One fully-coupled CN step at midpoint release rate.
+pub fn evr_step(scen: EverolimusScenario, p: PBPKParams28,
+                t_start: f64, dt: f64)
+    -> EverolimusScenario with Mut, Div
+{
+    let rel_mid = evr_release_rate_at(t_start + 0.5 * dt)
+    var out_pbpk = pbpk28_full_cn_step(scen.pbpk, p, rel_mid, dt)
+    return EverolimusScenario { pbpk: out_pbpk }
+}

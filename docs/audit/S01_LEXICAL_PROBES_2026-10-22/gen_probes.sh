@@ -46,6 +46,7 @@ w int_oct        "${M}    println(0o17)\n${E}"
 w int_leading0   "${M}    println(017)\n${E}"
 w int_suffix_u8  "${M}    let x = 5u8\n    println(x)\n${E}"
 w int_suffix_i32 "${M}    let x = 7i32\n    println(x)\n${E}"
+w int_suffix_u8_over "${M}    let x = 300u8\n    println(x)\n${E}"
 w int_suffix_bad "${M}    let x = 7q\n    println(x)\n${E}"
 # --- float literals
 w flt_basic      "${M}    print_f64(1.5)\n    println(\"\")\n    print_f64(1.5e3)\n    println(\"\")\n    print_f64(2E-2)\n    println(\"\")\n${E}"

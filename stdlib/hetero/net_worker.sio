@@ -1,0 +1,182 @@
+// stdlib::hetero::net_worker - TCP transport for multi-node workers.
+//
+// stdlib/net is types-only (no syscalls), so - exactly like cuda_exec -
+// the socket API comes from libc via dlopen/dlsym call-through: socket,
+// bind, listen, accept, connect, send, recv, close. No link-time
+// dependency; a machine without libc sockets gets ok=false.
+//
+// Protocol v1 (GEMM row-shard service), little-endian i64 header:
+//   coordinator -> worker: [magic=77, rows, n, k]
+//                          A_shard f64[rows*k], B f64[k*n]
+//   worker -> coordinator: C_shard f64[rows*n]   (C = A_shard * B)
+// The worker computes with tensor2::cpu_kernel (or, on a GPU node, the
+// same header can front rt_gemm_split - protocol is compute-agnostic).
+// One request per connection; the coordinator owns the planner decision
+// (which rows go where), workers are stateless executors.
+
+extern "C" {
+    fn dlopen(filename: *mut u8, flags: i32) -> *mut u8
+    fn dlsym(handle: *mut u8, symbol: *mut u8) -> *mut u8
+}
+
+use hetero::probe_cuda::{pb_cstr}
+use tensor2::cpu_kernel::{CpuBuf, ck_alloc, ck_gemm_rows}
+
+pub struct NwLib {
+    pub libc: *mut u8,
+    pub ok: bool,
+}
+
+pub fn nw_open() -> NwLib with Alloc, Mut, Panic {
+    var lib = NwLib { libc: 0 as *mut u8, ok: false }
+    let h = dlopen(pb_cstr("libc.so.6"), 1)
+    if (h as i64) == 0 { return lib }
+    lib.libc = h
+    lib.ok = true
+    lib
+}
+
+fn nw_sym(lib: &NwLib, name: string) -> *mut u8 with Alloc, Mut {
+    dlsym(lib.libc, pb_cstr(name))
+}
+
+// Build a zeroed sockaddr_in (16 bytes) for ip octets a.b.c.d and port.
+fn nw_sockaddr(a: i64, b: i64, c: i64, d: i64, port: i64) -> *mut u8 with Alloc, Mut {
+    let buf = heap_alloc(16)
+    write_i64(buf as *mut i64, 0, 0)
+    write_i64(buf as *mut i64, 1, 0)
+    let port_be = ((port & 255) << 8) | ((port >> 8) & 255)
+    let w = 2 + (port_be << 16) + (a << 32) + (b << 40) + (c << 48) + (d << 56)
+    write_i64(buf as *mut i64, 0, w)
+    buf
+}
+
+pub fn nw_socket(lib: &NwLib) -> i64 with Alloc, Mut, Panic {
+    let raw = nw_sym(lib, "socket")
+    if (raw as i64) == 0 { return -1 }
+    let f = raw as fn(i32, i32, i32) -> i32
+    f(2, 1, 0) as i64
+}
+
+pub fn nw_listen(lib: &NwLib, port: i64) -> i64 with Alloc, Mut, Panic {
+    let fd = nw_socket(lib)
+    if fd < 0 { return -1 }
+    let raw_so = nw_sym(lib, "setsockopt")
+    if (raw_so as i64) != 0 {
+        let one = heap_alloc(8)
+        write_i64(one as *mut i64, 0, 1)
+        let fso = raw_so as fn(i64, i32, i32, *mut u8, i32) -> i32
+        let _r = fso(fd, 1, 2, one, 4)
+    }
+    let raw_b = nw_sym(lib, "bind")
+    if (raw_b as i64) == 0 { return -1 }
+    let fb = raw_b as fn(i64, *mut u8, i32) -> i32
+    if fb(fd, nw_sockaddr(0, 0, 0, 0, port), 16) != 0 { return -1 }
+    let raw_l = nw_sym(lib, "listen")
+    if (raw_l as i64) == 0 { return -1 }
+    let fl = raw_l as fn(i64, i32) -> i32
+    if fl(fd, 4) != 0 { return -1 }
+    fd
+}
+
+pub fn nw_accept(lib: &NwLib, srv_fd: i64) -> i64 with Alloc, Mut, Panic {
+    let raw = nw_sym(lib, "accept")
+    if (raw as i64) == 0 { return -1 }
+    let f = raw as fn(i64, i64, i64) -> i32
+    f(srv_fd, 0, 0) as i64
+}
+
+pub fn nw_connect(lib: &NwLib, a: i64, b: i64, c: i64, d: i64, port: i64) -> i64 with Alloc, Mut, Panic {
+    let fd = nw_socket(lib)
+    if fd < 0 { return -1 }
+    let raw = nw_sym(lib, "connect")
+    if (raw as i64) == 0 { return -1 }
+    let f = raw as fn(i64, *mut u8, i32) -> i32
+    if f(fd, nw_sockaddr(a, b, c, d, port), 16) != 0 { return -1 }
+    fd
+}
+
+pub fn nw_close(lib: &NwLib, fd: i64) with Alloc, Mut, Panic {
+    let raw = nw_sym(lib, "close")
+    if (raw as i64) == 0 { return }
+    let f = raw as fn(i64) -> i32
+    let _r = f(fd)
+}
+
+pub fn nw_send_all(lib: &NwLib, fd: i64, buf: *mut u8, len: i64) -> i64 with Alloc, Mut, Panic {
+    let raw = nw_sym(lib, "send")
+    if (raw as i64) == 0 { return -1 }
+    let f = raw as fn(i64, *mut u8, i64, i32) -> i64
+    var sent: i64 = 0
+    while sent < len {
+        let p = nw_ptr_add(buf, sent)
+        // MSG_NOSIGNAL (16384): a dead peer must surface as a -1 return
+        // the runtime can replan around, never as a SIGPIPE that kills
+        // the coordinator mid-chain (observed: client died silently).
+        let r = f(fd, p, len - sent, 16384)
+        if r <= 0 { return -1 }
+        sent = sent + r
+    }
+    sent
+}
+
+pub fn nw_recv_all(lib: &NwLib, fd: i64, buf: *mut u8, len: i64) -> i64 with Alloc, Mut, Panic {
+    let raw = nw_sym(lib, "recv")
+    if (raw as i64) == 0 { return -1 }
+    let f = raw as fn(i64, *mut u8, i64, i32) -> i64
+    var got: i64 = 0
+    while got < len {
+        let p = nw_ptr_add(buf, got)
+        let r = f(fd, p, len - got, 0)
+        if r <= 0 { return -1 }
+        got = got + r
+    }
+    got
+}
+
+fn nw_ptr_add(p: *mut u8, off: i64) -> *mut u8 {
+    // Byte-pointer arithmetic through the i64 view of the pointer.
+    ((p as i64) + off) as *mut u8
+}
+
+// Serve ONE GEMM row-shard request on an accepted connection.
+// Returns 0 on success, negative on protocol/transport failure.
+pub fn nw_serve_gemm_once(lib: &NwLib, conn: i64) -> i64 with Alloc, Mut, Panic, Div {
+    let hdr = heap_alloc(32)
+    if nw_recv_all(lib, conn, hdr, 32) < 0 { return -1 }
+    let magic = read_i64(hdr as *mut i64, 0)
+    if magic != 77 { return -2 }
+    let rows = read_i64(hdr as *mut i64, 1)
+    let n = read_i64(hdr as *mut i64, 2)
+    let k = read_i64(hdr as *mut i64, 3)
+    if rows <= 0 || n <= 0 || k <= 0 || rows > 100000 || n > 100000 { return -3 }
+    var a = ck_alloc(rows * k)
+    var b = ck_alloc(k * n)
+    var c = ck_alloc(rows * n)
+    if nw_recv_all(lib, conn, a.data as *mut u8, rows * k * 8) < 0 { return -4 }
+    if nw_recv_all(lib, conn, b.data as *mut u8, k * n * 8) < 0 { return -5 }
+    // The shard is a self-contained GEMM: A_shard[rows][k] x B[k][n].
+    ck_gemm_rows(&a, &b, &!c, 0, rows, n, k)
+    if nw_send_all(lib, conn, c.data as *mut u8, rows * n * 8) < 0 { return -6 }
+    0
+}
+
+// Coordinator side: compute rows [r0, r1) of C = A*B (n x n, k = n) on a
+// remote worker and scatter them into c. Returns 0 on success.
+pub fn nw_gemm_rows_remote(lib: &NwLib, conn: i64, a: &CpuBuf, b: &CpuBuf, c: &!CpuBuf, r0: i64, r1: i64, n: i64) -> i64 with Alloc, Mut, Panic, Div {
+    let rows = r1 - r0
+    if rows <= 0 { return 0 }
+    let hdr = heap_alloc(32)
+    write_i64(hdr as *mut i64, 0, 77)
+    write_i64(hdr as *mut i64, 1, rows)
+    write_i64(hdr as *mut i64, 2, n)
+    write_i64(hdr as *mut i64, 3, n)
+    if nw_send_all(lib, conn, hdr, 32) < 0 { return -1 }
+    // A shard: rows r0..r1 are contiguous in the row-major master.
+    let a_off = nw_ptr_add(a.data as *mut u8, r0 * n * 8)
+    if nw_send_all(lib, conn, a_off, rows * n * 8) < 0 { return -2 }
+    if nw_send_all(lib, conn, b.data as *mut u8, n * n * 8) < 0 { return -3 }
+    let c_off = nw_ptr_add(c.data as *mut u8, r0 * n * 8)
+    if nw_recv_all(lib, conn, c_off, rows * n * 8) < 0 { return -4 }
+    0
+}

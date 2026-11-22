@@ -1,0 +1,109 @@
+// stdlib/physics/mechanics.sio
+//
+// Classical mechanics on dimensioned quantities (units::lib::Quantity).
+//
+// Every function checks the dimension of each input and returns the result
+// in its SI dimension. The standard uncertainty is the first-order GUM law of
+// propagation for uncorrelated inputs (JCGM 100:2008, eq. 10):
+//
+//     u_c(y)^2 = sum_i (df/dx_i)^2 u(x_i)^2
+//
+// written with the sensitivity coefficients of each formula, so it is exact to
+// first order and never divides by an input that may be zero.
+//
+// An input whose dimension is not the one the formula needs panics: a kinetic
+// energy computed from a length is not a number with a wrong unit, it is not
+// a kinetic energy at all.
+//
+// Gravitational constant: CODATA 2018 (unchanged in CODATA 2022),
+//     G = 6.67430(15) x 10^-11 m^3 kg^-1 s^-2,
+// and its standard uncertainty enters the propagated uncertainty of
+// gravitational_force_q.
+
+module physics::mechanics
+
+use units::lib::*
+use math::pure::{sqrt}
+
+pub fn gravitational_constant_q() -> Quantity {
+    quantity_new(6.67430e-11, 0.00015e-11,
+        UnitDim { mass: 0 - 1, length: 3, time: 0 - 2, temperature: 0, amount: 0, current: 0, luminosity: 0 })
+}
+
+fn mech_require(q: &Quantity, d: UnitDim, what: string) with Panic {
+    if !dim_eq(q.dim, d) {
+        panic(what)
+    }
+}
+
+// sqrt(a^2 + b^2 + c^2) for the uncertainty budget.
+fn mech_rss3(a: f64, b: f64, c: f64) -> f64 with Mut, Div, Panic {
+    sqrt(a * a + b * b + c * c)
+}
+
+// Kinetic energy E = m v^2 / 2   [J]
+//   dE/dm = v^2 / 2,  dE/dv = m v
+pub fn kinetic_energy_q(m: Quantity, v: Quantity) -> Quantity with Mut, Div, Panic {
+    mech_require(&m, dim_mass(), "kinetic_energy_q: m must be a mass")
+    mech_require(&v, dim_velocity(), "kinetic_energy_q: v must be a velocity")
+    let e = 0.5 * m.value * v.value * v.value
+    let u = mech_rss3(0.5 * v.value * v.value * m.uncertainty, m.value * v.value * v.uncertainty, 0.0)
+    quantity_new(e, u, dim_energy())
+}
+
+// Hooke's law, magnitude of the restoring force F = k x   [N]
+//   dF/dk = x,  dF/dx = k
+pub fn hookean_force_q(k: Quantity, x: Quantity) -> Quantity with Mut, Div, Panic {
+    mech_require(&k, dim_spring_constant(), "hookean_force_q: k must be a spring constant (N/m)")
+    mech_require(&x, dim_length(), "hookean_force_q: x must be a length")
+    let f = k.value * x.value
+    let u = mech_rss3(x.value * k.uncertainty, k.value * x.uncertainty, 0.0)
+    quantity_new(f, u, dim_force())
+}
+
+// Work of a constant force along its line of action W = F d   [J]
+//   dW/dF = d,  dW/dd = F
+pub fn work_done_q(f: Quantity, d: Quantity) -> Quantity with Mut, Div, Panic {
+    mech_require(&f, dim_force(), "work_done_q: f must be a force")
+    mech_require(&d, dim_length(), "work_done_q: d must be a length")
+    let w = f.value * d.value
+    let u = mech_rss3(d.value * f.uncertainty, f.value * d.uncertainty, 0.0)
+    quantity_new(w, u, dim_energy())
+}
+
+// Mean power P = W / t   [W]
+//   dP/dW = 1/t,  dP/dt = -W/t^2
+// A zero duration has no mean power and panics.
+pub fn power_q(w: Quantity, t: Quantity) -> Quantity with Mut, Div, Panic {
+    mech_require(&w, dim_energy(), "power_q: w must be an energy")
+    mech_require(&t, dim_time(), "power_q: t must be a time")
+    if t.value == 0.0 {
+        panic("power_q: zero duration")
+    }
+    let p = w.value / t.value
+    let u = mech_rss3(w.uncertainty / t.value, w.value * t.uncertainty / (t.value * t.value), 0.0)
+    quantity_new(p, u, dim_power())
+}
+
+// Newtonian gravitational attraction between two point masses
+// F = G m1 m2 / r^2   [N]
+//   dF/dm1 = F/m1 = G m2 / r^2,  dF/dm2 = G m1 / r^2,  dF/dr = -2F/r,
+//   dF/dG = m1 m2 / r^2
+// A zero separation panics.
+pub fn gravitational_force_q(m1: Quantity, m2: Quantity, r: Quantity) -> Quantity with Mut, Div, Panic {
+    mech_require(&m1, dim_mass(), "gravitational_force_q: m1 must be a mass")
+    mech_require(&m2, dim_mass(), "gravitational_force_q: m2 must be a mass")
+    mech_require(&r, dim_length(), "gravitational_force_q: r must be a length")
+    if r.value == 0.0 {
+        panic("gravitational_force_q: zero separation")
+    }
+    let g = gravitational_constant_q()
+    let inv_r2 = 1.0 / (r.value * r.value)
+    let f = g.value * m1.value * m2.value * inv_r2
+    let c_m1 = g.value * m2.value * inv_r2 * m1.uncertainty
+    let c_m2 = g.value * m1.value * inv_r2 * m2.uncertainty
+    let c_r = 2.0 * f / r.value * r.uncertainty
+    let c_g = m1.value * m2.value * inv_r2 * g.uncertainty
+    let u = sqrt(c_m1 * c_m1 + c_m2 * c_m2 + c_r * c_r + c_g * c_g)
+    quantity_new(f, u, dim_force())
+}
