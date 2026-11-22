@@ -1,12 +1,12 @@
 ---
-title: "Effects"
-description: "How Sounio's effect system works: with IO, Mut, Div and Panic in every signature, custom effects, and what handlers do today. Code from real tests."
+title: "Effect system"
+description: "Effect system in Sounio: side effects sit in the function signature. Built-in names form a closed checked list. A caller that omits one is rejected."
 weight: 30
 category: "effects"
 topic_id: "website.docs.effects"
 authority: "website_only"
 audience: "users"
-last_validated: "2026-10-29"
+last_validated: "2026-11-06"
 validated_by: "compiler-sources"
 source_of_truth: "docs/governance/topic-registry.v1.json#website.docs.effects"
 ---
@@ -15,6 +15,8 @@ import EffectSystemExamples from '../../../components/docs/EffectSystemExamples.
 import EffectSystemFaq from '../../../components/docs/EffectSystemFaq.astro';
 
 Research language; Sounio 3.0 (pre-release).
+
+This page is the effect system for learners: side effects written in the signature. The [effect checker internals and source map](/learn/compiler/effect-system/) is a different page. It names the checker files. It does not answer this query.
 
 ## Why effects are in the signature
 
@@ -58,21 +60,35 @@ Read that file as the compiler reads it. The call is illegal because the callee'
 
 The same rule is what a test harness wants. A function under test that declares no effects cannot reach a printer, a store, or a panic unless the test declares those effects too. The signature is the list of ways the test is allowed to leave pure computation.
 
-## Parsed, not yet implemented
+## Declared effects
 
-User-declared effects do not work yet. The parser accepts an `effect` item (`parse_effect_item` in `self-hosted/parser/items.sio`). The checker that Madaros actually runs, `checker_collect_item_inplace`, has no arm for that item. The item falls through to the branch marked not yet collected (`self-hosted/check/check.sio`). A by-value collector elsewhere in the same file does know how to register an effect item. That is not the collector on the path Madaros runs. The evidence note EFF-021 in `docs/spec/2026-10/03-evidence.tsv` records the skip. On lean_single, `ety_parse_effect_name` returns 0 for a name that is not in its built-in list (`self-hosted/compiler/lean_single.sio`), so a user name does not become its own bit.
+A name outside the closed list can still be an effect. The program declares it with `effect`, and the name must not be held.
 
-A trailing semicolon on an effect operation is optional. `parse_effect_item` skips a semicolon or a newline before the next operation, and `parse_effect_op_def` does not require one. The first file below writes the semicolon. The second omits it. Both forms parse. The form with the semicolon is the one to copy if you are showing the syntax. Copying it does not make the effect exist at compile time.
+The collector Madaros runs is `checker_collect_item_inplace` in `self-hosted/check/check.sio`. It has an arm for an effect item and calls `checker_collect_effect_def_inplace`. The comment on that arm dates the change to 2026-10-31. Before that arm, the item fell through and the declaration was inert. EFF-021 in `docs/spec/2026-10/03-evidence.tsv` records that skip. It is not a description of the collector that runs now. A registered user effect takes an id at `100` plus its index in the registry, which is a different range from the built-in ids 0-29.
 
-Two further facts keep these files from being a working example. `Fail` and `Choice` are on the held-name list in `effect_name_is_held` (`self-hosted/check/effects.sio`). A held name is dropped instead of registered and instead of E246. And the live collector never registered the `effect` item, so there is no distinct user effect for the `with` clause to point at. The files show the syntax the parser accepts. They are not a custom-effect implementation.
+The caller rule is the same rule as for IO. A function that declares the user effect can call another function that declares it. A function that omits it cannot. Both files below are Madaros tests. The first runs and prints `USER_EFFECT_OK 42`. The second is refused with E035, "effect not declared in function signature".
+
+<EffectSystemExamples group="declared" />
+
+Held names are still dropped. `effect_name_is_held` in `self-hosted/check/effects.sio` lists them, and a held spelling is not registered and is not E246. `Fail` and `Choice` are on that list. The two files below use those names. They show syntax the parser accepts. They are not the witness that a user effect was registered. Copy `HostT` from the run-pass file above, not `Fail` or `Choice`.
+
+A trailing semicolon on an effect operation is optional. `parse_effect_item` in `self-hosted/parser/items.sio` skips a semicolon or a newline before the next operation. The first file below writes the semicolon. The second omits it.
 
 <EffectSystemExamples group="parsed" />
 
-To [declare a custom effect](/learn/effects/custom/) in the sense of a checked, distinct effect that your program invents, there is nothing to turn on. The page that used to sketch one now says the same thing this section says.
+The note at [custom effects](/learn/effects/custom/) was written while the collector skipped effect items. The contract is the `HostT` tests above.
 
-`handle` is in the same state. `parse_handle_expr` in `self-hosted/parser/exprs.sio` builds an `ExprHandle` node. Lowering treats that kind as control flow it does not follow (`fo_expr_has_unsupported_ctl` in `self-hosted/ir/lower.sio` returns true for `ExprHandle`). lean_single reports E200. Madaros reports that the expression kind was not checked in place (`self-hosted/check/check.sio`) and sets the checker's error flag. The expression is not erased and then accepted. There is no backend that runs a handler, resumes a continuation, or chooses one-shot versus multi-shot. Resumption is not specified. The spec that would define it is still marked undefined.
+## Handlers
 
-## What is checked, and what is only parsed
+Madaros implements handlers. The founder ruling of 2026-10-31, in `docs/spec/S07_EFFECT_HANDLERS.md` section 7.4, is deep handlers and linear one-shot continuations. The status note in that file, dated 2026-11-01, says those rules are implemented on Madaros. `tests/run-pass/handler_discharge.sio` is a run-pass test: the handled body prints `handler: PASS`. `tests/run-pass/fx4_resume.sio` resumes once. `tests/compile-fail/fx7_double_resume.sio` refuses a second resume. `tests/compile-fail/fx8_missing_clause.sio` refuses a missing clause.
+
+Resume is linear. At most once on every path through a clause. Zero uses are allowed: the suspended computation is torn down, and that is not an error. Twice is a compile error. Multi-shot continuations and shallow handlers are non-goals of that ruling.
+
+The same status note names the limits that fail closed at compile time. Operations and answers are scalar i64 values. A perform stays in the handled body of the same function. A clause does not capture locals. At most 5 perform arguments, at most 12 clauses, nesting depth at most 8. This page does not paste a handler expression. The tests named above are the source.
+
+This section describes Madaros, the default engine. It does not claim the same handler behaviour for lean_single.
+
+## What is checked
 
 | Piece | Status |
 | --- | --- |
@@ -80,11 +96,11 @@ To [declare a custom effect](/learn/effects/custom/) in the sense of a checked, 
 | Built-in names | Closed list of 30, ids 0-29. IO, Mut, Div and Panic are the common ones. |
 | Eight effects in one signature | Madaros only. The ninth is E246. lean_single uses a bitmask and accepts nine. |
 | Subset check at a call | Both engines: `effects_subset`, and `bitset_is_subset`. |
-| `effect` declaration | Parsed, not implemented. |
-| `handle` | Parsed, not implemented. |
+| `effect` declaration | Registered on Madaros, unless the name is held. Ids start at 100. EFF-021 is the old skip. |
+| Handlers on Madaros | Deep, linear one-shot, with the limits in the section above. |
 | Effect rows | `TyEffectVar` and `TyEffectRow` exist. Nothing calls the constructors. |
 
-The row you can rely on is the second one, together with the subset check. The rows under it are syntax or unused types. A program that needs a handler today has to write the control flow with ordinary functions and an explicit result, and declare IO, Mut, Div or Panic where those built-ins are real.
+The rows a program can rely on are the built-in list, the subset check, a declared effect whose name is not held, and a Madaros handler inside the limits above. Effect rows are unused types. A held name is not a user effect.
 
 ## How this compares
 
@@ -97,7 +113,7 @@ The table states only what those projects' own docs say. It is a map of neighbor
 | Flix | "Flix effect handlers use dynamic scope, deep handlers, and support multiple resumptions." Algebraic effects with multiple resumptions are part of the same chapter ([effects and handlers](https://doc.flix.dev/effects-and-handlers.html)). |
 | OCaml 5.3 | Handlers were introduced in 5.0. Syntax support for deep handlers was introduced in 5.3. "effect handlers in OCaml do not provide effect safety; the compiler does not statically ensure that all the effects performed by the program are handled." Delimited continuations "must be used linearly"; using one more than once raises `Continuation_already_resumed`. "OCaml does not support multi-shot continuations." ([manual](https://ocaml.org/manual/5.3/effects.html)) |
 | Eff | Effects are first-class, and handlers override them. "We discourage the use of Eff in production" ([eff-lang.org](https://www.eff-lang.org/)). |
-| Sounio | Built-in effects are checked in the signature. User-declared effects and handlers are parsed, not implemented. |
+| Sounio | Built-in effects are a closed list checked in the signature. A declared effect is checked too, unless the name is held. Madaros handlers are deep and one-shot, inside the limits above. |
 
 ## Questions
 
@@ -109,4 +125,4 @@ The table states only what those projects' own docs say. It is a map of neighbor
 
 [Star Sounio on GitHub](https://github.com/Sounio-lang/sounio?utm_source=souniolang&utm_medium=docs&utm_campaign=effects).
 
-From here: the [IO effect](/learn/effects/io/), how to [declare a custom effect](/learn/effects/custom/) (parsed, not implemented), and the [effect checker internals](/learn/compiler/effect-system/) for the files named above.
+From here: the [IO effect](/learn/effects/io/), and the [effect checker internals and source map](/learn/compiler/effect-system/) when you want the files named above rather than the learner contract.

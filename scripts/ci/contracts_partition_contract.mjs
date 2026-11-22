@@ -9,7 +9,7 @@ const root=process.argv[2];assert(root,'usage: contracts_partition_contract.mjs 
 const workflow=fs.readFileSync(path.join(root,'.github/workflows/ci.yml'),'utf8');
 function job(w,id){const a=w.indexOf('  '+id+':\n');assert(a>=0,'missing '+id);const r=w.slice(a+1),e=r.search(/^  [A-Za-z0-9_-]+:/m);return e<0?w.slice(a):w.slice(a,a+1+e);}
 function check(w){
- for(const id of ['impact','contracts-core','contracts-ontology']){
+ for(const id of ['impact','contracts-core','contracts-ontology','madaros-current-source-deref-f64']){
   const b=job(w,id),checkout=b.split(/(?=^      - )/m).find(s=>s.startsWith('      - uses: actions/checkout@v4\n'));
   assert(checkout?.includes('          fetch-depth: 0\n          filter: blob:none\n'),'full metadata history and lazy blobs required: '+id);
   assert(!checkout.includes('sparse-checkout:'),'current working tree must be complete: '+id);
@@ -24,6 +24,8 @@ if(process.argv.includes('--selftest')){
   s=>s.replace('filter: blob:none','filter: tree:0'),
   s=>s.replace('filter: blob:none','filter: blob:none\n          sparse-checkout: scripts'),
   s=>s.replace('shard: [core-a, core-b, core-c, research]','shard: [core-a, core-c, research]'),
+  s=>{const b=job(s,'madaros-current-source-deref-f64');return s.replace(b,b.replace('filter: blob:none',''));},
+  s=>{const b=job(s,'madaros-current-source-deref-f64');return s.replace(b,b.replace('fetch-depth: 0','fetch-depth: 1'));},
  ]){const bad=mutate(workflow);assert.notEqual(bad,workflow,'ineffective control');assert.throws(()=>check(bad),'unsafe checkout accepted');}
  const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'contracts-history-'));
  const src=path.join(tmp,'source'),remote=path.join(tmp,'origin.git'),partial=path.join(tmp,'partial'),shallow=path.join(tmp,'shallow');

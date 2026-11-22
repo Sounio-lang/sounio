@@ -6,6 +6,7 @@ use parser::ast::*
 use lexer::token::*
 use lexer::cursor::*
 use lexer::tables::{keyword_lookup}
+use lexer::span::{srcmap_current}
 
 // Token storage lives in the parallel scalar arrays below, outside Parser state.
 // (A `[Token; 2097152]` global, PARSER_TOKENS, used to sit here unread: nothing
@@ -423,14 +424,60 @@ pub fn parser_span_int_literal_overflow(start: i64, end: i64) -> bool with Mut, 
         if lead2 < 18 { return false }
         return acc >= 446744073709551616
     }
-    // 19 digits. 2^63 = 92 * 10^18 + 23372036854775808, so only a literal that
-    // starts 92 and lands on that tail is 2^63; i64 MAX is 2^63-1, one below.
+    // 19 digits. 2^63 = 92 * 10^18 + 23372036854775808, and i64 MAX is one
+    // below. 2^63 is still inside the documented u64 band; the parser's job here
+    // is only width, not signedness. Let the checker decide how a value in
+    // (i64 MAX, u64 MAX] is used.
     if lead2 != 92 { return false }
     if acc != 23372036854775808 { return false }
-    // Exactly 2^63: the one value i64 cannot hold that the corpus still writes,
-    // because `-9223372036854775808` (i64 MIN) is a prefix minus over a value
-    // that does fit. Refuse only when no prefix minus absorbs the sign bit.
-    !parser_prefix_minus_before(start)
+    false
+}
+
+// ADR-015 row 6: extracts numeric type suffix (e.g. "u8", "i32", "f64") from the token's span.
+// Returns an empty Name if the literal has no suffix.
+pub fn parse_suffix_name_from_source(start: i64, end: i64) -> Name with Mut, Panic {
+    var name = Name { buf: [0; 384], len: 0 }
+    if end <= start + 1 { return name }
+    let l = end - start
+    if l >= 4 {
+        let b0 = cursor_source_byte(end - 4)
+        let b1 = cursor_source_byte(end - 3)
+        let b2 = cursor_source_byte(end - 2)
+        let b3 = cursor_source_byte(end - 1)
+        if b0 == (102 as i8) && b1 == (49 as i8) && b2 == (50 as i8) && b3 == (56 as i8) {  // f128
+            name.buf[0] = b0; name.buf[1] = b1; name.buf[2] = b2; name.buf[3] = b3; name.len = 4
+            return name
+        }
+        if b0 == (102 as i8) && b1 == (50 as i8) && b2 == (53 as i8) && b3 == (54 as i8) {  // f256
+            name.buf[0] = b0; name.buf[1] = b1; name.buf[2] = b2; name.buf[3] = b3; name.len = 4
+            return name
+        }
+    }
+    if l >= 3 {
+        let b0 = cursor_source_byte(end - 3)
+        let b1 = cursor_source_byte(end - 2)
+        let b2 = cursor_source_byte(end - 1)
+        if (b0 == (117 as i8) || b0 == (105 as i8)) && ((b1 == (49 as i8) && b2 == (54 as i8)) || (b1 == (51 as i8) && b2 == (50 as i8)) || (b1 == (54 as i8) && b2 == (52 as i8))) {
+            // u16, u32, u64, i16, i32, i64
+            name.buf[0] = b0; name.buf[1] = b1; name.buf[2] = b2; name.len = 3
+            return name
+        }
+        if b0 == (102 as i8) && ((b1 == (51 as i8) && b2 == (50 as i8)) || (b1 == (54 as i8) && b2 == (52 as i8))) {
+            // f32, f64
+            name.buf[0] = b0; name.buf[1] = b1; name.buf[2] = b2; name.len = 3
+            return name
+        }
+    }
+    if l >= 2 {
+        let b0 = cursor_source_byte(end - 2)
+        let b1 = cursor_source_byte(end - 1)
+        if (b0 == (117 as i8) || b0 == (105 as i8)) && b1 == (56 as i8) {
+            // u8, i8
+            name.buf[0] = b0; name.buf[1] = b1; name.len = 2
+            return name
+        }
+    }
+    name
 }
 
 // Is the byte before `start` a minus acting as a prefix operator on this
@@ -467,6 +514,7 @@ fn parser_prefix_minus_before(start: i64) -> bool with Mut, Panic {
         before == (41 as i8) || before == (93 as i8)
     !ends_value
 }
+
 
 pub fn parser_reset_truncated_literals() with Mut {
     PARSER_TRUNCATED_LITERALS = 0
@@ -2400,7 +2448,7 @@ impl Parser {
     fn current_span(self: Parser) -> Span with Panic, Div {
         if self.pos < self.token_count {
             Span::new(
-                0,
+                srcmap_current() as i32,
                 PT_START[self.pos as usize],
                 PT_END[self.pos as usize]
             )
@@ -2424,9 +2472,9 @@ impl Parser {
     // main.sio. Token tables are already live at that point.
     fn span_from_off(self: Parser, start_off: i64) -> Span with Panic, Div {
         if self.pos < self.token_count {
-            Span::new(0, start_off, PT_END[self.pos as usize])
+            Span::new(srcmap_current() as i32, start_off, PT_END[self.pos as usize])
         } else {
-            Span::new(0, start_off, start_off)
+            Span::new(srcmap_current() as i32, start_off, start_off)
         }
     }
 
@@ -2489,6 +2537,13 @@ impl Parser {
     fn at_expr_start(self: Parser) -> bool with Mut, Panic, Div {
         let k = self.peek()
         k == TokenKind::IntLit
+            // Hex, binary and octal integers are their own token kinds, and the
+            // primary parser accepts all three. Missing here, `return 0x10`
+            // parsed as a bare return followed by a dropped statement `0x10`,
+            // and the checker reported "expected i64, found ()" at `return`.
+            || k == TokenKind::HexLit
+            || k == TokenKind::BinLit
+            || k == TokenKind::OctLit
             || k == TokenKind::FloatLit
             || k == TokenKind::StringLit
             || k == TokenKind::CharLit
@@ -2631,4 +2686,20 @@ pub fn mk_expr(kind: ExprKind, span: Span) -> Expr {
         closure_body: None,
         type_args: None,
     }
+}
+
+// Read-only views of the token arrays, for tools that print tokens (--emit-docs).
+pub fn parser_pt_start(i: i64) -> i64 {
+    if i >= 0 && i < 2097152 { return PT_START[i as usize] }
+    return 0 - 1
+}
+
+pub fn parser_pt_end(i: i64) -> i64 {
+    if i >= 0 && i < 2097152 { return PT_END[i as usize] }
+    return 0 - 1
+}
+
+pub fn parser_pt_line(i: i64) -> i64 {
+    if i >= 0 && i < 2097152 { return PT_LINE[i as usize] }
+    return 0 - 1
 }

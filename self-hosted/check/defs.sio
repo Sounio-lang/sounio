@@ -3849,6 +3849,61 @@ pub fn fx_op_param_table_alloc() -> *mut FxOpParamTable with Alloc {
     raw
 }
 
+// SIO-417/d80: handler-frame side table. The eight fx_* tracking fields lived
+// inline in Checker (~1.6KB: two [i64; 64] perf logs, [i64; 8] frame stack,
+// two TypeEntries); every by-value check_* call copied them, costing ~32KB
+// per nested-call level. Moved here, shared by pointer across Checker copies
+// (same pattern as FxOpParamTable / fn_sigs). Sharing is sound: perf appends
+// are an append-only log with range-scoped reads (base..count per handle),
+// if/match arms accumulate sequentially on both spines, depth push/pop is
+// balanced, clause fields are save/restored. Branch divergence (if any) can
+// only ADD performed ops, which is the fail-closed direction for FX-8.
+pub struct FxFrameTable {
+    pub perf_ops: [i64; 64],
+    pub perf_owner: [i64; 64],
+    pub perf_count: i64,
+    pub frame_eff: [i64; 8],
+    pub depth: i64,
+    pub in_clause: i64,
+    pub clause_op_ret: TypeEntry,
+    pub answer_ty: TypeEntry,
+}
+
+pub fn fx_frame_table_alloc() -> *mut FxFrameTable with Alloc {
+    let raw = heap_alloc(8192) as *mut FxFrameTable
+    (*raw).perf_count = 0
+    (*raw).depth = 0
+    (*raw).in_clause = 0
+    (*raw).clause_op_ret = empty_type_entry()
+    (*raw).answer_ty = empty_type_entry()
+    raw
+}
+
+// SIO-417/d80: scoped constant-int propagation table. Seven fields (~19.5KB:
+// 16KB name buffer + 1KB lens + 1KB values + 1KB known + 512B scope marks)
+// lived inline in Checker; every Checker-holding frame on the nested-call
+// path paid it. Moved here, shared by pointer across Checker copies (same
+// pattern as FxFrameTable). Sound: binds are scope-bracketed (push/pop paired
+// at every site) or forward-threaded; lookup scans from the top so shadowing
+// is preserved; any residual cross-copy visibility is fail-closed (an extra
+// known-const only enables a fold the sequential spine would also see).
+pub struct ConstIntTable {
+    pub name_bufs: [i8; 16384],
+    pub name_lens: [i64; 128],
+    pub values: [i64; 128],
+    pub known: [i64; 128],
+    pub count: i64,
+    pub scope_marks: [i64; 64],
+    pub scope_depth: i64,
+}
+
+pub fn const_int_table_alloc() -> *mut ConstIntTable with Alloc {
+    let raw = heap_alloc(32768) as *mut ConstIntTable
+    (*raw).count = 0
+    (*raw).scope_depth = 0
+    raw
+}
+
 impl EffectOpTable {
     fn add(self, info: EffectOpInfo) -> (EffectOpTable, i64) with Mut, Panic, Div {
         var tbl = self

@@ -180,7 +180,10 @@ if [ "$_rc" -ne 0 ]; then
   exit 0
 fi
 chmod +x "$elf" 2>/dev/null
-out="$("$WORK/timeout_run.sh" "$elf")" || { echo "$name run"; exit 0; }
+# A test may state its own run bound (`//@ timeout: SECONDS`, as the stdlib and
+# run-pass harnesses honour); the default stays 30 s.
+tmo="$(sed -n 's|^//@[[:space:]]*timeout:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*$|\1|p' "$src" | head -1)"
+out="$("$WORK/timeout_run.sh" "$elf" "${tmo:-30}")" || { echo "$name run"; exit 0; }
 
 # If the test declares an expected marker, assert it. Exit status alone is not
 # evidence: a CPC 2026 receipt was found compiling, exiting 0 and printing ZERO
@@ -200,7 +203,7 @@ chmod +x "$WORK/run_one.sh"
 
 cat > "$WORK/timeout_run.sh" <<'TR'
 #!/usr/bin/env bash
-timeout 30 "$1" 2>/dev/null
+timeout "${2:-30}" "$1" 2>/dev/null
 TR
 chmod +x "$WORK/timeout_run.sh"
 export MADAROS WORK
@@ -305,6 +308,33 @@ NEW_COUNT="$(wc -l < "$WORK/new.txt" | tr -d ' ')"
 if [[ "$NEW_COUNT" -gt 0 ]]; then
   echo "[madaros-corpus] $NEW_COUNT NEW failure(s) under Madaros:" >&2
   sed 's/^/    - /' "$WORK/new.txt" >&2
+  # Show WHY, for the first few. The list above names the program and the stage
+  # and nothing else; the compiler's own message was sent to /dev/null by
+  # run_one.sh. Without it a new failure cannot be told apart from a stale
+  # baseline without rebuilding the compiler by hand. Re-running costs one
+  # compile per new failure and happens only on a red run.
+  _shown=0
+  while read -r _name _stage; do
+    [[ "$_shown" -ge 10 ]] && { echo "    (diagnostics shown for the first 10 only)" >&2; break; }
+    _src=""
+    for _p in "${PROGRAMS[@]}"; do
+      if [[ "$(basename "$_p")" == "$_name" ]]; then _src="$_p"; break; fi
+    done
+    [[ -n "$_src" ]] || continue
+    _elf="$WORK/${_name%.sio}.elf"
+    echo "" >&2
+    echo "    ---- $_name ($_stage) ----" >&2
+    if [[ "$_stage" == "compile" ]]; then
+      "$MADAROS" compile "$_src" -o "$_elf" 2>&1 | tail -n 15 | cut -c1-300 | sed 's/^/    | /' >&2
+      echo "    | compiler exit status: ${PIPESTATUS[0]}" >&2
+    else
+      _tmo="$(sed -n 's|^//@[[:space:]]*timeout:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*$|\1|p' "$_src" | head -1)"
+      timeout "${_tmo:-30}" "$_elf" 2>&1 | tail -n 15 | cut -c1-300 | sed 's/^/    | /' >&2
+      echo "    | program exit status: ${PIPESTATUS[0]}" >&2
+      echo "    | expected marker: $(sed -n 's|^//@ expect-stdout:[[:space:]]*||p' "$_src" | head -1)" >&2
+    fi
+    _shown=$((_shown + 1))
+  done < "$WORK/new.txt"
   echo "" >&2
   echo "These pass on the baseline and fail on this change. CI's full-test-suite" >&2
   echo "runs lean_single and will not show this." >&2

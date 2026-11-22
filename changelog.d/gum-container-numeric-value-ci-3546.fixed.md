@@ -1,0 +1,1 @@
+Deterministic status-bearing structs with a `.value` field no longer trigger `GUM_UNTRACKED_CONTAINER` in SVD and count-fitting code. Only a projection from an actual `Knowledge` receiver enables that measured-container guard; unsupported stores from genuine `Knowledge` parameters still refuse (issue #3546).

@@ -264,6 +264,16 @@ pub enum BinaryOp {
     OpUDiv,
     OpURem,
     OpUShr,
+    // Unsigned add/sub/mul variants: chosen by the lowerer for u8/u16/u32/u64
+    // operands (SIO-588). On x86_64 add/sub/imul set OF on the SIGNED
+    // overflow bit pattern, and SIO-207 arms a `jo` trap after every signed
+    // +,-,*. The unsigned variants emit the same bit-producing instruction
+    // with no trap: unsigned arithmetic wraps by definition. x86 add/sub/imul
+    // bit patterns are signedness-agnostic, so unlike UDiv/URem/UShr these
+    // need no distinct encoding -- only the missing guard.
+    OpUAdd,
+    OpUSub,
+    OpUMul,
 }
 
 // One `on op(params) -> body` clause of a handle with-block (SIO-417).
@@ -1453,6 +1463,20 @@ pub fn name_eq(a: Name, b: Name) -> bool with Mut, Panic, Div {
     true
 }
 
+// `name_eq(a, make_name("lit"))` without building the 384-byte Name, which in a
+// Madaros-compiled compiler takes a handle for the life of the process (#2966).
+pub fn name_eq_lit(a: Name, s: string) -> bool with Mut, Panic, Div {
+    let len = str_len(s)
+    let n = if len < 384 { len } else { 384 }
+    if a.len != n { return false }
+    var i: i64 = 0
+    while i < n {
+        if a.buf[i as usize] != (str_char_at(s, i) as i8) { return false }
+        i = i + 1
+    }
+    true
+}
+
 // ============================================================
 // Global variable initializer side table
 // ============================================================
@@ -1519,10 +1543,10 @@ pub fn ast_name_hash(n: Name) -> i64 with Div {
     var hash: i64 = 5381
     var i = 0
     while i < n.len {
-        hash = hash * 33 + (n.buf[i as usize] as i64)
+        hash = wrapping_add(wrapping_mul(hash, 33), n.buf[i as usize] as i64)
         i = i + 1
     }
-    if hash < 0 { 0 - hash } else { hash }
+    if hash < 0 { wrapping_sub(0, hash) } else { hash }
 }
 
 // Segment k of `sl`, by recursion (mirrors the identical nth-segment helper
@@ -1956,6 +1980,64 @@ pub fn ast_record_global_deferred_init(name: Name, init: Box<Expr>) with Mut, Di
     GLOBAL_DEFERRED_INIT_COUNT = GLOBAL_DEFERRED_INIT_COUNT + 1
 }
 
+// ADR-031 R1: a module-level `let`/`var` whose i64 initializer is a constant
+// expression that does not fit i64 is refused at compile time with E300, as a
+// local `let` already is. Globals are not type-checked expressions (the checker
+// sees only the declaration item), so the parser finds the first overflowing
+// `+ - *` while it still holds the initializer and records it here, keyed by
+// the declaration's name hash and item span; the checker reports it when it
+// reaches that item (check/check.sio checker_check_items_inplace). The table is
+// not cleared by ast_reset_global_var_inits: a module parsed twice replaces its
+// own entry. A full table drops the entry, and the run-time R1 guard still
+// stops the program at the same operation.
+pub var GLOBAL_INIT_OVF_HASH: [i64; 4096] = [0; 4096]
+pub var GLOBAL_INIT_OVF_FILE: [i64; 4096] = [0; 4096]
+pub var GLOBAL_INIT_OVF_ISTART: [i64; 4096] = [0; 4096]
+pub var GLOBAL_INIT_OVF_IEND: [i64; 4096] = [0; 4096]
+pub var GLOBAL_INIT_OVF_SSTART: [i64; 4096] = [0; 4096]
+pub var GLOBAL_INIT_OVF_SEND: [i64; 4096] = [0; 4096]
+pub var GLOBAL_INIT_OVF_COUNT: i64 = 0
+
+pub fn ast_record_global_init_overflow(name: Name, item_span: Span, site_start: i64, site_end: i64) with Mut, Div {
+    let h = ast_name_hash(name)
+    var k: i64 = 0
+    while k < GLOBAL_INIT_OVF_COUNT {
+        if GLOBAL_INIT_OVF_HASH[k as usize] == h && GLOBAL_INIT_OVF_FILE[k as usize] == item_span.file_id as i64
+            && GLOBAL_INIT_OVF_ISTART[k as usize] == item_span.start && GLOBAL_INIT_OVF_IEND[k as usize] == item_span.end {
+            GLOBAL_INIT_OVF_SSTART[k as usize] = site_start
+            GLOBAL_INIT_OVF_SEND[k as usize] = site_end
+            return
+        }
+        k = k + 1
+    }
+    if GLOBAL_INIT_OVF_COUNT >= 4096 { return }
+    let n = GLOBAL_INIT_OVF_COUNT as usize
+    GLOBAL_INIT_OVF_HASH[n] = h
+    GLOBAL_INIT_OVF_FILE[n] = item_span.file_id as i64
+    GLOBAL_INIT_OVF_ISTART[n] = item_span.start
+    GLOBAL_INIT_OVF_IEND[n] = item_span.end
+    GLOBAL_INIT_OVF_SSTART[n] = site_start
+    GLOBAL_INIT_OVF_SEND[n] = site_end
+    GLOBAL_INIT_OVF_COUNT = GLOBAL_INIT_OVF_COUNT + 1
+}
+
+// Index of the recorded overflow for this declaration, or -1.
+pub fn ast_global_init_overflow_index(name: Name, item_span: Span) -> i64 with Div {
+    if GLOBAL_INIT_OVF_COUNT == 0 { return 0 - 1 }
+    let h = ast_name_hash(name)
+    var k: i64 = 0
+    while k < GLOBAL_INIT_OVF_COUNT {
+        if GLOBAL_INIT_OVF_HASH[k as usize] == h && GLOBAL_INIT_OVF_FILE[k as usize] == item_span.file_id as i64
+            && GLOBAL_INIT_OVF_ISTART[k as usize] == item_span.start && GLOBAL_INIT_OVF_IEND[k as usize] == item_span.end {
+            return k
+        }
+        k = k + 1
+    }
+    0 - 1
+}
+pub fn ast_global_init_overflow_site_start(k: i64) -> i64 with Panic { GLOBAL_INIT_OVF_SSTART[k as usize] }
+pub fn ast_global_init_overflow_site_end(k: i64) -> i64 with Panic { GLOBAL_INIT_OVF_SEND[k as usize] }
+
 pub fn ast_global_deferred_init_count() -> i64 { GLOBAL_DEFERRED_INIT_COUNT }
 pub fn ast_global_deferred_init_overflowed() -> bool { GLOBAL_DEFERRED_INIT_OVERFLOW != 0 }
 pub fn ast_global_deferred_init_hash(i: i64) -> i64 with Panic {
@@ -1986,6 +2068,45 @@ pub var GLOBAL_DECL_TYPE_TYPES: [i64; 4096] = [0; 4096]
 pub var GLOBAL_DECL_TYPE_COUNT: i64 = 0
 pub var GLOBAL_DECL_TYPE_OVERFLOW: i64 = 0
 
+// #2966: for `var G: Option<Box<T>>` the recorded type above is `Option`, which
+// names no layout, so `var cur = G; match cur { Some(n) => (*n).next }` left
+// `n` untyped and `next` went to the untyped field vote (FO_INLINE_HEAD:
+// FoInlineNode.next read as `def`). The payload T is kept here, parallel to
+// GLOBAL_DECL_TYPE_HASHES (0 = none, -1 = ambiguous across modules).
+pub var GLOBAL_DECL_OPT_INNER: [i64; 4096] = [0; 4096]
+
+fn ast_name_is_ascii(n: Name, s0: i64, s1: i64, s2: i64, len: i64) -> bool {
+    n.len == len && (n.buf[0] as i64) == s0 && (n.buf[1] as i64) == s1 && (n.buf[2] as i64) == s2
+}
+
+// Hash of T for `Option<Box<T>>` (T a capitalised named type), else 0.
+fn ast_option_box_inner_hash(t: &TypeExpr) -> i64 with Mut, Panic, Div {
+    if (*t).kind != TypeExprKind::TypeNamed || (*t).path.seg_count <= 0 { return 0 }
+    // "Option": O=79 p=112 t=116, length 6
+    if !ast_name_is_ascii(ast_path_prefix_name((*t).path, 0), 79, 112, 116, 6) { return 0 }
+    match (*t).type_args {
+        Some(a) => {
+            let bx = &(*a).head
+            if (*bx).kind != TypeExprKind::TypeNamed || (*bx).path.seg_count <= 0 { return 0 }
+            // "Box": B=66 o=111 x=120, length 3
+            if !ast_name_is_ascii(ast_path_prefix_name((*bx).path, 0), 66, 111, 120, 3) { return 0 }
+            match (*bx).type_args {
+                Some(b) => {
+                    let inner = &(*b).head
+                    if (*inner).kind != TypeExprKind::TypeNamed || (*inner).path.seg_count != 1 { return 0 }
+                    let n = ast_path_prefix_name((*inner).path, 0)
+                    if n.len <= 0 { return 0 }
+                    let c0 = n.buf[0] as i64
+                    if c0 < 65 || c0 > 90 { return 0 }
+                    ast_name_hash(n)
+                }
+                None => 0,
+            }
+        }
+        None => 0,
+    }
+}
+
 pub fn ast_record_global_decl_type(name: Name, ty: &Option<Box<TypeExpr>>) with Mut, Panic, Div {
     match *ty {
         Some(t) => {
@@ -1997,11 +2118,15 @@ pub fn ast_record_global_decl_type(name: Name, ty: &Option<Box<TypeExpr>>) with 
             if c0 < 65 || c0 > 90 { return }
             let h = ast_name_hash(name)
             let th = ast_name_hash(tn)
+            let ih = ast_option_box_inner_hash(&(*t))
             var k: i64 = 0
             while k < GLOBAL_DECL_TYPE_COUNT {
                 if GLOBAL_DECL_TYPE_HASHES[k as usize] == h {
                     if GLOBAL_DECL_TYPE_TYPES[k as usize] != th {
                         GLOBAL_DECL_TYPE_TYPES[k as usize] = 0 - 1
+                    }
+                    if GLOBAL_DECL_OPT_INNER[k as usize] != ih {
+                        GLOBAL_DECL_OPT_INNER[k as usize] = 0 - 1
                     }
                     return
                 }
@@ -2013,6 +2138,7 @@ pub fn ast_record_global_decl_type(name: Name, ty: &Option<Box<TypeExpr>>) with 
             }
             GLOBAL_DECL_TYPE_HASHES[GLOBAL_DECL_TYPE_COUNT as usize] = h
             GLOBAL_DECL_TYPE_TYPES[GLOBAL_DECL_TYPE_COUNT as usize] = th
+            GLOBAL_DECL_OPT_INNER[GLOBAL_DECL_TYPE_COUNT as usize] = ih
             GLOBAL_DECL_TYPE_COUNT = GLOBAL_DECL_TYPE_COUNT + 1
         }
         None => {}
@@ -2031,6 +2157,22 @@ pub fn ast_global_decl_type_hash_of(name: Name) -> i64 with Div {
             let th = GLOBAL_DECL_TYPE_TYPES[k as usize]
             if th < 0 { return 0 }
             return th
+        }
+        k = k + 1
+    }
+    0
+}
+
+// Hash of T recorded for `var name: Option<Box<T>>`, or 0 (none / ambiguous).
+pub fn ast_global_decl_opt_inner_hash_of(name: Name) -> i64 with Div {
+    if GLOBAL_DECL_TYPE_COUNT <= 0 { return 0 }
+    let h = ast_name_hash(name)
+    var k: i64 = 0
+    while k < GLOBAL_DECL_TYPE_COUNT {
+        if GLOBAL_DECL_TYPE_HASHES[k as usize] == h {
+            let ih = GLOBAL_DECL_OPT_INNER[k as usize]
+            if ih < 0 { return 0 }
+            return ih
         }
         k = k + 1
     }
@@ -2106,7 +2248,7 @@ fn ast_gvi_dump_note(name: Name, value: i64, slot: i64) with Mut, Div {
             let ci = w * 8 + b
             var ch: i64 = 0
             if ci < name.len { ch = (name.buf[ci as usize] as i64) & 255 }
-            word = word * 256 + ch
+            word = wrapping_add(wrapping_mul(word, 256), ch)   // a non-ASCII top byte reaches the sign bit
             b = b - 1
         }
         GVI_DUMP_NAME_W[(e * 4 + w) as usize] = word
@@ -2214,12 +2356,11 @@ pub fn ast_record_global_str_init(name: Name, lit: Name) with Mut, Div {
         while b < 8 && off + b < payload.len {
             let byte = payload.buf[(off + b) as usize] as i64
             // little-endian pack without relying on variable shift amounts
-            if byte < 0 {
-                word = word + ((byte + 256) * place)
-            } else {
-                word = word + (byte * place)
-            }
-            place = place * 256
+            // The top byte lands in the sign bit, so the pack wraps by design
+            // (ADR-031 R1); 256^8 is never needed, so the weight stops at 256^7.
+            let ubyte = if byte < 0 { byte + 256 } else { byte }
+            word = wrapping_add(word, wrapping_mul(ubyte, place))
+            if b < 7 { place = place * 256 }
             b = b + 1
         }
         ast_record_global_var_init(name, word)

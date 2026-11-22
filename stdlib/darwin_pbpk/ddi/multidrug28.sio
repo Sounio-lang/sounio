@@ -131,7 +131,7 @@
 // nothing over 5 million calls.
 //
 // Layout note: every per-drug quantity is a FLAT f64 array indexed
-// [drug·14 + organ], [drug·8 + site·4 + enzyme], [drug·4 + enzyme] or [drug].
+// [drug·14 + organ], [drug·10 + site·5 + enzyme], [drug·5 + enzyme] or [drug].
 // Arrays of structs are avoided on purpose: measured 2026-09-26, a struct array
 // built with a repeat initializer ([mk(); N]) aliases all elements under the
 // committed Madaros prebuilt, and a write through `bag.st[i].field` is silently
@@ -143,14 +143,16 @@ use darwin_pbpk::pbpk28_hepatic::*
 use eisa::format::{is_finite_f64}
 
 const MD_MAX: i32 = 16
-const MD_NE: i32 = 4
+const MD_NE: i32 = 5
 const MD_NS: i32 = 2
 
-// Enzyme and site codes.
+// Enzyme and site codes. CYP1A2 (code 4) was added 2026-11-04 for the clozapine/olanzapine
+// victims; the older codes are unchanged, so stored scenarios keep their meaning.
 pub fn md_cyp3a4() -> i32 { return 0 }
 pub fn md_cyp2d6() -> i32 { return 1 }
 pub fn md_cyp2c9() -> i32 { return 2 }
 pub fn md_cyp2c19() -> i32 { return 3 }
+pub fn md_cyp1a2() -> i32 { return 4 }
 pub fn md_site_liver() -> i32 { return 0 }
 pub fn md_site_gut() -> i32 { return 1 }
 
@@ -178,9 +180,9 @@ pub struct MultiDrug28 {
     pub cl_central: [f64; 16],
     // enzyme-site parameters
     pub fu_site: [f64; 32],   // [drug·2 + site] unbound fraction at the enzyme site
-    pub clint: [f64; 128],    // [drug·8 + site·4 + enz] unbound intrinsic clearance (L/h)
-    pub ki: [f64; 64],        // [drug·4 + enz] competitive Ki (unbound, mg/L); <= 0: not an inhibitor
-    pub ext_load: [f64; 8],   // [site·4 + enz] constant external load Σ I/Ki
+    pub clint: [f64; 160],    // [drug·10 + site·5 + enz] unbound intrinsic clearance (L/h)
+    pub ki: [f64; 80],        // [drug·5 + enz] competitive Ki (unbound, mg/L); <= 0: not an inhibitor
+    pub ext_load: [f64; 10],  // [site·5 + enz] constant external load Σ I/Ki
     // absorption and dosing
     pub fa: [f64; 16],
     pub ka: [f64; 16],        // 1/h
@@ -201,9 +203,9 @@ pub struct MultiDrug28 {
     pub stepped: f64,         // 1.0 once any step has been taken (kinetic setters then restart)
     // step scratch (not model state): persistent so that a step allocates no
     // managed handles under Madaros (see the engine note in the header)
-    pub f_n: [f64; 128],      // factors at t_n
-    pub f_star: [f64; 128],   // factors of the predicted state
-    pub f_use: [f64; 128],    // factors the step is taken with
+    pub f_n: [f64; 160],      // factors at t_n
+    pub f_star: [f64; 160],   // factors of the predicted state
+    pub f_use: [f64; 160],    // factors the step is taken with
     pub ct_pred: [f64; 224],  // predicted interstitial layer
     pub gut_rate: [f64; 16],  // absorption input of this step (mg/h)
     pub sc_p: PBPKParams28,
@@ -219,12 +221,12 @@ pub fn md_new(portal: bool) -> MultiDrug28 {
         n: 0, portal: portal, iters: 1, method: 0,
         v_ref: [0.0; 224], vasc_frac: [0.0; 224], kp: [0.0; 224], ps: [0.0; 224], q: [0.0; 224],
         cl_central: [0.0; 16],
-        fu_site: [0.0; 32], clint: [0.0; 128], ki: [0.0; 64], ext_load: [0.0; 8],
+        fu_site: [0.0; 32], clint: [0.0; 160], ki: [0.0; 80], ext_load: [0.0; 10],
         fa: [0.0; 16], ka: [0.0; 16], iv_rate: [0.0; 16],
         cv: [0.0; 224], ct: [0.0; 224], lumen: [0.0; 16],
         dose_in: [0.0; 16], lost: [0.0; 16], elim: [0.0; 16], auc_b: [0.0; 16], clamped: [0.0; 16],
         neg_min_rel: [0.0; 16], t: 0.0, restart: [0.0; 16], stepped: 0.0,
-        f_n: [1.0; 128], f_star: [1.0; 128], f_use: [1.0; 128],
+        f_n: [1.0; 160], f_star: [1.0; 160], f_use: [1.0; 160],
         ct_pred: [0.0; 224], gut_rate: [0.0; 16],
         sc_p: pbpk28_params_rapamycin(), sc_s0: pbpk28_state_zero(), sc_s: pbpk28_state_zero(),
         sc_h: pbpk28_hepatic_none(), sc_i: pbpk28_input_none(), sc_w: pbpk28_work_new(),
@@ -372,9 +374,9 @@ fn md_restart_sinks_at(md: &!MultiDrug28, skip: i32, site: i32, enz: i32) with M
         if i != skip {
             var hit = false
             if site < 0 {
-                if (*md).clint[i * 8 + enz] > 0.0 || (*md).clint[i * 8 + 4 + enz] > 0.0 { hit = true }
+                if (*md).clint[i * 10 + enz] > 0.0 || (*md).clint[i * 10 + 5 + enz] > 0.0 { hit = true }
             } else {
-                if (*md).clint[i * 8 + site * 4 + enz] > 0.0 { hit = true }
+                if (*md).clint[i * 10 + site * 5 + enz] > 0.0 { hit = true }
             }
             if hit { (*md).restart[i] = 1.0 }
         }
@@ -382,12 +384,12 @@ fn md_restart_sinks_at(md: &!MultiDrug28, skip: i32, site: i32, enz: i32) with M
     }
 }
 
-// Has `drug` a positive CLint at `site`, over any of the 4 enzymes -- i.e.
+// Has `drug` a positive CLint at `site`, over any of the MD_NE enzymes -- i.e.
 // does its own sink actually depend on `fu_site[drug][site]`?
 fn md_has_clint_at_site(md: &MultiDrug28, drug: i32, site: i32) -> bool with Mut {
     var k: i32 = 0
     while k < MD_NE {
-        if (*md).clint[drug * 8 + site * 4 + k] > 0.0 { return true }
+        if (*md).clint[drug * 10 + site * 5 + k] > 0.0 { return true }
         k = k + 1
     }
     return false
@@ -410,7 +412,7 @@ pub fn md_set_fu_site(md: &!MultiDrug28, drug: i32, site: i32, fu: f64) with Mut
         if md_has_clint_at_site(md, drug, site) { (*md).restart[drug] = 1.0 }
         var k: i32 = 0
         while k < MD_NE {
-            if (*md).ki[drug * 4 + k] > 0.0 { md_restart_sinks_at(md, drug, site, k) }
+            if (*md).ki[drug * 5 + k] > 0.0 { md_restart_sinks_at(md, drug, site, k) }
             k = k + 1
         }
     }
@@ -422,8 +424,8 @@ pub fn md_set_clint(md: &!MultiDrug28, drug: i32, site: i32, enz: i32, clint_u: 
     md_check_site(site)
     md_check_enz(enz)
     if !(is_finite_f64(clint_u) && clint_u >= 0.0) { panic("multidrug28: md_set_clint needs a finite CLint_u >= 0") }
-    if clint_u == (*md).clint[drug * 8 + site * 4 + enz] { return }
-    (*md).clint[drug * 8 + site * 4 + enz] = clint_u
+    if clint_u == (*md).clint[drug * 10 + site * 5 + enz] { return }
+    (*md).clint[drug * 10 + site * 5 + enz] = clint_u
     if (*md).stepped != 0.0 { (*md).restart[drug] = 1.0 }
 }
 
@@ -434,8 +436,8 @@ pub fn md_set_ki(md: &!MultiDrug28, drug: i32, enz: i32, ki_u: f64) with Mut, Pa
     md_check_drug(md, drug)
     md_check_enz(enz)
     if !is_finite_f64(ki_u) { panic("multidrug28: md_set_ki needs a finite Ki (use Ki <= 0 for no inhibition)") }
-    if ki_u == (*md).ki[drug * 4 + enz] { return }
-    (*md).ki[drug * 4 + enz] = ki_u
+    if ki_u == (*md).ki[drug * 5 + enz] { return }
+    (*md).ki[drug * 5 + enz] = ki_u
     if (*md).stepped != 0.0 { md_restart_sinks_at(md, drug, 0 - 1, enz) }
 }
 
@@ -445,8 +447,8 @@ pub fn md_set_ext_load(md: &!MultiDrug28, site: i32, enz: i32, load: f64) with M
     md_check_site(site)
     md_check_enz(enz)
     if !(is_finite_f64(load) && load >= 0.0) { panic("multidrug28: md_set_ext_load needs a finite load >= 0") }
-    if load == (*md).ext_load[site * 4 + enz] { return }
-    (*md).ext_load[site * 4 + enz] = load
+    if load == (*md).ext_load[site * 5 + enz] { return }
+    (*md).ext_load[site * 5 + enz] = load
     if (*md).stepped != 0.0 { md_restart_sinks_at(md, 0 - 1, site, enz) }
 }
 
@@ -466,8 +468,8 @@ fn md_mark_restart(md: &!MultiDrug28, j: i32) with Mut {
             var coupled = false
             var k: i32 = 0
             while k < MD_NE {
-                if (*md).ki[j * 4 + k] > 0.0 {
-                    if (*md).clint[i * 8 + k] > 0.0 || (*md).clint[i * 8 + 4 + k] > 0.0 { coupled = true }
+                if (*md).ki[j * 5 + k] > 0.0 {
+                    if (*md).clint[i * 10 + k] > 0.0 || (*md).clint[i * 10 + 5 + k] > 0.0 { coupled = true }
                 }
                 k = k + 1
             }
@@ -664,10 +666,10 @@ pub fn md_absorbed_fraction(y: f64) -> f64 with Mut, Div, Panic {
 fn md_site_load(md: &MultiDrug28, from_pred: bool, i: i32, s: i32, k: i32) -> f64 with Mut, Div, Panic {
     let n = (*md).n
     let o = md_site_organ(s)
-    var load = (*md).ext_load[s * 4 + k]
+    var load = (*md).ext_load[s * 5 + k]
     var j: i32 = 0
     while j < n {
-        let kij = (*md).ki[j * 4 + k]
+        let kij = (*md).ki[j * 5 + k]
         if j != i && kij > 0.0 {
             let c_raw = if from_pred { (*md).ct_pred[j * 14 + o] } else { (*md).ct[j * 14 + o] }
             let c = if c_raw > 0.0 { c_raw } else { 0.0 }
@@ -692,7 +694,7 @@ fn md_factors_into(md: &!MultiDrug28, from_pred: bool, into_star: bool) with Mut
             var k: i32 = 0
             while k < MD_NE {
                 let fk = 1.0 / (1.0 + md_site_load(md, from_pred, i, s, k))
-                if into_star { (*md).f_star[i * 8 + s * 4 + k] = fk } else { (*md).f_n[i * 8 + s * 4 + k] = fk }
+                if into_star { (*md).f_star[i * 10 + s * 5 + k] = fk } else { (*md).f_n[i * 10 + s * 5 + k] = fk }
                 k = k + 1
             }
             s = s + 1
@@ -704,7 +706,7 @@ fn md_factors_into(md: &!MultiDrug28, from_pred: bool, into_star: bool) with Mut
 // f_use = f_n (Lie) or (f_n + f_star)/2 (predictor-corrector midpoint).
 fn md_set_f_use(md: &!MultiDrug28, midpoint: bool) with Mut {
     var x: i32 = 0
-    while x < 128 {
+    while x < 160 {
         if midpoint {
             (*md).f_use[x] = 0.5 * ((*md).f_n[x] + (*md).f_star[x])
         } else {
@@ -738,7 +740,7 @@ fn md_load(md: &!MultiDrug28, i: i32) with Mut, Div {
         var clint_eff = 0.0
         var k: i32 = 0
         while k < MD_NE {
-            clint_eff = clint_eff + (*md).clint[i * 8 + s * 4 + k] * (*md).f_use[i * 8 + s * 4 + k]
+            clint_eff = clint_eff + (*md).clint[i * 10 + s * 5 + k] * (*md).f_use[i * 10 + s * 5 + k]
             k = k + 1
         }
         (*md).sc_h.k_t[org] = pbpk28_sink_from_clint(clint_eff, (*md).fu_site[i * 2 + s], (*md).kp[i * 14 + org])
