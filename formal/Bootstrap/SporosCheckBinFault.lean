@@ -145,13 +145,13 @@ private theorem memOp_congr_lt {b1 b2 : Nat → Option Nat} {off m bb : Nat} {x 
           · rfl
           · cases hmd : m / 64 with
             | zero => rfl
-            | succ n => cases n with | zero => simp only [pure, h1] | succ _ => simp only [pure, h1, h3]
+            | succ n => cases n with | zero => simp only [pure, h1] | succ _ => simp only [pure, h3]
     · simp only [hm4, Bool.false_eq_true, ↓reduceIte, bind, Option.bind]
       split
       · rfl
       · cases hmd : m / 64 with
         | zero => rfl
-        | succ n => cases n with | zero => simp only [pure, h0] | succ _ => simp only [pure, h0, h2]
+        | succ n => cases n with | zero => simp only [pure, h0] | succ _ => simp only [pure, h2]
 
 private theorem decode_congr_12 {b1 b2 : Nat → Option Nat} (a : Nat)
     (h : ∀ i, i < 12 → b1 i = b2 i) :
