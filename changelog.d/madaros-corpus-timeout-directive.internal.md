@@ -1,0 +1,1 @@
+The Madaros corpus regression gate honours a test's `//@ timeout: SECONDS` instead of running every program under a fixed 30 s, with a selftest (`scripts/ci/madaros_corpus_timeout_selftest.sh`) in the same job.

@@ -1,0 +1,1 @@
+Unit registry exhaustion now refuses compilation with E301 instead of silently discarding unit dimensions (#3548). The registry accommodates 128 named and derived units, so arithmetic such as `m/s^7 + 2.0` remains correctly rejected with E041 after user unit declarations; existing dimensions can still be reused when the registry is full.

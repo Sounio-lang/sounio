@@ -1,0 +1,1 @@
+Registered struct len methods now use their impl dispatch instead of the array-length intrinsic. Preserve string, fixed-array and slice length lowering, including fixed arrays whose element type itself declares len.

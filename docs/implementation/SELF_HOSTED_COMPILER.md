@@ -50,11 +50,11 @@ The fastest way to orient yourself is:
 Those files are useful entry points, but they are not the full implementation. In most cases they fan out into the subsystem directories listed above.
 
 `self-hosted/compiler/typecheck.sio` and `self-hosted/compiler/gen.sio` are no
-longer entry points: `2661416ce2` archived both as superseded monolithic compiler
-stages, and they now sit unbuilt at `archive/dead-code-2026/compiler/typecheck.sio`
-and `archive/dead-code-2026/compiler/gen.sio`. Type checking now lives under
-`self-hosted/check/` (start at `self-hosted/check/check.sio`) and code generation
-under `self-hosted/compiler/codegen/` and `self-hosted/ir/`.
+longer entry points: `2661416ce2` moved both out as superseded monolithic
+compiler stages. That copy left the tree with the root `archive/` directory;
+git history holds it. Type checking now lives under `self-hosted/check/`
+(start at `self-hosted/check/check.sio`) and code generation under
+`self-hosted/compiler/codegen/` and `self-hosted/ir/`.
 
 ## 4. What "self-hosted-first" means in practice
 

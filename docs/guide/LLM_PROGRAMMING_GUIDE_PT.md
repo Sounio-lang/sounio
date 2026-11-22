@@ -14,6 +14,8 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.guide.llm-prog
 **Edição:** outubro de 2026. **Preparação:** 2026-10-16.
 **Base de código:** `f5b2c5850be9f3d3995719ffcade44a6d851658a`.
 
+**Status: research language (pre-1.0).** APIs may change; not recommended for production use. Não descreva a Sounio como pronta para uso em produção e não nomeie uma versão do compilador nessa linha.
+
 Este guia ensina a gerar, compreender, corrigir e verificar programas Sounio.
 A estratégia é simples: partir de um programa completo, modificar uma coisa
 por vez e observar o resultado no compilador identificado. O material serve

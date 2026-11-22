@@ -16,15 +16,9 @@ description: "L0 epistemic core of Sounio: language identity, epistemic invarian
 - Never allow implicit Knowledge→T unwrapping.
 
 3) Effects and purity
-- Consult `.claude/commands/sounio-effects.md` for effect expectations.
 - Ensure side effects are declared on functions (`with IO`, `with Panic`, etc.).
-
-4) Units and refinements (when relevant)
-- Use `.claude/commands/sounio-units.md` to keep unit syntax and checks consistent.
 
 ## References
 - `docs/implementation/MV_CORE_CHECKLIST.md`
 - `stdlib/epistemic/SEMANTICS.md`
 - `docs/spec/LANGUAGE_SPECIFICATION.md`
-- `.claude/commands/sounio-effects.md`
-- `.claude/commands/sounio-units.md`
