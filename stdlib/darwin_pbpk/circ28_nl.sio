@@ -1,0 +1,902 @@
+// stdlib/darwin_pbpk/circ28_nl.sio — circ28 with LOCAL saturable erythrocyte binding
+//
+// circ28_blood.sio keeps the linear kernel and feeds it ONE effective
+// blood:plasma ratio (bp of the blood-mass mean concentration) for every bed.
+// This file removes that approximation. Every blood state (venous, arterial and
+// the 13 organ vascular spaces) has its own plasma concentration given by the
+// local non-linear binding relation
+//
+//   C_blood = (1 - Hct) C_p + Hct Bmax C_p / (Kd + C_p)           (R)
+//
+// (C_p total plasma concentration; Bmax per litre of ERYTHROCYTES; Kd in the
+// units of C_p), and that local C_p replaces C_blood / bp in every term where the
+// linear kernel divides by bp. Flow terms carry whole blood and stay linear.
+// The state is the same 28 blood/tissue concentrations as circ28, so the mass
+// sum V_k x_k is conserved exactly as before. The module carries no literature
+// parameter value: Hct, Bmax and Kd are supplied by the caller.
+//
+// ---------------------------------------------------------------------------
+// 1. The system and the L / N split
+//
+//   dx/dt = L x + N p(x) + u,
+//
+//   p(x)_k = P(x_k)  for the 15 blood states (k = 0, 1 and k = 2 + 2(i-1)),
+//   p(x)_k = x_k     for the 13 tissue states (k = 3 + 2(i-1)),
+//
+// P = inverse of (R). L holds the flow terms and the tissue-side terms (the
+// vascular<-tissue exchange, tissue loss to hepatic and gut-wall metabolism).
+// N holds the plasma-driven terms, WRITTEN PER UNIT PLASMA CONCENTRATION. The
+// linear kernel (circ28_fill_rate_matrix) divides these terms by bp, so
+//
+//   A(bp) = L + N / bp                                              (S)
+//
+// exactly, and N has no bp in it: N is the linear kernel's coefficient of the
+// bp-carrying entries multiplied by bp. The N entries (and only these) are
+//   venous pool    (ven, ven)        - cl_plasma / V_ven      plasma clearance
+//   organ i        (iv_i, iv_i)      - ps_i / V_vasc_i        exchange, vascular side
+//                  (it_i, iv_i)      + ps_i / V_tissue_i      exchange, tissue side
+//   kidney         (iv_2, art)       - cl_renal / V_vasc_2    renal clearance, arterial plasma
+// so N has nonzero columns only at blood states. Everything else (CO and organ
+// flows, the lung, portal drainage, ps/(kp V) tissue terms, the hepatic and
+// gut-wall intrinsic clearances on the tissue concentration) is in L. Identity
+// (S) is tested entry by entry against circ28's own matrix (circ28_prepare
+// fills Circ28Sys.a) in tests/run-pass/circ28_nl_binding.sio, part b.
+//
+// Mass. The columns of the flow part of L sum (with the volumes) to zero, and
+// the exchange terms move drug between a vascular and a tissue space with equal
+// and opposite mass rates ps P(x_iv): V_vasc dx_iv/dt = -ps P, V_t dx_it/dt = +ps P.
+// The mass rates removed are
+//   hepatic  clint fu / kp_1 * T_liver       (stage value of the liver tissue)
+//   formed   clform fu / kp_1 * T_liver
+//   gut      clint_gut fu / kp_8 * T_gut
+//   renal    cl_renal * P(x_art)             (arterial PLASMA concentration)
+//   plasma   cl_plasma * P(x_ven)            (venous PLASMA concentration)
+// and these are what the tallies book.
+//
+// ---------------------------------------------------------------------------
+// 2. The inverse P and its derivative
+//
+// Put a = 1 - Hct. Multiplying (R) by (Kd + C_p):
+//   a C_p^2 + (a Kd + Hct Bmax - C_b) C_p - C_b Kd = 0.
+// For C_b > 0 the product of the roots is -C_b Kd / a < 0: exactly one positive
+// root. With b = a Kd + Hct Bmax - C_b and disc = b^2 + 4 a C_b Kd,
+//   P = (-b + sqrt(disc)) / (2 a)       (b <= 0),
+//   P = 2 C_b Kd / (b + sqrt(disc))     (b > 0, the same root rationalised:
+//                                        no cancellation for small C_b or Kd -> inf).
+// (The same root as blood28_plasma_from_blood of circ28_blood.sio, which is used
+// for nothing but bp_low here; nl28_plasma evaluates it with a cheaper square root,
+// the residual evaluation being the hot spot of the solver. Agreement to 1e-13
+// with blood28_plasma_from_blood is asserted in the test, part a.)
+// Derivative: P is the inverse of f(C_p) = a C_p + Hct Bmax C_p / (Kd + C_p), so
+//   P'(C_b) = 1 / f'(P),   f'(C_p) = a + Hct Bmax Kd / (Kd + C_p)^2.
+// (Equivalently, differentiating the quadratic in C_b at fixed parameters:
+//   2 a P P' + (a Kd + Hct Bmax - C_b) P' - P - Kd = 0, P' = (P + Kd) /
+//   (2 a P + a Kd + Hct Bmax - C_b); the two forms agree.)
+// f' decreases from f'(0) = bp_low = a + Hct Bmax / Kd to a, so
+//   1 / bp_low < P' < 1 / a, with P'(0) = 1 / bp_low.
+// Extension to C_b <= 0 (Newton iterates may leave the physical region): the
+// linear continuation P(C_b) = C_b / bp_low, P' = 1 / bp_low; it is C^1 at 0.
+// No state is clamped; the extension is used only inside the solver's trial
+// iterates and for states that rounding puts at or below zero.
+//
+// ---------------------------------------------------------------------------
+// 3. Time stepping
+//
+// The two-stage, second-order, L-stable SDIRK of Alexander (gamma = 1 - 1/sqrt 2),
+// the scheme of circ28, applied to the non-linear field f(x) = L x + N p(x) + u:
+//   stage 1:  X1 = x + gamma dt f(X1)
+//   stage 2:  X2 = x + (1 - gamma) dt f(X1) + gamma dt f(X2)
+//   x_new     = x + (1 - gamma) dt f(X1) + gamma dt f(X2)    (stiffly accurate).
+// Each stage is a non-linear system R(X) = X - base - gamma dt f(X) = 0, solved
+// by NEWTON with the EXACT Jacobian, refactored at EVERY iteration:
+//   (I - gamma dt (L + N diag(P'(X_k)))) dX = -R(X),   X <- X + lambda dX.
+// Choice and justification. The Jacobian is exact and cheap: 28 x 28, one LU
+// without pivoting (the matrix is diagonally dominant by columns in mass form:
+// L + N D with D = diag(P') > 0 keeps the sign pattern of a compartment model,
+// and the LU without pivoting is invariant under the diagonal similarity that
+// turns concentrations into masses), about 7e3 flops. A simplified (chord)
+// Newton would save that LU but converges only linearly, with a contraction
+// factor set by how far P' moved from its value at the frozen point; in the
+// regime that broke the explicit schemes of circ28_blood (d ln bp / d ln C =
+// -2.2) P' changes by a factor 2 within one stage, which is where a chord
+// iteration is slowest or diverges. So: full Newton, quadratic convergence,
+// iteration counts are measured (accessors below): exactly 1 per stage in the
+// linear limit (the first solve is exact), means of 1.1 to 2.0 per stage in
+// the non-linear runs of the test, maxima of 3-4 in transients (6 at dt = 20 h
+// towards a steady state).
+// Starting guesses: stage 1 from x; stage 2 from base_2 + gamma dt f(X1).
+// Safeguard: if a full step does not reduce the scaled residual it is halved
+// (at most 10 times); failing that the stage has stagnated.
+// Convergence test: the residual is scaled by the magnitude of its own terms,
+//   scale_i = |X_i| + |base_i| + gamma dt (sum_c |L_ic x_c| + |N_ic P(x_c)|) + floor,
+//   floor = 1e-9 max_k |X_k| (+ 1e-300),
+// and the stage has converged when max_i |R_i| / scale_i <= tol (default 1e-12;
+// 1e-12 times a quantity that already contains the rounding scale of the
+// residual, so the test is reachable at any dt). Maximum 30 iterations (default).
+//
+// FAIL CLOSED. nl28_step returns a status: 0 = both stages converged; 1 = a stage
+// did not converge within the iteration limit or stagnated (non-finite residual
+// included). On status != 0 the state, the tallies and the time are NOT touched:
+// the step has not happened, sys.n_fail counts it, and the caller must stop or
+// change dt. Nothing is silently continued.
+//
+// Mass balance to rounding at ANY Newton accuracy: the step is x_new =
+// x + w1 k1 + w2 k2 with k_j = f(X_j) EVALUATED at the converged stage values
+// (not (X_j - base)/(gamma dt)), and the tallies use the same stage values X_j
+// with the weights w1 = (1 - gamma) dt, w2 = gamma dt. Since sum_k V_k f_k(X) =
+// -(elimination rates at X) + inputs holds algebraically for every X, input =
+// eliminated + remaining to rounding, whatever the Newton residual.
+// Tallies are exactly those of circ28 (hepatic, formed, renal, plasma, gut,
+// auc_ven, auc_art, all with the stage weights; renal and plasma eliminations
+// from the stage values of the LOCAL plasma concentrations), plus the areas
+// under the venous and arterial PLASMA curves (auc_pven, auc_part), since plasma
+// is no longer blood / bp.
+//
+// Doses enter as rates (iv into the venous pool, oral into gut tissue), constant
+// over a step, as in circ28.
+//
+// The caller owns the Nl28Sys (three 784-entry arrays): create it ONCE with
+// nl28_sys_zero(), fill it with nl28_prepare, pass it with &! to every step.
+//
+// ---------------------------------------------------------------------------
+// 4. Steady-state closed forms (constant infusion R0 into the venous pool)
+//
+// With f(C_p) = (R): at steady state the exchange of every organ vanishes
+// (tissue balance), so each blood bed is fed by the arterial concentration.
+//  (i)   plasma clearance only: all blood states equal C, R0 = cl_plasma P(C):
+//          C = f(R0 / cl_plasma)           [nl28_ss_plasma_only]
+//  (ii)  renal clearance only: lung and arterial pool have no loss, so
+//          C_ven = C_art = C, and the venous balance gives R0 = cl_renal P(C):
+//          C = f(R0 / cl_renal); the kidney vascular space is C - R0 / Q_kidney;
+//          every other blood state is C        [nl28_ss_renal_only]
+//  (iii) hepatic intrinsic clearance only (ci = (clint + clform) fu): liver
+//          tissue balance ps (P_l - u) = ci u, u = T / kp, gives the exchange
+//          ps ci/(ps + ci) P_l = cl_eff P_l, with P_l the plasma concentration
+//          of the LIVER vascular space; liver vascular balance Q_h (C - C_l) =
+//          cl_eff P(C_l); global balance R0 = cl_eff P(C_l). Hence
+//          C_l = f(R0 / cl_eff), C = C_l + R0 / Q_h (arterial = venous = every
+//          other vascular state), T_liver = kp_1 ps P_l / (ps + ci)
+//                                            [nl28_ss_liver_plasma, nl28_ss_hepatic_art]
+// The single-ratio module's steady state differs only in (iii): there the liver
+// vascular concentration is C (1 - E(bp_eff)) with E from ONE bp.
+
+use darwin_pbpk::circ28::*
+use darwin_pbpk::circ28_blood::*
+
+// ------------------------------------------------------------------ helpers
+
+fn nl28_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn nl28_is_blood(k: i32) -> bool {
+    return k <= 1 || k % 2 == 0
+}
+
+// -------------------------------------------------------- binding relation
+
+// Whole-blood concentration from total plasma concentration, relation (R).
+pub fn nl28_blood_from_plasma(hct: f64, bmax: f64, kd: f64, cp: f64) -> f64 with Div {
+    return (1.0 - hct) * cp + hct * bmax * cp / (kd + cp)
+}
+
+// Square root for x > 0 (finite): range reduction to [1, 4) and four Newton
+// iterations from the chord start (v + 2) / 3 (relative error < 6 %, so the
+// iterates have error 1.5e-3, 1e-6, 6e-13, 2e-25): full double precision with a
+// fifth of the cost of math::pure::sqrt, which the residual evaluations of the
+// Newton solver call 15 times each.
+fn nl28_sqrt(x: f64) -> f64 with Mut, Div {
+    var v = x
+    var sc = 1.0
+    while v >= 4.0 {
+        v = v * 0.25
+        sc = sc * 2.0
+    }
+    while v < 1.0 {
+        v = v * 4.0
+        sc = sc * 0.5
+    }
+    var y = (v + 2.0) / 3.0
+    y = 0.5 * (y + v / y)
+    y = 0.5 * (y + v / y)
+    y = 0.5 * (y + v / y)
+    y = 0.5 * (y + v / y)
+    return y * sc
+}
+
+// P: total plasma concentration from whole-blood concentration; linear
+// continuation C_b / bp_low for C_b <= 0 (see header). The positive root of the
+// quadratic of section 2, the same expression as blood28_plasma_from_blood
+// (agreement to 1e-13 is asserted in the test, part a), with the cheaper sqrt.
+pub fn nl28_plasma(hct: f64, bmax: f64, kd: f64, cb: f64) -> f64 with Mut, Div, Panic {
+    if !(cb > 0.0) { return cb / blood28_bp_low(hct, bmax, kd) }
+    let a = 1.0 - hct
+    let b = a * kd + hct * bmax - cb
+    let r = nl28_sqrt(b * b + 4.0 * a * cb * kd)
+    if b > 0.0 { return 2.0 * cb * kd / (b + r) }
+    return (r - b) / (2.0 * a)
+}
+
+// P'(C_b) = 1 / (a + Hct Bmax Kd / (Kd + P)^2).
+pub fn nl28_dplasma(hct: f64, bmax: f64, kd: f64, cb: f64) -> f64 with Mut, Div, Panic {
+    if !(cb > 0.0) { return 1.0 / blood28_bp_low(hct, bmax, kd) }
+    let cp = nl28_plasma(hct, bmax, kd, cb)
+    let w = kd + cp
+    return 1.0 / ((1.0 - hct) + hct * bmax * kd / (w * w))
+}
+
+// Local blood:plasma ratio C_b / P(C_b); bp_low at C_b <= 0.
+pub fn nl28_bp_local(hct: f64, bmax: f64, kd: f64, cb: f64) -> f64 with Mut, Div, Panic {
+    if !(cb > 0.0) { return blood28_bp_low(hct, bmax, kd) }
+    return cb / nl28_plasma(hct, bmax, kd, cb)
+}
+
+// ------------------------------------------------------------- structures
+
+// Tallies: masses removed (mg) and areas (mg.h/L): the seven of Circ28Elim
+// plus the plasma areas.
+pub struct Nl28Tally {
+    pub hepatic: f64,
+    pub formed: f64,
+    pub renal: f64,
+    pub plasma: f64,
+    pub gut: f64,
+    pub auc_ven: f64,
+    pub auc_art: f64,
+    pub auc_pven: f64,
+    pub auc_part: f64,
+}
+
+pub struct Nl28Sys {
+    pub l: [f64; 784],       // L, row-major (1/h)
+    pub n: [f64; 784],       // N, per unit plasma concentration (1/h)
+    pub lu: [f64; 784],      // LU of the last Newton matrix (workspace)
+    pub nl: i32,             // nonzeros of L (row, col, value lists, built by nl28_prepare)
+    pub li: [i32; 192],
+    pub lj: [i32; 192],
+    pub lv: [f64; 192],
+    pub nn: i32,             // nonzeros of N
+    pub ni: [i32; 64],
+    pub nj: [i32; 64],
+    pub nv: [f64; 64],
+    pub pv: [f64; 28],       // P(x_k) / x_k and P'(x_k) at the point of the last residual
+    pub dv: [f64; 28],       //   evaluation (workspace shared by residual and Jacobian)
+    pub hct: f64,
+    pub bmax: f64,
+    pub kd: f64,
+    pub dt: f64,
+    pub k_hep: f64,          // L/h: mass rate = k_hep * T_liver
+    pub k_form: f64,
+    pub k_gut: f64,          // mass rate = k_gut * T_gut
+    pub cl_ren: f64,         // mass rate = cl_ren * P(C_art)
+    pub cl_pla: f64,         // mass rate = cl_pla * P(C_ven)
+    pub v_ven: f64,
+    pub v_gutt: f64,         // gut tissue volume (oral input)
+    pub tol: f64,
+    pub maxit: i32,
+    pub n_stage: i32,        // stages solved (converged)
+    pub it_total: i32,       // Newton iterations (Jacobian factorisations) in them
+    pub it_max: i32,
+    pub n_fail: i32,         // failed steps
+}
+
+pub fn nl28_tally_zero() -> Nl28Tally {
+    Nl28Tally { hepatic: 0.0, formed: 0.0, renal: 0.0, plasma: 0.0, gut: 0.0, auc_ven: 0.0, auc_art: 0.0, auc_pven: 0.0, auc_part: 0.0 }
+}
+
+pub fn nl28_sys_zero() -> Nl28Sys {
+    Nl28Sys {
+        l: [0.0; 784], n: [0.0; 784], lu: [0.0; 784],
+        nl: 0, li: [0; 192], lj: [0; 192], lv: [0.0; 192],
+        nn: 0, ni: [0; 64], nj: [0; 64], nv: [0.0; 64],
+        pv: [0.0; 28], dv: [1.0; 28],
+        hct: 0.0, bmax: 0.0, kd: 1.0, dt: 0.0,
+        k_hep: 0.0, k_form: 0.0, k_gut: 0.0, cl_ren: 0.0, cl_pla: 0.0,
+        v_ven: 1.0, v_gutt: 1.0,
+        tol: 1.0e-12, maxit: 30,
+        n_stage: 0, it_total: 0, it_max: 0, n_fail: 0,
+    }
+}
+
+// ----------------------------------------------------------------- builders
+
+fn nl28_add(m: &![f64; 784], r: i32, c: i32, a: f64) with Mut {
+    (*m)[r * 28 + c] = (*m)[r * 28 + c] + a
+}
+
+// L: flow terms, tissue-side terms, intrinsic clearances on tissue.
+pub fn nl28_build_l(p: Circ28Params, l: &![f64; 784]) with Mut, Div {
+    var k: i32 = 0
+    while k < 784 {
+        (*l)[k] = 0.0
+        k = k + 1
+    }
+    let co = circ28_cardiac_output(p)
+    let qh = circ28_q_hepatic(p)
+    let ven = 0
+    let art = 1
+    nl28_add(l, ven, ven, 0.0 - co / p.v_ven)
+    nl28_add(l, art, circ28_iv(5), co / p.v_art)
+    nl28_add(l, art, art, 0.0 - co / p.v_art)
+    var i: i32 = 1
+    while i < 14 {
+        let iv = circ28_iv(i)
+        let it = circ28_it(i)
+        let vv = p.v[i] * p.vf[i]
+        let vt = p.v[i] * (1.0 - p.vf[i])
+        nl28_add(l, iv, it, p.ps[i] / (p.kp[i] * vv))
+        nl28_add(l, it, it, 0.0 - p.ps[i] / (p.kp[i] * vt))
+        if i == 5 {
+            nl28_add(l, iv, ven, co / vv)
+            nl28_add(l, iv, iv, 0.0 - co / vv)
+        } else if i == 1 {
+            nl28_add(l, iv, art, p.q[1] / vv)
+            nl28_add(l, iv, iv, 0.0 - qh / vv)
+            nl28_add(l, ven, iv, qh / p.v_ven)
+            nl28_add(l, it, it, 0.0 - (p.clint + p.clform) * p.fu / (p.kp[1] * vt))
+        } else {
+            let qi = p.q[i]
+            nl28_add(l, iv, art, qi / vv)
+            nl28_add(l, iv, iv, 0.0 - qi / vv)
+            if i == 8 || i == 11 || i == 12 {
+                nl28_add(l, circ28_iv(1), iv, qi / (p.v[1] * p.vf[1]))
+            } else {
+                nl28_add(l, ven, iv, qi / p.v_ven)
+            }
+            if i == 8 {
+                nl28_add(l, it, it, 0.0 - p.clint_gut * p.fu / (p.kp[8] * vt))
+            }
+        }
+        i = i + 1
+    }
+}
+
+// N: plasma-driven terms per unit plasma concentration (no bp).
+pub fn nl28_build_n(p: Circ28Params, n: &![f64; 784]) with Mut, Div {
+    var k: i32 = 0
+    while k < 784 {
+        (*n)[k] = 0.0
+        k = k + 1
+    }
+    nl28_add(n, 0, 0, 0.0 - p.cl_plasma / p.v_ven)
+    var i: i32 = 1
+    while i < 14 {
+        let iv = circ28_iv(i)
+        let it = circ28_it(i)
+        let vv = p.v[i] * p.vf[i]
+        let vt = p.v[i] * (1.0 - p.vf[i])
+        nl28_add(n, iv, iv, 0.0 - p.ps[i] / vv)
+        nl28_add(n, it, iv, p.ps[i] / vt)
+        if i == 2 {
+            nl28_add(n, iv, 1, 0.0 - p.cl_renal / vv)
+        }
+        i = i + 1
+    }
+}
+
+// Fills L and N, the elimination coefficients and the binding parameters.
+// p.bp is not used (ignored).
+pub fn nl28_prepare(p: Circ28Params, hct: f64, bmax: f64, kd: f64, dt: f64, sys: &!Nl28Sys) with Mut, Div {
+    nl28_build_l(p, &!(*sys).l)
+    nl28_build_n(p, &!(*sys).n)
+    (*sys).hct = hct
+    (*sys).bmax = bmax
+    (*sys).kd = kd
+    (*sys).dt = dt
+    (*sys).k_hep = p.clint * p.fu / p.kp[1]
+    (*sys).k_form = p.clform * p.fu / p.kp[1]
+    (*sys).k_gut = p.clint_gut * p.fu / p.kp[8]
+    (*sys).cl_ren = p.cl_renal
+    (*sys).cl_pla = p.cl_plasma
+    (*sys).v_ven = p.v_ven
+    (*sys).v_gutt = p.v[8] * (1.0 - p.vf[8])
+    var cl: i32 = 0
+    var cn: i32 = 0
+    var r: i32 = 0
+    while r < 28 {
+        var c: i32 = 0
+        while c < 28 {
+            let e = (*sys).l[r * 28 + c]
+            if e != 0.0 {
+                (*sys).li[cl] = r
+                (*sys).lj[cl] = c
+                (*sys).lv[cl] = e
+                cl = cl + 1
+            }
+            let g = (*sys).n[r * 28 + c]
+            if g != 0.0 {
+                (*sys).ni[cn] = r
+                (*sys).nj[cn] = c
+                (*sys).nv[cn] = g
+                cn = cn + 1
+            }
+            c = c + 1
+        }
+        r = r + 1
+    }
+    (*sys).nl = cl
+    (*sys).nn = cn
+}
+
+// Newton controls: scaled-residual tolerance and iteration limit.
+pub fn nl28_set_newton(sys: &!Nl28Sys, tol: f64, maxit: i32) with Mut {
+    (*sys).tol = tol
+    (*sys).maxit = maxit
+}
+
+// ------------------------------------------------------- field and Jacobian
+
+// out = L x + N p(x) + u.
+pub fn nl28_rhs(sys: &Nl28Sys, x: &[f64; 28], u_ven: f64, u_gut: f64, out: &![f64; 28]) with Mut, Div, Panic {
+    var pv: [f64; 28] = [0.0; 28]
+    var k: i32 = 0
+    while k < 28 {
+        if nl28_is_blood(k) {
+            pv[k] = nl28_plasma((*sys).hct, (*sys).bmax, (*sys).kd, (*x)[k])
+        } else {
+            pv[k] = (*x)[k]
+        }
+        k = k + 1
+    }
+    var r: i32 = 0
+    while r < 28 {
+        var acc = 0.0
+        var c: i32 = 0
+        while c < 28 {
+            let e = (*sys).l[r * 28 + c]
+            if e != 0.0 { acc = acc + e * (*x)[c] }
+            let g = (*sys).n[r * 28 + c]
+            if g != 0.0 { acc = acc + g * pv[c] }
+            c = c + 1
+        }
+        (*out)[r] = acc
+        r = r + 1
+    }
+    (*out)[0] = (*out)[0] + u_ven
+    (*out)[17] = (*out)[17] + u_gut
+}
+
+// J = L + N diag(P'(x_k)) into jac (row-major 784), P' = 1 on tissue columns
+// (N is zero there).
+pub fn nl28_jacobian(sys: &Nl28Sys, x: &[f64; 28], jac: &![f64; 784]) with Mut, Div, Panic {
+    var d: [f64; 28] = [1.0; 28]
+    var k: i32 = 0
+    while k < 28 {
+        if nl28_is_blood(k) {
+            d[k] = nl28_dplasma((*sys).hct, (*sys).bmax, (*sys).kd, (*x)[k])
+        }
+        k = k + 1
+    }
+    var r: i32 = 0
+    while r < 28 {
+        var c: i32 = 0
+        while c < 28 {
+            (*jac)[r * 28 + c] = (*sys).l[r * 28 + c] + (*sys).n[r * 28 + c] * d[c]
+            c = c + 1
+        }
+        r = r + 1
+    }
+}
+
+// Factors I - h J(x) into sys.lu (Doolittle, no pivoting), with J = L + N diag(P'):
+// uses the P' stored in sys.dv by the last nl28_resid call, which the stage
+// solver always makes at the point being factored.
+fn nl28_factor(sys: &!Nl28Sys, h: f64) with Mut, Div {
+    var k: i32 = 0
+    while k < 784 {
+        (*sys).lu[k] = 0.0
+        k = k + 1
+    }
+    k = 0
+    while k < 28 {
+        (*sys).lu[k * 28 + k] = 1.0
+        k = k + 1
+    }
+    k = 0
+    while k < (*sys).nl {
+        let q = (*sys).li[k] * 28 + (*sys).lj[k]
+        (*sys).lu[q] = (*sys).lu[q] - h * (*sys).lv[k]
+        k = k + 1
+    }
+    k = 0
+    while k < (*sys).nn {
+        let q = (*sys).ni[k] * 28 + (*sys).nj[k]
+        (*sys).lu[q] = (*sys).lu[q] - h * (*sys).nv[k] * (*sys).dv[(*sys).nj[k]]
+        k = k + 1
+    }
+    var j: i32 = 0
+    while j < 28 {
+        let piv = (*sys).lu[j * 28 + j]
+        var rr: i32 = j + 1
+        while rr < 28 {
+            let a = (*sys).lu[rr * 28 + j]
+            if a != 0.0 {
+                let f = a / piv
+                (*sys).lu[rr * 28 + j] = f
+                var cc: i32 = j + 1
+                while cc < 28 {
+                    (*sys).lu[rr * 28 + cc] = (*sys).lu[rr * 28 + cc] - f * (*sys).lu[j * 28 + cc]
+                    cc = cc + 1
+                }
+            }
+            rr = rr + 1
+        }
+        j = j + 1
+    }
+}
+
+// b <- lu^-1 b in place.
+fn nl28_lusolve(sys: &Nl28Sys, b: &![f64; 28]) with Mut, Div {
+    var r: i32 = 1
+    while r < 28 {
+        var acc = (*b)[r]
+        var c: i32 = 0
+        while c < r {
+            let l = (*sys).lu[r * 28 + c]
+            if l != 0.0 { acc = acc - l * (*b)[c] }
+            c = c + 1
+        }
+        (*b)[r] = acc
+        r = r + 1
+    }
+    r = 27
+    while r >= 0 {
+        var acc = (*b)[r]
+        var c: i32 = r + 1
+        while c < 28 {
+            let u = (*sys).lu[r * 28 + c]
+            if u != 0.0 { acc = acc - u * (*b)[c] }
+            c = c + 1
+        }
+        (*b)[r] = acc / (*sys).lu[r * 28 + r]
+        r = r - 1
+    }
+}
+
+// f = field at x, r = x - base - h f; returns the scaled residual
+// max_i |r_i| / scale_i (header, section 3). Leaves P(x_k) and P'(x_k) in
+// sys.pv / sys.dv for the Jacobian.
+fn nl28_resid(
+    sys: &!Nl28Sys,
+    base: &[f64; 28],
+    u_ven: f64,
+    u_gut: f64,
+    h: f64,
+    x: &[f64; 28],
+    f: &![f64; 28],
+    r: &![f64; 28]
+) -> f64 with Mut, Div, Panic {
+    var xmax = 0.0
+    var k: i32 = 0
+    while k < 28 {
+        if nl28_is_blood(k) {
+            let cp = nl28_plasma((*sys).hct, (*sys).bmax, (*sys).kd, (*x)[k])
+            (*sys).pv[k] = cp
+            if (*x)[k] > 0.0 {
+                let w = (*sys).kd + cp
+                (*sys).dv[k] = 1.0 / ((1.0 - (*sys).hct) + (*sys).hct * (*sys).bmax * (*sys).kd / (w * w))
+            } else {
+                (*sys).dv[k] = 1.0 / blood28_bp_low((*sys).hct, (*sys).bmax, (*sys).kd)
+            }
+        } else {
+            (*sys).pv[k] = (*x)[k]
+            (*sys).dv[k] = 1.0
+        }
+        let ax = nl28_abs((*x)[k])
+        if ax > xmax { xmax = ax }
+        (*f)[k] = 0.0
+        k = k + 1
+    }
+    var mag: [f64; 28] = [0.0; 28]
+    k = 0
+    while k < (*sys).nl {
+        let i = (*sys).li[k]
+        let t = (*sys).lv[k] * (*x)[(*sys).lj[k]]
+        (*f)[i] = (*f)[i] + t
+        mag[i] = mag[i] + nl28_abs(t)
+        k = k + 1
+    }
+    k = 0
+    while k < (*sys).nn {
+        let i = (*sys).ni[k]
+        let t = (*sys).nv[k] * (*sys).pv[(*sys).nj[k]]
+        (*f)[i] = (*f)[i] + t
+        mag[i] = mag[i] + nl28_abs(t)
+        k = k + 1
+    }
+    (*f)[0] = (*f)[0] + u_ven
+    (*f)[17] = (*f)[17] + u_gut
+    let floor = 1.0e-9 * xmax + 1.0e-300
+    var rho = 0.0
+    var i: i32 = 0
+    while i < 28 {
+        let ri = (*x)[i] - (*base)[i] - h * (*f)[i]
+        (*r)[i] = ri
+        let scale = nl28_abs((*x)[i]) + nl28_abs((*base)[i]) + h * mag[i] + floor
+        let q = nl28_abs(ri) / scale
+        if q > rho { rho = q }
+        // NaN residual: the comparison above is false; force failure
+        if !(q >= 0.0) { rho = 1.0e300 }
+        i = i + 1
+    }
+    return rho
+}
+
+// Solves X = base + h f(X) by Newton. On entry xs holds the guess; on exit
+// (status 0) xs the solution and ks = f(xs). Status 1: not converged.
+fn nl28_stage(
+    sys: &!Nl28Sys,
+    base: &[f64; 28],
+    u_ven: f64,
+    u_gut: f64,
+    h: f64,
+    xs: &![f64; 28],
+    ks: &![f64; 28]
+) -> i32 with Mut, Div, Panic {
+    var r: [f64; 28] = [0.0; 28]
+    var dx: [f64; 28] = [0.0; 28]
+    var xt: [f64; 28] = [0.0; 28]
+    var ft: [f64; 28] = [0.0; 28]
+    var rt: [f64; 28] = [0.0; 28]
+    let tol = (*sys).tol
+    let maxit = (*sys).maxit
+    var rho = nl28_resid(sys, base, u_ven, u_gut, h, xs, ks, &!r)
+    var it: i32 = 0
+    var status: i32 = 1
+    var go: i32 = 1
+    while go == 1 {
+        if rho <= tol {
+            status = 0
+            go = 0
+        } else if it >= maxit {
+            status = 1
+            go = 0
+        } else {
+            nl28_factor(sys, h)
+            var i: i32 = 0
+            while i < 28 {
+                dx[i] = 0.0 - r[i]
+                i = i + 1
+            }
+            nl28_lusolve(sys, &!dx)
+            it = it + 1
+            var lam = 1.0
+            var acc: i32 = 0
+            var tr: i32 = 0
+            var rho_t = 0.0
+            while acc == 0 && tr < 10 {
+                i = 0
+                while i < 28 {
+                    xt[i] = (*xs)[i] + lam * dx[i]
+                    i = i + 1
+                }
+                rho_t = nl28_resid(sys, base, u_ven, u_gut, h, &xt, &!ft, &!rt)
+                if rho_t < rho || rho_t <= tol {
+                    acc = 1
+                } else {
+                    lam = 0.5 * lam
+                    tr = tr + 1
+                }
+            }
+            if acc == 0 {
+                status = 1
+                go = 0
+            } else {
+                i = 0
+                while i < 28 {
+                    (*xs)[i] = xt[i]
+                    (*ks)[i] = ft[i]
+                    r[i] = rt[i]
+                    i = i + 1
+                }
+                rho = rho_t
+            }
+        }
+    }
+    if status == 0 {
+        (*sys).n_stage = (*sys).n_stage + 1
+        (*sys).it_total = (*sys).it_total + it
+        if it > (*sys).it_max { (*sys).it_max = it }
+    }
+    return status
+}
+
+pub fn circ28_nl_gamma() -> f64 { return circ28_gamma() }
+
+// One step of length sys.dt. iv_rate (mg/h) enters the venous pool, oral_rate
+// (mg/h) gut tissue; both constant over the step. Returns 0 on success; on a
+// non-zero status s, el and the time are untouched (fail closed).
+pub fn nl28_step(
+    s: &!Circ28State,
+    sys: &!Nl28Sys,
+    iv_rate: f64,
+    oral_rate: f64,
+    el: &!Nl28Tally
+) -> i32 with Mut, Div, Panic {
+    let dt = (*sys).dt
+    let g = circ28_gamma()
+    let h = g * dt
+    let u_ven = iv_rate / (*sys).v_ven
+    let u_gut = oral_rate / (*sys).v_gutt
+
+    var x0: [f64; 28] = [0.0; 28]
+    var xa: [f64; 28] = [0.0; 28]
+    var xb: [f64; 28] = [0.0; 28]
+    var k1: [f64; 28] = [0.0; 28]
+    var k2: [f64; 28] = [0.0; 28]
+    var base2: [f64; 28] = [0.0; 28]
+    var i: i32 = 0
+    while i < 28 {
+        x0[i] = (*s).x[i]
+        xa[i] = (*s).x[i]
+        i = i + 1
+    }
+    // stage 1
+    let st1 = nl28_stage(sys, &x0, u_ven, u_gut, h, &!xa, &!k1)
+    if st1 != 0 {
+        (*sys).n_fail = (*sys).n_fail + 1
+        return 1
+    }
+    // stage 2
+    i = 0
+    while i < 28 {
+        base2[i] = x0[i] + (1.0 - g) * dt * k1[i]
+        xb[i] = base2[i] + h * k1[i]
+        i = i + 1
+    }
+    let st2 = nl28_stage(sys, &base2, u_ven, u_gut, h, &!xb, &!k2)
+    if st2 != 0 {
+        (*sys).n_fail = (*sys).n_fail + 1
+        return 1
+    }
+
+    let w1 = (1.0 - g) * dt
+    let w2 = g * dt
+    var xn: [f64; 28] = [0.0; 28]
+    i = 0
+    while i < 28 {
+        xn[i] = x0[i] + w1 * k1[i] + w2 * k2[i]
+        i = i + 1
+    }
+    i = 0
+    while i < 28 {
+        if !(xn[i] > -1.0e300 && xn[i] < 1.0e300) {
+            (*sys).n_fail = (*sys).n_fail + 1
+            return 1
+        }
+        i = i + 1
+    }
+
+    let hct = (*sys).hct
+    let bmax = (*sys).bmax
+    let kd = (*sys).kd
+    let pv1 = nl28_plasma(hct, bmax, kd, xa[0])
+    let pv2 = nl28_plasma(hct, bmax, kd, xb[0])
+    let pa1 = nl28_plasma(hct, bmax, kd, xa[1])
+    let pa2 = nl28_plasma(hct, bmax, kd, xb[1])
+    i = 0
+    while i < 28 {
+        (*s).x[i] = xn[i]
+        i = i + 1
+    }
+    (*el).auc_ven = (*el).auc_ven + w1 * xa[0] + w2 * xb[0]
+    (*el).auc_art = (*el).auc_art + w1 * xa[1] + w2 * xb[1]
+    (*el).auc_pven = (*el).auc_pven + w1 * pv1 + w2 * pv2
+    (*el).auc_part = (*el).auc_part + w1 * pa1 + w2 * pa2
+    let q_tl = w1 * xa[3] + w2 * xb[3]
+    let q_tg = w1 * xa[17] + w2 * xb[17]
+    (*el).hepatic = (*el).hepatic + (*sys).k_hep * q_tl
+    (*el).formed = (*el).formed + (*sys).k_form * q_tl
+    (*el).gut = (*el).gut + (*sys).k_gut * q_tg
+    (*el).renal = (*el).renal + (*sys).cl_ren * (w1 * pa1 + w2 * pa2)
+    (*el).plasma = (*el).plasma + (*sys).cl_pla * (w1 * pv1 + w2 * pv2)
+    return 0
+}
+
+// ---------------------------------------------------------------- accessors
+
+// Plasma concentration of blood state k (k = 0, 1 or 2 + 2(i-1)); for a tissue
+// state index the state itself is returned.
+pub fn nl28_plasma_at(s: &Circ28State, sys: &Nl28Sys, k: i32) -> f64 with Mut, Div, Panic {
+    if !nl28_is_blood(k) { return (*s).x[k] }
+    return nl28_plasma((*sys).hct, (*sys).bmax, (*sys).kd, (*s).x[k])
+}
+
+// Local blood:plasma ratio of blood state k.
+pub fn nl28_bp_at(s: &Circ28State, sys: &Nl28Sys, k: i32) -> f64 with Mut, Div, Panic {
+    return nl28_bp_local((*sys).hct, (*sys).bmax, (*sys).kd, (*s).x[k])
+}
+
+// Largest and smallest local blood:plasma ratio over the 15 blood states.
+pub fn nl28_bp_max(s: &Circ28State, sys: &Nl28Sys) -> f64 with Mut, Div, Panic {
+    var m = 0.0
+    var k: i32 = 0
+    while k < 28 {
+        if nl28_is_blood(k) {
+            let b = nl28_bp_at(s, sys, k)
+            if b > m { m = b }
+        }
+        k = k + 1
+    }
+    return m
+}
+
+pub fn nl28_bp_min(s: &Circ28State, sys: &Nl28Sys) -> f64 with Mut, Div, Panic {
+    var m = 1.0e300
+    var k: i32 = 0
+    while k < 28 {
+        if nl28_is_blood(k) {
+            let b = nl28_bp_at(s, sys, k)
+            if b < m { m = b }
+        }
+        k = k + 1
+    }
+    return m
+}
+
+// Total drug mass (mg); the same quantity as circ28_total_mass.
+pub fn nl28_total_mass(s: &Circ28State, p: Circ28Params) -> f64 with Mut {
+    return circ28_total_mass(s, p)
+}
+
+// Mass removed by all channels (mg).
+pub fn nl28_eliminated(el: &Nl28Tally) -> f64 {
+    return (*el).hepatic + (*el).formed + (*el).renal + (*el).plasma + (*el).gut
+}
+
+// Newton statistics: stages solved, iterations (factorisations), failures.
+pub fn nl28_stages(sys: &Nl28Sys) -> i32 { return (*sys).n_stage }
+pub fn nl28_iter_total(sys: &Nl28Sys) -> i32 { return (*sys).it_total }
+pub fn nl28_iter_max(sys: &Nl28Sys) -> i32 { return (*sys).it_max }
+pub fn nl28_failures(sys: &Nl28Sys) -> i32 { return (*sys).n_fail }
+pub fn nl28_iter_mean(sys: &Nl28Sys) -> f64 with Div {
+    if (*sys).n_stage == 0 { return 0.0 }
+    return ((*sys).it_total as f64) / ((*sys).n_stage as f64)
+}
+pub fn nl28_stats_reset(sys: &!Nl28Sys) with Mut {
+    (*sys).n_stage = 0
+    (*sys).it_total = 0
+    (*sys).it_max = 0
+    (*sys).n_fail = 0
+}
+
+// --------------------------------------------------- steady-state closed forms
+
+// (i) plasma clearance only, infusion `rate` (mg/h): common blood concentration.
+pub fn nl28_ss_plasma_only(p: Circ28Params, hct: f64, bmax: f64, kd: f64, rate: f64) -> f64 with Div {
+    return nl28_blood_from_plasma(hct, bmax, kd, rate / p.cl_plasma)
+}
+
+// (ii) renal clearance only: C_ven = C_art = C and every other blood state is C
+// except the kidney vascular space, C - rate / Q_kidney.
+pub fn nl28_ss_renal_only(p: Circ28Params, hct: f64, bmax: f64, kd: f64, rate: f64) -> f64 with Div {
+    return nl28_blood_from_plasma(hct, bmax, kd, rate / p.cl_renal)
+}
+
+pub fn nl28_ss_renal_kidney(p: Circ28Params, hct: f64, bmax: f64, kd: f64, rate: f64) -> f64 with Div {
+    return nl28_ss_renal_only(p, hct, bmax, kd, rate) - rate / p.q[2]
+}
+
+// (iii) hepatic only: effective tissue-limited clearance ps ci / (ps + ci).
+pub fn nl28_ss_cl_eff_liver(p: Circ28Params) -> f64 with Div {
+    let ci = (p.clint + p.clform) * p.fu
+    return p.ps[1] * ci / (p.ps[1] + ci)
+}
+
+// plasma concentration of the liver vascular space: rate / cl_eff
+pub fn nl28_ss_liver_plasma(p: Circ28Params, rate: f64) -> f64 with Div {
+    return rate / nl28_ss_cl_eff_liver(p)
+}
+
+// arterial (= venous = every other vascular) blood concentration:
+// C = f(rate / cl_eff) + rate / Q_h
+pub fn nl28_ss_hepatic_art(p: Circ28Params, hct: f64, bmax: f64, kd: f64, rate: f64) -> f64 with Div {
+    return nl28_blood_from_plasma(hct, bmax, kd, nl28_ss_liver_plasma(p, rate)) + rate / circ28_q_hepatic(p)
+}
+
+// liver tissue concentration: kp_1 ps P_l / (ps + ci)
+pub fn nl28_ss_liver_tissue(p: Circ28Params, rate: f64) -> f64 with Div {
+    let ci = (p.clint + p.clform) * p.fu
+    return p.kp[1] * p.ps[1] * nl28_ss_liver_plasma(p, rate) / (p.ps[1] + ci)
+}

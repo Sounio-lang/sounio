@@ -1,0 +1,405 @@
+//@ run-pass
+//@ timeout: 120
+//@ expect-stdout-contains: CIRC28_BLOOD_BINDING_PASS
+//
+// Saturable erythrocyte binding on the circ28 kernel (stdlib/darwin_pbpk/
+// circ28_blood.sio). Parameters are made-up round numbers (Hct 0.4, Bmax 100
+// per L of erythrocytes, Kd 2, in the same concentration unit); the module
+// carries no literature values. Expectations, fixed before this file was first
+// run (the scratch convergence run of the three schemes was done before this
+// file was written; the numbers it gave are not used as targets except f):
+//
+//   a  plasma_from_blood(blood_from_plasma(c)) = c to 1e-12 for c in
+//      1e-4 .. 1e2 (six decades); bp(C -> 0) = 0.6 + 0.4 * 100 / 2 = 20.6 and
+//      bp(C -> inf) = 0.6 to 1e-9; bp strictly decreasing in C.
+//   b  Kd = 1e11, Bmax = 2e11 (binding linear to 1e-11): wrapper = plain
+//      circ28 with bp = 0.6 + 0.4 * 2 = 1.4, AUC and final state to 1e-9.
+//   c  plasma clearance only, infusion R0: every blood state equals
+//      C_ss = blood_from_plasma(R0 / cl_plasma) to 1e-8. Cp = 1 -> C = 13.9333,
+//      Cp = 20 -> C = 48.3636; for a 20-fold rate the blood concentration
+//      rises by 48.3636 / 13.9333 = 3.4710 (< 20), the measured ratio equals
+//      the prediction to 1e-8, and the single-bp diagnostic is ~0 there.
+//   d  hepatic intrinsic clearance only. At steady state C_art = C_ven = C
+//      (lung has no loss) and every other vascular state is C except the
+//      liver's: C_lv = C (1 - E), E = circ28_hepatic_extraction at bp_eff,
+//      from Q_h (C - C_lv) = liver elimination. The infusion balance is
+//      R0 = Q_h E C. The effective concentration of the wrapper is the
+//      blood-volume mean Cw = C (1 - f E), f = V_liver_vascular / V_blood, so
+//      for a chosen Cw: bp_eff = bp(Cw), E = E(bp_eff), C = Cw / (1 - f E),
+//      R0 = Q_h E C. Run with that R0; C_art, C_ven, Cw and the worst-bed
+//      bp discrepancy |bp(C_lv) - bp_eff| / bp_eff (or that of C) are asserted
+//      to 1e-8.
+//   e  bolus as an infusion (200 mg over 0.1 h): input = eliminated +
+//      remaining to 1e-10 in the three schemes; bp max / min over the run > 1.5.
+//   f  halving dt from 0.04 three times, the AUC differences between successive
+//      runs shrink by a ratio about 4 (second order); asserted >= 1.8 for the
+//      default scheme; the ratios of all schemes are printed (the lag scheme is
+//      first order asymptotically: about 2.1-2.3 at dt 0.0025-0.00125 in the scratch study, but
+//      4.8 and 3.4 at the coarser dt used here, still pre-asymptotic).
+//
+// Found by the first run of this file, and the reason the default scheme is the
+// implicit one (header of circ28_blood.sio): the explicit schemes (0, 1, 2)
+// fall into a period-2 cycle at the 20-fold infusion of c, where
+// d ln bp / d ln C = -2.2, and end on nonsense states instead of the
+// steady state of c. Part g prints that for the record. Parts c, d, e, f use
+// the default (implicit) scheme; e also runs the explicit ones, whose mass
+// balance holds regardless.
+
+use darwin_pbpk::circ28::*
+use darwin_pbpk::circ28_blood::*
+
+fn ck_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn ck_rel(tag: string, got: f64, want: f64, tol: f64) -> i32 with IO, Mut, Div, Panic {
+    let r = ck_abs(got - want) / ck_abs(want)
+    print("  "); print(tag); print(": got "); print(got); print(" want "); print(want)
+    print("  rel x 1e9 = "); println(r * 1.0e9)
+    if !(r <= tol) {
+        println("  [FAIL]")
+        return 1
+    }
+    return 0
+}
+
+fn ck_true(tag: string, ok: bool) -> i32 with IO {
+    print("  "); print(tag)
+    if ok {
+        println(": ok")
+        return 0
+    }
+    println(": [FAIL]")
+    return 1
+}
+
+fn ck_set() -> Circ28Params with Mut {
+    var p = circ28_physiology()
+    p.kp = [0.0, 1.0, 0.8, 0.5, 1.0, 1.2, 1.5, 1.0, 1.0, 0.8, 0.8, 1.0, 1.0, 1.0]
+    p.fu = 0.1
+    return p
+}
+
+// largest |x_k - c| / c over the 15 blood states
+fn ck_spread(b: &Blood28, c: f64) -> f64 with Mut, Div {
+    var w = 0.0
+    var k: i32 = 0
+    while k < 15 {
+        var idx = k
+        if k >= 2 { idx = circ28_iv(k - 1) }
+        let d = ck_abs(blood28_get_x(b, idx) - c) / c
+        if d > w { w = d }
+        k = k + 1
+    }
+    return w
+}
+
+fn ck_bolus_params() -> Circ28Params with Mut {
+    var p = ck_set()
+    p.clint = 300.0
+    p.cl_renal = 2.0
+    p.cl_plasma = 3.0
+    return p
+}
+
+// 200 mg infused over the first 0.08 h (dt divides 0.08); returns the venous blood AUC to `horizon`.
+fn ck_bolus(mode: i32, dt: f64, horizon: f64, p: Circ28Params, hct: f64, bmax: f64, kd: f64) -> f64 with Mut, Div, Panic {
+    var sys = circ28_sys_zero()
+    var b = blood28_new(p, hct, bmax, kd, dt)
+    blood28_set_mode(&!b, mode)
+    var t = 0.0
+    while t + dt * 0.5 < horizon {
+        var iv = 0.0
+        if t + dt * 0.5 < 0.08 { iv = 200.0 / 0.08 }
+        blood28_step(&!b, &!sys, iv, 0.0)
+        t = t + dt
+    }
+    return blood28_auc_blood(&b)
+}
+
+// Constant infusion to (near) steady state.
+fn ck_infuse(b: &!Blood28, sys: &!Circ28Sys, rate: f64, dt: f64, horizon: f64) with Mut, Div, Panic {
+    var t = 0.0
+    while t + dt * 0.5 < horizon {
+        blood28_step(b, sys, rate, 0.0)
+        t = t + dt
+    }
+}
+
+fn ck_part_a() -> i32 with IO, Mut, Div, Panic {
+    var fails: i32 = 0
+    let hct = 0.4
+    let bmax = 100.0
+    let kd = 2.0
+    var c = 1.0e-4
+    var worst = 0.0
+    var nd: i32 = 0
+    while c < 1.5e2 {
+        let cb = blood28_blood_from_plasma(hct, bmax, kd, c)
+        let back = blood28_plasma_from_blood(hct, bmax, kd, cb)
+        let r = ck_abs(back - c) / c
+        if r > worst { worst = r }
+        let bp1 = blood28_bp(hct, bmax, kd, cb)
+        let r2 = ck_abs(bp1 - cb / c) / (cb / c)
+        if r2 > worst { worst = r2 }
+        c = c * 1.5848931924611136
+        nd = nd + 1
+    }
+    print("  points: "); print(nd); print("  worst round-trip rel error: "); println(worst)
+    fails = fails + ck_true("round trip <= 1e-12", worst <= 1.0e-12)
+    fails = fails + ck_rel("bp(C -> 0)", blood28_bp(hct, bmax, kd, 1.0e-9), blood28_bp_low(hct, bmax, kd), 1.0e-9)
+    fails = fails + ck_rel("bp_low = 0.6 + 0.4 * 100 / 2", blood28_bp_low(hct, bmax, kd), 20.6, 1.0e-12)
+    fails = fails + ck_rel("bp(C -> inf)", blood28_bp(hct, bmax, kd, 1.0e12), blood28_bp_high(hct), 1.0e-9)
+    var mono = true
+    var prev = blood28_bp(hct, bmax, kd, 1.0e-6)
+    var cc = 1.0e-6
+    while cc < 1.0e8 {
+        cc = cc * 1.7782794100389228
+        let cur = blood28_bp(hct, bmax, kd, cc)
+        if !(cur < prev) { mono = false }
+        prev = cur
+    }
+    fails = fails + ck_true("bp strictly decreasing over 14 decades", mono)
+
+    return fails
+}
+
+fn ck_part_b() -> i32 with IO, Mut, Div, Panic {
+    var fails: i32 = 0
+    let hct = 0.4
+    let bmax = 100.0
+    let kd = 2.0
+    let kb = 1.0e11
+    let bb = 2.0e11
+    var pb = ck_bolus_params()
+    // plain run, constant bp
+    var pl = ck_bolus_params()
+    pl.bp = 0.6 + 0.4 * 2.0
+    var sysl = circ28_sys_zero()
+    circ28_prepare(pl, 0.05, &!sysl)
+    var sl = circ28_state_zero()
+    var ell = circ28_elim_zero()
+    var sysw = circ28_sys_zero()
+    var bw = blood28_new(pb, hct, bb, kb, 0.05)
+    var t = 0.0
+    while t + 0.025 < 6.0 {
+        var iv = 0.0
+        if t + 0.025 < 0.08 { iv = 200.0 / 0.08 }
+        circ28_step(&!sl, pl, &sysl, iv, 0.0, &!ell)
+        blood28_step(&!bw, &!sysw, iv, 0.0)
+        t = t + 0.05
+    }
+    fails = fails + ck_rel("AUC venous", blood28_auc_blood(&bw), ell.auc_ven, 1.0e-9)
+    var xmax = 0.0
+    var dmax = 0.0
+    var k: i32 = 0
+    while k < 28 {
+        if ck_abs(sl.x[k]) > xmax { xmax = ck_abs(sl.x[k]) }
+        let d = ck_abs(blood28_get_x(&bw, k) - sl.x[k])
+        if d > dmax { dmax = d }
+        k = k + 1
+    }
+    print("  final state: max |difference| / max |x| = "); println(dmax / xmax)
+    fails = fails + ck_true("final state to 1e-9", dmax / xmax <= 1.0e-9)
+
+    return fails
+}
+
+fn ck_part_c() -> i32 with IO, Mut, Div, Panic {
+    var fails: i32 = 0
+    let hct = 0.4
+    let bmax = 100.0
+    let kd = 2.0
+    var pc = ck_set()
+    pc.cl_plasma = 60.0
+    var sysc1 = circ28_sys_zero()
+    var bc1 = blood28_new(pc, hct, bmax, kd, 0.25)
+    let r1 = 60.0
+    ck_infuse(&!bc1, &!sysc1, r1, 0.25, 100.0)
+    let c1 = blood28_blood_from_plasma(hct, bmax, kd, r1 / 60.0)
+    fails = fails + ck_rel("C_ss, Cp = 1", blood28_get_x(&bc1, 0), c1, 1.0e-8)
+    print("  max spread over the 15 blood states: "); println(ck_spread(&bc1, c1))
+    fails = fails + ck_true("all blood states equal C_ss (1e-8)", ck_spread(&bc1, c1) <= 1.0e-8)
+    var sysc2 = circ28_sys_zero()
+    var bc2 = blood28_new(pc, hct, bmax, kd, 0.25)
+    let r2 = 20.0 * r1
+    ck_infuse(&!bc2, &!sysc2, r2, 0.25, 100.0)
+    let c2 = blood28_blood_from_plasma(hct, bmax, kd, r2 / 60.0)
+    fails = fails + ck_rel("C_ss, Cp = 20", blood28_get_x(&bc2, 0), c2, 1.0e-8)
+    fails = fails + ck_true("all blood states equal C_ss (1e-8)", ck_spread(&bc2, c2) <= 1.0e-8)
+    let ratio = blood28_get_x(&bc2, 0) / blood28_get_x(&bc1, 0)
+    print("  C_ss ratio for a 20-fold rate: "); print(ratio); print("  predicted 3.4710 = "); println(c2 / c1)
+    fails = fails + ck_rel("ratio", ratio, c2 / c1, 1.0e-8)
+    fails = fails + ck_true("rises less than proportionally (ratio < 20)", ratio < 19.0)
+    print("  bp at the two steady states: "); print(blood28_bp_current(&bc1)); print(" "); println(blood28_bp_current(&bc2))
+    print("  single-bp diagnostic at steady state: "); println(blood28_disc_last(&bc2))
+    fails = fails + ck_true("diagnostic ~ 0 when all beds equal", blood28_disc_last(&bc2) <= 1.0e-7)
+
+    return fails
+}
+
+fn ck_part_d() -> i32 with IO, Mut, Div, Panic {
+    var fails: i32 = 0
+    let hct = 0.4
+    let bmax = 100.0
+    let kd = 2.0
+    var ph = ck_set()
+    ph.clint = 3000.0
+    let cw_t = 20.0
+    let bpe = blood28_bp(hct, bmax, kd, cw_t)
+    var pe = ph
+    pe.bp = bpe
+    let eh = circ28_hepatic_extraction(pe)
+    let vlv = circ28_state_volume(ph, circ28_iv(1))
+    let f = vlv / circ28_blood_volume(ph)
+    let c_art = cw_t / (1.0 - f * eh)
+    let qh = circ28_q_hepatic(ph)
+    let r0 = qh * eh * c_art
+    print("  Cw "); print(cw_t); print("  bp_eff "); print(bpe); print("  E "); print(eh)
+    print("  C_art "); print(c_art); print("  R0 (mg/h) "); println(r0)
+    var sysd = circ28_sys_zero()
+    var bd = blood28_new(ph, hct, bmax, kd, 0.25)
+    ck_infuse(&!bd, &!sysd, r0, 0.25, 250.0)
+    fails = fails + ck_rel("C_art", blood28_get_x(&bd, 1), c_art, 1.0e-8)
+    fails = fails + ck_rel("C_ven", blood28_get_x(&bd, 0), c_art, 1.0e-8)
+    fails = fails + ck_rel("Cw (wrapper effective conc)", blood28_effective_conc(&bd), cw_t, 1.0e-8)
+    fails = fails + ck_rel("bp_eff", blood28_bp_current(&bd), bpe, 1.0e-8)
+    fails = fails + ck_rel("C_liver_vascular = C (1 - E)", blood28_get_x(&bd, circ28_iv(1)), c_art * (1.0 - eh), 1.0e-8)
+    let bp_a = blood28_bp(hct, bmax, kd, c_art)
+    let bp_l = blood28_bp(hct, bmax, kd, c_art * (1.0 - eh))
+    var dp = ck_abs(bp_a - bpe) / bpe
+    let dl = ck_abs(bp_l - bpe) / bpe
+    if dl > dp { dp = dl }
+    let dgot = blood28_bp_discrepancy(&bd.s, bd.p, hct, bmax, kd, bpe)
+    print("  bp(C_art) "); print(bp_a); print("  bp(C_liver_vasc) "); println(bp_l)
+    fails = fails + ck_rel("worst-bed bp discrepancy", dgot, dp, 1.0e-8)
+
+    return fails
+}
+
+fn ck_part_e(mode: i32) -> i32 with IO, Mut, Div, Panic {
+    var fails: i32 = 0
+    let hct = 0.4
+    let bmax = 100.0
+    let kd = 2.0
+    var sye = circ28_sys_zero()
+    var be = blood28_new(ck_bolus_params(), hct, bmax, kd, 0.05)
+    blood28_set_mode(&!be, mode)
+    var input = 0.0
+    var te = 0.0
+    var shown: i32 = 0
+    while te + 0.025 < 24.0 {
+        var iv = 0.0
+        if te + 0.025 < 0.1 { iv = 200.0 / 0.1 }
+        input = input + iv * 0.05
+        blood28_step(&!be, &!sye, iv, 0.0)
+        te = te + 0.05
+        if mode == 0 {
+            if shown == 0 { if te > 0.099 { print("  t "); print(te); print(" bp_eff "); print(blood28_bp_current(&be)); print(" diagnostic "); println(blood28_disc_last(&be)); shown = 1 } }
+            if shown == 1 { if te > 0.499 { print("  t "); print(te); print(" bp_eff "); print(blood28_bp_current(&be)); print(" diagnostic "); println(blood28_disc_last(&be)); shown = 2 } }
+            if shown == 2 { if te > 2.999 { print("  t "); print(te); print(" bp_eff "); print(blood28_bp_current(&be)); print(" diagnostic "); println(blood28_disc_last(&be)); shown = 3 } }
+            if shown == 3 { if te > 23.999 { print("  t "); print(te); print(" bp_eff "); print(blood28_bp_current(&be)); print(" diagnostic "); println(blood28_disc_last(&be)); shown = 4 } }
+        }
+    }
+    print("  mode "); print(mode); print(": input "); print(input)
+    print("  bp min "); print(blood28_bp_min(&be)); print(" max "); print(blood28_bp_max(&be))
+    print("  worst single-bp discrepancy "); print(blood28_disc_max(&be))
+    print("  refactorisations "); println(blood28_refactorisations(&be))
+    fails = fails + ck_rel("(eliminated + remaining) / input", (blood28_eliminated(&be) + blood28_remaining(&be)) / input, 1.0, 1.0e-10)
+    fails = fails + ck_true("bp max / min > 1.5", blood28_bp_max(&be) > 1.5 * blood28_bp_min(&be))
+    return fails
+}
+
+fn ck_part_f() -> i32 with IO, Mut, Div, Panic {
+    var fails: i32 = 0
+    let hct = 0.4
+    let bmax = 100.0
+    let kd = 2.0
+    var si: i32 = 0
+    while si < 3 {
+        var sc: i32 = 3
+        if si == 1 { sc = 0 }
+        if si == 2 { sc = 1 }
+        let a1 = ck_bolus(sc, 0.04, 2.0, ck_bolus_params(), hct, bmax, kd)
+        let a2 = ck_bolus(sc, 0.02, 2.0, ck_bolus_params(), hct, bmax, kd)
+        let a3 = ck_bolus(sc, 0.01, 2.0, ck_bolus_params(), hct, bmax, kd)
+        let a4 = ck_bolus(sc, 0.005, 2.0, ck_bolus_params(), hct, bmax, kd)
+        let q1 = (a1 - a2) / (a2 - a3)
+        let q2 = (a2 - a3) / (a3 - a4)
+        print("  scheme "); print(sc); print(": AUC "); print(a1); print(" "); print(a2); print(" "); print(a3); print(" "); println(a4)
+        print("    difference ratios "); print(q1); print(" "); println(q2)
+        if sc == 3 {
+            fails = fails + ck_true("default scheme: ratios >= 1.8", q1 >= 1.8 && q2 >= 1.8)
+        }
+        si = si + 1
+    }
+    return fails
+}
+
+// For the record, not asserted: the explicit lag scheme (mode 1) at the
+// 20-fold infusion of part c does not reach the steady state (see header).
+fn ck_part_g() -> i32 with IO, Mut, Div, Panic {
+    var pc = ck_set()
+    pc.cl_plasma = 60.0
+    var sys = circ28_sys_zero()
+    var b = blood28_new(pc, 0.4, 100.0, 2.0, 0.1)
+    blood28_set_mode(&!b, 1)
+    ck_infuse(&!b, &!sys, 1200.0, 0.1, 60.0)
+    print("  lag scheme, dt 0.1 h, 60 h: venous "); print(blood28_get_x(&b, 0))
+    print(" arterial "); print(blood28_get_x(&b, 1)); print(" bp used "); print(blood28_bp_current(&b))
+    println("   (steady state: 48.3636, 48.3636, bp 2.4182)")
+    return 0
+}
+
+// Illustration only, printed and NOT asserted against any literature: Bmax 418
+// ng/mL erythrocytes and Kd 3.8 ng/mL plasma are values attributed to Jusko 1995
+// as cited by Storset 2014 (primary paper not opened); Hct 0.45 is an arbitrary
+// choice of this test.
+fn ck_part_i() -> i32 with IO, Mut, Div, Panic {
+    let h = 0.45
+    let bm = 418.0
+    let k = 3.8
+    println("  Hct 0.45 (arbitrary), Bmax 418, Kd 3.8 (attributed to Jusko 1995 via Storset 2014)")
+    print("  limits: bp(C -> 0) "); print(blood28_bp_low(h, bm, k)); print("  bp(C -> inf) "); println(blood28_bp_high(h))
+    var cb = 3.0
+    var j: i32 = 0
+    while j < 4 {
+        if j == 1 { cb = 10.0 }
+        if j == 2 { cb = 30.0 }
+        if j == 3 { cb = 75.0 }
+        let cp = blood28_plasma_from_blood(h, bm, k, cb)
+        print("  whole blood "); print(cb); print(" ng/mL  plasma "); print(cp); print("  blood:plasma "); println(cb / cp)
+        j = j + 1
+    }
+    return 0
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var fails: i32 = 0
+    println("a algebra")
+    fails = fails + ck_part_a()
+    println("b linear limit")
+    fails = fails + ck_part_b()
+    println("c steady state, plasma clearance only")
+    fails = fails + ck_part_c()
+    println("d steady state, hepatic intrinsic clearance only")
+    fails = fails + ck_part_d()
+    println("e mass balance, bolus as infusion, bp changing")
+    fails = fails + ck_part_e(0)
+    fails = fails + ck_part_e(1)
+    fails = fails + ck_part_e(2)
+    fails = fails + ck_part_e(3)
+    println("f convergence in dt (infusion 200 mg over 0.08 h, AUC to 2 h)")
+    fails = fails + ck_part_f()
+    println("g explicit lag, for the record")
+    fails = fails + ck_part_g()
+    println("i illustrative tacrolimus-like case, printed only")
+    fails = fails + ck_part_i()
+    if fails == 0 {
+        println("CIRC28_BLOOD_BINDING_PASS")
+        return 0
+    }
+    println("CIRC28_BLOOD_BINDING_FAIL")
+    return 1
+}

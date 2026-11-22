@@ -24,6 +24,9 @@
 //      AUC_oral / AUC_iv = Fg, with Fg and Eg from circ28_gut_availability
 //      and circ28_gut_extraction. (b) gut wall and liver: AUC_iv = Dose /
 //      [Q_gut Eg + Eh (Q_h - Q_gut Eg)] and AUC_oral / AUC_iv = Fg (1 - Eh).
+//   T9 general source: circ28_step_src with the venous and gut-tissue rates
+//      reproduces circ28_step; a source in liver tissue gives
+//      AUC_ven = S F_src / (Q_h Eh), F_src = 1/(1 + c/(Q_h bp) + c/ps_liver).
 //   T7 10 mg given as an infusion over the first step of a coarse grid
 //      (0.25 h): no state goes below -1e-12 mg/L in 100 h and mass is
 //      conserved. Measured for the record: Crank-Nicolson reached -8.4 mg/L
@@ -185,6 +188,76 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     fails = fails + ck_rel("gut + liver: eliminated + remaining (mg)", r8bi.el_total + r8bi.mass_end, 10.0, 1.0e-10)
     fails = fails + ck_rel("gut + liver: AUC iv (mg.h/L)", r8bi.auc_ven, 10.0 / cl8, 1.0e-6)
     fails = fails + ck_rel("gut + liver: F = Fg (1 - Eh)", (r8bo.auc_ven / r8bo.input) / (r8bi.auc_ven / 10.0), fg * (1.0 - eh8), 1.0e-6)
+
+    println("T9 general source")
+    // (a) the same oral and intravenous rates given through circ28_step_src
+    //     reproduce circ28_step; (b) a constant source in liver tissue with
+    //     hepatic clearance only: at steady state the liver removes what
+    //     the liver balance with no drug arriving by blood gives the
+    //     fraction of the source that leaves the liver in blood,
+    //       F_src = 1 / (1 + c/(Q_h bp) + c/ps_liver),  c = clint fu,
+    //     (tissue either metabolises the drug or passes it to blood, and
+    //     blood is not a perfect sink: the term c/(Q_h bp)); what leaves
+    //     recirculates and is cleared at Q_h Eh, so
+    //       AUC_ven = S F_src / (Q_h Eh).
+    //     A first derivation left out c/(Q_h bp) and predicted 0.2578; the
+    //     run gave 0.1600, which is the value of the formula above.
+    var p9 = ck_set()
+    p9.clint = 500.0
+    p9.clint_gut = 300.0
+    var sys9 = circ28_sys_zero()
+    circ28_prepare(p9, 0.05, &!sys9)
+    var sa = circ28_state_zero()
+    var sb = circ28_state_zero()
+    var ea = circ28_elim_zero()
+    var eb = circ28_elim_zero()
+    var src9: [f64; 28] = [0.0; 28]
+    var n9: i32 = 0
+    while n9 < 400 {
+        var iv9 = 0.0
+        var or9 = 0.0
+        if n9 < 10 { iv9 = 7.0 }
+        if n9 < 40 { or9 = 3.0 }
+        src9[0] = iv9
+        src9[17] = or9
+        circ28_step(&!sa, p9, &sys9, iv9, or9, &!ea)
+        circ28_step_src(&!sb, p9, &sys9, &src9, &!eb)
+        n9 = n9 + 1
+    }
+    var d9 = 0.0
+    var j9: i32 = 0
+    while j9 < 28 {
+        let dd = ck_abs(sa.x[j9] - sb.x[j9])
+        if dd > d9 { d9 = dd }
+        j9 = j9 + 1
+    }
+    print("  max |state difference| step vs step_src: "); println(d9 * 1.0e15)
+    if d9 > 1.0e-13 {
+        println("  [FAIL]")
+        fails = fails + 1
+    }
+    fails = fails + ck_rel("AUC venous step_src vs step", eb.auc_ven, ea.auc_ven, 1.0e-12)
+    var p9b = ck_set()
+    p9b.clint = 500.0
+    var sys9b = circ28_sys_zero()
+    circ28_prepare(p9b, 0.05, &!sys9b)
+    var sc = circ28_state_zero()
+    var ec = circ28_elim_zero()
+    var src9b: [f64; 28] = [0.0; 28]
+    var in9 = 0.0
+    n9 = 0
+    while n9 < 8000 {
+        src9b[3] = 0.0
+        if n9 < 20 { src9b[3] = 10.0 }
+        in9 = in9 + src9b[3] * 0.05
+        circ28_step_src(&!sc, p9b, &sys9b, &src9b, &!ec)
+        n9 = n9 + 1
+    }
+    let c9 = p9b.clint * p9b.fu
+    let esc9 = 1.0 / (1.0 + c9 / (circ28_q_hepatic(p9b) * p9b.bp) + c9 / p9b.ps[1])
+    let eh9 = circ28_hepatic_extraction(p9b)
+    fails = fails + ck_rel("liver source: eliminated + remaining (mg)", ec.hepatic + circ28_total_mass(&sc, p9b), in9, 1.0e-10)
+    fails = fails + ck_rel("liver source: AUC venous (mg.h/L)", ec.auc_ven, in9 * esc9 / (circ28_q_hepatic(p9b) * eh9), 1.0e-6)
 
     println("T7 dose as a one-step infusion, coarse step")
     var p7 = ck_set()
