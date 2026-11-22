@@ -1,0 +1,2 @@
+M1 prompt-lookup drafter on L4 (job 20665, ExitCode 0:0, LOOKUP PASS + SPECDONE PASS): lookup draft decodes 16 tokens in 14 singles + 2 verifies (2 accepted) bit-exact vs plain greedy, GPU counts identical to CPU. No draft weights needed.
+No regression on Plan I/J/K/L receipts in the same run (SERVJPARAMS PASS, CHATTPL/CHATBODY PASS, SERVEDONE PASS parity=1, BATCHDONE PASS cpu 1 gpu 1, OVERLAP-OK, CHAT-OK, ALLDONE).

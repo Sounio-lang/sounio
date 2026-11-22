@@ -9,6 +9,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import githubDarkTheme from '@shikijs/themes/github-dark';
 import { HREFLANG, isIndexableSitemapUrl, sitemapLinks } from './src/lib/seo-locales.mjs';
+import { lastmodForUrl } from './src/lib/sitemap-lastmod.mjs';
 import { rehypeDemoteH1 } from './src/lib/rehype-demote-h1.mjs';
 
 // Real Shiki grammar for Sounio (`sio` code fences). Previously ```sio blocks
@@ -66,7 +67,9 @@ export default defineConfig({
     sitemap({
       filter: (page) => isIndexableSitemapUrl(page),
       serialize(item) {
-        return { ...item, links: sitemapLinks(item.url) };
+        const lastmod = lastmodForUrl(item.url);
+        if (!lastmod) throw new Error(`sitemap lastmod missing for ${item.url}`);
+        return { ...item, lastmod, links: sitemapLinks(item.url) };
       },
       i18n: {
         defaultLocale: 'en',

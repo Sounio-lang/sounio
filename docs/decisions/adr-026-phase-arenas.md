@@ -171,3 +171,11 @@ Split implementation out of this ADR into separate cards:
 - `u32` graph indices plus capacity diagnostics;
 - provenance/diagnostic promotion to stable identities;
 - seed large-spill/sret pooling on non-macOS targets.
+
+## Amendment (2026-11-09): field resolution
+
+Added by [ADR-028](adr-028-rulings-2026-11-09.md); the sections above are unchanged.
+
+A phase hands the next phase typed data, so a field is resolved by the type that owns it, never by its name. Resolving a field by a hash of its name, or by a majority vote across the structs that declare a field with that name, is forbidden in every phase of the HIR → MIR → IR → codegen pipeline. Where the type of a field access is unknown at lowering, lowering refuses rather than guesses.
+
+Acceptance: the Stage 0 gate (`lower_refuse_untyped_field_hash` in `self-hosted/ir/lower.sio`, extracted from PR #3045) is on `main` and refuses an untyped field access that a name hash would have resolved.

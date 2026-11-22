@@ -1,0 +1,1 @@
+Decimal `9223372036854775808` (`2^63`) is now accepted in the parser as within the width-valid `u64` band instead of triggering premature parser refusal `E276`. Type interpretation and signedness enforcement remain deferred to the type checker.
