@@ -134,7 +134,7 @@ theorem DSt.st_valid {t : DSt} (hv : Valid t) {a n v qn : Nat} (hq : qn < t.ar.l
   · simp only [Option.some.injEq] at h
     subst h
     refine ⟨hv.mem ?_, Ext.refl _, by simp, rfl, rfl, rfl, rfl, rfl⟩
-    intro x; dsimp only; split
+    intro x; split
     · exact hq
     · exact hv.2.2.2.2.1 x
   · contradiction
@@ -209,7 +209,7 @@ theorem prim_valid (ph : Phys) (p : Prim) (args : List DVal) (t : DSt) (o : Orig
       | exact valid_copy hv hq _ _ _
       | exact valid_tput hv hq _ _ _ (ha _ (by simp)) (by assumption)
       | (refine ⟨hv.mem ?_, Ext.refl _, by simp, rfl, rfl, rfl, rfl, rfl⟩
-         intro x; dsimp only; split
+         intro x; split
          · exact hq
          · exact hv.2.2.2.2.1 x)
       | (obtain ⟨hg, hds, hax, hrs, hmem, htab, hout, hpc'⟩ := hv

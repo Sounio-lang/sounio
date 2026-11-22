@@ -19,6 +19,25 @@ gen() { # name file
   rm -f "$tmp"/c.*
   local IFS='+'
   printf 'def %s : List Nat :=\n  %s\n\n' "$name" "$(echo "${parts[*]}" | sed 's/+/ ++ /g')"
+  local IFS=','
+  printf 'def %sChunks : List (List Nat) := [%s]\n\n' "$name" "$(echo "${parts[*]}" | sed 's/,/, /g')"
+}
+
+genA() { # name file
+  local name="$1" file="$2" i=0
+  echo "/-- ${file} (decoded from format A) -/"
+  sed 's/#.*//' "$root/$file" | tr -cd '0-9a-f' | fold -w 2 |
+    while read -r pair || [ -n "$pair" ]; do printf '%d\n' "0x$pair"; done |
+    split -l 256 - "$tmp/c."
+  local parts=()
+  for c in "$tmp"/c.*; do
+    printf 'def %s_%d : List Nat := [%s]\n' "$name" "$i" "$(paste -sd, "$c" | sed 's/,/, /g')"
+    parts+=("${name}_${i}")
+    i=$((i + 1))
+  done
+  rm -f "$tmp"/c.*
+  local IFS='+'
+  printf 'def %s : List Nat :=\n  %s\n\n' "$name" "$(echo "${parts[*]}" | sed 's/+/ ++ /g')"
 }
 
 tmp="$(mktemp -d)"
@@ -38,5 +57,7 @@ HEAD
   gen seedB bootstrap/roots/b/seed-b
   gen seedBOct bootstrap/roots/b/seed-b.oct
   gen seedBHex bootstrap/roots/b/seed-b.hex
+  gen sporosStage1Hex bootstrap/roots/sporos/sporos-stage1.hex
+  genA sporosStage1 bootstrap/roots/sporos/sporos-stage1.hex
   echo 'end X86Min.Data'
 } > "$out"

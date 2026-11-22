@@ -44,6 +44,7 @@ jobs:
       stdlib: ${{ steps.classify.outputs.stdlib }}
       tests: ${{ steps.classify.outputs.tests }}
       lean: ${{ steps.classify.outputs.lean }}
+      bootstrap: ${{ steps.classify.outputs.bootstrap }}
       math: ${{ steps.classify.outputs.math }}
       ontology: ${{ steps.classify.outputs.ontology }}
       clinical: ${{ steps.classify.outputs.clinical }}
@@ -2487,6 +2488,7 @@ jobs:
           SOUNIO_IR_FN_INDEX_VERIFY: "1"
         run: |
           set -o pipefail
+          bash scripts/ci/madaros_corpus_timeout_selftest.sh
           bash scripts/ci/madaros_corpus_regression_gate.sh 2>&1 | tee "$RUNNER_TEMP/madaros-corpus.log"
       - name: Summarise
         if: always()
@@ -2981,7 +2983,7 @@ jobs:
     needs: [impact, fast-checks]
     if: needs.impact.outputs.lean == 'true' || needs.impact.outputs.full == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 35  # 31.8 min on the #3687 head (2026-11-22) before the bootstrap steps moved to Bootstrap Proofs; 13.8 min of that stays here
     steps:
       - uses: actions/checkout@v4
       - name: Materialize the committed Madaros prebuilt
@@ -3033,25 +3035,6 @@ jobs:
         run: |
           cd formal
           lake build OctonionAlgebra
-      # Bootstrap model (formal/Bootstrap): a minimal x86-64 semantics for the
-      # two seed loaders and short kernel-checked runs of both. SeedData.lean
-      # must match the seed files. The full self-reproduction and cross-check
-      # proofs are too heavy for CI and run on the lab cluster through
-      # bootstrap/model/seed_proofs.sh; the CPU differential is
-      # bootstrap/model/x86diff_gate.sh.
-      - name: Bootstrap x86 model and short seed runs
-        run: |
-          bash bootstrap/model/gen_seed_data.sh /tmp/SeedData.fresh.lean
-          cmp /tmp/SeedData.fresh.lean formal/Bootstrap/SeedData.lean
-          cd formal
-          lake build Bootstrap x86run
-      # The two Sporos interpreters must agree: the Lean reference (`sporos`,
-      # correct by the DAG simulation theorems) and the C++23 one
-      # (`bootstrap/model/sporos_fast.cpp`, trusted only through this check).
-      # Exit status, output and error are compared byte for byte on the
-      # example programs and on 500 random checker-valid programs.
-      - name: Sporos differential (C++ interpreter against the Lean reference)
-        run: bash bootstrap/model/sporos_diff.sh 500
       - name: Build all default-target proof modules
         run: |
           cd formal/lean4
@@ -3095,6 +3078,128 @@ jobs:
       # a PR that adds an axiom or a native_decide must regenerate it.
       - name: Axiom inventory is current
         run: bash scripts/dev/gen_axiom_inventory.sh --check
+
+  # The bootstrap chain (formal/Bootstrap, formal/Sporos, bootstrap/model): its own
+  # job so that a bootstrap PR does not also rebuild formal/lean4, and a formal/lean4
+  # PR does not rebuild the bootstrap model. The heavy bootstrap proofs (seeds,
+  # stage 1, sporos_vm) run on the lab cluster through their scripts, not here.
+  bootstrap-proofs:
+    name: Bootstrap Proofs
+    needs: [impact, fast-checks]
+    if: needs.impact.outputs.bootstrap == 'true' || needs.impact.outputs.full == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35  # split out of Lean Proofs on 2026-11-22: these steps took 18.0 of its 31.8 min on the #3687 head
+    steps:
+      - uses: actions/checkout@v4
+      - name: Materialize the committed Madaros prebuilt
+        run: bash scripts/lib/materialize_madaros_prebuilt.sh
+      # Toolchains and build products have different lifetimes. A toolchain-only
+      # key made immutable .lake snapshots rebuild every later proof change.
+      - name: Cache elan toolchains
+        uses: actions/cache@v4
+        with:
+          path: ~/.elan
+          key: lean-elan-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('formal/lean-toolchain', 'formal/lean4/lean-toolchain') }}
+      # Exact source key only: never restore proof objects from another source
+      # tree or toolchain. All lake builds and gates below remain unconditional,
+      # including on a cache hit.
+      - name: Cache exact-source Lean build products
+        uses: actions/cache@v4
+        with:
+          path: |
+            formal/.lake
+          key: bootstrap-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('formal/**', '!formal/**/.lake/**', 'bootstrap/**', 'scripts/ci/*lean*.sh', '.github/workflows/ci.yml') }}
+      - name: Install elan (Lean toolchain manager)
+        run: |
+          if ! command -v elan &>/dev/null; then
+            curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
+              | sh -s -- -y --no-modify-path
+          fi
+          echo "$HOME/.elan/bin" >> $GITHUB_PATH
+      # Bootstrap model (formal/Bootstrap): a minimal x86-64 semantics for the
+      # two seed loaders and short kernel-checked runs of both. SeedData.lean
+      # must match the seed files. The full self-reproduction and cross-check
+      # proofs are too heavy for CI and run on the lab cluster through
+      # bootstrap/model/seed_proofs.sh; the CPU differential is
+      # bootstrap/model/x86diff_gate.sh.
+      - name: Bootstrap x86 model and short seed runs
+        run: |
+          bash bootstrap/model/gen_seed_data.sh /tmp/SeedData.fresh.lean
+          cmp /tmp/SeedData.fresh.lean formal/Bootstrap/SeedData.lean
+          cd formal
+          lake build Bootstrap x86run
+      # The two Sporos interpreters must agree: the Lean reference (`sporos`,
+      # correct by the DAG simulation theorems) and the C++23 one
+      # (`bootstrap/model/sporos_fast.cpp`, trusted only through this check).
+      # Exit status, output and error are compared byte for byte on the
+      # example programs and on 500 random checker-valid programs.
+      - name: Sporos differential (C++ interpreter against the Lean reference)
+        run: bash bootstrap/model/sporos_diff.sh 500
+      # `SporosProvLen`: the Lean reference under `noPhys` is observationally the
+      # machine that tracks provenance only by a 64-bit length, which is what
+      # `sporos_fast.cpp` implements. The examples and 500 random programs must agree,
+      # and two built-in mutations of the C++ provenance tracking must be caught.
+      - name: Sporos provenance-length differential and mutation controls
+        run: sh bootstrap/model/sporos_provlen_gate.sh 500
+      # sporos_vm, the native x86-64 Sporos VM: generator determinism and parity with
+      # the committed binary, its Lean byte check, seed-a rebuilding it from its hex,
+      # the differential against sporos_fast on the examples, the vectors and 2,000
+      # generated programs, and the TMR and mutation controls. Its simulation proofs
+      # (BootstrapSporosVm) are built by sporos_vm_proofs.sh, not here; the step runs
+      # that script's axiom-parser selftest.
+      - name: Bootstrap sporos_vm differential, TMR and mutation controls
+        run: |
+          bash bootstrap/model/sporos_vm_proofs.sh --selftest
+          sh bootstrap/model/sporos_vm_gate.sh 1000
+      # Instruction-level CPU differential for `X86Int` and `X86Dec` (the
+      # stage-1 model): 200,000 random instructions across all 45 decoded forms
+      # executed natively on the runner CPU and compared against `X86Int.step`.
+      - name: Bootstrap X86Int CPU differential
+        run: bash bootstrap/model/x86int_diff_gate.sh 200000 1
+      # Kernel-checked process environment differential (`X86Env`, `syscall`, `initStack`).
+      - name: Bootstrap X86Env Linux syscall differential
+        run: bash bootstrap/model/x86env_diff_gate.sh 2000 1
+      # Hamming-1/2 (`X86Dec.altsAt`) and byte-boundary differential fuzz against CPU.
+      - name: Bootstrap X86Dec Hamming and byte fuzzer
+        run: bash bootstrap/model/x86dec_fuzz_gate.sh 5000 100000 1
+      # Physical 4-site fault injection of the canonical 38-byte machine-code TMR voter.
+      - name: Bootstrap TMR machine-code voter fault injection
+        run: bash bootstrap/model/tmr_fault_gate.sh 20000 1
+      # spr1_check, the independent second stage-1 checker (Root A is
+      # bootstrap/roots/sporos/sporos-stage1.hex): seed-a rebuilds it from its hex,
+      # 2,000 files against the Lean verdict of SporosCheckDiff, the two
+      # negative controls. Fault injection (INJECT=1) runs by hand.
+      - name: Bootstrap spr1_check differential (second stage-1 checker)
+        run: bash bootstrap/model/spr1_check_gate.sh 2000 0
+      # X86Uni (X86Int plus the seeds' narrow forms) against the CPU, 60,000 cases
+      # over every form; the narrow forms at least 1,200 cases each.
+      - name: Bootstrap X86Uni CPU differential
+        run: bash bootstrap/model/x86uni_diff_gate.sh
+      # X86Vm (X86Int plus the forms sporos_vm needs: mul/div, variable shifts,
+      # 16-bit and indexed memory, setcc/cmovcc) against the CPU: 66,000 cases, each
+      # of the 31 new forms at least 1,000; a Hamming-1 fetch sweep; one corrupted
+      # CPU trace that must be rejected.
+      - name: Bootstrap X86Vm CPU differential
+        run: bash bootstrap/model/x86vm_diff_gate.sh
+      # AArch64 physical model and the 44-byte TMR voter. On this x86-64 runner
+      # the gate builds `aarch64-phys-check` and runs its Lean selftest only; the
+      # native AArch64 differential and fault sweeps need ARM64 hardware (run by
+      # hand, or traces from --emit-only checked here with --verify-dir).
+      - name: Bootstrap AArch64 physical model selftest
+        run: bash bootstrap/model/aarch64_phys_gate.sh --selftest
+      # Root C (AArch64 seed-c): seed-a and seed-b assemble seed-c's format A and B
+      # listings to the committed bytes, and the Lean AArch64 model runs it on fixed
+      # vectors, all 256 bytes and 5000 fuzz cases. Native AArch64 runs need Apple Silicon.
+      - name: Bootstrap root C seed gate (Linux half)
+        run: bash bootstrap/model/root_c_seed_gate.sh
+      # Contiguous 64-byte cache-line bursts on the three Decision 50 arenas, and
+      # instruction fetches straddling a guard page, against the CPU (`TMRBurst`).
+      - name: Bootstrap TMR burst and page-straddle gate
+        run: bash bootstrap/model/tmr_burst_straddle_gate.sh 3400 20000 1
+      # The `#print axioms` list for the headline bootstrap theorems built here
+      # (the formal/ package part is in the Lean Proofs job).
+      - name: Axiom report for headline bootstrap theorems
+        run: bash scripts/ci/lean_axiom_report.sh --bootstrap
 
   website:
     name: Website
@@ -3190,6 +3295,7 @@ jobs:
       - gate-wave-0
       - sounio-lint
       - lean-proofs
+      - bootstrap-proofs
       - website
       - r6-corpus-sweep
       - slow-lane
