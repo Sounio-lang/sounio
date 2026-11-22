@@ -77,3 +77,28 @@ The repository ships a Sounio LSP ([`tools/lsp/README.md`](tools/lsp/README.md))
 ## Known limitations
 
 See `CLAUDE.md` §13 and [`docs/compiler/KNOWN_LIMITATIONS.md`](docs/compiler/KNOWN_LIMITATIONS.md).
+
+---
+
+## Cursor Cloud specific instructions
+
+Linux x86_64. The default compiler is `./bin/souc` (Madaros). The raw ELF `bin/madaros-linux-x86_64` is gitignored. The tracked artifacts are `bin/madaros-linux-x86_64.gz` and `bin/madaros-linux-x86_64.sha256`. Cloud Agent `install` runs:
+
+```bash
+bash scripts/lib/materialize_madaros_prebuilt.sh
+```
+
+That script checks the sha256 and writes the ELF. `./bin/souc` and `./bin/madaros` also materialize it on first use, so a branch that updates the `.gz` still gets the matching ELF. `make build` is the multi-stage bootstrap fixed-point ceremony. `make build-madaros` rebuilds the modular compiler from source. Ordinary edits use the materialized prebuilt.
+
+Set `SOUNIO_STDLIB_PATH` to this repo's `stdlib` directory when the compiler is invoked outside the repository root. Inside the repo, `./bin/souc` resolves stdlib itself.
+
+Hello-world and the checks this environment is built around:
+
+- `./bin/souc --version`
+- `./bin/souc check examples/hello.sio`
+- `./bin/souc run examples/hello.sio` prints `Hello, Sounio`
+- `make test-madaros-identity`
+- `python3 scripts/dev/sounio-lint.py --errors-only <file.sio>` (the linter takes one file)
+- `bash scripts/run_sio_test_suite.sh` for the full suite. The harness prints `engine=lean_single` when `artifacts/self-hosted/madaros` is absent. That line names the local rebuild it did not find. The suite still invokes `./bin/souc`, which runs the materialized prebuilt.
+
+Library files under `stdlib/` and `examples/` are checked with `./bin/souc check`. `./bin/souc run` is for programs that define `main`. Formal proofs under `formal/` use the Lean toolchain in `formal/lean-toolchain` and are separate from this compiler setup. No long-running service is required.
