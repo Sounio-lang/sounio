@@ -10,11 +10,9 @@ From 3.0.0 on, the following rules from [ADR-018](docs/decisions/adr-018-release
 
 The release process is in [`docs/RELEASE_POLICY.md`](docs/RELEASE_POLICY.md).
 
-## Current maturity
+## [3.0.0] - 2026-11-22
 
-**Status: research language (pre-1.0).** APIs may change; not recommended for production use.
-
-This block is the current status. Sections under a version heading are a historical record of what that release note said when it was written. Wording inside those sections is not the current status. A future tag in the release process is not a statement that the language is recommended for production use today. A footer status that used to sit at the end of this file was removed on 2026-10-24 and is not the present maturity. This note does not name a compiler version.
+The first stable release of Sounio 3, edition 2026 ([ADR-018](docs/decisions/adr-018-release-cycle-and-versioning.md)). Its code is exactly 3.0.0-rc.2 (`release/3.0` at b1b740760): the 7-day soak that began with rc.2 on 2026-10-31 ended with no `release-blocker`, and nothing was merged into the branch in between. Every change since 2.1.0 is listed under 3.0.0-rc.1 and 3.0.0-rc.2 below.
 
 ## [3.0.0-rc.2] - 2026-10-31
 
