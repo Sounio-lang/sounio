@@ -157,12 +157,37 @@ run_checker() {
   "$checker" "$@"
 }
 
+# design_controls REPORT: three altered copies of a genuine report must each be refused by
+# verify-phys: a Mode A point replaced by q = 1 (which makes the bound vacuous), a point
+# duplicated while another is dropped, and one row cut to a single trial.
+design_controls() {
+  local rep="$1" bad
+  bad="$work/design_q1.txt"
+  sed '0,/^MODE_A 1 1000 /s//MODE_A 1 1 /' "$rep" > "$bad"
+  bad2="$work/design_dup.txt"
+  awk '/^MODE_A 3 1000 / { print; print; next } /^MODE_A 1 100 / { next } { print }' "$rep" > "$bad2"
+  bad3="$work/design_trials.txt"
+  awk '!done && /^MODE_B / { $6 = 1; done = 1 } { print }' "$rep" > "$bad3"
+  for f in "$bad" "$bad2" "$bad3"; do
+    if cmp -s "$f" "$rep"; then
+      echo "AARCH64_PHYS_GATE_FAIL: design control $(basename "$f") did not change the report" >&2
+      exit 1
+    fi
+    if run_checker verify-phys "$f" "$mc_trials" >/dev/null 2>&1; then
+      echo "AARCH64_PHYS_GATE_FAIL: design control $(basename "$f") was NOT caught" >&2
+      exit 1
+    fi
+  done
+  echo "AARCH64_PHYS_DESIGN_CONTROLS_CAUGHT_OK"
+}
+
 # Always run the pure-Lean model selftest first (all architectures).
 run_checker selftest
 
 if [[ "$mode" == "verify-dir" ]]; then
   run_checker diff "$diff_cases" "$io_dir/diff.txt"
-  run_checker verify-phys "$io_dir/phys.txt"
+  run_checker verify-phys "$io_dir/phys.txt" "$mc_trials"
+  design_controls "$io_dir/phys.txt"
   if [[ -f "$io_dir/neg_diff.txt" ]]; then
     if run_checker diff 530 "$io_dir/neg_diff.txt" >/dev/null 2>&1; then
       echo "AARCH64_PHYS_GATE_FAIL: neg_diff.txt was NOT caught" >&2
@@ -215,4 +240,5 @@ run_checker diff "$diff_cases" "$work/diff.txt"
 
 "$fuzz" --phys "$mc_trials" "$seed" > "$work/phys.txt"
 grep -v '^FETCH_ALT ' "$work/phys.txt"
-run_checker verify-phys "$work/phys.txt"
+run_checker verify-phys "$work/phys.txt" "$mc_trials"
+design_controls "$work/phys.txt"

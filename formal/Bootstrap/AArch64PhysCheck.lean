@@ -24,6 +24,9 @@ Supports three CLI subcommands:
        * `NEG_UNHARDENED` negative baseline (`SDC = 640 / 640`)
        * Mode A (4 points) & Mode B (9 points) exact `Rat` 5-sigma validation
          against `3 * q² + 11 * r`.
+       * the Monte Carlo design itself: each of the 4 Mode A and 9 Mode B `(q, r)` points
+         exactly once, no other point, and at least `min_trials` trials per row
+         (`verify-phys [file [min_trials]]`, default 20,000).
 
 Core Lean 4 only: zero Mathlib imports, zero axioms beyond core Lean.
 -/
@@ -524,11 +527,45 @@ structure PhysSummary where
   negSdc       : Nat := 0
   modeACount   : Nat := 0
   modeBCount   : Nat := 0
+  -- `(q_num, q_den, trials)` and `(q_num, q_den, r_num, r_den, trials)` of every Monte Carlo row.
+  modeARows    : List (Nat × Nat × Nat) := []
+  modeBRows    : List (Nat × Nat × Nat × Nat × Nat) := []
   mcFails      : List String := []
 
 def parseNatTok (s : String) : Option Nat := s.toNat?
 
-def runVerifyPhysStream (stream : IO.FS.Stream) : IO UInt32 := do
+/-- The Monte Carlo design of `aarch64_phys_fuzz --phys`: the body rates `q` of Mode A
+(ideal voter) and the `(q, r)` pairs of Mode B (faulty voter), as numerator and denominator.
+A report must contain each point exactly once and nothing else, so a missing, repeated or
+substituted point (for example `q = 1`, which makes `3 q²` vacuous) is refused. -/
+def modeAGrid : List (Nat × Nat) := [(1, 1000), (3, 1000), (1, 100), (3, 100)]
+def modeBGrid : List (Nat × Nat × Nat × Nat) :=
+  [(1, 1000, 1, 10000), (1, 1000, 5, 10000), (1, 1000, 2, 1000),
+   (1, 100, 1, 10000), (1, 100, 5, 10000), (1, 100, 2, 1000),
+   (3, 100, 1, 10000), (3, 100, 5, 10000), (3, 100, 2, 1000)]
+
+/-- Errors of the Monte Carlo rows against the design: every grid point exactly once, no
+other point, and every row with at least `minTrials` trials. -/
+def checkMcDesign (minTrials : Nat) (st : PhysSummary) : List String := Id.run do
+  let mut errs : List String := []
+  for (qn, qd) in modeAGrid do
+    let n := (st.modeARows.filter fun (a, b, _) => a == qn && b == qd).length
+    if n != 1 then errs := errs ++ [s!"MODE_A q={qn}/{qd} appears {n} times, expected once"]
+  for (qn, qd, _) in st.modeARows do
+    if !modeAGrid.contains (qn, qd) then errs := errs ++ [s!"MODE_A q={qn}/{qd} is not a design point"]
+  for (qn, qd, tr) in st.modeARows do
+    if tr < minTrials then errs := errs ++ [s!"MODE_A q={qn}/{qd} trials={tr} < {minTrials}"]
+  for (qn, qd, rn, rd) in modeBGrid do
+    let n := (st.modeBRows.filter fun (a, b, c, d, _) => a == qn && b == qd && c == rn && d == rd).length
+    if n != 1 then errs := errs ++ [s!"MODE_B q={qn}/{qd} r={rn}/{rd} appears {n} times, expected once"]
+  for (qn, qd, rn, rd, _) in st.modeBRows do
+    if !modeBGrid.contains (qn, qd, rn, rd) then
+      errs := errs ++ [s!"MODE_B q={qn}/{qd} r={rn}/{rd} is not a design point"]
+  for (qn, qd, rn, rd, tr) in st.modeBRows do
+    if tr < minTrials then errs := errs ++ [s!"MODE_B q={qn}/{qd} r={rn}/{rd} trials={tr} < {minTrials}"]
+  return errs
+
+def runVerifyPhysStream (stream : IO.FS.Stream) (minTrials : Nat) : IO UInt32 := do
   let mut st : PhysSummary := {}
   let mut parseErrors : List String := []
   repeat do
@@ -594,7 +631,7 @@ def runVerifyPhysStream (stream : IO.FS.Stream) : IO UInt32 := do
           else
             let q : Rat := (qn : Rat) / (qd : Rat)
             let bnd := tmrBoundArm64 q 0
-            st := { st with modeACount := st.modeACount + 1 }
+            st := { st with modeACount := st.modeACount + 1, modeARows := st.modeARows ++ [(qn, qd, tr)] }
             if !withinFiveSigma bnd tr fl then
               st := { st with mcFails := s!"MODE_A q={qn}/{qd} fails={fl}/{tr} exceeds 3*q^2" :: st.mcFails }
         | _, _, _, _ => parseErrors := "bad MODE_A numbers" :: parseErrors
@@ -610,7 +647,7 @@ def runVerifyPhysStream (stream : IO.FS.Stream) : IO UInt32 := do
             let q : Rat := (qn : Rat) / (qd : Rat)
             let r : Rat := (rn : Rat) / (rd : Rat)
             let bnd := tmrBoundArm64 q r
-            st := { st with modeBCount := st.modeBCount + 1 }
+            st := { st with modeBCount := st.modeBCount + 1, modeBRows := st.modeBRows ++ [(qn, qd, rn, rd, tr)] }
             if !withinFiveSigma bnd tr fl then
               st := { st with mcFails := s!"MODE_B q={qn}/{qd} r={rn}/{rd} fails={fl}/{tr} exceeds 3*q^2+11*r" :: st.mcFails }
         | _, _, _, _, _, _ => parseErrors := "bad MODE_B numbers" :: parseErrors
@@ -644,6 +681,7 @@ def runVerifyPhysStream (stream : IO.FS.Stream) : IO UInt32 := do
     errs := errs ++ [s!"MODE_A expected 4 rows, got {st.modeACount}"]
   if st.modeBCount != 9 then
     errs := errs ++ [s!"MODE_B expected 9 rows, got {st.modeBCount}"]
+  errs := errs ++ checkMcDesign minTrials st
   errs := errs ++ st.mcFails.reverse
 
   if !errs.isEmpty then
@@ -654,12 +692,12 @@ def runVerifyPhysStream (stream : IO.FS.Stream) : IO UInt32 := do
   IO.println s!"AARCH64_PHYS_GATE_OK platform={st.platform} voter_bytes=44 ptrace={st.ptraceStatus} fetch_flips={st.fetchFlips} guard_pf=0 fetch_alts_lean={st.fetchAltsOk} single_fault={st.sfCorrected}/{st.sfTrials} sdc=0 neg_unhardened={st.negSdc}/{st.negTrials} modeA={st.modeACount} modeB={st.modeBCount}"
   return 0
 
-def runVerifyPhys (file? : Option String := none) : IO UInt32 := do
+def runVerifyPhys (file? : Option String := none) (minTrials : Nat := 20000) : IO UInt32 := do
   match file? with
-  | none => runVerifyPhysStream (← IO.getStdin)
+  | none => runVerifyPhysStream (← IO.getStdin) minTrials
   | some path =>
     let h ← IO.FS.Handle.mk path .read
-    runVerifyPhysStream (IO.FS.Stream.ofHandle h)
+    runVerifyPhysStream (IO.FS.Stream.ofHandle h) minTrials
 
 end AArch64PhysCheck
 
@@ -680,6 +718,12 @@ def main (args : List String) : IO UInt32 :=
       return 2
   | ["verify-phys"] => AArch64PhysCheck.runVerifyPhys none
   | ["verify-phys", path] => AArch64PhysCheck.runVerifyPhys (some path)
+  | ["verify-phys", path, tStr] =>
+    match tStr.toNat? with
+    | some t => AArch64PhysCheck.runVerifyPhys (some path) t
+    | none => do
+      IO.eprintln "usage: aarch64-phys-check verify-phys [file [min_trials]]"
+      return 2
   | _ => do
-    IO.eprintln "usage: aarch64-phys-check <selftest | diff <min_cases> [file] | verify-phys [file]>"
+    IO.eprintln "usage: aarch64-phys-check <selftest | diff <min_cases> [file] | verify-phys [file [min_trials]]>"
     return 2
