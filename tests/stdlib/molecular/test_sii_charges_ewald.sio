@@ -1,0 +1,211 @@
+//@ run-pass
+//@ requires: madaros
+//@ timeout: 180
+//@ expect-stdout: SII_CHARGES_EWALD_OK
+// molecular::ice_rules + molecular::ewald on the sII clathrate (a = 17.31 A),
+// against stdlib/molecular/oracles/sii_ewald_oracle.cpp (long double, the same
+// minstd generator, edge order and orientation set). Every expected number
+// below was printed by that oracle; the predictions it tests were written
+// before it ran (stdlib/molecular/oracles/sii_ewald_predictions.txt).
+//
+// Model: SPC/E water (OH 1.0 A, HOH 109.47 deg, qO -0.8476, qH +0.4238) on a
+// proton configuration with the ice rules and zero bond winding; H2 of Alavi
+// et al. 2005 (bond 0.7414 A, +0.4932 on the atoms, -0.9864 at the centre);
+// tinfoil Ewald, alpha = 0.35 / A, rc = 16 A, kc = 3.92 / A.
+//
+// Run time: 27 s for the compiled program on one core (measured 2026-11-17),
+// over the 30 s default once CI runs tests in parallel; hence the timeout.
+
+use molecular::host_guest::{hg_sii_oxygens, hg_sii_cages}
+use molecular::ice_rules::{ir_build_bonds, ir_degree_bad, ir_winding_parity, ir_euler_orient, ir_violations,
+    ir_winding, ir_depolarize, ir_place_water, ir_fingerprint}
+use molecular::ewald::{ew_setup, ew_fixed_charges, ew_phi, ew_molecules_energy, ew_coulomb_kj}
+
+fn absd(v: f64) -> f64 { if v < 0.0 { 0.0 - v } else { v } }
+
+// True when `got` is NOT within relative tolerance of `want`. Written as
+// "not (within)" so that it fails closed: every comparison with a NaN is false,
+// and the earlier `diff / den > tol` form let a NaN result count as a match.
+fn rel_bad(got: f64, want: f64, tol: f64) -> bool with Div {
+    var den = absd(want)
+    if den < 1.0e-300 { den = 1.0 }
+    if got != got || want != want { return true }
+    !(absd(got - want) / den <= tol)
+}
+
+fn rel_ok(tag: string, got: f64, want: f64, tol: f64) -> i64 with IO, Mut, Div {
+    if rel_bad(got, want, tol) {
+        print("MISMATCH "); print(tag); print(" got "); println(got * 1.0e6); print("   want "); println(want * 1.0e6)
+        return 1
+    }
+    0
+}
+
+// Electrostatic energy (kJ/mol) of an Alavi H2 centred at (cx, cy, cz) along the
+// unit axis (nx, ny, nz) in the host potential.
+fn h2_energy(sites: &[f64; 12288], q: &[f64; 4096], ns: i64, cx: f64, cy: f64, cz: f64, nx: f64, ny: f64, nz: f64) -> f64 with Mut, Div, Panic {
+    let h = 0.5 * 0.7414
+    let p1 = ew_phi(sites, q, ns, cx + h * nx, cy + h * ny, cz + h * nz)
+    let p2 = ew_phi(sites, q, ns, cx - h * nx, cy - h * ny, cz - h * nz)
+    let p0 = ew_phi(sites, q, ns, cx, cy, cz)
+    ew_coulomb_kj() * 0.4932 * (p1 + p2 - 2.0 * p0)
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let a = 17.31
+    var bad: i64 = 0
+    // Canary: the comparison itself must reject a NaN on either side and an
+    // infinity, or a calculation that went non-finite would print OK.
+    let zero = absd(0.0)
+    let nan = zero / zero
+    let inf = 1.0 / zero
+    if !rel_bad(nan, 1.0, 1.0e-9) { println("CANARY nan got accepted"); bad = bad + 1 }
+    if !rel_bad(1.0, nan, 1.0e-9) { println("CANARY nan want accepted"); bad = bad + 1 }
+    if !rel_bad(inf, 1.0, 1.0e-9) { println("CANARY inf accepted"); bad = bad + 1 }
+    if rel_bad(1.0 + 1.0e-12, 1.0, 1.0e-9) { println("CANARY finite match refused"); bad = bad + 1 }
+    var frac: [f64; 12288] = [0.0; 12288]
+    let no = hg_sii_oxygens(&!frac, 0.21796, 0.18198, 0.37081)
+    var pos: [f64; 12288] = [0.0; 12288]
+    var i: i64 = 0
+    while i < 3 * no {
+        pos[i as usize] = a * frac[i as usize]
+        i = i + 1
+    }
+    // ---- proton configuration ----
+    let ne = ir_build_bonds(&pos, no, a, 3.2)
+    if no != 136 || ne != 272 || ir_degree_bad() != 0 { println("bad lattice"); bad = bad + 1 }
+    let par = ir_winding_parity()
+    if par.0 + par.1 + par.2 != 0 { println("odd winding parity"); bad = bad + 1 }
+    if ir_euler_orient() != 0 || ir_violations() != 0 { println("euler orientation"); bad = bad + 1 }
+    let fp = ir_fingerprint()
+    if fp.0 != 0 - 808 || fp.1 != 28238387 { println("euler fingerprint differs from the oracle"); bad = bad + 1 }
+    let w0 = ir_winding()
+    if w0.0 != 0 || w0.1 != 0 || w0.2 != 2 { println("initial winding"); bad = bad + 1 }
+    let mv = ir_depolarize(20261116, 200000)
+    if mv.0 != 200000 || mv.1 != 131982 || mv.2 != 1 { println("loop-move counts differ from the oracle"); bad = bad + 1 }
+    let w = ir_winding()
+    if w.0 != 0 || w.1 != 0 || w.2 != 0 || ir_violations() != 0 { println("not depolarised"); bad = bad + 1 }
+
+    // ---- SPC/E charges ----
+    var sites: [f64; 12288] = [0.0; 12288]
+    var q: [f64; 4096] = [0.0; 4096]
+    let ns = ir_place_water(&!sites, &!q, 1.0, 109.47 * 3.14159265358979323846 / 180.0, 0.0 - 0.8476, 0.4238)
+    if ns != 408 { println("water placement"); bad = bad + 1 }
+    var mx = 0.0
+    var my = 0.0
+    var mz = 0.0
+    var s: i64 = 0
+    while s < ns {
+        mx = mx + q[s as usize] * sites[(3 * s) as usize]
+        my = my + q[s as usize] * sites[(3 * s + 1) as usize]
+        mz = mz + q[s as usize] * sites[(3 * s + 2) as usize]
+        s = s + 1
+    }
+    bad = bad + rel_ok("Mx", mx, 0.0 - 2.220651518126210e-01, 1.0e-10)
+    bad = bad + rel_ok("My", my, 0.0 - 1.977714575999252e-01, 1.0e-10)
+    bad = bad + rel_ok("Mz", mz, 1.076299863903882e-01, 1.0e-10)
+
+    // ---- Ewald potential and guest energies ----
+    let nk = ew_setup(a, 0.35, 16.0, 3.92)
+    if nk != 2628 { println("k-vector count"); bad = bad + 1 }
+    ew_fixed_charges(&sites, &q, ns)
+    bad = bad + rel_ok("phi(1,2,3)", ew_phi(&sites, &q, ns, 1.0, 2.0, 3.0), 6.547057476053419e-02, 1.0e-11)
+    let tn = sqrt(0.3 * 0.3 + 0.5 * 0.5 + 0.81 * 0.81)
+    let nx = 0.3 / tn
+    let ny = 0.0 - 0.5 / tn
+    let nz = 0.81 / tn
+    bad = bad + rel_ok("E small cage 0", h2_energy(&sites, &q, ns, 0.31, 0.0 - 0.17, 0.22, nx, ny, nz), 1.912992833605208e-01, 1.0e-9)
+    bad = bad + rel_ok("E large cage 16", h2_energy(&sites, &q, ns, 6.80125, 6.32125, 6.71125, nx, ny, nz), 6.237642885830138e-02, 1.0e-9)
+    // the same energies with alpha = 0.40 (rc 14, kc 4.48): alpha-independence
+    let nk40 = ew_setup(a, 0.40, 14.0, 4.48)
+    if nk40 <= nk { println("alpha 0.40 k-vectors"); bad = bad + 1 }
+    ew_fixed_charges(&sites, &q, ns)
+    bad = bad + rel_ok("E small cage 0 alpha .40", h2_energy(&sites, &q, ns, 0.31, 0.0 - 0.17, 0.22, nx, ny, nz), 1.912992833605208e-01, 1.0e-9)
+    bad = bad + rel_ok("E large cage 16 alpha .40", h2_energy(&sites, &q, ns, 6.80125, 6.32125, 6.71125, nx, ny, nz), 6.237642885830138e-02, 1.0e-9)
+
+    // ---- orientation scan at four cage centres (240 Fibonacci directions) ----
+    let _nk2 = ew_setup(a, 0.35, 16.0, 3.92)
+    ew_fixed_charges(&sites, &q, ns)
+    var cen: [f64; 192] = [0.0; 192]
+    let nc = hg_sii_cages(&!cen, a)
+    if nc != 24 { println("cage count"); bad = bad + 1 }
+    let pick: [i64; 4] = [0, 4, 16, 21]
+    let want_mean: [f64; 4] = [0.0 - 3.371643148406718e-05, 4.112266222617997e-06, 4.558271538130890e-06, 2.596049618384836e-06]
+    let want_min: [f64; 4] = [0.0 - 5.968235596201106e-01, 0.0 - 6.527462356704728e-01, 0.0 - 8.070469300418703e-02, 0.0 - 2.011526725654789e-01]
+    let want_max: [f64; 4] = [6.315374942770518e-01, 6.799639377793748e-01, 5.669916127904880e-02, 1.865954329842507e-01]
+    let want_boltz: [f64; 4] = [1.011884477085035, 1.014057392407560, 1.000158496831437, 1.001177011024974]
+    let kt = 0.00831446261815324 * 250.0
+    let nd: i64 = 240
+    var c: i64 = 0
+    while c < 4 {
+        let ci = pick[c as usize]
+        let cx = cen[(3 * ci) as usize]
+        let cy = cen[(3 * ci + 1) as usize]
+        let cz = cen[(3 * ci + 2) as usize]
+        var sum = 0.0
+        var mn = 1.0e9
+        var mxe = 0.0 - 1.0e9
+        var bz = 0.0
+        var d: i64 = 0
+        while d < nd {
+            let z = 1.0 - (2.0 * (d as f64) + 1.0) / (nd as f64)
+            let rr = sqrt(1.0 - z * z)
+            let ph = (d as f64) * 3.14159265358979323846 * (3.0 - sqrt(5.0))
+            let e = h2_energy(&sites, &q, ns, cx, cy, cz, rr * cos(ph), rr * sin(ph), z)
+            sum = sum + e
+            if e < mn { mn = e }
+            if e > mxe { mxe = e }
+            bz = bz + exp(0.0 - e / kt)
+            d = d + 1
+        }
+        // the mean is ~1e-5 of the spread (Laplace): compare it on the spread's scale
+        if !(absd(sum / (nd as f64) - want_mean[c as usize]) <= 1.0e-10) { println("orientation mean"); println(sum / (nd as f64) * 1.0e9); bad = bad + 1 }
+        bad = bad + rel_ok("min", mn, want_min[c as usize], 1.0e-9)
+        bad = bad + rel_ok("max", mxe, want_max[c as usize], 1.0e-9)
+        bad = bad + rel_ok("boltzmann", bz / (nd as f64), want_boltz[c as usize], 1.0e-11)
+        c = c + 1
+    }
+
+    // ---- guest-guest Ewald: five H2 molecules ----
+    let gc: [f64; 15] = [1.50877060830571597e-01, 0.0 - 1.89860240578528838e-01, 1.00000000000000000e-01,
+        8.68325431264075737e+00, 0.0 - 1.10186317007886100e-02, 8.75500000000000000e+00,
+        1.30339316137527994e+01, 1.28389188630701993e+01, 1.00000000000000000e-01,
+        1.30619890908831468e+01, 0.0 - 6.17057433254947885e-02, 1.30825000000000000e+01,
+        6.69030236535573287e+00, 6.29251945435744399e+00, 6.59125000000000000e+00]
+    let gn: [f64; 15] = [5.00974189326687265e-01, 0.0 - 4.04397740106358380e-01, 0.0 - 7.65171437930963760e-01,
+        6.06129370246896258e-01, 0.0 - 4.36258015626115257e-01, 6.65045961062891600e-01,
+        0.0 - 7.07073975623455463e-01, 0.0 - 4.88287110027684259e-01, 5.11490069480193599e-01,
+        0.0 - 2.48783314914799874e-01, 7.04814551348781435e-01, 6.64336744751499841e-01,
+        0.0 - 7.51073772165772420e-02, 6.75977242662215264e-01, 7.33085021870202524e-01]
+    var gpos: [f64; 12288] = [0.0; 12288]
+    var gq: [f64; 4096] = [0.0; 4096]
+    var gm: [i64; 4096] = [0; 4096]
+    var m: i64 = 0
+    while m < 5 {
+        let h = 0.5 * 0.7414
+        var k: i64 = 0
+        while k < 3 {
+            let sgn = if k == 0 { 1.0 } else if k == 1 { 0.0 - 1.0 } else { 0.0 }
+            let si = 3 * m + k
+            var t: i64 = 0
+            while t < 3 {
+                gpos[(3 * si + t) as usize] = gc[(3 * m + t) as usize] + sgn * h * gn[(3 * m + t) as usize]
+                t = t + 1
+            }
+            gq[si as usize] = if k < 2 { 0.4932 } else { 0.0 - 0.9864 }
+            gm[si as usize] = m
+            k = k + 1
+        }
+        m = m + 1
+    }
+    let gg = ew_coulomb_kj() * ew_molecules_energy(&gpos, &gq, &gm, 15)
+    bad = bad + rel_ok("guest-guest", gg, 0.0 - 7.878762857117400e-03, 1.0e-8)
+
+    if bad != 0 {
+        print_int(bad)
+        println(" mismatches")
+        return 1
+    }
+    println("SII_CHARGES_EWALD_OK")
+    0
+}

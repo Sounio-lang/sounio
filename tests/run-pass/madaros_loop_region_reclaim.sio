@@ -1,0 +1,109 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: LOOP_REGION_RECLAIM_OK
+//@ description: 10M tuple results inside one loop in main; iteration regions keep them under the 2^22 handle table
+// Before loop-iteration regions a function region gave its garbage back only
+// at return, and `main` never had one, so the 24-byte tuple from f() kept a
+// handle for the whole loop and this died with `madaros: handles full`
+// (exit 182) near i = 4.19M. Prediction: it now completes with the exact sums.
+//
+// Cases 5 and 6 carry an aggregate with INTEGER words across iterations. The
+// carried copy-out used to run every word through the reference classifier,
+// and handle ids are the integers 1..handle_count: the counter walks into the
+// ids of the loop's own young handles, the region reads as escaped and is
+// kept from then on, so these died with exit 182 like case 1 did before loop
+// regions. Region exits now trust declared numeric types (numeric provenance,
+// ir/lower.sio rgn_copy_cost). Prediction: both complete with exact counts.
+fn f(i: i64) -> (i64, f64, i64) { (i, 0.5, 1) }
+
+struct Cnt { a: f64, n: i64, c: f64 }
+
+fn bump(b: &Cnt) -> Cnt { Cnt { a: (*b).a + 1.0, n: (*b).n + 1, c: 0.0 } }
+
+// Case 7 checks what the carried copy CONTAINS, word by word: each iteration
+// adds q to element q of a 513-word array that the region protocol moves with
+// one block copy (__rgn_copy_payload) at every iteration end, so a copy that
+// drops, shifts or truncates a word shows up as a wrong element.
+struct Pos { x: [f64; 513], k: i64 }
+
+fn adv(p: &Pos) -> Pos with Mut, Panic {
+    var r = Pos { x: [0.0; 513], k: (*p).k + 1 }
+    var q: usize = 0
+    while q < 513 {
+        r.x[q] = (*p).x[q] + (q as f64)
+        q = q + 1
+    }
+    r
+}
+
+fn step(xs: [i64; 8], k: i64) -> [i64; 8] with Mut, Panic {
+    var r: [i64; 8] = [0; 8]
+    var q: usize = 0
+    while q < 8 {
+        r[q] = xs[q] + k
+        q = q + 1
+    }
+    r
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var s: i64 = 0
+    var h = 0.0
+    var i: i64 = 0
+    while i < 10000000 {
+        let (a, b, c) = f(i)
+        s = s + a + c
+        h = h + b
+        i = i + 1
+    }
+    if s != 50000005000000 { return 1 }
+    if h != 5000000.0 { return 2 }
+    // Same through `for` over a range and through `loop` with `break`.
+    var t: i64 = 0
+    for k in 0..6000000 {
+        let (a, _b, c) = f(k)
+        t = t + a - c
+    }
+    if t != 17999991000000 { return 3 }
+    var u: i64 = 0
+    var j: i64 = 0
+    loop {
+        if j >= 6000000 { break }
+        let (a, _b, _c) = f(j)
+        u = u + a
+        j = j + 1
+    }
+    if u != 17999997000000 { return 4 }
+    var b = Cnt { a: 0.0, n: 0, c: 0.0 }
+    var m: i64 = 0
+    while m < 10000000 {
+        b = bump(&b)
+        m = m + 1
+    }
+    if b.n != 10000000 || b.a != 10000000.0 { return 5 }
+    var xs: [i64; 8] = [0; 8]
+    var r: i64 = 0
+    while r < 6000000 {
+        xs = step(xs, 1)
+        r = r + 1
+    }
+    var e: usize = 0
+    while e < 8 {
+        if xs[e] != 6000000 { return 6 }
+        e = e + 1
+    }
+    var p = Pos { x: [0.0; 513], k: 0 }
+    var it: i64 = 0
+    while it < 20000 {
+        p = adv(&p)
+        it = it + 1
+    }
+    if p.k != 20000 { return 7 }
+    var w: usize = 0
+    while w < 513 {
+        if p.x[w] != 20000.0 * (w as f64) { return 7 }
+        w = w + 1
+    }
+    println("LOOP_REGION_RECLAIM_OK")
+    0
+}

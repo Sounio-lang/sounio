@@ -81,6 +81,9 @@ variant."*
 
 ### 6.1.0 CORRECTION — thirty-one names, thirty ids, and this is not a row
 
+**Count refreshed against source, 2026-11-06.** These counts cover the closed
+builtin list; declared user effects are registered separately.
+
 Raised by an independent review of this section on 2026-08-20 (fable-1, consulted
 for disagreement rather than agreement). Four criticisms; three land.
 
@@ -103,8 +106,8 @@ describes an intention rather than the mechanism. The review put it exactly:
 *writing `[i64; 8]` is already the answer to the question of whether this is a
 row.*
 
-**The two silent-drop holes are one mechanism.** The unknown-name hole and the
-ninth-effect hole are both `if eff_id >= 0 && c.current_effect_count < 8`. §6.1.1
+**Historical finding (2026-08-20): the two silent-drop holes are one mechanism.**
+The unknown-name hole and the ninth-effect hole are both `if eff_id >= 0 && c.current_effect_count < 8`. §6.1.1
 already unified them; a later dispatch of mine re-separated them, and that was a
 regression against this section.
 
@@ -134,6 +137,16 @@ effect's syntax, and its ordering must be ruled there.
 
 ### 6.1.1 Four of the effects are bookkeeping with no consumer
 
+> **Current correction, 2026-11-06.** The measurements and silent-drop
+> description below are historical. In current Madaros,
+> `checker_collect_effects_mut` resolves declared user effects through
+> `checker_lookup_user_effect_id_mut`, reports E246 for unknown names outside
+> `effect_name_is_held`, and reports E246 for a ninth distinct signature effect.
+> The eight-slot representation remains. The held names retain their explicit
+> exception; they do not establish general user-effect support. Discriminating
+> fixtures are `tests/compile-fail/effect_unknown_name_refused.sio` and
+> `tests/compile-fail/effect_ninth_slot_refused.sio`.
+
 Measured 2026-08-19. Of the 23 names, the ones any `has_effect_id` **decision**
 consults are `ZD` (8 call sites), `Epistemic` (4), `Observe` (2), `Chaotic`,
 `MultiTest`, `Hypothesis`, `Witness`, `Temporal` and `NonAssoc`.
@@ -158,7 +171,7 @@ consume slots against the cap, and are read by nothing. That is the measured
 shape of 6.6's "set or row" question, and it is why 6.6 now carries a third
 option.
 
-`self-hosted/check/check.sio:347` declares
+`Checker.current_effects` in `self-hosted/check/check.sio` declares
 
     current_effects: [i64; 8],
 
