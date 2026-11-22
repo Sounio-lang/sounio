@@ -4950,6 +4950,10 @@ fn lower_rgn_enabled() -> bool with IO, Mut, Panic, Div {
 // f64 position (`let y: f64 = if c { 1.0 } else { 2.0 }`) never sets the tail
 // flag, so it stays f64.
 var LOWER_F128_FN_BODY_PENDING: bool = false
+// Set by lowerer_lower_fn_item_mut around the body block of a function with a value result: the block's tail expression
+// is the function's result, and lower_block_ref value-copies it when it is a place read through a reference
+// (`(*w).ts`, `*p`), exactly as `return (*w).ts` does in lower_return_expr_ref.
+var LOWER_RET_PLACE_BODY_PENDING: bool = false
 var LOWER_F128_TAIL_EXPR: bool = false
 
 pub fn lower_monolithic_public_probe_trace_set(enabled: bool) with Mut {
@@ -7752,6 +7756,17 @@ fn lower_type_expr_fixed_array_word_scalar_ref(ty: &TypeExpr) -> bool with Mut, 
     }
 }
 
+// `&[T; N]` / `&![T; N]` with T a word scalar: the parameter shape whose `*p` is a fixed array that a `let`, an assignment
+// or a return must value-copy. lower_type_expr_fixed_array_word_scalar_ref does not peel the reference, so such a
+// parameter was never marked and `var t = *p` bound the caller's array itself.
+fn lower_type_expr_ref_fixed_array_word_scalar_ref(ty: &TypeExpr) -> bool with Mut, Panic, Div {
+    if (*ty).kind != TypeExprKind::TypeReference && (*ty).kind != TypeExprKind::TypeRefMut { return false }
+    match (*ty).inner {
+        Some(inner) => lower_type_expr_fixed_array_word_scalar_ref(&(*inner)),
+        None => false,
+    }
+}
+
 fn lower_opt_type_fixed_array_word_scalar(ty_opt: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, Div {
     match *ty_opt {
         Some(ty) => lower_type_expr_fixed_array_word_scalar_ref(&(*ty)),
@@ -9344,6 +9359,25 @@ fn lowerer_bind_local_fixed_array_len_mut(
     }
 }
 
+// array_copy_word_scalar = 2: a REFERENCE parameter to a word-scalar fixed array (`p: &[f64; 18]`). Kept apart from 1 on
+// purpose: every reader of 1 treats the local's register as an array handle, and a reference parameter's register holds
+// the address of the caller's slot. Only the deref copy (emit_place_aggregate_value_copy) reads 2.
+fn lowerer_mark_local_ref_array_copy_word_scalar_mut(
+    lo: &! Lowerer,
+    name: Name
+) with Mut, Alloc, Panic, Div {
+    var locals_box = (*lo).locals
+    var i = (*locals_box).count - 1
+    while i >= 0 {
+        if (*(*locals_box).depths).values[i as usize] <= (*lo).scope_depth && ir_name_eq((*(*locals_box).names).values[i as usize], name) {
+            (*(*locals_box).array_copy_word_scalar).values[i as usize] = 2
+            (*lo).locals = locals_box
+            return
+        }
+        i = i - 1
+    }
+}
+
 // *mut analogue of bind_local_array_copy_word_scalar. This bit is the second
 // half of the inferred fixed-array copy predicate in lower_let_stmt_ref.
 fn lowerer_mark_local_array_copy_word_scalar_mut(
@@ -9761,6 +9795,8 @@ fn lowerer_lower_fn_params_mut(
                 }
                 if param_word_scalar {
                     lowerer_mark_local_array_copy_word_scalar_mut(lo, (*list).head.name)
+                } else if param_is_ref && param_array_len >= 0 && lower_type_expr_ref_fixed_array_word_scalar_ref(&(*list).head.ty) {
+                    lowerer_mark_local_ref_array_copy_word_scalar_mut(lo, (*list).head.name)
                 }
                 lowerer_bind_local_struct_type_mut(lo, (*list).head.name, lower_param_struct_type_name(&(*list).head.ty))
                 // #2820: an array-of-struct parameter records its ELEMENT struct.
@@ -10958,8 +10994,10 @@ lower_rss_mark("before_block")
         }
         // V0-E.5.10: the body block of an `-> f128` fn owns its literal tail.
         LOWER_F128_FN_BODY_PENDING = (*lo).current_func_loaded && lower_fn_returns_f128(&(*(*lo).current_func))
+        LOWER_RET_PLACE_BODY_PENDING = !lower_opt_type_is_unit_or_implicit(&fd.return_type)
         let bpair = (*lo).lower_block_ref(&fd.body)
         LOWER_F128_FN_BODY_PENDING = false
+        LOWER_RET_PLACE_BODY_PENDING = false
         (*lo) = bpair.0
         result_reg = bpair.1
     }
@@ -20612,7 +20650,7 @@ impl Lowerer {
                 Some(operand) => {
                     if (*operand).kind == ExprKind::ExprIdent && self.lookup_local_is_ref((*operand).name) {
                         let arr_len = self.lookup_local_fixed_array_len((*operand).name)
-                        if arr_len >= 0 && self.lookup_local_array_copy_word_scalar((*operand).name) {
+                        if arr_len >= 0 && (self.lookup_local_array_copy_word_scalar((*operand).name) || self.lookup_local_ref_array_copy_word_scalar((*operand).name)) {
                             let elem_is_float = self.lookup_local_array_elem_float((*operand).name)
                             return self.emit_fixed_array_value_copy(reg, arr_len, elem_is_float)
                         }
@@ -22169,6 +22207,64 @@ impl Lowerer {
         }
         false
     }
+    // A reference parameter to a word-scalar fixed array (array_copy_word_scalar = 2, see
+    // lowerer_mark_local_ref_array_copy_word_scalar_mut).
+    fn lookup_local_ref_array_copy_word_scalar(self, name: Name) -> bool with Mut, Panic, Div, Alloc {
+        var i = (*self.locals).count - 1
+        while i >= 0 {
+            if (*(*self.locals).depths).values[i as usize] <= self.scope_depth && ir_name_eq((*(*self.locals).names).values[i as usize], name) {
+                return (*(*self.locals).array_copy_word_scalar).values[i as usize] == 2
+            }
+            i = i - 1
+        }
+        false
+    }
+
+    // A place a `var` may value-copy whatever the struct (LOWER_PLACE_FORCE_COPY): a field, an element, or a deref of a
+    // reference local. A deref of a Box local keeps the let path's gate.
+    fn place_force_copy_source_ok(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        if (*e).kind == ExprKind::ExprUnary {
+            if (*e).un_op != UnaryOp::OpDeref { return false }
+            match (*e).left {
+                Some(op) => {
+                    if (*op).kind != ExprKind::ExprIdent { return false }
+                    if !self.lookup_local_is_ref((*op).name) { return false }
+                    return !ir_name_is_box(self.lookup_local_struct_type((*op).name))
+                }
+                None => { return false }
+            }
+        }
+        (*e).kind == ExprKind::ExprFieldAccess || (*e).kind == ExprKind::ExprIndex
+    }
+
+    // A function result read through a reference: `*p`, `(*p).f`, `(*p).f.g`, or `p.f` with p a reference local (not a
+    // Box). Returning it stored the referent's handle, so the caller's value and the referent were one object.
+    fn return_place_needs_copy(self, e: &Expr, depth: i64) -> bool with Mut, Panic, Div, Alloc {
+        if depth > 16 { return false }
+        if (*e).kind == ExprKind::ExprFieldAccess {
+            match (*e).left {
+                Some(l) => { return self.return_place_needs_copy(&(*l), depth + 1) }
+                None => { return false }
+            }
+        }
+        if (*e).kind == ExprKind::ExprIdent {
+            if depth == 0 { return false }
+            if !self.lookup_local_is_ref((*e).name) { return false }
+            return !ir_name_is_box(self.lookup_local_struct_type((*e).name))
+        }
+        if (*e).kind == ExprKind::ExprUnary && (*e).un_op == UnaryOp::OpDeref {
+            match (*e).left {
+                Some(op) => {
+                    if (*op).kind != ExprKind::ExprIdent { return false }
+                    if !self.lookup_local_is_ref((*op).name) { return false }
+                    return !ir_name_is_box(self.lookup_local_struct_type((*op).name))
+                }
+                None => { return false }
+            }
+        }
+        false
+    }
+
     fn lookup_local_array_copy_word_scalar(self, name: Name) -> bool with Mut, Panic, Div, Alloc {
         var i = (*self.locals).count - 1
         while i >= 0 {
@@ -35619,7 +35715,7 @@ impl Lowerer {
                         // fail closed instead of lowering as integers.
                         (*(*locals).array_elem_wide_bits).values[idx as usize] = lower_type_expr_array_elem_wide_bits(&(*list).head.ty)
                         (*(*locals).array_lens).values[idx as usize] = param_array_len
-                        (*(*locals).array_copy_word_scalar).values[idx as usize] = if param_word_scalar || lower_type_expr_seq_elem_is_direct_word_scalar(&(*list).head.ty) { 1 } else { 0 }
+                        (*(*locals).array_copy_word_scalar).values[idx as usize] = if param_word_scalar || lower_type_expr_seq_elem_is_direct_word_scalar(&(*list).head.ty) { 1 } else if param_array_len >= 0 && lower_type_expr_ref_fixed_array_word_scalar_ref(&(*list).head.ty) { 2 } else { 0 }
                         // This path writes the slot directly, not through bind_local,
                         // and the stack only resets count between functions. An
                         // array local in a function lowered earlier can leave
@@ -36235,6 +36331,8 @@ impl Lowerer {
         TG_BODY_PENDING = false
         let f128_body_tail = LOWER_F128_FN_BODY_PENDING
         LOWER_F128_FN_BODY_PENDING = false
+        let ret_place_body_tail = LOWER_RET_PLACE_BODY_PENDING
+        LOWER_RET_PLACE_BODY_PENDING = false
         let f128_lit_tail_ctx = f128_body_tail || LOWER_F128_TAIL_EXPR
         lo.scope_depth = lo.scope_depth + 1
         let saved_local_count = (*lo.locals).count
@@ -36266,13 +36364,20 @@ impl Lowerer {
                                 if f128_body_tail && is_tail_stmt {
                                     LOWER_F128_TAIL_EXPR = true
                                 }
-                                let pair_tail = if f128_lit_tail_ctx && is_tail_stmt && lower_expr_is_float_literal_like_ref(&(*expr_box)) {
+                                let pair_tail_raw = if f128_lit_tail_ctx && is_tail_stmt && lower_expr_is_float_literal_like_ref(&(*expr_box)) {
                                     lo.lower_f128_value_ref(&(*expr_box))
                                 } else {
                                     lo.lower_expr_ref(&(*expr_box))
                                 }
                                 if f128_body_tail && is_tail_stmt {
                                     LOWER_F128_TAIL_EXPR = false
+                                }
+                                // The body's tail is the function result: `fn get(w: &W) -> S { (*w).ts }` copies like `return`.
+                                var pair_tail = pair_tail_raw
+                                if ret_place_body_tail && is_tail_stmt && pair_tail.0.return_place_needs_copy(&(*expr_box), 0) {
+                                    LOWER_PLACE_FORCE_COPY = 1
+                                    pair_tail = pair_tail.0.emit_place_aggregate_value_copy(&(*expr_box), pair_tail.1)
+                                    LOWER_PLACE_FORCE_COPY = 0
                                 }
                                 if is_tail_stmt {
                                     // Read now: this block's locals leave scope below.
@@ -37276,6 +37381,19 @@ impl Lowerer {
                     if (*rhs_shape).kind == ExprKind::ExprIdent {
                         fixed_array_len = lo.lookup_local_fixed_array_len((*rhs_shape).name)
                         fixed_array_word_scalar = lo.lookup_local_array_copy_word_scalar((*rhs_shape).name)
+                    } else if (*rhs_shape).kind == ExprKind::ExprUnary && (*rhs_shape).un_op == UnaryOp::OpDeref {
+                        // `var t = *p` with `p: &[T; N]`: t is a fixed array of its own (the place copy below gives it fresh
+                        // storage), so a later `var u = t` copies it too.
+                        match (*rhs_shape).left {
+                            Some(deref_op) => {
+                                if (*deref_op).kind == ExprKind::ExprIdent && lo.lookup_local_ref_array_copy_word_scalar((*deref_op).name) {
+                                    fixed_array_len = lo.lookup_local_fixed_array_len((*deref_op).name)
+                                    fixed_array_word_scalar = fixed_array_len >= 0
+                                    rhs_array_elem_is_float = lo.lookup_local_array_elem_float((*deref_op).name)
+                                }
+                            }
+                            None => {}
+                        }
                     } else if (*rhs_shape).kind == ExprKind::ExprCall {
                         // #1475: `var a = make_arr()` — no annotation, so the shape has to
                         // come from the callee's declared return type. Without this the
@@ -37473,13 +37591,19 @@ impl Lowerer {
                             bind_reg = copy_reg
                         }
                     }
-                } else if (*rhs_ident).kind == ExprKind::ExprUnary || (*rhs_ident).kind == ExprKind::ExprFieldAccess {
+                } else if (*rhs_ident).kind == ExprKind::ExprUnary || (*rhs_ident).kind == ExprKind::ExprFieldAccess
+                    || (is_mut && (*rhs_ident).kind == ExprKind::ExprIndex) {
                     // SIO-278: `let saved = *b` / `let s = o.f` bound the
                     // source storage itself, so `(*b).a[0] = 99` showed
                     // through `saved.a[0]` (lean_single prints the copied
                     // value). Apply the same value copy the identifier path
                     // above applies; non-aggregate places keep the handle.
+                    // A `var` is written in place later, so its copy is taken whatever the struct (as the assignment does):
+                    // `var t = *p` of a scalar-only struct, `var x = w.m` of a struct whose arrays sit one struct down, and
+                    // `var e = arr[i]` bound the source object and the first write through the var changed the source.
+                    if is_mut && lo.place_force_copy_source_ok(&(*rhs_ident)) { LOWER_PLACE_FORCE_COPY = 1 }
                     let place_pair = lo.emit_place_aggregate_value_copy(&(*rhs_ident), reg)
+                    LOWER_PLACE_FORCE_COPY = 0
                     lo = place_pair.0
                     bind_reg = place_pair.1
                 } else if (*rhs_ident).kind == ExprKind::ExprCast
@@ -49542,7 +49666,21 @@ impl Lowerer {
             self.lower_opt_expr_ref(&e.left)
         }
         var lo = pair.0
-        let reg = pair.1
+        var reg = pair.1
+        // `return (*w).ts` / `return *p`: the result is a value of the caller's, not the referent (see
+        // return_place_needs_copy).
+        match e.left {
+            Some(ret_place) => {
+                if lo.return_place_needs_copy(&(*ret_place), 0) {
+                    LOWER_PLACE_FORCE_COPY = 1
+                    let ret_copy = lo.emit_place_aggregate_value_copy(&(*ret_place), reg)
+                    LOWER_PLACE_FORCE_COPY = 0
+                    lo = ret_copy.0
+                    reg = ret_copy.1
+                }
+            }
+            None => {}
+        }
         if TG_CLONE_FN >= 0 && TG_CLONE_FN == lo.current_fn {
             match e.left {
                 Some(trv) => { lo = lo.tg_emit_ret_store(&(*trv)) }
