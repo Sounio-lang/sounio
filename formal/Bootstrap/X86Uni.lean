@@ -34,6 +34,16 @@ namespace X86Uni
 
 open X86Env PDist
 
+/-- `simpa [..] using t` closed by `exact` at default transparency. Lean 4.33 checks the
+closing step of `simpa` at reducible transparency, which no longer sees through
+`X86Min.St.setReg` or `X86Min.pow2 64`. -/
+local macro "simpaX " "[" ls:Lean.Parser.Tactic.simpLemma,* "]" " using " t:term : tactic =>
+  `(tactic| first
+    | exact $t
+    | (have hX := $t; simp [$ls,*] at hX ⊢; exact hX)
+    | (have hX := $t; simp [$ls,*] at hX; exact hX)
+    | (simp [$ls,*]; exact $t))
+
 abbrev Reg := X86Int.Reg
 abbrev Flags := X86Int.Flags
 abbrev St := X86Int.St
@@ -591,6 +601,10 @@ private theorem rex_parts (b0 : Nat) :
   dsimp only
   refine ⟨by split <;> omega, by omega, by omega⟩
 
+private theorem toUniIns_xor32 (a len d src : Nat) :
+    toUniIns a len (X86Min.Ins.rr X86Min.Op.xor 32 d src) =
+      if (d == src) = true then Ins.ofInt (X86Int.Ins.alu X86Int.Alu.xor d d) else Ins.rr32 NarrowRR32.xor d src := rfl
+
 private theorem if_none_eq_some {α : Type _} {c : Bool} {t : Option α} {x : α}
     (h : (if c = true then none else t) = some x) : c ≠ true ∧ t = some x := by
   cases c <;> simp_all
@@ -784,9 +798,8 @@ private theorem decode_min_agree_aux {b : Nat → Option Nat} {a b0 o : Nat}
             have hres := decode_of_dec hdec
             dsimp only [wd] at hwd32
             rw [hwd32]
-            dsimp only [toUniIns]
             rw [if_pos (by decide : (0x31 == 0x31) = true)]
-            dsimp only
+            rw [toUniIns_xor32]
             rw [if_pos (beq_iff_eq.mpr hds)]
             exact hres
           · have hdec_none : X86Dec.decode b a = none := by
@@ -810,9 +823,8 @@ private theorem decode_min_agree_aux {b : Nat → Option Nat} {a b0 o : Nat}
             dsimp only [wd] at hwd32
             rw [hwd32]
             simp only [decode, hdec_none, hnar]
-            dsimp only [toUniIns]
             rw [if_pos (by decide : (0x31 == 0x31) = true)]
-            dsimp only
+            rw [toUniIns_xor32]
             rw [if_neg (fun h => hds (eq_of_beq h))]
         · -- o = 0x09
           have hdec_none : X86Dec.decode b a = none := by
@@ -2155,6 +2167,23 @@ def checkImageOk (code : List Nat) (vbase : Nat) : Bool :=
     | some (.jmpReg _, _) => false
     | _ => true
 
+/-- `decodeAt` on a built image, as a range fact and a table lookup. Stated once: the
+`if` inside `decodeAt` carries decidability instances that still mention the image after
+unfolding, which `split` and `rw` in Lean 4.33 do not see through. -/
+theorem decodeAt_mk'_eq_some {code : List Nat} {vbase a : Nat} {x : X86Min.Ins × Nat}
+    (h : (X86Min.Img.mk' code vbase code.length).decodeAt a = some x) :
+    (vbase ≤ a ∧ a < vbase + code.length) ∧
+      X86Min.Tree.get none X86Min.tdepth (X86Min.Img.mk' code vbase code.length).dec (a - vbase) = some x := by
+  have h' := h
+  simp [X86Min.Img.decodeAt, X86Min.Img.mk'] at h'
+  exact ⟨⟨of_decide_eq_true h'.1.1, of_decide_eq_true h'.1.2⟩, h'.2⟩
+
+theorem decodeAt_mk'_of_range {code : List Nat} {vbase a : Nat}
+    (h1 : vbase ≤ a) (h2 : a < vbase + code.length) :
+    (X86Min.Img.mk' code vbase code.length).decodeAt a =
+      X86Min.Tree.get none X86Min.tdepth (X86Min.Img.mk' code vbase code.length).dec (a - vbase) := by
+  simp [X86Min.Img.decodeAt, X86Min.Img.mk', h1, h2]
+
 theorem imageOk_of_check {code : List Nat} {vbase : Nat}
     (h : checkImageOk code vbase = true) : ImageOk code vbase := by
   simp only [checkImageOk, Bool.and_eq_true, decide_eq_true_eq] at h
@@ -2162,37 +2191,21 @@ theorem imageOk_of_check {code : List Nat} {vbase : Nat}
   refine ⟨fun b hb => of_decide_eq_true (List.all_eq_true.1 hbytes b hb), hlen, hcanon, ?_, ?_⟩
   · intro a ins len hd w heq
     subst heq
-    unfold X86Min.Img.decodeAt at hd
-    dsimp only [X86Min.Img.mk'] at hd
-    split at hd
-    · rename_i hrange
-      simp only [Bool.and_eq_true, decide_eq_true_eq] at hrange
-      have hoff : a - vbase < code.length := by omega
-      have hchk := List.all_eq_true.1 hnox (a - vbase) (List.mem_range.2 hoff)
-      have ha_eq : vbase + (a - vbase) = a := by omega
-      rw [ha_eq] at hchk
-      unfold X86Min.Img.decodeAt at hchk
-      dsimp only [X86Min.Img.mk'] at hchk
-      rw [if_pos (by simp; omega)] at hchk
-      rw [hd] at hchk
-      cases hchk
-    · cases hd
+    obtain ⟨hrange, hd⟩ := decodeAt_mk'_eq_some hd
+    have hoff : a - vbase < code.length := by omega
+    have hchk := List.all_eq_true.1 hnox (a - vbase) (List.mem_range.2 hoff)
+    have ha_eq : vbase + (a - vbase) = a := by omega
+    rw [ha_eq] at hchk
+    rw [decodeAt_mk'_of_range hrange.1 hrange.2, hd] at hchk
+    cases hchk
   · intro a r len hd
-    unfold X86Min.Img.decodeAt at hd
-    dsimp only [X86Min.Img.mk'] at hd
-    split at hd
-    · rename_i hrange
-      simp only [Bool.and_eq_true, decide_eq_true_eq] at hrange
-      have hoff : a - vbase < code.length := by omega
-      have hchk := List.all_eq_true.1 hnox (a - vbase) (List.mem_range.2 hoff)
-      have ha_eq : vbase + (a - vbase) = a := by omega
-      rw [ha_eq] at hchk
-      unfold X86Min.Img.decodeAt at hchk
-      dsimp only [X86Min.Img.mk'] at hchk
-      rw [if_pos (by simp; omega)] at hchk
-      rw [hd] at hchk
-      cases hchk
-    · cases hd
+    obtain ⟨hrange, hd⟩ := decodeAt_mk'_eq_some hd
+    have hoff : a - vbase < code.length := by omega
+    have hchk := List.all_eq_true.1 hnox (a - vbase) (List.mem_range.2 hoff)
+    have ha_eq : vbase + (a - vbase) = a := by omega
+    rw [ha_eq] at hchk
+    rw [decodeAt_mk'_of_range hrange.1 hrange.2, hd] at hchk
+    cases hchk
 
 theorem fetchIn_eq_getElem? (code : List Nat) (i : Nat) :
     X86Min.fetchIn code code.length i = code[i]? := by
@@ -2206,31 +2219,25 @@ theorem minCompat_of_imageOk {code : List Nat} {vbase : Nat} (hok : ImageOk code
   refine ⟨?_, fun a r len hd => hok.noJmpReg a r len hd⟩
   intro a ins len hd
   have hnox := hok.noXor11 a ins len hd
-  unfold X86Min.Img.decodeAt at hd
-  dsimp only [X86Min.Img.mk'] at hd
-  split at hd
-  · rename_i hrange
-    simp only [Bool.and_eq_true, decide_eq_true_eq] at hrange
-    have hidx : a - vbase < 2 ^ X86Min.tdepth := Nat.lt_of_lt_of_le (by omega) hok.lenBound
-    have hd' : X86Min.Tree.get none X86Min.tdepth (X86Min.Img.mk' code vbase code.length).dec (a - vbase) =
-        some (ins, len) := hd
-    rw [X86Min.Img.dec_spec code vbase code.length (a - vbase) hidx] at hd'
-    have hb256 : ∀ i v, (fun j => X86Min.fetchIn code code.length (a - vbase + j)) i = some v → v < 256 := by
-      intro i v hv
-      dsimp only at hv
-      rw [fetchIn_eq_getElem?] at hv
-      exact hok.bytesLt256 v (List.mem_of_getElem? hv)
-    obtain ⟨huni, hlen7, hwf⟩ := decode_min_agree (a := a) hb256 hd'
-    have him : imageOf code vbase a = some (toUniIns a len ins, len) := by
-      unfold imageOf
-      rw [if_neg (by omega)]
-      have hfn : (fun i => code[a - vbase + i]?) = (fun j => X86Min.fetchIn code code.length (a - vbase + j)) := by
-        funext j; exact (fetchIn_eq_getElem? code (a - vbase + j)).symm
-      rw [hfn]
-      exact huni
-    have hacanon : a + len < W := by have := hok.vbaseCanon; omega
-    exact ⟨hwf, hnox, hacanon, him⟩
-  · cases hd
+  obtain ⟨hrange, hd⟩ := decodeAt_mk'_eq_some hd
+  have hidx : a - vbase < 2 ^ X86Min.tdepth := Nat.lt_of_lt_of_le (by omega) hok.lenBound
+  have hd' : X86Min.Tree.get none X86Min.tdepth (X86Min.Img.mk' code vbase code.length).dec (a - vbase) = some (ins, len) := hd
+  rw [X86Min.Img.dec_spec code vbase code.length (a - vbase) hidx] at hd'
+  have hb256 : ∀ i v, (fun j => X86Min.fetchIn code code.length (a - vbase + j)) i = some v → v < 256 := by
+    intro i v hv
+    dsimp only at hv
+    rw [fetchIn_eq_getElem?] at hv
+    exact hok.bytesLt256 v (List.mem_of_getElem? hv)
+  obtain ⟨huni, hlen7, hwf⟩ := decode_min_agree (a := a) hb256 hd'
+  have him : imageOf code vbase a = some (toUniIns a len ins, len) := by
+    unfold imageOf
+    rw [if_neg (by omega)]
+    have hfn : (fun i => code[a - vbase + i]?) = (fun j => X86Min.fetchIn code code.length (a - vbase + j)) := by
+      funext j; exact (fetchIn_eq_getElem? code (a - vbase + j)).symm
+    rw [hfn]
+    exact huni
+  have hacanon : a + len < W := by have := hok.vbaseCanon; omega
+  exact ⟨hwf, hnox, hacanon, him⟩
 
 /-! ### Single-step and multi-step forward simulation (`X86Min -> X86Uni`) -/
 
@@ -2342,7 +2349,7 @@ theorem step_min_sim {imMin : X86Min.Img} {imUni : Nat → Option (Ins × Nat)}
               constructor
               · intro m' hm'; cases hm'
                 refine ⟨_, rfl, ?_⟩
-                simpa [X86Min.St.setReg, X86Int.St.set, hnx_eq, hrip_int, X86Min.alu, X86Int.aluF] using
+                simpaX [X86Min.St.setReg, X86Int.St.set, hnx_eq, hrip_int, X86Min.alu, X86Int.aluF] using
                   sim_setReg hsim hd16 hres_lt (m.rip + len) hcanon hfl
               · intro code out h; cases h
       | sub =>
@@ -2371,7 +2378,7 @@ theorem step_min_sim {imMin : X86Min.Img} {imUni : Nat → Option (Ins × Nat)}
               constructor
               · intro m' hm'; cases hm'
                 refine ⟨_, rfl, ?_⟩
-                simpa [X86Min.St.setReg, X86Int.St.set, hnx_eq, hrip_int, X86Min.alu, aluW] using
+                simpaX [X86Min.St.setReg, X86Int.St.set, hnx_eq, hrip_int, X86Min.alu, aluW] using
                   sim_setReg hsim hd16 hres_lt (m.rip + len) hcanon hfl
               · intro code out h; cases h
         · -- sub64
@@ -2398,7 +2405,7 @@ theorem step_min_sim {imMin : X86Min.Img} {imUni : Nat → Option (Ins × Nat)}
               constructor
               · intro m' hm'; cases hm'
                 refine ⟨_, rfl, ?_⟩
-                simpa [X86Min.St.setReg, X86Int.St.set, hnx_eq, hrip_int, X86Min.alu, X86Int.aluF] using
+                simpaX [X86Min.St.setReg, X86Int.St.set, hnx_eq, hrip_int, X86Min.alu, X86Int.aluF] using
                   sim_setReg hsim hd16 hres_lt (m.rip + len) hcanon hfl
               · intro code out h; cases h
       | mov =>
@@ -2979,7 +2986,7 @@ theorem step_min_sim {imMin : X86Min.Img} {imUni : Nat → Option (Ins × Nat)}
                   have hnone : (i.set 4 (some sp')).regs[r]? = none :=
                     List.getElem?_eq_none (by rw [hlen]; exact Nat.le_of_not_lt hr16)
                   simp [X86Int.St.reg, hnone] at hu
-              fl := by simpa [X86Min.St.setReg, hfl'] using hsim.fl
+              fl := by simpaX [X86Min.St.setReg, hfl'] using hsim.fl
               memLen := by simpa [X86Min.St.setReg] using hmlen'
               loCanon := by simpa [X86Min.St.setReg, hlo'] using hsim.loCanon
               stackWritable := fun x hx1 hx2 => by
@@ -2988,7 +2995,7 @@ theorem step_min_sim {imMin : X86Min.Img} {imUni : Nat → Option (Ins × Nat)}
                   (by simpa [X86Min.St.setReg, hlo'] using hx2)
               memLe := fun x u hu => by
                 have hu' : t.rdByte x = some u := by
-                  simpa [X86Min.St.setReg, X86Min.St.rdByte] using hu
+                  simpaX [X86Min.St.setReg, X86Min.St.rdByte] using hu
                 rw [hrd'] at hu'
                 rw [hrd_i]
                 by_cases hx : sp' ≤ x ∧ x < sp' + 8
@@ -3015,9 +3022,9 @@ theorem step_min_sim {imMin : X86Min.Img} {imUni : Nat → Option (Ins × Nat)}
                     have heq := Option.some.inj hu; subst heq; exact List.getElem_mem _
                   exact hb_i u this
                 · exact hsim.memBound x u hu
-              stdin := by simpa [X86Min.St.setReg, hinp'] using hsim.stdin
+              stdin := by simpaX [X86Min.St.setReg, hinp'] using hsim.stdin
               inpBound := by simpa [X86Min.St.setReg, hinp'] using hsim.inpBound
-              out := by simpa [X86Min.St.setReg, hout'] using hsim.out
+              out := by simpaX [X86Min.St.setReg, hout'] using hsim.out
               oracle := hsim.oracle }
           · intro code out h; cases h
     | pop d =>
@@ -3030,10 +3037,10 @@ theorem step_min_sim {imMin : X86Min.Img} {imUni : Nat → Option (Ins × Nat)}
         simp only [hi4, bind, Option.bind, pure]
         cases hle_m : X86Min.le ({ m with rip := (m.rip + len) % X86Min.pow2 64 } : X86Min.St).rdByte sp 8 with
         | none =>
-          have hle_m' : X86Min.le m.rdByte sp 8 = none := by simpa [X86Min.St.rdByte] using hle_m
+          have hle_m' : X86Min.le m.rdByte sp 8 = none := by simpaX [X86Min.St.rdByte] using hle_m
           simp [hle_m']
         | some v =>
-          have hle_m' : X86Min.le m.rdByte sp 8 = some v := by simpa [X86Min.St.rdByte] using hle_m
+          have hle_m' : X86Min.le m.rdByte sp 8 = some v := by simpaX [X86Min.St.rdByte] using hle_m
           have hmb : ∀ x u, m.rdByte x = some u → u < 256 := fun x u hu => hsim.memBound x u (hsim.memLe x u hu)
           obtain ⟨bs, hrdN, hleVal, hv_lt⟩ := le_to_rdN_leVal hsim.memLe hmb 8 sp v hle_m'
           have hvW : v < W := by simpa [W] using hv_lt
@@ -3052,7 +3059,7 @@ theorem step_min_sim {imMin : X86Min.Img} {imUni : Nat → Option (Ins × Nat)}
               simpa [X86Min.St.setReg, X86Int.St.set, hrip_int] using
                 sim_setReg hsim (by decide : 4 < 16) hsp'_lt (m.rip + len) hcanon hsim.fl
             rw [hnx_eq]
-            simpa [sp', X86Min.St.setReg, X86Int.St.set, hrip_int] using
+            simpaX [sp', X86Min.St.setReg, X86Int.St.set, hrip_int] using
               sim_setReg hsim1 hd16 hvW (m.rip + len) hcanon hsim1.fl
           · intro code out h; cases h
     | ldRsp8 d =>
@@ -3293,12 +3300,12 @@ theorem step_min_sim {imMin : X86Min.Img} {imUni : Nat → Option (Ins × Nat)}
                             have hnone : (((i.set 0 (some 0)).set 1 (some (i.rip + len))).set 11 none).regs[r]? = none :=
                               List.getElem?_eq_none (by rw [hlen]; exact Nat.le_of_not_lt hr16)
                             simp [X86Int.St.reg, hnone] at hu
-                        fl := by simpa [X86Min.St.setReg] using hsim.fl
+                        fl := by simpaX [X86Min.St.setReg] using hsim.fl
                         memLen := by simpa [X86Min.St.setReg] using hsim.memLen
                         loCanon := by simpa [X86Min.St.setReg] using hsim.loCanon
                         stackWritable := fun x hx1 hx2 =>
                           hsim.stackWritable x (by simpa [X86Min.St.setReg] using hx1) (by simpa [X86Min.St.setReg] using hx2)
-                        memLe := fun x => by simpa [X86Min.St.setReg, X86Min.St.rdByte] using hsim.memLe x
+                        memLe := fun x => by simpaX [X86Min.St.setReg, X86Min.St.rdByte] using hsim.memLe x
                         memBound := hsim.memBound
                         stdin := by simp [X86Min.St.setReg]
                         inpBound := fun c hc => by simp [X86Min.St.setReg] at hc
@@ -3407,7 +3414,7 @@ theorem step_min_sim {imMin : X86Min.Img} {imUni : Nat → Option (Ins × Nat)}
                               have hnone : (((i.set 0 (some 1)).set 1 (some (i.rip + len))).set 11 none).regs[r]? = none :=
                                 List.getElem?_eq_none (by rw [hlen]; exact Nat.le_of_not_lt hr16)
                               simp [X86Int.St.reg, hnone] at hu
-                          fl := by simpa [X86Min.St.setReg, heq_t, s2] using hsim.fl
+                          fl := by simpaX [X86Min.St.setReg, heq_t, s2] using hsim.fl
                           memLen := by simpa [X86Min.St.setReg] using htlen
                           loCanon := by simpa [X86Min.St.setReg, heq_t, s2] using hsim.loCanon
                           stackWritable := fun x hx1 hx2 => by
@@ -3416,7 +3423,7 @@ theorem step_min_sim {imMin : X86Min.Img} {imUni : Nat → Option (Ins × Nat)}
                               (by simpa [X86Min.St.setReg, heq_t, s2] using hx2)
                           memLe := fun x u hu => by
                             have hu' : t.rdByte x = some u := by
-                              simpa [X86Min.St.setReg, X86Min.St.rdByte] using hu
+                              simpaX [X86Min.St.setReg, X86Min.St.rdByte] using hu
                             rw [htrd] at hu'
                             rw [hrd']
                             by_cases hx : x = ad
@@ -3441,7 +3448,7 @@ theorem step_min_sim {imMin : X86Min.Img} {imUni : Nat → Option (Ins × Nat)}
                         simpa [Bool.and_eq_true, decide_eq_true_eq] using hwin
                       have hnone : (({ m with rip := (m.rip + len) % X86Min.pow2 64 }.setReg 1
                           (some ((m.rip + len) % X86Min.pow2 64))).setReg 11 none).wrByte ad c = none := by
-                        simp [X86Min.St.wrByte, X86Min.St.setReg, hwin']
+                        simp [X86Min.St.wrByte, X86Min.St.setReg]; intro h1; exact Decidable.byContradiction fun h2 => hwin' ⟨of_decide_eq_true h1, Decidable.byContradiction fun h3 => h2 (decide_eq_false h3)⟩
                       rw [hinp] at hnone
                       dsimp only
                       rw [hnone]
@@ -3554,12 +3561,12 @@ theorem step_min_sim {imMin : X86Min.Img} {imUni : Nat → Option (Ins × Nat)}
                               have hnone : (((i.set 0 (some 1)).set 1 (some (i.rip + len))).set 11 none).regs[r]? = none :=
                                 List.getElem?_eq_none (by rw [hlen]; exact Nat.le_of_not_lt hr16)
                               simp [X86Int.St.reg, hnone] at hu
-                          fl := by simpa [X86Min.St.setReg] using hsim.fl
+                          fl := by simpaX [X86Min.St.setReg] using hsim.fl
                           memLen := by simpa [X86Min.St.setReg] using hsim.memLen
                           loCanon := by simpa [X86Min.St.setReg] using hsim.loCanon
                           stackWritable := fun x hx1 hx2 =>
                             hsim.stackWritable x (by simpa [X86Min.St.setReg] using hx1) (by simpa [X86Min.St.setReg] using hx2)
-                          memLe := fun x => by simpa [X86Min.St.setReg, X86Min.St.rdByte] using hsim.memLe x
+                          memLe := fun x => by simpaX [X86Min.St.setReg, X86Min.St.rdByte] using hsim.memLe x
                           memBound := hsim.memBound
                           stdin := by simpa [X86Min.St.setReg] using hsim.stdin
                           inpBound := by simpa [X86Min.St.setReg] using hsim.inpBound
@@ -3877,13 +3884,12 @@ theorem sim_of_load {f inp : List Nat} {imMin : X86Min.Img} {m0 : X86Min.St}
       | some p =>
         rw [hf] at hv; dsimp only at hv
         simp only [Mem.find, Region.hi] at hf
-        split at hf
-        · simp only [Option.some.injEq] at hf; subst hf
+        have hf' := hf; simp at hf'; obtain ⟨_, hp⟩ := hf'; subst hp
+        · skip
           simp only [List.getElem?_replicate] at hv
           split at hv
           · cases hv; decide
           · cases hv
-        · cases hf
     stdin := rfl
     inpBound := hinp
     out := rfl
