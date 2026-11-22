@@ -1,0 +1,135 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: GUM_FO_TANGENT_CLONE_HOF_OK
+//@ description: First- and second-order GUM through higher-order calls, where a function is passed as a parameter (`apply1(dbl, x)`). Each call goes through a clone of the helper specialised to the function arguments (`apply1__fotan__dbl`), inside which `f(x)` is a direct call to `dbl`, so its own tangent clone and the chain rule nest; the function argument is a named function, a `let` alias of one, or a function parameter of an enclosing specialised clone. Covers two function parameters, a loop calling the parameter, forwarding to another higher-order function, one HOF specialised at two call sites, a binary function, and the Hessian. Before, variance_of(apply1(dbl, x)) read 0.0 (first order truth 0.36) and was then refused at compile time. Expected values: tests/oracles/gum_fo_tangent_clone_hof.cpp (1e-12 relative first order, 1e-10 second order).
+
+ontology HofProbe {
+    class Parameter { property amount: f64 where amount >= 0.0 }
+    class WellDepth subclass_of Parameter
+}
+
+fn dbl(y: f64) -> f64 with Mut, Div { 2.0 * y }
+fn sq(y: f64) -> f64 with Mut, Div { y * y }
+fn expo(y: f64) -> f64 with Mut, Div { exp(0.0 - y / 10.0) }
+fn mul2(a: f64, b: f64) -> f64 with Mut, Div { a * b }
+fn mixed(a: f64, b: f64) -> f64 with Mut, Div { a * exp(0.0 - b / 10.0) }
+
+fn apply1(f: fn(f64) -> f64 with Mut, Div, x: f64) -> f64 with Mut, Div {
+    var s = 0.0
+    var i: i64 = 0
+    while i < 1 {
+        s = s + f(x)
+        i = i + 1
+    }
+    s
+}
+
+fn apply2(f: fn(f64) -> f64 with Mut, Div, g: fn(f64) -> f64 with Mut, Div, x: f64) -> f64 with Mut, Div {
+    f(g(x))
+}
+
+fn applyn(f: fn(f64) -> f64 with Mut, Div, x: f64, n: i64) -> f64 with Mut, Div {
+    var s = x
+    var i: i64 = 0
+    while i < n {
+        s = f(s)
+        i = i + 1
+    }
+    s
+}
+
+fn apply_bin(f: fn(f64, f64) -> f64 with Mut, Div, a: f64, b: f64) -> f64 with Mut, Div {
+    f(a, b)
+}
+
+fn forward(f: fn(f64) -> f64 with Mut, Div, x: f64) -> f64 with Mut, Div {
+    apply1(f, x) * x
+}
+
+fn forward2(f: fn(f64) -> f64 with Mut, Div, g: fn(f64) -> f64 with Mut, Div, x: f64) -> f64 with Mut, Div {
+    apply2(g, f, x)
+}
+
+fn forward3(f: fn(f64) -> f64 with Mut, Div, x: f64) -> f64 with Mut, Div {
+    forward(f, x)
+}
+
+fn close(got: f64, want: f64, rel: f64) -> bool with Mut, Div {
+    var d = got - want
+    if d < 0.0 { d = 0.0 - d }
+    var w = want
+    if w < 0.0 { w = 0.0 - w }
+    d <= 1.0e-14 + rel * w
+}
+
+fn report(name: string, got: f64, want: f64, rel: f64) -> i64 with IO, Mut, Div {
+    print(name)
+    print(" ")
+    print_f64(got)
+    if close(got, want, rel) {
+        print(" ok\n")
+        return 0
+    }
+    print(" FAIL\n")
+    1
+}
+
+fn check_first_order() -> i64 with IO, Mut, Div, Epistemic {
+    let kx = measure(5.0, uncertainty: 0.3)
+    let kz = measure(2.0, uncertainty: 0.1)
+    let x: f64 = kx.value
+    let z: f64 = kz.value
+    let r = 1.0e-12
+    var bad: i64 = 0
+    bad = bad + report("hof_dbl", variance_of(apply1(dbl, x)), 0.35999999999999999, r)
+    bad = bad + report("hof_sq", variance_of(apply1(sq, x)), 9.0, r)
+    bad = bad + report("hof_expo", variance_of(apply1(expo, x)), 0.00033109149705429816, r)
+    bad = bad + report("two_dbl_sq", variance_of(apply2(dbl, sq, x)), 36.0, r)
+    bad = bad + report("two_sq_dbl", variance_of(apply2(sq, dbl, x)), 144.0, r)
+    bad = bad + report("two_expo_sq", variance_of(apply2(expo, sq, x)), 0.0006064152299176921, r)
+    bad = bad + report("loop_dbl3", variance_of(applyn(dbl, x, 3)), 5.7599999999999998, r)
+    bad = bad + report("loop_sq2", variance_of(applyn(sq, x, 2)), 22500.0, r)
+    bad = bad + report("fwd_dbl", variance_of(forward(dbl, x)), 36.0, r)
+    bad = bad + report("fwd_sq", variance_of(forward(sq, x)), 506.25, r)
+    bad = bad + report("fwd2_dbl_sq", variance_of(forward2(dbl, sq, x)), 144.0, r)
+    bad = bad + report("fwd3_sq", variance_of(forward3(sq, x)), 506.25, r)
+    let h = dbl
+    bad = bad + report("alias_dbl", variance_of(apply1(h, x)), 0.35999999999999999, r)
+    bad = bad + report("cancel_dbl", variance_of(apply1(dbl, x) - 2.0 * x), 0.0, r)
+    bad = bad + report("cancel_sq", variance_of(apply1(sq, x) - x * x), 0.0, r)
+    bad = bad + report("bin_mul", variance_of(apply_bin(mul2, x, z)), 0.6100000000000001, r)
+    bad = bad + report("bin_mul_same", variance_of(apply_bin(mul2, x, x)), 9.0, r)
+    bad = bad + report("two_sites", variance_of(apply1(dbl, x) + apply1(sq, x)), 12.959999999999999, r)
+    bad = bad + report("cov_dbl_x", covariance_of(apply1(dbl, x), x), 0.17999999999999999, r)
+    bad
+}
+
+fn check_second_order() -> i64 with IO, Mut, Div, Epistemic {
+    let kx = measure(5.0, uncertainty: 0.3)
+    let kz = measure(2.0, uncertainty: 0.1)
+    let x: f64 = kx.value
+    let z: f64 = kz.value
+    let r = 1.0e-10
+    var bad: i64 = 0
+    let a = apply1(sq, x)
+    bad = bad + report("h_sq", hessian_of(a, 0, 0), 2.0, r)
+    let b = apply1(expo, x)
+    bad = bad + report("h_expo", hessian_of(b, 0, 0), 0.006065306597126334, r)
+    let c = apply2(expo, sq, x)
+    bad = bad + report("h_expo_sq", hessian_of(c, 0, 0), 0.065667998899119048, r)
+    let d = apply_bin(mixed, x, z)
+    bad = bad + report("h_bin_xx", hessian_of(d, 0, 0), 0.0, r)
+    bad = bad + report("h_bin_xz", hessian_of(d, 0, 1), -0.081873075307798193, r)
+    bad = bad + report("h_bin_zz", hessian_of(d, 1, 1), 0.040936537653899097, r)
+    bad
+}
+
+fn main() -> i32 with IO, Mut, Div, Epistemic {
+    let bad = check_first_order() + check_second_order()
+    if bad == 0 {
+        print("GUM_FO_TANGENT_CLONE_HOF_OK\n")
+        return 0
+    }
+    print("FAIL\n")
+    1
+}

@@ -1,0 +1,1 @@
+`--native-v2-emit-reloc-shape` now exits with the writer refusal code when it cannot patch a recorded relocation. Shape 2 exits 29 and writes no ELF; a diagnostic followed by process exit 0 is no longer treated as a refusal. Patchable shapes still exit 0 and their ELFs still exit 37.

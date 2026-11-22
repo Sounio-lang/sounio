@@ -1,6 +1,6 @@
 //@ run-pass
 //@ expect-stdout: BIGFRAME_OPS_GATE_OK
-//@ timeout: 120
+//@ timeout: 450
 // Runtime (2026-09-27): 13.4 s on lean_single (souc-stage2 engine) on a
 // 4-core dev container, against the harness default of 30 s. CI job
 // 108525867166 measured the Full Test Suite runner at 2.65-4.3x slower
@@ -8,6 +8,12 @@
 // timed out intermittently (job 108543622564, an unrelated PR). 120 s is
 // about 2x the worst projection, 4.3 x 13.4 s. The workload (1,000,000
 // rows) is the point of the gate, so it is not shrunk.
+// Re-derived 2026-10-30 for Madaros, which now compiles this file (it was refused
+// at IR_MAX_INSTRS = 16384: one `main` of 37526 IR instructions). Measured on a
+// 2-core container: compile 24 s + run 27 s = 51 s. 4.3 x 51 s = 219 s worst CI
+// projection; 450 s is about 2x that, the same rule as above. Each row loop
+// reuses one hoisted [f64;64] buffer: Madaros gives every array literal a block
+// of a never-reclaimed ~2 GiB arena, and ~12.7M per-iteration literals exhausted it.
 // Run-proof for stdlib/data/bigframe_ops.sio — scale verbs over the heap-backed
 // columnar BigFrame. Builds a 1,000,000-row frame via a LOOP, then exercises
 // bf_filter_gt and bf_groupby_sum against oracle-exact answers.
@@ -120,20 +126,23 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     if pass == 1 {
         var wf = bf_new(10, 16)
     var wr: i64 = 0
-    while wr < 1000 { var wrow: [f64;64]=[0.0;64]; var wc: i64=0; while wc<10 { wrow[wc]=(wr*10+wc) as f64; wc=wc+1 } bf_push_row(&!wf,&wrow,10); wr=wr+1 }
+    var hoistbuf1:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while wr < 1000 { var wc: i64=0; while wc<10 { hoistbuf1[wc]=(wr*10+wc) as f64; wc=wc+1 } bf_push_row(&!wf,&hoistbuf1,10); wr=wr+1 }
     let wfilt = bf_filter_gt(&wf, 0, 4995.0)
     if bf_nrows(&wfilt) != 500 { print("FAIL wide_filter_n\n"); return 40 }
     if bf_get(&wfilt, 0, 9) != 5009.0 { print("FAIL wide_filter_v\n"); return 41 }
     var sf = bf_new(2, 16)
     var si: i64 = 0
-    while si < 100 { var srow:[f64;64]=[0.0;64]; srow[0]=(si%2) as f64; srow[1]=si as f64; bf_push_row(&!sf,&srow,2); si=si+1 }
+    var hoistbuf2:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while si < 100 { hoistbuf2[0]=(si%2) as f64; hoistbuf2[1]=si as f64; bf_push_row(&!sf,&hoistbuf2,2); si=si+1 }
     let sfilt = bf_filter_gt(&sf, 0, 0.5)
     if bf_nrows(&sfilt) != 50 { print("FAIL scatter_n\n"); return 42 }
     if bf_get(&sfilt, 0, 1) != 1.0 { print("FAIL scatter_v\n"); return 43 }
     // SPARSE-key hash groupby: keys 0,1000,..,999000 (all >> the dense cap of 1023, which would drop them)
     var hg = bf_new(2, 1024)
     var hi: i64 = 0
-    while hi < 50000 { var hrow:[f64;64]=[0.0;64]; hrow[0]=((hi%1000)*1000) as f64; hrow[1]=1.0; bf_push_row(&!hg,&hrow,2); hi=hi+1 }
+    var hoistbuf3:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while hi < 50000 { hoistbuf3[0]=((hi%1000)*1000) as f64; hoistbuf3[1]=1.0; bf_push_row(&!hg,&hoistbuf3,2); hi=hi+1 }
     let hgr = bf_groupby_sum_hash(&hg, 0, 1)
     if bf_nrows(&hgr) != 1000 { print("FAIL hash_groupby_n\n"); return 44 }   // 1000 distinct sparse keys
     var htot = bf_col_sum(&hgr, 1)
@@ -142,10 +151,12 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     // (key=i, rval=i*2). Inner join on key drops left rows with key >= 60000 -> 60000 matches.
     var jl = bf_new(2, 1024)
     var jli: i64 = 0
-    while jli < 100000 { var jrow:[f64;64]=[0.0;64]; jrow[0]=jli as f64; jrow[1]=(jli*10) as f64; bf_push_row(&!jl,&jrow,2); jli=jli+1 }
+    var hoistbuf4:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while jli < 100000 { hoistbuf4[0]=jli as f64; hoistbuf4[1]=(jli*10) as f64; bf_push_row(&!jl,&hoistbuf4,2); jli=jli+1 }
     var jr = bf_new(2, 1024)
     var jrx: i64 = 0
-    while jrx < 60000 { var krow:[f64;64]=[0.0;64]; krow[0]=jrx as f64; krow[1]=(jrx*2) as f64; bf_push_row(&!jr,&krow,2); jrx=jrx+1 }
+    var hoistbuf5:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while jrx < 60000 { hoistbuf5[0]=jrx as f64; hoistbuf5[1]=(jrx*2) as f64; bf_push_row(&!jr,&hoistbuf5,2); jrx=jrx+1 }
     let jj = bf_join_inner(&jl, 0, &jr, 0)
     if bf_nrows(&jj) != 60000 { print("FAIL join_n\n"); return 46 }   // inner join filters 100k -> 60k
     if bf_ncols(&jj) != 3 { print("FAIL join_c\n"); return 47 }       // left 2 cols + right 1 non-key col
@@ -158,10 +169,12 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     // right-only = 100000..109999 (10000). fill = -1.0 sentinel for unmatched cells.
     var lo = bf_new(2, 1024)
     var loi: i64 = 0
-    while loi < 100000 { var lrow:[f64;64]=[0.0;64]; lrow[0]=loi as f64; lrow[1]=(loi*10) as f64; bf_push_row(&!lo,&lrow,2); loi=loi+1 }
+    var hoistbuf6:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while loi < 100000 { hoistbuf6[0]=loi as f64; hoistbuf6[1]=(loi*10) as f64; bf_push_row(&!lo,&hoistbuf6,2); loi=loi+1 }
     var ro = bf_new(2, 1024)
     var roi: i64 = 0
-    while roi < 60000 { var rrow:[f64;64]=[0.0;64]; let rk=(roi+50000); rrow[0]=rk as f64; rrow[1]=(rk*2) as f64; bf_push_row(&!ro,&rrow,2); roi=roi+1 }
+    var hoistbuf7:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while roi < 60000 { let rk=(roi+50000); hoistbuf7[0]=rk as f64; hoistbuf7[1]=(rk*2) as f64; bf_push_row(&!ro,&hoistbuf7,2); roi=roi+1 }
     // LEFT join: all 100000 left rows kept.
     let lj = bf_join_left(&lo, 0, &ro, 0, 0.0 - 1.0)
     if bf_nrows(&lj) != 100000 { print("FAIL left_n\n"); return 51 }
@@ -182,7 +195,8 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     // SORT at scale: 1,000,000 rows, col0 = reverse key (n-1-i), col1 = original index i.
     var sf = bf_new(2, 16)
     var sfi: i64 = 0
-    while sfi < 1000000 { var srow2:[f64;64]=[0.0;64]; srow2[0]=(1000000-1-sfi) as f64; srow2[1]=sfi as f64; bf_push_row(&!sf,&srow2,2); sfi=sfi+1 }
+    var hoistbuf8:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while sfi < 1000000 { hoistbuf8[0]=(1000000-1-sfi) as f64; hoistbuf8[1]=sfi as f64; bf_push_row(&!sf,&hoistbuf8,2); sfi=sfi+1 }
     let asc = bf_sort_by(&sf, 0, true)
     if bf_nrows(&asc) != 1000000 { print("FAIL sort_n\n"); return 62 }
     // fully ordered: zero inversions over 1M rows.
@@ -199,7 +213,8 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     // within a key -> the ten key==0 rows carry col1 = 0,3,6,...,27 in that order.
     var stf = bf_new(2, 16)
     var sti: i64 = 0
-    while sti < 30 { var strow:[f64;64]=[0.0;64]; strow[0]=(sti%3) as f64; strow[1]=sti as f64; bf_push_row(&!stf,&strow,2); sti=sti+1 }
+    var hoistbuf9:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while sti < 30 { hoistbuf9[0]=(sti%3) as f64; hoistbuf9[1]=sti as f64; bf_push_row(&!stf,&hoistbuf9,2); sti=sti+1 }
     let sts = bf_sort_by(&stf, 0, true)
     if bf_get(&sts, 0, 1) != 0.0 { print("FAIL sort_stable0\n"); return 68 }   // first key==0 row = original 0
     if bf_get(&sts, 1, 1) != 3.0 { print("FAIL sort_stable1\n"); return 69 }   // second = original 3 (order kept)
@@ -214,7 +229,8 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     let RN: i64 = 100000
     var rf = bf_new(2, 16)
     var rfi: i64 = 0
-    while rfi < RN { var rr:[f64;64]=[0.0;64]; let s=((rfi*48271)%100000 - 50000); rr[0]=(s as f64)*0.5; rr[1]=rfi as f64; bf_push_row(&!rf,&rr,2); rfi=rfi+1 }
+    var hoistbuf10:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while rfi < RN { let s=((rfi*48271)%100000 - 50000); hoistbuf10[0]=(s as f64)*0.5; hoistbuf10[1]=rfi as f64; bf_push_row(&!rf,&hoistbuf10,2); rfi=rfi+1 }
     let rx = bf_sort_radix(&rf, 0, true)
     let mg = bf_sort_by(&rf, 0, true)
     var rd: i64 = 0; var rj: i64 = 0
@@ -226,7 +242,8 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     if rinv != 0 { print("FAIL radix_inversions\n"); return 73 }
     var tf = bf_new(2, 16)
     var tfi: i64 = 0
-    while tfi < RN { var tr:[f64;64]=[0.0;64]; tr[0]=(tfi%100) as f64; tr[1]=tfi as f64; bf_push_row(&!tf,&tr,2); tfi=tfi+1 }
+    var hoistbuf11:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while tfi < RN { hoistbuf11[0]=(tfi%100) as f64; hoistbuf11[1]=tfi as f64; bf_push_row(&!tf,&hoistbuf11,2); tfi=tfi+1 }
     let trx = bf_sort_radix(&tf, 0, true)
     let tmg = bf_sort_by(&tf, 0, true)
     var td: i64 = 0; var tj: i64 = 0
@@ -236,7 +253,8 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     let rdesc = bf_sort_radix(&rf, 0, false)
     if bf_get(&rdesc, 0, 0) < bf_get(&rdesc, RN-1, 0) { print("FAIL radix_desc\n"); return 75 }
     var eqf = bf_new(1, 16); var eqi: i64 = 0
-    while eqi < 1000 { var er:[f64;64]=[0.0;64]; er[0]=7.0; bf_push_row(&!eqf,&er,1); eqi=eqi+1 }
+    var hoistbuf12:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while eqi < 1000 { hoistbuf12[0]=7.0; bf_push_row(&!eqf,&hoistbuf12,1); eqi=eqi+1 }
     let eqs = bf_sort_radix(&eqf, 0, true)
     if bf_nrows(&eqs) != 1000 { print("FAIL radix_alleq_n\n"); return 76 }
     if bf_get(&eqs, 0, 0) != 7.0 { print("FAIL radix_alleq_v\n"); return 77 }
@@ -244,7 +262,8 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     // col1 = i. Key j first appears at i=j.
     var uf = bf_new(2, 16)
     var ufi: i64 = 0
-    while ufi < 1000000 { var ur:[f64;64]=[0.0;64]; ur[0]=(ufi%1000) as f64; ur[1]=ufi as f64; bf_push_row(&!uf,&ur,2); ufi=ufi+1 }
+    var hoistbuf13:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while ufi < 1000000 { hoistbuf13[0]=(ufi%1000) as f64; hoistbuf13[1]=ufi as f64; bf_push_row(&!uf,&hoistbuf13,2); ufi=ufi+1 }
     let uq = bf_unique(&uf, 0)
     if bf_nrows(&uq) != 1000 { print("FAIL unique_n\n"); return 78 }
     if bf_ncols(&uq) != 1 { print("FAIL unique_c\n"); return 79 }
@@ -268,10 +287,11 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     // Result must be sorted by COUNT DESCENDING -> rows [3,500000],[1,300000],[4,150000],[2,50000].
     var vf = bf_new(1, 16)
     var vfi: i64 = 0
+    var hoistbuf68:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
     while vfi < 1000000 {
         var vv = 2.0
         if vfi < 500000 { vv = 3.0 } else { if vfi < 800000 { vv = 1.0 } else { if vfi < 950000 { vv = 4.0 } else { vv = 2.0 } } }
-        var vr:[f64;64]=[0.0;64]; vr[0]=vv; bf_push_row(&!vf,&vr,1); vfi=vfi+1
+        hoistbuf68[0]=vv; bf_push_row(&!vf,&hoistbuf68,1); vfi=vfi+1
     }
     let vc = bf_value_counts(&vf, 0)
     if bf_nrows(&vc) != 4 { print("FAIL vc_n\n"); return 90 }
@@ -288,7 +308,8 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     // CUMULATIVE ops: 1,000,000 rows, col0 = i, col1 = i%1000 (key), col2 = 1.0.
     var cf = bf_new(3, 16)
     var cfi: i64 = 0
-    while cfi < 1000000 { var cr:[f64;64]=[0.0;64]; cr[0]=cfi as f64; cr[1]=(cfi%1000) as f64; cr[2]=1.0; bf_push_row(&!cf,&cr,3); cfi=cfi+1 }
+    var hoistbuf14:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while cfi < 1000000 { hoistbuf14[0]=cfi as f64; hoistbuf14[1]=(cfi%1000) as f64; hoistbuf14[2]=1.0; bf_push_row(&!cf,&hoistbuf14,3); cfi=cfi+1 }
     // cumsum(col0=i): out[k] = k*(k+1)/2. Exact in f64 up to n=1e6 (< 2^53).
     let cs = bf_cumsum(&cf, 0)
     if bf_nrows(&cs) != 1000000 { print("FAIL cumsum_n\n"); return 98 }
@@ -319,7 +340,8 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     // _hash handles SPARSE keys the dense path can't: keys 5000 & 9000 (>1024).
     var spf = bf_new(2, 16)
     var spi: i64 = 0
-    while spi < 6 { var spr:[f64;64]=[0.0;64]; spr[0]=(5000 + 4000*(spi%2)) as f64; spr[1]=1.0; bf_push_row(&!spf,&spr,2); spi=spi+1 }
+    var hoistbuf15:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while spi < 6 { hoistbuf15[0]=(5000 + 4000*(spi%2)) as f64; hoistbuf15[1]=1.0; bf_push_row(&!spf,&hoistbuf15,2); spi=spi+1 }
     let sph = bf_cumsum_by_hash(&spf, 0, 1)   // key 5000: rows 0,2,4 -> 1,2,3 ; key 9000: rows 1,3,5 -> 1,2,3
     if bf_get(&sph, 4, 0) != 3.0 { print("FAIL cumsum_hash_sparse\n"); return 334 }
     if bf_get(&sph, 5, 0) != 3.0 { print("FAIL cumsum_hash_sparse2\n"); return 335 }
@@ -327,7 +349,8 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     // Add a strictly-decreasing column for cummin by rebuilding a small dedicated frame.
     var xf = bf_new(3, 16)
     var xfi: i64 = 0
-    while xfi < 1000000 { var xr:[f64;64]=[0.0;64]; xr[0]=(xfi%100) as f64; xr[1]=(1000000-xfi) as f64; xr[2]=xfi as f64; bf_push_row(&!xf,&xr,3); xfi=xfi+1 }
+    var hoistbuf16:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while xfi < 1000000 { hoistbuf16[0]=(xfi%100) as f64; hoistbuf16[1]=(1000000-xfi) as f64; hoistbuf16[2]=xfi as f64; bf_push_row(&!xf,&hoistbuf16,3); xfi=xfi+1 }
     // cummax(col0=i%100): rises 0..99 then stays 99.
     let cmx = bf_cummax(&xf, 0)
     if bf_nrows(&cmx) != 1000000 { print("FAIL cummax_n\n"); return 112 }
@@ -344,7 +367,8 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     // so per group max-so-far = current i, min = first occurrence = key).
     var gf = bf_new(2, 16)
     var gfi: i64 = 0
-    while gfi < 1000000 { var gr:[f64;64]=[0.0;64]; gr[0]=(gfi%1000) as f64; gr[1]=gfi as f64; bf_push_row(&!gf,&gr,2); gfi=gfi+1 }
+    var hoistbuf17:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while gfi < 1000000 { hoistbuf17[0]=(gfi%1000) as f64; hoistbuf17[1]=gfi as f64; bf_push_row(&!gf,&hoistbuf17,2); gfi=gfi+1 }
     let gmn = bf_cummin_by(&gf, 0, 1)   // min val in each key-group = first occurrence = key
     if bf_nrows(&gmn) != 1000000 { print("FAIL cummin_by_n\n"); return 120 }
     if bf_get(&gmn, 0, 0) != 0.0 { print("FAIL cummin_by0\n"); return 121 }
@@ -357,7 +381,8 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     // (a) sum/mean over col0=1.0 (window 100): sum=100, mean=1.0 once the window fills.
     var rf = bf_new(2, 16)
     var rfi: i64 = 0
-    while rfi < 1000000 { var rr:[f64;64]=[0.0;64]; rr[0]=1.0; rr[1]=rfi as f64; bf_push_row(&!rf,&rr,2); rfi=rfi+1 }
+    var hoistbuf18:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while rfi < 1000000 { hoistbuf18[0]=1.0; hoistbuf18[1]=rfi as f64; bf_push_row(&!rf,&hoistbuf18,2); rfi=rfi+1 }
     let rs = bf_rolling_sum(&rf, 0, 100, 0.0 - 1.0)
     if bf_nrows(&rs) != 1000000 { print("FAIL rsum_n\n"); return 126 }
     if bf_get(&rs, 98, 0) != (0.0 - 1.0) { print("FAIL rsum_fill\n"); return 127 }   // window not full yet
@@ -372,7 +397,8 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     // O(n*w) scan over a 5000-row sawtooth (col = i%37, window 50) -> must be identical.
     var wf2 = bf_new(1, 16)
     var wfi: i64 = 0
-    while wfi < 5000 { var wr:[f64;64]=[0.0;64]; wr[0]=(wfi%37) as f64; bf_push_row(&!wf2,&wr,1); wfi=wfi+1 }
+    var hoistbuf19:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while wfi < 5000 { hoistbuf19[0]=(wfi%37) as f64; bf_push_row(&!wf2,&hoistbuf19,1); wfi=wfi+1 }
     let rmax = bf_rolling_max(&wf2, 0, 50, 0.0 - 1.0)
     let rmin = bf_rolling_min(&wf2, 0, 50, 0.0 - 1.0)
     var rd: i64 = 0
@@ -396,7 +422,8 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     // SHIFT / DIFF / PCT_CHANGE: col0=i, col1=i*i, col2=i+1. fill = -1.0 sentinel.
     var df2 = bf_new(3, 16)
     var dfi: i64 = 0
-    while dfi < 1000000 { var dr:[f64;64]=[0.0;64]; dr[0]=dfi as f64; dr[1]=(dfi*dfi) as f64; dr[2]=(dfi+1) as f64; bf_push_row(&!df2,&dr,3); dfi=dfi+1 }
+    var hoistbuf20:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while dfi < 1000000 { hoistbuf20[0]=dfi as f64; hoistbuf20[1]=(dfi*dfi) as f64; hoistbuf20[2]=(dfi+1) as f64; bf_push_row(&!df2,&hoistbuf20,3); dfi=dfi+1 }
     // shift(col0=i, periods=1): out[0]=fill, out[i]=i-1.
     let sh = bf_shift(&df2, 0, 1, 0.0 - 1.0)
     if bf_nrows(&sh) != 1000000 { print("FAIL shift_n\n"); return 134 }
@@ -423,7 +450,8 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     // (a) adjust=false, alpha=0.5, impulse x=[0,4,0,0,...] -> y=[0,2,1,0.5,0.25,...] (exact).
     var ef = bf_new(1, 16)
     var efi: i64 = 0
-    while efi < 1000 { var er:[f64;64]=[0.0;64]; if efi == 1 { er[0]=4.0 } else { er[0]=0.0 } bf_push_row(&!ef,&er,1); efi=efi+1 }
+    var hoistbuf21:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while efi < 1000 { if efi == 1 { hoistbuf21[0]=4.0 } else { hoistbuf21[0]=0.0 } bf_push_row(&!ef,&hoistbuf21,1); efi=efi+1 }
     let ew = bf_ewm_mean(&ef, 0, 0.5, false)
     if bf_nrows(&ew) != 1000 { print("FAIL ewm_n\n"); return 148 }
     if bf_get(&ew, 0, 0) != 0.0 { print("FAIL ewm0\n"); return 149 }
@@ -434,7 +462,8 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     // (b) constant input -> both modes return the constant (weighted mean of equal values).
     var ec = bf_new(1, 16)
     var eci: i64 = 0
-    while eci < 1000 { var cr2:[f64;64]=[0.0;64]; cr2[0]=5.0; bf_push_row(&!ec,&cr2,1); eci=eci+1 }
+    var hoistbuf22:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while eci < 1000 { hoistbuf22[0]=5.0; bf_push_row(&!ec,&hoistbuf22,1); eci=eci+1 }
     let eca = bf_ewm_mean(&ec, 0, 0.3, true)
     if !approx_eq(bf_get(&eca, 500, 0), 5.0) { print("FAIL ewm_const_adj\n"); return 154 }
     let ecf = bf_ewm_mean(&ec, 0, 0.3, false)
@@ -442,7 +471,8 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     // (c) adjust=true, alpha=0.3, x=(i*7)%13: y[1] = (7 + 0.7*0)/(1+0.7) = 7/1.7 (pandas-verified).
     var ev = bf_new(1, 16)
     var evi: i64 = 0
-    while evi < 1000 { var vr2:[f64;64]=[0.0;64]; vr2[0]=((evi*7)%13) as f64; bf_push_row(&!ev,&vr2,1); evi=evi+1 }
+    var hoistbuf23:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while evi < 1000 { hoistbuf23[0]=((evi*7)%13) as f64; bf_push_row(&!ev,&hoistbuf23,1); evi=evi+1 }
     let eva = bf_ewm_mean(&ev, 0, 0.3, true)
     if bf_get(&eva, 0, 0) != 0.0 { print("FAIL ewm_adj0\n"); return 156 }
     if !approx_eq(bf_get(&eva, 1, 0), 4.1176470588) { print("FAIL ewm_adj1\n"); return 157 }  // 7/1.7
@@ -451,7 +481,8 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     // EXPANDING mean / var / std over x=(i*7)%13, validated against pandas-computed values.
     var xf2 = bf_new(1, 16)
     var xf2i: i64 = 0
-    while xf2i < 1000 { var xr2:[f64;64]=[0.0;64]; xr2[0]=((xf2i*7)%13) as f64; bf_push_row(&!xf2,&xr2,1); xf2i=xf2i+1 }
+    var hoistbuf24:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while xf2i < 1000 { hoistbuf24[0]=((xf2i*7)%13) as f64; bf_push_row(&!xf2,&hoistbuf24,1); xf2i=xf2i+1 }
     let em2 = bf_expanding_mean(&xf2, 0)
     if bf_nrows(&em2) != 1000 { print("FAIL exp_mean_n\n"); return 159 }
     if bf_get(&em2, 0, 0) != 0.0 { print("FAIL exp_mean0\n"); return 160 }
@@ -469,7 +500,8 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     var rf2 = bf_new(1, 16)
     var rvals: [f64;5] = [30.0, 10.0, 20.0, 10.0, 40.0]
     var rvi: i64 = 0
-    while rvi < 5 { var rrow:[f64;64]=[0.0;64]; rrow[0]=rvals[rvi]; bf_push_row(&!rf2,&rrow,1); rvi=rvi+1 }
+    var hoistbuf25:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while rvi < 5 { hoistbuf25[0]=rvals[rvi]; bf_push_row(&!rf2,&hoistbuf25,1); rvi=rvi+1 }
     let rkA = bf_rank(&rf2, 0, 0)   // average -> [4, 1.5, 3, 1.5, 5]
     if bf_nrows(&rkA) != 5 { print("FAIL rank_n\n"); return 169 }
     if bf_get(&rkA,0,0) != 4.0 || bf_get(&rkA,1,0) != 1.5 || bf_get(&rkA,2,0) != 3.0 || bf_get(&rkA,3,0) != 1.5 || bf_get(&rkA,4,0) != 5.0 { print("FAIL rank_avg\n"); return 170 }
@@ -482,7 +514,8 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     // SCALE: average-rank of 1M rows is a permutation-average -> sum == n(n+1)/2 exactly.
     var rbig = bf_new(1, 16)
     var rbi: i64 = 0
-    while rbi < 1000000 { var brow:[f64;64]=[0.0;64]; brow[0]=((rbi*7)%1000) as f64; bf_push_row(&!rbig,&brow,1); rbi=rbi+1 }
+    var hoistbuf26:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while rbi < 1000000 { hoistbuf26[0]=((rbi*7)%1000) as f64; bf_push_row(&!rbig,&hoistbuf26,1); rbi=rbi+1 }
     let rkbig = bf_rank(&rbig, 0, 0)
     if bf_nrows(&rkbig) != 1000000 { print("FAIL rank_big_n\n"); return 174 }
     var rksum = bf_col_sum(&rkbig, 0)
@@ -491,7 +524,8 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     var qf = bf_new(1, 16)
     var qvals: [f64;5] = [50.0, 10.0, 40.0, 20.0, 30.0]
     var qvi: i64 = 0
-    while qvi < 5 { var qrow:[f64;64]=[0.0;64]; qrow[0]=qvals[qvi]; bf_push_row(&!qf,&qrow,1); qvi=qvi+1 }
+    var hoistbuf27:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while qvi < 5 { hoistbuf27[0]=qvals[qvi]; bf_push_row(&!qf,&hoistbuf27,1); qvi=qvi+1 }
     if !approx_eq(bf_quantile(&qf,0,0.0), 10.0) { print("FAIL q0\n"); return 176 }
     if !approx_eq(bf_quantile(&qf,0,0.1), 14.0) { print("FAIL q10\n"); return 177 }    // 10 + 0.4*(20-10)
     if !approx_eq(bf_quantile(&qf,0,0.25), 20.0) { print("FAIL q25\n"); return 178 }
@@ -500,11 +534,13 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     if !approx_eq(bf_quantile(&qf,0,1.0), 50.0) { print("FAIL q100\n"); return 181 }
     // Constant column (duplicate-heavy quickselect stress -> must stay O(n), correct).
     var qc = bf_new(1, 16); var qci: i64 = 0
-    while qci < 5000 { var ccr:[f64;64]=[0.0;64]; ccr[0]=7.0; bf_push_row(&!qc,&ccr,1); qci=qci+1 }
+    var hoistbuf28:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while qci < 5000 { hoistbuf28[0]=7.0; bf_push_row(&!qc,&hoistbuf28,1); qci=qci+1 }
     if !approx_eq(bf_median(&qc,0), 7.0) { print("FAIL const_median\n"); return 182 }
     // SCALE: col=i over 1M rows -> median = 499999.5 (interp of sorted[499999],sorted[500000]).
     var qbig = bf_new(1, 16); var qbi: i64 = 0
-    while qbi < 1000000 { var qbr:[f64;64]=[0.0;64]; qbr[0]=qbi as f64; bf_push_row(&!qbig,&qbr,1); qbi=qbi+1 }
+    var hoistbuf29:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while qbi < 1000000 { hoistbuf29[0]=qbi as f64; bf_push_row(&!qbig,&hoistbuf29,1); qbi=qbi+1 }
     if !approx_eq(bf_median(&qbig,0), 499999.5) { print("FAIL big_median\n"); return 183 }
     if !approx_eq(bf_quantile(&qbig,0,0.0), 0.0) { print("FAIL big_q0\n"); return 184 }
     if !approx_eq(bf_quantile(&qbig,0,1.0), 999999.0) { print("FAIL big_q1\n"); return 185 }
@@ -512,7 +548,8 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     var cvf = bf_new(3, 16)
     var cx:[f64;5]=[1.0,2.0,3.0,4.0,5.0]; var cy:[f64;5]=[2.0,4.0,6.0,8.0,10.0]; var cy2:[f64;5]=[5.0,4.0,3.0,2.0,1.0]
     var cvi: i64 = 0
-    while cvi < 5 { var cvr:[f64;64]=[0.0;64]; cvr[0]=cx[cvi]; cvr[1]=cy[cvi]; cvr[2]=cy2[cvi]; bf_push_row(&!cvf,&cvr,3); cvi=cvi+1 }
+    var hoistbuf30:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while cvi < 5 { hoistbuf30[0]=cx[cvi]; hoistbuf30[1]=cy[cvi]; hoistbuf30[2]=cy2[cvi]; bf_push_row(&!cvf,&hoistbuf30,3); cvi=cvi+1 }
     if !approx_eq(bf_cov(&cvf,0,1), 5.0) { print("FAIL cov_small\n"); return 186 }
     if !approx_eq(bf_corr(&cvf,0,1), 1.0) { print("FAIL corr_pos\n"); return 187 }
     if !approx_eq(bf_corr(&cvf,0,2), 0.0 - 1.0) { print("FAIL corr_neg\n"); return 188 }
@@ -520,7 +557,8 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     // This routes bf_sqrt over cxx*cyy ~ 2.8e28; the BUGGY builtin sqrt returned 6e-9 here.
     var lmf = bf_new(2, 16)
     var lmi: i64 = 0
-    while lmi < 100000 { var lmr:[f64;64]=[0.0;64]; lmr[0]=1000000000.0+(lmi as f64); lmr[1]=1000000000.0+(2*lmi) as f64; bf_push_row(&!lmf,&lmr,2); lmi=lmi+1 }
+    var hoistbuf31:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while lmi < 100000 { hoistbuf31[0]=1000000000.0+(lmi as f64); hoistbuf31[1]=1000000000.0+(2*lmi) as f64; bf_push_row(&!lmf,&hoistbuf31,2); lmi=lmi+1 }
     if !approx_eq(bf_corr(&lmf,0,1), 1.0) { print("FAIL corr_largemag\n"); return 189 }
     var lmcov = bf_cov(&lmf,0,1)
     if lmcov < 1666683000.0 || lmcov > 1666683700.0 { print("FAIL cov_largemag\n"); return 190 }  // 1666683333.33
@@ -529,14 +567,16 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     // correct bf_sqrt gives ~1000000.5, so this range would FAIL under the buggy sqrt.
     var lvf = bf_new(1, 16)
     var lvi: i64 = 0
-    while lvi < 1000000 { var lvr:[f64;64]=[0.0;64]; if lvi%2==1 { lvr[0]=2000000.0 } else { lvr[0]=0.0 } bf_push_row(&!lvf,&lvr,1); lvi=lvi+1 }
+    var hoistbuf32:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while lvi < 1000000 { if lvi%2==1 { hoistbuf32[0]=2000000.0 } else { hoistbuf32[0]=0.0 } bf_push_row(&!lvf,&hoistbuf32,1); lvi=lvi+1 }
     let lvstd = bf_expanding_std(&lvf, 0, 0.0 - 1.0)
     var lvlast = bf_get(&lvstd, 999999, 0)
     if lvlast < 1000000.0 || lvlast > 1000001.0 { print("FAIL expstd_largevar\n"); return 191 }  // 1000000.5; buggy sqrt ~1279997 excluded
     // ROLLING VAR / STD. col0=i, col1=i*1000000 (large-var lock). fill=-1.0.
     var rvf = bf_new(2, 16)
     var rvfi: i64 = 0
-    while rvfi < 100000 { var rvr:[f64;64]=[0.0;64]; rvr[0]=rvfi as f64; rvr[1]=(rvfi*1000000) as f64; bf_push_row(&!rvf,&rvr,2); rvfi=rvfi+1 }
+    var hoistbuf33:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while rvfi < 100000 { hoistbuf33[0]=rvfi as f64; hoistbuf33[1]=(rvfi*1000000) as f64; bf_push_row(&!rvf,&hoistbuf33,2); rvfi=rvfi+1 }
     // window 3 over consecutive ints -> var=1, std=1 for i>=2 (devs {-1,0,1}, Σ=2, /2=1).
     let rvv = bf_rolling_var(&rvf, 0, 3, 0.0 - 1.0)
     let rvs = bf_rolling_std(&rvf, 0, 3, 0.0 - 1.0)
@@ -557,7 +597,8 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     if rsL < 999999.0 || rsL > 1000001.0 { print("FAIL rstd_large\n"); return 199 }                 // 1e6; buggy sqrt ~1.28e6 excluded
     // constant window -> var=0, std=0.
     var rcf = bf_new(1, 16); var rci: i64 = 0
-    while rci < 1000 { var rcr:[f64;64]=[0.0;64]; rcr[0]=42.0; bf_push_row(&!rcf,&rcr,1); rci=rci+1 }
+    var hoistbuf34:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while rci < 1000 { hoistbuf34[0]=42.0; bf_push_row(&!rcf,&hoistbuf34,1); rci=rci+1 }
     let rcv = bf_rolling_var(&rcf, 0, 100, 0.0 - 1.0)
     let rcs = bf_rolling_std(&rcf, 0, 100, 0.0 - 1.0)
     if !approx_eq(bf_get(&rcv, 500, 0), 0.0) { print("FAIL rvar_const\n"); return 201 }
@@ -566,7 +607,8 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     // per-window sort on scrambled + duplicate-heavy data (validates binary-search insert/remove).
     var rmf = bf_new(1, 16)
     var rmi: i64 = 0
-    while rmi < 2000 { var rmr:[f64;64]=[0.0;64]; rmr[0]=(rmi%37) as f64; bf_push_row(&!rmf,&rmr,1); rmi=rmi+1 }
+    var hoistbuf35:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while rmi < 2000 { hoistbuf35[0]=(rmi%37) as f64; bf_push_row(&!rmf,&hoistbuf35,1); rmi=rmi+1 }
     let rm5 = bf_rolling_median(&rmf, 0, 5, 0.0 - 1.0)   // window 5 over 0..36 sawtooth
     if bf_get(&rm5, 3, 0) != (0.0 - 1.0) { print("FAIL rmed_fill\n"); return 203 }   // window not full
     if !approx_eq(bf_get(&rm5, 4, 0), 2.0) { print("FAIL rmed5a\n"); return 204 }    // median[0..4]=median(0,1,2,3,4)=2
@@ -576,7 +618,8 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     // DIFFERENTIAL vs naive: scrambled + dup-heavy col = (i*2654435761)%100, 3000 rows, window 50.
     var rdf = bf_new(1, 16)
     var rdi: i64 = 0
-    while rdi < 3000 { var rdr:[f64;64]=[0.0;64]; rdr[0]=((rdi*2654435761)%100) as f64; bf_push_row(&!rdf,&rdr,1); rdi=rdi+1 }
+    var hoistbuf36:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while rdi < 3000 { hoistbuf36[0]=((rdi*2654435761)%100) as f64; bf_push_row(&!rdf,&hoistbuf36,1); rdi=rdi+1 }
     let rda = bf_rolling_median(&rdf, 0, 50, 0.0 - 1.0)
     let rdb = naive_rolling_median(&rdf, 0, 50, 0.0 - 1.0)
     var rdd: i64 = 0; var rdj: i64 = 0
@@ -586,12 +629,12 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     // col1 = i%1000 (key); col2 = 2.0 if (i/1000) even else 0.5 -> per-group product oscillates 2,1,2,1.
     var cpf = bf_new(3, 16)
     var cpi: i64 = 0
+    var hoistbuf69:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
     while cpi < 1000000 {
-        var cpr:[f64;64]=[0.0;64]
-        if cpi==0 { cpr[0]=2.0 } else { if cpi==1 { cpr[0]=3.0 } else { if cpi==2 { cpr[0]=4.0 } else { cpr[0]=1.0 } } }
-        cpr[1]=(cpi%1000) as f64
-        if (cpi/1000)-2*((cpi/1000)/2)==0 { cpr[2]=2.0 } else { cpr[2]=0.5 }
-        bf_push_row(&!cpf,&cpr,3); cpi=cpi+1
+        if cpi==0 { hoistbuf69[0]=2.0 } else { if cpi==1 { hoistbuf69[0]=3.0 } else { if cpi==2 { hoistbuf69[0]=4.0 } else { hoistbuf69[0]=1.0 } } }
+        hoistbuf69[1]=(cpi%1000) as f64
+        if (cpi/1000)-2*((cpi/1000)/2)==0 { hoistbuf69[2]=2.0 } else { hoistbuf69[2]=0.5 }
+        bf_push_row(&!cpf,&hoistbuf69,3); cpi=cpi+1
     }
     let cp = bf_cumprod(&cpf, 0)
     if bf_nrows(&cp) != 1000000 { print("FAIL cumprod_n\n"); return 208 }
@@ -606,7 +649,8 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     // NUNIQUE PER GROUP. key=i%1000, val=(i/1000)%5 -> each of 1000 groups sees vals 0..4 -> nunique=5.
     var nqf = bf_new(2, 16)
     var nqi: i64 = 0
-    while nqi < 1000000 { var nqr:[f64;64]=[0.0;64]; nqr[0]=(nqi%1000) as f64; nqr[1]=((nqi/1000)-5*((nqi/1000)/5)) as f64; bf_push_row(&!nqf,&nqr,2); nqi=nqi+1 }
+    var hoistbuf37:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while nqi < 1000000 { hoistbuf37[0]=(nqi%1000) as f64; hoistbuf37[1]=((nqi/1000)-5*((nqi/1000)/5)) as f64; bf_push_row(&!nqf,&hoistbuf37,2); nqi=nqi+1 }
     let nq = bf_nunique_by(&nqf, 0, 1)
     if bf_nrows(&nq) != 1000 { print("FAIL nunique_ngroups\n"); return 216 }
     if bf_ncols(&nq) != 2 { print("FAIL nunique_c\n"); return 217 }
@@ -618,14 +662,16 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     // varied: key=i%7, val=i%13 (3000 rows) -> gcd(7,13)=1 so each group sees all 13 vals -> nunique=13.
     var nvf = bf_new(2, 16)
     var nvi: i64 = 0
-    while nvi < 3000 { var nvr:[f64;64]=[0.0;64]; nvr[0]=(nvi-7*(nvi/7)) as f64; nvr[1]=(nvi-13*(nvi/13)) as f64; bf_push_row(&!nvf,&nvr,2); nvi=nvi+1 }
+    var hoistbuf38:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while nvi < 3000 { hoistbuf38[0]=(nvi-7*(nvi/7)) as f64; hoistbuf38[1]=(nvi-13*(nvi/13)) as f64; bf_push_row(&!nvf,&hoistbuf38,2); nvi=nvi+1 }
     let nv = bf_nunique_by(&nvf, 0, 1)
     if bf_nrows(&nv) != 7 { print("FAIL nunique_var_ngroups\n"); return 220 }
     if !approx_eq(bf_col_sum(&nv, 1), 91.0) { print("FAIL nunique_var_total\n"); return 221 }  // 7 groups x 13
     // IDXMAX / IDXMIN PER GROUP. key=i%1000, val=i -> per group k: max at i=k+999000, min at i=k.
     var ixf = bf_new(2, 16)
     var ixi: i64 = 0
-    while ixi < 1000000 { var ixr:[f64;64]=[0.0;64]; ixr[0]=(ixi%1000) as f64; ixr[1]=ixi as f64; bf_push_row(&!ixf,&ixr,2); ixi=ixi+1 }
+    var hoistbuf39:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while ixi < 1000000 { hoistbuf39[0]=(ixi%1000) as f64; hoistbuf39[1]=ixi as f64; bf_push_row(&!ixf,&hoistbuf39,2); ixi=ixi+1 }
     let imx = bf_idxmax_by(&ixf, 0, 1)
     let imn = bf_idxmin_by(&ixf, 0, 1)
     if bf_nrows(&imx) != 1000 { print("FAIL idxmax_n\n"); return 222 }
@@ -636,7 +682,8 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     // TIE: constant val -> both idxmax and idxmin return the FIRST index of the group.
     var itf = bf_new(2, 16)
     var iti: i64 = 0
-    while iti < 10000 { var itr:[f64;64]=[0.0;64]; itr[0]=(iti%100) as f64; itr[1]=5.0; bf_push_row(&!itf,&itr,2); iti=iti+1 }
+    var hoistbuf40:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while iti < 10000 { hoistbuf40[0]=(iti%100) as f64; hoistbuf40[1]=5.0; bf_push_row(&!itf,&hoistbuf40,2); iti=iti+1 }
     let timx = bf_idxmax_by(&itf, 0, 1)
     let timn = bf_idxmin_by(&itf, 0, 1)
     if !approx_eq(lookup2(&timx, 7.0), 7.0) { print("FAIL idxmax_tie\n"); return 227 }   // first row of group 7 is index 7
@@ -645,10 +692,11 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     // per group (others ~166x) -> mode=7 for all 1000 groups.
     var mof = bf_new(2, 16)
     var moi: i64 = 0
+    var hoistbuf70:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
     while moi < 1000000 {
-        var mor:[f64;64]=[0.0;64]; mor[0]=(moi%1000) as f64; let mj=moi/1000
-        if mj < 500 { mor[1]=7.0 } else { mor[1]=(mj-3*(mj/3)) as f64 }
-        bf_push_row(&!mof,&mor,2); moi=moi+1
+        hoistbuf70[0]=(moi%1000) as f64; let mj=moi/1000
+        if mj < 500 { hoistbuf70[1]=7.0 } else { hoistbuf70[1]=(mj-3*(mj/3)) as f64 }
+        bf_push_row(&!mof,&hoistbuf70,2); moi=moi+1
     }
     let mo = bf_mode_by(&mof, 0, 1)
     if bf_nrows(&mo) != 1000 { print("FAIL mode_ngroups\n"); return 229 }
@@ -659,14 +707,16 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     var mtf = bf_new(2, 16)
     var mtv:[f64;8] = [2.0,5.0,2.0,5.0,2.0,5.0,9.0,9.0]
     var mti: i64 = 0
-    while mti < 8 { var mtr:[f64;64]=[0.0;64]; mtr[0]=0.0; mtr[1]=mtv[mti]; bf_push_row(&!mtf,&mtr,2); mti=mti+1 }
+    var hoistbuf41:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while mti < 8 { hoistbuf41[0]=0.0; hoistbuf41[1]=mtv[mti]; bf_push_row(&!mtf,&hoistbuf41,2); mti=mti+1 }
     let mt = bf_mode_by(&mtf, 0, 1)
     if !approx_eq(lookup2(&mt, 0.0), 2.0) { print("FAIL mode_tie\n"); return 233 }
     // ROLLING CORR. x=i, y=2i (perfectly correlated) -> rolling corr = 1.0 for every full window;
     // y2=-i (anti) -> -1.0. window 50 over 5000 rows. fill=-2.0 sentinel.
     var rcf = bf_new(3, 16)
     var rcii: i64 = 0
-    while rcii < 5000 { var rcr:[f64;64]=[0.0;64]; rcr[0]=rcii as f64; rcr[1]=(2*rcii) as f64; rcr[2]=(0-rcii) as f64; bf_push_row(&!rcf,&rcr,3); rcii=rcii+1 }
+    var hoistbuf42:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while rcii < 5000 { hoistbuf42[0]=rcii as f64; hoistbuf42[1]=(2*rcii) as f64; hoistbuf42[2]=(0-rcii) as f64; bf_push_row(&!rcf,&hoistbuf42,3); rcii=rcii+1 }
     let rcp = bf_rolling_corr(&rcf, 0, 1, 50, 0.0 - 2.0)
     let rcn = bf_rolling_corr(&rcf, 0, 2, 50, 0.0 - 2.0)
     if bf_nrows(&rcp) != 5000 { print("FAIL rcorr_n\n"); return 234 }
@@ -677,7 +727,8 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     // varied (pandas-verified): x=(i*7)%13, y=(i*11)%17, window 100.
     var rvf2 = bf_new(2, 16)
     var rvfi2: i64 = 0
-    while rvfi2 < 5000 { var rvr2:[f64;64]=[0.0;64]; rvr2[0]=((rvfi2*7)%13) as f64; rvr2[1]=((rvfi2*11)%17) as f64; bf_push_row(&!rvf2,&rvr2,2); rvfi2=rvfi2+1 }
+    var hoistbuf43:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while rvfi2 < 5000 { hoistbuf43[0]=((rvfi2*7)%13) as f64; hoistbuf43[1]=((rvfi2*11)%17) as f64; bf_push_row(&!rvf2,&hoistbuf43,2); rvfi2=rvfi2+1 }
     let rvc2 = bf_rolling_corr(&rvf2, 0, 1, 100, 0.0 - 2.0)
     // references are pandas values rounded to 6 dp -> compare with a 1e-5 tolerance.
     var rcd1 = bf_get(&rvc2, 100, 0) - 0.008766
@@ -689,7 +740,8 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     // ROLLING COV. x=i, y=2i, const=5, window 50. cov(x,x)=var, cov(x,2x)=2var, cov(x,const)=0.
     var kvf = bf_new(3, 16)
     var kvi: i64 = 0
-    while kvi < 5000 { var kvr:[f64;64]=[0.0;64]; kvr[0]=kvi as f64; kvr[1]=(2*kvi) as f64; kvr[2]=5.0; bf_push_row(&!kvf,&kvr,3); kvi=kvi+1 }
+    var hoistbuf44:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while kvi < 5000 { hoistbuf44[0]=kvi as f64; hoistbuf44[1]=(2*kvi) as f64; hoistbuf44[2]=5.0; bf_push_row(&!kvf,&hoistbuf44,3); kvi=kvi+1 }
     let kc1 = bf_rolling_cov(&kvf, 0, 1, 50, 0.0 - 999.0)  // cov(x,2x)
     let kc2 = bf_rolling_cov(&kvf, 0, 0, 50, 0.0 - 999.0)  // cov(x,x)=var
     let kc3 = bf_rolling_cov(&kvf, 0, 2, 50, 0.0 - 999.0)  // cov(x,const)=0
@@ -700,7 +752,8 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     // ROLLING SKEW. varied data matches pandas to 6 dp (1e-5 tol). Symmetric window -> ~0.
     var skf = bf_new(1, 16)
     var ski: i64 = 0
-    while ski < 5000 { var skr:[f64;64]=[0.0;64]; skr[0]=((ski*7)%13 + (ski%5)) as f64; bf_push_row(&!skf,&skr,1); ski=ski+1 }
+    var hoistbuf45:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while ski < 5000 { hoistbuf45[0]=((ski*7)%13 + (ski%5)) as f64; bf_push_row(&!skf,&hoistbuf45,1); ski=ski+1 }
     let sk = bf_rolling_skew(&skf, 0, 100, 0.0 - 999.0)
     var skd1 = bf_get(&sk, 100, 0) - 0.005080
     if skd1 < 0.0 { skd1 = 0.0 - skd1 }
@@ -711,7 +764,8 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     // ROLLING KURT. varied data matches pandas to 6 dp (1e-5 tol). window 100.
     var kuf = bf_new(1, 16)
     var kui: i64 = 0
-    while kui < 5000 { var kur:[f64;64]=[0.0;64]; kur[0]=((kui*7)%13 + (kui%5)) as f64; bf_push_row(&!kuf,&kur,1); kui=kui+1 }
+    var hoistbuf46:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while kui < 5000 { hoistbuf46[0]=((kui*7)%13 + (kui%5)) as f64; bf_push_row(&!kuf,&hoistbuf46,1); kui=kui+1 }
     let ku = bf_rolling_kurt(&kuf, 0, 100, 0.0 - 999.0)
     if bf_nrows(&ku) != 5000 { print("FAIL rkurt_n\n"); return 247 }
     if bf_get(&ku, 98, 0) != (0.0 - 999.0) { print("FAIL rkurt_fill\n"); return 248 }   // window not full
@@ -725,7 +779,8 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     // these q so exact: q0=i-100, q0.25=i-75, q0.5=i-50, q0.9=i-10, q1=i.
     var rqf = bf_new(1, 16)
     var rqi: i64 = 0
-    while rqi < 5000 { var rqr:[f64;64]=[0.0;64]; rqr[0]=rqi as f64; bf_push_row(&!rqf,&rqr,1); rqi=rqi+1 }
+    var hoistbuf47:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while rqi < 5000 { hoistbuf47[0]=rqi as f64; bf_push_row(&!rqf,&hoistbuf47,1); rqi=rqi+1 }
     let q0  = bf_rolling_quantile(&rqf, 0, 101, 0.0, 0.0 - 1.0)
     let q25 = bf_rolling_quantile(&rqf, 0, 101, 0.25, 0.0 - 1.0)
     let q50 = bf_rolling_quantile(&rqf, 0, 101, 0.5, 0.0 - 1.0)
@@ -741,7 +796,8 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     // DIFFERENTIAL: rolling_quantile(0.5) must equal the shipped rolling_median on scrambled data.
     var rqs = bf_new(1, 16)
     var rqsi: i64 = 0
-    while rqsi < 3000 { var rsr:[f64;64]=[0.0;64]; rsr[0]=((rqsi*2654435761)%100) as f64; bf_push_row(&!rqs,&rsr,1); rqsi=rqsi+1 }
+    var hoistbuf48:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while rqsi < 3000 { hoistbuf48[0]=((rqsi*2654435761)%100) as f64; bf_push_row(&!rqs,&hoistbuf48,1); rqsi=rqsi+1 }
     let rqm = bf_rolling_quantile(&rqs, 0, 51, 0.5, 0.0 - 1.0)   // odd window -> median = win[mid]
     let rmd = bf_rolling_median(&rqs, 0, 51, 0.0 - 1.0)
     var rqd: i64 = 0; var rqj: i64 = 0
@@ -751,7 +807,8 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     // the j-th occurrence sums vals of occurrences j-2..j; occurrence j=i/1000 has val=i.
     var gsf = bf_new(2, 16)
     var gsi: i64 = 0
-    while gsi < 100000 { var gsr:[f64;64]=[0.0;64]; gsr[0]=(gsi%1000) as f64; gsr[1]=gsi as f64; bf_push_row(&!gsf,&gsr,2); gsi=gsi+1 }
+    var hoistbuf49:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while gsi < 100000 { hoistbuf49[0]=(gsi%1000) as f64; hoistbuf49[1]=gsi as f64; bf_push_row(&!gsf,&hoistbuf49,2); gsi=gsi+1 }
     let gs = bf_rolling_sum_by(&gsf, 0, 1, 3, 0.0 - 1.0)
     if bf_nrows(&gs) != 100000 { print("FAIL rsumby_n\n"); return 259 }
     if bf_get(&gs, 1000, 0) != (0.0 - 1.0) { print("FAIL rsumby_fill\n"); return 260 }   // group 0 occ 1, window not full
@@ -781,7 +838,8 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     // CROSS-CHECK: a single-group frame -> grouped rolling max == ungrouped bf_rolling_max.
     var sgf = bf_new(2, 16)
     var sgi: i64 = 0
-    while sgi < 3000 { var sgr:[f64;64]=[0.0;64]; sgr[0]=0.0; sgr[1]=((sgi*13)%37) as f64; bf_push_row(&!sgf,&sgr,2); sgi=sgi+1 }
+    var hoistbuf50:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while sgi < 3000 { hoistbuf50[0]=0.0; hoistbuf50[1]=((sgi*13)%37) as f64; bf_push_row(&!sgf,&hoistbuf50,2); sgi=sgi+1 }
     let gone = bf_rolling_max_by(&sgf, 0, 1, 50, 0.0 - 1.0)   // 1 group
     let uone = bf_rolling_max(&sgf, 1, 50, 0.0 - 1.0)          // ungrouped, shipped
     var sgd: i64 = 0; var sgj: i64 = 0
@@ -791,7 +849,8 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     // group sees consecutive integers -> window-3 var of 3 consecutive ints = 1, std = 1.
     var vbf = bf_new(2, 16)
     var vbi: i64 = 0
-    while vbi < 6000 { var vbr:[f64;64]=[0.0;64]; vbr[0]=(vbi%2) as f64; vbr[1]=(vbi/2) as f64; bf_push_row(&!vbf,&vbr,2); vbi=vbi+1 }
+    var hoistbuf51:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while vbi < 6000 { hoistbuf51[0]=(vbi%2) as f64; hoistbuf51[1]=(vbi/2) as f64; bf_push_row(&!vbf,&hoistbuf51,2); vbi=vbi+1 }
     let rvb = bf_rolling_var_by(&vbf, 0, 1, 3, 0.0 - 999.0)
     let rsb = bf_rolling_std_by(&vbf, 0, 1, 3, 0.0 - 999.0)
     if bf_nrows(&rvb) != 6000 { print("FAIL rvarby_n\n"); return 276 }
@@ -841,7 +900,8 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     // per group). nlargest(3) -> vals 9,8,7 at rows 10g+9,10g+8,10g+7; nsmallest(3) -> 0,1,2.
     var ntf = bf_new(2, 16)
     var nti: i64 = 0
-    while nti < 30 { var ntr:[f64;64]=[0.0;64]; ntr[0]=(nti/10) as f64; ntr[1]=(nti-10*(nti/10)) as f64; bf_push_row(&!ntf,&ntr,2); nti=nti+1 }
+    var hoistbuf52:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while nti < 30 { hoistbuf52[0]=(nti/10) as f64; hoistbuf52[1]=(nti-10*(nti/10)) as f64; bf_push_row(&!ntf,&hoistbuf52,2); nti=nti+1 }
     let nlg = bf_nlargest_by(&ntf, 0, 1, 3)
     if bf_nrows(&nlg) != 9 { print("FAIL nlargest_n\n"); return 294 }        // 3 groups * 3
     if bf_ncols(&nlg) != 3 { print("FAIL nlargest_cols\n"); return 295 }
@@ -860,7 +920,8 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     // g, g+4, ..., g+36 (10 rows). first=g, last=g+36; nth(2)=g+8; nth(-1)=last=g+36.
     var flf = bf_new(2, 16)
     var fli: i64 = 0
-    while fli < 40 { var flr:[f64;64]=[0.0;64]; flr[0]=(fli-4*(fli/4)) as f64; flr[1]=fli as f64; bf_push_row(&!flf,&flr,2); fli=fli+1 }
+    var hoistbuf53:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while fli < 40 { hoistbuf53[0]=(fli-4*(fli/4)) as f64; hoistbuf53[1]=fli as f64; bf_push_row(&!flf,&hoistbuf53,2); fli=fli+1 }
     let fb = bf_first_by(&flf, 0, 1)
     let lb = bf_last_by(&flf, 0, 1)
     if bf_nrows(&fb) != 4 { print("FAIL first_n\n"); return 302 }
@@ -948,7 +1009,8 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     // CROSS-CHECK: single-group rank_by == ungrouped bf_rank (all methods), value-by-value.
     var sgr = bf_new(2, 16)
     var sgk: i64 = 0
-    while sgk < 400 { var sr:[f64;64]=[0.0;64]; sr[0]=0.0; sr[1]=((sgk*29)%53) as f64; bf_push_row(&!sgr,&sr,2); sgk=sgk+1 }
+    var hoistbuf54:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while sgk < 400 { hoistbuf54[0]=0.0; hoistbuf54[1]=((sgk*29)%53) as f64; bf_push_row(&!sgr,&hoistbuf54,2); sgk=sgk+1 }
     var rmm: i64 = 0
     while rmm < 4 {
         let a = bf_rank_by(&sgr, 0, 1, rmm)
@@ -961,7 +1023,8 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     // NGROUP / DESCENDING CUMCOUNT. sparse keys {0,10,20} (compacted -> groups 0,1,2).
     var ngf = bf_new(2, 16)
     var ngi: i64 = 0
-    while ngi < 30 { var ngr:[f64;64]=[0.0;64]; ngr[0]=(10*(ngi%3)) as f64; ngr[1]=ngi as f64; bf_push_row(&!ngf,&ngr,2); ngi=ngi+1 }
+    var hoistbuf55:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while ngi < 30 { hoistbuf55[0]=(10*(ngi%3)) as f64; hoistbuf55[1]=ngi as f64; bf_push_row(&!ngf,&hoistbuf55,2); ngi=ngi+1 }
     let ng = bf_ngroup_by(&ngf, 0)
     if bf_nrows(&ng) != 30 { print("FAIL ngroup_n\n"); return 338 }
     // rows: key cycles 0,10,20,0,10,20,... -> ngroup 0,1,2,0,1,2,... (sorted-key compacted)
@@ -997,7 +1060,8 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     // CROSS-CHECK: single-group pct_change_by == ungrouped bf_pct_change.
     var pgf = bf_new(2, 16)
     var pgk: i64 = 0
-    while pgk < 300 { var pr:[f64;64]=[0.0;64]; pr[0]=0.0; pr[1]=((pgk*13)%89 + 1) as f64; bf_push_row(&!pgf,&pr,2); pgk=pgk+1 }
+    var hoistbuf56:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while pgk < 300 { hoistbuf56[0]=0.0; hoistbuf56[1]=((pgk*13)%89 + 1) as f64; bf_push_row(&!pgf,&hoistbuf56,2); pgk=pgk+1 }
     let pgb = bf_pct_change_by(&pgf, 0, 1, 0.0 - 999.0)
     let pgu = bf_pct_change(&pgf, 1, 0.0 - 999.0)
     var pgd: i64 = 0; var pgj: i64 = 0
@@ -1007,7 +1071,8 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     // 2 (rows g, g+2, g+4,...). periods=1 -> diff 2 (first-in-group fill); periods=2 -> diff 4.
     var dff = bf_new(2, 16)
     var dfi: i64 = 0
-    while dfi < 20 { var dfr:[f64;64]=[0.0;64]; dfr[0]=(dfi%2) as f64; dfr[1]=dfi as f64; bf_push_row(&!dff,&dfr,2); dfi=dfi+1 }
+    var hoistbuf57:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while dfi < 20 { hoistbuf57[0]=(dfi%2) as f64; hoistbuf57[1]=dfi as f64; bf_push_row(&!dff,&hoistbuf57,2); dfi=dfi+1 }
     let d1 = bf_diff_by(&dff, 0, 1, 1, 0.0 - 999.0)
     if bf_nrows(&d1) != 20 { print("FAIL diff_n\n"); return 352 }
     if bf_get(&d1, 0, 0) != (0.0 - 999.0) || bf_get(&d1, 1, 0) != (0.0 - 999.0) { print("FAIL diff_fill\n"); return 353 } // first of each group
@@ -1020,7 +1085,8 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     // CROSS-CHECK: single-group diff_by(periods=1) == ungrouped bf_diff(periods=1).
     var dgf = bf_new(2, 16)
     var dgk: i64 = 0
-    while dgk < 300 { var dr:[f64;64]=[0.0;64]; dr[0]=0.0; dr[1]=((dgk*17)%71) as f64; bf_push_row(&!dgf,&dr,2); dgk=dgk+1 }
+    var hoistbuf58:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while dgk < 300 { hoistbuf58[0]=0.0; hoistbuf58[1]=((dgk*17)%71) as f64; bf_push_row(&!dgf,&hoistbuf58,2); dgk=dgk+1 }
     let dgb = bf_diff_by(&dgf, 0, 1, 1, 0.0 - 999.0)
     let dgu = bf_diff(&dgf, 1, 1, 0.0 - 999.0)
     var dgd: i64 = 0; var dgj: i64 = 0
@@ -1031,7 +1097,8 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     // out = next group member (last-in-group fill).
     var shf = bf_new(2, 16)
     var shi: i64 = 0
-    while shi < 20 { var shr:[f64;64]=[0.0;64]; shr[0]=(shi%2) as f64; shr[1]=shi as f64; bf_push_row(&!shf,&shr,2); shi=shi+1 }
+    var hoistbuf59:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while shi < 20 { hoistbuf59[0]=(shi%2) as f64; hoistbuf59[1]=shi as f64; bf_push_row(&!shf,&hoistbuf59,2); shi=shi+1 }
     let sl = bf_shift_by(&shf, 0, 1, 1, 0.0 - 999.0)      // lag 1
     if bf_nrows(&sl) != 20 { print("FAIL shift_n\n"); return 360 }
     if bf_get(&sl, 0, 0) != (0.0 - 999.0) { print("FAIL shift_lag_fill\n"); return 361 }  // group 0 first
@@ -1049,7 +1116,8 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     // CROSS-CHECK: single-group shift_by(1) == ungrouped bf_shift(1).
     var sgf2 = bf_new(2, 16)
     var sgk2: i64 = 0
-    while sgk2 < 300 { var sr2:[f64;64]=[0.0;64]; sr2[0]=0.0; sr2[1]=((sgk2*19)%67) as f64; bf_push_row(&!sgf2,&sr2,2); sgk2=sgk2+1 }
+    var hoistbuf60:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while sgk2 < 300 { hoistbuf60[0]=0.0; hoistbuf60[1]=((sgk2*19)%67) as f64; bf_push_row(&!sgf2,&hoistbuf60,2); sgk2=sgk2+1 }
     let sgb = bf_shift_by(&sgf2, 0, 1, 1, 0.0 - 999.0)
     let sgu = bf_shift(&sgf2, 1, 1, 0.0 - 999.0)
     var sgd2: i64 = 0; var sgj2: i64 = 0
@@ -1099,7 +1167,8 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     // GROUPED SAMPLE. 50 groups (key=r%50) of 100 rows each; sample 10 per group, seed 123.
     var spf = bf_new(1, 16)
     var spi: i64 = 0
-    while spi < 5000 { var spr:[f64;64]=[0.0;64]; spr[0]=(spi-50*(spi/50)) as f64; bf_push_row(&!spf,&spr,1); spi=spi+1 }
+    var hoistbuf61:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while spi < 5000 { hoistbuf61[0]=(spi-50*(spi/50)) as f64; bf_push_row(&!spf,&hoistbuf61,1); spi=spi+1 }
     let smA = bf_sample_n_by(&spf, 0, 10, 123)
     if bf_nrows(&smA) != 5000 { print("FAIL sample_n\n"); return 385 }
     // exactly 10 selected per group, total 500; count per group via a 50-slot tally.
@@ -1134,7 +1203,8 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     // suffix sums are 10,9,8,...,1 (first row = total 10, last = 1).
     var rcf = bf_new(2, 16)
     var rci: i64 = 0
-    while rci < 20 { var rcr:[f64;64]=[0.0;64]; rcr[0]=(rci%2) as f64; rcr[1]=1.0; bf_push_row(&!rcf,&rcr,2); rci=rci+1 }
+    var hoistbuf62:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while rci < 20 { hoistbuf62[0]=(rci%2) as f64; hoistbuf62[1]=1.0; bf_push_row(&!rcf,&hoistbuf62,2); rci=rci+1 }
     let rc = bf_cumsum_rev_by(&rcf, 0, 1)
     if bf_nrows(&rc) != 20 { print("FAIL revcs_n\n"); return 392 }
     if bf_get(&rc, 0, 0) != 10.0 { print("FAIL revcs_first\n"); return 393 }   // group 0 first row = total 10
@@ -1154,7 +1224,8 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     // (4 values 0,1,2,3) sum=6, mean=1.5, var(0,1,2,3)=1.6667, std=1.2910.
     var exf = bf_new(2, 16)
     var exi: i64 = 0
-    while exi < 40 { var exr:[f64;64]=[0.0;64]; exr[0]=(exi%2) as f64; exr[1]=(exi/2) as f64; bf_push_row(&!exf,&exr,2); exi=exi+1 }
+    var hoistbuf63:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while exi < 40 { hoistbuf63[0]=(exi%2) as f64; hoistbuf63[1]=(exi/2) as f64; bf_push_row(&!exf,&hoistbuf63,2); exi=exi+1 }
     let es = bf_expanding_sum_by(&exf, 0, 1)
     let em = bf_expanding_mean_by(&exf, 0, 1)
     let ev = bf_expanding_var_by(&exf, 0, 1)
@@ -1183,13 +1254,15 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     // cumprod: exf group members 0,1,2,3,... -> cumprod = 0 (first elem 0). Use a 2nd frame with vals 1,2,3.
     var cpf = bf_new(2, 16)
     var cpi: i64 = 0
-    while cpi < 12 { var cpr:[f64;64]=[0.0;64]; cpr[0]=(cpi%2) as f64; cpr[1]=(cpi/2 + 1) as f64; bf_push_row(&!cpf,&cpr,2); cpi=cpi+1 }
+    var hoistbuf64:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while cpi < 12 { hoistbuf64[0]=(cpi%2) as f64; hoistbuf64[1]=(cpi/2 + 1) as f64; bf_push_row(&!cpf,&hoistbuf64,2); cpi=cpi+1 }
     let cp = bf_cumprod_by(&cpf, 0, 1)   // group 0 vals 1,2,3,4,5,6 -> cumprod 1,2,6,24,120,720
     if bf_get(&cp,0,0)!=1.0 || bf_get(&cp,2,0)!=2.0 || bf_get(&cp,4,0)!=6.0 || bf_get(&cp,10,0)!=720.0 { print("FAIL cumprod\n"); return 407 }
     // zscore/demean/minmax/range on a known group: use a frame where group 0 = {2,4,6,8,10}.
     var stf = bf_new(2, 16)
     var sti: i64 = 0
-    while sti < 10 { var str2:[f64;64]=[0.0;64]; str2[0]=(sti%2) as f64; str2[1]=(2*(sti/2)+2) as f64; bf_push_row(&!stf,&str2,2); sti=sti+1 }
+    var hoistbuf65:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while sti < 10 { hoistbuf65[0]=(sti%2) as f64; hoistbuf65[1]=(2*(sti/2)+2) as f64; bf_push_row(&!stf,&hoistbuf65,2); sti=sti+1 }
     // group 0 rows (even idx) vals 2,4,6,8,10: mean=6, std(ddof1)=sqrt(10)=3.1623, min2 max10 range8.
     let dm2 = bf_demean_by(&stf, 0, 1)
     if !approx_eq(bf_get(&dm2, 0, 0), 0.0 - 4.0) { print("FAIL demean\n"); return 408 }   // 2-6=-4
@@ -1208,7 +1281,8 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     // head/tail mask: 2 groups (key=r%2), 10 rows each; head(3)/tail(3).
     var htf = bf_new(1, 16)
     var hti: i64 = 0
-    while hti < 20 { var htr:[f64;64]=[0.0;64]; htr[0]=(hti%2) as f64; bf_push_row(&!htf,&htr,1); hti=hti+1 }
+    var hoistbuf66:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while hti < 20 { hoistbuf66[0]=(hti%2) as f64; bf_push_row(&!htf,&hoistbuf66,1); hti=hti+1 }
     let hm = bf_head_mask_by(&htf, 0, 3)
     let tm = bf_tail_mask_by(&htf, 0, 3)
     var htot: i64 = 0; var ttot: i64 = 0; var hj: i64 = 0
@@ -1270,7 +1344,8 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     // corr/cov: build 3-col frame, group 0 x={1,2,3,4}, y=2x -> corr 1.0, cov = 2*var(x).
     var ccf = bf_new(3, 16)
     var cci: i64 = 0
-    while cci < 8 { var ccr:[f64;64]=[0.0;64]; ccr[0]=(cci%2) as f64; let xv=(cci/2 + 1); ccr[1]=xv as f64; ccr[2]=(2*xv) as f64; bf_push_row(&!ccf,&ccr,3); cci=cci+1 }
+    var hoistbuf67:[f64;64]=[0.0;64]   // hoisted: one buffer for the loop (Madaros arena)
+    while cci < 8 { hoistbuf67[0]=(cci%2) as f64; let xv=(cci/2 + 1); hoistbuf67[1]=xv as f64; hoistbuf67[2]=(2*xv) as f64; bf_push_row(&!ccf,&hoistbuf67,3); cci=cci+1 }
     let cob = bf_corr_by(&ccf, 0, 1, 2); let cvb = bf_cov_by(&ccf, 0, 1, 2)
     if !approx_eq(bf_get(&cob, 0, 0), 1.0) { print("FAIL corr\n"); return 440 }   // y=2x perfectly correlated
     // group 0 x={1,2,3,4} var(ddof1)=1.6667, cov(x,2x)=2*1.6667=3.3333

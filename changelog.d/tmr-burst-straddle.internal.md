@@ -1,0 +1,1 @@
+Add a 64-byte cache-line burst fault model for the Decision 50 arenas, with kernel-checked single-burst isolation and the `3·q_burst²` bound (`formal/Bootstrap/TMRBurst.lean`), and a CPU gate for bursts and guard-page instruction straddles (`bootstrap/model/tmr_burst_straddle_gate.sh`) wired into the Lean job.

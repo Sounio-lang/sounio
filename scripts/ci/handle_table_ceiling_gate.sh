@@ -92,10 +92,39 @@ fi
 echo "S1_OK rc=0"
 
 ###############################################################################
-# Ceiling witness — capacity+16 handle-consuming allocs.
-# PASS: rc=182 and stderr contains "madaros: handles full".
+# Ceiling witness — capacity+16 handles that all stay REACHABLE (a linked
+# chain), so no reclamation can give one back: the wall is reached by live
+# data only. PASS: rc=182 and stderr contains "madaros: handles full".
+#
+# Until loop regions (ADR-010 amendment, 2026-11) this witness was capacity+16
+# discarded temporaries. Those are garbage: the loop region now returns them
+# every iteration, so that program runs to completion, and the reclaim check
+# below asserts exactly that. A wall witness built on garbage would be
+# measuring a missing reclamation, not the ceiling.
 ###############################################################################
 cat > "$TMP/ceiling.sio" <<EOF
+struct N { x: i64, y: i64, next: Option<Box<N>> }
+fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
+    var head: Option<Box<N>> = None
+    var i: i64 = 0
+    while i < $CEILING_ITERS {
+        head = Some(Box::new(N { x: i, y: 1, next: head }))
+        i = i + 1
+    }
+    print("done\\n")
+    0
+}
+EOF
+echo
+echo "--- ceiling: $CEILING_ITERS live handles (capacity $CAPACITY) ---"
+compile_and_run ceiling "$TMP/ceiling.sio" "$TMP/ceiling.elf"
+C_RC="$(cat "$TMP/ceiling.run.rc")"
+
+###############################################################################
+# Reclaim check — the same count of handle-consuming temporaries, discarded
+# each iteration. PASS: rc=0 and stdout "done".
+###############################################################################
+cat > "$TMP/garbage.sio" <<EOF
 struct H { x: i64, y: i64, z: i64 }
 fn alloc_one() -> H with Alloc { H { x: 1, y: 1, z: 1 } }
 fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
@@ -109,19 +138,30 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
 }
 EOF
 echo
-echo "--- ceiling: $CEILING_ITERS allocs (capacity $CAPACITY) ---"
-compile_and_run ceiling "$TMP/ceiling.sio" "$TMP/ceiling.elf"
-C_RC="$(cat "$TMP/ceiling.run.rc")"
+echo "--- reclaim: $CEILING_ITERS discarded temporaries ---"
+compile_and_run garbage "$TMP/garbage.sio" "$TMP/garbage.elf"
+G_RC="$(cat "$TMP/garbage.run.rc")"
 
 echo
 echo "=== handle_table_ceiling_gate verdict ==="
+fail=0
 if [[ "$C_RC" == "182" ]] && grep -qF 'madaros: handles full' "$TMP/ceiling.run.err"; then
     echo "PASS ceiling rc=182 named 'madaros: handles full'"
+else
+    echo "FAIL ceiling: want rc=182 and stderr 'madaros: handles full'; got rc=$C_RC" >&2
+    fail=1
+fi
+if [[ "$G_RC" == "0" ]] && grep -qxF 'done' "$TMP/garbage.run.out"; then
+    echo "PASS reclaim rc=0 'done' (temporaries returned by the loop region)"
+else
+    echo "FAIL reclaim: want rc=0 and stdout 'done'; got rc=$G_RC" >&2
+    fail=1
+fi
+if [[ "$fail" == "0" ]]; then
     gate_measured_yes
     echo "HANDLE_TABLE_CEILING_GATE_OK"
     exit 0
 fi
-echo "FAIL ceiling: want rc=182 and stderr 'madaros: handles full'; got rc=$C_RC" >&2
 echo "measured=no"
 echo "HANDLE_TABLE_CEILING_GATE_FAIL" >&2
 exit 1

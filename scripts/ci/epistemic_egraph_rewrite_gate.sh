@@ -4,8 +4,9 @@
 # exactness, Lyapunov chaos predicate) that decide whether a float
 # reassociation rewrite is legal.
 #
-# Restored from scripts/archive/sprint247_epistemic_egraph_rewrite_gate.sh and
-# rewritten 2026-07-27 against current source: the archived version checked
+# Restored from the retired sprint247_epistemic_egraph_rewrite_gate.sh
+# (removed with scripts/archive/) and rewritten 2026-07-27 against current
+# source: the archived version checked
 # for test IDs (T1148-T1153, total=1153) and an invocation
 # (`$SOUC run main.sio -- --self-test`) that no longer match current source
 # (the flag is `--self-test`, not `run ... -- --self-test`). Since #1680 the

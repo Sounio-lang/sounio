@@ -103,6 +103,91 @@ pub fn tc_eps_protein() -> f64  { return 0.65 }   // by difference
 pub fn tc_lipid_composite_ceiling() -> f64 { return 0.55 }
 
 // ============================================================================
+// Acidic phospholipid [AP-]: source-explicit accessors
+// ============================================================================
+//
+// [AP-] is not tc_comp.f_np.  The latter is a neutral-phospholipid volume
+// fraction; Rodgers and Rowland consume an acidic-phospholipid concentration.
+// Keeping source and convention in the function name prevents a caller from
+// silently mixing the two quantities.
+//
+// Rodgers & Rowland (2007), Table VII, human, mg/g tissue,
+// doi:10.1007/s11095-006-9210-0:
+//   plasma 0.041, muscle 2.42, red blood cells 0.57.
+// No other organ value has been verified from that primary table in this
+// module.  The primary-source accessor therefore refuses every other organ.
+pub fn tc_ap_rr_mg_per_g(organ: i32) -> f64 {
+    if organ == 0 { return 0.041 }
+    if organ == 6 { return 2.42 }
+    return 0.0 - 1.0
+}
+
+pub fn tc_ap_rr_mg_per_g_sourced(organ: i32) -> bool {
+    if organ == 0 { return true }
+    if organ == 6 { return true }
+    return false
+}
+
+pub fn tc_ap_rr_rbc_mg_per_g() -> f64 { return 0.57 }
+
+pub fn tc_ap_rr_tissue_to_rbc_ratio(organ: i32) -> f64 with Div {
+    if !tc_ap_rr_mg_per_g_sourced(organ) { return 0.0 - 1.0 }
+    if organ == 0 { return 0.0 - 1.0 } // plasma is not a red-cell ratio
+    return tc_ap_rr_mg_per_g(organ) / tc_ap_rr_rbc_mg_per_g()
+}
+
+// httk 2.7.4, data/Tables.RData, tissue.data, Species == "Human".
+// CRAN source tarball SHA-256:
+// e186171a90d97fe456e7836ec3096719feb49354afd71860df2d2a5c8c4c51b2
+// Tables.RData SHA-256:
+// a8e76bb6b667659d32802a236668652e2a163cdcbcecffd4f03cd63af1402327
+// Fa_PLc is acidic phospholipid / cell lipid; FLc is cell lipid / cell volume.
+// Their product is divided by the red-cell product 0.1 * 0.00501 = 0.000501.
+// These are dimensionless tissue:red-cell ratios, not mg/g concentrations.
+// Plasma (0), pancreas (12), and the PBPK "other" compartment (13) have no
+// matching httk tissue value and remain refused.  Coverage is 11 of 14.
+pub fn tc_ap_httk_fa_plc(organ: i32) -> f64 {
+    if organ == 1  { return 0.050510 }
+    if organ == 2  { return 0.068530 }
+    if organ == 3  { return 0.167800 }
+    if organ == 4  { return 0.030900 }
+    if organ == 5  { return 0.140000 }
+    if organ == 6  { return 0.078840 }
+    if organ == 7  { return 0.007859 }
+    if organ == 8  { return 0.050000 }
+    if organ == 9  { return 0.138200 }
+    if organ == 10 { return 0.040000 }
+    if organ == 11 { return 0.072870 }
+    return 0.0 - 1.0
+}
+
+pub fn tc_ap_httk_flc(organ: i32) -> f64 {
+    if organ == 1  { return 0.092310 }
+    if organ == 2  { return 0.064070 }
+    if organ == 3  { return 0.112300 }
+    if organ == 4  { return 0.137500 }
+    if organ == 5  { return 0.013160 }
+    if organ == 6  { return 0.023870 }
+    if organ == 7  { return 0.934000 }
+    if organ == 8  { return 0.070000 }
+    if organ == 9  { return 0.283100 }
+    if organ == 10 { return 0.020000 }
+    if organ == 11 { return 0.039460 }
+    return 0.0 - 1.0
+}
+
+pub fn tc_ap_httk_ratio_sourced(organ: i32) -> bool {
+    if organ <= 0 { return false }
+    if organ >= 12 { return false }
+    return true
+}
+
+pub fn tc_ap_httk_tissue_to_rbc_ratio(organ: i32) -> f64 with Div {
+    if !tc_ap_httk_ratio_sourced(organ) { return 0.0 - 1.0 }
+    return tc_ap_httk_fa_plc(organ) * tc_ap_httk_flc(organ) / 0.000501
+}
+
+// ============================================================================
 // Self-test (plain f64 — Madaros + lean_single safe)
 // ============================================================================
 
@@ -161,6 +246,86 @@ fn main() -> i32 with IO, Mut, Div, Panic {
         }
     } else {
         println("T4 FAIL: ε ordering wrong (phospho/lipid)"); fails = fails + 1
+    }
+
+    // T5 — the primary Rodgers-Rowland reading supports muscle, but not brain.
+    if tc_ap_rr_mg_per_g_sourced(6) {
+        if tc_ap_rr_mg_per_g(6) > 2.419 {
+            if tc_ap_rr_mg_per_g(6) < 2.421 {
+                if !tc_ap_rr_mg_per_g_sourced(3) {
+                    if tc_ap_rr_mg_per_g(3) < 0.0 {
+                        println("T5 PASS: R-R [AP-] supports muscle and refuses brain")
+                    } else {
+                        println("T5 FAIL: refused R-R brain value is not negative"); fails = fails + 1
+                    }
+                } else {
+                    println("T5 FAIL: R-R brain value is marked sourced"); fails = fails + 1
+                }
+            } else {
+                println("T5 FAIL: R-R muscle [AP-] above source band"); fails = fails + 1
+            }
+        } else {
+            println("T5 FAIL: R-R muscle [AP-] below source band"); fails = fails + 1
+        }
+    } else {
+        println("T5 FAIL: R-R muscle [AP-] is not sourced"); fails = fails + 1
+    }
+
+    // T6 — httk supplies exactly eleven tissue:red-cell ratios.  The brain is
+    // supported under this convention; plasma, pancreas, and other are not.
+    var ap_httk_count = 0
+    var ap_organ = 0
+    while ap_organ < 14 {
+        if tc_ap_httk_ratio_sourced(ap_organ) { ap_httk_count = ap_httk_count + 1 }
+        ap_organ = ap_organ + 1
+    }
+    if ap_httk_count == 11 {
+        if tc_ap_httk_ratio_sourced(3) {
+            if !tc_ap_httk_ratio_sourced(12) {
+                if tc_ap_httk_tissue_to_rbc_ratio(12) < 0.0 {
+                    println("T6 PASS: httk [AP-] covers 11/14 and refuses absent tissues")
+                } else {
+                    println("T6 FAIL: refused httk pancreas ratio is not negative"); fails = fails + 1
+                }
+            } else {
+                println("T6 FAIL: httk pancreas ratio is marked sourced"); fails = fails + 1
+            }
+        } else {
+            println("T6 FAIL: httk brain ratio is not sourced"); fails = fails + 1
+        }
+    } else {
+        println("T6 FAIL: httk [AP-] coverage is not 11/14"); fails = fails + 1
+    }
+
+    // T7 — source choice is material and must remain visible.  Muscle is the
+    // only current overlap: R-R 4.2456 versus httk 3.7563 tissue:RBC.
+    let ap_rr_muscle = tc_ap_rr_tissue_to_rbc_ratio(6)
+    let ap_httk_muscle = tc_ap_httk_tissue_to_rbc_ratio(6)
+    let ap_httk_brain = tc_ap_httk_tissue_to_rbc_ratio(3)
+    if ap_rr_muscle > 4.24 {
+        if ap_rr_muscle < 4.25 {
+            if ap_httk_muscle > 3.75 {
+                if ap_httk_muscle < 3.76 {
+                    if ap_httk_brain > 37.60 {
+                        if ap_httk_brain < 37.62 {
+                            println("T7 PASS: source-specific muscle and brain [AP-] ratios are pinned")
+                        } else {
+                            println("T7 FAIL: httk brain ratio above band"); fails = fails + 1
+                        }
+                    } else {
+                        println("T7 FAIL: httk brain ratio below band"); fails = fails + 1
+                    }
+                } else {
+                    println("T7 FAIL: httk muscle ratio above band"); fails = fails + 1
+                }
+            } else {
+                println("T7 FAIL: httk muscle ratio below band"); fails = fails + 1
+            }
+        } else {
+            println("T7 FAIL: R-R muscle ratio above band"); fails = fails + 1
+        }
+    } else {
+        println("T7 FAIL: R-R muscle ratio below band"); fails = fails + 1
     }
 
     if fails == 0 {

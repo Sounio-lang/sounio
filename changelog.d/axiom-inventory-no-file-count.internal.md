@@ -1,0 +1,1 @@
+Axiom inventory: the generated `formal/AXIOM_INVENTORY.md` no longer records how many `.lean` files it scanned. That count changed with every new file, so two pull requests that each added a clean file failed the merge queue against each other.

@@ -36,7 +36,7 @@ OPEN_IDS=""
 # declared open ONLY by exact id + reason below. The gate fails if the actual
 # open set differs from this set in ANY direction -- new opens, or a declared
 # residual silently starting to pass (promotion must be witnessed, not assumed).
-DECLARED_OPEN="w17"
+DECLARED_OPEN=""
 # w5 and w14 were open 2026-08-14/15 on a Madaros built fresh from current
 # main.sio source: ir_empty_function() leaves its region unallocated by
 # design (see ir_function_alloc_region's comment in ir.sio), and both the
@@ -71,6 +71,16 @@ DECLARED_OPEN="w17"
 # on the arena bug before it ever reached this file's actual effect leak).
 # `souc check` on that file returns "check: OK" post-fix. Pre-existing gap
 # in self-hosted/check/, unrelated to the IR-lowering fix, not attempted.
+#
+# w17 CLOSED 2026-10-27 (SIO-27, PR for #2760's minimal slice): the implicit
+# IO builtins now carry the IO effect in Madaros's checker whenever the name
+# does not resolve to a user function. A builtin IO call inside a closure is
+# effect-transparent: the obligation lands on the enclosing named fn, so the
+# `print` here is refused with E035 because pure_fn declares no IO (the
+# closure keeps its pure type, so an IO-declaring caller still compiles --
+# tests/run-pass/closure_effect_transparent_hof.sio). `souc check` on this
+# file went from "check: OK" to a rejection. Witnessed by the matrix itself:
+# w17 flipped from open to rejected with no other row changing (22/22 correct).
 
 run_value() {
   id="$1"; file="$2"; want="$3"; wrong="$4"; origin="$5"

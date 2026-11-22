@@ -1,0 +1,969 @@
+// stdlib/arrow/ext.sio — Arrow canonical extension types
+//
+// https://arrow.apache.org/docs/format/CanonicalExtensions.html
+//
+// Each type is the extension name `arrow.*` plus the storage layout and the
+// metadata string pyarrow writes. Unknown extension names are left in place.
+
+use arrow::lib::{
+    ArrowSchema,
+    arrow_field_set_extension,
+    arrow_field_set_extension_buf,
+    arrow_type_binary,
+    arrow_type_binary_view,
+    arrow_type_bool,
+    arrow_type_date,
+    arrow_type_decimal,
+    arrow_type_fixed_binary,
+    arrow_type_fixed_list,
+    arrow_type_float,
+    arrow_type_int,
+    arrow_type_large_binary,
+    arrow_type_large_list,
+    arrow_type_large_list_view,
+    arrow_type_large_utf8,
+    arrow_type_list,
+    arrow_type_list_view,
+    arrow_type_run_end,
+    arrow_type_struct,
+    arrow_type_time,
+    arrow_type_timestamp,
+    arrow_type_utf8,
+    arrow_type_utf8_view,
+}
+
+pub fn arrow_ext_none() -> i64 { 0 }
+pub fn arrow_ext_uuid() -> i64 { 1 }
+pub fn arrow_ext_json() -> i64 { 2 }
+pub fn arrow_ext_bool8() -> i64 { 3 }
+pub fn arrow_ext_opaque() -> i64 { 4 }
+pub fn arrow_ext_fixed_tensor() -> i64 { 5 }
+pub fn arrow_ext_var_tensor() -> i64 { 6 }
+pub fn arrow_ext_variant() -> i64 { 7 }
+pub fn arrow_ext_ts_offset() -> i64 { 8 }
+pub fn arrow_ext_other() -> i64 { 9 }
+
+fn b8(v: i64) -> i64 {
+    if v < 0 { v + 256 } else { v }
+}
+
+fn node_name_is(s: &ArrowSchema, node: i64, text: string) -> i64 with Panic {
+    let n = str_len(text)
+    if s.name_lens[node as usize] != n { return 0 }
+    var i: i64 = 0
+    while i < n {
+        var want = text[i as usize] as i64
+        want = b8(want)
+        let got = b8(s.name_bytes[(node * 32 + i) as usize] as i64)
+        if got != want { return 0 }
+        i = i + 1
+    }
+    1
+}
+
+fn child_named(s: &ArrowSchema, parent: i64, text: string) -> i64 with Panic {
+    var i: i64 = 0
+    while i < s.n_nodes {
+        if s.parent[i as usize] == parent && node_name_is(s, i, text) != 0 { return i }
+        i = i + 1
+    }
+    -1
+}
+
+fn nth_child(s: &ArrowSchema, parent: i64, n: i64) -> i64 with Panic {
+    var seen: i64 = 0
+    var i: i64 = 0
+    while i < s.n_nodes {
+        if s.parent[i as usize] == parent {
+            if seen == n { return i }
+            seen = seen + 1
+        }
+        i = i + 1
+    }
+    -1
+}
+
+fn child_count(s: &ArrowSchema, parent: i64) -> i64 with Panic {
+    var n: i64 = 0
+    var i: i64 = 0
+    while i < s.n_nodes {
+        if s.parent[i as usize] == parent { n = n + 1 }
+        i = i + 1
+    }
+    n
+}
+
+fn meta_slot(s: &ArrowSchema, node: i64, key: string) -> i64 with Panic {
+    let n = s.meta_n[node as usize]
+    var i: i64 = 0
+    while i < n {
+        let nk = s.meta_kl[(node * 4 + i) as usize]
+        let wantn = str_len(key)
+        if nk == wantn {
+            var ok: i64 = 1
+            var k: i64 = 0
+            while k < nk {
+                var want = key[k as usize] as i64
+                want = b8(want)
+                let got = b8(s.meta_k[((node * 4 + i) * 32 + k) as usize] as i64)
+                if got != want { ok = 0 }
+                k = k + 1
+            }
+            if ok != 0 { return i }
+        }
+        i = i + 1
+    }
+    -1
+}
+
+fn val_eq(s: &ArrowSchema, node: i64, slot: i64, text: string) -> i64 with Panic {
+    let n = str_len(text)
+    if s.meta_vl[(node * 4 + slot) as usize] != n { return 0 }
+    var i: i64 = 0
+    while i < n {
+        var want = text[i as usize] as i64
+        want = b8(want)
+        let got = b8(s.meta_v[((node * 4 + slot) * 128 + i) as usize] as i64)
+        if got != want { return 0 }
+        i = i + 1
+    }
+    1
+}
+
+fn ext_name_is(s: &ArrowSchema, node: i64, text: string) -> i64 with Panic {
+    let slot = meta_slot(s, node, "ARROW:extension:name")
+    if slot < 0 { return 0 }
+    val_eq(s, node, slot, text)
+}
+
+fn ext_meta_len(s: &ArrowSchema, node: i64) -> i64 with Panic {
+    let slot = meta_slot(s, node, "ARROW:extension:metadata")
+    if slot < 0 { return -1 }
+    s.meta_vl[(node * 4 + slot) as usize]
+}
+
+fn ext_meta_byte(s: &ArrowSchema, node: i64, i: i64) -> i64 with Panic {
+    let slot = meta_slot(s, node, "ARROW:extension:metadata")
+    if slot < 0 || i < 0 { return -1 }
+    if i >= ext_meta_len(s, node) || i >= 128 { return -1 }
+    b8(s.meta_v[((node * 4 + slot) * 128 + i) as usize] as i64)
+}
+
+pub fn arrow_ext_meta_is(s: &ArrowSchema, node: i64, text: string) -> i64 with Panic {
+    let slot = meta_slot(s, node, "ARROW:extension:metadata")
+    if slot < 0 { return 0 }
+    val_eq(s, node, slot, text)
+}
+
+pub fn arrow_ext_kind(s: &ArrowSchema, node: i64) -> i64 with Panic {
+    if node < 0 || node >= s.n_nodes { return 0 }
+    if meta_slot(s, node, "ARROW:extension:name") < 0 { return 0 }
+    if ext_name_is(s, node, "arrow.uuid") != 0 { return 1 }
+    if ext_name_is(s, node, "arrow.json") != 0 { return 2 }
+    if ext_name_is(s, node, "arrow.bool8") != 0 { return 3 }
+    if ext_name_is(s, node, "arrow.opaque") != 0 { return 4 }
+    if ext_name_is(s, node, "arrow.fixed_shape_tensor") != 0 { return 5 }
+    if ext_name_is(s, node, "arrow.variable_shape_tensor") != 0 { return 6 }
+    if ext_name_is(s, node, "arrow.parquet.variant") != 0 { return 7 }
+    if ext_name_is(s, node, "arrow.timestamp_with_offset") != 0 { return 8 }
+    9
+}
+
+fn j_byte(dst: &![u8; 128], n: &!i64, b: i64) -> i64 with Mut, Panic {
+    if *n >= 128 { return -7 }
+    dst[*n as usize] = (b8(b) as i32) as u8
+    *n = *n + 1
+    0
+}
+
+fn j_text(dst: &![u8; 128], n: &!i64, text: string) -> i64 with Mut, Panic {
+    let m = str_len(text)
+    var i: i64 = 0
+    while i < m {
+        var ch = text[i as usize] as i64
+        ch = b8(ch)
+        if j_byte(dst, n, ch) != 0 { return -7 }
+        i = i + 1
+    }
+    0
+}
+
+fn j_int(dst: &![u8; 128], n: &!i64, v: i64) -> i64 with Mut, Panic, Div {
+    if v < 0 { return -6 }
+    if v == 0 { return j_byte(dst, n, 48) }
+    var digs: [i64; 19] = [0; 19]
+    var nd: i64 = 0
+    var x = v
+    while x > 0 {
+        digs[nd as usize] = 48 + (x % 10)
+        nd = nd + 1
+        x = x / 10
+    }
+    var i = nd - 1
+    while i >= 0 {
+        if j_byte(dst, n, digs[i as usize]) != 0 { return -7 }
+        i = i - 1
+    }
+    0
+}
+
+fn j_escaped_byte(dst: &![u8; 128], n: &!i64, ch: i64) -> i64 with Mut, Panic {
+    if ch < 32 {
+        if j_text(dst, n, "\\u00") != 0 { return -7 }
+        var hi: i64 = 48
+        if ch >= 16 { hi = 49 }
+        var lo = ch
+        if lo >= 16 { lo = lo - 16 }
+        if lo < 10 { lo = lo + 48 } else { lo = lo + 87 }
+        if j_byte(dst, n, hi) != 0 { return -7 }
+        return j_byte(dst, n, lo)
+    }
+    if ch == 34 || ch == 92 {
+        if j_byte(dst, n, 92) != 0 { return -7 }
+    }
+    j_byte(dst, n, ch)
+}
+
+fn j_raw(dst: &![u8; 128], n: &!i64, src: &[u8; 64], at: i64, len: i64) -> i64 with Mut, Panic {
+    if len < 0 || len > 16 || at < 0 || at > 64 - len { return -7 }
+    var i: i64 = 0
+    while i < len {
+        let ch = b8(src[(at + i) as usize] as i64)
+        if j_escaped_byte(dst, n, ch) != 0 { return -7 }
+        i = i + 1
+    }
+    0
+}
+
+fn j_str_esc(dst: &![u8; 128], n: &!i64, text: string) -> i64 with Mut, Panic {
+    let m = str_len(text)
+    var i: i64 = 0
+    while i < m {
+        var ch = text[i as usize] as i64
+        ch = b8(ch)
+        if j_escaped_byte(dst, n, ch) != 0 { return -7 }
+        i = i + 1
+    }
+    0
+}
+
+fn shape_product(shape: &[i64; 4], n: i64) -> i64 {
+    if n < 1 || n > 4 { return -6 }
+    var p: i64 = 1
+    var i: i64 = 0
+    while i < n {
+        let d = shape[i as usize]
+        if d <= 0 { return -6 }
+        if d > 65536 { return -7 }
+        p = p * d
+        if p > 65536 { return -7 }
+        i = i + 1
+    }
+    p
+}
+
+fn perm_ok(perm: &[i64; 4], n: i64) -> i64 with Panic {
+    if n < 1 || n > 4 { return 0 }
+    var seen: [i64; 4] = [0; 4]
+    var i: i64 = 0
+    while i < n {
+        let v = perm[i as usize]
+        if v < 0 || v >= n { return 0 }
+        if seen[v as usize] != 0 { return 0 }
+        seen[v as usize] = 1
+        i = i + 1
+    }
+    1
+}
+
+fn tz_is_utc(s: &ArrowSchema, node: i64) -> i64 with Panic {
+    if s.tz_lens[node as usize] != 3 { return 0 }
+    if b8(s.tz_bytes[(node * 32) as usize] as i64) != 85 { return 0 }
+    if b8(s.tz_bytes[(node * 32 + 1) as usize] as i64) != 84 { return 0 }
+    if b8(s.tz_bytes[(node * 32 + 2) as usize] as i64) != 67 { return 0 }
+    1
+}
+
+fn is_binary_storage(s: &ArrowSchema, node: i64) -> i64 with Panic {
+    let t = s.type_tag[node as usize]
+    if t == arrow_type_binary() || t == arrow_type_large_binary() || t == arrow_type_binary_view() { return 1 }
+    if t == arrow_type_run_end() {
+        let values = child_named(s, node, "values")
+        if values < 0 { return 0 }
+        return is_binary_storage(s, values)
+    }
+    0
+}
+
+fn is_text_storage(tag: i64) -> i64 {
+    if tag == arrow_type_utf8() || tag == arrow_type_large_utf8() || tag == arrow_type_utf8_view() { return 1 }
+    0
+}
+
+fn is_list_storage(tag: i64) -> i64 {
+    if tag == arrow_type_list() || tag == arrow_type_large_list() || tag == arrow_type_list_view() { return 1 }
+    0
+}
+
+fn variant_primitive(s: &ArrowSchema, node: i64) -> i64 with Panic {
+    let t = s.type_tag[node as usize]
+    if t == arrow_type_bool() { return 1 }
+    if t == arrow_type_int() {
+        if s.is_signed[node as usize] != 1 { return 0 }
+        let w = s.bit_width[node as usize]
+        if w == 8 || w == 16 || w == 32 || w == 64 { return 1 }
+        return 0
+    }
+    if t == arrow_type_float() {
+        let p = s.precision[node as usize]
+        if p == 1 || p == 2 { return 1 }
+        return 0
+    }
+    if t == arrow_type_decimal() {
+        let p = s.precision[node as usize]
+        let sc = s.scale[node as usize]
+        var w = s.bit_width[node as usize]
+        if w == 0 { w = 128 }
+        if sc < 0 || sc > p { return 0 }
+        if w == 32 && p >= 1 && p <= 9 { return 1 }
+        if w == 64 && p >= 10 && p <= 18 { return 1 }
+        if w == 128 && p >= 19 && p <= 38 { return 1 }
+        return 0
+    }
+    if t == arrow_type_date() && s.precision[node as usize] == 0 { return 1 }
+    if t == arrow_type_time() && s.bit_width[node as usize] == 64 && s.precision[node as usize] == 2 { return 1 }
+    if t == arrow_type_timestamp() {
+        let u = s.precision[node as usize]
+        if u != 2 && u != 3 { return 0 }
+        if s.tz_lens[node as usize] == 0 { return 1 }
+        return tz_is_utc(s, node)
+    }
+    if is_binary_storage(s, node) != 0 { return 1 }
+    if is_text_storage(t) != 0 { return 1 }
+    if t == arrow_type_fixed_binary() && s.extra[node as usize] == 16 { return 1 }
+    0
+}
+
+fn variant_payload(s: &ArrowSchema, node: i64, nested: i64) -> i64 with Panic {
+    var saw: i64 = 0
+    var i: i64 = 0
+    while i < s.n_nodes {
+        if s.parent[i as usize] == node {
+            if node_name_is(s, i, "value") != 0 {
+                if is_binary_storage(s, i) == 0 { return 0 }
+                saw = 1
+            } else if node_name_is(s, i, "typed_value") != 0 {
+                if nested != 0 && s.nullable[i as usize] != 0 { return 0 }
+                if variant_typed(s, i) == 0 { return 0 }
+                saw = 1
+            }
+        }
+        i = i + 1
+    }
+    saw
+}
+
+fn variant_typed(s: &ArrowSchema, node: i64) -> i64 with Panic {
+    if variant_primitive(s, node) != 0 { return 1 }
+    let t = s.type_tag[node as usize]
+    if is_list_storage(t) != 0 {
+        let ch = nth_child(s, node, 0)
+        if ch < 0 || nth_child(s, node, 1) >= 0 { return 0 }
+        if s.nullable[ch as usize] != 0 { return 0 }
+        if s.type_tag[ch as usize] != arrow_type_struct() { return 0 }
+        return variant_payload(s, ch, 1)
+    }
+    if t == arrow_type_struct() {
+        var i: i64 = 0
+        var any: i64 = 0
+        while i < s.n_nodes {
+            if s.parent[i as usize] == node {
+                any = 1
+                if s.nullable[i as usize] != 0 { return 0 }
+                if s.type_tag[i as usize] != arrow_type_struct() { return 0 }
+                if variant_payload(s, i, 1) == 0 { return 0 }
+            }
+            i = i + 1
+        }
+        return any
+    }
+    0
+}
+
+fn variant_ok(s: &ArrowSchema, node: i64) -> i64 with Panic {
+    if s.type_tag[node as usize] != arrow_type_struct() { return 0 }
+    let meta = child_named(s, node, "metadata")
+    if meta < 0 { return 0 }
+    if s.nullable[meta as usize] != 0 { return 0 }
+    if is_binary_storage(s, meta) == 0 { return 0 }
+    let value = child_named(s, node, "value")
+    let typed = child_named(s, node, "typed_value")
+    if value < 0 && typed < 0 { return 0 }
+    if value >= 0 {
+        if is_binary_storage(s, value) == 0 { return 0 }
+    }
+    if typed >= 0 {
+        if variant_typed(s, typed) == 0 { return 0 }
+    }
+    1
+}
+
+fn ts_offset_ok(s: &ArrowSchema, node: i64) -> i64 with Panic {
+    if s.type_tag[node as usize] != arrow_type_struct() { return 0 }
+    if child_count(s, node) != 2 { return 0 }
+    let ts = nth_child(s, node, 0)
+    let off = nth_child(s, node, 1)
+    if ts < 0 || off < 0 { return 0 }
+    if node_name_is(s, ts, "timestamp") == 0 { return 0 }
+    if node_name_is(s, off, "offset_minutes") == 0 { return 0 }
+    if s.nullable[ts as usize] != 0 || s.nullable[off as usize] != 0 { return 0 }
+    if s.type_tag[ts as usize] != arrow_type_timestamp() { return 0 }
+    if tz_is_utc(s, ts) == 0 { return 0 }
+    if s.type_tag[off as usize] == arrow_type_int() {
+        if s.bit_width[off as usize] == 16 && s.is_signed[off as usize] == 1 { return 1 }
+        return 0
+    }
+    if s.type_tag[off as usize] == arrow_type_run_end() {
+        let values = child_named(s, off, "values")
+        if values < 0 { return 0 }
+        if s.type_tag[values as usize] != arrow_type_int() { return 0 }
+        if s.bit_width[values as usize] == 16 && s.is_signed[values as usize] == 1 { return 1 }
+    }
+    0
+}
+
+fn var_tensor_storage(s: &ArrowSchema, node: i64) -> i64 with Panic {
+    if s.type_tag[node as usize] != arrow_type_struct() { return 0 }
+    let data = child_named(s, node, "data")
+    let shape = child_named(s, node, "shape")
+    if data < 0 || shape < 0 { return 0 }
+    if is_list_storage(s.type_tag[data as usize]) == 0 { return 0 }
+    if child_count(s, data) != 1 { return 0 }
+    if s.type_tag[shape as usize] != arrow_type_fixed_list() { return 0 }
+    if s.extra[shape as usize] < 1 || s.extra[shape as usize] > 4 { return 0 }
+    if child_count(s, shape) != 1 { return 0 }
+    let item = nth_child(s, shape, 0)
+    if item < 0 { return 0 }
+    if s.type_tag[item as usize] != arrow_type_int() { return 0 }
+    if s.bit_width[item as usize] != 32 || s.is_signed[item as usize] != 1 { return 0 }
+    1
+}
+
+fn fixed_storage(s: &ArrowSchema, node: i64) -> i64 with Panic {
+    if s.type_tag[node as usize] != arrow_type_fixed_list() { return 0 }
+    if child_count(s, node) != 1 { return 0 }
+    if s.extra[node as usize] <= 0 { return 0 }
+    1
+}
+
+fn j_at_is(s: &ArrowSchema, node: i64, pos: i64, text: string) -> i64 with Panic {
+    let n = str_len(text)
+    if pos + n > ext_meta_len(s, node) { return 0 }
+    var i: i64 = 0
+    while i < n {
+        var want = text[i as usize] as i64
+        want = b8(want)
+        if ext_meta_byte(s, node, pos + i) != want { return 0 }
+        i = i + 1
+    }
+    1
+}
+
+fn j_ws(s: &ArrowSchema, node: i64, pos: i64) -> i64 with Panic {
+    var p = pos
+    while p < ext_meta_len(s, node) {
+        let ch = ext_meta_byte(s, node, p)
+        if ch != 32 && ch != 9 && ch != 10 && ch != 13 { break }
+        p = p + 1
+    }
+    p
+}
+
+fn j_take(s: &ArrowSchema, node: i64, pos: &!i64, ch: i64) -> i64 with Mut, Panic {
+    *pos = j_ws(s, node, *pos)
+    if ext_meta_byte(s, node, *pos) != ch { return 0 }
+    *pos = *pos + 1
+    1
+}
+
+fn j_hex(ch: i64) -> i64 {
+    if ch >= 48 && ch <= 57 { return ch - 48 }
+    if ch >= 65 && ch <= 70 { return ch - 55 }
+    if ch >= 97 && ch <= 102 { return ch - 87 }
+    -1
+}
+
+// Consume a JSON string, returning -1 for malformed input and 1 for a match.
+fn j_string(s: &ArrowSchema, node: i64, pos: &!i64, text: string) -> i64 with Mut, Panic {
+    if j_take(s, node, pos, 34) == 0 { return -1 }
+    var matched: i64 = 1
+    var count: i64 = 0
+    while *pos < ext_meta_len(s, node) {
+        var ch = ext_meta_byte(s, node, *pos)
+        *pos = *pos + 1
+        if ch == 34 {
+            if count != str_len(text) { matched = 0 }
+            return matched
+        }
+        if ch < 32 { return -1 }
+        if ch == 92 {
+            ch = ext_meta_byte(s, node, *pos)
+            *pos = *pos + 1
+            if ch == 117 {
+                ch = 0
+                var k: i64 = 0
+                while k < 4 {
+                    let digit = j_hex(ext_meta_byte(s, node, *pos))
+                    if digit < 0 { return -1 }
+                    ch = ch * 16 + digit
+                    *pos = *pos + 1
+                    k = k + 1
+                }
+            } else if ch == 98 { ch = 8 }
+            else if ch == 102 { ch = 12 }
+            else if ch == 110 { ch = 10 }
+            else if ch == 114 { ch = 13 }
+            else if ch == 116 { ch = 9 }
+            else if ch != 34 && ch != 92 && ch != 47 { return -1 }
+        }
+        if count < str_len(text) {
+            if ch != b8(text[count as usize] as i64) { matched = 0 }
+        } else { matched = 0 }
+        count = count + 1
+    }
+    -1
+}
+
+fn parse_ints(s: &ArrowSchema, node: i64, pos: &!i64, out: &![i64; 4], allow_null: i64) -> i64 with Mut, Panic {
+    var n: i64 = 0
+    let total = ext_meta_len(s, node)
+    if j_take(s, node, pos, 91) == 0 { return -6 }
+    *pos = j_ws(s, node, *pos)
+    if ext_meta_byte(s, node, *pos) == 93 {
+        *pos = *pos + 1
+        return 0
+    }
+    while n < 4 {
+        *pos = j_ws(s, node, *pos)
+        let c2 = ext_meta_byte(s, node, *pos)
+        if allow_null != 0 && c2 == 110 {
+            if j_at_is(s, node, *pos, "null") == 0 { return -6 }
+            out[n as usize] = -1
+            *pos = *pos + 4
+        } else {
+            if c2 < 48 || c2 > 57 { return -6 }
+            var v: i64 = 0
+            let start = *pos
+            while *pos < total {
+                let d = ext_meta_byte(s, node, *pos)
+                if d < 48 || d > 57 { break }
+                if *pos > start && c2 == 48 { return -6 }
+                if v > 922337203685477580 { return -6 }
+                if v == 922337203685477580 && d > 55 { return -6 }
+                v = v * 10 + (d - 48)
+                *pos = *pos + 1
+            }
+            out[n as usize] = v
+        }
+        n = n + 1
+        if j_take(s, node, pos, 93) != 0 { return n }
+        if j_take(s, node, pos, 44) == 0 { return -6 }
+    }
+    -6
+}
+
+fn parse_names(s: &ArrowSchema, node: i64, pos: &!i64) -> i64 with Mut, Panic {
+    if j_take(s, node, pos, 91) == 0 { return -1 }
+    var n: i64 = 0
+    while n < 4 {
+        if j_string(s, node, pos, "") < 0 { return -1 }
+        n = n + 1
+        if j_take(s, node, pos, 93) != 0 { return n }
+        if j_take(s, node, pos, 44) == 0 { return -1 }
+    }
+    -1
+}
+
+fn tensor_meta_ok(s: &ArrowSchema, node: i64, ndim: i64, fixed: i64) -> i64 with Mut, Panic {
+    if fixed == 0 && ext_meta_len(s, node) == 0 { return 1 }
+    var pos: i64 = 0
+    if j_take(s, node, &!pos, 123) == 0 { return 0 }
+    var shape: [i64; 4] = [0; 4]
+    var perm: [i64; 4] = [0; 4]
+    var ns: i64 = -1
+    var np: i64 = -1
+    var nn: i64 = -1
+    var nu: i64 = -1
+    if j_take(s, node, &!pos, 125) == 0 {
+        if pos >= ext_meta_len(s, node) { return 0 }
+        var closed: i64 = 0
+        while pos < ext_meta_len(s, node) {
+            let key = pos
+            var end = pos
+            if j_string(s, node, &!end, "") < 0 { return 0 }
+            pos = end
+            if j_take(s, node, &!pos, 58) == 0 { return 0 }
+            var probe = key
+            if j_string(s, node, &!probe, "shape") == 1 {
+                if fixed == 0 || ns >= 0 { return 0 }
+                ns = parse_ints(s, node, &!pos, &!shape, 0)
+                if ns < 1 { return 0 }
+            } else {
+                probe = key
+                if j_string(s, node, &!probe, "permutation") == 1 {
+                    if np >= 0 { return 0 }
+                    np = parse_ints(s, node, &!pos, &!perm, 0)
+                    if np < 1 { return 0 }
+                } else {
+                    probe = key
+                    if j_string(s, node, &!probe, "dim_names") == 1 {
+                        if nn >= 0 { return 0 }
+                        nn = parse_names(s, node, &!pos)
+                        if nn < 1 { return 0 }
+                    } else {
+                        probe = key
+                        if j_string(s, node, &!probe, "uniform_shape") != 1 { return 0 }
+                        if fixed != 0 || nu >= 0 { return 0 }
+                        var dims: [i64; 4] = [0; 4]
+                        nu = parse_ints(s, node, &!pos, &!dims, 1)
+                        if nu < 1 { return 0 }
+                    }
+                }
+            }
+            if j_take(s, node, &!pos, 125) != 0 {
+                closed = 1
+                break
+            }
+            if j_take(s, node, &!pos, 44) == 0 { return 0 }
+        }
+        if closed == 0 { return 0 }
+    }
+    if j_ws(s, node, pos) != ext_meta_len(s, node) { return 0 }
+    var nd = ndim
+    if fixed != 0 {
+        if ns < 1 { return 0 }
+        if shape_product(&shape, ns) != s.extra[node as usize] { return 0 }
+        nd = ns
+    }
+    if np >= 0 {
+        if np != nd || perm_ok(&perm, np) == 0 { return 0 }
+    }
+    if nn >= 0 && nn != nd { return 0 }
+    if nu >= 0 && nu != nd { return 0 }
+    1
+}
+
+// Unknown opaque members may contain any JSON value, including containers.
+fn j_skip(s: &ArrowSchema, node: i64, pos: &!i64, depth: i64) -> i64 with Mut, Panic {
+    if depth > 64 { return 0 }
+    *pos = j_ws(s, node, *pos)
+    let ch = ext_meta_byte(s, node, *pos)
+    if ch == 34 {
+        if j_string(s, node, pos, "") < 0 { return 0 }
+        return 1
+    }
+    if ch == 123 || ch == 91 {
+        *pos = *pos + 1
+        var close: i64 = 93
+        if ch == 123 { close = 125 }
+        if j_take(s, node, pos, close) != 0 { return 1 }
+        while *pos < ext_meta_len(s, node) {
+            if ch == 123 {
+                if j_string(s, node, pos, "") < 0 { return 0 }
+                if j_take(s, node, pos, 58) == 0 { return 0 }
+            }
+            if j_skip(s, node, pos, depth + 1) == 0 { return 0 }
+            if j_take(s, node, pos, close) != 0 { return 1 }
+            if j_take(s, node, pos, 44) == 0 { return 0 }
+        }
+        return 0
+    }
+    if j_at_is(s, node, *pos, "true") != 0 || j_at_is(s, node, *pos, "null") != 0 {
+        *pos = *pos + 4
+        return 1
+    }
+    if j_at_is(s, node, *pos, "false") != 0 {
+        *pos = *pos + 5
+        return 1
+    }
+    if ch == 45 { *pos = *pos + 1 }
+    let first = ext_meta_byte(s, node, *pos)
+    if first < 48 || first > 57 { return 0 }
+    *pos = *pos + 1
+    if first != 48 {
+        while ext_meta_byte(s, node, *pos) >= 48 && ext_meta_byte(s, node, *pos) <= 57 { *pos = *pos + 1 }
+    }
+    if ext_meta_byte(s, node, *pos) == 46 {
+        *pos = *pos + 1
+        let start = *pos
+        while ext_meta_byte(s, node, *pos) >= 48 && ext_meta_byte(s, node, *pos) <= 57 { *pos = *pos + 1 }
+        if *pos == start { return 0 }
+    }
+    let exp = ext_meta_byte(s, node, *pos)
+    if exp == 101 || exp == 69 {
+        *pos = *pos + 1
+        let sign = ext_meta_byte(s, node, *pos)
+        if sign == 43 || sign == 45 { *pos = *pos + 1 }
+        let start = *pos
+        while ext_meta_byte(s, node, *pos) >= 48 && ext_meta_byte(s, node, *pos) <= 57 { *pos = *pos + 1 }
+        if *pos == start { return 0 }
+    }
+    1
+}
+
+fn opaque_ok(s: &ArrowSchema, node: i64) -> i64 with Mut, Panic {
+    var pos: i64 = 0
+    if j_take(s, node, &!pos, 123) == 0 { return 0 }
+    var saw_type: i64 = 0
+    var saw_vendor: i64 = 0
+    while pos < ext_meta_len(s, node) {
+        var probe = pos
+        let is_type = j_string(s, node, &!probe, "type_name")
+        probe = pos
+        let is_vendor = j_string(s, node, &!probe, "vendor_name")
+        if is_type < 0 || is_vendor < 0 { return 0 }
+        pos = probe
+        if j_take(s, node, &!pos, 58) == 0 { return 0 }
+        if is_type == 1 || is_vendor == 1 {
+            if j_string(s, node, &!pos, "") < 0 { return 0 }
+            if is_type == 1 {
+                if saw_type != 0 { return 0 }
+                saw_type = 1
+            } else {
+                if saw_vendor != 0 { return 0 }
+                saw_vendor = 1
+            }
+        } else {
+            if j_skip(s, node, &!pos, 0) == 0 { return 0 }
+        }
+        if j_take(s, node, &!pos, 125) != 0 {
+            if j_ws(s, node, pos) != ext_meta_len(s, node) { return 0 }
+            return saw_type * saw_vendor
+        }
+        if j_take(s, node, &!pos, 44) == 0 { return 0 }
+    }
+    0
+}
+
+fn empty_object(s: &ArrowSchema, node: i64) -> i64 with Mut, Panic {
+    var pos: i64 = 0
+    if j_take(s, node, &!pos, 123) == 0 { return 0 }
+    if j_take(s, node, &!pos, 125) == 0 { return 0 }
+    if j_ws(s, node, pos) != ext_meta_len(s, node) { return 0 }
+    1
+}
+
+pub fn arrow_ext_check(s: &ArrowSchema, node: i64) -> i64 with Mut, Panic {
+    let kind = arrow_ext_kind(s, node)
+    if kind == 0 || kind == 9 { return 0 }
+    let meta_n = ext_meta_len(s, node)
+    if meta_n < 0 { return -6 }
+    if kind == 1 {
+        if s.type_tag[node as usize] != arrow_type_fixed_binary() || s.extra[node as usize] != 16 { return -6 }
+        if meta_n != 0 { return -6 }
+        return 0
+    }
+    if kind == 2 {
+        if is_text_storage(s.type_tag[node as usize]) == 0 { return -6 }
+        if meta_n == 0 { return 0 }
+        if empty_object(s, node) != 0 { return 0 }
+        return -6
+    }
+    if kind == 3 {
+        if s.type_tag[node as usize] != arrow_type_int() { return -6 }
+        if s.bit_width[node as usize] != 8 || s.is_signed[node as usize] != 1 { return -6 }
+        if meta_n != 0 { return -6 }
+        return 0
+    }
+    if kind == 4 {
+        if opaque_ok(s, node) == 0 { return -6 }
+        return 0
+    }
+    if kind == 5 {
+        if fixed_storage(s, node) == 0 { return -6 }
+        if tensor_meta_ok(s, node, 0, 1) == 0 { return -6 }
+        return 0
+    }
+    if kind == 6 {
+        if var_tensor_storage(s, node) == 0 { return -6 }
+        let shape = child_named(s, node, "shape")
+        if tensor_meta_ok(s, node, s.extra[shape as usize], 0) == 0 { return -6 }
+        return 0
+    }
+    if kind == 7 {
+        if meta_n != 0 { return -6 }
+        if variant_ok(s, node) == 0 { return -6 }
+        return 0
+    }
+    if meta_n != 0 { return -6 }
+    if ts_offset_ok(s, node) == 0 { return -6 }
+    0
+}
+
+fn apply_buf(s: &!ArrowSchema, node: i64, name: string, raw: &[u8; 128], n: i64) -> i64 with Mut, Panic {
+    arrow_field_set_extension_buf(s, node, name, raw, n)
+}
+
+pub fn arrow_ext_set_uuid(s: &!ArrowSchema, node: i64) -> i64 with Mut, Panic {
+    if node < 0 || node >= s.n_nodes { return -6 }
+    if s.type_tag[node as usize] != arrow_type_fixed_binary() || s.extra[node as usize] != 16 { return -6 }
+    arrow_field_set_extension(s, node, "arrow.uuid", "")
+}
+
+pub fn arrow_ext_set_json(s: &!ArrowSchema, node: i64) -> i64 with Mut, Panic {
+    if node < 0 || node >= s.n_nodes { return -6 }
+    if is_text_storage(s.type_tag[node as usize]) == 0 { return -6 }
+    arrow_field_set_extension(s, node, "arrow.json", "")
+}
+
+pub fn arrow_ext_set_bool8(s: &!ArrowSchema, node: i64) -> i64 with Mut, Panic {
+    if node < 0 || node >= s.n_nodes { return -6 }
+    if s.type_tag[node as usize] != arrow_type_int() { return -6 }
+    if s.bit_width[node as usize] != 8 || s.is_signed[node as usize] != 1 { return -6 }
+    arrow_field_set_extension(s, node, "arrow.bool8", "")
+}
+
+pub fn arrow_ext_set_opaque(s: &!ArrowSchema, node: i64, type_name: string, vendor_name: string) -> i64 with Mut, Panic {
+    if node < 0 || node >= s.n_nodes { return -6 }
+    if str_len(type_name) == 0 || str_len(vendor_name) == 0 { return -6 }
+    var raw: [u8; 128] = [0; 128]
+    var n: i64 = 0
+    if j_text(&!raw, &!n, "{\"type_name\":\"") != 0 { return -7 }
+    if j_str_esc(&!raw, &!n, type_name) != 0 { return -7 }
+    if j_text(&!raw, &!n, "\",\"vendor_name\":\"") != 0 { return -7 }
+    if j_str_esc(&!raw, &!n, vendor_name) != 0 { return -7 }
+    if j_text(&!raw, &!n, "\"}") != 0 { return -7 }
+    apply_buf(s, node, "arrow.opaque", &raw, n)
+}
+
+pub fn arrow_ext_set_fixed_tensor(s: &!ArrowSchema, node: i64, shape: &[i64; 4], nshape: i64, perm: &[i64; 4], nperm: i64, names: &[u8; 64], name_lens: &[i64; 4], nnames: i64) -> i64 with Mut, Panic, Div {
+    if node < 0 || node >= s.n_nodes { return -6 }
+    if fixed_storage(s, node) == 0 { return -6 }
+    let prod = shape_product(shape, nshape)
+    if prod < 0 || prod != s.extra[node as usize] { return -6 }
+    if nperm != 0 {
+        if nperm != nshape || perm_ok(perm, nperm) == 0 { return -6 }
+    }
+    if nnames != 0 && nnames != nshape { return -6 }
+    var raw: [u8; 128] = [0; 128]
+    var n: i64 = 0
+    if j_text(&!raw, &!n, "{\"shape\":[") != 0 { return -7 }
+    var i: i64 = 0
+    while i < nshape {
+        if i > 0 {
+            if j_byte(&!raw, &!n, 44) != 0 { return -7 }
+        }
+        if j_int(&!raw, &!n, shape[i as usize]) != 0 { return -7 }
+        i = i + 1
+    }
+    if j_byte(&!raw, &!n, 93) != 0 { return -7 }
+    if nperm > 0 {
+        if j_text(&!raw, &!n, ",\"permutation\":[") != 0 { return -7 }
+        i = 0
+        while i < nperm {
+            if i > 0 {
+                if j_byte(&!raw, &!n, 44) != 0 { return -7 }
+            }
+            if j_int(&!raw, &!n, perm[i as usize]) != 0 { return -7 }
+            i = i + 1
+        }
+        if j_byte(&!raw, &!n, 93) != 0 { return -7 }
+    }
+    if nnames > 0 {
+        if j_text(&!raw, &!n, ",\"dim_names\":[") != 0 { return -7 }
+        i = 0
+        while i < nnames {
+            if i > 0 {
+                if j_byte(&!raw, &!n, 44) != 0 { return -7 }
+            }
+            if j_byte(&!raw, &!n, 34) != 0 { return -7 }
+            if j_raw(&!raw, &!n, names, i * 16, name_lens[i as usize]) != 0 { return -7 }
+            if j_byte(&!raw, &!n, 34) != 0 { return -7 }
+            i = i + 1
+        }
+        if j_byte(&!raw, &!n, 93) != 0 { return -7 }
+    }
+    if j_byte(&!raw, &!n, 125) != 0 { return -7 }
+    apply_buf(s, node, "arrow.fixed_shape_tensor", &raw, n)
+}
+
+pub fn arrow_ext_set_var_tensor(s: &!ArrowSchema, node: i64, perm: &[i64; 4], nperm: i64, names: &[u8; 64], name_lens: &[i64; 4], nnames: i64, uniform: &[i64; 4], nuniform: i64) -> i64 with Mut, Panic, Div {
+    if node < 0 || node >= s.n_nodes { return -6 }
+    if var_tensor_storage(s, node) == 0 { return -6 }
+    let shape = child_named(s, node, "shape")
+    let ndim = s.extra[shape as usize]
+    if nperm != 0 && (nperm != ndim || perm_ok(perm, nperm) == 0) { return -6 }
+    if nnames != 0 && nnames != ndim { return -6 }
+    if nuniform != 0 && nuniform != ndim { return -6 }
+    if nperm == 0 && nnames == 0 && nuniform == 0 {
+        return arrow_field_set_extension(s, node, "arrow.variable_shape_tensor", "")
+    }
+    var raw: [u8; 128] = [0; 128]
+    var n: i64 = 0
+    if j_byte(&!raw, &!n, 123) != 0 { return -7 }
+    var wrote: i64 = 0
+    if nnames > 0 {
+        if j_text(&!raw, &!n, "\"dim_names\":[") != 0 { return -7 }
+        var i: i64 = 0
+        while i < nnames {
+            if i > 0 {
+                if j_byte(&!raw, &!n, 44) != 0 { return -7 }
+            }
+            if j_byte(&!raw, &!n, 34) != 0 { return -7 }
+            if j_raw(&!raw, &!n, names, i * 16, name_lens[i as usize]) != 0 { return -7 }
+            if j_byte(&!raw, &!n, 34) != 0 { return -7 }
+            i = i + 1
+        }
+        if j_byte(&!raw, &!n, 93) != 0 { return -7 }
+        wrote = 1
+    }
+    if nperm > 0 {
+        if wrote != 0 {
+            if j_byte(&!raw, &!n, 44) != 0 { return -7 }
+        }
+        if j_text(&!raw, &!n, "\"permutation\":[") != 0 { return -7 }
+        var i: i64 = 0
+        while i < nperm {
+            if i > 0 {
+                if j_byte(&!raw, &!n, 44) != 0 { return -7 }
+            }
+            if j_int(&!raw, &!n, perm[i as usize]) != 0 { return -7 }
+            i = i + 1
+        }
+        if j_byte(&!raw, &!n, 93) != 0 { return -7 }
+        wrote = 1
+    }
+    if nuniform > 0 {
+        if wrote != 0 {
+            if j_byte(&!raw, &!n, 44) != 0 { return -7 }
+        }
+        if j_text(&!raw, &!n, "\"uniform_shape\":[") != 0 { return -7 }
+        var i: i64 = 0
+        while i < nuniform {
+            if i > 0 {
+                if j_byte(&!raw, &!n, 44) != 0 { return -7 }
+            }
+            if uniform[i as usize] < 0 {
+                if j_text(&!raw, &!n, "null") != 0 { return -7 }
+            } else {
+                if j_int(&!raw, &!n, uniform[i as usize]) != 0 { return -7 }
+            }
+            i = i + 1
+        }
+        if j_byte(&!raw, &!n, 93) != 0 { return -7 }
+    }
+    if j_byte(&!raw, &!n, 125) != 0 { return -7 }
+    apply_buf(s, node, "arrow.variable_shape_tensor", &raw, n)
+}
+
+pub fn arrow_ext_set_variant(s: &!ArrowSchema, node: i64) -> i64 with Mut, Panic {
+    if node < 0 || node >= s.n_nodes { return -6 }
+    if variant_ok(s, node) == 0 { return -6 }
+    arrow_field_set_extension(s, node, "arrow.parquet.variant", "")
+}
+
+pub fn arrow_ext_set_ts_offset(s: &!ArrowSchema, node: i64) -> i64 with Mut, Panic {
+    if node < 0 || node >= s.n_nodes { return -6 }
+    if ts_offset_ok(s, node) == 0 { return -6 }
+    arrow_field_set_extension(s, node, "arrow.timestamp_with_offset", "")
+}
