@@ -1,0 +1,1 @@
+Fixes the SIO-572 inline-cast raw-struct miscompile: `*((h as i64) as *mut W)` now classifies as a raw payload deref and resolves the pointee layout, so field stores/loads after inline arrays land on the right slots instead of writing slot 0 (val read 0) and SIGILLing on indexed fields.

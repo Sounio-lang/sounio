@@ -1,0 +1,546 @@
+// stdlib::llm::gguf - GGUF v3 reader (header, KV skip, tensor index).
+
+use tensor2::convert::f32_bits_to_f64
+//
+// Binary-safe load via libc stdio + dlopen/dlsym (same pattern as
+// llm::safetensors). Parses magic, metadata, and tensor directory;
+// tensor payloads stay in the file buffer (raw byte slices for Q4_K packs).
+// Missing file or bad header -> ok=false, never a crash on find.
+
+extern "C" {
+    fn dlopen(filename: *mut u8, flags: i32) -> *mut u8
+    fn dlsym(handle: *mut u8, symbol: *mut u8) -> *mut u8
+}
+
+pub fn gguf_dtype_f32() -> i32 { 0 }
+pub fn gguf_dtype_f16() -> i32 { 1 }
+pub fn gguf_dtype_q4_k() -> i32 { 12 }
+pub fn gguf_dtype_q8_0() -> i32 { 8 }
+pub fn gguf_dtype_q5_k() -> i32 { 13 }
+
+pub fn gguf_type_f32() -> i32 { 6 }
+pub fn gguf_type_u32() -> i32 { 4 }
+pub fn gguf_type_array() -> i32 { 9 }
+pub fn gguf_type_string() -> i32 { 8 }
+
+pub struct GgufFile {
+    pub data: *mut u8,
+    pub len: i64,
+    pub ok: bool,
+    pub version: i32,
+    pub data_off: i64,
+    pub alignment: i64,
+    pub n_tensors: i64,
+    pub n_kv: i64,
+    pub kv_pos: i64,
+    pub t_names: *mut u8,
+    pub t_dtype: *mut u8,
+    pub t_rank: *mut u8,
+    pub t_dims: *mut u8,
+    pub t_off: *mut u8,
+    pub t_nbytes: *mut u8,
+}
+
+pub struct GgufTensor {
+    pub found: bool,
+    pub dtype: i32,
+    pub rank: i32,
+    pub dims: [i64; 4],
+    pub count: i64,
+    pub nbytes: i64,
+    pub off: i64,
+    pub raw: *mut u8,
+}
+
+fn gg_max_str() -> i64 { 1048576 }
+fn gg_max_count() -> i64 { 8192 }
+fn gg_default_align() -> i64 { 32 }
+
+pub fn gguf_byte_at(data: *mut u8, i: i64) -> i64 {
+    (read_i64(data as *mut i64, i / 8) >> ((i % 8) * 8)) & 255
+}
+
+fn gg_write_byte(data: *mut u8, i: i64, v: i64) {
+    let w = read_i64(data as *mut i64, i / 8)
+    let sh = (i % 8) * 8
+    let mask = 255 << sh
+    let cleared = w & ((0 - 1) - mask)
+    write_i64(data as *mut i64, i / 8, cleared | ((v & 255) << sh))
+}
+
+fn gg_cstr(s: string) -> *mut u8 with Alloc, Mut {
+    let n = str_len(s)
+    let buf = heap_alloc(n + 8)
+    var i: i64 = 0
+    while i < n {
+        gg_write_byte(buf, i, str_char_at(s, i))
+        i = i + 1
+    }
+    gg_write_byte(buf, n, 0)
+    buf
+}
+
+fn gg_sym(libc: *mut u8, name: string) -> *mut u8 with Alloc, Mut {
+    dlsym(libc, gg_cstr(name))
+}
+
+fn gg_read_u32(data: *mut u8, len: i64, pos: i64) -> [i64; 2] with Mut {
+    if pos + 4 > len { return [-1, pos] }
+    var v: i64 = 0
+    var i: i64 = 0
+    while i < 4 {
+        v = v | (gguf_byte_at(data, pos + i) << (i * 8))
+        i = i + 1
+    }
+    var out: [i64; 2] = [v, pos + 4]
+    out
+}
+
+fn gg_read_i32(data: *mut u8, len: i64, pos: i64) -> [i64; 2] with Mut {
+    let r = gg_read_u32(data, len, pos)
+    if r[0] < 0 { return r }
+    var v = r[0]
+    if (v & 2147483648) != 0 { v = v - 4294967296 }
+    var out: [i64; 2] = [v, r[1]]
+    out
+}
+
+fn gg_read_i64(data: *mut u8, len: i64, pos: i64) -> [i64; 2] with Mut {
+    if pos + 8 > len { return [-1, pos] }
+    var v: i64 = 0
+    var i: i64 = 0
+    while i < 8 {
+        v = v | (gguf_byte_at(data, pos + i) << (i * 8))
+        i = i + 1
+    }
+    var out: [i64; 2] = [v, pos + 8]
+    out
+}
+
+fn gg_read_u64(data: *mut u8, len: i64, pos: i64) -> [i64; 2] with Mut {
+    gg_read_i64(data, len, pos)
+}
+
+fn gg_read_f32(data: *mut u8, len: i64, pos: i64) -> [i64; 2] with Mut {
+    gg_read_u32(data, len, pos)
+}
+
+fn gg_read_f64(data: *mut u8, len: i64, pos: i64) -> [i64; 2] with Mut {
+    gg_read_i64(data, len, pos)
+}
+
+// Read GGUF string at pos; copy to heap c-string. Returns [ptr, new_pos] or [0, -1].
+fn gg_read_string(data: *mut u8, len: i64, pos: i64) -> [i64; 2] with Alloc, Mut {
+    let r = gg_read_u64(data, len, pos)
+    if r[0] < 0 { return [0, -1] }
+    let slen = r[0]
+    if slen < 0 || slen > gg_max_str() { return [0, -1] }
+    let start = r[1]
+    if start + slen > len { return [0, -1] }
+    let buf = heap_alloc(slen + 8)
+    var i: i64 = 0
+    while i < slen {
+        gg_write_byte(buf, i, gguf_byte_at(data, start + i))
+        i = i + 1
+    }
+    gg_write_byte(buf, slen, 0)
+    var out: [i64; 2] = [buf as i64, start + slen]
+    out
+}
+
+fn gg_key_is(key: *mut u8, want: string) -> bool with Mut {
+    if (key as i64) == 0 { return false }
+    let n = str_len(want)
+    var i: i64 = 0
+    while i < n {
+        if gguf_byte_at(key, i) != (str_char_at(want, i) & 255) { return false }
+        i = i + 1
+    }
+    gguf_byte_at(key, n) == 0
+}
+
+fn gg_type_size(gguf_type: i32) -> i64 {
+    if gguf_type == 0 || gguf_type == 1 || gguf_type == 7 { return 1 }
+    if gguf_type == 2 || gguf_type == 3 { return 2 }
+    if gguf_type == 4 || gguf_type == 5 || gguf_type == 6 { return 4 }
+    if gguf_type == 10 || gguf_type == 11 || gguf_type == 12 { return 8 }
+    if gguf_type == 8 || gguf_type == 9 { return 0 }
+    0
+}
+
+fn gg_skip_value(data: *mut u8, len: i64, pos: i64, vtype: i32, n: i64) -> i64 with Alloc, Mut {
+    if pos < 0 { return -1 }
+    if vtype == gguf_type_string() {
+        var i: i64 = 0
+        var p = pos
+        while i < n {
+            let sr = gg_read_string(data, len, p)
+            if sr[1] < 0 { return -1 }
+            p = sr[1]
+            i = i + 1
+        }
+        return p
+    }
+    let es = gg_type_size(vtype)
+    if es <= 0 { return -1 }
+    let need = n * es
+    if need < 0 || pos + need > len { return -1 }
+    pos + need
+}
+
+fn gg_ggml_type_size(dtype: i32) -> i64 {
+    if dtype == gguf_dtype_f32() { return 4 }
+    if dtype == gguf_dtype_f16() { return 2 }
+    if dtype == gguf_dtype_q4_k() { return 144 }
+    if dtype == gguf_dtype_q5_k() { return 176 }
+    if dtype == gguf_dtype_q8_0() { return 34 }
+    0
+}
+
+fn gg_ggml_blck_size(dtype: i32) -> i64 {
+    if dtype == gguf_dtype_f32() || dtype == gguf_dtype_f16() { return 1 }
+    if dtype == gguf_dtype_q4_k() { return 256 }
+    if dtype == gguf_dtype_q5_k() { return 256 }
+    if dtype == gguf_dtype_q8_0() { return 32 }
+    0
+}
+
+fn gg_tensor_nbytes(dtype: i32, dims: [i64; 4], rank: i32) -> i64 with Mut {
+    let tb = gg_ggml_type_size(dtype)
+    let bl = gg_ggml_blck_size(dtype)
+    if tb <= 0 || bl <= 0 { return 0 }
+    var ne: [i64; 4] = [1, 1, 1, 1]
+    var j: i32 = 0
+    while j < rank && j < 4 {
+        ne[j as usize] = dims[j as usize]
+        j = j + 1
+    }
+    if ne[0] % bl != 0 { return 0 }
+    if bl == 1 {
+        var n = tb
+        var k: i32 = 0
+        while k < rank && k < 4 {
+            n = n * ne[k as usize]
+            k = k + 1
+        }
+        return n
+    }
+    let nb0 = tb
+    let nb1 = nb0 * (ne[0] / bl)
+    let nb2 = nb1 * ne[1]
+    let nb3 = nb2 * ne[2]
+    var nbytes = ne[0] * nb0 / bl
+    nbytes = nbytes + (ne[1] - 1) * nb1
+    nbytes = nbytes + (ne[2] - 1) * nb2
+    nbytes = nbytes + (ne[3] - 1) * nb3
+    nbytes
+}
+
+fn gg_elem_count(dims: [i64; 4], rank: i32) -> i64 with Mut {
+    var c: i64 = 1
+    var j: i32 = 0
+    while j < rank && j < 4 {
+        c = c * dims[j as usize]
+        j = j + 1
+    }
+    c
+}
+
+fn gg_pad(x: i64, align: i64) -> i64 {
+    if align <= 0 { return x }
+    (x + align - 1) / align * align
+}
+
+fn gg_name_eq(name_ptr: *mut u8, want: string) -> bool with Mut {
+    if (name_ptr as i64) == 0 { return false }
+    let n = str_len(want)
+    var i: i64 = 0
+    while i < n {
+        if gguf_byte_at(name_ptr, i) != (str_char_at(want, i) & 255) { return false }
+        i = i + 1
+    }
+    gguf_byte_at(name_ptr, n) == 0
+}
+
+fn gg_read_all(path: string) -> GgufFile with Alloc, Mut, Panic {
+    var f = GgufFile {
+        data: 0 as *mut u8, len: 0, ok: false, version: 0, data_off: 0,
+        alignment: gg_default_align(), n_tensors: 0, n_kv: 0, kv_pos: 0,
+        t_names: 0 as *mut u8, t_dtype: 0 as *mut u8, t_rank: 0 as *mut u8,
+        t_dims: 0 as *mut u8, t_off: 0 as *mut u8, t_nbytes: 0 as *mut u8,
+    }
+    let libc = dlopen(gg_cstr("libc.so.6"), 1)
+    if (libc as i64) == 0 { return f }
+    let raw_open = gg_sym(libc, "fopen")
+    if (raw_open as i64) == 0 { return f }
+    let fopen = raw_open as fn(*mut u8, *mut u8) -> *mut u8
+    let fp = fopen(gg_cstr(path), gg_cstr("rb"))
+    if (fp as i64) == 0 { return f }
+    let fseek = gg_sym(libc, "fseek") as fn(*mut u8, i64, i32) -> i32
+    let ftell = gg_sym(libc, "ftell") as fn(*mut u8) -> i64
+    let fread = gg_sym(libc, "fread") as fn(*mut u8, i64, i64, *mut u8) -> i64
+    if fseek(fp, 0, 2) != 0 { return f }
+    let size = ftell(fp)
+    if size <= 0 { return f }
+    if fseek(fp, 0, 0) != 0 { return f }
+    let buf = heap_alloc(size + 16)
+    let got = fread(buf, 1, size, fp)
+    if got != size { return f }
+    f.data = buf
+    f.len = size
+    f
+}
+
+
+pub fn gguf_moe_quant_for_dtype(dtype: i32) -> i64 {
+    if dtype == gguf_dtype_q4_k() { return 0 }
+    if dtype == gguf_dtype_q5_k() { return 1 }
+    if dtype == gguf_dtype_q8_0() { return 2 }
+    -1
+}
+
+pub fn gguf_row_quant_bytes(dtype: i32, k: i64) -> i64 {
+    let tb = gg_ggml_type_size(dtype)
+    let bl = gg_ggml_blck_size(dtype)
+    if tb <= 0 || bl <= 0 { return 0 }
+    if k % bl != 0 { return 0 }
+    (k / bl) * tb
+}
+
+pub fn gguf_open(path: string) -> GgufFile with Alloc, Mut, Panic {
+    var f = gg_read_all(path)
+    if (f.data as i64) == 0 { return f }
+    let data = f.data
+    let len = f.len
+    var pos: i64 = 0
+    if len < 24 { return f }
+    if gguf_byte_at(data, 0) != 71 || gguf_byte_at(data, 1) != 71 ||
+        gguf_byte_at(data, 2) != 85 || gguf_byte_at(data, 3) != 70 {
+        return f
+    }
+    pos = 4
+    let ver = gg_read_u32(data, len, pos)
+    if ver[0] < 0 { return f }
+    f.version = ver[0] as i32
+    pos = ver[1]
+    if f.version != 3 { return f }
+    let nt = gg_read_i64(data, len, pos)
+    if nt[0] < 0 || nt[0] > gg_max_count() { return f }
+    pos = nt[1]
+    let nk = gg_read_i64(data, len, pos)
+    if nk[0] < 0 || nk[0] > gg_max_count() { return f }
+    pos = nk[1]
+    let n_tensors = nt[0]
+    let n_kv = nk[0]
+    f.n_kv = n_kv
+    f.kv_pos = pos
+    var align: i64 = gg_default_align()
+    var ki: i64 = 0
+    while ki < n_kv {
+        let keyr = gg_read_string(data, len, pos)
+        if keyr[1] < 0 { return f }
+        pos = keyr[1]
+        let key = keyr[0] as *mut u8
+        let ty = gg_read_i32(data, len, pos)
+        if ty[0] < 0 { return f }
+        pos = ty[1]
+        var vtype = ty[0] as i32
+        var vn: i64 = 1
+        if vtype == gguf_type_array() {
+            let et = gg_read_i32(data, len, pos)
+            if et[0] < 0 { return f }
+            pos = et[1]
+            vtype = et[0] as i32
+            let cn = gg_read_u64(data, len, pos)
+            if cn[0] < 0 || cn[0] > gg_max_count() { return f }
+            pos = cn[1]
+            vn = cn[0]
+        }
+        if gg_key_is(key, "general.alignment") && vtype == gguf_type_u32() && vn == 1 {
+            let av = gg_read_u32(data, len, pos)
+            if av[0] > 0 { align = av[0] }
+        }
+        pos = gg_skip_value(data, len, pos, vtype, vn)
+        if pos < 0 { return f }
+        ki = ki + 1
+    }
+    if align <= 0 || (align & (align - 1)) != 0 { return f }
+    f.alignment = align
+    if n_tensors == 0 {
+        f.data_off = gg_pad(pos, align)
+        f.n_tensors = 0
+        f.ok = true
+        return f
+    }
+    f.t_names = heap_alloc(n_tensors * 8)
+    f.t_dtype = heap_alloc(n_tensors * 8)
+    f.t_rank = heap_alloc(n_tensors * 8)
+    f.t_dims = heap_alloc(n_tensors * 4 * 8)
+    f.t_off = heap_alloc(n_tensors * 8)
+    f.t_nbytes = heap_alloc(n_tensors * 8)
+    var ti: i64 = 0
+    while ti < n_tensors {
+        let nr = gg_read_string(data, len, pos)
+        if nr[1] < 0 { return f }
+        pos = nr[1]
+        write_i64(f.t_names as *mut i64, ti, nr[0])
+        let nd = gg_read_u32(data, len, pos)
+        if nd[0] < 0 || nd[0] > 4 { return f }
+        pos = nd[1]
+        let rank = nd[0] as i32
+        write_i64(f.t_rank as *mut i64, ti, rank as i64)
+        var dims: [i64; 4] = [1, 1, 1, 1]
+        var dj: i32 = 0
+        while dj < 4 {
+            if dj < rank {
+                let dr = gg_read_i64(data, len, pos)
+                if dr[0] < 0 { return f }
+                pos = dr[1]
+                dims[dj as usize] = dr[0]
+                if dr[0] < 0 { return f }
+            }
+            write_i64(f.t_dims as *mut i64, ti * 4 + dj as i64, dims[dj as usize])
+            dj = dj + 1
+        }
+        let dtr = gg_read_i32(data, len, pos)
+        if dtr[0] < 0 { return f }
+        pos = dtr[1]
+        let dtype = dtr[0] as i32
+        write_i64(f.t_dtype as *mut i64, ti, dtype as i64)
+        let nb = gg_tensor_nbytes(dtype, dims, rank)
+        if nb <= 0 { return f }
+        write_i64(f.t_nbytes as *mut i64, ti, nb)
+        let offr = gg_read_u64(data, len, pos)
+        if offr[0] < 0 { return f }
+        pos = offr[1]
+        write_i64(f.t_off as *mut i64, ti, offr[0])
+        ti = ti + 1
+    }
+    f.data_off = gg_pad(pos, align)
+    if f.data_off > len { return f }
+    f.n_tensors = n_tensors
+    f.ok = true
+    f
+}
+
+pub fn gguf_find(f: &GgufFile, name: string) -> GgufTensor with Mut {
+    var t = GgufTensor {
+        found: false, dtype: 0, rank: 0, dims: [0; 4], count: 0,
+        nbytes: 0, off: 0, raw: 0 as *mut u8,
+    }
+    if !f.ok || f.n_tensors <= 0 { return t }
+    var i: i64 = 0
+    while i < f.n_tensors {
+        let np = read_i64(f.t_names as *mut i64, i) as *mut u8
+        if gg_name_eq(np, name) {
+            t.found = true
+            t.dtype = read_i64(f.t_dtype as *mut i64, i) as i32
+            t.rank = read_i64(f.t_rank as *mut i64, i) as i32
+            var j: i32 = 0
+            while j < 4 {
+                t.dims[j as usize] = read_i64(f.t_dims as *mut i64, i * 4 + j as i64)
+                j = j + 1
+            }
+            t.count = gg_elem_count(t.dims, t.rank)
+            t.nbytes = read_i64(f.t_nbytes as *mut i64, i)
+            let rel = read_i64(f.t_off as *mut i64, i)
+            t.off = f.data_off + rel
+            if t.off >= 0 && t.nbytes >= 0 && t.off + t.nbytes <= f.len {
+                t.raw = ((f.data as i64) + t.off) as *mut u8
+            }
+            return t
+        }
+        i = i + 1
+    }
+    t
+}
+
+// Absolute file offset of tensor payload (0 when not found).
+pub fn gguf_tensor_off(f: &GgufFile, name: string) -> i64 with Mut {
+    let t = gguf_find(f, name)
+    if !t.found { return 0 }
+    t.off
+}
+
+fn gg_read_f32_bits(data: *mut u8, len: i64, pos: i64) -> [i64; 2] with Mut {
+    gg_read_u32(data, len, pos)
+}
+
+pub fn gguf_kv_u32(f: &GgufFile, want: string) -> i64 with Alloc, Mut {
+    if !f.ok || f.n_kv <= 0 || f.kv_pos <= 0 { return 0 }
+    let data = f.data
+    let len = f.len
+    var pos = f.kv_pos
+    var ki: i64 = 0
+    while ki < f.n_kv {
+        let keyr = gg_read_string(data, len, pos)
+        if keyr[1] < 0 { return 0 }
+        pos = keyr[1]
+        let key = keyr[0] as *mut u8
+        let ty = gg_read_i32(data, len, pos)
+        if ty[0] < 0 { return 0 }
+        pos = ty[1]
+        var vtype = ty[0] as i32
+        var vn: i64 = 1
+        if vtype == gguf_type_array() {
+            let et = gg_read_i32(data, len, pos)
+            if et[0] < 0 { return 0 }
+            pos = et[1]
+            vtype = et[0] as i32
+            let cn = gg_read_u64(data, len, pos)
+            if cn[0] < 0 { return 0 }
+            pos = cn[1]
+            vn = cn[0]
+        }
+        let hit = gg_key_is(key, want)
+        if hit && vtype == gguf_type_u32() && vn == 1 {
+            let av = gg_read_u32(data, len, pos)
+            if av[0] < 0 { return 0 }
+            return av[0]
+        }
+        pos = gg_skip_value(data, len, pos, vtype, vn)
+        if pos < 0 { return 0 }
+        ki = ki + 1
+    }
+    0
+}
+
+pub fn gguf_kv_f32(f: &GgufFile, want: string) -> f64 with Alloc, Mut, Div {
+    if !f.ok || f.n_kv <= 0 || f.kv_pos <= 0 { return 0.0 }
+    let data = f.data
+    let len = f.len
+    var pos = f.kv_pos
+    var ki: i64 = 0
+    while ki < f.n_kv {
+        let keyr = gg_read_string(data, len, pos)
+        if keyr[1] < 0 { return 0.0 }
+        pos = keyr[1]
+        let key = keyr[0] as *mut u8
+        let ty = gg_read_i32(data, len, pos)
+        if ty[0] < 0 { return 0.0 }
+        pos = ty[1]
+        var vtype = ty[0] as i32
+        var vn: i64 = 1
+        if vtype == gguf_type_array() {
+            let et = gg_read_i32(data, len, pos)
+            if et[0] < 0 { return 0.0 }
+            pos = et[1]
+            vtype = et[0] as i32
+            let cn = gg_read_u64(data, len, pos)
+            if cn[0] < 0 { return 0.0 }
+            pos = cn[1]
+            vn = cn[0]
+        }
+        let hit = gg_key_is(key, want)
+        if hit && vtype == gguf_type_f32() && vn == 1 {
+            let av = gg_read_f32_bits(data, len, pos)
+            if av[0] < 0 { return 0.0 }
+            return f32_bits_to_f64(av[0])
+        }
+        pos = gg_skip_value(data, len, pos, vtype, vn)
+        if pos < 0 { return 0.0 }
+        ki = ki + 1
+    }
+    0.0
+}
+

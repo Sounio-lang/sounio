@@ -1,0 +1,172 @@
+//@ run-pass
+//@ requires: slow
+//@ timeout: 5400
+//@ expect-stdout: LJ_WIDOM_FINITE_SIZE_OK
+// examples/molecular/lj_widom_finite_size.sio
+//
+// Widom test-particle insertion in molecular::lj, and two finite-size terms
+// that have to be accounted for before its result can be compared with a
+// tabulated activity.
+//
+// HISTORY, KEPT BECAUSE THE FIRST PREDICTION WAS WRONG. The first version of
+// this check predicted that a canonical run at N = 500 and the NIST
+// saturated-vapour density rho* = 0.0096404 (T* = 0.85, cutoff 3 with tail)
+// would return the tabulated ln z_sat = -4.7788 through
+// z = (N+1) / (V m), m the Widom mean. Measured, 8 seeds:
+//       ln z = -4.775871 +/- 0.000142      |diff| = 0.002929, 20 se.  FAILED.
+// The code was not changed to make it pass. Two terms were missing from the
+// prediction, both parameter-free:
+//
+//   (a) z = (N+1)/(V m) is the exact canonical ratio Q(N+1)/Q(N). For an
+//       ideal gas it gives ln((N+1)/V), which exceeds the bulk value ln(N/V)
+//       by ln((N+1)/N). At second-virial level m = exp(-2 B N / V) with no
+//       further 1/N term, so the whole shift is ln((N+1)/N): +0.001998 at
+//       N = 500.
+//
+//   (b) The tail energy is c N^2 / V, the convention of the NIST tables. A
+//       pair-consistent tail would be c N (N-1) / V. The difference, c N / V,
+//       multiplies the grand-canonical weight by exp(-beta c / V) per
+//       particle: the tabulated activity, obtained in a box of V = 512,
+//       corresponds to a bulk activity larger by exp(-beta c / 512).
+//       With c = (8/3) pi (rc^-9 / 3 - rc^-3) = -0.310139 at rc = 3 and
+//       beta = 1/0.85 this is +0.000713 in ln z. In the canonical boxes used
+//       here (V > 25000) the same term is below 0.00002 and is left out.
+//
+//   Corrected:  ln z(N) = -4.7788 + 0.000713 + ln((N+1)/N).
+//
+// Because that model was built after seeing the N = 500 number, agreement at
+// N = 500 explains and does not test. The test is W3.
+//
+// PREDICTIONS
+//
+//   W1  (written before its first run) Dilute gas, T* = 2, rho* = 0.001,
+//       N = 100. The Widom mean obeys -ln m = 2 B rho with
+//       B = B2(truncated at 3) + beta c = -1.3144244699, from
+//       stdlib/molecular/oracles/lj_b2_oracle.cpp:  -ln m = -0.00262885.
+//       A spurious 1/(2N) term would show as 0.005.
+//   W2  (explained, not predicted) N = 500, rho* = 0.0096404, T* = 0.85:
+//       ln z = -4.7788 + 0.000713 + 0.001998 = -4.776089.
+//   W3  (written before its first run) N = 250, same state:
+//       ln z = -4.7788 + 0.000713 + 0.003992 = -4.774095.
+//       The uncorrected -4.7788 is 0.0047 away from this.
+//
+// DECISION RULE. Mean and standard error over 8 independently seeded runs.
+// HOLDS if |mine - predicted| <= 3 se and se is below the stated resolution.
+// The run passes if W1 and W3 hold. W2 is printed and not counted.
+//
+// MEASURED when this file was written (Madaros v0.80.0, same seeds):
+//   W1  -0.00268998 +/- 0.00002731   predicted -0.00262885   2.2 se
+//   W2  -4.775871   +/- 0.000142     model     -4.776089     1.5 se
+//   W3  -4.773849   +/- 0.000158     predicted -4.774095     1.6 se
+// W2 and W3 both sit about 0.0002 above the model. Two values at 1.5 se do
+// not establish a third term, and none is claimed.
+//
+// Run:
+//   export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
+//   bin/souc run examples/molecular/lj_widom_finite_size.sio
+
+use molecular::lj::*
+use math::pure::{ln}
+
+fn ae(a: f64, b: f64) -> f64 { if a > b { a - b } else { b - a } }
+
+fn cbrt_n(x: f64) -> f64 with Mut, Div, Panic {
+    var g = x
+    if g < 1.0 { g = 1.0 }
+    var i: i64 = 0
+    while i < 200 { g = (2.0 * g + x / (g * g)) / 3.0; i = i + 1 }
+    g
+}
+
+fn check(mine: f64, se: f64, pred: f64, resolution: f64) -> i64 with IO, Mut, Div, Panic {
+    let d = ae(mine, pred)
+    print("    mine x1e6      = "); println(mine * 1000000.0)
+    print("    se x1e6        = "); println(se * 1000000.0)
+    print("    predicted x1e6 = "); println(pred * 1000000.0)
+    print("    |diff| x1e6    = "); println(d * 1000000.0)
+    if se >= resolution { println("    NOT RESOLVED: se above the stated resolution"); return 0 }
+    if d > 3.0 * se { println("    FAILS"); return 0 }
+    println("    HOLDS")
+    1
+}
+
+// Canonical run with Widom sampling. Returns the Widom mean m.
+fn widom_mean(seed: i64, n: i64, l: f64, temp: f64, delta: f64,
+              equil: i64, prod: i64, every: i64, trials: i64,
+              pos: &![f64; 3072]) -> f64 with Mut, Div, Panic {
+    mol_seed(seed)
+    let beta = 1.0 / temp
+    let _k = mol_init_grid(pos, n, l)
+    var s: i64 = 0
+    while s < equil {
+        let (_d, _a) = mol_sweep_nvt(pos, n, l, 3.0, beta, delta)
+        s = s + 1
+    }
+    var sw = 0.0
+    var cnt: i64 = 0
+    s = 0
+    while s < prod {
+        let (_d, _a) = mol_sweep_nvt(pos, n, l, 3.0, beta, delta)
+        if s % every == 0 {
+            sw = sw + mol_widom_sum(pos, n, l, 3.0, beta, trials)
+            cnt = cnt + trials
+        }
+        s = s + 1
+    }
+    sw / (cnt as f64)
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var pos: [f64; 3072] = [0.0; 3072]
+    var a: [f64; 64] = [0.0; 64]
+    let kruns: i64 = 8
+    var held: i64 = 0
+
+    println("Widom insertion in stdlib/molecular/lj.sio, with finite-size terms")
+    println("")
+
+    // ---- W1 -------------------------------------------------------------
+    let l1 = cbrt_n(100.0 / 0.001)
+    var r: i64 = 0
+    while r < kruns {
+        let m = widom_mean(7000 + 17 * r, 100, l1, 2.0, 5.0, 200, 500, 1, 2000, &!pos)
+        a[r as usize] = 0.0 - ln(m)
+        r = r + 1
+    }
+    let (w1, s1) = mol_mean_sem(&a, kruns)
+    println("W1  dilute gas against the exact second virial coefficient: -ln m")
+    held = held + check(w1, s1, 0.0 - 0.00262885, 0.0001)
+    println("")
+
+    // ---- W2 -------------------------------------------------------------
+    let l2 = cbrt_n(500.0 / 0.0096404)
+    r = 0
+    while r < kruns {
+        let m = widom_mean(4000 + 17 * r, 500, l2, 0.85, 2.5, 400, 1000, 4, 2000, &!pos)
+        a[r as usize] = mol_ln_activity(500, l2, m)
+        r = r + 1
+    }
+    let (w2, s2) = mol_mean_sem(&a, kruns)
+    println("W2  N = 500 at the NIST saturated-vapour density: ln z  (explained, not counted)")
+    let _e2 = check(w2, s2, 0.0 - 4.776089, 0.0005)
+    print("    against the uncorrected -4.7788, |diff| x1e6 = "); println(ae(w2, 0.0 - 4.7788) * 1000000.0)
+    println("")
+
+    // ---- W3 -------------------------------------------------------------
+    let l3 = cbrt_n(250.0 / 0.0096404)
+    r = 0
+    while r < kruns {
+        let m = widom_mean(8000 + 17 * r, 250, l3, 0.85, 2.5, 400, 4000, 4, 2000, &!pos)
+        a[r as usize] = mol_ln_activity(250, l3, m)
+        r = r + 1
+    }
+    let (w3, s3) = mol_mean_sem(&a, kruns)
+    println("W3  N = 250, same state: ln z")
+    held = held + check(w3, s3, 0.0 - 4.774095, 0.0005)
+    println("")
+
+    print("predictions held (of 2 counted): "); println(held)
+    if held != 2 { println("LJ_WIDOM_FINITE_SIZE_FAILED"); return 1 }
+    println("LJ_WIDOM_FINITE_SIZE_OK")
+    return 0
+}

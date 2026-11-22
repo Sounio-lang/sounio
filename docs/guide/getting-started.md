@@ -122,4 +122,4 @@ souc --version
 - [Known limitations](../compiler/KNOWN_LIMITATIONS.md) — open ledger, including KL-11 and KL-20
 - [Programming guide](programming.md) — longer reference; sections without a cited test are not the contract
 
-Do not treat every file under `examples/` as equally runnable. Enum variants with payloads do not work (KL-20). Closures are not a safe user surface.
+Do not treat every file under `examples/` as equally runnable. Enum variants with payloads work on default Madaros for non-generic enums only (KL-20). Closures are not a safe user surface.

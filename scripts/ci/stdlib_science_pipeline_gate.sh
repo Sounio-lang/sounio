@@ -211,8 +211,12 @@ if [[ $souc_rc -ne 0 ]]; then
 fi
 
 export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
-RUNTIME_SOUC_BIN="$SOUC_BIN"
-RUNTIME_SOUC_VERSION="$("$SOUC_BIN" --version 2>/dev/null | awk 'NR==1 {print $2}')"
+# Record the binary relative to the checkout, so a committed snapshot does not
+# carry the absolute path of whichever machine produced it.
+RUNTIME_SOUC_BIN="${SOUC_BIN#"$ROOT_DIR/"}"
+# The first version-shaped field: `3.0.0-rc.2 (madaros 5fc3964e)` since
+# ADR-018 §1, `Madaros v0.80.0` before it.
+RUNTIME_SOUC_VERSION="$("$SOUC_BIN" --version 2>/dev/null | awk 'NR==1 { for (i = 1; i <= NF; i++) if ($i ~ /^v?[0-9]+\.[0-9]+\.[0-9]+/) { print $i; exit } }')"
 if [[ -z "$RUNTIME_SOUC_VERSION" ]]; then
   RUNTIME_SOUC_VERSION="unknown"
 fi

@@ -3,6 +3,10 @@
 use math::pure::{CheckedLog,is_finite,ln_checked_into}
 use math::logarithmic::{log1p_checked_into}
 use special::gamma::{lgamma}
+use collections::numeric_buffer::{NumericBuffer,numeric_buffer_status,numeric_buffer_len,numeric_buffer_at}
+use collections::integer_buffer::{IntegerBuffer,integer_buffer_status,integer_buffer_len,integer_buffer_at}
+use linalg::least_squares_scale::{LeastSquaresNumber}
+use stats::regression::nb2_log_increment::{nb2_same_alpha_increment_into,nb2_dispersion_increment_into}
 use stats::regression::nb2_deviance::{Nb2DevianceSlot,nb2_deviance_slot,nb2_deviance_slot_reset,nb2_deviance_into,nb2_deviance_slot_status,nb2_deviance_slot_deviance_status,nb2_deviance_slot_deviance,nb2_deviance_slot_residual}
 pub struct Nb2Normalizer {
  pub status:i64, pub count:i64, pub value:f64, pub poisson_limit:bool,
@@ -341,4 +345,116 @@ pub fn nb2_log_probability(count:i64,mean:f64,alpha:f64)->Nb2Likelihood with Mut
  var slot=nb2_likelihood_slot()
  let ignored=nb2_log_probability_into(count,mean,alpha,&!slot)
  nb2_likelihood_snapshot(&slot)
+}
+
+// Paired full-log-PMF difference: second minus first. Local same-alpha increments
+// avoid cancellation before aggregation; unequal-alpha routes retain BOTH full
+// normalizers. Availability of individual PMFs is reported independently.
+pub struct Nb2LikelihoodDifference {
+ pub status:i64,pub value:f64,pub first_status:i64,pub second_status:i64,
+ pub local_increment:bool,
+}
+pub struct Nb2LikelihoodDifferenceSlot {
+ first:Nb2LikelihoodSlot,second:Nb2LikelihoodSlot,product:LeastSquaresNumber,log_work:CheckedLog,
+ status:i64,value:f64,first_status:i64,second_status:i64,local_increment:bool,
+}
+pub fn nb2_likelihood_difference_slot()->Nb2LikelihoodDifferenceSlot {
+ Nb2LikelihoodDifferenceSlot{first:nb2_likelihood_slot(),second:nb2_likelihood_slot(),
+ product:LeastSquaresNumber{status:4,value:0.0},log_work:CheckedLog{status:2,value:0.0},status:5,value:0.0,
+ first_status:2,second_status:2,local_increment:false}
+}
+pub fn nb2_likelihood_difference_status(s:&Nb2LikelihoodDifferenceSlot)->i64 {s.status}
+pub fn nb2_likelihood_difference_value(s:&Nb2LikelihoodDifferenceSlot)->f64 {s.value}
+pub fn nb2_likelihood_difference_first_status(s:&Nb2LikelihoodDifferenceSlot)->i64 {s.first_status}
+pub fn nb2_likelihood_difference_second_status(s:&Nb2LikelihoodDifferenceSlot)->i64 {s.second_status}
+pub fn nb2_likelihood_difference_snapshot(s:&Nb2LikelihoodDifferenceSlot)->Nb2LikelihoodDifference {
+ Nb2LikelihoodDifference{status:s.status,value:s.value,first_status:s.first_status,
+ second_status:s.second_status,local_increment:s.local_increment}
+}
+pub fn nb2_log_probability_difference_into(count:i64,first_mean:f64,first_alpha:f64,
+ second_mean:f64,second_alpha:f64,s:&!Nb2LikelihoodDifferenceSlot)->i64 with Mut,Div,Panic {
+ s.status=5;s.value=0.0;s.first_status=2;s.second_status=2;s.local_increment=false
+ let first_status=nb2_log_probability_into(count,first_mean,first_alpha,&!s.first)
+ let first_value:f64=s.first.result.log_probability
+ let second_status=nb2_log_probability_into(count,second_mean,second_alpha,&!s.second)
+ let second_value:f64=s.second.result.log_probability
+ s.first_status=first_status;s.second_status=second_status
+ if first_status!=0 {if first_status!=5 {s.status=first_status;return s.status}}
+ if second_status!=0 {if second_status!=5 {s.status=second_status;return s.status}}
+ if first_alpha==second_alpha {
+  let local_status=nb2_same_alpha_increment_into(count,first_mean,second_mean,first_alpha,&!s.product)
+  let local_value:f64=s.product.value
+  if local_status==0 {
+   s.status=0;s.value=local_value;s.local_increment=true;return 0
+  }
+  if local_status!=6 {return s.status}
+ }
+ if first_alpha!=second_alpha {
+  // Total change = mean change at second alpha + dispersion change at first mean.
+  let mean_status=nb2_same_alpha_increment_into(count,first_mean,second_mean,second_alpha,&!s.product)
+  let mean_value:f64=s.product.value
+  if mean_status==0 {
+   let alpha_status=nb2_dispersion_increment_into(count,first_mean,first_alpha,second_alpha,&!s.product,&!s.log_work)
+   let alpha_value:f64=s.product.value
+   if alpha_status==0 {
+    let value=mean_value+alpha_value
+    if !is_finite(value) || value==0.0 {return s.status}
+    s.status=0;s.value=value;s.local_increment=true;return 0
+   }
+   if alpha_status!=6 {return s.status}
+  } else {if mean_status!=6 {return s.status}}
+ }
+ if first_status!=0 || second_status!=0 {return s.status}
+ let value=second_value-first_value
+ if !is_finite(value) {return s.status}
+ // A rounded far-path tie is not an authenticated equal likelihood.
+ if value==0.0 {return s.status}
+ s.status=0;s.value=value
+ return 0
+}
+
+pub fn nb2_log_probability_mean_difference_into(counts:&IntegerBuffer,first:&NumericBuffer,first_alpha:f64,
+ second:&NumericBuffer,second_alpha:f64,n:i64,work:&!Nb2LikelihoodDifferenceSlot)->i64 with Mut,Div,Panic {
+ work.status=5;work.value=0.0;work.first_status=2;work.second_status=2;work.local_increment=false
+ if n<1 {work.status=1;return 1}
+ if integer_buffer_status(counts)!=0 || numeric_buffer_status(first)!=0 || numeric_buffer_status(second)!=0 {work.status=1;return 1}
+ if integer_buffer_len(counts)!=n || numeric_buffer_len(first)!=n || numeric_buffer_len(second)!=n {work.status=1;return 1}
+ var scale:f64=0.0
+ var sum:f64=0.0
+ var correction:f64=0.0
+ var all_local=true
+ var first_status:i64=0
+ var second_status:i64=0
+ var i:i64=0
+ while i<n {
+  let status=nb2_log_probability_difference_into(integer_buffer_at(counts,i),numeric_buffer_at(first,i),first_alpha,numeric_buffer_at(second,i),second_alpha,work)
+  let value:f64=nb2_likelihood_difference_value(work)
+  if !work.local_increment {all_local=false}
+  if work.first_status!=0 {first_status=work.first_status}
+  if work.second_status!=0 {second_status=work.second_status}
+  if status!=0 {work.status=status;work.value=0.0;work.local_increment=false;return status}
+  let magnitude=if value<0.0 {-value}else{value}
+  if magnitude>scale {
+   let ratio=if scale==0.0 {0.0}else{scale/magnitude}
+   sum=sum*ratio;correction=correction*ratio;scale=magnitude
+  }
+  if magnitude>0.0 {
+   let scaled=value/scale
+   if scaled==0.0 {work.status=5;work.value=0.0;work.local_increment=false;return 5}
+   let adjusted=scaled-correction
+   let next=sum+adjusted
+   correction=(next-sum)-adjusted;sum=next
+   if !is_finite(sum) || !is_finite(correction) {work.status=5;work.value=0.0;work.local_increment=false;return 5}
+  }
+  i=i+1
+ }
+ var value:f64=0.0
+ if scale>0.0 {
+  value=scale*(sum/(n as f64))
+  if !is_finite(value) {work.status=5;work.value=0.0;work.local_increment=false;return 5}
+  if sum!=0.0 {if value==0.0 {work.status=5;work.value=0.0;work.local_increment=false;return 5}}
+ }
+ work.status=0;work.value=value;work.local_increment=all_local
+ work.first_status=first_status;work.second_status=second_status
+ return 0
 }

@@ -1,0 +1,1 @@
+`systems::lib::lyapunov_estimate` multiplied the `f64` step by the `i64` sample count (`dt * count`), which Madaros refuses with E004, so `systems::lib` did not type-check for any caller that reached it. The count is now converted (`dt * (count as f64)`), and the estimate is unchanged.

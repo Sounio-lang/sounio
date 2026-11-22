@@ -28,7 +28,7 @@ owning document records it closed with a receipt.
 | any token that starts no expression loads 0: `let var = 5; println(var)` prints 0, `println()` prints 0, `+a` is 0; reached by 166 files that compile today, including `stdlib/epistemic/knightian.sio:309` (p-box variance 0 under the seed) | lean_single | receipt §6, [`seed_fallback_sweep.tsv`](../audit/S01_LEXICAL_PROBES_2026-10-22/seed_fallback_sweep.tsv) |
 | integer literals that do not fit wrap (`99999999999999999999` → `7766279631452241919`) | both | receipt; D-33.1 |
 | unknown ASCII byte skipped, changing the expression (`1 $ 2` prints `1`) | lean_single | receipt |
-| no f64 literal is correctly rounded at the midpoint probe | both | receipt; [D-27](../decisions/PENDING.md#d-27) |
+| no f64 literal is correctly rounded at the midpoint probe | both | receipt; [D-27, decided: ADR-020](../decisions/adr-020-rulings-2026-10-25.md) |
 | cross-call first-order variance not carried for general user calls (KL-11) | Madaros | [`KNOWN_LIMITATIONS.md`](../compiler/KNOWN_LIMITATIONS.md) |
 | `Knowledge` propagation carries no rounding term at all | both | [interval proposal](../proposals/CERTIFIED_INTERVAL_PRIMITIVE_2026-10-22.md) §1 |
 

@@ -7,15 +7,19 @@ validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.implementation.production-readyness
 -->
 
-# Sounio Production Readiness (Linux x86-64)
+# Phase-0 rollout boundaries (Linux x86-64)
 
-This document defines the production-readiness boundaries for the first operational rollout.
+**Status: research language (pre-1.0).** APIs may change; not recommended for production use.
+
+The sections below are an internal phase-0 boundary note. They are not the public maturity line, and they do not name a compiler version.
+
+This document defines the phase-0 boundaries for a narrow operational note.
 Scope is intentionally narrow: **Linux x86-64** native ELF execution and
 high-confidence internal workflows.
 
-## 1) Stability by feature
+## 1) Commands in this note
 
-### Stable for phase-0 rollout
+### Commands named for the phase-0 note
 - `souc build --backend=native`
 - `souc run` / `souc check` / `souc compile`
 - `compile_source_to_native_elf` and `compile_native_file_to_native_elf` internal API

@@ -1,0 +1,3257 @@
+# sporos_vm: post-admission native x86-64 Sporos bytecode VM (`Sporos.decode` + `Sporos.checkProg` + `SporosProvLen.lstep`).
+# Root A framing: Root A is MUSE's hand-written checker (`bootstrap/roots/sporos/sporos-stage1.hex`);
+# `spr1_check` is an independent second check (not Root A or Root A's trust base).
+# Canonical 38-byte TMR voter at L_vm_vote (0x40024a) -> L_vm_dispatch (0x400270), exit 3 on 3-way split.
+# Total 12945 bytes, entry 0x402044.
+
+# ---------------------------------------------------------------- ELF header
+7f 45 4c 46                     # 000  e_ident: magic 0x7f E L F
+02                              # 004  ELFCLASS64
+01                              # 005  little endian
+01                              # 006  EI_VERSION = 1
+00                              # 007  System V
+00 00 00 00 00 00 00 00         # 008  padding
+02 00                           # 010  e_type = ET_EXEC
+3e 00                           # 012  e_machine = EM_X86_64
+01 00 00 00                     # 014  e_version = 1
+44 20 40 00 00 00 00 00         # 018  e_entry = L_start
+40 00 00 00 00 00 00 00         # 020  e_phoff = 0x40
+00 00 00 00 00 00 00 00         # 028  e_shoff = 0
+00 00 00 00                     # 030  e_flags = 0
+40 00                           # 034  e_ehsize = 64
+38 00                           # 036  e_phentsize = 56
+02 00                           # 038  e_phnum = 2
+00 00                           # 03a  e_shentsize = 0
+00 00                           # 03c  e_shnum = 0
+00 00                           # 03e  e_shstrndx = 0
+
+# ----------------------------------------------------------- program headers
+01 00 00 00                     # 040  PT_LOAD 0 (code + rodata)
+05 00 00 00                     # 044  PF_R | PF_X
+00 00 00 00 00 00 00 00         # 048  p_offset = 0
+00 00 40 00 00 00 00 00         # 050  p_vaddr = 0x400000
+00 00 40 00 00 00 00 00         # 058  p_paddr = 0x400000
+91 32 00 00 00 00 00 00         # 060  p_filesz = whole file
+91 32 00 00 00 00 00 00         # 068  p_memsz = whole file
+00 10 00 00 00 00 00 00         # 070  p_align = 0x1000
+01 00 00 00                     # 078  PT_LOAD 1 (VmCtx BSS)
+06 00 00 00                     # 07c  PF_R | PF_W
+00 00 00 00 00 00 00 00         # 080  p_offset = 0
+00 00 60 00 00 00 00 00         # 088  p_vaddr = 0x600000
+00 00 60 00 00 00 00 00         # 090  p_paddr = 0x600000
+00 00 00 00 00 00 00 00         # 098  p_filesz = 0
+00 10 00 00 00 00 00 00         # 0a0  p_memsz = 0x1000
+00 10 00 00 00 00 00 00         # 0a8  p_align = 0x1000
+
+# --------------------------------------------------------------------- code
+
+# L_code_start:
+
+# L_vm_ready:
+
+# L_vm_loop:
+49 8b 47 38                     # 0b0  ld rax, [r15+0x38]   rs_len
+48 85 c0                        # 0b4  test rax, rax
+0f 84 f0 19 00 00               # 0b7  je 0x401aad    -> L_fail_noFrame
+48 83 e8 01                     # 0bd  sub rax, 0x1
+48 c1 e0 05                     # 0c1  shl rax, 5   (rs_len - 1) * 32
+49 8b 57 30                     # 0c5  ld rdx, [r15+0x30]
+48 01 d0                        # 0c9  add rax, rdx   top frame ptr
+4c 8b 20                        # 0cc  ld r12, [rax+0x0]   r12 = f.word
+4c 8b 68 08                     # 0cf  ld r13, [rax+0x8]   r13 = f.pc
+49 8b 97 e8 00 00 00            # 0d3  ld rdx, [r15+0xe8]
+48 8b 42 08                     # 0da  ld rax, [rdx+0x8]
+49 8b 97 f0 00 00 00            # 0de  ld rdx, [r15+0xf0]
+48 8b 5a 08                     # 0e5  ld rbx, [rdx+0x8]
+49 8b 97 f8 00 00 00            # 0e9  ld rdx, [r15+0xf8]
+48 8b 4a 08                     # 0f0  ld rcx, [rdx+0x8]
+48 39 d8                        # 0f4  cmp rax, rbx   vote3: a == b?
+74 12                           # 0f7  je 0x40010b    -> v3_nw_1
+48 39 c8                        # 0f9  cmp rax, rcx   vote3: a == c?
+74 0d                           # 0fc  je 0x40010b    -> v3_nw_1
+48 39 cb                        # 0fe  cmp rbx, rcx   vote3: b == c?
+74 05                           # 101  je 0x400108   3-way disagreement -> exit 3 (jne: je over jmp)
+e9 5c 01 00 00                  # 103  jmp 0x400264   -> L_exit3
+48 8b c3                        # 108  mov rax, rbx   repair rax = b
+
+# v3_nw_1:
+49 39 c4                        # 10b  cmp r12, rax   f.word < nw?
+0f 83 77 19 00 00               # 10e  jae 0x401a8b    -> L_fail_badJump
+49 8b 97 e8 00 00 00            # 114  ld rdx, [r15+0xe8]
+48 8b 42 10                     # 11b  ld rax, [rdx+0x10]
+49 8b 97 f0 00 00 00            # 11f  ld rdx, [r15+0xf0]
+48 8b 5a 10                     # 126  ld rbx, [rdx+0x10]
+49 8b 97 f8 00 00 00            # 12a  ld rdx, [r15+0xf8]
+48 8b 4a 10                     # 131  ld rcx, [rdx+0x10]
+48 39 d8                        # 135  cmp rax, rbx   vote3: a == b?
+74 12                           # 138  je 0x40014c    -> v3_nd_2
+48 39 c8                        # 13a  cmp rax, rcx   vote3: a == c?
+74 0d                           # 13d  je 0x40014c    -> v3_nd_2
+48 39 cb                        # 13f  cmp rbx, rcx   vote3: b == c?
+74 05                           # 142  je 0x400149   3-way disagreement -> exit 3 (jne: je over jmp)
+e9 1b 01 00 00                  # 144  jmp 0x400264   -> L_exit3
+48 8b c3                        # 149  mov rax, rbx   repair rax = b
+
+# v3_nd_2:
+48 c1 e0 04                     # 14c  shl rax, 4   16 * nd
+49 8b f4                        # 150  mov rsi, r12
+48 c1 e6 06                     # 153  shl rsi, 6   64 * f.word
+48 01 c6                        # 157  add rsi, rax
+48 83 c6 20                     # 15a  add rsi, 0x20   rsi = w_off
+49 8b 97 e8 00 00 00            # 15e  ld rdx, [r15+0xe8]   code1
+48 8b 44 32 18                  # 165  ld_w64 rax, [rdx+rsi*1+0x18]   replica 1
+49 8b 97 f0 00 00 00            # 16a  ld rdx, [r15+0xf0]   code2
+48 8b 5c 32 18                  # 171  ld_w64 rbx, [rdx+rsi*1+0x18]   replica 2
+49 8b 97 f8 00 00 00            # 176  ld rdx, [r15+0xf8]   code3
+48 8b 4c 32 18                  # 17d  ld_w64 rcx, [rdx+rsi*1+0x18]   replica 3
+48 39 d8                        # 182  cmp rax, rbx   vote3: a == b?
+74 12                           # 185  je 0x400199    -> v3_ncode_3
+48 39 c8                        # 187  cmp rax, rcx   vote3: a == c?
+74 0d                           # 18a  je 0x400199    -> v3_ncode_3
+48 39 cb                        # 18c  cmp rbx, rcx   vote3: b == c?
+74 05                           # 18f  je 0x400196   3-way disagreement -> exit 3 (jne: je over jmp)
+e9 ce 00 00 00                  # 191  jmp 0x400264   -> L_exit3
+48 8b c3                        # 196  mov rax, rbx   repair rax = b
+
+# v3_ncode_3:
+49 39 c5                        # 199  cmp r13, rax   f.pc < ncode?
+0f 83 e9 18 00 00               # 19c  jae 0x401a8b    -> L_fail_badJump
+49 8b 97 e8 00 00 00            # 1a2  ld rdx, [r15+0xe8]   code1
+48 8b 44 32 20                  # 1a9  ld_w64 rax, [rdx+rsi*1+0x20]   replica 1
+49 8b 97 f0 00 00 00            # 1ae  ld rdx, [r15+0xf0]   code2
+48 8b 5c 32 20                  # 1b5  ld_w64 rbx, [rdx+rsi*1+0x20]   replica 2
+49 8b 97 f8 00 00 00            # 1ba  ld rdx, [r15+0xf8]   code3
+48 8b 4c 32 20                  # 1c1  ld_w64 rcx, [rdx+rsi*1+0x20]   replica 3
+48 39 d8                        # 1c6  cmp rax, rbx   vote3: a == b?
+74 12                           # 1c9  je 0x4001dd    -> v3_code_off_4
+48 39 c8                        # 1cb  cmp rax, rcx   vote3: a == c?
+74 0d                           # 1ce  je 0x4001dd    -> v3_code_off_4
+48 39 cb                        # 1d0  cmp rbx, rcx   vote3: b == c?
+74 05                           # 1d3  je 0x4001da   3-way disagreement -> exit 3 (jne: je over jmp)
+e9 8a 00 00 00                  # 1d5  jmp 0x400264   -> L_exit3
+48 8b c3                        # 1da  mov rax, rbx   repair rax = b
+
+# v3_code_off_4:
+49 8b f5                        # 1dd  mov rsi, r13
+48 c1 e6 04                     # 1e0  shl rsi, 4   16 * f.pc
+48 01 c6                        # 1e4  add rsi, rax   rsi = inst_off
+49 8b 97 e8 00 00 00            # 1e7  ld rdx, [r15+0xe8]   code1
+48 8b 44 32 08                  # 1ee  ld_w64 rax, [rdx+rsi*1+0x8]   replica 1
+49 8b 97 f0 00 00 00            # 1f3  ld rdx, [r15+0xf0]   code2
+48 8b 5c 32 08                  # 1fa  ld_w64 rbx, [rdx+rsi*1+0x8]   replica 2
+49 8b 97 f8 00 00 00            # 1ff  ld rdx, [r15+0xf8]   code3
+48 8b 4c 32 08                  # 206  ld_w64 rcx, [rdx+rsi*1+0x8]   replica 3
+48 39 d8                        # 20b  cmp rax, rbx   vote3: a == b?
+74 12                           # 20e  je 0x400222    -> v3_imm_5
+48 39 c8                        # 210  cmp rax, rcx   vote3: a == c?
+74 0d                           # 213  je 0x400222    -> v3_imm_5
+48 39 cb                        # 215  cmp rbx, rcx   vote3: b == c?
+74 05                           # 218  je 0x40021f   3-way disagreement -> exit 3 (jne: je over jmp)
+e9 45 00 00 00                  # 21a  jmp 0x400264   -> L_exit3
+48 8b c3                        # 21f  mov rax, rbx   repair rax = b
+
+# v3_imm_5:
+49 89 87 08 01 00 00            # 222  st [r15+0x108], rax   cur_imm
+49 8b 97 e8 00 00 00            # 229  ld rdx, [r15+0xe8]
+48 8b 04 32                     # 230  ld_w64 rax, [rdx+rsi*1+0x0]   op replica 1
+49 8b 97 f0 00 00 00            # 234  ld rdx, [r15+0xf0]
+48 8b 1c 32                     # 23b  ld_w64 rbx, [rdx+rsi*1+0x0]   op replica 2
+49 8b 97 f8 00 00 00            # 23f  ld rdx, [r15+0xf8]
+48 8b 0c 32                     # 246  ld_w64 rcx, [rdx+rsi*1+0x0]   op replica 3
+
+# L_vm_vote:
+# TMRVoter compare/repair + jmp L_vm_dispatch
+48 39 d8                        # 24a  cmp rax, rbx
+74 0d                           # 24d  je 0x40025c
+48 39 c8                        # 24f  cmp rax, rcx
+74 08                           # 252  je 0x40025c
+48 39 cb                        # 254  cmp rbx, rcx
+75 0b                           # 257  jne 0x400264
+48 89 d8                        # 259  mov rax, rbx
+48 89 c3                        # 25c  mov rbx, rax
+48 89 c1                        # 25f  mov rcx, rax
+eb 0c                           # 262  jmp 0x400270
+
+# L_exit3:
+# TMRVoter 3-way disagreement -> exit(3)
+bf 03 00 00 00                  # 264  mov rdi, 0x3
+b8 3c 00 00 00                  # 269  mov rax, 0x3c
+0f 05                           # 26e  syscall
+
+# L_vm_dispatch:
+49 89 87 00 01 00 00            # 270  st [r15+0x100], rax   cur_op
+48 83 f8 46                     # 277  cmp rax, 0x46
+0f 83 0a 18 00 00               # 27b  jae 0x401a8b   op out of range -> L_fail_badJump
+ba eb 2c 40 00                  # 281  mov rdx, 0x402ceb   dispatch table (L_jtab)
+ff 24 c2                        # 286  jmp [rdx+rax*8+0x0]   jmp [L_jtab + op*8]
+
+# L_prim_prologue:
+ba 79 2c 40 00                  # 289  mov rdx, 0x402c79   (L_prim_eff_in)
+44 0f b6 04 02                  # 28e  ld_w8 r8, [rdx+rax*1+0x0]   r8 = e_in
+ba b2 2c 40 00                  # 293  mov rdx, 0x402cb2   (L_prim_eff_out)
+44 0f b6 0c 02                  # 298  ld_w8 r9, [rdx+rax*1+0x0]   r9 = e_out
+4d 89 87 18 01 00 00            # 29d  st [r15+0x118], r8
+4d 89 8f 20 01 00 00            # 2a4  st [r15+0x120], r9
+49 8b 4f 08                     # 2ab  ld rcx, [r15+0x8]   ds_len
+4c 39 c1                        # 2af  cmp rcx, r8   ds_len < e_in?
+0f 82 a0 17 00 00               # 2b2  jb 0x401a58    -> L_fail_underflow
+45 31 d2                        # 2b8  xor r10, r10   qa = 0
+49 8b 37                        # 2bb  ld rsi, [r15+0x0]   ds_base
+4d 85 c0                        # 2be  test r8, r8
+0f 84 a6 00 00 00               # 2c1  je 0x40036d    -> pp_q
+48 8b d1                        # 2c7  mov rdx, rcx
+48 83 ea 01                     # 2ca  sub rdx, 0x1   ds_len - (k+1)
+48 c1 e2 04                     # 2ce  shl rdx, 4   * 16
+4c 8b 1c 16                     # 2d2  ld_w64 r11, [rsi+rdx*1+0x0]   ak.w
+4d 89 9f 28 01 00 00            # 2d6  st [r15+0x128], r11
+4c 8b 5c 16 08                  # 2dd  ld_w64 r11, [rsi+rdx*1+0x8]   ak.p
+4d 89 9f 30 01 00 00            # 2e2  st [r15+0x130], r11
+4d 01 da                        # 2e9  add r10, r11   qa += ak.p
+49 83 f8 01                     # 2ec  cmp r8, 0x1
+74 7b                           # 2f0  je 0x40036d    -> pp_q
+48 8b d1                        # 2f2  mov rdx, rcx
+48 83 ea 02                     # 2f5  sub rdx, 0x2   ds_len - (k+1)
+48 c1 e2 04                     # 2f9  shl rdx, 4   * 16
+4c 8b 1c 16                     # 2fd  ld_w64 r11, [rsi+rdx*1+0x0]   ak.w
+4d 89 9f 38 01 00 00            # 301  st [r15+0x138], r11
+4c 8b 5c 16 08                  # 308  ld_w64 r11, [rsi+rdx*1+0x8]   ak.p
+4d 89 9f 40 01 00 00            # 30d  st [r15+0x140], r11
+4d 01 da                        # 314  add r10, r11   qa += ak.p
+49 83 f8 02                     # 317  cmp r8, 0x2
+74 50                           # 31b  je 0x40036d    -> pp_q
+48 8b d1                        # 31d  mov rdx, rcx
+48 83 ea 03                     # 320  sub rdx, 0x3   ds_len - (k+1)
+48 c1 e2 04                     # 324  shl rdx, 4   * 16
+4c 8b 1c 16                     # 328  ld_w64 r11, [rsi+rdx*1+0x0]   ak.w
+4d 89 9f 48 01 00 00            # 32c  st [r15+0x148], r11
+4c 8b 5c 16 08                  # 333  ld_w64 r11, [rsi+rdx*1+0x8]   ak.p
+4d 89 9f 50 01 00 00            # 338  st [r15+0x150], r11
+4d 01 da                        # 33f  add r10, r11   qa += ak.p
+49 83 f8 03                     # 342  cmp r8, 0x3
+74 25                           # 346  je 0x40036d    -> pp_q
+48 8b d1                        # 348  mov rdx, rcx
+48 83 ea 04                     # 34b  sub rdx, 0x4   ds_len - (k+1)
+48 c1 e2 04                     # 34f  shl rdx, 4   * 16
+4c 8b 1c 16                     # 353  ld_w64 r11, [rsi+rdx*1+0x0]   ak.w
+4d 89 9f 58 01 00 00            # 357  st [r15+0x158], r11
+4c 8b 5c 16 08                  # 35e  ld_w64 r11, [rsi+rdx*1+0x8]   ak.p
+4d 89 9f 60 01 00 00            # 363  st [r15+0x160], r11
+4d 01 da                        # 36a  add r10, r11   qa += ak.p
+
+# pp_q:
+4d 8b 9f e0 00 00 00            # 36d  ld r11, [r15+0xe0]
+4d 01 da                        # 374  add r10, r11   qa + pc
+49 83 c2 01                     # 377  add r10, 0x1   q = qa + pc + 1
+4d 89 97 10 01 00 00            # 37b  st [r15+0x110], r10   cur_q
+ba 1b 2f 40 00                  # 382  mov rdx, 0x402f1b   (L_prim_jtab)
+ff 24 c2                        # 387  jmp [rdx+rax*8+0x0]   jmp [L_prim_jtab + prim*8]
+
+# L_prim_epilogue_mk1:
+49 89 87 68 01 00 00            # 38a  st [r15+0x168], rax
+49 8b 97 10 01 00 00            # 391  ld rdx, [r15+0x110]
+49 89 97 70 01 00 00            # 398  st [r15+0x170], rdx
+eb 00                           # 39f  jmp 0x4003a1    -> L_prim_epilogue
+
+# L_prim_epilogue_0:
+
+# L_prim_epilogue:
+49 8b 47 08                     # 3a1  ld rax, [r15+0x8]
+49 8b 8f 18 01 00 00            # 3a5  ld rcx, [r15+0x118]
+48 29 c8                        # 3ac  sub rax, rcx   pop e_in
+49 89 47 08                     # 3af  st [r15+0x8], rax
+49 8b 9f 20 01 00 00            # 3b3  ld rbx, [r15+0x120]   rbx = e_out (0..3)
+48 85 db                        # 3ba  test rbx, rbx
+74 7a                           # 3bd  je 0x400439    -> pe_adv
+4c 8b e0                        # 3bf  mov r12, rax
+49 01 dc                        # 3c2  add r12, rbx
+49 8b 4f 10                     # 3c5  ld rcx, [r15+0x10]
+49 39 cc                        # 3c9  cmp r12, rcx
+76 25                           # 3cc  jbe 0x4003f3    -> pe_push
+49 8b 3f                        # 3ce  ld rdi, [r15+0x0]
+48 8b f1                        # 3d1  mov rsi, rcx
+48 c1 e6 04                     # 3d4  shl rsi, 4
+48 8b d6                        # 3d8  mov rdx, rsi
+48 c1 e2 01                     # 3db  shl rdx, 1
+e8 af 17 00 00                  # 3df  call 0x401b93    -> fn_mremap
+49 89 07                        # 3e4  st [r15+0x0], rax
+49 8b 4f 10                     # 3e7  ld rcx, [r15+0x10]
+48 c1 e1 01                     # 3eb  shl rcx, 1
+49 89 4f 10                     # 3ef  st [r15+0x10], rcx
+
+# pe_push:
+4d 8b 27                        # 3f3  ld r12, [r15+0x0]
+4d 8b 6f 08                     # 3f6  ld r13, [r15+0x8]
+49 8b 9f 20 01 00 00            # 3fa  ld rbx, [r15+0x120]
+
+# pe_loop:
+48 83 eb 01                     # 401  sub rbx, 0x1
+48 8b d3                        # 405  mov rdx, rbx
+48 c1 e2 04                     # 408  shl rdx, 4   res_k offset
+49 8b 84 17 68 01 00 00         # 40c  ld_w64 rax, [r15+rdx*1+0x168]   res_k.w
+49 8b 8c 17 70 01 00 00         # 414  ld_w64 rcx, [r15+rdx*1+0x170]   res_k.p
+49 8b f5                        # 41c  mov rsi, r13
+48 c1 e6 04                     # 41f  shl rsi, 4
+49 89 04 34                     # 423  st_w64 [r12+rsi*1+0x0], rax
+49 89 4c 34 08                  # 427  st_w64 [r12+rsi*1+0x8], rcx
+49 83 c5 01                     # 42c  add r13, 0x1
+48 85 db                        # 430  test rbx, rbx
+75 cc                           # 433  jne 0x400401    -> pe_loop
+4d 89 6f 08                     # 435  st [r15+0x8], r13
+
+# pe_adv:
+49 8b 47 30                     # 439  ld rax, [r15+0x30]
+49 8b 4f 38                     # 43d  ld rcx, [r15+0x38]
+48 83 e9 01                     # 441  sub rcx, 0x1
+48 c1 e1 05                     # 445  shl rcx, 5   * 32
+48 01 c8                        # 449  add rax, rcx
+48 8b 48 08                     # 44c  ld rcx, [rax+0x8]   f.pc
+48 83 c1 01                     # 450  add rcx, 0x1
+48 89 48 08                     # 454  st [rax+0x8], rcx   f.pc + 1
+e9 53 fc ff ff                  # 458  jmp 0x4000b0    -> L_vm_loop
+
+# P_dup:
+49 8b 87 28 01 00 00            # 45d  ld rax, [r15+0x128]
+49 89 87 68 01 00 00            # 464  st [r15+0x168], rax
+49 8b 87 30 01 00 00            # 46b  ld rax, [r15+0x130]
+49 8b 8f e0 00 00 00            # 472  ld rcx, [r15+0xe0]
+48 01 c8                        # 479  add rax, rcx
+48 83 c0 01                     # 47c  add rax, 0x1
+49 89 87 70 01 00 00            # 480  st [r15+0x170], rax
+49 8b 87 68 01 00 00            # 487  ld rax, [r15+0x168]
+49 89 87 78 01 00 00            # 48e  st [r15+0x178], rax
+49 8b 87 70 01 00 00            # 495  ld rax, [r15+0x170]
+49 89 87 80 01 00 00            # 49c  st [r15+0x180], rax
+e9 f9 fe ff ff                  # 4a3  jmp 0x4003a1    -> L_prim_epilogue
+
+# P_drop:
+e9 f4 fe ff ff                  # 4a8  jmp 0x4003a1    -> L_prim_epilogue_0
+
+# P_swap:
+49 8b 87 38 01 00 00            # 4ad  ld rax, [r15+0x138]
+49 89 87 68 01 00 00            # 4b4  st [r15+0x168], rax
+49 8b 87 40 01 00 00            # 4bb  ld rax, [r15+0x140]
+49 8b 8f e0 00 00 00            # 4c2  ld rcx, [r15+0xe0]
+48 01 c8                        # 4c9  add rax, rcx
+48 83 c0 01                     # 4cc  add rax, 0x1
+49 89 87 70 01 00 00            # 4d0  st [r15+0x170], rax
+49 8b 87 28 01 00 00            # 4d7  ld rax, [r15+0x128]
+49 89 87 78 01 00 00            # 4de  st [r15+0x178], rax
+49 8b 87 30 01 00 00            # 4e5  ld rax, [r15+0x130]
+49 8b 8f e0 00 00 00            # 4ec  ld rcx, [r15+0xe0]
+48 01 c8                        # 4f3  add rax, rcx
+48 83 c0 01                     # 4f6  add rax, 0x1
+49 89 87 80 01 00 00            # 4fa  st [r15+0x180], rax
+e9 9b fe ff ff                  # 501  jmp 0x4003a1    -> L_prim_epilogue
+
+# P_over:
+49 8b 87 38 01 00 00            # 506  ld rax, [r15+0x138]
+49 89 87 68 01 00 00            # 50d  st [r15+0x168], rax
+49 8b 87 40 01 00 00            # 514  ld rax, [r15+0x140]
+49 8b 8f e0 00 00 00            # 51b  ld rcx, [r15+0xe0]
+48 01 c8                        # 522  add rax, rcx
+48 83 c0 01                     # 525  add rax, 0x1
+49 89 87 70 01 00 00            # 529  st [r15+0x170], rax
+49 8b 87 28 01 00 00            # 530  ld rax, [r15+0x128]
+49 89 87 78 01 00 00            # 537  st [r15+0x178], rax
+49 8b 87 30 01 00 00            # 53e  ld rax, [r15+0x130]
+49 8b 8f e0 00 00 00            # 545  ld rcx, [r15+0xe0]
+48 01 c8                        # 54c  add rax, rcx
+48 83 c0 01                     # 54f  add rax, 0x1
+49 89 87 80 01 00 00            # 553  st [r15+0x180], rax
+49 8b 87 68 01 00 00            # 55a  ld rax, [r15+0x168]
+49 89 87 88 01 00 00            # 561  st [r15+0x188], rax
+49 8b 87 70 01 00 00            # 568  ld rax, [r15+0x170]
+49 89 87 90 01 00 00            # 56f  st [r15+0x190], rax
+e9 26 fe ff ff                  # 576  jmp 0x4003a1    -> L_prim_epilogue
+
+# P_rot:
+49 8b 87 48 01 00 00            # 57b  ld rax, [r15+0x148]
+49 89 87 68 01 00 00            # 582  st [r15+0x168], rax
+49 8b 87 50 01 00 00            # 589  ld rax, [r15+0x150]
+49 8b 8f e0 00 00 00            # 590  ld rcx, [r15+0xe0]
+48 01 c8                        # 597  add rax, rcx
+48 83 c0 01                     # 59a  add rax, 0x1
+49 89 87 70 01 00 00            # 59e  st [r15+0x170], rax
+49 8b 87 28 01 00 00            # 5a5  ld rax, [r15+0x128]
+49 89 87 78 01 00 00            # 5ac  st [r15+0x178], rax
+49 8b 87 30 01 00 00            # 5b3  ld rax, [r15+0x130]
+49 8b 8f e0 00 00 00            # 5ba  ld rcx, [r15+0xe0]
+48 01 c8                        # 5c1  add rax, rcx
+48 83 c0 01                     # 5c4  add rax, 0x1
+49 89 87 80 01 00 00            # 5c8  st [r15+0x180], rax
+49 8b 87 38 01 00 00            # 5cf  ld rax, [r15+0x138]
+49 89 87 88 01 00 00            # 5d6  st [r15+0x188], rax
+49 8b 87 40 01 00 00            # 5dd  ld rax, [r15+0x140]
+49 8b 8f e0 00 00 00            # 5e4  ld rcx, [r15+0xe0]
+48 01 c8                        # 5eb  add rax, rcx
+48 83 c0 01                     # 5ee  add rax, 0x1
+49 89 87 90 01 00 00            # 5f2  st [r15+0x190], rax
+e9 a3 fd ff ff                  # 5f9  jmp 0x4003a1    -> L_prim_epilogue
+
+# P_nip:
+49 8b 87 28 01 00 00            # 5fe  ld rax, [r15+0x128]
+49 89 87 68 01 00 00            # 605  st [r15+0x168], rax
+49 8b 87 30 01 00 00            # 60c  ld rax, [r15+0x130]
+49 8b 8f e0 00 00 00            # 613  ld rcx, [r15+0xe0]
+48 01 c8                        # 61a  add rax, rcx
+48 83 c0 01                     # 61d  add rax, 0x1
+49 89 87 70 01 00 00            # 621  st [r15+0x170], rax
+e9 74 fd ff ff                  # 628  jmp 0x4003a1    -> L_prim_epilogue
+
+# P_tuck:
+49 8b 87 28 01 00 00            # 62d  ld rax, [r15+0x128]
+49 89 87 68 01 00 00            # 634  st [r15+0x168], rax
+49 8b 87 30 01 00 00            # 63b  ld rax, [r15+0x130]
+49 8b 8f e0 00 00 00            # 642  ld rcx, [r15+0xe0]
+48 01 c8                        # 649  add rax, rcx
+48 83 c0 01                     # 64c  add rax, 0x1
+49 89 87 70 01 00 00            # 650  st [r15+0x170], rax
+49 8b 87 38 01 00 00            # 657  ld rax, [r15+0x138]
+49 89 87 78 01 00 00            # 65e  st [r15+0x178], rax
+49 8b 87 40 01 00 00            # 665  ld rax, [r15+0x140]
+49 8b 8f e0 00 00 00            # 66c  ld rcx, [r15+0xe0]
+48 01 c8                        # 673  add rax, rcx
+48 83 c0 01                     # 676  add rax, 0x1
+49 89 87 80 01 00 00            # 67a  st [r15+0x180], rax
+49 8b 87 68 01 00 00            # 681  ld rax, [r15+0x168]
+49 89 87 88 01 00 00            # 688  st [r15+0x188], rax
+49 8b 87 70 01 00 00            # 68f  ld rax, [r15+0x170]
+49 89 87 90 01 00 00            # 696  st [r15+0x190], rax
+e9 ff fc ff ff                  # 69d  jmp 0x4003a1    -> L_prim_epilogue
+
+# P_add:
+49 8b 87 38 01 00 00            # 6a2  ld rax, [r15+0x138]
+49 8b 8f 28 01 00 00            # 6a9  ld rcx, [r15+0x128]
+48 01 c8                        # 6b0  add rax, rcx
+e9 d2 fc ff ff                  # 6b3  jmp 0x40038a    -> L_prim_epilogue_mk1
+
+# P_sub:
+49 8b 87 38 01 00 00            # 6b8  ld rax, [r15+0x138]
+49 8b 8f 28 01 00 00            # 6bf  ld rcx, [r15+0x128]
+48 29 c8                        # 6c6  sub rax, rcx
+e9 bc fc ff ff                  # 6c9  jmp 0x40038a    -> L_prim_epilogue_mk1
+
+# P_mul:
+49 8b 87 38 01 00 00            # 6ce  ld rax, [r15+0x138]
+49 8b 8f 28 01 00 00            # 6d5  ld rcx, [r15+0x128]
+48 0f af c1                     # 6dc  imul rax, rcx
+e9 a5 fc ff ff                  # 6e0  jmp 0x40038a    -> L_prim_epilogue_mk1
+
+# P_divu:
+49 8b 8f 28 01 00 00            # 6e5  ld rcx, [r15+0x128]
+48 85 c9                        # 6ec  test rcx, rcx
+0f 84 da 13 00 00               # 6ef  je 0x401acf    -> L_fail_divZero
+49 8b 87 38 01 00 00            # 6f5  ld rax, [r15+0x138]
+31 d2                           # 6fc  xor rdx, rdx
+48 f7 f1                        # 6fe  div rcx
+e9 84 fc ff ff                  # 701  jmp 0x40038a    -> L_prim_epilogue_mk1
+
+# P_modu:
+49 8b 8f 28 01 00 00            # 706  ld rcx, [r15+0x128]
+48 85 c9                        # 70d  test rcx, rcx
+0f 84 b9 13 00 00               # 710  je 0x401acf    -> L_fail_divZero
+49 8b 87 38 01 00 00            # 716  ld rax, [r15+0x138]
+31 d2                           # 71d  xor rdx, rdx
+48 f7 f1                        # 71f  div rcx
+48 8b c2                        # 722  mov rax, rdx
+e9 60 fc ff ff                  # 725  jmp 0x40038a    -> L_prim_epilogue_mk1
+
+# P_divs:
+49 8b 8f 28 01 00 00            # 72a  ld rcx, [r15+0x128]
+48 85 c9                        # 731  test rcx, rcx
+0f 84 95 13 00 00               # 734  je 0x401acf    -> L_fail_divZero
+49 8b 87 38 01 00 00            # 73a  ld rax, [r15+0x138]
+48 ba 00 00 00 00 00 00 00 80   # 741  mov rdx, 0x8000000000000000
+48 39 d0                        # 74b  cmp rax, rdx
+75 0a                           # 74e  jne 0x40075a    -> divs_go
+48 83 f9 ff                     # 750  cmp rcx, 0xffffffffffffffff
+0f 84 30 fc ff ff               # 754  je 0x40038a   INT64_MIN / -1 wraps to INT64_MIN -> L_prim_epilogue_mk1
+
+# divs_go:
+48 99                           # 75a  cqo
+48 f7 f9                        # 75c  idiv rcx
+e9 26 fc ff ff                  # 75f  jmp 0x40038a    -> L_prim_epilogue_mk1
+
+# P_mods:
+49 8b 8f 28 01 00 00            # 764  ld rcx, [r15+0x128]
+48 85 c9                        # 76b  test rcx, rcx
+0f 84 5b 13 00 00               # 76e  je 0x401acf    -> L_fail_divZero
+48 83 f9 ff                     # 774  cmp rcx, 0xffffffffffffffff
+75 07                           # 778  jne 0x400781    -> mods_go
+31 c0                           # 77a  xor rax, rax   x % -1 == 0 without #DE
+e9 09 fc ff ff                  # 77c  jmp 0x40038a    -> L_prim_epilogue_mk1
+
+# mods_go:
+49 8b 87 38 01 00 00            # 781  ld rax, [r15+0x138]
+48 99                           # 788  cqo
+48 f7 f9                        # 78a  idiv rcx
+48 8b c2                        # 78d  mov rax, rdx
+e9 f5 fb ff ff                  # 790  jmp 0x40038a    -> L_prim_epilogue_mk1
+
+# P_neg:
+49 8b 87 28 01 00 00            # 795  ld rax, [r15+0x128]
+48 f7 d8                        # 79c  neg rax
+e9 e6 fb ff ff                  # 79f  jmp 0x40038a    -> L_prim_epilogue_mk1
+
+# P_band:
+49 8b 87 38 01 00 00            # 7a4  ld rax, [r15+0x138]
+49 8b 8f 28 01 00 00            # 7ab  ld rcx, [r15+0x128]
+48 21 c8                        # 7b2  and rax, rcx
+e9 d0 fb ff ff                  # 7b5  jmp 0x40038a    -> L_prim_epilogue_mk1
+
+# P_bor:
+49 8b 87 38 01 00 00            # 7ba  ld rax, [r15+0x138]
+49 8b 8f 28 01 00 00            # 7c1  ld rcx, [r15+0x128]
+48 09 c8                        # 7c8  or rax, rcx
+e9 ba fb ff ff                  # 7cb  jmp 0x40038a    -> L_prim_epilogue_mk1
+
+# P_bxor:
+49 8b 87 38 01 00 00            # 7d0  ld rax, [r15+0x138]
+49 8b 8f 28 01 00 00            # 7d7  ld rcx, [r15+0x128]
+48 31 c8                        # 7de  xor rax, rcx
+e9 a4 fb ff ff                  # 7e1  jmp 0x40038a    -> L_prim_epilogue_mk1
+
+# P_bnot:
+49 8b 87 28 01 00 00            # 7e6  ld rax, [r15+0x128]
+48 f7 d0                        # 7ed  not rax
+e9 95 fb ff ff                  # 7f0  jmp 0x40038a    -> L_prim_epilogue_mk1
+
+# P_shl:
+49 8b 87 38 01 00 00            # 7f5  ld rax, [r15+0x138]
+49 8b 8f 28 01 00 00            # 7fc  ld rcx, [r15+0x128]
+48 d3 e0                        # 803  shl rax, cl
+e9 7f fb ff ff                  # 806  jmp 0x40038a    -> L_prim_epilogue_mk1
+
+# P_shr:
+49 8b 87 38 01 00 00            # 80b  ld rax, [r15+0x138]
+49 8b 8f 28 01 00 00            # 812  ld rcx, [r15+0x128]
+48 d3 e8                        # 819  shr rax, cl
+e9 69 fb ff ff                  # 81c  jmp 0x40038a    -> L_prim_epilogue_mk1
+
+# P_sar:
+49 8b 87 38 01 00 00            # 821  ld rax, [r15+0x138]
+49 8b 8f 28 01 00 00            # 828  ld rcx, [r15+0x128]
+48 d3 f8                        # 82f  sar rax, cl
+e9 53 fb ff ff                  # 832  jmp 0x40038a    -> L_prim_epilogue_mk1
+
+# P_eq:
+31 d2                           # 837  xor rdx, rdx
+49 8b 87 38 01 00 00            # 839  ld rax, [r15+0x138]
+49 8b 8f 28 01 00 00            # 840  ld rcx, [r15+0x128]
+48 39 c8                        # 847  cmp rax, rcx
+0f 94 c2                        # 84a  sete rdx
+48 8b c2                        # 84d  mov rax, rdx
+e9 35 fb ff ff                  # 850  jmp 0x40038a    -> L_prim_epilogue_mk1
+
+# P_ne:
+31 d2                           # 855  xor rdx, rdx
+49 8b 87 38 01 00 00            # 857  ld rax, [r15+0x138]
+49 8b 8f 28 01 00 00            # 85e  ld rcx, [r15+0x128]
+48 39 c8                        # 865  cmp rax, rcx
+0f 95 c2                        # 868  setne rdx
+48 8b c2                        # 86b  mov rax, rdx
+e9 17 fb ff ff                  # 86e  jmp 0x40038a    -> L_prim_epilogue_mk1
+
+# P_ltu:
+31 d2                           # 873  xor rdx, rdx
+49 8b 87 38 01 00 00            # 875  ld rax, [r15+0x138]
+49 8b 8f 28 01 00 00            # 87c  ld rcx, [r15+0x128]
+48 39 c8                        # 883  cmp rax, rcx
+0f 92 c2                        # 886  setb rdx
+48 8b c2                        # 889  mov rax, rdx
+e9 f9 fa ff ff                  # 88c  jmp 0x40038a    -> L_prim_epilogue_mk1
+
+# P_lts:
+31 d2                           # 891  xor rdx, rdx
+49 8b 87 38 01 00 00            # 893  ld rax, [r15+0x138]
+49 8b 8f 28 01 00 00            # 89a  ld rcx, [r15+0x128]
+48 39 c8                        # 8a1  cmp rax, rcx
+0f 9c c2                        # 8a4  setl rdx
+48 8b c2                        # 8a7  mov rax, rdx
+e9 db fa ff ff                  # 8aa  jmp 0x40038a    -> L_prim_epilogue_mk1
+
+# P_leu:
+31 d2                           # 8af  xor rdx, rdx
+49 8b 87 38 01 00 00            # 8b1  ld rax, [r15+0x138]
+49 8b 8f 28 01 00 00            # 8b8  ld rcx, [r15+0x128]
+48 39 c8                        # 8bf  cmp rax, rcx
+0f 96 c2                        # 8c2  setbe rdx
+48 8b c2                        # 8c5  mov rax, rdx
+e9 bd fa ff ff                  # 8c8  jmp 0x40038a    -> L_prim_epilogue_mk1
+
+# P_les:
+31 d2                           # 8cd  xor rdx, rdx
+49 8b 87 38 01 00 00            # 8cf  ld rax, [r15+0x138]
+49 8b 8f 28 01 00 00            # 8d6  ld rcx, [r15+0x128]
+48 39 c8                        # 8dd  cmp rax, rcx
+0f 9e c2                        # 8e0  setle rdx
+48 8b c2                        # 8e3  mov rax, rdx
+e9 9f fa ff ff                  # 8e6  jmp 0x40038a    -> L_prim_epilogue_mk1
+
+# P_ld8:
+49 8b 87 28 01 00 00            # 8eb  ld rax, [r15+0x128]   addr
+b9 01 00 00 00                  # 8f2  mov rcx, 0x1
+4d 8b 57 70                     # 8f7  ld r10, [r15+0x70]   msize
+4c 39 d0                        # 8fb  cmp rax, r10   addr <= msize?
+0f 87 ba 11 00 00               # 8fe  ja 0x401abe   addr > msize -> L_fail_bounds
+4d 8b da                        # 904  mov r11, r10
+49 29 c3                        # 907  sub r11, rax   msize - addr
+4c 39 d9                        # 90a  cmp rcx, r11   len <= msize - addr?
+0f 87 ab 11 00 00               # 90d  ja 0x401abe   len > msize - addr -> L_fail_bounds
+4d 8b 47 60                     # 913  ld r8, [r15+0x60]
+41 0f b6 14 00                  # 917  ld_w8 rdx, [r8+rax*1+0x0]   val
+49 89 97 68 01 00 00            # 91c  st [r15+0x168], rdx
+4d 8b 4f 68                     # 923  ld r9, [r15+0x68]
+4d 8b 97 10 01 00 00            # 927  ld r10, [r15+0x110]   pm = cur_q
+4d 8b 1c c1                     # 92e  ld_w64 r11, [r9+rax*8+0x0]
+4d 01 da                        # 932  add r10, r11
+4d 89 97 70 01 00 00            # 935  st [r15+0x170], r10
+e9 60 fa ff ff                  # 93c  jmp 0x4003a1    -> L_prim_epilogue
+
+# P_ld16:
+49 8b 87 28 01 00 00            # 941  ld rax, [r15+0x128]   addr
+b9 02 00 00 00                  # 948  mov rcx, 0x2
+4d 8b 57 70                     # 94d  ld r10, [r15+0x70]   msize
+4c 39 d0                        # 951  cmp rax, r10   addr <= msize?
+0f 87 64 11 00 00               # 954  ja 0x401abe   addr > msize -> L_fail_bounds
+4d 8b da                        # 95a  mov r11, r10
+49 29 c3                        # 95d  sub r11, rax   msize - addr
+4c 39 d9                        # 960  cmp rcx, r11   len <= msize - addr?
+0f 87 55 11 00 00               # 963  ja 0x401abe   len > msize - addr -> L_fail_bounds
+4d 8b 47 60                     # 969  ld r8, [r15+0x60]
+41 0f b7 14 00                  # 96d  ld_w16 rdx, [r8+rax*1+0x0]   val
+49 89 97 68 01 00 00            # 972  st [r15+0x168], rdx
+4d 8b 4f 68                     # 979  ld r9, [r15+0x68]
+4d 8b 97 10 01 00 00            # 97d  ld r10, [r15+0x110]   pm = cur_q
+4d 8b 1c c1                     # 984  ld_w64 r11, [r9+rax*8+0x0]
+4d 01 da                        # 988  add r10, r11
+4d 8b 5c c1 08                  # 98b  ld_w64 r11, [r9+rax*8+0x8]
+4d 01 da                        # 990  add r10, r11
+4d 89 97 70 01 00 00            # 993  st [r15+0x170], r10
+e9 02 fa ff ff                  # 99a  jmp 0x4003a1    -> L_prim_epilogue
+
+# P_ld32:
+49 8b 87 28 01 00 00            # 99f  ld rax, [r15+0x128]   addr
+b9 04 00 00 00                  # 9a6  mov rcx, 0x4
+4d 8b 57 70                     # 9ab  ld r10, [r15+0x70]   msize
+4c 39 d0                        # 9af  cmp rax, r10   addr <= msize?
+0f 87 06 11 00 00               # 9b2  ja 0x401abe   addr > msize -> L_fail_bounds
+4d 8b da                        # 9b8  mov r11, r10
+49 29 c3                        # 9bb  sub r11, rax   msize - addr
+4c 39 d9                        # 9be  cmp rcx, r11   len <= msize - addr?
+0f 87 f7 10 00 00               # 9c1  ja 0x401abe   len > msize - addr -> L_fail_bounds
+4d 8b 47 60                     # 9c7  ld r8, [r15+0x60]
+41 8b 14 00                     # 9cb  ld_w32 rdx, [r8+rax*1+0x0]   val
+49 89 97 68 01 00 00            # 9cf  st [r15+0x168], rdx
+4d 8b 4f 68                     # 9d6  ld r9, [r15+0x68]
+4d 8b 97 10 01 00 00            # 9da  ld r10, [r15+0x110]   pm = cur_q
+4d 8b 1c c1                     # 9e1  ld_w64 r11, [r9+rax*8+0x0]
+4d 01 da                        # 9e5  add r10, r11
+4d 8b 5c c1 08                  # 9e8  ld_w64 r11, [r9+rax*8+0x8]
+4d 01 da                        # 9ed  add r10, r11
+4d 8b 5c c1 10                  # 9f0  ld_w64 r11, [r9+rax*8+0x10]
+4d 01 da                        # 9f5  add r10, r11
+4d 8b 5c c1 18                  # 9f8  ld_w64 r11, [r9+rax*8+0x18]
+4d 01 da                        # 9fd  add r10, r11
+4d 89 97 70 01 00 00            # a00  st [r15+0x170], r10
+e9 95 f9 ff ff                  # a07  jmp 0x4003a1    -> L_prim_epilogue
+
+# P_ld64:
+49 8b 87 28 01 00 00            # a0c  ld rax, [r15+0x128]   addr
+b9 08 00 00 00                  # a13  mov rcx, 0x8
+4d 8b 57 70                     # a18  ld r10, [r15+0x70]   msize
+4c 39 d0                        # a1c  cmp rax, r10   addr <= msize?
+0f 87 99 10 00 00               # a1f  ja 0x401abe   addr > msize -> L_fail_bounds
+4d 8b da                        # a25  mov r11, r10
+49 29 c3                        # a28  sub r11, rax   msize - addr
+4c 39 d9                        # a2b  cmp rcx, r11   len <= msize - addr?
+0f 87 8a 10 00 00               # a2e  ja 0x401abe   len > msize - addr -> L_fail_bounds
+4d 8b 47 60                     # a34  ld r8, [r15+0x60]
+49 8b 14 00                     # a38  ld_w64 rdx, [r8+rax*1+0x0]   val
+49 89 97 68 01 00 00            # a3c  st [r15+0x168], rdx
+4d 8b 4f 68                     # a43  ld r9, [r15+0x68]
+4d 8b 97 10 01 00 00            # a47  ld r10, [r15+0x110]   pm = cur_q
+4d 8b 1c c1                     # a4e  ld_w64 r11, [r9+rax*8+0x0]
+4d 01 da                        # a52  add r10, r11
+4d 8b 5c c1 08                  # a55  ld_w64 r11, [r9+rax*8+0x8]
+4d 01 da                        # a5a  add r10, r11
+4d 8b 5c c1 10                  # a5d  ld_w64 r11, [r9+rax*8+0x10]
+4d 01 da                        # a62  add r10, r11
+4d 8b 5c c1 18                  # a65  ld_w64 r11, [r9+rax*8+0x18]
+4d 01 da                        # a6a  add r10, r11
+4d 8b 5c c1 20                  # a6d  ld_w64 r11, [r9+rax*8+0x20]
+4d 01 da                        # a72  add r10, r11
+4d 8b 5c c1 28                  # a75  ld_w64 r11, [r9+rax*8+0x28]
+4d 01 da                        # a7a  add r10, r11
+4d 8b 5c c1 30                  # a7d  ld_w64 r11, [r9+rax*8+0x30]
+4d 01 da                        # a82  add r10, r11
+4d 8b 5c c1 38                  # a85  ld_w64 r11, [r9+rax*8+0x38]
+4d 01 da                        # a8a  add r10, r11
+4d 89 97 70 01 00 00            # a8d  st [r15+0x170], r10
+e9 08 f9 ff ff                  # a94  jmp 0x4003a1    -> L_prim_epilogue
+
+# P_st8:
+49 8b 87 28 01 00 00            # a99  ld rax, [r15+0x128]   addr
+b9 01 00 00 00                  # aa0  mov rcx, 0x1
+4d 8b 57 70                     # aa5  ld r10, [r15+0x70]   msize
+4c 39 d0                        # aa9  cmp rax, r10   addr <= msize?
+0f 87 0c 10 00 00               # aac  ja 0x401abe   addr > msize -> L_fail_bounds
+4d 8b da                        # ab2  mov r11, r10
+49 29 c3                        # ab5  sub r11, rax   msize - addr
+4c 39 d9                        # ab8  cmp rcx, r11   len <= msize - addr?
+0f 87 fd 0f 00 00               # abb  ja 0x401abe   len > msize - addr -> L_fail_bounds
+4d 8b 47 60                     # ac1  ld r8, [r15+0x60]
+49 8b 97 38 01 00 00            # ac5  ld rdx, [r15+0x138]   val
+41 88 14 00                     # acc  st_w8 [r8+rax*1+0x0], rdx
+4d 8b 4f 68                     # ad0  ld r9, [r15+0x68]
+4d 8b 97 10 01 00 00            # ad4  ld r10, [r15+0x110]
+4d 89 14 c1                     # adb  st_w64 [r9+rax*8+0x0], r10
+e9 bd f8 ff ff                  # adf  jmp 0x4003a1    -> L_prim_epilogue_0
+
+# P_st16:
+49 8b 87 28 01 00 00            # ae4  ld rax, [r15+0x128]   addr
+b9 02 00 00 00                  # aeb  mov rcx, 0x2
+4d 8b 57 70                     # af0  ld r10, [r15+0x70]   msize
+4c 39 d0                        # af4  cmp rax, r10   addr <= msize?
+0f 87 c1 0f 00 00               # af7  ja 0x401abe   addr > msize -> L_fail_bounds
+4d 8b da                        # afd  mov r11, r10
+49 29 c3                        # b00  sub r11, rax   msize - addr
+4c 39 d9                        # b03  cmp rcx, r11   len <= msize - addr?
+0f 87 b2 0f 00 00               # b06  ja 0x401abe   len > msize - addr -> L_fail_bounds
+4d 8b 47 60                     # b0c  ld r8, [r15+0x60]
+49 8b 97 38 01 00 00            # b10  ld rdx, [r15+0x138]   val
+66 41 89 14 00                  # b17  st_w16 [r8+rax*1+0x0], rdx
+4d 8b 4f 68                     # b1c  ld r9, [r15+0x68]
+4d 8b 97 10 01 00 00            # b20  ld r10, [r15+0x110]
+4d 89 14 c1                     # b27  st_w64 [r9+rax*8+0x0], r10
+4d 89 54 c1 08                  # b2b  st_w64 [r9+rax*8+0x8], r10
+e9 6c f8 ff ff                  # b30  jmp 0x4003a1    -> L_prim_epilogue_0
+
+# P_st32:
+49 8b 87 28 01 00 00            # b35  ld rax, [r15+0x128]   addr
+b9 04 00 00 00                  # b3c  mov rcx, 0x4
+4d 8b 57 70                     # b41  ld r10, [r15+0x70]   msize
+4c 39 d0                        # b45  cmp rax, r10   addr <= msize?
+0f 87 70 0f 00 00               # b48  ja 0x401abe   addr > msize -> L_fail_bounds
+4d 8b da                        # b4e  mov r11, r10
+49 29 c3                        # b51  sub r11, rax   msize - addr
+4c 39 d9                        # b54  cmp rcx, r11   len <= msize - addr?
+0f 87 61 0f 00 00               # b57  ja 0x401abe   len > msize - addr -> L_fail_bounds
+4d 8b 47 60                     # b5d  ld r8, [r15+0x60]
+49 8b 97 38 01 00 00            # b61  ld rdx, [r15+0x138]   val
+41 89 14 00                     # b68  st_w32 [r8+rax*1+0x0], rdx
+4d 8b 4f 68                     # b6c  ld r9, [r15+0x68]
+4d 8b 97 10 01 00 00            # b70  ld r10, [r15+0x110]
+4d 89 14 c1                     # b77  st_w64 [r9+rax*8+0x0], r10
+4d 89 54 c1 08                  # b7b  st_w64 [r9+rax*8+0x8], r10
+4d 89 54 c1 10                  # b80  st_w64 [r9+rax*8+0x10], r10
+4d 89 54 c1 18                  # b85  st_w64 [r9+rax*8+0x18], r10
+e9 12 f8 ff ff                  # b8a  jmp 0x4003a1    -> L_prim_epilogue_0
+
+# P_st64:
+49 8b 87 28 01 00 00            # b8f  ld rax, [r15+0x128]   addr
+b9 08 00 00 00                  # b96  mov rcx, 0x8
+4d 8b 57 70                     # b9b  ld r10, [r15+0x70]   msize
+4c 39 d0                        # b9f  cmp rax, r10   addr <= msize?
+0f 87 16 0f 00 00               # ba2  ja 0x401abe   addr > msize -> L_fail_bounds
+4d 8b da                        # ba8  mov r11, r10
+49 29 c3                        # bab  sub r11, rax   msize - addr
+4c 39 d9                        # bae  cmp rcx, r11   len <= msize - addr?
+0f 87 07 0f 00 00               # bb1  ja 0x401abe   len > msize - addr -> L_fail_bounds
+4d 8b 47 60                     # bb7  ld r8, [r15+0x60]
+49 8b 97 38 01 00 00            # bbb  ld rdx, [r15+0x138]   val
+49 89 14 00                     # bc2  st_w64 [r8+rax*1+0x0], rdx
+4d 8b 4f 68                     # bc6  ld r9, [r15+0x68]
+4d 8b 97 10 01 00 00            # bca  ld r10, [r15+0x110]
+4d 89 14 c1                     # bd1  st_w64 [r9+rax*8+0x0], r10
+4d 89 54 c1 08                  # bd5  st_w64 [r9+rax*8+0x8], r10
+4d 89 54 c1 10                  # bda  st_w64 [r9+rax*8+0x10], r10
+4d 89 54 c1 18                  # bdf  st_w64 [r9+rax*8+0x18], r10
+4d 89 54 c1 20                  # be4  st_w64 [r9+rax*8+0x20], r10
+4d 89 54 c1 28                  # be9  st_w64 [r9+rax*8+0x28], r10
+4d 89 54 c1 30                  # bee  st_w64 [r9+rax*8+0x30], r10
+4d 89 54 c1 38                  # bf3  st_w64 [r9+rax*8+0x38], r10
+e9 a4 f7 ff ff                  # bf8  jmp 0x4003a1    -> L_prim_epilogue_0
+
+# P_copy:
+49 8b 8f 28 01 00 00            # bfd  ld rcx, [r15+0x128]   n
+49 8b 97 38 01 00 00            # c04  ld rdx, [r15+0x138]   dst
+49 8b 87 48 01 00 00            # c0b  ld rax, [r15+0x148]   src
+4d 8b 57 70                     # c12  ld r10, [r15+0x70]   msize
+4c 39 d0                        # c16  cmp rax, r10   addr <= msize?
+0f 87 9f 0e 00 00               # c19  ja 0x401abe   addr > msize -> L_fail_bounds
+4d 8b da                        # c1f  mov r11, r10
+49 29 c3                        # c22  sub r11, rax   msize - addr
+4c 39 d9                        # c25  cmp rcx, r11   len <= msize - addr?
+0f 87 90 0e 00 00               # c28  ja 0x401abe   len > msize - addr -> L_fail_bounds
+4d 8b 57 70                     # c2e  ld r10, [r15+0x70]   msize
+4c 39 d2                        # c32  cmp rdx, r10   addr <= msize?
+0f 87 83 0e 00 00               # c35  ja 0x401abe   addr > msize -> L_fail_bounds
+4d 8b da                        # c3b  mov r11, r10
+49 29 d3                        # c3e  sub r11, rdx   msize - addr
+4c 39 d9                        # c41  cmp rcx, r11   len <= msize - addr?
+0f 87 74 0e 00 00               # c44  ja 0x401abe   len > msize - addr -> L_fail_bounds
+48 85 c9                        # c4a  test rcx, rcx
+0f 84 4e f7 ff ff               # c4d  je 0x4003a1    -> L_prim_epilogue_0
+4d 8b 47 60                     # c53  ld r8, [r15+0x60]
+49 8d 34 00                     # c57  lea rsi, [r8+rax*1+0x0]   memw + src
+49 8d 3c 10                     # c5b  lea rdi, [r8+rdx*1+0x0]   memw + dst
+4d 8b 4f 68                     # c5f  ld r9, [r15+0x68]
+4d 8d 24 c1                     # c63  lea r12, [r9+rax*8+0x0]   memp + src*8
+4d 8d 2c d1                     # c67  lea r13, [r9+rdx*8+0x0]   memp + dst*8
+4d 8b 97 10 01 00 00            # c6b  ld r10, [r15+0x110]
+48 39 c2                        # c72  cmp rdx, rax   dst <= src?
+77 27                           # c75  ja 0x400c9e    -> cp_back
+45 31 db                        # c77  xor r11, r11
+
+# cp_fwd:
+49 39 cb                        # c7a  cmp r11, rcx
+0f 83 1e f7 ff ff               # c7d  jae 0x4003a1    -> L_prim_epilogue_0
+42 0f b6 04 1e                  # c83  ld_w8 rax, [rsi+r11*1+0x0]
+42 88 04 1f                     # c88  st_w8 [rdi+r11*1+0x0], rax
+4b 8b 04 dc                     # c8c  ld_w64 rax, [r12+r11*8+0x0]
+4c 01 d0                        # c90  add rax, r10
+4b 89 44 dd 00                  # c93  st_w64 [r13+r11*8+0x0], rax
+49 83 c3 01                     # c98  add r11, 0x1
+eb dc                           # c9c  jmp 0x400c7a    -> cp_fwd
+
+# cp_back:
+4c 8b d9                        # c9e  mov r11, rcx
+
+# cp_bkw:
+4d 85 db                        # ca1  test r11, r11
+0f 84 f7 f6 ff ff               # ca4  je 0x4003a1    -> L_prim_epilogue_0
+49 83 eb 01                     # caa  sub r11, 0x1
+42 0f b6 04 1e                  # cae  ld_w8 rax, [rsi+r11*1+0x0]
+42 88 04 1f                     # cb3  st_w8 [rdi+r11*1+0x0], rax
+4b 8b 04 dc                     # cb7  ld_w64 rax, [r12+r11*8+0x0]
+4c 01 d0                        # cbb  add rax, r10
+4b 89 44 dd 00                  # cbe  st_w64 [r13+r11*8+0x0], rax
+eb dc                           # cc3  jmp 0x400ca1    -> cp_bkw
+
+# P_fill:
+49 8b 97 28 01 00 00            # cc5  ld rdx, [r15+0x128]   b
+49 8b 8f 38 01 00 00            # ccc  ld rcx, [r15+0x138]   n
+49 8b 87 48 01 00 00            # cd3  ld rax, [r15+0x148]   dst
+4d 8b 57 70                     # cda  ld r10, [r15+0x70]   msize
+4c 39 d0                        # cde  cmp rax, r10   addr <= msize?
+0f 87 d7 0d 00 00               # ce1  ja 0x401abe   addr > msize -> L_fail_bounds
+4d 8b da                        # ce7  mov r11, r10
+49 29 c3                        # cea  sub r11, rax   msize - addr
+4c 39 d9                        # ced  cmp rcx, r11   len <= msize - addr?
+0f 87 c8 0d 00 00               # cf0  ja 0x401abe   len > msize - addr -> L_fail_bounds
+4d 8b 47 60                     # cf6  ld r8, [r15+0x60]
+49 8d 3c 00                     # cfa  lea rdi, [r8+rax*1+0x0]
+4d 8b 4f 68                     # cfe  ld r9, [r15+0x68]
+49 8d 34 c1                     # d02  lea rsi, [r9+rax*8+0x0]
+4d 8b 97 10 01 00 00            # d06  ld r10, [r15+0x110]
+45 31 db                        # d0d  xor r11, r11
+
+# fill_loop:
+49 39 cb                        # d10  cmp r11, rcx
+0f 83 88 f6 ff ff               # d13  jae 0x4003a1    -> L_prim_epilogue_0
+42 88 14 1f                     # d19  st_w8 [rdi+r11*1+0x0], rdx
+4e 89 14 de                     # d1d  st_w64 [rsi+r11*8+0x0], r10
+49 83 c3 01                     # d21  add r11, 0x1
+eb e9                           # d25  jmp 0x400d10    -> fill_loop
+
+# P_mcmp:
+49 8b 8f 28 01 00 00            # d27  ld rcx, [r15+0x128]   n
+49 8b 97 38 01 00 00            # d2e  ld rdx, [r15+0x138]   y
+49 8b 87 48 01 00 00            # d35  ld rax, [r15+0x148]   x
+4d 8b 57 70                     # d3c  ld r10, [r15+0x70]   msize
+4c 39 d0                        # d40  cmp rax, r10   addr <= msize?
+0f 87 75 0d 00 00               # d43  ja 0x401abe   addr > msize -> L_fail_bounds
+4d 8b da                        # d49  mov r11, r10
+49 29 c3                        # d4c  sub r11, rax   msize - addr
+4c 39 d9                        # d4f  cmp rcx, r11   len <= msize - addr?
+0f 87 66 0d 00 00               # d52  ja 0x401abe   len > msize - addr -> L_fail_bounds
+4d 8b 57 70                     # d58  ld r10, [r15+0x70]   msize
+4c 39 d2                        # d5c  cmp rdx, r10   addr <= msize?
+0f 87 59 0d 00 00               # d5f  ja 0x401abe   addr > msize -> L_fail_bounds
+4d 8b da                        # d65  mov r11, r10
+49 29 d3                        # d68  sub r11, rdx   msize - addr
+4c 39 d9                        # d6b  cmp rcx, r11   len <= msize - addr?
+0f 87 4a 0d 00 00               # d6e  ja 0x401abe   len > msize - addr -> L_fail_bounds
+4d 8b 47 60                     # d74  ld r8, [r15+0x60]
+49 8d 34 00                     # d78  lea rsi, [r8+rax*1+0x0]   memw + x
+49 8d 3c 10                     # d7c  lea rdi, [r8+rdx*1+0x0]   memw + y
+4d 8b 4f 68                     # d80  ld r9, [r15+0x68]
+4d 8d 24 c1                     # d84  lea r12, [r9+rax*8+0x0]   memp + x*8
+4d 8d 2c d1                     # d88  lea r13, [r9+rdx*8+0x0]   memp + y*8
+bb 01 00 00 00                  # d8c  mov rbx, 0x1   eq = 1
+4d 8b 97 10 01 00 00            # d91  ld r10, [r15+0x110]   pm = cur_q
+45 31 db                        # d98  xor r11, r11   i = 0
+45 31 f6                        # d9b  xor r14, r14   0 constant for cmovne
+
+# mcmp_loop:
+49 39 cb                        # d9e  cmp r11, rcx
+73 26                           # da1  jae 0x400dc9    -> mcmp_done
+42 0f b6 04 1e                  # da3  ld_w8 rax, [rsi+r11*1+0x0]
+42 0f b6 14 1f                  # da8  ld_w8 rdx, [rdi+r11*1+0x0]
+48 39 d0                        # dad  cmp rax, rdx
+49 0f 45 de                     # db0  cmovne rbx, r14   if mismatch eq = 0 (no short-circuit)
+4b 8b 04 dc                     # db4  ld_w64 rax, [r12+r11*8+0x0]
+49 01 c2                        # db8  add r10, rax
+4b 8b 44 dd 00                  # dbb  ld_w64 rax, [r13+r11*8+0x0]
+49 01 c2                        # dc0  add r10, rax
+49 83 c3 01                     # dc3  add r11, 0x1
+eb d5                           # dc7  jmp 0x400d9e    -> mcmp_loop
+
+# mcmp_done:
+49 89 9f 68 01 00 00            # dc9  st [r15+0x168], rbx
+4d 89 97 70 01 00 00            # dd0  st [r15+0x170], r10
+e9 c5 f5 ff ff                  # dd7  jmp 0x4003a1    -> L_prim_epilogue
+
+# P_alloc:
+49 8b 47 78                     # ddc  ld rax, [r15+0x78]
+49 8b 8f 28 01 00 00            # de0  ld rcx, [r15+0x128]   n
+4d 8b 57 70                     # de7  ld r10, [r15+0x70]   msize
+4c 39 d0                        # deb  cmp rax, r10   addr <= msize?
+0f 87 ca 0c 00 00               # dee  ja 0x401abe   addr > msize -> L_fail_bounds
+4d 8b da                        # df4  mov r11, r10
+49 29 c3                        # df7  sub r11, rax   msize - addr
+4c 39 d9                        # dfa  cmp rcx, r11   len <= msize - addr?
+0f 87 bb 0c 00 00               # dfd  ja 0x401abe   len > msize - addr -> L_fail_bounds
+48 8b d0                        # e03  mov rdx, rax
+48 01 ca                        # e06  add rdx, rcx
+49 89 57 78                     # e09  st [r15+0x78], rdx
+e9 78 f5 ff ff                  # e0d  jmp 0x40038a    -> L_prim_epilogue_mk1
+
+# P_mark:
+49 8b 47 78                     # e12  ld rax, [r15+0x78]
+e9 6f f5 ff ff                  # e16  jmp 0x40038a    -> L_prim_epilogue_mk1
+
+# P_release:
+49 8b 87 28 01 00 00            # e1b  ld rax, [r15+0x128]
+49 8b 4f 78                     # e22  ld rcx, [r15+0x78]
+48 39 c8                        # e26  cmp rax, rcx
+0f 87 8f 0c 00 00               # e29  ja 0x401abe    -> L_fail_bounds
+49 89 47 78                     # e2f  st [r15+0x78], rax
+e9 69 f5 ff ff                  # e33  jmp 0x4003a1    -> L_prim_epilogue_0
+
+# P_streq:
+49 8b 87 58 01 00 00            # e38  ld rax, [r15+0x158]   a1
+49 8b 8f 48 01 00 00            # e3f  ld rcx, [r15+0x148]   l1
+4d 8b 57 70                     # e46  ld r10, [r15+0x70]   msize
+4c 39 d0                        # e4a  cmp rax, r10   addr <= msize?
+0f 87 6b 0c 00 00               # e4d  ja 0x401abe   addr > msize -> L_fail_bounds
+4d 8b da                        # e53  mov r11, r10
+49 29 c3                        # e56  sub r11, rax   msize - addr
+4c 39 d9                        # e59  cmp rcx, r11   len <= msize - addr?
+0f 87 5c 0c 00 00               # e5c  ja 0x401abe   len > msize - addr -> L_fail_bounds
+49 8b 97 38 01 00 00            # e62  ld rdx, [r15+0x138]   a2
+4d 8b 87 28 01 00 00            # e69  ld r8, [r15+0x128]   l2
+4d 8b 57 70                     # e70  ld r10, [r15+0x70]   msize
+4c 39 d2                        # e74  cmp rdx, r10   addr <= msize?
+0f 87 41 0c 00 00               # e77  ja 0x401abe   addr > msize -> L_fail_bounds
+4d 8b da                        # e7d  mov r11, r10
+49 29 d3                        # e80  sub r11, rdx   msize - addr
+4d 39 d8                        # e83  cmp r8, r11   len <= msize - addr?
+0f 87 32 0c 00 00               # e86  ja 0x401abe   len > msize - addr -> L_fail_bounds
+4c 39 c1                        # e8c  cmp rcx, r8   l1 == l2?
+74 07                           # e8f  je 0x400e98    -> streq_eq_len
+31 c0                           # e91  xor rax, rax
+e9 f2 f4 ff ff                  # e93  jmp 0x40038a    -> L_prim_epilogue_mk1
+
+# streq_eq_len:
+4d 8b 47 60                     # e98  ld r8, [r15+0x60]
+49 8d 34 00                     # e9c  lea rsi, [r8+rax*1+0x0]   memw + a1
+49 8d 3c 10                     # ea0  lea rdi, [r8+rdx*1+0x0]   memw + a2
+4d 8b 4f 68                     # ea4  ld r9, [r15+0x68]
+4d 8d 24 c1                     # ea8  lea r12, [r9+rax*8+0x0]   memp + a1*8
+4d 8d 2c d1                     # eac  lea r13, [r9+rdx*8+0x0]   memp + a2*8
+bb 01 00 00 00                  # eb0  mov rbx, 0x1   eq = 1
+4d 8b 97 10 01 00 00            # eb5  ld r10, [r15+0x110]   pm = cur_q
+45 31 db                        # ebc  xor r11, r11
+45 31 f6                        # ebf  xor r14, r14
+
+# streq_loop:
+49 39 cb                        # ec2  cmp r11, rcx
+73 26                           # ec5  jae 0x400eed    -> streq_done
+42 0f b6 04 1e                  # ec7  ld_w8 rax, [rsi+r11*1+0x0]
+42 0f b6 14 1f                  # ecc  ld_w8 rdx, [rdi+r11*1+0x0]
+48 39 d0                        # ed1  cmp rax, rdx
+49 0f 45 de                     # ed4  cmovne rbx, r14
+4b 8b 04 dc                     # ed8  ld_w64 rax, [r12+r11*8+0x0]
+49 01 c2                        # edc  add r10, rax
+4b 8b 44 dd 00                  # edf  ld_w64 rax, [r13+r11*8+0x0]
+49 01 c2                        # ee4  add r10, rax
+49 83 c3 01                     # ee7  add r11, 0x1
+eb d5                           # eeb  jmp 0x400ec2    -> streq_loop
+
+# streq_done:
+49 89 9f 68 01 00 00            # eed  st [r15+0x168], rbx
+4d 89 97 70 01 00 00            # ef4  st [r15+0x170], r10
+e9 a1 f4 ff ff                  # efb  jmp 0x4003a1    -> L_prim_epilogue
+
+# P_strhash:
+49 8b 8f 28 01 00 00            # f00  ld rcx, [r15+0x128]   l
+49 8b 87 38 01 00 00            # f07  ld rax, [r15+0x138]   a
+4d 8b 57 70                     # f0e  ld r10, [r15+0x70]   msize
+4c 39 d0                        # f12  cmp rax, r10   addr <= msize?
+0f 87 a3 0b 00 00               # f15  ja 0x401abe   addr > msize -> L_fail_bounds
+4d 8b da                        # f1b  mov r11, r10
+49 29 c3                        # f1e  sub r11, rax   msize - addr
+4c 39 d9                        # f21  cmp rcx, r11   len <= msize - addr?
+0f 87 94 0b 00 00               # f24  ja 0x401abe   len > msize - addr -> L_fail_bounds
+4d 8b 47 60                     # f2a  ld r8, [r15+0x60]
+49 8d 34 00                     # f2e  lea rsi, [r8+rax*1+0x0]
+4d 8b 4f 68                     # f32  ld r9, [r15+0x68]
+49 8d 3c c1                     # f36  lea rdi, [r9+rax*8+0x0]
+48 b8 25 23 22 84 e4 9c f2 cb   # f3a  mov rax, 0xcbf29ce484222325   FNV offset basis
+48 ba b3 01 00 00 00 01 00 00   # f44  mov rdx, 0x100000001b3   FNV prime
+4d 8b 97 10 01 00 00            # f4e  ld r10, [r15+0x110]   pm = cur_q
+45 31 db                        # f55  xor r11, r11   i = 0
+
+# sh_loop:
+49 39 cb                        # f58  cmp r11, rcx
+73 19                           # f5b  jae 0x400f76    -> sh_done
+42 0f b6 1c 1e                  # f5d  ld_w8 rbx, [rsi+r11*1+0x0]
+48 31 d8                        # f62  xor rax, rbx
+48 0f af c2                     # f65  imul rax, rdx
+4a 8b 1c df                     # f69  ld_w64 rbx, [rdi+r11*8+0x0]
+49 01 da                        # f6d  add r10, rbx
+49 83 c3 01                     # f70  add r11, 0x1
+eb e2                           # f74  jmp 0x400f58    -> sh_loop
+
+# sh_done:
+49 89 87 68 01 00 00            # f76  st [r15+0x168], rax
+4d 89 97 70 01 00 00            # f7d  st [r15+0x170], r10
+e9 18 f4 ff ff                  # f84  jmp 0x4003a1    -> L_prim_epilogue
+
+# P_tnew:
+49 8b 87 88 00 00 00            # f89  ld rax, [r15+0x88]
+49 8b 8f 90 00 00 00            # f90  ld rcx, [r15+0x90]
+48 39 c8                        # f97  cmp rax, rcx
+72 33                           # f9a  jb 0x400fcf    -> tn_room
+49 8b bf 80 00 00 00            # f9c  ld rdi, [r15+0x80]
+48 8b f1                        # fa3  mov rsi, rcx
+48 c1 e6 03                     # fa6  shl rsi, 3
+48 8b d6                        # faa  mov rdx, rsi
+48 c1 e2 01                     # fad  shl rdx, 1
+e8 dd 0b 00 00                  # fb1  call 0x401b93    -> fn_mremap
+49 89 87 80 00 00 00            # fb6  st [r15+0x80], rax
+49 8b 8f 90 00 00 00            # fbd  ld rcx, [r15+0x90]
+48 c1 e1 01                     # fc4  shl rcx, 1
+49 89 8f 90 00 00 00            # fc8  st [r15+0x90], rcx
+
+# tn_room:
+49 8b 87 88 00 00 00            # fcf  ld rax, [r15+0x88]
+49 8b 97 80 00 00 00            # fd6  ld rdx, [r15+0x80]
+48 b9 ff ff ff ff ff ff ff ff   # fdd  mov rcx, 0xffffffffffffffff
+48 89 0c c2                     # fe7  st_w64 [rdx+rax*8+0x0], rcx   tab_heads[id] = ~0
+48 8d 48 01                     # feb  lea rcx, [rax+0x1]
+49 89 8f 88 00 00 00            # fef  st [r15+0x88], rcx
+e9 8f f3 ff ff                  # ff6  jmp 0x40038a    -> L_prim_epilogue_mk1
+
+# P_tput:
+4d 8b a7 48 01 00 00            # ffb  ld r12, [r15+0x148]   tb
+49 8b 8f 88 00 00 00            # 1002  ld rcx, [r15+0x88]
+49 39 cc                        # 1009  cmp r12, rcx
+0f 83 ce 0a 00 00               # 100c  jae 0x401ae0    -> L_fail_badTable
+49 8b 87 a0 00 00 00            # 1012  ld rax, [r15+0xa0]
+49 8b 8f a8 00 00 00            # 1019  ld rcx, [r15+0xa8]
+48 39 c8                        # 1020  cmp rax, rcx
+72 33                           # 1023  jb 0x401058    -> tp_room
+49 8b bf 98 00 00 00            # 1025  ld rdi, [r15+0x98]
+48 8b f1                        # 102c  mov rsi, rcx
+48 c1 e6 05                     # 102f  shl rsi, 5   * 32
+48 8b d6                        # 1033  mov rdx, rsi
+48 c1 e2 01                     # 1036  shl rdx, 1
+e8 54 0b 00 00                  # 103a  call 0x401b93    -> fn_mremap
+49 89 87 98 00 00 00            # 103f  st [r15+0x98], rax
+49 8b 8f a8 00 00 00            # 1046  ld rcx, [r15+0xa8]
+48 c1 e1 01                     # 104d  shl rcx, 1
+49 89 8f a8 00 00 00            # 1051  st [r15+0xa8], rcx
+
+# tp_room:
+49 8b 87 a0 00 00 00            # 1058  ld rax, [r15+0xa0]   idx
+48 8b d0                        # 105f  mov rdx, rax
+48 c1 e2 05                     # 1062  shl rdx, 5   idx * 32
+4d 8b 87 98 00 00 00            # 1066  ld r8, [r15+0x98]
+49 01 d0                        # 106d  add r8, rdx   node ptr
+49 8b 8f 38 01 00 00            # 1070  ld rcx, [r15+0x138]   k.w
+49 89 08                        # 1077  st [r8+0x0], rcx   node.key
+49 8b 8f 28 01 00 00            # 107a  ld rcx, [r15+0x128]   v.w
+49 89 48 08                     # 1081  st [r8+0x8], rcx   node.val_w
+49 8b 8f 30 01 00 00            # 1085  ld rcx, [r15+0x130]   v.p
+49 8b 97 10 01 00 00            # 108c  ld rdx, [r15+0x110]
+48 01 d1                        # 1093  add rcx, rdx
+49 89 48 10                     # 1096  st [r8+0x10], rcx   node.val_p = v.p + q
+4d 8b 8f 80 00 00 00            # 109a  ld r9, [r15+0x80]
+4b 8b 0c e1                     # 10a1  ld_w64 rcx, [r9+r12*8+0x0]   old head
+49 89 48 18                     # 10a5  st [r8+0x18], rcx   node.prev = old head
+4b 89 04 e1                     # 10a9  st_w64 [r9+r12*8+0x0], rax   tab_heads[tb] = idx
+48 83 c0 01                     # 10ad  add rax, 0x1
+49 89 87 a0 00 00 00            # 10b1  st [r15+0xa0], rax
+e9 e4 f2 ff ff                  # 10b8  jmp 0x4003a1    -> L_prim_epilogue_0
+
+# P_tget:
+4d 8b a7 38 01 00 00            # 10bd  ld r12, [r15+0x138]   tb
+49 8b 8f 88 00 00 00            # 10c4  ld rcx, [r15+0x88]
+49 39 cc                        # 10cb  cmp r12, rcx
+0f 83 0c 0a 00 00               # 10ce  jae 0x401ae0    -> L_fail_badTable
+4d 8b 8f 80 00 00 00            # 10d4  ld r9, [r15+0x80]
+4b 8b 04 e1                     # 10db  ld_w64 rax, [r9+r12*8+0x0]   idx = tab_heads[tb]
+4d 8b 87 98 00 00 00            # 10df  ld r8, [r15+0x98]
+49 8b 97 28 01 00 00            # 10e6  ld rdx, [r15+0x128]   target key
+48 be ff ff ff ff ff ff ff ff   # 10ed  mov rsi, 0xffffffffffffffff
+
+# tg_loop:
+48 39 f0                        # 10f7  cmp rax, rsi
+74 52                           # 10fa  je 0x40114e    -> tg_miss
+48 8b c8                        # 10fc  mov rcx, rax
+48 c1 e1 05                     # 10ff  shl rcx, 5
+4d 8b 14 08                     # 1103  ld_w64 r10, [r8+rcx*1+0x0]   node.key
+49 39 d2                        # 1107  cmp r10, rdx
+74 07                           # 110a  je 0x401113    -> tg_hit
+49 8b 44 08 18                  # 110c  ld_w64 rax, [r8+rcx*1+0x18]   node.prev
+eb e4                           # 1111  jmp 0x4010f7    -> tg_loop
+
+# tg_hit:
+41 ba 01 00 00 00               # 1113  mov r10, 0x1
+4d 89 97 68 01 00 00            # 1119  st [r15+0x168], r10
+4d 8b 9f 10 01 00 00            # 1120  ld r11, [r15+0x110]
+4d 89 9f 70 01 00 00            # 1127  st [r15+0x170], r11
+49 8b 44 08 08                  # 112e  ld_w64 rax, [r8+rcx*1+0x8]   node.val_w
+49 89 87 78 01 00 00            # 1133  st [r15+0x178], rax
+49 8b 44 08 10                  # 113a  ld_w64 rax, [r8+rcx*1+0x10]   node.val_p
+4c 01 d8                        # 113f  add rax, r11   node.val_p + cur_q
+49 89 87 80 01 00 00            # 1142  st [r15+0x180], rax
+e9 53 f2 ff ff                  # 1149  jmp 0x4003a1    -> L_prim_epilogue
+
+# tg_miss:
+31 c0                           # 114e  xor rax, rax
+49 89 87 68 01 00 00            # 1150  st [r15+0x168], rax
+49 89 87 78 01 00 00            # 1157  st [r15+0x178], rax
+4d 8b 9f 10 01 00 00            # 115e  ld r11, [r15+0x110]
+4d 89 9f 70 01 00 00            # 1165  st [r15+0x170], r11
+4d 89 9f 80 01 00 00            # 116c  st [r15+0x180], r11
+e9 29 f2 ff ff                  # 1173  jmp 0x4003a1    -> L_prim_epilogue
+
+# P_getb:
+49 8b 8f c0 00 00 00            # 1178  ld rcx, [r15+0xc0]
+49 8b 97 b8 00 00 00            # 117f  ld rdx, [r15+0xb8]
+48 39 d1                        # 1186  cmp rcx, rdx
+72 0f                           # 1189  jb 0x40119a    -> gb_have
+48 b8 ff ff ff ff ff ff ff ff   # 118b  mov rax, 0xffffffffffffffff
+e9 f0 f1 ff ff                  # 1195  jmp 0x40038a    -> L_prim_epilogue_mk1
+
+# gb_have:
+4d 8b 87 b0 00 00 00            # 119a  ld r8, [r15+0xb0]
+41 0f b6 04 08                  # 11a1  ld_w8 rax, [r8+rcx*1+0x0]   inp[ipos]
+48 83 c1 01                     # 11a6  add rcx, 0x1
+49 89 8f c0 00 00 00            # 11aa  st [r15+0xc0], rcx
+49 89 87 68 01 00 00            # 11b1  st [r15+0x168], rax
+49 8b 97 e0 00 00 00            # 11b8  ld rdx, [r15+0xe0]
+48 83 c2 01                     # 11bf  add rdx, 0x1
+49 89 97 70 01 00 00            # 11c3  st [r15+0x170], rdx
+e9 d2 f1 ff ff                  # 11ca  jmp 0x4003a1    -> L_prim_epilogue
+
+# P_putb:
+49 8b bf 28 01 00 00            # 11cf  ld rdi, [r15+0x128]
+e8 be 0a 00 00                  # 11d6  call 0x401c99    -> fn_out_push_byte
+e9 c1 f1 ff ff                  # 11db  jmp 0x4003a1    -> L_prim_epilogue_0
+
+# P_putn:
+49 8b bf 28 01 00 00            # 11e0  ld rdi, [r15+0x128]
+e8 10 0b 00 00                  # 11e7  call 0x401cfc    -> fn_out_push_u64
+e9 b0 f1 ff ff                  # 11ec  jmp 0x4003a1    -> L_prim_epilogue_0
+
+# P_exit:
+49 8b 87 28 01 00 00            # 11f1  ld rax, [r15+0x128]
+48 81 e0 ff 00 00 00            # 11f8  and rax, 0xff
+49 89 87 c0 01 00 00            # 11ff  st [r15+0x1c0], rax
+e9 f7 07 00 00                  # 1206  jmp 0x401a02    -> L_vm_halt
+
+# P_zero_mk1:
+31 c0                           # 120b  xor rax, rax
+e9 78 f1 ff ff                  # 120d  jmp 0x40038a    -> L_prim_epilogue_mk1
+
+# P_provget:
+49 8b 87 30 01 00 00            # 1212  ld rax, [r15+0x130]
+49 89 87 68 01 00 00            # 1219  st [r15+0x168], rax
+49 8b 97 10 01 00 00            # 1220  ld rdx, [r15+0x110]
+49 89 97 70 01 00 00            # 1227  st [r15+0x170], rdx
+49 8b 87 28 01 00 00            # 122e  ld rax, [r15+0x128]
+49 89 87 78 01 00 00            # 1235  st [r15+0x178], rax
+49 8b 87 30 01 00 00            # 123c  ld rax, [r15+0x130]
+49 8b 8f e0 00 00 00            # 1243  ld rcx, [r15+0xe0]
+48 01 c8                        # 124a  add rax, rcx
+48 83 c0 01                     # 124d  add rax, 0x1
+49 89 87 80 01 00 00            # 1251  st [r15+0x180], rax
+e9 44 f1 ff ff                  # 1258  jmp 0x4003a1    -> L_prim_epilogue
+
+# P_confget:
+31 c0                           # 125d  xor rax, rax
+49 89 87 68 01 00 00            # 125f  st [r15+0x168], rax
+49 8b 97 10 01 00 00            # 1266  ld rdx, [r15+0x110]
+49 89 97 70 01 00 00            # 126d  st [r15+0x170], rdx
+49 8b 87 28 01 00 00            # 1274  ld rax, [r15+0x128]
+49 89 87 78 01 00 00            # 127b  st [r15+0x178], rax
+49 8b 87 30 01 00 00            # 1282  ld rax, [r15+0x130]
+49 8b 8f e0 00 00 00            # 1289  ld rcx, [r15+0xe0]
+48 01 c8                        # 1290  add rax, rcx
+48 83 c0 01                     # 1293  add rax, 0x1
+49 89 87 80 01 00 00            # 1297  st [r15+0x180], rax
+e9 fe f0 ff ff                  # 129e  jmp 0x4003a1    -> L_prim_epilogue
+
+# P_demand:
+49 8b 87 28 01 00 00            # 12a3  ld rax, [r15+0x128]
+48 85 c0                        # 12aa  test rax, rax
+74 05                           # 12ad  je 0x4012b4    (jne: je over jmp)
+e9 3d 08 00 00                  # 12af  jmp 0x401af1   -> L_fail_demand
+49 8b 87 38 01 00 00            # 12b4  ld rax, [r15+0x138]
+49 89 87 68 01 00 00            # 12bb  st [r15+0x168], rax
+49 8b 87 40 01 00 00            # 12c2  ld rax, [r15+0x140]
+49 8b 8f e0 00 00 00            # 12c9  ld rcx, [r15+0xe0]
+48 01 c8                        # 12d0  add rax, rcx
+48 83 c0 01                     # 12d3  add rax, 0x1
+49 89 87 70 01 00 00            # 12d7  st [r15+0x170], rax
+e9 be f0 ff ff                  # 12de  jmp 0x4003a1    -> L_prim_epilogue
+
+# O_lit:
+49 8b bf 08 01 00 00            # 12e3  ld rdi, [r15+0x108]
+49 8b b7 e0 00 00 00            # 12ea  ld rsi, [r15+0xe0]
+48 83 c6 01                     # 12f1  add rsi, 0x1
+e8 ec 08 00 00                  # 12f5  call 0x401be6    -> fn_ds_push
+49 8b 47 30                     # 12fa  ld rax, [r15+0x30]
+49 8b 4f 38                     # 12fe  ld rcx, [r15+0x38]
+48 83 e9 01                     # 1302  sub rcx, 0x1
+48 c1 e1 05                     # 1306  shl rcx, 5   * 32
+48 01 c8                        # 130a  add rax, rcx
+48 8b 48 08                     # 130d  ld rcx, [rax+0x8]   f.pc
+48 83 c1 01                     # 1311  add rcx, 0x1
+48 89 48 08                     # 1315  st [rax+0x8], rcx   f.pc + 1
+e9 92 ed ff ff                  # 1319  jmp 0x4000b0    -> L_vm_loop
+
+# O_str:
+49 8b 97 e8 00 00 00            # 131e  ld rdx, [r15+0xe8]
+48 8b 42 10                     # 1325  ld rax, [rdx+0x10]
+49 8b 97 f0 00 00 00            # 1329  ld rdx, [r15+0xf0]
+48 8b 5a 10                     # 1330  ld rbx, [rdx+0x10]
+49 8b 97 f8 00 00 00            # 1334  ld rdx, [r15+0xf8]
+48 8b 4a 10                     # 133b  ld rcx, [rdx+0x10]
+48 39 d8                        # 133f  cmp rax, rbx   vote3: a == b?
+74 12                           # 1342  je 0x401356    -> v3_str_nd_6
+48 39 c8                        # 1344  cmp rax, rcx   vote3: a == c?
+74 0d                           # 1347  je 0x401356    -> v3_str_nd_6
+48 39 cb                        # 1349  cmp rbx, rcx   vote3: b == c?
+74 05                           # 134c  je 0x401353   3-way disagreement -> exit 3 (jne: je over jmp)
+e9 11 ef ff ff                  # 134e  jmp 0x400264   -> L_exit3
+48 8b c3                        # 1353  mov rax, rbx   repair rax = b
+
+# v3_str_nd_6:
+4d 8b 87 08 01 00 00            # 1356  ld r8, [r15+0x108]   i
+49 39 c0                        # 135d  cmp r8, rax
+0f 83 58 07 00 00               # 1360  jae 0x401abe    -> L_fail_bounds
+49 c1 e0 04                     # 1366  shl r8, 4   16 * i
+49 83 c0 20                     # 136a  add r8, 0x20   off = 32 + 16*i
+49 8b 97 e8 00 00 00            # 136e  ld rdx, [r15+0xe8]   code1
+4a 8b 04 02                     # 1375  ld_w64 rax, [rdx+r8*1+0x0]   replica 1
+49 8b 97 f0 00 00 00            # 1379  ld rdx, [r15+0xf0]   code2
+4a 8b 1c 02                     # 1380  ld_w64 rbx, [rdx+r8*1+0x0]   replica 2
+49 8b 97 f8 00 00 00            # 1384  ld rdx, [r15+0xf8]   code3
+4a 8b 0c 02                     # 138b  ld_w64 rcx, [rdx+r8*1+0x0]   replica 3
+48 39 d8                        # 138f  cmp rax, rbx   vote3: a == b?
+74 12                           # 1392  je 0x4013a6    -> v3_str_addr_7
+48 39 c8                        # 1394  cmp rax, rcx   vote3: a == c?
+74 0d                           # 1397  je 0x4013a6    -> v3_str_addr_7
+48 39 cb                        # 1399  cmp rbx, rcx   vote3: b == c?
+74 05                           # 139c  je 0x4013a3   3-way disagreement -> exit 3 (jne: je over jmp)
+e9 c1 ee ff ff                  # 139e  jmp 0x400264   -> L_exit3
+48 8b c3                        # 13a3  mov rax, rbx   repair rax = b
+
+# v3_str_addr_7:
+49 89 87 68 02 00 00            # 13a6  st [r15+0x268], rax
+49 8b 97 e8 00 00 00            # 13ad  ld rdx, [r15+0xe8]   code1
+4a 8b 44 02 08                  # 13b4  ld_w64 rax, [rdx+r8*1+0x8]   replica 1
+49 8b 97 f0 00 00 00            # 13b9  ld rdx, [r15+0xf0]   code2
+4a 8b 5c 02 08                  # 13c0  ld_w64 rbx, [rdx+r8*1+0x8]   replica 2
+49 8b 97 f8 00 00 00            # 13c5  ld rdx, [r15+0xf8]   code3
+4a 8b 4c 02 08                  # 13cc  ld_w64 rcx, [rdx+r8*1+0x8]   replica 3
+48 39 d8                        # 13d1  cmp rax, rbx   vote3: a == b?
+74 12                           # 13d4  je 0x4013e8    -> v3_str_len_8
+48 39 c8                        # 13d6  cmp rax, rcx   vote3: a == c?
+74 0d                           # 13d9  je 0x4013e8    -> v3_str_len_8
+48 39 cb                        # 13db  cmp rbx, rcx   vote3: b == c?
+74 05                           # 13de  je 0x4013e5   3-way disagreement -> exit 3 (jne: je over jmp)
+e9 7f ee ff ff                  # 13e0  jmp 0x400264   -> L_exit3
+48 8b c3                        # 13e5  mov rax, rbx   repair rax = b
+
+# v3_str_len_8:
+49 89 87 70 02 00 00            # 13e8  st [r15+0x270], rax
+49 8b bf 68 02 00 00            # 13ef  ld rdi, [r15+0x268]   addr
+49 8b b7 e0 00 00 00            # 13f6  ld rsi, [r15+0xe0]
+48 83 c6 01                     # 13fd  add rsi, 0x1
+e8 e0 07 00 00                  # 1401  call 0x401be6    -> fn_ds_push
+49 8b bf 70 02 00 00            # 1406  ld rdi, [r15+0x270]   len
+49 8b b7 e0 00 00 00            # 140d  ld rsi, [r15+0xe0]
+48 83 c6 01                     # 1414  add rsi, 0x1
+e8 c9 07 00 00                  # 1418  call 0x401be6    -> fn_ds_push
+49 8b 47 30                     # 141d  ld rax, [r15+0x30]
+49 8b 4f 38                     # 1421  ld rcx, [r15+0x38]
+48 83 e9 01                     # 1425  sub rcx, 0x1
+48 c1 e1 05                     # 1429  shl rcx, 5   * 32
+48 01 c8                        # 142d  add rax, rcx
+48 8b 48 08                     # 1430  ld rcx, [rax+0x8]   f.pc
+48 83 c1 01                     # 1434  add rcx, 0x1
+48 89 48 08                     # 1438  st [rax+0x8], rcx   f.pc + 1
+e9 6f ec ff ff                  # 143c  jmp 0x4000b0    -> L_vm_loop
+
+# O_pick:
+49 8b 87 08 01 00 00            # 1441  ld rax, [r15+0x108]   n
+49 8b 4f 08                     # 1448  ld rcx, [r15+0x8]
+48 39 c8                        # 144c  cmp rax, rcx
+0f 83 03 06 00 00               # 144f  jae 0x401a58    -> L_fail_underflow
+48 29 c1                        # 1455  sub rcx, rax
+48 83 e9 01                     # 1458  sub rcx, 0x1   idx = ds_len - 1 - n
+48 c1 e1 04                     # 145c  shl rcx, 4
+49 8b 17                        # 1460  ld rdx, [r15+0x0]
+48 8b 3c 0a                     # 1463  ld_w64 rdi, [rdx+rcx*1+0x0]
+48 8b 74 0a 08                  # 1467  ld_w64 rsi, [rdx+rcx*1+0x8]
+4d 8b 87 e0 00 00 00            # 146c  ld r8, [r15+0xe0]
+4c 01 c6                        # 1473  add rsi, r8
+48 83 c6 01                     # 1476  add rsi, 0x1
+e8 67 07 00 00                  # 147a  call 0x401be6    -> fn_ds_push
+49 8b 47 30                     # 147f  ld rax, [r15+0x30]
+49 8b 4f 38                     # 1483  ld rcx, [r15+0x38]
+48 83 e9 01                     # 1487  sub rcx, 0x1
+48 c1 e1 05                     # 148b  shl rcx, 5   * 32
+48 01 c8                        # 148f  add rax, rcx
+48 8b 48 08                     # 1492  ld rcx, [rax+0x8]   f.pc
+48 83 c1 01                     # 1496  add rcx, 0x1
+48 89 48 08                     # 149a  st [rax+0x8], rcx   f.pc + 1
+e9 0d ec ff ff                  # 149e  jmp 0x4000b0    -> L_vm_loop
+
+# O_tor:
+49 8b 4f 08                     # 14a3  ld rcx, [r15+0x8]
+48 85 c9                        # 14a7  test rcx, rcx
+0f 84 a8 05 00 00               # 14aa  je 0x401a58    -> L_fail_underflow
+48 83 e9 01                     # 14b0  sub rcx, 0x1
+49 89 4f 08                     # 14b4  st [r15+0x8], rcx
+48 c1 e1 04                     # 14b8  shl rcx, 4
+49 8b 17                        # 14bc  ld rdx, [r15+0x0]
+48 8b 3c 0a                     # 14bf  ld_w64 rdi, [rdx+rcx*1+0x0]
+48 8b 74 0a 08                  # 14c3  ld_w64 rsi, [rdx+rcx*1+0x8]
+4d 8b 87 e0 00 00 00            # 14c8  ld r8, [r15+0xe0]
+4c 01 c6                        # 14cf  add rsi, r8
+48 83 c6 01                     # 14d2  add rsi, 0x1
+e8 63 07 00 00                  # 14d6  call 0x401c3e    -> fn_aux_push
+49 8b 47 30                     # 14db  ld rax, [r15+0x30]
+49 8b 4f 38                     # 14df  ld rcx, [r15+0x38]
+48 83 e9 01                     # 14e3  sub rcx, 0x1
+48 c1 e1 05                     # 14e7  shl rcx, 5   * 32
+48 01 c8                        # 14eb  add rax, rcx
+48 8b 48 08                     # 14ee  ld rcx, [rax+0x8]   f.pc
+48 83 c1 01                     # 14f2  add rcx, 0x1
+48 89 48 08                     # 14f6  st [rax+0x8], rcx   f.pc + 1
+e9 b1 eb ff ff                  # 14fa  jmp 0x4000b0    -> L_vm_loop
+
+# O_fromr:
+49 8b 4f 20                     # 14ff  ld rcx, [r15+0x20]
+48 85 c9                        # 1503  test rcx, rcx
+0f 84 5d 05 00 00               # 1506  je 0x401a69    -> L_fail_auxUnderflow
+48 83 e9 01                     # 150c  sub rcx, 0x1
+49 89 4f 20                     # 1510  st [r15+0x20], rcx
+48 c1 e1 04                     # 1514  shl rcx, 4
+49 8b 57 18                     # 1518  ld rdx, [r15+0x18]
+48 8b 3c 0a                     # 151c  ld_w64 rdi, [rdx+rcx*1+0x0]
+48 8b 74 0a 08                  # 1520  ld_w64 rsi, [rdx+rcx*1+0x8]
+4d 8b 87 e0 00 00 00            # 1525  ld r8, [r15+0xe0]
+4c 01 c6                        # 152c  add rsi, r8
+48 83 c6 01                     # 152f  add rsi, 0x1
+e8 ae 06 00 00                  # 1533  call 0x401be6    -> fn_ds_push
+49 8b 47 30                     # 1538  ld rax, [r15+0x30]
+49 8b 4f 38                     # 153c  ld rcx, [r15+0x38]
+48 83 e9 01                     # 1540  sub rcx, 0x1
+48 c1 e1 05                     # 1544  shl rcx, 5   * 32
+48 01 c8                        # 1548  add rax, rcx
+48 8b 48 08                     # 154b  ld rcx, [rax+0x8]   f.pc
+48 83 c1 01                     # 154f  add rcx, 0x1
+48 89 48 08                     # 1553  st [rax+0x8], rcx   f.pc + 1
+e9 54 eb ff ff                  # 1557  jmp 0x4000b0    -> L_vm_loop
+
+# O_rfetch:
+49 8b 4f 20                     # 155c  ld rcx, [r15+0x20]
+48 85 c9                        # 1560  test rcx, rcx
+0f 84 00 05 00 00               # 1563  je 0x401a69    -> L_fail_auxUnderflow
+48 83 e9 01                     # 1569  sub rcx, 0x1
+48 c1 e1 04                     # 156d  shl rcx, 4
+49 8b 57 18                     # 1571  ld rdx, [r15+0x18]
+48 8b 3c 0a                     # 1575  ld_w64 rdi, [rdx+rcx*1+0x0]
+48 8b 74 0a 08                  # 1579  ld_w64 rsi, [rdx+rcx*1+0x8]
+4d 8b 87 e0 00 00 00            # 157e  ld r8, [r15+0xe0]
+4c 01 c6                        # 1585  add rsi, r8
+48 83 c6 01                     # 1588  add rsi, 0x1
+e8 55 06 00 00                  # 158c  call 0x401be6    -> fn_ds_push
+49 8b 47 30                     # 1591  ld rax, [r15+0x30]
+49 8b 4f 38                     # 1595  ld rcx, [r15+0x38]
+48 83 e9 01                     # 1599  sub rcx, 0x1
+48 c1 e1 05                     # 159d  shl rcx, 5   * 32
+48 01 c8                        # 15a1  add rax, rcx
+48 8b 48 08                     # 15a4  ld rcx, [rax+0x8]   f.pc
+48 83 c1 01                     # 15a8  add rcx, 0x1
+48 89 48 08                     # 15ac  st [rax+0x8], rcx   f.pc + 1
+e9 fb ea ff ff                  # 15b0  jmp 0x4000b0    -> L_vm_loop
+
+# O_locget:
+49 8b 47 30                     # 15b5  ld rax, [r15+0x30]
+49 8b 4f 38                     # 15b9  ld rcx, [r15+0x38]
+48 83 e9 01                     # 15bd  sub rcx, 0x1
+48 c1 e1 05                     # 15c1  shl rcx, 5
+48 01 c8                        # 15c5  add rax, rcx   top frame
+49 8b 97 08 01 00 00            # 15c8  ld rdx, [r15+0x108]   i
+4c 8b 40 18                     # 15cf  ld r8, [rax+0x18]   nlocs
+4c 39 c2                        # 15d3  cmp rdx, r8
+0f 83 9e 04 00 00               # 15d6  jae 0x401a7a    -> L_fail_badLocal
+4c 8b 48 10                     # 15dc  ld r9, [rax+0x10]   locs_off
+49 01 d1                        # 15e0  add r9, rdx
+49 c1 e1 04                     # 15e3  shl r9, 4
+4d 8b 57 48                     # 15e7  ld r10, [r15+0x48]
+4b 8b 3c 0a                     # 15eb  ld_w64 rdi, [r10+r9*1+0x0]
+4b 8b 74 0a 08                  # 15ef  ld_w64 rsi, [r10+r9*1+0x8]
+4d 8b 9f e0 00 00 00            # 15f4  ld r11, [r15+0xe0]
+4c 01 de                        # 15fb  add rsi, r11
+48 83 c6 01                     # 15fe  add rsi, 0x1
+e8 df 05 00 00                  # 1602  call 0x401be6    -> fn_ds_push
+49 8b 47 30                     # 1607  ld rax, [r15+0x30]
+49 8b 4f 38                     # 160b  ld rcx, [r15+0x38]
+48 83 e9 01                     # 160f  sub rcx, 0x1
+48 c1 e1 05                     # 1613  shl rcx, 5   * 32
+48 01 c8                        # 1617  add rax, rcx
+48 8b 48 08                     # 161a  ld rcx, [rax+0x8]   f.pc
+48 83 c1 01                     # 161e  add rcx, 0x1
+48 89 48 08                     # 1622  st [rax+0x8], rcx   f.pc + 1
+e9 85 ea ff ff                  # 1626  jmp 0x4000b0    -> L_vm_loop
+
+# O_locset:
+4d 8b 67 08                     # 162b  ld r12, [r15+0x8]
+4d 85 e4                        # 162f  test r12, r12
+0f 84 20 04 00 00               # 1632  je 0x401a58    -> L_fail_underflow
+49 8b 47 30                     # 1638  ld rax, [r15+0x30]
+49 8b 4f 38                     # 163c  ld rcx, [r15+0x38]
+48 83 e9 01                     # 1640  sub rcx, 0x1
+48 c1 e1 05                     # 1644  shl rcx, 5
+48 01 c8                        # 1648  add rax, rcx   top frame
+49 8b 97 08 01 00 00            # 164b  ld rdx, [r15+0x108]   i
+4c 8b 40 18                     # 1652  ld r8, [rax+0x18]   nlocs
+4c 39 c2                        # 1656  cmp rdx, r8
+0f 83 1b 04 00 00               # 1659  jae 0x401a7a    -> L_fail_badLocal
+49 83 ec 01                     # 165f  sub r12, 0x1
+4d 89 67 08                     # 1663  st [r15+0x8], r12
+49 c1 e4 04                     # 1667  shl r12, 4
+49 8b 37                        # 166b  ld rsi, [r15+0x0]
+4a 8b 3c 26                     # 166e  ld_w64 rdi, [rsi+r12*1+0x0]   v.w
+4e 8b 6c 26 08                  # 1672  ld_w64 r13, [rsi+r12*1+0x8]   v.p
+4d 8b 9f e0 00 00 00            # 1677  ld r11, [r15+0xe0]
+4d 01 dd                        # 167e  add r13, r11
+49 83 c5 01                     # 1681  add r13, 0x1
+4c 8b 48 10                     # 1685  ld r9, [rax+0x10]   locs_off
+49 01 d1                        # 1689  add r9, rdx
+49 c1 e1 04                     # 168c  shl r9, 4
+4d 8b 57 48                     # 1690  ld r10, [r15+0x48]
+4b 89 3c 0a                     # 1694  st_w64 [r10+r9*1+0x0], rdi
+4f 89 6c 0a 08                  # 1698  st_w64 [r10+r9*1+0x8], r13
+49 8b 47 30                     # 169d  ld rax, [r15+0x30]
+49 8b 4f 38                     # 16a1  ld rcx, [r15+0x38]
+48 83 e9 01                     # 16a5  sub rcx, 0x1
+48 c1 e1 05                     # 16a9  shl rcx, 5   * 32
+48 01 c8                        # 16ad  add rax, rcx
+48 8b 48 08                     # 16b0  ld rcx, [rax+0x8]   f.pc
+48 83 c1 01                     # 16b4  add rcx, 0x1
+48 89 48 08                     # 16b8  st [rax+0x8], rcx   f.pc + 1
+e9 ef e9 ff ff                  # 16bc  jmp 0x4000b0    -> L_vm_loop
+
+# O_jmp:
+49 8b 47 30                     # 16c1  ld rax, [r15+0x30]
+49 8b 4f 38                     # 16c5  ld rcx, [r15+0x38]
+48 83 e9 01                     # 16c9  sub rcx, 0x1
+48 c1 e1 05                     # 16cd  shl rcx, 5
+48 01 c8                        # 16d1  add rax, rcx
+49 8b 97 08 01 00 00            # 16d4  ld rdx, [r15+0x108]
+48 89 50 08                     # 16db  st [rax+0x8], rdx
+e9 cc e9 ff ff                  # 16df  jmp 0x4000b0    -> L_vm_loop
+
+# O_jz:
+49 8b 4f 08                     # 16e4  ld rcx, [r15+0x8]
+48 85 c9                        # 16e8  test rcx, rcx
+0f 84 67 03 00 00               # 16eb  je 0x401a58    -> L_fail_underflow
+48 83 e9 01                     # 16f1  sub rcx, 0x1
+49 89 4f 08                     # 16f5  st [r15+0x8], rcx
+48 c1 e1 04                     # 16f9  shl rcx, 4
+49 8b 17                        # 16fd  ld rdx, [r15+0x0]
+4c 8b 04 0a                     # 1700  ld_w64 r8, [rdx+rcx*1+0x0]   c.w
+4c 8b 4c 0a 08                  # 1704  ld_w64 r9, [rdx+rcx*1+0x8]   c.plen
+4d 8b 97 e0 00 00 00            # 1709  ld r10, [r15+0xe0]
+4d 01 ca                        # 1710  add r10, r9
+49 83 c2 01                     # 1713  add r10, 0x1
+4d 89 97 e0 00 00 00            # 1717  st [r15+0xe0], r10   pc = pc + c.plen + 1
+49 8b 47 30                     # 171e  ld rax, [r15+0x30]
+49 8b 4f 38                     # 1722  ld rcx, [r15+0x38]
+48 83 e9 01                     # 1726  sub rcx, 0x1
+48 c1 e1 05                     # 172a  shl rcx, 5
+48 01 c8                        # 172e  add rax, rcx   top frame
+48 8b 50 08                     # 1731  ld rdx, [rax+0x8]   f.pc
+48 83 c2 01                     # 1735  add rdx, 0x1   fallthrough = f.pc + 1
+49 8b b7 08 01 00 00            # 1739  ld rsi, [r15+0x108]   target = t
+4d 85 c0                        # 1740  test r8, r8
+48 0f 44 d6                     # 1743  cmove rdx, rsi
+48 89 50 08                     # 1747  st [rax+0x8], rdx
+e9 60 e9 ff ff                  # 174b  jmp 0x4000b0    -> L_vm_loop
+
+# O_jnz:
+49 8b 4f 08                     # 1750  ld rcx, [r15+0x8]
+48 85 c9                        # 1754  test rcx, rcx
+0f 84 fb 02 00 00               # 1757  je 0x401a58    -> L_fail_underflow
+48 83 e9 01                     # 175d  sub rcx, 0x1
+49 89 4f 08                     # 1761  st [r15+0x8], rcx
+48 c1 e1 04                     # 1765  shl rcx, 4
+49 8b 17                        # 1769  ld rdx, [r15+0x0]
+4c 8b 04 0a                     # 176c  ld_w64 r8, [rdx+rcx*1+0x0]   c.w
+4c 8b 4c 0a 08                  # 1770  ld_w64 r9, [rdx+rcx*1+0x8]   c.plen
+4d 8b 97 e0 00 00 00            # 1775  ld r10, [r15+0xe0]
+4d 01 ca                        # 177c  add r10, r9
+49 83 c2 01                     # 177f  add r10, 0x1
+4d 89 97 e0 00 00 00            # 1783  st [r15+0xe0], r10   pc = pc + c.plen + 1
+49 8b 47 30                     # 178a  ld rax, [r15+0x30]
+49 8b 4f 38                     # 178e  ld rcx, [r15+0x38]
+48 83 e9 01                     # 1792  sub rcx, 0x1
+48 c1 e1 05                     # 1796  shl rcx, 5
+48 01 c8                        # 179a  add rax, rcx   top frame
+48 8b 50 08                     # 179d  ld rdx, [rax+0x8]   f.pc
+48 83 c2 01                     # 17a1  add rdx, 0x1   fallthrough = f.pc + 1
+49 8b b7 08 01 00 00            # 17a5  ld rsi, [r15+0x108]   target = t
+4d 85 c0                        # 17ac  test r8, r8
+48 0f 45 d6                     # 17af  cmovne rdx, rsi
+48 89 50 08                     # 17b3  st [rax+0x8], rdx
+e9 f4 e8 ff ff                  # 17b7  jmp 0x4000b0    -> L_vm_loop
+
+# O_call:
+49 8b 97 e8 00 00 00            # 17bc  ld rdx, [r15+0xe8]
+48 8b 42 08                     # 17c3  ld rax, [rdx+0x8]
+49 8b 97 f0 00 00 00            # 17c7  ld rdx, [r15+0xf0]
+48 8b 5a 08                     # 17ce  ld rbx, [rdx+0x8]
+49 8b 97 f8 00 00 00            # 17d2  ld rdx, [r15+0xf8]
+48 8b 4a 08                     # 17d9  ld rcx, [rdx+0x8]
+48 39 d8                        # 17dd  cmp rax, rbx   vote3: a == b?
+74 12                           # 17e0  je 0x4017f4    -> v3_call_nw_9
+48 39 c8                        # 17e2  cmp rax, rcx   vote3: a == c?
+74 0d                           # 17e5  je 0x4017f4    -> v3_call_nw_9
+48 39 cb                        # 17e7  cmp rbx, rcx   vote3: b == c?
+74 05                           # 17ea  je 0x4017f1   3-way disagreement -> exit 3 (jne: je over jmp)
+e9 73 ea ff ff                  # 17ec  jmp 0x400264   -> L_exit3
+48 8b c3                        # 17f1  mov rax, rbx   repair rax = b
+
+# v3_call_nw_9:
+4d 8b a7 08 01 00 00            # 17f4  ld r12, [r15+0x108]   w
+49 39 c4                        # 17fb  cmp r12, rax
+0f 83 98 02 00 00               # 17fe  jae 0x401a9c    -> L_fail_badWord
+49 8b 97 e8 00 00 00            # 1804  ld rdx, [r15+0xe8]
+48 8b 42 10                     # 180b  ld rax, [rdx+0x10]
+49 8b 97 f0 00 00 00            # 180f  ld rdx, [r15+0xf0]
+48 8b 5a 10                     # 1816  ld rbx, [rdx+0x10]
+49 8b 97 f8 00 00 00            # 181a  ld rdx, [r15+0xf8]
+48 8b 4a 10                     # 1821  ld rcx, [rdx+0x10]
+48 39 d8                        # 1825  cmp rax, rbx   vote3: a == b?
+74 12                           # 1828  je 0x40183c    -> v3_call_nd_10
+48 39 c8                        # 182a  cmp rax, rcx   vote3: a == c?
+74 0d                           # 182d  je 0x40183c    -> v3_call_nd_10
+48 39 cb                        # 182f  cmp rbx, rcx   vote3: b == c?
+74 05                           # 1832  je 0x401839   3-way disagreement -> exit 3 (jne: je over jmp)
+e9 2b ea ff ff                  # 1834  jmp 0x400264   -> L_exit3
+48 8b c3                        # 1839  mov rax, rbx   repair rax = b
+
+# v3_call_nd_10:
+48 c1 e0 04                     # 183c  shl rax, 4   16 * nd
+4d 8b c4                        # 1840  mov r8, r12
+49 c1 e0 06                     # 1843  shl r8, 6   64 * w
+49 01 c0                        # 1847  add r8, rax
+49 83 c0 20                     # 184a  add r8, 0x20   w_off = 32 + 16*nd + 64*w
+49 8b 97 e8 00 00 00            # 184e  ld rdx, [r15+0xe8]   code1
+4a 8b 04 02                     # 1855  ld_w64 rax, [rdx+r8*1+0x0]   replica 1
+49 8b 97 f0 00 00 00            # 1859  ld rdx, [r15+0xf0]   code2
+4a 8b 1c 02                     # 1860  ld_w64 rbx, [rdx+r8*1+0x0]   replica 2
+49 8b 97 f8 00 00 00            # 1864  ld rdx, [r15+0xf8]   code3
+4a 8b 0c 02                     # 186b  ld_w64 rcx, [rdx+r8*1+0x0]   replica 3
+48 39 d8                        # 186f  cmp rax, rbx   vote3: a == b?
+74 12                           # 1872  je 0x401886    -> v3_call_ins_11
+48 39 c8                        # 1874  cmp rax, rcx   vote3: a == c?
+74 0d                           # 1877  je 0x401886    -> v3_call_ins_11
+48 39 cb                        # 1879  cmp rbx, rcx   vote3: b == c?
+74 05                           # 187c  je 0x401883   3-way disagreement -> exit 3 (jne: je over jmp)
+e9 e1 e9 ff ff                  # 187e  jmp 0x400264   -> L_exit3
+48 8b c3                        # 1883  mov rax, rbx   repair rax = b
+
+# v3_call_ins_11:
+49 8b 4f 08                     # 1886  ld rcx, [r15+0x8]
+48 39 c1                        # 188a  cmp rcx, rax   ds_len < c.ins?
+0f 82 c5 01 00 00               # 188d  jb 0x401a58    -> L_fail_underflow
+49 8b 97 e8 00 00 00            # 1893  ld rdx, [r15+0xe8]   code1
+4a 8b 44 02 10                  # 189a  ld_w64 rax, [rdx+r8*1+0x10]   replica 1
+49 8b 97 f0 00 00 00            # 189f  ld rdx, [r15+0xf0]   code2
+4a 8b 5c 02 10                  # 18a6  ld_w64 rbx, [rdx+r8*1+0x10]   replica 2
+49 8b 97 f8 00 00 00            # 18ab  ld rdx, [r15+0xf8]   code3
+4a 8b 4c 02 10                  # 18b2  ld_w64 rcx, [rdx+r8*1+0x10]   replica 3
+48 39 d8                        # 18b7  cmp rax, rbx   vote3: a == b?
+74 12                           # 18ba  je 0x4018ce    -> v3_call_locs_12
+48 39 c8                        # 18bc  cmp rax, rcx   vote3: a == c?
+74 0d                           # 18bf  je 0x4018ce    -> v3_call_locs_12
+48 39 cb                        # 18c1  cmp rbx, rcx   vote3: b == c?
+74 05                           # 18c4  je 0x4018cb   3-way disagreement -> exit 3 (jne: je over jmp)
+e9 99 e9 ff ff                  # 18c6  jmp 0x400264   -> L_exit3
+48 8b c3                        # 18cb  mov rax, rbx   repair rax = b
+
+# v3_call_locs_12:
+4c 8b e8                        # 18ce  mov r13, rax   r13 = c.locals
+49 8b 47 38                     # 18d1  ld rax, [r15+0x38]
+49 8b 4f 40                     # 18d5  ld rcx, [r15+0x40]
+48 39 c8                        # 18d9  cmp rax, rcx
+72 27                           # 18dc  jb 0x401905    -> call_rs_ok
+49 8b 7f 30                     # 18de  ld rdi, [r15+0x30]
+48 8b f1                        # 18e2  mov rsi, rcx
+48 c1 e6 05                     # 18e5  shl rsi, 5   cap * 32
+48 8b d6                        # 18e9  mov rdx, rsi
+48 c1 e2 01                     # 18ec  shl rdx, 1
+e8 9e 02 00 00                  # 18f0  call 0x401b93    -> fn_mremap
+49 89 47 30                     # 18f5  st [r15+0x30], rax
+49 8b 4f 40                     # 18f9  ld rcx, [r15+0x40]
+48 c1 e1 01                     # 18fd  shl rcx, 1
+49 89 4f 40                     # 1901  st [r15+0x40], rcx
+
+# call_rs_ok:
+
+# call_locs_chk:
+49 8b 47 50                     # 1905  ld rax, [r15+0x50]
+4c 01 e8                        # 1909  add rax, r13   needed_locs
+49 8b 4f 58                     # 190c  ld rcx, [r15+0x58]
+48 39 c8                        # 1910  cmp rax, rcx
+76 29                           # 1913  jbe 0x40193e    -> call_locs_ok
+49 8b 7f 48                     # 1915  ld rdi, [r15+0x48]
+48 8b f1                        # 1919  mov rsi, rcx
+48 c1 e6 04                     # 191c  shl rsi, 4
+48 8b d6                        # 1920  mov rdx, rsi
+48 c1 e2 01                     # 1923  shl rdx, 1
+e8 67 02 00 00                  # 1927  call 0x401b93    -> fn_mremap
+49 89 47 48                     # 192c  st [r15+0x48], rax
+49 8b 4f 58                     # 1930  ld rcx, [r15+0x58]
+48 c1 e1 01                     # 1934  shl rcx, 1
+49 89 4f 58                     # 1938  st [r15+0x58], rcx
+eb c7                           # 193c  jmp 0x401905    -> call_locs_chk
+
+# call_locs_ok:
+49 8b 47 30                     # 193e  ld rax, [r15+0x30]
+49 8b 4f 38                     # 1942  ld rcx, [r15+0x38]
+48 83 e9 01                     # 1946  sub rcx, 0x1
+48 c1 e1 05                     # 194a  shl rcx, 5   * 32
+48 01 c8                        # 194e  add rax, rcx
+48 8b 48 08                     # 1951  ld rcx, [rax+0x8]   f.pc
+48 83 c1 01                     # 1955  add rcx, 0x1
+48 89 48 08                     # 1959  st [rax+0x8], rcx   f.pc + 1
+4d 8b 47 48                     # 195d  ld r8, [r15+0x48]
+4d 8b 4f 50                     # 1961  ld r9, [r15+0x50]   old locs_len
+4d 8b 97 e0 00 00 00            # 1965  ld r10, [r15+0xe0]
+49 83 c2 01                     # 196c  add r10, 0x1   pc + 1
+31 db                           # 1970  xor rbx, rbx   i = 0
+4c 8b db                        # 1972  mov r11, rbx   0 (avoids reading syscall-clobbered R11)
+
+# call_init_locs:
+4c 39 eb                        # 1975  cmp rbx, r13
+73 19                           # 1978  jae 0x401993    -> call_locs_done
+49 8b d1                        # 197a  mov rdx, r9
+48 01 da                        # 197d  add rdx, rbx
+48 c1 e2 04                     # 1980  shl rdx, 4
+4d 89 1c 10                     # 1984  st_w64 [r8+rdx*1+0x0], r11
+4d 89 54 10 08                  # 1988  st_w64 [r8+rdx*1+0x8], r10
+48 83 c3 01                     # 198d  add rbx, 0x1
+eb e2                           # 1991  jmp 0x401975    -> call_init_locs
+
+# call_locs_done:
+49 8b c1                        # 1993  mov rax, r9
+4c 01 e8                        # 1996  add rax, r13
+49 89 47 50                     # 1999  st [r15+0x50], rax
+49 8b 47 30                     # 199d  ld rax, [r15+0x30]
+49 8b 4f 38                     # 19a1  ld rcx, [r15+0x38]
+48 8b d1                        # 19a5  mov rdx, rcx
+48 c1 e2 05                     # 19a8  shl rdx, 5
+4c 89 24 10                     # 19ac  st_w64 [rax+rdx*1+0x0], r12
+4c 89 5c 10 08                  # 19b0  st_w64 [rax+rdx*1+0x8], r11
+4c 89 4c 10 10                  # 19b5  st_w64 [rax+rdx*1+0x10], r9
+4c 89 6c 10 18                  # 19ba  st_w64 [rax+rdx*1+0x18], r13
+48 83 c1 01                     # 19bf  add rcx, 0x1
+49 89 4f 38                     # 19c3  st [r15+0x38], rcx
+e9 e4 e6 ff ff                  # 19c7  jmp 0x4000b0    -> L_vm_loop
+
+# O_ret:
+49 8b 4f 38                     # 19cc  ld rcx, [r15+0x38]
+48 83 f9 01                     # 19d0  cmp rcx, 0x1
+77 0e                           # 19d4  ja 0x4019e4    -> ret_pop
+31 c0                           # 19d6  xor rax, rax
+49 89 87 c0 01 00 00            # 19d8  st [r15+0x1c0], rax
+e9 1e 00 00 00                  # 19df  jmp 0x401a02    -> L_vm_halt
+
+# ret_pop:
+48 83 e9 01                     # 19e4  sub rcx, 0x1
+49 89 4f 38                     # 19e8  st [r15+0x38], rcx
+48 c1 e1 05                     # 19ec  shl rcx, 5
+49 8b 47 30                     # 19f0  ld rax, [r15+0x30]
+48 8b 54 08 10                  # 19f4  ld_w64 rdx, [rax+rcx*1+0x10]   popped.locs_off
+49 89 57 50                     # 19f9  st [r15+0x50], rdx
+e9 ae e6 ff ff                  # 19fd  jmp 0x4000b0    -> L_vm_loop
+
+# L_vm_halt:
+4d 8b a7 d0 00 00 00            # 1a02  ld r12, [r15+0xd0]
+45 31 ed                        # 1a09  xor r13, r13   written = 0
+
+# halt_flush:
+4d 39 e5                        # 1a0c  cmp r13, r12
+73 32                           # 1a0f  jae 0x401a43    -> halt_exit
+49 8b b7 c8 00 00 00            # 1a11  ld rsi, [r15+0xc8]
+4c 01 ee                        # 1a18  add rsi, r13
+49 8b d4                        # 1a1b  mov rdx, r12
+4c 29 ea                        # 1a1e  sub rdx, r13
+bf 01 00 00 00                  # 1a21  mov rdi, 0x1   fd 1
+b8 01 00 00 00                  # 1a26  mov rax, 0x1   sys_write
+0f 05                           # 1a2b  syscall
+48 85 c0                        # 1a2d  test rax, rax
+7e 05                           # 1a30  jle 0x401a37    -> halt_werr
+49 01 c5                        # 1a32  add r13, rax
+eb d5                           # 1a35  jmp 0x401a0c    -> halt_flush
+
+# halt_werr:
+bf 01 00 00 00                  # 1a37  mov rdi, 0x1
+b8 3c 00 00 00                  # 1a3c  mov rax, 0x3c
+0f 05                           # 1a41  syscall
+
+# halt_exit:
+49 8b bf c0 01 00 00            # 1a43  ld rdi, [r15+0x1c0]
+48 81 e7 ff 00 00 00            # 1a4a  and rdi, 0xff
+b8 3c 00 00 00                  # 1a51  mov rax, 0x3c
+0f 05                           # 1a56  syscall
+
+# L_fail_underflow:
+b8 00 00 00 00                  # 1a58  mov rax, 0x0
+49 89 87 c8 01 00 00            # 1a5d  st [r15+0x1c8], rax
+e9 99 00 00 00                  # 1a64  jmp 0x401b02    -> L_vm_fail
+
+# L_fail_auxUnderflow:
+b8 01 00 00 00                  # 1a69  mov rax, 0x1
+49 89 87 c8 01 00 00            # 1a6e  st [r15+0x1c8], rax
+e9 88 00 00 00                  # 1a75  jmp 0x401b02    -> L_vm_fail
+
+# L_fail_badLocal:
+b8 02 00 00 00                  # 1a7a  mov rax, 0x2
+49 89 87 c8 01 00 00            # 1a7f  st [r15+0x1c8], rax
+e9 77 00 00 00                  # 1a86  jmp 0x401b02    -> L_vm_fail
+
+# L_fail_badJump:
+b8 03 00 00 00                  # 1a8b  mov rax, 0x3
+49 89 87 c8 01 00 00            # 1a90  st [r15+0x1c8], rax
+e9 66 00 00 00                  # 1a97  jmp 0x401b02    -> L_vm_fail
+
+# L_fail_badWord:
+b8 04 00 00 00                  # 1a9c  mov rax, 0x4
+49 89 87 c8 01 00 00            # 1aa1  st [r15+0x1c8], rax
+e9 55 00 00 00                  # 1aa8  jmp 0x401b02    -> L_vm_fail
+
+# L_fail_noFrame:
+b8 05 00 00 00                  # 1aad  mov rax, 0x5
+49 89 87 c8 01 00 00            # 1ab2  st [r15+0x1c8], rax
+e9 44 00 00 00                  # 1ab9  jmp 0x401b02    -> L_vm_fail
+
+# L_fail_bounds:
+b8 06 00 00 00                  # 1abe  mov rax, 0x6
+49 89 87 c8 01 00 00            # 1ac3  st [r15+0x1c8], rax
+e9 33 00 00 00                  # 1aca  jmp 0x401b02    -> L_vm_fail
+
+# L_fail_divZero:
+b8 07 00 00 00                  # 1acf  mov rax, 0x7
+49 89 87 c8 01 00 00            # 1ad4  st [r15+0x1c8], rax
+e9 22 00 00 00                  # 1adb  jmp 0x401b02    -> L_vm_fail
+
+# L_fail_badTable:
+b8 08 00 00 00                  # 1ae0  mov rax, 0x8
+49 89 87 c8 01 00 00            # 1ae5  st [r15+0x1c8], rax
+e9 11 00 00 00                  # 1aec  jmp 0x401b02    -> L_vm_fail
+
+# L_fail_demand:
+b8 09 00 00 00                  # 1af1  mov rax, 0x9
+49 89 87 c8 01 00 00            # 1af6  st [r15+0x1c8], rax
+e9 00 00 00 00                  # 1afd  jmp 0x401b02    -> L_vm_fail
+
+# L_vm_fail:
+be 88 31 40 00                  # 1b02  mov rsi, 0x403188   (L_str_run_failed)
+ba 14 00 00 00                  # 1b07  mov rdx, 0x14
+e8 a2 00 00 00                  # 1b0c  call 0x401bb3    -> fn_write_stderr
+49 8b 87 c8 01 00 00            # 1b11  ld rax, [r15+0x1c8]
+b9 f1 31 40 00                  # 1b18  mov rcx, 0x4031f1   (L_err_ptrs)
+48 8b 34 c1                     # 1b1d  ld_w64 rsi, [rcx+rax*8+0x0]
+b9 41 32 40 00                  # 1b21  mov rcx, 0x403241   (L_err_lens)
+48 8b 14 c1                     # 1b26  ld_w64 rdx, [rcx+rax*8+0x0]
+e8 84 00 00 00                  # 1b2a  call 0x401bb3    -> fn_write_stderr
+be 9c 31 40 00                  # 1b2f  mov rsi, 0x40319c   (L_str_nl)
+ba 01 00 00 00                  # 1b34  mov rdx, 0x1
+e8 75 00 00 00                  # 1b39  call 0x401bb3    -> fn_write_stderr
+bf 01 00 00 00                  # 1b3e  mov rdi, 0x1
+b8 3c 00 00 00                  # 1b43  mov rax, 0x3c
+0f 05                           # 1b48  syscall
+
+# L_exit_nomem:
+be 6f 31 40 00                  # 1b4a  mov rsi, 0x40316f   (L_str_nomem)
+ba 19 00 00 00                  # 1b4f  mov rdx, 0x19
+e8 5a 00 00 00                  # 1b54  call 0x401bb3    -> fn_write_stderr
+bf 02 00 00 00                  # 1b59  mov rdi, 0x2
+b8 3c 00 00 00                  # 1b5e  mov rax, 0x3c
+0f 05                           # 1b63  syscall
+
+# fn_mmap:
+48 8b f7                        # 1b65  mov rsi, rdi   len
+31 ff                           # 1b68  xor rdi, rdi   addr = 0
+ba 03 00 00 00                  # 1b6a  mov rdx, 0x3   PROT_READ|PROT_WRITE
+41 ba 22 00 00 00               # 1b6f  mov r10, 0x22   MAP_PRIVATE|MAP_ANONYMOUS
+49 b8 ff ff ff ff ff ff ff ff   # 1b75  mov r8, 0xffffffffffffffff   fd = -1
+45 31 c9                        # 1b7f  xor r9, r9   off = 0
+b8 09 00 00 00                  # 1b82  mov rax, 0x9   sys_mmap
+0f 05                           # 1b87  syscall
+48 85 c0                        # 1b89  test rax, rax
+0f 88 b8 ff ff ff               # 1b8c  js 0x401b4a   -ENOMEM -> L_exit_nomem
+c3                              # 1b92  ret
+
+# fn_mremap:
+41 ba 01 00 00 00               # 1b93  mov r10, 0x1   MREMAP_MAYMOVE
+41 b8 00 00 00 00               # 1b99  mov r8, 0x0
+45 31 c9                        # 1b9f  xor r9, r9
+b8 19 00 00 00                  # 1ba2  mov rax, 0x19   sys_mremap
+0f 05                           # 1ba7  syscall
+48 85 c0                        # 1ba9  test rax, rax
+0f 88 98 ff ff ff               # 1bac  js 0x401b4a   -ENOMEM -> L_exit_nomem
+c3                              # 1bb2  ret
+
+# fn_write_stderr:
+bf 02 00 00 00                  # 1bb3  mov rdi, 0x2   fd 2 = stderr
+b8 01 00 00 00                  # 1bb8  mov rax, 0x1   sys_write
+0f 05                           # 1bbd  syscall
+c3                              # 1bbf  ret
+
+# fn_write_stderr_cstr:
+48 8b f7                        # 1bc0  mov rsi, rdi
+31 d2                           # 1bc3  xor rdx, rdx
+
+# wsc_loop:
+0f b6 04 16                     # 1bc5  ld_w8 rax, [rsi+rdx*1+0x0]
+48 85 c0                        # 1bc9  test rax, rax
+74 06                           # 1bcc  je 0x401bd4    -> wsc_done
+48 83 c2 01                     # 1bce  add rdx, 0x1
+eb f1                           # 1bd2  jmp 0x401bc5    -> wsc_loop
+
+# wsc_done:
+48 85 d2                        # 1bd4  test rdx, rdx
+74 0c                           # 1bd7  je 0x401be5    -> wsc_ret
+bf 02 00 00 00                  # 1bd9  mov rdi, 0x2
+b8 01 00 00 00                  # 1bde  mov rax, 0x1
+0f 05                           # 1be3  syscall
+
+# wsc_ret:
+c3                              # 1be5  ret
+
+# fn_ds_push:
+4c 8b e7                        # 1be6  mov r12, rdi   save w
+4c 8b ee                        # 1be9  mov r13, rsi   save plen
+49 8b 47 08                     # 1bec  ld rax, [r15+0x8]
+49 8b 4f 10                     # 1bf0  ld rcx, [r15+0x10]
+48 39 c8                        # 1bf4  cmp rax, rcx
+72 25                           # 1bf7  jb 0x401c1e    -> dsp_room
+49 8b 3f                        # 1bf9  ld rdi, [r15+0x0]
+48 8b f1                        # 1bfc  mov rsi, rcx
+48 c1 e6 04                     # 1bff  shl rsi, 4   old_bytes = cap * 16
+48 8b d6                        # 1c03  mov rdx, rsi
+48 c1 e2 01                     # 1c06  shl rdx, 1   new_bytes = 2 * old_bytes
+e8 84 ff ff ff                  # 1c0a  call 0x401b93    -> fn_mremap
+49 89 07                        # 1c0f  st [r15+0x0], rax
+49 8b 4f 10                     # 1c12  ld rcx, [r15+0x10]
+48 c1 e1 01                     # 1c16  shl rcx, 1
+49 89 4f 10                     # 1c1a  st [r15+0x10], rcx
+
+# dsp_room:
+49 8b 07                        # 1c1e  ld rax, [r15+0x0]
+49 8b 4f 08                     # 1c21  ld rcx, [r15+0x8]
+48 8b d1                        # 1c25  mov rdx, rcx
+48 c1 e2 04                     # 1c28  shl rdx, 4   len * 16
+4c 89 24 10                     # 1c2c  st_w64 [rax+rdx*1+0x0], r12   ds[len].w
+4c 89 6c 10 08                  # 1c30  st_w64 [rax+rdx*1+0x8], r13   ds[len].plen
+48 83 c1 01                     # 1c35  add rcx, 0x1
+49 89 4f 08                     # 1c39  st [r15+0x8], rcx
+c3                              # 1c3d  ret
+
+# fn_aux_push:
+4c 8b e7                        # 1c3e  mov r12, rdi
+4c 8b ee                        # 1c41  mov r13, rsi
+49 8b 47 20                     # 1c44  ld rax, [r15+0x20]
+49 8b 4f 28                     # 1c48  ld rcx, [r15+0x28]
+48 39 c8                        # 1c4c  cmp rax, rcx
+72 27                           # 1c4f  jb 0x401c78    -> axp_room
+49 8b 7f 18                     # 1c51  ld rdi, [r15+0x18]
+48 8b f1                        # 1c55  mov rsi, rcx
+48 c1 e6 04                     # 1c58  shl rsi, 4
+48 8b d6                        # 1c5c  mov rdx, rsi
+48 c1 e2 01                     # 1c5f  shl rdx, 1
+e8 2b ff ff ff                  # 1c63  call 0x401b93    -> fn_mremap
+49 89 47 18                     # 1c68  st [r15+0x18], rax
+49 8b 4f 28                     # 1c6c  ld rcx, [r15+0x28]
+48 c1 e1 01                     # 1c70  shl rcx, 1
+49 89 4f 28                     # 1c74  st [r15+0x28], rcx
+
+# axp_room:
+49 8b 47 18                     # 1c78  ld rax, [r15+0x18]
+49 8b 4f 20                     # 1c7c  ld rcx, [r15+0x20]
+48 8b d1                        # 1c80  mov rdx, rcx
+48 c1 e2 04                     # 1c83  shl rdx, 4
+4c 89 24 10                     # 1c87  st_w64 [rax+rdx*1+0x0], r12
+4c 89 6c 10 08                  # 1c8b  st_w64 [rax+rdx*1+0x8], r13
+48 83 c1 01                     # 1c90  add rcx, 0x1
+49 89 4f 20                     # 1c94  st [r15+0x20], rcx
+c3                              # 1c98  ret
+
+# fn_out_push_byte:
+4c 8b e7                        # 1c99  mov r12, rdi
+49 8b 87 d0 00 00 00            # 1c9c  ld rax, [r15+0xd0]
+49 8b 8f d8 00 00 00            # 1ca3  ld rcx, [r15+0xd8]
+48 39 c8                        # 1caa  cmp rax, rcx
+72 2f                           # 1cad  jb 0x401cde    -> ob_room
+49 8b bf c8 00 00 00            # 1caf  ld rdi, [r15+0xc8]
+48 8b f1                        # 1cb6  mov rsi, rcx
+48 8b d1                        # 1cb9  mov rdx, rcx
+48 c1 e2 01                     # 1cbc  shl rdx, 1
+e8 ce fe ff ff                  # 1cc0  call 0x401b93    -> fn_mremap
+49 89 87 c8 00 00 00            # 1cc5  st [r15+0xc8], rax
+49 8b 8f d8 00 00 00            # 1ccc  ld rcx, [r15+0xd8]
+48 c1 e1 01                     # 1cd3  shl rcx, 1
+49 89 8f d8 00 00 00            # 1cd7  st [r15+0xd8], rcx
+
+# ob_room:
+49 8b 87 c8 00 00 00            # 1cde  ld rax, [r15+0xc8]
+49 8b 8f d0 00 00 00            # 1ce5  ld rcx, [r15+0xd0]
+44 88 24 08                     # 1cec  st_w8 [rax+rcx*1+0x0], r12
+48 83 c1 01                     # 1cf0  add rcx, 0x1
+49 89 8f d0 00 00 00            # 1cf4  st [r15+0xd0], rcx
+c3                              # 1cfb  ret
+
+# fn_out_push_u64:
+4c 8b e7                        # 1cfc  mov r12, rdi
+
+# ou_chk:
+49 8b 87 d0 00 00 00            # 1cff  ld rax, [r15+0xd0]
+48 83 c0 08                     # 1d06  add rax, 0x8
+49 8b 8f d8 00 00 00            # 1d0a  ld rcx, [r15+0xd8]
+48 39 c8                        # 1d11  cmp rax, rcx
+76 31                           # 1d14  jbe 0x401d47    -> ou_room
+49 8b bf c8 00 00 00            # 1d16  ld rdi, [r15+0xc8]
+48 8b f1                        # 1d1d  mov rsi, rcx
+48 8b d1                        # 1d20  mov rdx, rcx
+48 c1 e2 01                     # 1d23  shl rdx, 1
+e8 67 fe ff ff                  # 1d27  call 0x401b93    -> fn_mremap
+49 89 87 c8 00 00 00            # 1d2c  st [r15+0xc8], rax
+49 8b 8f d8 00 00 00            # 1d33  ld rcx, [r15+0xd8]
+48 c1 e1 01                     # 1d3a  shl rcx, 1
+49 89 8f d8 00 00 00            # 1d3e  st [r15+0xd8], rcx
+eb b8                           # 1d45  jmp 0x401cff    -> ou_chk
+
+# ou_room:
+49 8b 87 c8 00 00 00            # 1d47  ld rax, [r15+0xc8]
+49 8b 8f d0 00 00 00            # 1d4e  ld rcx, [r15+0xd0]
+4c 89 24 08                     # 1d55  st_w64 [rax+rcx*1+0x0], r12
+48 83 c1 08                     # 1d59  add rcx, 0x8
+49 89 8f d0 00 00 00            # 1d5d  st [r15+0xd0], rcx
+c3                              # 1d64  ret
+
+# fn_ann_lookup:
+45 31 c9                        # 1d65  xor r9, r9   j = 0
+
+# al_loop:
+49 39 f1                        # 1d68  cmp r9, rsi
+73 30                           # 1d6b  jae 0x401d9d    -> al_miss
+4d 8b d1                        # 1d6d  mov r10, r9
+49 c1 e2 03                     # 1d70  shl r10, 3
+4d 8b d9                        # 1d74  mov r11, r9
+49 c1 e3 02                     # 1d77  shl r11, 2
+4d 01 da                        # 1d7b  add r10, r11   12 * j
+46 8b 1c 17                     # 1d7e  ld_w32 r11, [rdi+r10*1+0x0]   ann[j].t
+49 39 d3                        # 1d82  cmp r11, rdx
+74 06                           # 1d85  je 0x401d8d    -> al_hit
+49 83 c1 01                     # 1d87  add r9, 0x1
+eb db                           # 1d8b  jmp 0x401d68    -> al_loop
+
+# al_hit:
+42 8b 4c 17 04                  # 1d8d  ld_w32 rcx, [rdi+r10*1+0x4]   d
+46 8b 44 17 08                  # 1d92  ld_w32 r8, [rdi+r10*1+0x8]   a
+b8 01 00 00 00                  # 1d97  mov rax, 0x1
+c3                              # 1d9c  ret
+
+# al_miss:
+31 c0                           # 1d9d  xor rax, rax
+c3                              # 1d9f  ret
+
+# fn_hstep:
+4d 8b 8f 48 02 00 00            # 1da0  ld r9, [r15+0x248]   h.d
+4d 8b 97 50 02 00 00            # 1da7  ld r10, [r15+0x250]   h.a
+48 83 ff 39                     # 1dae  cmp rdi, 0x39
+73 40                           # 1db2  jae 0x401df4    -> hs_nonprim
+41 bb 79 2c 40 00               # 1db4  mov r11, 0x402c79   (L_prim_eff_in)
+41 0f b6 0c 3b                  # 1dba  ld_w8 rcx, [r11+rdi*1+0x0]   e_in
+49 39 c9                        # 1dbf  cmp r9, rcx
+0f 82 79 02 00 00               # 1dc2  jb 0x402041    -> hs_bad
+48 83 ff 32                     # 1dc8  cmp rdi, 0x32   exit?
+0f 84 67 02 00 00               # 1dcc  je 0x402039    -> hs_nofall
+41 bb b2 2c 40 00               # 1dd2  mov r11, 0x402cb2   (L_prim_eff_out)
+45 0f b6 04 3b                  # 1dd8  ld_w8 r8, [r11+rdi*1+0x0]   e_out
+49 29 c9                        # 1ddd  sub r9, rcx
+4d 01 c1                        # 1de0  add r9, r8
+49 8b c9                        # 1de3  mov rcx, r9
+4d 8b c2                        # 1de6  mov r8, r10
+ba 01 00 00 00                  # 1de9  mov rdx, 0x1
+b8 01 00 00 00                  # 1dee  mov rax, 0x1
+c3                              # 1df3  ret
+
+# hs_nonprim:
+48 83 ff 39                     # 1df4  cmp rdi, 0x39
+75 12                           # 1df8  jne 0x401e0c    -> hs_str
+49 8d 49 01                     # 1dfa  lea rcx, [r9+0x1]
+4d 8b c2                        # 1dfe  mov r8, r10
+ba 01 00 00 00                  # 1e01  mov rdx, 0x1
+b8 01 00 00 00                  # 1e06  mov rax, 0x1
+c3                              # 1e0b  ret
+
+# hs_str:
+48 83 ff 3a                     # 1e0c  cmp rdi, 0x3a
+75 12                           # 1e10  jne 0x401e24    -> hs_pick
+49 8d 49 02                     # 1e12  lea rcx, [r9+0x2]
+4d 8b c2                        # 1e16  mov r8, r10
+ba 01 00 00 00                  # 1e19  mov rdx, 0x1
+b8 01 00 00 00                  # 1e1e  mov rax, 0x1
+c3                              # 1e23  ret
+
+# hs_pick:
+48 83 ff 3b                     # 1e24  cmp rdi, 0x3b
+75 1b                           # 1e28  jne 0x401e45    -> hs_tor
+4c 39 ce                        # 1e2a  cmp rsi, r9
+0f 83 0e 02 00 00               # 1e2d  jae 0x402041    -> hs_bad
+49 8d 49 01                     # 1e33  lea rcx, [r9+0x1]
+4d 8b c2                        # 1e37  mov r8, r10
+ba 01 00 00 00                  # 1e3a  mov rdx, 0x1
+b8 01 00 00 00                  # 1e3f  mov rax, 0x1
+c3                              # 1e44  ret
+
+# hs_tor:
+48 83 ff 3c                     # 1e45  cmp rdi, 0x3c
+75 1d                           # 1e49  jne 0x401e68    -> hs_fromr
+49 83 f9 01                     # 1e4b  cmp r9, 0x1
+0f 82 ec 01 00 00               # 1e4f  jb 0x402041    -> hs_bad
+49 8d 49 ff                     # 1e55  lea rcx, [r9-0x1]
+4d 8d 42 01                     # 1e59  lea r8, [r10+0x1]
+ba 01 00 00 00                  # 1e5d  mov rdx, 0x1
+b8 01 00 00 00                  # 1e62  mov rax, 0x1
+c3                              # 1e67  ret
+
+# hs_fromr:
+48 83 ff 3d                     # 1e68  cmp rdi, 0x3d
+75 1d                           # 1e6c  jne 0x401e8b    -> hs_rfetch
+49 83 fa 01                     # 1e6e  cmp r10, 0x1
+0f 82 c9 01 00 00               # 1e72  jb 0x402041    -> hs_bad
+49 8d 49 01                     # 1e78  lea rcx, [r9+0x1]
+4d 8d 42 ff                     # 1e7c  lea r8, [r10-0x1]
+ba 01 00 00 00                  # 1e80  mov rdx, 0x1
+b8 01 00 00 00                  # 1e85  mov rax, 0x1
+c3                              # 1e8a  ret
+
+# hs_rfetch:
+48 83 ff 3e                     # 1e8b  cmp rdi, 0x3e
+75 1c                           # 1e8f  jne 0x401ead    -> hs_locget
+49 83 fa 01                     # 1e91  cmp r10, 0x1
+0f 82 a6 01 00 00               # 1e95  jb 0x402041    -> hs_bad
+49 8d 49 01                     # 1e9b  lea rcx, [r9+0x1]
+4d 8b c2                        # 1e9f  mov r8, r10
+ba 01 00 00 00                  # 1ea2  mov rdx, 0x1
+b8 01 00 00 00                  # 1ea7  mov rax, 0x1
+c3                              # 1eac  ret
+
+# hs_locget:
+48 83 ff 3f                     # 1ead  cmp rdi, 0x3f
+75 26                           # 1eb1  jne 0x401ed9    -> hs_locset
+4d 8b 9f 58 02 00 00            # 1eb3  ld r11, [r15+0x258]
+49 8b 4b 10                     # 1eba  ld rcx, [r11+0x10]   wd.locals
+48 39 ce                        # 1ebe  cmp rsi, rcx
+0f 83 7a 01 00 00               # 1ec1  jae 0x402041    -> hs_bad
+49 8d 49 01                     # 1ec7  lea rcx, [r9+0x1]
+4d 8b c2                        # 1ecb  mov r8, r10
+ba 01 00 00 00                  # 1ece  mov rdx, 0x1
+b8 01 00 00 00                  # 1ed3  mov rax, 0x1
+c3                              # 1ed8  ret
+
+# hs_locset:
+48 83 ff 40                     # 1ed9  cmp rdi, 0x40
+75 30                           # 1edd  jne 0x401f0f    -> hs_jmp
+49 83 f9 01                     # 1edf  cmp r9, 0x1
+0f 82 58 01 00 00               # 1ee3  jb 0x402041    -> hs_bad
+4d 8b 9f 58 02 00 00            # 1ee9  ld r11, [r15+0x258]
+49 8b 4b 10                     # 1ef0  ld rcx, [r11+0x10]   wd.locals
+48 39 ce                        # 1ef4  cmp rsi, rcx
+0f 83 44 01 00 00               # 1ef7  jae 0x402041    -> hs_bad
+49 8d 49 ff                     # 1efd  lea rcx, [r9-0x1]
+4d 8b c2                        # 1f01  mov r8, r10
+ba 01 00 00 00                  # 1f04  mov rdx, 0x1
+b8 01 00 00 00                  # 1f09  mov rax, 0x1
+c3                              # 1f0e  ret
+
+# hs_jmp:
+48 83 ff 41                     # 1f0f  cmp rdi, 0x41
+75 46                           # 1f13  jne 0x401f5b    -> hs_jz
+49 8b bf 30 02 00 00            # 1f15  ld rdi, [r15+0x230]
+48 8b d6                        # 1f1c  mov rdx, rsi
+49 8b b7 28 02 00 00            # 1f1f  ld rsi, [r15+0x228]
+e8 3a fe ff ff                  # 1f26  call 0x401d65    -> fn_ann_lookup
+48 85 c0                        # 1f2b  test rax, rax
+0f 84 0d 01 00 00               # 1f2e  je 0x402041    -> hs_bad
+4d 8b 8f 48 02 00 00            # 1f34  ld r9, [r15+0x248]
+4d 8b 97 50 02 00 00            # 1f3b  ld r10, [r15+0x250]
+4c 39 c9                        # 1f42  cmp rcx, r9
+74 05                           # 1f45  je 0x401f4c    (jne: je over jmp)
+e9 f5 00 00 00                  # 1f47  jmp 0x402041   -> hs_bad
+4d 39 d0                        # 1f4c  cmp r8, r10
+74 05                           # 1f4f  je 0x401f56    (jne: je over jmp)
+e9 eb 00 00 00                  # 1f51  jmp 0x402041   -> hs_bad
+e9 de 00 00 00                  # 1f56  jmp 0x402039    -> hs_nofall
+
+# hs_jz:
+48 83 ff 42                     # 1f5b  cmp rdi, 0x42
+74 06                           # 1f5f  je 0x401f67    -> hs_jcc
+48 83 ff 43                     # 1f61  cmp rdi, 0x43
+75 5a                           # 1f65  jne 0x401fc1    -> hs_call
+
+# hs_jcc:
+49 83 f9 01                     # 1f67  cmp r9, 0x1
+0f 82 d0 00 00 00               # 1f6b  jb 0x402041    -> hs_bad
+49 8b bf 30 02 00 00            # 1f71  ld rdi, [r15+0x230]
+48 8b d6                        # 1f78  mov rdx, rsi
+49 8b b7 28 02 00 00            # 1f7b  ld rsi, [r15+0x228]
+e8 de fd ff ff                  # 1f82  call 0x401d65    -> fn_ann_lookup
+48 85 c0                        # 1f87  test rax, rax
+0f 84 b1 00 00 00               # 1f8a  je 0x402041    -> hs_bad
+4d 8b 8f 48 02 00 00            # 1f90  ld r9, [r15+0x248]
+49 83 e9 01                     # 1f97  sub r9, 0x1
+4d 8b 97 50 02 00 00            # 1f9b  ld r10, [r15+0x250]
+4c 39 c9                        # 1fa2  cmp rcx, r9
+74 05                           # 1fa5  je 0x401fac    (jne: je over jmp)
+e9 95 00 00 00                  # 1fa7  jmp 0x402041   -> hs_bad
+4d 39 d0                        # 1fac  cmp r8, r10
+74 05                           # 1faf  je 0x401fb6    (jne: je over jmp)
+e9 8b 00 00 00                  # 1fb1  jmp 0x402041   -> hs_bad
+ba 01 00 00 00                  # 1fb6  mov rdx, 0x1
+b8 01 00 00 00                  # 1fbb  mov rax, 0x1
+c3                              # 1fc0  ret
+
+# hs_call:
+48 83 ff 44                     # 1fc1  cmp rdi, 0x44
+75 57                           # 1fc5  jne 0x40201e    -> hs_ret
+4d 8b 9f d8 01 00 00            # 1fc7  ld r11, [r15+0x1d8]
+4c 39 de                        # 1fce  cmp rsi, r11
+0f 83 6a 00 00 00               # 1fd1  jae 0x402041    -> hs_bad
+49 8b 87 e8 00 00 00            # 1fd7  ld rax, [r15+0xe8]
+49 8b 97 e0 01 00 00            # 1fde  ld rdx, [r15+0x1e0]
+48 c1 e2 04                     # 1fe5  shl rdx, 4
+48 83 c2 20                     # 1fe9  add rdx, 0x20
+48 c1 e6 06                     # 1fed  shl rsi, 6
+48 01 f2                        # 1ff1  add rdx, rsi
+48 01 d0                        # 1ff4  add rax, rdx   words[w]
+48 8b 08                        # 1ff7  ld rcx, [rax+0x0]   c.ins
+4c 8b 40 08                     # 1ffa  ld r8, [rax+0x8]   c.outs
+49 39 c9                        # 1ffe  cmp r9, rcx
+0f 82 3a 00 00 00               # 2001  jb 0x402041    -> hs_bad
+49 29 c9                        # 2007  sub r9, rcx
+4d 01 c1                        # 200a  add r9, r8
+49 8b c9                        # 200d  mov rcx, r9
+4d 8b c2                        # 2010  mov r8, r10
+ba 01 00 00 00                  # 2013  mov rdx, 0x1
+b8 01 00 00 00                  # 2018  mov rax, 0x1
+c3                              # 201d  ret
+
+# hs_ret:
+48 83 ff 45                     # 201e  cmp rdi, 0x45
+75 1d                           # 2022  jne 0x402041    -> hs_bad
+4d 8b 9f 58 02 00 00            # 2024  ld r11, [r15+0x258]
+49 8b 4b 08                     # 202b  ld rcx, [r11+0x8]   wd.outs
+49 39 c9                        # 202f  cmp r9, rcx
+75 0d                           # 2032  jne 0x402041    -> hs_bad
+4d 85 d2                        # 2034  test r10, r10
+75 08                           # 2037  jne 0x402041    -> hs_bad
+
+# hs_nofall:
+31 d2                           # 2039  xor rdx, rdx   has_fall = 0
+b8 01 00 00 00                  # 203b  mov rax, 0x1
+c3                              # 2040  ret
+
+# hs_bad:
+31 c0                           # 2041  xor rax, rax
+c3                              # 2043  ret
+
+# L_start:
+31 c0                           # 2044  xor rax, rax
+31 c9                           # 2046  xor rcx, rcx
+31 d2                           # 2048  xor rdx, rdx
+31 db                           # 204a  xor rbx, rbx
+31 ed                           # 204c  xor rbp, rbp
+31 f6                           # 204e  xor rsi, rsi
+31 ff                           # 2050  xor rdi, rdi
+45 31 c0                        # 2052  xor r8, r8
+45 31 c9                        # 2055  xor r9, r9
+45 31 d2                        # 2058  xor r10, r10
+45 31 db                        # 205b  xor r11, r11
+45 31 e4                        # 205e  xor r12, r12
+45 31 ed                        # 2061  xor r13, r13
+45 31 f6                        # 2064  xor r14, r14
+41 bf 00 00 60 00               # 2067  mov r15, 0x600000   r15 = VmCtx
+48 8b 04 24                     # 206d  ld rax, [rsp+0x0]   argc
+48 83 f8 02                     # 2071  cmp rax, 0x2
+73 1b                           # 2075  jae 0x402092    -> boot_argc_ok
+be e3 30 40 00                  # 2077  mov rsi, 0x4030e3   (L_str_usage)
+ba 3d 00 00 00                  # 207c  mov rdx, 0x3d
+e8 2d fb ff ff                  # 2081  call 0x401bb3    -> fn_write_stderr
+bf 01 00 00 00                  # 2086  mov rdi, 0x1
+b8 3c 00 00 00                  # 208b  mov rax, 0x3c
+0f 05                           # 2090  syscall
+
+# boot_argc_ok:
+48 8b 7c 24 10                  # 2092  ld rdi, [rsp+0x10]   argv[1]
+49 89 bf 98 01 00 00            # 2097  st [r15+0x198], rdi
+b8 00 00 00 01                  # 209e  mov rax, 0x1000000
+49 89 47 70                     # 20a3  st [r15+0x70], rax
+48 8b 04 24                     # 20a7  ld rax, [rsp+0x0]   argc
+48 83 f8 03                     # 20ab  cmp rax, 0x3
+72 34                           # 20af  jb 0x4020e5    -> boot_msize_ok
+48 8b 74 24 18                  # 20b1  ld rsi, [rsp+0x18]   argv[2]
+31 c0                           # 20b6  xor rax, rax
+31 c9                           # 20b8  xor rcx, rcx
+
+# parse_ms_loop:
+0f b6 14 0e                     # 20ba  ld_w8 rdx, [rsi+rcx*1+0x0]
+48 83 fa 30                     # 20be  cmp rdx, 0x30
+72 1d                           # 20c2  jb 0x4020e1    -> parse_ms_done
+48 83 fa 39                     # 20c4  cmp rdx, 0x39
+77 17                           # 20c8  ja 0x4020e1    -> parse_ms_done
+41 b8 0a 00 00 00               # 20ca  mov r8, 0xa
+49 0f af c0                     # 20d0  imul rax, r8
+48 83 ea 30                     # 20d4  sub rdx, 0x30
+48 01 d0                        # 20d8  add rax, rdx
+48 83 c1 01                     # 20db  add rcx, 0x1
+eb d9                           # 20df  jmp 0x4020ba    -> parse_ms_loop
+
+# parse_ms_done:
+49 89 47 70                     # 20e1  st [r15+0x70], rax
+
+# boot_msize_ok:
+49 8b 47 70                     # 20e5  ld rax, [r15+0x70]
+48 b9 00 00 00 00 00 10 00 00   # 20e9  mov rcx, 0x100000000000
+48 39 c8                        # 20f3  cmp rax, rcx
+0f 83 4e fa ff ff               # 20f6  jae 0x401b4a   msize >= 2^44 -> L_exit_nomem
+49 8b bf 98 01 00 00            # 20fc  ld rdi, [r15+0x198]
+31 f6                           # 2103  xor rsi, rsi   O_RDONLY
+31 d2                           # 2105  xor rdx, rdx   mode = 0
+b8 02 00 00 00                  # 2107  mov rax, 0x2   sys_open
+0f 05                           # 210c  syscall
+48 85 c0                        # 210e  test rax, rax
+0f 88 c0 0a 00 00               # 2111  js 0x402bd7    -> L_err_open
+49 89 87 b8 01 00 00            # 2117  st [r15+0x1b8], rax
+bf 00 10 00 00                  # 211e  mov rdi, 0x1000
+e8 3d fa ff ff                  # 2123  call 0x401b65    -> fn_mmap
+49 89 87 a0 01 00 00            # 2128  st [r15+0x1a0], rax
+b9 00 10 00 00                  # 212f  mov rcx, 0x1000
+49 89 8f b0 01 00 00            # 2134  st [r15+0x1b0], rcx
+31 c9                           # 213b  xor rcx, rcx
+49 89 8f a8 01 00 00            # 213d  st [r15+0x1a8], rcx
+
+# rd_file_loop:
+49 8b 87 a8 01 00 00            # 2144  ld rax, [r15+0x1a8]
+49 8b 8f b0 01 00 00            # 214b  ld rcx, [r15+0x1b0]
+48 39 c8                        # 2152  cmp rax, rcx
+72 2f                           # 2155  jb 0x402186    -> rd_file_go
+49 8b bf a0 01 00 00            # 2157  ld rdi, [r15+0x1a0]
+48 8b f1                        # 215e  mov rsi, rcx
+48 8b d1                        # 2161  mov rdx, rcx
+48 c1 e2 01                     # 2164  shl rdx, 1
+e8 26 fa ff ff                  # 2168  call 0x401b93    -> fn_mremap
+49 89 87 a0 01 00 00            # 216d  st [r15+0x1a0], rax
+49 8b 8f b0 01 00 00            # 2174  ld rcx, [r15+0x1b0]
+48 c1 e1 01                     # 217b  shl rcx, 1
+49 89 8f b0 01 00 00            # 217f  st [r15+0x1b0], rcx
+
+# rd_file_go:
+49 8b bf b8 01 00 00            # 2186  ld rdi, [r15+0x1b8]
+49 8b b7 a0 01 00 00            # 218d  ld rsi, [r15+0x1a0]
+49 8b 87 a8 01 00 00            # 2194  ld rax, [r15+0x1a8]
+48 01 c6                        # 219b  add rsi, rax
+49 8b 97 b0 01 00 00            # 219e  ld rdx, [r15+0x1b0]
+48 29 c2                        # 21a5  sub rdx, rax
+31 c0                           # 21a8  xor rax, rax   sys_read
+0f 05                           # 21aa  syscall
+48 85 c0                        # 21ac  test rax, rax
+0f 88 22 0a 00 00               # 21af  js 0x402bd7    -> L_err_open
+74 16                           # 21b5  je 0x4021cd    -> rd_file_done
+49 8b 8f a8 01 00 00            # 21b7  ld rcx, [r15+0x1a8]
+48 01 c1                        # 21be  add rcx, rax
+49 89 8f a8 01 00 00            # 21c1  st [r15+0x1a8], rcx
+e9 77 ff ff ff                  # 21c8  jmp 0x402144    -> rd_file_loop
+
+# rd_file_done:
+49 8b bf b8 01 00 00            # 21cd  ld rdi, [r15+0x1b8]
+b8 03 00 00 00                  # 21d4  mov rax, 0x3   sys_close
+0f 05                           # 21d9  syscall
+4d 8b a7 a0 01 00 00            # 21db  ld r12, [r15+0x1a0]   file_base
+4d 8b af a8 01 00 00            # 21e2  ld r13, [r15+0x1a8]   file_len
+49 83 fd 10                     # 21e9  cmp r13, 0x10
+0f 82 1a 0a 00 00               # 21ed  jb 0x402c0d    -> L_err_decode
+41 8b 04 24                     # 21f3  ld32 rax, [r12+0x0]
+48 81 f8 53 50 52 31            # 21f7  cmp rax, 0x31525053
+74 05                           # 21fe  je 0x402205    (jne: je over jmp)
+e9 08 0a 00 00                  # 2200  jmp 0x402c0d   -> L_err_decode
+41 8b 44 24 04                  # 2205  ld32 rax, [r12+0x4]
+49 89 87 d0 01 00 00            # 220a  st [r15+0x1d0], rax
+41 8b 44 24 08                  # 2211  ld32 rax, [r12+0x8]
+49 89 87 d8 01 00 00            # 2216  st [r15+0x1d8], rax
+41 8b 44 24 0c                  # 221d  ld32 rax, [r12+0xc]
+49 89 87 e0 01 00 00            # 2222  st [r15+0x1e0], rax
+be 10 00 00 00                  # 2229  mov rsi, 0x10   pos = 16
+45 31 c0                        # 222e  xor r8, r8   total_data = 0
+49 8b 8f e0 01 00 00            # 2231  ld rcx, [r15+0x1e0]   k = nd
+
+# p1_data_loop:
+48 85 c9                        # 2238  test rcx, rcx
+74 2f                           # 223b  je 0x40226c    -> p1_data_done
+48 8d 46 04                     # 223d  lea rax, [rsi+0x4]
+4c 39 e8                        # 2241  cmp rax, r13
+0f 87 c3 09 00 00               # 2244  ja 0x402c0d    -> L_err_decode
+41 8b 14 34                     # 224a  ld_w32 rdx, [r12+rsi*1+0x0]   dlen
+48 8b f0                        # 224e  mov rsi, rax
+49 8b c5                        # 2251  mov rax, r13
+48 29 f0                        # 2254  sub rax, rsi   rem
+48 39 c2                        # 2257  cmp rdx, rax
+0f 87 ad 09 00 00               # 225a  ja 0x402c0d    -> L_err_decode
+48 01 d6                        # 2260  add rsi, rdx
+49 01 d0                        # 2263  add r8, rdx
+48 83 e9 01                     # 2266  sub rcx, 0x1
+eb cc                           # 226a  jmp 0x402238    -> p1_data_loop
+
+# p1_data_done:
+4d 89 87 f0 01 00 00            # 226c  st [r15+0x1f0], r8
+49 89 b7 f8 01 00 00            # 2273  st [r15+0x1f8], rsi
+45 31 c0                        # 227a  xor r8, r8   total_instrs = 0
+49 8b 8f d8 01 00 00            # 227d  ld rcx, [r15+0x1d8]   w_rem = nw
+
+# p1_word_loop:
+48 85 c9                        # 2284  test rcx, rcx
+0f 84 ba 00 00 00               # 2287  je 0x402347    -> p1_word_done
+48 8d 46 14                     # 228d  lea rax, [rsi+0x14]
+4c 39 e8                        # 2291  cmp rax, r13
+0f 87 73 09 00 00               # 2294  ja 0x402c0d    -> L_err_decode
+45 8b 4c 34 0c                  # 229a  ld_w32 r9, [r12+rsi*1+0xc]   nc
+45 8b 54 34 10                  # 229f  ld_w32 r10, [r12+rsi*1+0x10]   na
+4d 01 c8                        # 22a4  add r8, r9
+48 8b f0                        # 22a7  mov rsi, rax
+
+# p1_code_loop:
+4d 85 c9                        # 22aa  test r9, r9
+74 6f                           # 22ad  je 0x40231e    -> p1_code_done
+4c 39 ee                        # 22af  cmp rsi, r13
+0f 83 55 09 00 00               # 22b2  jae 0x402c0d    -> L_err_decode
+41 0f b6 04 34                  # 22b8  ld_w8 rax, [r12+rsi*1+0x0]   op
+48 83 f8 39                     # 22bd  cmp rax, 0x39
+72 3e                           # 22c1  jb 0x402301    -> p1_ilen1
+48 81 f8 80 00 00 00            # 22c3  cmp rax, 0x80
+0f 82 3d 09 00 00               # 22ca  jb 0x402c0d    -> L_err_decode
+74 28                           # 22d0  je 0x4022fa    -> p1_ilen9
+48 81 f8 8c 00 00 00            # 22d2  cmp rax, 0x8c
+0f 87 2e 09 00 00               # 22d9  ja 0x402c0d    -> L_err_decode
+74 20                           # 22df  je 0x402301    -> p1_ilen1
+48 81 f8 83 00 00 00            # 22e1  cmp rax, 0x83
+72 09                           # 22e8  jb 0x4022f3    -> p1_ilen5
+48 81 f8 86 00 00 00            # 22ea  cmp rax, 0x86
+72 0e                           # 22f1  jb 0x402301    -> p1_ilen1
+
+# p1_ilen5:
+ba 05 00 00 00                  # 22f3  mov rdx, 0x5
+eb 0c                           # 22f8  jmp 0x402306    -> p1_ilen_chk
+
+# p1_ilen9:
+ba 09 00 00 00                  # 22fa  mov rdx, 0x9
+eb 05                           # 22ff  jmp 0x402306    -> p1_ilen_chk
+
+# p1_ilen1:
+ba 01 00 00 00                  # 2301  mov rdx, 0x1
+
+# p1_ilen_chk:
+4d 8b dd                        # 2306  mov r11, r13
+49 29 f3                        # 2309  sub r11, rsi
+4c 39 da                        # 230c  cmp rdx, r11
+0f 87 f8 08 00 00               # 230f  ja 0x402c0d    -> L_err_decode
+48 01 d6                        # 2315  add rsi, rdx
+49 83 e9 01                     # 2318  sub r9, 0x1
+eb 8c                           # 231c  jmp 0x4022aa    -> p1_code_loop
+
+# p1_code_done:
+49 8b d2                        # 231e  mov rdx, r10
+48 c1 e2 03                     # 2321  shl rdx, 3
+49 c1 e2 02                     # 2325  shl r10, 2
+4c 01 d2                        # 2329  add rdx, r10   12 * na
+4d 8b dd                        # 232c  mov r11, r13
+49 29 f3                        # 232f  sub r11, rsi
+4c 39 da                        # 2332  cmp rdx, r11
+0f 87 d2 08 00 00               # 2335  ja 0x402c0d    -> L_err_decode
+48 01 d6                        # 233b  add rsi, rdx
+48 83 e9 01                     # 233e  sub rcx, 0x1
+e9 3d ff ff ff                  # 2342  jmp 0x402284    -> p1_word_loop
+
+# p1_word_done:
+4c 39 ee                        # 2347  cmp rsi, r13   no trailing bytes
+74 05                           # 234a  je 0x402351    (jne: je over jmp)
+e9 bc 08 00 00                  # 234c  jmp 0x402c0d   -> L_err_decode
+4d 89 87 e8 01 00 00            # 2351  st [r15+0x1e8], r8
+49 8b 87 e0 01 00 00            # 2358  ld rax, [r15+0x1e0]
+48 c1 e0 04                     # 235f  shl rax, 4
+48 83 c0 20                     # 2363  add rax, 0x20
+49 8b 8f d8 01 00 00            # 2367  ld rcx, [r15+0x1d8]
+48 c1 e1 06                     # 236e  shl rcx, 6
+48 01 c8                        # 2372  add rax, rcx
+49 8b 97 e8 01 00 00            # 2375  ld rdx, [r15+0x1e8]
+48 c1 e2 04                     # 237c  shl rdx, 4
+48 01 d0                        # 2380  add rax, rdx
+48 81 c0 ff 0f 00 00            # 2383  add rax, 0xfff
+48 c1 e8 0c                     # 238a  shr rax, 12
+48 c1 e0 0c                     # 238e  shl rax, 12
+49 89 87 00 02 00 00            # 2392  st [r15+0x200], rax
+48 8b f8                        # 2399  mov rdi, rax
+e8 c4 f7 ff ff                  # 239c  call 0x401b65    -> fn_mmap
+49 89 87 e8 00 00 00            # 23a1  st [r15+0xe8], rax
+4c 8b f0                        # 23a8  mov r14, rax   r14 = code1
+49 8b 87 d0 01 00 00            # 23ab  ld rax, [r15+0x1d0]
+49 89 06                        # 23b2  st [r14+0x0], rax
+49 8b 87 d8 01 00 00            # 23b5  ld rax, [r15+0x1d8]
+49 89 46 08                     # 23bc  st [r14+0x8], rax
+49 8b 87 e0 01 00 00            # 23c0  ld rax, [r15+0x1e0]
+49 89 46 10                     # 23c7  st [r14+0x10], rax
+49 8b 87 e8 01 00 00            # 23cb  ld rax, [r15+0x1e8]
+49 89 46 18                     # 23d2  st [r14+0x18], rax
+be 10 00 00 00                  # 23d6  mov rsi, 0x10   file pos
+45 31 c0                        # 23db  xor r8, r8   addr = 0
+31 c9                           # 23de  xor rcx, rcx   k = 0
+4d 8b 8f e0 01 00 00            # 23e0  ld r9, [r15+0x1e0]
+
+# p2_data_loop:
+4c 39 c9                        # 23e7  cmp rcx, r9
+73 28                           # 23ea  jae 0x402414    -> p2_data_done
+41 8b 04 34                     # 23ec  ld_w32 rax, [r12+rsi*1+0x0]   dlen
+48 83 c6 04                     # 23f0  add rsi, 0x4
+48 8b d1                        # 23f4  mov rdx, rcx
+48 c1 e2 04                     # 23f7  shl rdx, 4
+48 83 c2 20                     # 23fb  add rdx, 0x20
+4d 89 04 16                     # 23ff  st_w64 [r14+rdx*1+0x0], r8   data[k].addr
+49 89 44 16 08                  # 2403  st_w64 [r14+rdx*1+0x8], rax   data[k].len
+49 01 c0                        # 2408  add r8, rax
+48 01 c6                        # 240b  add rsi, rax
+48 83 c1 01                     # 240e  add rcx, 0x1
+eb d3                           # 2412  jmp 0x4023e7    -> p2_data_loop
+
+# p2_data_done:
+4d 8b af e0 01 00 00            # 2414  ld r13, [r15+0x1e0]
+49 c1 e5 04                     # 241b  shl r13, 4
+49 83 c5 20                     # 241f  add r13, 0x20
+49 8b 87 d8 01 00 00            # 2423  ld rax, [r15+0x1d8]
+48 c1 e0 06                     # 242a  shl rax, 6
+49 01 c5                        # 242e  add r13, rax   start of instrs in code1
+4d 8b c5                        # 2431  mov r8, r13
+49 29 c0                        # 2434  sub r8, rax
+4d 01 f0                        # 2437  add r8, r14   start of words_meta in code1
+31 c9                           # 243a  xor rcx, rcx   w = 0
+
+# p2_word_loop:
+49 8b 87 d8 01 00 00            # 243c  ld rax, [r15+0x1d8]
+48 39 c1                        # 2443  cmp rcx, rax
+0f 83 d7 00 00 00               # 2446  jae 0x402523    -> p2_word_done
+48 8b d1                        # 244c  mov rdx, rcx
+48 c1 e2 06                     # 244f  shl rdx, 6
+4c 01 c2                        # 2453  add rdx, r8   w_ptr = words_meta[w]
+41 8b 04 34                     # 2456  ld_w32 rax, [r12+rsi*1+0x0]
+48 89 02                        # 245a  st [rdx+0x0], rax   ins
+41 8b 44 34 04                  # 245d  ld_w32 rax, [r12+rsi*1+0x4]
+48 89 42 08                     # 2462  st [rdx+0x8], rax   outs
+41 8b 44 34 08                  # 2466  ld_w32 rax, [r12+rsi*1+0x8]
+48 89 42 10                     # 246b  st [rdx+0x10], rax   locals
+45 8b 4c 34 0c                  # 246f  ld_w32 r9, [r12+rsi*1+0xc]   nc
+4c 89 4a 18                     # 2474  st [rdx+0x18], r9   ncode
+4c 89 6a 20                     # 2478  st [rdx+0x20], r13   code_byte_off
+45 8b 54 34 10                  # 247c  ld_w32 r10, [r12+rsi*1+0x10]   na
+4c 89 52 28                     # 2481  st [rdx+0x28], r10   tmp na
+48 83 c6 14                     # 2485  add rsi, 0x14
+41 bb 00 00 00 00               # 2489  mov r11, 0x0   j = 0 (avoids reading syscall-clobbered R11)
+
+# p2_code_loop:
+4d 39 cb                        # 248f  cmp r11, r9
+0f 83 6d 00 00 00               # 2492  jae 0x402505    -> p2_code_done
+41 0f b6 04 34                  # 2498  ld_w8 rax, [r12+rsi*1+0x0]   byte op
+48 83 c6 01                     # 249d  add rsi, 0x1
+48 83 f8 39                     # 24a1  cmp rax, 0x39
+73 04                           # 24a5  jae 0x4024ab    -> p2_nonprim
+31 db                           # 24a7  xor rbx, rbx   imm = 0
+eb 47                           # 24a9  jmp 0x4024f2    -> p2_store_ins
+
+# p2_nonprim:
+48 81 f8 80 00 00 00            # 24ab  cmp rax, 0x80
+75 0f                           # 24b2  jne 0x4024c3    -> p2_np_other
+b8 39 00 00 00                  # 24b4  mov rax, 0x39
+49 8b 1c 34                     # 24b9  ld_w64 rbx, [r12+rsi*1+0x0]   u64 imm
+48 83 c6 08                     # 24bd  add rsi, 0x8
+eb 2f                           # 24c1  jmp 0x4024f2    -> p2_store_ins
+
+# p2_np_other:
+48 81 e8 80 00 00 00            # 24c3  sub rax, 0x80
+48 83 c0 39                     # 24ca  add rax, 0x39   op_id = 57 + (byte - 0x80)
+48 83 f8 3c                     # 24ce  cmp rax, 0x3c
+74 1c                           # 24d2  je 0x4024f0    -> p2_imm0
+48 83 f8 3d                     # 24d4  cmp rax, 0x3d
+74 16                           # 24d8  je 0x4024f0    -> p2_imm0
+48 83 f8 3e                     # 24da  cmp rax, 0x3e
+74 10                           # 24de  je 0x4024f0    -> p2_imm0
+48 83 f8 45                     # 24e0  cmp rax, 0x45
+74 0a                           # 24e4  je 0x4024f0    -> p2_imm0
+41 8b 1c 34                     # 24e6  ld_w32 rbx, [r12+rsi*1+0x0]   u32 imm
+48 83 c6 04                     # 24ea  add rsi, 0x4
+eb 02                           # 24ee  jmp 0x4024f2    -> p2_store_ins
+
+# p2_imm0:
+31 db                           # 24f0  xor rbx, rbx
+
+# p2_store_ins:
+4b 89 04 2e                     # 24f2  st_w64 [r14+r13*1+0x0], rax
+4b 89 5c 2e 08                  # 24f6  st_w64 [r14+r13*1+0x8], rbx
+49 83 c5 10                     # 24fb  add r13, 0x10
+49 83 c3 01                     # 24ff  add r11, 0x1
+eb 8a                           # 2503  jmp 0x40248f    -> p2_code_loop
+
+# p2_code_done:
+48 89 72 30                     # 2505  st [rdx+0x30], rsi   tmp ann_file_off
+49 8b c2                        # 2509  mov rax, r10
+48 c1 e0 03                     # 250c  shl rax, 3
+49 c1 e2 02                     # 2510  shl r10, 2
+4c 01 d0                        # 2514  add rax, r10
+48 01 c6                        # 2517  add rsi, rax   skip na * 12
+48 83 c1 01                     # 251a  add rcx, 0x1
+e9 19 ff ff ff                  # 251e  jmp 0x40243c    -> p2_word_loop
+
+# p2_word_done:
+49 8b 87 d0 01 00 00            # 2523  ld rax, [r15+0x1d0]
+49 8b 8f d8 01 00 00            # 252a  ld rcx, [r15+0x1d8]
+48 39 c8                        # 2531  cmp rax, rcx
+0f 83 09 07 00 00               # 2534  jae 0x402c43   main >= nw -> L_err_check
+49 8b 97 e0 01 00 00            # 253a  ld rdx, [r15+0x1e0]
+48 c1 e2 04                     # 2541  shl rdx, 4
+48 83 c2 20                     # 2545  add rdx, 0x20
+48 c1 e0 06                     # 2549  shl rax, 6
+48 01 c2                        # 254d  add rdx, rax
+49 8b 04 16                     # 2550  ld_w64 rax, [r14+rdx*1+0x0]   words[main].ins
+48 85 c0                        # 2554  test rax, rax
+74 05                           # 2557  je 0x40255e   main.ins != 0 (jne: je over jmp)
+e9 e5 06 00 00                  # 2559  jmp 0x402c43   -> L_err_check
+bf 00 10 00 00                  # 255e  mov rdi, 0x1000
+e8 fd f5 ff ff                  # 2563  call 0x401b65    -> fn_mmap
+49 89 87 08 02 00 00            # 2568  st [r15+0x208], rax
+b8 00 01 00 00                  # 256f  mov rax, 0x100
+49 89 87 10 02 00 00            # 2574  st [r15+0x210], rax
+31 c0                           # 257b  xor rax, rax
+49 89 87 18 02 00 00            # 257d  st [r15+0x218], rax
+
+# chk_word_loop:
+49 8b 8f 18 02 00 00            # 2584  ld rcx, [r15+0x218]
+49 8b 87 d8 01 00 00            # 258b  ld rax, [r15+0x1d8]
+48 39 c1                        # 2592  cmp rcx, rax
+0f 83 15 03 00 00               # 2595  jae 0x4028b0    -> chk_all_ok
+49 8b 97 e0 01 00 00            # 259b  ld rdx, [r15+0x1e0]
+48 c1 e2 04                     # 25a2  shl rdx, 4
+48 83 c2 20                     # 25a6  add rdx, 0x20
+48 c1 e1 06                     # 25aa  shl rcx, 6
+48 01 ca                        # 25ae  add rdx, rcx
+4d 8b b7 e8 00 00 00            # 25b1  ld r14, [r15+0xe8]
+49 01 d6                        # 25b8  add r14, rdx   r14 = wd ptr
+4d 89 b7 58 02 00 00            # 25bb  st [r15+0x258], r14
+4d 8b 46 18                     # 25c2  ld r8, [r14+0x18]   nc
+4d 85 c0                        # 25c6  test r8, r8
+0f 84 c3 02 00 00               # 25c9  je 0x402892   empty word code -> chk_fail_munmap
+4d 89 87 20 02 00 00            # 25cf  st [r15+0x220], r8
+49 8b 46 28                     # 25d6  ld rax, [r14+0x28]   na
+49 89 87 28 02 00 00            # 25da  st [r15+0x228], rax
+49 8b 46 30                     # 25e1  ld rax, [r14+0x30]   ann_file_off
+4d 8b a7 a0 01 00 00            # 25e5  ld r12, [r15+0x1a0]
+4c 01 e0                        # 25ec  add rax, r12
+49 89 87 30 02 00 00            # 25ef  st [r15+0x230], rax
+
+# chk_hbuf_grow:
+49 8b 87 20 02 00 00            # 25f6  ld rax, [r15+0x220]
+49 8b 8f 10 02 00 00            # 25fd  ld rcx, [r15+0x210]
+48 39 c8                        # 2604  cmp rax, rcx
+76 35                           # 2607  jbe 0x40263e    -> chk_hbuf_ok
+49 8b bf 08 02 00 00            # 2609  ld rdi, [r15+0x208]
+48 8b f1                        # 2610  mov rsi, rcx
+48 c1 e6 04                     # 2613  shl rsi, 4
+48 8b d6                        # 2617  mov rdx, rsi
+48 c1 e2 01                     # 261a  shl rdx, 1
+e8 70 f5 ff ff                  # 261e  call 0x401b93    -> fn_mremap
+49 89 87 08 02 00 00            # 2623  st [r15+0x208], rax
+49 8b 8f 10 02 00 00            # 262a  ld rcx, [r15+0x210]
+48 c1 e1 01                     # 2631  shl rcx, 1
+49 89 8f 10 02 00 00            # 2635  st [r15+0x210], rcx
+eb b8                           # 263c  jmp 0x4025f6    -> chk_hbuf_grow
+
+# chk_hbuf_ok:
+4d 8b b7 58 02 00 00            # 263e  ld r14, [r15+0x258]
+49 8b 06                        # 2645  ld rax, [r14+0x0]   wd.ins
+49 89 87 38 02 00 00            # 2648  st [r15+0x238], rax
+31 c0                           # 264f  xor rax, rax
+49 89 87 40 02 00 00            # 2651  st [r15+0x240], rax
+45 31 ed                        # 2658  xor r13, r13   i = 0
+
+# chk_infer_loop:
+49 8b 87 20 02 00 00            # 265b  ld rax, [r15+0x220]
+49 39 c5                        # 2662  cmp r13, rax
+0f 83 c3 00 00 00               # 2665  jae 0x40272e    -> chk_infer_done
+49 8b bf 30 02 00 00            # 266b  ld rdi, [r15+0x230]
+49 8b b7 28 02 00 00            # 2672  ld rsi, [r15+0x228]
+49 8b d5                        # 2679  mov rdx, r13
+e8 e4 f6 ff ff                  # 267c  call 0x401d65    -> fn_ann_lookup
+48 85 c0                        # 2681  test rax, rax
+75 0e                           # 2684  jne 0x402694    -> ci_has_ann
+49 8b 8f 38 02 00 00            # 2686  ld rcx, [r15+0x238]
+4d 8b 87 40 02 00 00            # 268d  ld r8, [r15+0x240]
+
+# ci_has_ann:
+49 89 8f 48 02 00 00            # 2694  st [r15+0x248], rcx
+4d 89 87 50 02 00 00            # 269b  st [r15+0x250], r8
+4d 8b 8f 08 02 00 00            # 26a2  ld r9, [r15+0x208]
+4d 8b d5                        # 26a9  mov r10, r13
+49 c1 e2 04                     # 26ac  shl r10, 4
+4b 89 0c 11                     # 26b0  st_w64 [r9+r10*1+0x0], rcx
+4f 89 44 11 08                  # 26b4  st_w64 [r9+r10*1+0x8], r8
+4d 8b b7 58 02 00 00            # 26b9  ld r14, [r15+0x258]
+49 8b 46 20                     # 26c0  ld rax, [r14+0x20]   code_byte_off
+4c 01 d0                        # 26c4  add rax, r10   code_byte_off + i*16
+4d 8b 9f e8 00 00 00            # 26c7  ld r11, [r15+0xe8]
+49 8b 3c 03                     # 26ce  ld_w64 rdi, [r11+rax*1+0x0]   op
+49 8b 74 03 08                  # 26d2  ld_w64 rsi, [r11+rax*1+0x8]   imm
+e8 c4 f6 ff ff                  # 26d7  call 0x401da0    -> fn_hstep
+48 85 c0                        # 26dc  test rax, rax
+74 15                           # 26df  je 0x4026f6    -> ci_fallback
+48 85 d2                        # 26e1  test rdx, rdx
+74 10                           # 26e4  je 0x4026f6    -> ci_fallback
+49 89 8f 38 02 00 00            # 26e6  st [r15+0x238], rcx
+4d 89 87 40 02 00 00            # 26ed  st [r15+0x240], r8
+eb 2f                           # 26f4  jmp 0x402725    -> ci_next
+
+# ci_fallback:
+49 8b bf 30 02 00 00            # 26f6  ld rdi, [r15+0x230]
+49 8b b7 28 02 00 00            # 26fd  ld rsi, [r15+0x228]
+49 8d 55 01                     # 2704  lea rdx, [r13+0x1]
+e8 58 f6 ff ff                  # 2708  call 0x401d65    -> fn_ann_lookup
+48 85 c0                        # 270d  test rax, rax
+75 05                           # 2710  jne 0x402717    -> ci_fb_set
+31 c9                           # 2712  xor rcx, rcx
+45 31 c0                        # 2714  xor r8, r8
+
+# ci_fb_set:
+49 89 8f 38 02 00 00            # 2717  st [r15+0x238], rcx
+4d 89 87 40 02 00 00            # 271e  st [r15+0x240], r8
+
+# ci_next:
+49 83 c5 01                     # 2725  add r13, 0x1
+e9 2d ff ff ff                  # 2729  jmp 0x40265b    -> chk_infer_loop
+
+# chk_infer_done:
+4d 8b 8f 08 02 00 00            # 272e  ld r9, [r15+0x208]
+4d 8b b7 58 02 00 00            # 2735  ld r14, [r15+0x258]
+49 8b 01                        # 273c  ld rax, [r9+0x0]
+49 8b 0e                        # 273f  ld rcx, [r14+0x0]
+48 39 c8                        # 2742  cmp rax, rcx
+74 05                           # 2745  je 0x40274c    (jne: je over jmp)
+e9 46 01 00 00                  # 2747  jmp 0x402892   -> chk_fail_munmap
+49 8b 41 08                     # 274c  ld rax, [r9+0x8]
+48 85 c0                        # 2750  test rax, rax
+74 05                           # 2753  je 0x40275a    (jne: je over jmp)
+e9 38 01 00 00                  # 2755  jmp 0x402892   -> chk_fail_munmap
+45 31 ed                        # 275a  xor r13, r13   i = 0
+
+# chk_verify_loop:
+49 8b 87 20 02 00 00            # 275d  ld rax, [r15+0x220]
+49 39 c5                        # 2764  cmp r13, rax
+0f 83 9b 00 00 00               # 2767  jae 0x402808    -> chk_verify_anns
+4d 8b 8f 08 02 00 00            # 276d  ld r9, [r15+0x208]
+4d 8b d5                        # 2774  mov r10, r13
+49 c1 e2 04                     # 2777  shl r10, 4
+4b 8b 04 11                     # 277b  ld_w64 rax, [r9+r10*1+0x0]
+49 89 87 48 02 00 00            # 277f  st [r15+0x248], rax
+4b 8b 44 11 08                  # 2786  ld_w64 rax, [r9+r10*1+0x8]
+49 89 87 50 02 00 00            # 278b  st [r15+0x250], rax
+4d 8b b7 58 02 00 00            # 2792  ld r14, [r15+0x258]
+49 8b 46 20                     # 2799  ld rax, [r14+0x20]
+4c 01 d0                        # 279d  add rax, r10
+4d 8b 9f e8 00 00 00            # 27a0  ld r11, [r15+0xe8]
+49 8b 3c 03                     # 27a7  ld_w64 rdi, [r11+rax*1+0x0]
+49 8b 74 03 08                  # 27ab  ld_w64 rsi, [r11+rax*1+0x8]
+e8 eb f5 ff ff                  # 27b0  call 0x401da0    -> fn_hstep
+48 85 c0                        # 27b5  test rax, rax
+0f 84 d4 00 00 00               # 27b8  je 0x402892    -> chk_fail_munmap
+48 85 d2                        # 27be  test rdx, rdx
+74 3c                           # 27c1  je 0x4027ff    -> cv_next
+49 8d 45 01                     # 27c3  lea rax, [r13+0x1]
+49 8b 97 20 02 00 00            # 27c7  ld rdx, [r15+0x220]
+48 39 d0                        # 27ce  cmp rax, rdx
+0f 83 bb 00 00 00               # 27d1  jae 0x402892   falls off end -> chk_fail_munmap
+4d 8b 8f 08 02 00 00            # 27d7  ld r9, [r15+0x208]
+48 c1 e0 04                     # 27de  shl rax, 4
+4d 8b 14 01                     # 27e2  ld_w64 r10, [r9+rax*1+0x0]
+49 39 ca                        # 27e6  cmp r10, rcx
+74 05                           # 27e9  je 0x4027f0    (jne: je over jmp)
+e9 a2 00 00 00                  # 27eb  jmp 0x402892   -> chk_fail_munmap
+4d 8b 54 01 08                  # 27f0  ld_w64 r10, [r9+rax*1+0x8]
+4d 39 c2                        # 27f5  cmp r10, r8
+74 05                           # 27f8  je 0x4027ff    (jne: je over jmp)
+e9 93 00 00 00                  # 27fa  jmp 0x402892   -> chk_fail_munmap
+
+# cv_next:
+49 83 c5 01                     # 27ff  add r13, 0x1
+e9 55 ff ff ff                  # 2803  jmp 0x40275d    -> chk_verify_loop
+
+# chk_verify_anns:
+45 31 ed                        # 2808  xor r13, r13   j = 0
+4d 8b 87 28 02 00 00            # 280b  ld r8, [r15+0x228]
+4d 8b 8f 08 02 00 00            # 2812  ld r9, [r15+0x208]
+4d 8b 97 20 02 00 00            # 2819  ld r10, [r15+0x220]
+4d 8b 9f 30 02 00 00            # 2820  ld r11, [r15+0x230]
+
+# cva_loop:
+4d 39 c5                        # 2827  cmp r13, r8
+73 4f                           # 282a  jae 0x40287b    -> chk_word_next
+49 8b c5                        # 282c  mov rax, r13
+48 c1 e0 03                     # 282f  shl rax, 3
+49 8b cd                        # 2833  mov rcx, r13
+48 c1 e1 02                     # 2836  shl rcx, 2
+48 01 c8                        # 283a  add rax, rcx
+41 8b 14 03                     # 283d  ld_w32 rdx, [r11+rax*1+0x0]   t
+4c 39 d2                        # 2841  cmp rdx, r10
+0f 83 48 00 00 00               # 2844  jae 0x402892    -> chk_fail_munmap
+48 c1 e2 04                     # 284a  shl rdx, 4
+41 8b 4c 03 04                  # 284e  ld_w32 rcx, [r11+rax*1+0x4]   ann.d
+49 8b 34 11                     # 2853  ld_w64 rsi, [r9+rdx*1+0x0]   H[t].d
+48 39 f1                        # 2857  cmp rcx, rsi
+74 05                           # 285a  je 0x402861    (jne: je over jmp)
+e9 31 00 00 00                  # 285c  jmp 0x402892   -> chk_fail_munmap
+41 8b 4c 03 08                  # 2861  ld_w32 rcx, [r11+rax*1+0x8]   ann.a
+49 8b 74 11 08                  # 2866  ld_w64 rsi, [r9+rdx*1+0x8]   H[t].a
+48 39 f1                        # 286b  cmp rcx, rsi
+74 05                           # 286e  je 0x402875    (jne: je over jmp)
+e9 1d 00 00 00                  # 2870  jmp 0x402892   -> chk_fail_munmap
+49 83 c5 01                     # 2875  add r13, 0x1
+eb ac                           # 2879  jmp 0x402827    -> cva_loop
+
+# chk_word_next:
+49 8b 87 18 02 00 00            # 287b  ld rax, [r15+0x218]
+48 83 c0 01                     # 2882  add rax, 0x1
+49 89 87 18 02 00 00            # 2886  st [r15+0x218], rax
+e9 f2 fc ff ff                  # 288d  jmp 0x402584    -> chk_word_loop
+
+# chk_fail_munmap:
+49 8b bf 08 02 00 00            # 2892  ld rdi, [r15+0x208]
+49 8b b7 10 02 00 00            # 2899  ld rsi, [r15+0x210]
+48 c1 e6 04                     # 28a0  shl rsi, 4
+b8 0b 00 00 00                  # 28a4  mov rax, 0xb   sys_munmap
+0f 05                           # 28a9  syscall
+e9 93 03 00 00                  # 28ab  jmp 0x402c43    -> L_err_check
+
+# chk_all_ok:
+49 8b bf 08 02 00 00            # 28b0  ld rdi, [r15+0x208]
+49 8b b7 10 02 00 00            # 28b7  ld rsi, [r15+0x210]
+48 c1 e6 04                     # 28be  shl rsi, 4
+b8 0b 00 00 00                  # 28c2  mov rax, 0xb   sys_munmap H_buf
+0f 05                           # 28c7  syscall
+4d 8b b7 e8 00 00 00            # 28c9  ld r14, [r15+0xe8]
+4d 8b 87 e0 01 00 00            # 28d0  ld r8, [r15+0x1e0]
+49 c1 e0 04                     # 28d7  shl r8, 4
+49 83 c0 20                     # 28db  add r8, 0x20
+4d 8b 8f d8 01 00 00            # 28df  ld r9, [r15+0x1d8]
+31 c9                           # 28e6  xor rcx, rcx
+31 c0                           # 28e8  xor rax, rax
+
+# clr_meta_loop:
+4c 39 c9                        # 28ea  cmp rcx, r9
+73 1a                           # 28ed  jae 0x402909    -> clr_meta_done
+48 8b d1                        # 28ef  mov rdx, rcx
+48 c1 e2 06                     # 28f2  shl rdx, 6
+4c 01 c2                        # 28f6  add rdx, r8
+49 89 44 16 28                  # 28f9  st_w64 [r14+rdx*1+0x28], rax
+49 89 44 16 30                  # 28fe  st_w64 [r14+rdx*1+0x30], rax
+48 83 c1 01                     # 2903  add rcx, 0x1
+eb e1                           # 2907  jmp 0x4028ea    -> clr_meta_loop
+
+# clr_meta_done:
+49 8b bf 00 02 00 00            # 2909  ld rdi, [r15+0x200]
+e8 50 f2 ff ff                  # 2910  call 0x401b65    -> fn_mmap
+49 89 87 f0 00 00 00            # 2915  st [r15+0xf0], rax
+49 8b b7 e8 00 00 00            # 291c  ld rsi, [r15+0xe8]
+49 8b 8f 00 02 00 00            # 2923  ld rcx, [r15+0x200]
+31 d2                           # 292a  xor rdx, rdx
+
+# trip_lp_13:
+48 39 ca                        # 292c  cmp rdx, rcx
+73 0e                           # 292f  jae 0x40293f    -> trip_dn_14
+4c 8b 04 16                     # 2931  ld_w64 r8, [rsi+rdx*1+0x0]
+4c 89 04 10                     # 2935  st_w64 [rax+rdx*1+0x0], r8
+48 83 c2 08                     # 2939  add rdx, 0x8
+eb ed                           # 293d  jmp 0x40292c    -> trip_lp_13
+
+# trip_dn_14:
+49 8b bf 00 02 00 00            # 293f  ld rdi, [r15+0x200]
+e8 1a f2 ff ff                  # 2946  call 0x401b65    -> fn_mmap
+49 89 87 f8 00 00 00            # 294b  st [r15+0xf8], rax
+49 8b b7 e8 00 00 00            # 2952  ld rsi, [r15+0xe8]
+49 8b 8f 00 02 00 00            # 2959  ld rcx, [r15+0x200]
+31 d2                           # 2960  xor rdx, rdx
+
+# trip_lp_15:
+48 39 ca                        # 2962  cmp rdx, rcx
+73 0e                           # 2965  jae 0x402975    -> trip_dn_16
+4c 8b 04 16                     # 2967  ld_w64 r8, [rsi+rdx*1+0x0]
+4c 89 04 10                     # 296b  st_w64 [rax+rdx*1+0x0], r8
+48 83 c2 08                     # 296f  add rdx, 0x8
+eb ed                           # 2973  jmp 0x402962    -> trip_lp_15
+
+# trip_dn_16:
+bf 00 10 00 00                  # 2975  mov rdi, 0x1000
+e8 e6 f1 ff ff                  # 297a  call 0x401b65    -> fn_mmap
+49 89 87 b0 00 00 00            # 297f  st [r15+0xb0], rax
+b9 00 10 00 00                  # 2986  mov rcx, 0x1000
+49 89 8f 60 02 00 00            # 298b  st [r15+0x260], rcx
+31 c9                           # 2992  xor rcx, rcx
+49 89 8f b8 00 00 00            # 2994  st [r15+0xb8], rcx
+49 89 8f c0 00 00 00            # 299b  st [r15+0xc0], rcx
+
+# rd_inp_loop:
+49 8b 87 b8 00 00 00            # 29a2  ld rax, [r15+0xb8]
+49 8b 8f 60 02 00 00            # 29a9  ld rcx, [r15+0x260]
+48 39 c8                        # 29b0  cmp rax, rcx
+72 2f                           # 29b3  jb 0x4029e4    -> rd_inp_go
+49 8b bf b0 00 00 00            # 29b5  ld rdi, [r15+0xb0]
+48 8b f1                        # 29bc  mov rsi, rcx
+48 8b d1                        # 29bf  mov rdx, rcx
+48 c1 e2 01                     # 29c2  shl rdx, 1
+e8 c8 f1 ff ff                  # 29c6  call 0x401b93    -> fn_mremap
+49 89 87 b0 00 00 00            # 29cb  st [r15+0xb0], rax
+49 8b 8f 60 02 00 00            # 29d2  ld rcx, [r15+0x260]
+48 c1 e1 01                     # 29d9  shl rcx, 1
+49 89 8f 60 02 00 00            # 29dd  st [r15+0x260], rcx
+
+# rd_inp_go:
+31 ff                           # 29e4  xor rdi, rdi   fd 0 = stdin
+49 8b b7 b0 00 00 00            # 29e6  ld rsi, [r15+0xb0]
+49 8b 87 b8 00 00 00            # 29ed  ld rax, [r15+0xb8]
+48 01 c6                        # 29f4  add rsi, rax
+49 8b 97 60 02 00 00            # 29f7  ld rdx, [r15+0x260]
+48 29 c2                        # 29fe  sub rdx, rax
+31 c0                           # 2a01  xor rax, rax   sys_read
+0f 05                           # 2a03  syscall
+48 85 c0                        # 2a05  test rax, rax
+0f 88 3c f1 ff ff               # 2a08  js 0x401b4a    -> L_exit_nomem
+74 16                           # 2a0e  je 0x402a26    -> rd_inp_done
+49 8b 8f b8 00 00 00            # 2a10  ld rcx, [r15+0xb8]
+48 01 c1                        # 2a17  add rcx, rax
+49 89 8f b8 00 00 00            # 2a1a  st [r15+0xb8], rcx
+e9 7c ff ff ff                  # 2a21  jmp 0x4029a2    -> rd_inp_loop
+
+# rd_inp_done:
+bf 00 10 00 00                  # 2a26  mov rdi, 0x1000
+e8 35 f1 ff ff                  # 2a2b  call 0x401b65    -> fn_mmap
+49 89 07                        # 2a30  st [r15+0x0], rax
+b8 00 01 00 00                  # 2a33  mov rax, 0x100
+49 89 47 10                     # 2a38  st [r15+0x10], rax
+bf 00 10 00 00                  # 2a3c  mov rdi, 0x1000
+e8 1f f1 ff ff                  # 2a41  call 0x401b65    -> fn_mmap
+49 89 47 18                     # 2a46  st [r15+0x18], rax
+b8 00 01 00 00                  # 2a4a  mov rax, 0x100
+49 89 47 28                     # 2a4f  st [r15+0x28], rax
+bf 00 10 00 00                  # 2a53  mov rdi, 0x1000
+e8 08 f1 ff ff                  # 2a58  call 0x401b65    -> fn_mmap
+49 89 47 30                     # 2a5d  st [r15+0x30], rax
+b8 80 00 00 00                  # 2a61  mov rax, 0x80
+49 89 47 40                     # 2a66  st [r15+0x40], rax
+4d 8b 87 d0 01 00 00            # 2a6a  ld r8, [r15+0x1d0]
+4d 8b 8f e0 01 00 00            # 2a71  ld r9, [r15+0x1e0]
+49 c1 e1 04                     # 2a78  shl r9, 4
+49 83 c1 20                     # 2a7c  add r9, 0x20
+49 c1 e0 06                     # 2a80  shl r8, 6
+4d 01 c8                        # 2a84  add r8, r9
+4d 8b b7 e8 00 00 00            # 2a87  ld r14, [r15+0xe8]
+4f 8b 64 06 10                  # 2a8e  ld_w64 r12, [r14+r8*1+0x10]   main.locals
+b9 00 01 00 00                  # 2a93  mov rcx, 0x100
+
+# init_locs_cap:
+49 39 cc                        # 2a98  cmp r12, rcx
+76 06                           # 2a9b  jbe 0x402aa3    -> init_locs_alloc
+48 c1 e1 01                     # 2a9d  shl rcx, 1
+eb f5                           # 2aa1  jmp 0x402a98    -> init_locs_cap
+
+# init_locs_alloc:
+49 89 4f 58                     # 2aa3  st [r15+0x58], rcx
+48 8b f9                        # 2aa7  mov rdi, rcx
+48 c1 e7 04                     # 2aaa  shl rdi, 4
+e8 b2 f0 ff ff                  # 2aae  call 0x401b65    -> fn_mmap
+49 89 47 48                     # 2ab3  st [r15+0x48], rax
+4d 89 67 50                     # 2ab7  st [r15+0x50], r12
+49 8b 47 30                     # 2abb  ld rax, [r15+0x30]
+49 8b 8f d0 01 00 00            # 2abf  ld rcx, [r15+0x1d0]
+48 89 08                        # 2ac6  st [rax+0x0], rcx
+31 d2                           # 2ac9  xor rdx, rdx
+48 89 50 08                     # 2acb  st [rax+0x8], rdx
+48 89 50 10                     # 2acf  st [rax+0x10], rdx
+4c 89 60 18                     # 2ad3  st [rax+0x18], r12
+b9 01 00 00 00                  # 2ad7  mov rcx, 0x1
+49 89 4f 38                     # 2adc  st [r15+0x38], rcx
+49 8b 7f 70                     # 2ae0  ld rdi, [r15+0x70]
+b9 01 00 00 00                  # 2ae4  mov rcx, 0x1
+48 85 ff                        # 2ae9  test rdi, rdi
+48 0f 44 f9                     # 2aec  cmove rdi, rcx
+4c 8b e7                        # 2af0  mov r12, rdi   bytes
+e8 6d f0 ff ff                  # 2af3  call 0x401b65    -> fn_mmap
+49 89 47 60                     # 2af8  st [r15+0x60], rax
+49 8b fc                        # 2afc  mov rdi, r12
+48 c1 e7 03                     # 2aff  shl rdi, 3
+e8 5d f0 ff ff                  # 2b03  call 0x401b65    -> fn_mmap
+49 89 47 68                     # 2b08  st [r15+0x68], rax
+4d 8b a7 a0 01 00 00            # 2b0c  ld r12, [r15+0x1a0]
+4d 8b 47 60                     # 2b13  ld r8, [r15+0x60]
+4d 8b 4f 70                     # 2b17  ld r9, [r15+0x70]
+be 10 00 00 00                  # 2b1b  mov rsi, 0x10   file pos
+45 31 d2                        # 2b20  xor r10, r10   a = 0
+31 c9                           # 2b23  xor rcx, rcx   k = 0
+4d 8b 9f e0 01 00 00            # 2b25  ld r11, [r15+0x1e0]
+
+# init_data_loop:
+4c 39 d9                        # 2b2c  cmp rcx, r11
+73 31                           # 2b2f  jae 0x402b62    -> init_data_done
+45 8b 2c 34                     # 2b31  ld_w32 r13, [r12+rsi*1+0x0]   dlen
+48 83 c6 04                     # 2b35  add rsi, 0x4
+31 d2                           # 2b39  xor rdx, rdx   i = 0
+
+# init_dbyte_loop:
+4c 39 ea                        # 2b3b  cmp rdx, r13
+73 1c                           # 2b3e  jae 0x402b5c    -> init_dbyte_done
+4d 39 ca                        # 2b40  cmp r10, r9
+73 09                           # 2b43  jae 0x402b4e    -> init_dbyte_skip
+41 0f b6 04 34                  # 2b45  ld_w8 rax, [r12+rsi*1+0x0]
+43 88 04 10                     # 2b4a  st_w8 [r8+r10*1+0x0], rax
+
+# init_dbyte_skip:
+48 83 c6 01                     # 2b4e  add rsi, 0x1
+49 83 c2 01                     # 2b52  add r10, 0x1
+48 83 c2 01                     # 2b56  add rdx, 0x1
+eb df                           # 2b5a  jmp 0x402b3b    -> init_dbyte_loop
+
+# init_dbyte_done:
+48 83 c1 01                     # 2b5c  add rcx, 0x1
+eb ca                           # 2b60  jmp 0x402b2c    -> init_data_loop
+
+# init_data_done:
+4d 89 57 78                     # 2b62  st [r15+0x78], r10
+49 8b bf a0 01 00 00            # 2b66  ld rdi, [r15+0x1a0]
+49 8b b7 b0 01 00 00            # 2b6d  ld rsi, [r15+0x1b0]
+b8 0b 00 00 00                  # 2b74  mov rax, 0xb   sys_munmap file_buf
+0f 05                           # 2b79  syscall
+bf 00 10 00 00                  # 2b7b  mov rdi, 0x1000
+e8 e0 ef ff ff                  # 2b80  call 0x401b65    -> fn_mmap
+49 89 87 80 00 00 00            # 2b85  st [r15+0x80], rax
+b8 00 02 00 00                  # 2b8c  mov rax, 0x200
+49 89 87 90 00 00 00            # 2b91  st [r15+0x90], rax
+bf 00 10 00 00                  # 2b98  mov rdi, 0x1000
+e8 c3 ef ff ff                  # 2b9d  call 0x401b65    -> fn_mmap
+49 89 87 98 00 00 00            # 2ba2  st [r15+0x98], rax
+b8 80 00 00 00                  # 2ba9  mov rax, 0x80
+49 89 87 a8 00 00 00            # 2bae  st [r15+0xa8], rax
+bf 00 10 00 00                  # 2bb5  mov rdi, 0x1000
+e8 a6 ef ff ff                  # 2bba  call 0x401b65    -> fn_mmap
+49 89 87 c8 00 00 00            # 2bbf  st [r15+0xc8], rax
+b8 00 10 00 00                  # 2bc6  mov rax, 0x1000
+49 89 87 d8 00 00 00            # 2bcb  st [r15+0xd8], rax
+e9 d9 d4 ff ff                  # 2bd2  jmp 0x4000b0    -> L_vm_ready
+
+# L_err_open:
+be 20 31 40 00                  # 2bd7  mov rsi, 0x403120   (L_str_prog_pre)
+ba 0b 00 00 00                  # 2bdc  mov rdx, 0xb
+e8 cd ef ff ff                  # 2be1  call 0x401bb3    -> fn_write_stderr
+49 8b bf 98 01 00 00            # 2be6  ld rdi, [r15+0x198]
+e8 ce ef ff ff                  # 2bed  call 0x401bc0    -> fn_write_stderr_cstr
+be 2b 31 40 00                  # 2bf2  mov rsi, 0x40312b   (L_str_open_suf)
+ba 0e 00 00 00                  # 2bf7  mov rdx, 0xe
+e8 b2 ef ff ff                  # 2bfc  call 0x401bb3    -> fn_write_stderr
+bf 01 00 00 00                  # 2c01  mov rdi, 0x1
+b8 3c 00 00 00                  # 2c06  mov rax, 0x3c
+0f 05                           # 2c0b  syscall
+
+# L_err_decode:
+be 20 31 40 00                  # 2c0d  mov rsi, 0x403120   (L_str_prog_pre)
+ba 0b 00 00 00                  # 2c12  mov rdx, 0xb
+e8 97 ef ff ff                  # 2c17  call 0x401bb3    -> fn_write_stderr
+49 8b bf 98 01 00 00            # 2c1c  ld rdi, [r15+0x198]
+e8 98 ef ff ff                  # 2c23  call 0x401bc0    -> fn_write_stderr_cstr
+be 39 31 40 00                  # 2c28  mov rsi, 0x403139   (L_str_dec_suf)
+ba 1d 00 00 00                  # 2c2d  mov rdx, 0x1d
+e8 7c ef ff ff                  # 2c32  call 0x401bb3    -> fn_write_stderr
+bf 01 00 00 00                  # 2c37  mov rdi, 0x1
+b8 3c 00 00 00                  # 2c3c  mov rax, 0x3c
+0f 05                           # 2c41  syscall
+
+# L_err_check:
+be 20 31 40 00                  # 2c43  mov rsi, 0x403120   (L_str_prog_pre)
+ba 0b 00 00 00                  # 2c48  mov rdx, 0xb
+e8 61 ef ff ff                  # 2c4d  call 0x401bb3    -> fn_write_stderr
+49 8b bf 98 01 00 00            # 2c52  ld rdi, [r15+0x198]
+e8 62 ef ff ff                  # 2c59  call 0x401bc0    -> fn_write_stderr_cstr
+be 56 31 40 00                  # 2c5e  mov rsi, 0x403156   (L_str_chk_suf)
+ba 19 00 00 00                  # 2c63  mov rdx, 0x19
+e8 46 ef ff ff                  # 2c68  call 0x401bb3    -> fn_write_stderr
+bf 01 00 00 00                  # 2c6d  mov rdi, 0x1
+b8 3c 00 00 00                  # 2c72  mov rax, 0x3c
+0f 05                           # 2c77  syscall
+
+# ------------------------------------------------------------------- rodata
+
+# L_rodata:
+
+# L_prim_eff_in:
+01 01 02 02 03 02 02 02 02 02 02 02 02 02 01 02     # 2c79
+02 02 01 02 02 02 02 02 02 02 02 02 01 02 01 02     # 2c89
+01 02 01 02 03 03 03 01 00 01 04 02 00 03 02 00     # 2c99
+01 01 01 00 00 01 01 01 02                          # 2ca9
+
+# L_prim_eff_out:
+02 00 02 03 03 01 03 01 01 01 01 01 01 01 01 01     # 2cb2
+01 01 01 01 01 01 01 01 01 01 01 01 01 00 01 00     # 2cc2
+01 00 01 00 00 00 01 01 01 00 01 01 01 00 02 01     # 2cd2
+00 00 00 01 01 01 02 02 01                          # 2ce2
+
+# L_jtab:
+89 02 40 00 00 00 00 00                             # 2ceb
+89 02 40 00 00 00 00 00                             # 2cf3
+89 02 40 00 00 00 00 00                             # 2cfb
+89 02 40 00 00 00 00 00                             # 2d03
+89 02 40 00 00 00 00 00                             # 2d0b
+89 02 40 00 00 00 00 00                             # 2d13
+89 02 40 00 00 00 00 00                             # 2d1b
+89 02 40 00 00 00 00 00                             # 2d23
+89 02 40 00 00 00 00 00                             # 2d2b
+89 02 40 00 00 00 00 00                             # 2d33
+89 02 40 00 00 00 00 00                             # 2d3b
+89 02 40 00 00 00 00 00                             # 2d43
+89 02 40 00 00 00 00 00                             # 2d4b
+89 02 40 00 00 00 00 00                             # 2d53
+89 02 40 00 00 00 00 00                             # 2d5b
+89 02 40 00 00 00 00 00                             # 2d63
+89 02 40 00 00 00 00 00                             # 2d6b
+89 02 40 00 00 00 00 00                             # 2d73
+89 02 40 00 00 00 00 00                             # 2d7b
+89 02 40 00 00 00 00 00                             # 2d83
+89 02 40 00 00 00 00 00                             # 2d8b
+89 02 40 00 00 00 00 00                             # 2d93
+89 02 40 00 00 00 00 00                             # 2d9b
+89 02 40 00 00 00 00 00                             # 2da3
+89 02 40 00 00 00 00 00                             # 2dab
+89 02 40 00 00 00 00 00                             # 2db3
+89 02 40 00 00 00 00 00                             # 2dbb
+89 02 40 00 00 00 00 00                             # 2dc3
+89 02 40 00 00 00 00 00                             # 2dcb
+89 02 40 00 00 00 00 00                             # 2dd3
+89 02 40 00 00 00 00 00                             # 2ddb
+89 02 40 00 00 00 00 00                             # 2de3
+89 02 40 00 00 00 00 00                             # 2deb
+89 02 40 00 00 00 00 00                             # 2df3
+89 02 40 00 00 00 00 00                             # 2dfb
+89 02 40 00 00 00 00 00                             # 2e03
+89 02 40 00 00 00 00 00                             # 2e0b
+89 02 40 00 00 00 00 00                             # 2e13
+89 02 40 00 00 00 00 00                             # 2e1b
+89 02 40 00 00 00 00 00                             # 2e23
+89 02 40 00 00 00 00 00                             # 2e2b
+89 02 40 00 00 00 00 00                             # 2e33
+89 02 40 00 00 00 00 00                             # 2e3b
+89 02 40 00 00 00 00 00                             # 2e43
+89 02 40 00 00 00 00 00                             # 2e4b
+89 02 40 00 00 00 00 00                             # 2e53
+89 02 40 00 00 00 00 00                             # 2e5b
+89 02 40 00 00 00 00 00                             # 2e63
+89 02 40 00 00 00 00 00                             # 2e6b
+89 02 40 00 00 00 00 00                             # 2e73
+89 02 40 00 00 00 00 00                             # 2e7b
+89 02 40 00 00 00 00 00                             # 2e83
+89 02 40 00 00 00 00 00                             # 2e8b
+89 02 40 00 00 00 00 00                             # 2e93
+89 02 40 00 00 00 00 00                             # 2e9b
+89 02 40 00 00 00 00 00                             # 2ea3
+89 02 40 00 00 00 00 00                             # 2eab
+e3 12 40 00 00 00 00 00                             # 2eb3
+1e 13 40 00 00 00 00 00                             # 2ebb
+41 14 40 00 00 00 00 00                             # 2ec3
+a3 14 40 00 00 00 00 00                             # 2ecb
+ff 14 40 00 00 00 00 00                             # 2ed3
+5c 15 40 00 00 00 00 00                             # 2edb
+b5 15 40 00 00 00 00 00                             # 2ee3
+2b 16 40 00 00 00 00 00                             # 2eeb
+c1 16 40 00 00 00 00 00                             # 2ef3
+e4 16 40 00 00 00 00 00                             # 2efb
+50 17 40 00 00 00 00 00                             # 2f03
+bc 17 40 00 00 00 00 00                             # 2f0b
+cc 19 40 00 00 00 00 00                             # 2f13
+
+# L_prim_jtab:
+5d 04 40 00 00 00 00 00                             # 2f1b
+a8 04 40 00 00 00 00 00                             # 2f23
+ad 04 40 00 00 00 00 00                             # 2f2b
+06 05 40 00 00 00 00 00                             # 2f33
+7b 05 40 00 00 00 00 00                             # 2f3b
+fe 05 40 00 00 00 00 00                             # 2f43
+2d 06 40 00 00 00 00 00                             # 2f4b
+a2 06 40 00 00 00 00 00                             # 2f53
+b8 06 40 00 00 00 00 00                             # 2f5b
+ce 06 40 00 00 00 00 00                             # 2f63
+e5 06 40 00 00 00 00 00                             # 2f6b
+06 07 40 00 00 00 00 00                             # 2f73
+2a 07 40 00 00 00 00 00                             # 2f7b
+64 07 40 00 00 00 00 00                             # 2f83
+95 07 40 00 00 00 00 00                             # 2f8b
+a4 07 40 00 00 00 00 00                             # 2f93
+ba 07 40 00 00 00 00 00                             # 2f9b
+d0 07 40 00 00 00 00 00                             # 2fa3
+e6 07 40 00 00 00 00 00                             # 2fab
+f5 07 40 00 00 00 00 00                             # 2fb3
+0b 08 40 00 00 00 00 00                             # 2fbb
+21 08 40 00 00 00 00 00                             # 2fc3
+37 08 40 00 00 00 00 00                             # 2fcb
+55 08 40 00 00 00 00 00                             # 2fd3
+73 08 40 00 00 00 00 00                             # 2fdb
+91 08 40 00 00 00 00 00                             # 2fe3
+af 08 40 00 00 00 00 00                             # 2feb
+cd 08 40 00 00 00 00 00                             # 2ff3
+eb 08 40 00 00 00 00 00                             # 2ffb
+99 0a 40 00 00 00 00 00                             # 3003
+41 09 40 00 00 00 00 00                             # 300b
+e4 0a 40 00 00 00 00 00                             # 3013
+9f 09 40 00 00 00 00 00                             # 301b
+35 0b 40 00 00 00 00 00                             # 3023
+0c 0a 40 00 00 00 00 00                             # 302b
+8f 0b 40 00 00 00 00 00                             # 3033
+fd 0b 40 00 00 00 00 00                             # 303b
+c5 0c 40 00 00 00 00 00                             # 3043
+27 0d 40 00 00 00 00 00                             # 304b
+dc 0d 40 00 00 00 00 00                             # 3053
+12 0e 40 00 00 00 00 00                             # 305b
+1b 0e 40 00 00 00 00 00                             # 3063
+38 0e 40 00 00 00 00 00                             # 306b
+00 0f 40 00 00 00 00 00                             # 3073
+89 0f 40 00 00 00 00 00                             # 307b
+fb 0f 40 00 00 00 00 00                             # 3083
+bd 10 40 00 00 00 00 00                             # 308b
+78 11 40 00 00 00 00 00                             # 3093
+cf 11 40 00 00 00 00 00                             # 309b
+e0 11 40 00 00 00 00 00                             # 30a3
+f1 11 40 00 00 00 00 00                             # 30ab
+0b 12 40 00 00 00 00 00                             # 30b3
+0b 12 40 00 00 00 00 00                             # 30bb
+0b 12 40 00 00 00 00 00                             # 30c3
+12 12 40 00 00 00 00 00                             # 30cb
+5d 12 40 00 00 00 00 00                             # 30d3
+a3 12 40 00 00 00 00 00                             # 30db
+
+# L_str_usage:
+75 73 61 67 65 3a 20 73 70 6f 72 6f 73 5f 76 6d     # 30e3
+20 50 52 4f 47 52 41 4d 2e 73 70 62 20 5b 4d 45     # 30f3
+4d 4f 52 59 2d 42 59 54 45 53 5d 20 3c 20 69 6e     # 3103
+70 75 74 20 3e 20 6f 75 74 70 75 74 0a              # 3113
+
+# L_str_prog_pre:
+73 70 6f 72 6f 73 5f 76 6d 3a 20                    # 3120
+
+# L_str_open_suf:
+3a 20 63 61 6e 6e 6f 74 20 6f 70 65 6e 0a           # 312b
+
+# L_str_dec_suf:
+3a 20 6e 6f 74 20 61 20 53 70 6f 72 6f 73 20 62     # 3139
+79 74 65 63 6f 64 65 20 66 69 6c 65 0a              # 3149
+
+# L_str_chk_suf:
+3a 20 72 65 66 75 73 65 64 20 62 79 20 74 68 65     # 3156
+20 63 68 65 63 6b 65 72 0a                          # 3166
+
+# L_str_nomem:
+73 70 6f 72 6f 73 5f 76 6d 3a 20 6f 75 74 20 6f     # 316f
+66 20 6d 65 6d 6f 72 79 0a                          # 317f
+
+# L_str_run_failed:
+73 70 6f 72 6f 73 3a 20 72 75 6e 20 66 61 69 6c     # 3188
+65 64 3a 20                                         # 3198
+
+# L_str_nl:
+0a                                                  # 319c
+
+# L_err_s_0:
+75 6e 64 65 72 66 6c 6f 77                          # 319d
+
+# L_err_s_1:
+61 75 78 2d 75 6e 64 65 72 66 6c 6f 77              # 31a6
+
+# L_err_s_2:
+62 61 64 2d 6c 6f 63 61 6c                          # 31b3
+
+# L_err_s_3:
+62 61 64 2d 6a 75 6d 70                             # 31bc
+
+# L_err_s_4:
+62 61 64 2d 77 6f 72 64                             # 31c4
+
+# L_err_s_5:
+6e 6f 2d 66 72 61 6d 65                             # 31cc
+
+# L_err_s_6:
+62 6f 75 6e 64 73                                   # 31d4
+
+# L_err_s_7:
+64 69 76 2d 7a 65 72 6f                             # 31da
+
+# L_err_s_8:
+62 61 64 2d 74 61 62 6c 65                          # 31e2
+
+# L_err_s_9:
+64 65 6d 61 6e 64                                   # 31eb
+
+# L_err_ptrs:
+9d 31 40 00 00 00 00 00                             # 31f1
+a6 31 40 00 00 00 00 00                             # 31f9
+b3 31 40 00 00 00 00 00                             # 3201
+bc 31 40 00 00 00 00 00                             # 3209
+c4 31 40 00 00 00 00 00                             # 3211
+cc 31 40 00 00 00 00 00                             # 3219
+d4 31 40 00 00 00 00 00                             # 3221
+da 31 40 00 00 00 00 00                             # 3229
+e2 31 40 00 00 00 00 00                             # 3231
+eb 31 40 00 00 00 00 00                             # 3239
+
+# L_err_lens:
+09 00 00 00 00 00 00 00                             # 3241
+0d 00 00 00 00 00 00 00                             # 3249
+09 00 00 00 00 00 00 00                             # 3251
+08 00 00 00 00 00 00 00                             # 3259
+08 00 00 00 00 00 00 00                             # 3261
+08 00 00 00 00 00 00 00                             # 3269
+06 00 00 00 00 00 00 00                             # 3271
+08 00 00 00 00 00 00 00                             # 3279
+09 00 00 00 00 00 00 00                             # 3281
+06 00 00 00 00 00 00 00                             # 3289

@@ -1,0 +1,1 @@
+Add `X86Vm`, `X86Int` extended with the arithmetic, shift, memory-width, indexed-addressing and conditional forms the native Sporos VM needs, equal to `X86Int` on its instructions architecturally and under physical faults (`formal/Bootstrap/X86Vm.lean`), with a CPU differential in the Lean job (`bootstrap/model/x86vm_diff_gate.sh`).

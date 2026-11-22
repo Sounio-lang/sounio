@@ -1,0 +1,153 @@
+: Cross-check listing: seed-a (bootstrap/roots/a) rendered in format C, so that
+: seed-c can assemble it. The bytes are the same as seed-a.hex; the comments
+: below are seed-a.hex's, verbatim, and describe seed-a and its format A.
+
+: seed-a: the first loader of bootstrap root A. Written by hand, byte by byte.
+:
+: What it does: reads a listing from standard input and writes the bytes it
+: describes to standard output.
+:
+: Format A, the format of this file:
+:   - a byte is two lowercase hexadecimal digits, 0-9 and a-f;
+:   - the two digits of a byte may be separated by whitespace;
+:   - whitespace is space (0x20), tab (0x09) and newline (0x0a);
+:   - '#' starts a comment that runs to the end of the line.
+: Anything else is refused: uppercase digits, carriage return (0x0d), any
+: other character, and an odd number of digits at the end of input.
+:
+: Exit status: 0 when the whole input was valid and every byte was written;
+: 1 on a refused input, a failed read or a short write. Output is written as
+: it is decoded, so on exit 1 the bytes already written must be discarded.
+:
+: Self-reproduction: `seed-a < seed-a.hex` writes exactly the bytes of `seed-a`.
+:
+: Layout: one ELF64 header (0x00-0x3f), one program header (0x40-0x77), code
+: (0x78-0x10e). The file is loaded at virtual address 0x400000, so file offset
+: X is address 0x400000 + X. Total 271 bytes.
+:
+: Machine state at entry: only rsp is used as given by the kernel. Every
+: register the code reads is set first (r12, r14) or set by an instruction
+: before use (eax, edi, esi, edx). Registers used:
+:   r12  digit accumulator, with a sentinel: 1 means "no digit yet". One digit
+:        makes it 0x10-0x1f, a second makes it 0x100-0x1ff: the low eight bits
+:        are then the byte, which is written, and r12 goes back to 1.
+:   r14  1 inside a comment, 0 outside.
+:   [rsp] one-byte buffer for read and for write.
+
+: ---------------------------------------------------------------- ELF header
+01111111 01000101 01001100 01000110                                       : 00  e_ident: magic 0x7f 'E' 'L' 'F'
+00000010                                                                  : 04  EI_CLASS   = ELFCLASS64
+00000001                                                                  : 05  EI_DATA    = little endian
+00000001                                                                  : 06  EI_VERSION = 1
+00000000                                                                  : 07  EI_OSABI   = System V
+00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000   : 08  EI_ABIVERSION and padding
+00000010 00000000                                                         : 10  e_type      = ET_EXEC
+00111110 00000000                                                         : 12  e_machine   = EM_X86_64
+00000001 00000000 00000000 00000000                                       : 14  e_version   = 1
+01111000 00000000 01000000 00000000 00000000 00000000 00000000 00000000   : 18  e_entry     = 0x400078 (start of the code)
+01000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000   : 20  e_phoff     = 0x40
+00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000   : 28  e_shoff     = 0 (no section headers)
+00000000 00000000 00000000 00000000                                       : 30  e_flags     = 0
+01000000 00000000                                                         : 34  e_ehsize    = 64
+00111000 00000000                                                         : 36  e_phentsize = 56
+00000001 00000000                                                         : 38  e_phnum     = 1
+00000000 00000000                                                         : 3a  e_shentsize = 0
+00000000 00000000                                                         : 3c  e_shnum     = 0
+00000000 00000000                                                         : 3e  e_shstrndx  = 0
+
+: ----------------------------------------------------------- program header
+00000001 00000000 00000000 00000000                                       : 40  p_type   = PT_LOAD
+00000101 00000000 00000000 00000000                                       : 44  p_flags  = PF_R | PF_X
+00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000   : 48  p_offset = 0
+00000000 00000000 01000000 00000000 00000000 00000000 00000000 00000000   : 50  p_vaddr  = 0x400000
+00000000 00000000 01000000 00000000 00000000 00000000 00000000 00000000   : 58  p_paddr  = 0x400000
+00001111 00000001 00000000 00000000 00000000 00000000 00000000 00000000   : 60  p_filesz = 0x10f (the whole file)
+00001111 00000001 00000000 00000000 00000000 00000000 00000000 00000000   : 68  p_memsz  = 0x10f
+00000000 00010000 00000000 00000000 00000000 00000000 00000000 00000000   : 70  p_align  = 0x1000
+
+: --------------------------------------------------------------------- code
+: Offsets on the left are file offsets. A jump's target is the offset of the
+: next instruction plus the signed 8-bit displacement.
+
+: start
+01000001 10111100 00000001 00000000 00000000 00000000                     : 78  mov r12d, 1          accumulator: no digit yet
+01000101 00110001 11110110                                                : 7e  xor r14d, r14d       not in a comment
+
+: loop: read one byte into [rsp]
+00110001 11000000                                                         : 81  xor eax, eax         syscall 0 = read
+00110001 11111111                                                         : 83  xor edi, edi         fd 0 = stdin
+01001000 10001001 11100110                                                : 85  mov rsi, rsp         buffer
+01101010 00000001                                                         : 88  push 1
+01011010                                                                  : 8a  pop rdx              count = 1
+00001111 00000101                                                         : 8b  syscall
+01001000 10000101 11000000                                                : 8d  test rax, rax
+01111000 01110101                                                         : 90  js fail              92 + 75 = 107: read failed
+01110100 01100110                                                         : 92  jz eof               94 + 66 = fa: end of input
+00001111 10110110 00000100 00100100                                       : 94  movzx eax, byte [rsp]
+
+: inside a comment: skip everything up to and including the newline
+01000101 10000101 11110110                                                : 98  test r14d, r14d
+01110100 00001001                                                         : 9b  jz notc              9d + 09 = a6
+00111100 00001010                                                         : 9d  cmp al, 0x0a
+01110101 11100000                                                         : 9f  jne loop             a1 - 20 = 81
+01000101 00110001 11110110                                                : a1  xor r14d, r14d       newline ends the comment
+11101011 11011011                                                         : a4  jmp loop             a6 - 25 = 81
+
+: notc: '#' opens a comment
+00111100 00100011                                                         : a6  cmp al, '#'
+01110101 00001000                                                         : a8  jne ws               aa + 08 = b2
+01000001 10111110 00000001 00000000 00000000 00000000                     : aa  mov r14d, 1
+11101011 11001111                                                         : b0  jmp loop             b2 - 31 = 81
+
+: ws: space, newline and tab are skipped
+00111100 00100000                                                         : b2  cmp al, ' '
+01110100 11001011                                                         : b4  je loop              b6 - 35 = 81
+00111100 00001010                                                         : b6  cmp al, 0x0a
+01110100 11000111                                                         : b8  je loop              ba - 39 = 81
+00111100 00001001                                                         : ba  cmp al, 0x09
+01110100 11000011                                                         : bc  je loop              be - 3d = 81
+
+: digit value: '0'-'9' gives 0-9, 'a'-'f' gives 10-15, anything else fails.
+: eax was zero-extended from the byte, so only al changes below.
+00101100 00110000                                                         : be  sub al, '0'
+00111100 00001001                                                         : c0  cmp al, 9
+01110110 00001000                                                         : c2  jbe nib              c4 + 08 = cc  ('0'-'9')
+00101100 00110001                                                         : c4  sub al, 'a' - '0'
+00111100 00000101                                                         : c6  cmp al, 5
+01110111 00111101                                                         : c8  ja fail              ca + 3d = 107 (not 'a'-'f')
+00000100 00001010                                                         : ca  add al, 10
+
+: nib: shift the digit into the accumulator
+01000001 11000001 11100100 00000100                                       : cc  shl r12d, 4
+01000001 00001001 11000100                                                : d0  or r12d, eax
+01000001 10000001 11111100 00000000 00000001 00000000 00000000            : d3  cmp r12d, 0x100
+01110010 10100101                                                         : da  jb loop              dc - 5b = 81  (first digit)
+
+: second digit: write the low byte of the accumulator
+01000100 10001000 00100100 00100100                                       : dc  mov [rsp], r12b
+01101010 00000001                                                         : e0  push 1
+01011000                                                                  : e2  pop rax              syscall 1 = write
+10001001 11000111                                                         : e3  mov edi, eax         fd 1 = stdout
+01001000 10001001 11100110                                                : e5  mov rsi, rsp         buffer
+10001001 11000010                                                         : e8  mov edx, eax         count = 1
+00001111 00000101                                                         : ea  syscall
+01001000 10000011 11111000 00000001                                       : ec  cmp rax, 1
+01110101 00010101                                                         : f0  jne fail             f2 + 15 = 107 (write failed)
+01000001 10111100 00000001 00000000 00000000 00000000                     : f2  mov r12d, 1          back to "no digit yet"
+11101011 10000111                                                         : f8  jmp loop             fa - 79 = 81
+
+: eof: accept only if no digit is left over
+01000001 10000011 11111100 00000001                                       : fa  cmp r12d, 1
+01110101 00000111                                                         : fe  jne fail             100 + 07 = 107 (odd digit count)
+01101010 00111100                                                         : 100 push 60
+01011000                                                                  : 102 pop rax              syscall 60 = exit
+00110001 11111111                                                         : 103 xor edi, edi         status 0
+00001111 00000101                                                         : 105 syscall
+
+: fail
+01101010 00111100                                                         : 107 push 60
+01011000                                                                  : 109 pop rax              syscall 60 = exit
+01101010 00000001                                                         : 10a push 1
+01011111                                                                  : 10c pop rdi              status 1
+00001111 00000101                                                         : 10d syscall
+: 10f end of file

@@ -1,0 +1,1 @@
+Removed the unused Python mirror under `ecosystem/sounio-py/src/sounio/` (maturin already builds from `python/`), seven unreferenced ecosystem roadmaps, the Linguist pull-request drafts, and the unreferenced `scratchpad/parsedrift.sio`. The Rust extension sources in `ecosystem/sounio-py/src/*.rs` stay.

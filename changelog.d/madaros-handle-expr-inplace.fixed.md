@@ -1,0 +1,1 @@
+Madaros checks `handle<E> { body } with { .. }` again. ExprHandle had no arm in the in-place expression dispatch, so it reached the fallback that refuses any kind it is handed ("expression kind was not checked in place"), and every handle expression failed `--check`, including the #830 f32-join fixtures (`handle_if_f32_literal_join`, `handle_match_f32_large_literal_first`, ...).

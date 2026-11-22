@@ -1,0 +1,189 @@
+// Shared same-alpha local full-log-likelihood increment: trial minus current.
+// Extracted from the existing CountGLM local line-search series; no normalizer
+// is dropped across unequal alpha. 0 available,1 count,2 mean,3 alpha,4 count
+// range,5 arithmetic,6 nonlocal (caller must use a checked far route).
+use math::pure::{CheckedLog,is_finite}
+use math::logarithmic::{log1p_checked_into,log1pmx_checked_into,log1p_phi_checked_into}
+use linalg::least_squares_scale::{LeastSquaresNumber,least_squares_scaled_product_into}
+fn nli_abs(x:f64)->f64 {if x<0.0 {-x}else{x}}
+fn nli_fail(status:i64,out:&!LeastSquaresNumber)->i64 with Mut {out.status=status;out.value=0.0;status}
+fn nli_weight(mu:f64,alpha:f64)->f64 with Mut,Div,Panic {
+ var value=mu
+ if alpha>0.0 {
+  if mu>=1.0 {value=1.0/(alpha+1.0/mu)} else {value=mu/(1.0+alpha*mu)}
+ }
+ if !is_finite(value) || value<=0.0 {return -1.0}
+ value
+}
+pub fn nb2_same_alpha_increment_into(count:i64,mu:f64,trial:f64,alpha:f64,out:&!LeastSquaresNumber)->i64 with Mut,Div,Panic {
+ out.status=5;out.value=0.0
+ if count<0 {return nli_fail(1,out)}
+ if !is_finite(mu) || mu<=0.0 || !is_finite(trial) || trial<=0.0 {return nli_fail(2,out)}
+ if !is_finite(alpha) || alpha<0.0 {return nli_fail(3,out)}
+ if count>9007199254740992 {return nli_fail(4,out)}
+ let delta_mu=trial-mu
+ if delta_mu==0.0 {out.status=0;return 0}
+   let d=delta_mu/mu
+   if !is_finite(d) {return nli_fail(6,out)}
+   if nli_abs(d)>0.25 {return nli_fail(6,out)}
+   if d==0.0 {return nli_fail(5,out)}
+   let weight=nli_weight(mu,alpha)
+   if weight<0.0 {return nli_fail(5,out)}
+   var q:f64=0.0
+   if alpha>0.0 {
+    if mu>=1.0 {q=alpha/(alpha+1.0/mu)} else {
+     let product=alpha*mu
+     q=product/(1.0+product)
+    }
+   }
+   if !is_finite(q) || q<0.0 || q>1.0 {return nli_fail(5,out)}
+   var a:f64=1.0
+   var b:f64=0.5
+   var a_correction:f64=0.0
+   var b_correction:f64=0.0
+   var power:f64=1.0
+   var geometric:f64=1.0
+   var k:i64=1
+   while k<32 {
+    power=power*(-d)
+    geometric=1.0+q*geometric
+    let a_term=(power*geometric)/((k+1) as f64)-a_correction
+    let a_next=a+a_term
+    a_correction=(a_next-a)-a_term
+    a=a_next
+    let b_term=(power*geometric)/((k+2) as f64)-b_correction
+    let b_next=b+b_term
+    b_correction=(b_next-b)-b_term
+    b=b_next
+    k=k+1
+   }
+   if !is_finite(a) || !is_finite(b) || a<=0.0 || b<=0.0 {return nli_fail(5,out)}
+   let delta=(count as f64)-mu
+   let absolute_d=nli_abs(d)
+   // |d|*A and |d|*B are bounded local coefficients; keep W and mu
+   // separate in the balanced products to retain extreme conditional weights.
+   let first_status=least_squares_scaled_product_into(delta,weight,absolute_d*a,mu,1.0,1.0,out)
+   let first_value:f64=out.value
+   let second_status=least_squares_scaled_product_into(weight,absolute_d,absolute_d*b,1.0,1.0,1.0,out)
+   let second_value:f64=out.value
+   if first_status!=0 || second_status!=0 {return nli_fail(5,out)}
+   if delta!=0.0 {if first_value==0.0 {return nli_fail(5,out)}}
+   if second_value==0.0 {return nli_fail(5,out)}
+   var signed_first=first_value
+   if d<0.0 {signed_first= -signed_first}
+
+ let value=signed_first-second_value
+ if !is_finite(value) {return nli_fail(5,out)}
+ out.status=0;out.value=value
+ return 0
+}
+
+// Bounded candidate for the alpha-dependent full-normalizer increment at fixed
+// mean. 6 requests checked far fallback. No rounded-zero contrast certificate.
+fn nli_from_poisson_into(count:i64,mu:f64,alpha:f64,out:&!LeastSquaresNumber,
+ log_work:&!CheckedLog)->i64 with Mut,Div,Panic {
+ let z=alpha*mu
+ if !is_finite(z) {return nli_fail(6,out)}
+ if z==0.0 {return nli_fail(5,out)}
+ let logged_status=log1p_checked_into(z,log_work)
+ let logged:f64=log_work.value
+ let mx_status=log1pmx_checked_into(z,log_work)
+ let mx:f64=log_work.value
+ if logged_status!=0 || mx_status!=0 {return nli_fail(6,out)}
+ if logged==0.0 || mx==0.0 {return nli_fail(5,out)}
+ let divided_status=least_squares_scaled_product_into(mx,1.0,1.0,alpha,1.0,1.0,out)
+ let divided:f64=out.value
+ if divided_status!=0 || divided==0.0 {return nli_fail(5,out)}
+ var sum:f64=0.0
+ var correction:f64=0.0
+ var k:i64=1
+ while k<count {
+  let x=(k as f64)*alpha
+  if !is_finite(x) {return nli_fail(6,out)}
+  let status=log1p_checked_into(x,log_work)
+  let value:f64=log_work.value
+  if status!=0 {return nli_fail(6,out)}
+  if value==0.0 {return nli_fail(5,out)}
+  let adjusted=value-correction
+  let next=sum+adjusted
+  correction=(next-sum)-adjusted;sum=next
+  k=k+1
+ }
+ let slope_term= -((count as f64)*logged)
+ if !is_finite(slope_term) {return nli_fail(5,out)}
+ let adjusted=slope_term-correction
+ let next=sum+adjusted
+ correction=(next-sum)-adjusted;sum=next
+ let adjusted_final= -divided-correction
+ let value=sum+adjusted_final
+ if !is_finite(value) {return nli_fail(5,out)}
+ out.status=0;out.value=value
+ return 0
+}
+pub fn nb2_dispersion_increment_into(count:i64,mu:f64,first_alpha:f64,
+ second_alpha:f64,out:&!LeastSquaresNumber,log_work:&!CheckedLog)->i64 with Mut,Div,Panic {
+ out.status=5;out.value=0.0;log_work.status=2;log_work.value=0.0
+ if count<0 {return nli_fail(1,out)}
+ if !is_finite(mu) || mu<=0.0 {return nli_fail(2,out)}
+ if !is_finite(first_alpha) || first_alpha<0.0 || !is_finite(second_alpha) || second_alpha<0.0 {return nli_fail(3,out)}
+ if count>9007199254740992 {return nli_fail(4,out)}
+ if first_alpha==second_alpha {out.status=0;return 0}
+ if count>4096 {return nli_fail(6,out)}
+ if first_alpha==0.0 {return nli_from_poisson_into(count,mu,second_alpha,out,log_work)}
+ if second_alpha==0.0 {
+  let status=nli_from_poisson_into(count,mu,first_alpha,out,log_work)
+  let value:f64=out.value
+  if status!=0 {return status}
+  out.value= -value;return 0
+ }
+ let delta=second_alpha-first_alpha
+ let u=delta/first_alpha
+ if !is_finite(u) || nli_abs(u)>0.25 {return nli_fail(6,out)}
+ if u==0.0 {return nli_fail(5,out)}
+ let z=first_alpha*mu
+ if !is_finite(z) {return nli_fail(6,out)}
+ if z==0.0 {return nli_fail(5,out)}
+ let v=(z/(1.0+z))*u
+ if v==0.0 {return nli_fail(5,out)}
+ let lv_status=log1p_checked_into(v,log_work)
+ let lv:f64=log_work.value
+ let mx_status=log1pmx_checked_into(v,log_work)
+ let mx:f64=log_work.value
+ let phi_status=log1p_phi_checked_into(z,log_work)
+ let phi:f64=log_work.value
+ if lv_status!=0 || mx_status!=0 || phi_status!=0 {return nli_fail(6,out)}
+ if lv==0.0 || mx==0.0 || phi==0.0 {return nli_fail(5,out)}
+ let scaled_status=least_squares_scaled_product_into(u,phi,1.0,1.0+z,1.0,1.0,out)
+ let scaled:f64=out.value
+ if scaled_status!=0 || scaled==0.0 {return nli_fail(5,out)}
+ let numerator=mx-scaled
+ if !is_finite(numerator) || numerator==0.0 {return nli_fail(5,out)}
+ let divided_status=least_squares_scaled_product_into(numerator,1.0,1.0,second_alpha,1.0,1.0,out)
+ let divided:f64=out.value
+ if divided_status!=0 || divided==0.0 {return nli_fail(5,out)}
+ var sum:f64=0.0
+ var correction:f64=0.0
+ var k:i64=1
+ while k<count {
+  let x=delta/(first_alpha+1.0/(k as f64))
+  if !is_finite(x) || x==0.0 {return nli_fail(5,out)}
+  let status=log1p_checked_into(x,log_work)
+  let value:f64=log_work.value
+  if status!=0 {return nli_fail(6,out)}
+  if value==0.0 {return nli_fail(5,out)}
+  let adjusted=value-correction
+  let next=sum+adjusted
+  correction=(next-sum)-adjusted;sum=next
+  k=k+1
+ }
+ let slope_term= -((count as f64)*lv)
+ if !is_finite(slope_term) {return nli_fail(5,out)}
+ let adjusted=slope_term-correction
+ let next=sum+adjusted
+ correction=(next-sum)-adjusted;sum=next
+ let adjusted_final= -divided-correction
+ let value=sum+adjusted_final
+ if !is_finite(value) {return nli_fail(5,out)}
+ out.status=0;out.value=value
+ return 0
+}

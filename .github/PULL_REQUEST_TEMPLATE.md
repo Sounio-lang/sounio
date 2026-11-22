@@ -14,6 +14,15 @@
 - [ ] Test improvement (adding compile-fail gates or golden snapshot validations)
 - [ ] Performance improvement (reduction of bootstrap build time or codegen optimization)
 
+## Changelog
+
+<!-- Compiler, runtime, stdlib or CI-script changes need changelog.d/<slug>.<kind>.md
+     (kind=internal when nothing is user-visible). See changelog.d/README.md and ADR-018. -->
+
+- Fragment(s): <!-- e.g. changelog.d/fix-atan-reduction.numerical-correction.md -->
+- [ ] Changes printed numbers (kind `numerical` or `numerical-correction`)
+- [ ] Changes what existing programs do or whether they compile (kind `breaking`, `refusal` or `semantics`)
+
 ## Related Issues
 
 <!-- Link any related issues here, e.g., "Fixes #123" or "Related to #456" -->

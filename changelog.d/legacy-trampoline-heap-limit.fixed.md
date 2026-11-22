@@ -1,0 +1,1 @@
+The legacy Linux entry trampoline (`emit_entry_trampoline_into`, used by the wide native driver) mapped a fixed 2 GiB but set `heap_limit` from the reservation's 1 TiB upper bound, so arena exhaustion faulted instead of exiting 181. It now takes the same reserve-then-commit mapping as the main path; Windows and macOS set `heap_limit` from their fixed 2 GiB mapping.
