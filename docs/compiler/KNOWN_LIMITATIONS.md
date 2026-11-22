@@ -42,6 +42,7 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 | KL-16 | Hessian Tier-4 (16a–16f CLOSED; residual H-multi/non-H00 if/a64 atan2) | lean_single |
 | KL-20 | enum variants with payloads: Madaros CLOSED for non-generic enums (tagged cells, 2026-10-30); generic enums do not parse; lean_single unchanged | lean_single (+ generic enums) |
 | KL-21 | user fns named like compiler builtins: `pub` residual on Madaros; seed hijacks or rejects | both |
+| KL-22 | Madaros x86-64 `tan(x)` for `|x| >= 2^50` returns NaN (no Payne-Hanek reduction); atan, atan2, asin, acos, tanh, ln are total | madaros |
 | KL-18 | `Hyper<…>` CPU values: Madaros fail-closed; lean_single prints a wrong value (seed) | both |
 | KL-17 | #2773 same-named items across modules: fns resolved per module on both engines; differing same-named structs refused instead of kept apart | both (types) |
 
@@ -439,6 +440,18 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 - Channel-at-`.value` semantics (`MEAS_KNOW_IDX`,
   `formal/ChannelAssignmentSemantics.lean`) are a model, not a defect —
   see the history snapshot for the KAS-1 rationale.
+
+### KL-22 — `tan` for huge arguments
+
+- Engine: `madaros`, x86-64. `tan`, `atan`, `atan2`, `asin`, `acos`, `tanh` and
+  `ln` are emitted by `native::math_trans` (`ln` is `log`). `tan` reduces its
+  argument by n * (pi/2 as four doubles), exact for `|x| < 2^50`. Beyond that
+  the four-part pi/2 no longer covers the quotient and the kernel returns NaN
+  instead of a wrong finite value. A Payne-Hanek reduction (about 1100 bits of
+  2/pi) removes the limit; it is not implemented. Measured maxima over 40000-point
+  grids against a `__float128` reference: atan 0.83 ulp, atan2 1.15, asin 2.02,
+  acos 1.63, tan 2.38, tanh 2.16, ln 2.75; special values are exact
+  (`scripts/dev/gen_math_trans_tests.cpp`, `tests/run-pass/math_trans_values.sio`).
 
 ### KL-20 — enum payload variants (P1.3)
 

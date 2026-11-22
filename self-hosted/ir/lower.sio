@@ -2147,6 +2147,7 @@ let FO_MAX_CH: i64 = 64
 // Keep both facts across module resets so either discovery order fails closed.
 var FO_CAPACITY_OVERFLOWED: bool = false
 var FO_UNCERTAINTY_USED: bool = false
+var FO_XFER_OVERFLOWED: bool = false
 // WHICH PRESEED STAGE first turned had_error true, and for the two that loop,
 // on which module index. The counters above proved the flag goes true without
 // any `had_error = true` in this file firing, so the write happens inside one
@@ -2425,6 +2426,7 @@ pub fn lower_compile_error_scope_begin() with Mut {
     IR_LOWER_COMPILE_ERROR_SCOPE_ACTIVE = true
     FO_CAPACITY_OVERFLOWED = false
     FO_UNCERTAINTY_USED = false
+    FO_XFER_OVERFLOWED = false
 }
 
 pub fn lower_compile_error_scope_end() with Mut {
@@ -2538,19 +2540,52 @@ fn fo_refuse_capacity(correlation: bool) with Mut, Panic, Div, IO {
     }
 }
 
+// A Hessian that has no bind row to live in cannot be stored, and an empty slot
+// reads back as a structural zero -- a wrong curvature with exit code 0. The row
+// table has one row per fo_bind row (128), so this fires only when the first-order
+// bind table itself is full. Refuse, as for channels, instead of dropping it.
+fn so_refuse_hess_row_capacity() with Mut, IO {
+    print("error[E303]: GUM channel capacity exceeded: second-order lowering keeps a Hessian for at most 128 locals per function; refusing to drop curvature\n")
+    IR_LOWER_HARD_ERROR = 1
+    if IR_LOWER_COMPILE_ERROR_SCOPE_ACTIVE {
+        IR_LOWER_COMPILE_ERROR_LATCH = true
+    }
+    if IR_LOWER_HARD_ERROR_REASON == 0 {
+        IR_LOWER_HARD_ERROR_REASON = 10
+    }
+}
+
+// The pure-function transfer table and the f64-global table are fixed-size. A
+// function that did not fit reads back as opaque, which clears its sensitivity
+// and reports a variance that is too small with exit 0. Refuse instead, once an
+// uncertainty value is in play.
+fn fo_refuse_xfer_capacity() with Mut, IO {
+    print("error[E303]: GUM channel capacity exceeded: the transfer table holds at most 512 pure helper functions (and 512 f64 globals) are analysed per compile; refusing to drop their uncertainty transfers\n")
+    IR_LOWER_HARD_ERROR = 1
+    if IR_LOWER_COMPILE_ERROR_SCOPE_ACTIVE {
+        IR_LOWER_COMPILE_ERROR_LATCH = true
+    }
+    if IR_LOWER_HARD_ERROR_REASON == 0 {
+        IR_LOWER_HARD_ERROR_REASON = 10
+    }
+}
+
 fn fo_require_uncertainty_tracking() with Mut, Panic, Div, IO {
     // An overflow is refused where a query reads the value that lost its
     // channel (fo_refuse_capacity taints it), not at every later measure().
+    // A transfer-table overflow has no value to taint: the helper that did not
+    // fit is opaque everywhere, so it is refused once uncertainty is in play.
     FO_UNCERTAINTY_USED = true
+    if FO_XFER_OVERFLOWED { fo_refuse_xfer_capacity() }
 }
 var FO_XFER_COUNT: i64 = 0
-var FO_XFER_KIND: [i64; 64] = [0; 64]
+var FO_XFER_KIND: [i64; 512] = [0; 512]
 // f64 globals whose initializer is a float word. A scale transfer folds them.
 var FO_GF64_COUNT: i64 = 0
-var FO_GF64_HASH: [i64; 64] = [0; 64]
-var FO_GF64_VAL: [f64; 64] = [0.0; 64]
-var FO_XFER_LIT: [f64; 64] = [0.0; 64]
-var FO_XFER_HASH: [i64; 64] = [0; 64]
+var FO_GF64_HASH: [i64; 512] = [0; 512]
+var FO_GF64_VAL: [f64; 512] = [0.0; 512]
+var FO_XFER_LIT: [f64; 512] = [0.0; 512]
+var FO_XFER_HASH: [i64; 512] = [0; 512]
 
 // #1706: per-FIELD FO transfers for struct-returning functions.
 //
@@ -2821,7 +2856,7 @@ fn fo_letcall_note(local: Name, callee: Name, args: Option<Box<ExprList> >) with
         next: FO_LETCALL_HEAD,
     }))
 }
-var FO_XFER_FWD_HASH: [i64; 64] = [0; 64]
+var FO_XFER_FWD_HASH: [i64; 512] = [0; 512]
 
 // Copilot review (PR #2516): the byte cap here must match Name.buf's actual
 // capacity (parser/ast.sio: `buf: [i8; 384]`), not an arbitrary smaller
@@ -4247,11 +4282,15 @@ pub fn fo_xfer_global_reset() with Mut {
     FO_XFER_COUNT = 0
     FO_GF64_COUNT = 0
     var i: i64 = 0
-    while i < 64 {
+    while i < 512 {
         FO_XFER_KIND[i as usize] = 0
         FO_XFER_LIT[i as usize] = 0.0
         FO_XFER_HASH[i as usize] = 0
         FO_XFER_FWD_HASH[i as usize] = 0
+        i = i + 1
+    }
+    i = 0
+    while i < 512 {
         FO_GF64_HASH[i as usize] = 0
         FO_GF64_VAL[i as usize] = 0.0
         i = i + 1
@@ -4336,7 +4375,10 @@ fn fo_gf64_collect(items: &Option<Box<ItemList>>) with Mut, Panic, Div {
                                 Some(ty) => {
                                     if lower_type_expr_is_f64(&(*ty)) {
                                         if ast_global_str_init_present(head.name) == 0 && ast_global_var_init_count(head.name) == 1 {
-                                            if FO_GF64_COUNT < 64 {
+                                            if FO_GF64_COUNT >= 512 {
+                                                FO_XFER_OVERFLOWED = true
+                                            }
+                                            if FO_GF64_COUNT < 512 {
                                                 let word = ast_global_var_init_nth(head.name, 0)
                                                 let idx = FO_GF64_COUNT
                                                 FO_GF64_HASH[idx as usize] = fo_name_hash(head.name)
@@ -4394,6 +4436,9 @@ fn fo_xfer_seed_transcendentals() with Mut, Panic, Div, IO {
     // KL-6: natural log and square root. Both are backend builtins (ids 17,
     // 14); their derivatives are emitted from x and sqrt, so no E221 hole.
     fo_xfer_global_set(make_name("log"), 8, 6.0, ir_empty_name())
+    fo_xfer_global_set(make_name("ln"), 8, 6.0, ir_empty_name())
+    // Kind 13: atan2(y, x), binary, partials emitted (see kind 13 below).
+    fo_xfer_global_set(make_name("atan2"), 13, 0.0, ir_empty_name())
     fo_xfer_global_set(make_name("sqrt"), 8, 7.0, ir_empty_name())
     // KL-11: pow is binary; kind 9 emits ∂/∂x, ∂²/∂x², ∂/∂y, ∂²/∂y² and
     // the mixed ∂²/∂x∂y. Without this entry fo_apply_call_transfer treats pow
@@ -4449,7 +4494,9 @@ fn fo_xfer_global_set(name: Name, kind: i64, lit: f64, fwd: Name) with Mut, Pani
         FO_XFER_FWD_HASH[existing as usize] = fh
         return
     }
-    if FO_XFER_COUNT >= 64 {
+    if FO_XFER_COUNT >= 512 {
+        FO_XFER_OVERFLOWED = true
+        if FO_UNCERTAINTY_USED { fo_refuse_xfer_capacity() }
         return
     }
     let idx = FO_XFER_COUNT
@@ -11294,6 +11341,9 @@ fn lowerer_fo_preregister_pure_fns_mut(
     items: &Option<Box<ItemList>>
 ) with Mut, Panic, Div, Alloc, IO {
     fo_gf64_collect(items)
+    // fo_gf64_collect only latches an overflow (it has no IO effect); the
+    // refusal is printed here, or later by fo_require_uncertainty_tracking.
+    if FO_XFER_OVERFLOWED && FO_UNCERTAINTY_USED { fo_refuse_xfer_capacity() }
     var current = items
     while true {
         match *current {
@@ -12018,6 +12068,13 @@ fn lower_name_is_float_builtin(n: Name) -> bool with Mut, Panic, Div {
     ir_name_eq(n, make_name("sqrt"))
         || ir_name_eq(n, make_name("exp"))
         || ir_name_eq(n, make_name("log"))
+        || ir_name_eq(n, make_name("ln"))
+        || ir_name_eq(n, make_name("tan"))
+        || ir_name_eq(n, make_name("atan"))
+        || ir_name_eq(n, make_name("tanh"))
+        || ir_name_eq(n, make_name("asin"))
+        || ir_name_eq(n, make_name("acos"))
+        || ir_name_eq(n, make_name("atan2"))
         || ir_name_eq(n, make_name("sin"))
         || ir_name_eq(n, make_name("cos"))
         || ir_name_eq(n, make_name("pow"))
@@ -14167,6 +14224,8 @@ fn lower_name_is_pure_math_builtin(n: Name) -> bool with Mut, Panic, Div, Alloc 
     if ir_name_eq_lit(n, "sqrt") { return true }
     if ir_name_eq_lit(n, "exp") { return true }
     if ir_name_eq_lit(n, "log") { return true }
+    if ir_name_eq_lit(n, "ln") { return true }
+    if ir_name_eq_lit(n, "atan2") { return true }
     if ir_name_eq_lit(n, "sin") { return true }
     if ir_name_eq_lit(n, "cos") { return true }
     if ir_name_eq_lit(n, "tan") { return true }
@@ -23722,7 +23781,7 @@ impl Lowerer {
         false
     }
 
-    fn so_bind_local_hess(self, name: Name) -> Lowerer with Mut, Panic, Div {
+    fn so_bind_local_hess(self, name: Name) -> Lowerer with Mut, Panic, Div, IO {
         var lo = self
         // Only claim a bind row when there is actually a Hessian to store.
         // fo_bind_row_for ALLOCATES, and the table holds 128 rows; calling it
@@ -23737,6 +23796,7 @@ impl Lowerer {
         lo = rp.0
         let row = rp.1
         if row < 0 || row >= 128 {
+            so_refuse_hess_row_capacity()
             return lo
         }
         var i: i64 = 0
@@ -23750,7 +23810,7 @@ impl Lowerer {
     // #1706: set `name`'s second-order row outright (an inlined parameter), even
     // to "none" -- so_bind_local_hess skips an empty Hessian and would leave a
     // caller local's row of the same name in place.
-    fn so_set_local_hess_row(self, name: Name, row_hess: [i64; 2080]) -> Lowerer with Mut, Panic, Div {
+    fn so_set_local_hess_row(self, name: Name, row_hess: [i64; 2080]) -> Lowerer with Mut, Panic, Div, IO {
         var lo = self
         var row: i64 = 0 - 1
         var i: i64 = 0
@@ -23772,6 +23832,7 @@ impl Lowerer {
             row = rp.1
         }
         if row < 0 || row >= 128 {
+            if any { so_refuse_hess_row_capacity() }
             return lo
         }
         var bg = lo.big
@@ -25913,20 +25974,10 @@ impl Lowerer {
             return (lo, d2p.1)
         }
         if which == 5 {
-            // tanh: e = exp(2x) ; t = (e-1)/(e+1) ; f' = 1 - t^2 ; f'' = -2 t f'
-            let x2p = lo.fo_emit_f64_binop(two, BinaryOp::OpMul, argv)
-            lo = x2p.0
-            let x2 = x2p.1
-            let ep = lo.fo_emit_math_call(make_name("exp"), x2)
-            lo = ep.0
-            let e = ep.1
-            let emp = lo.fo_emit_f64_binop(e, BinaryOp::OpSub, one)
-            lo = emp.0
-            let em = emp.1
-            let epp = lo.fo_emit_f64_binop(e, BinaryOp::OpAdd, one)
-            lo = epp.0
-            let epl = epp.1
-            let tp = lo.fo_emit_f64_binop(em, BinaryOp::OpDiv, epl)
+            // tanh: t = tanh(x) (native::math_trans builtin) ; f' = 1 - t^2 ; f'' = -2 t f'.
+            // The old exp-based t = (e-1)/(e+1) lost ~6 digits for small x, which
+            // the second derivative inherited (relative error 1e-6 at x = 1e-10).
+            let tp = lo.fo_emit_math_call(make_name("tanh"), argv)
             lo = tp.0
             let t = tp.1
             let ttp = lo.fo_emit_f64_binop(t, BinaryOp::OpMul, t)
@@ -25938,7 +25989,14 @@ impl Lowerer {
             if !want_second {
                 return (lo, d1)
             }
-            let ntxp = lo.fo_emit_f64_binop(negtwo, BinaryOp::OpMul, t)
+            // f'' = (0 - 2t) * f': a subtraction so tanh''(0) is +0.0, not -0.0.
+            let ztp = lo.emit_f64_const(0.0)
+            lo = ztp.0
+            let z0 = ztp.1
+            let t2p = lo.fo_emit_f64_binop(two, BinaryOp::OpMul, t)
+            lo = t2p.0
+            let t2 = t2p.1
+            let ntxp = lo.fo_emit_f64_binop(z0, BinaryOp::OpSub, t2)
             lo = ntxp.0
             let ntx = ntxp.1
             let d2p = lo.fo_emit_f64_binop(ntx, BinaryOp::OpMul, d1)
@@ -26038,6 +26096,243 @@ impl Lowerer {
     // than growing a second variance algebra beside it. `idx` is only consulted
     // for kinds that need a table-resident detail (5 forwards by hash, 6 chases
     // the derivative name); ctor entries never register those.
+    // atan2 transfer (kind 13), split out of fo_apply_transfer_kind: its frame
+    // already carries the pow block and the 64-channel snapshots, and the extra
+    // locals of this block put a register slot past the frame the bootstrap
+    // codegen addresses correctly (garbage operand, malformed_ir_registers).
+    fn fo_apply_transfer_atan2(
+        self,
+        args: &Option<Box<ExprList>>,
+        s0: [i64; 64],
+        s1: [i64; 64],
+        h0: i64
+    ) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        // SIO-146: same re-lowering hazard as kinds 6/8. Bail when the
+        // arguments are not relower-safe.
+        if !lower_expr_list_relower_safe(args) {
+            return (lo.fo_clear_expr_sens(), -1)
+        }
+        let avalx = lo.fo_lower_nth_arg_value(args, 0)
+        lo = avalx.0
+        let xv = avalx.1
+        let avaly = lo.fo_lower_nth_arg_value(args, 1)
+        lo = avaly.0
+        let yv = avaly.1
+        if xv < 0 || yv < 0 {
+            return (lo.fo_clear_expr_sens(), -1)
+        }
+        lo = lo.emit(ir_mark_float_reg(xv))
+        lo = lo.emit(ir_mark_float_reg(yv))
+        let zp = lo.emit_f64_const(0.0)
+        lo = zp.0
+        let zero = zp.1
+        let twop = lo.emit_f64_const(2.0)
+        lo = twop.0
+        let two = twop.1
+        // a0 = arg0 (= y), a1 = arg1 (= x); r2 = a0^2 + a1^2.
+        //   d/da0 = a1/r2        d/da1 = -a0/r2
+        //   d2/da0^2 = -2 a0 a1 / r2^2     d2/da1^2 = +2 a0 a1 / r2^2
+        //   d2/da0 da1 = (a0^2 - a1^2) / r2^2
+        // Names d1x/d2x/d1y/d2y/dxy are kept from the pow block so the
+        // Hessian chain below is textually the pow chain: x there is arg0.
+        let aap = lo.fo_emit_f64_binop(xv, BinaryOp::OpMul, xv)
+        lo = aap.0
+        let aa = aap.1
+        let bbp = lo.fo_emit_f64_binop(yv, BinaryOp::OpMul, yv)
+        lo = bbp.0
+        let bb = bbp.1
+        let r2p = lo.fo_emit_f64_binop(aa, BinaryOp::OpAdd, bb)
+        lo = r2p.0
+        let r2 = r2p.1
+        let r4p = lo.fo_emit_f64_binop(r2, BinaryOp::OpMul, r2)
+        lo = r4p.0
+        let r4 = r4p.1
+        let abp = lo.fo_emit_f64_binop(xv, BinaryOp::OpMul, yv)
+        lo = abp.0
+        let ab = abp.1
+        let ab2p = lo.fo_emit_f64_binop(ab, BinaryOp::OpMul, two)
+        lo = ab2p.0
+        let ab2 = ab2p.1
+        let d1xp = lo.fo_emit_f64_binop(yv, BinaryOp::OpDiv, r2)
+        lo = d1xp.0
+        let d1x = d1xp.1
+        let na0p = lo.fo_emit_f64_binop(zero, BinaryOp::OpSub, xv)
+        lo = na0p.0
+        let na0 = na0p.1
+        let d1yp = lo.fo_emit_f64_binop(na0, BinaryOp::OpDiv, r2)
+        lo = d1yp.0
+        let d1y = d1yp.1
+        let m2p = lo.fo_emit_f64_binop(ab2, BinaryOp::OpDiv, r4)
+        lo = m2p.0
+        let m2 = m2p.1
+        let d2xp = lo.fo_emit_f64_binop(zero, BinaryOp::OpSub, m2)
+        lo = d2xp.0
+        let d2x = d2xp.1
+        let d2y = m2
+        let dnp = lo.fo_emit_f64_binop(aa, BinaryOp::OpSub, bb)
+        lo = dnp.0
+        let dn = dnp.1
+        let dxyp = lo.fo_emit_f64_binop(dn, BinaryOp::OpDiv, r4)
+        lo = dxyp.0
+        let dxy = dxyp.1
+        if lo.so_enabled && !sab_hessian_chain() {
+            // so_expr_hess still holds H(x): arg1 was lowered after h0. Taken as
+            // an SO_HS row, as in the pow block: a by-value 2080-slot row in this
+            // frame is what this depth smashes. The caller, fo_apply_transfer_kind,
+            // gives the row back (so_hs_pop) whichever way this returns.
+            let h1 = lo.so_snapshot_expr_hess()
+            var hj9: i64 = 0
+            while hj9 < FO_MAX_CH {
+                var hk9: i64 = hj9
+                while hk9 < FO_MAX_CH {
+                    let sj9 = s0[hj9 as usize]
+                    let sk9 = s0[hk9 as usize]
+                    let syj9 = s1[hj9 as usize]
+                    let syk9 = s1[hk9 as usize]
+                    let hid9 = lo.so_hess_idx(hj9, hk9)
+                    let hg9 = SO_HS[(h0 * 2080 + hid9) as usize]
+                    let hy9 = SO_HS[(h1 * 2080 + hid9) as usize]
+                    var acc9: i64 = 0 - 1
+                    if hg9 >= 0 {
+                        let d = lo.fresh_reg()
+                        lo = d.0
+                        let dr = d.1
+                        lo = lo.emit(ir_binop_typed(dr, d1x, BinaryOp::OpMul, hg9, true, true))
+                        lo = lo.emit(ir_mark_float_reg(dr))
+                        acc9 = dr
+                    }
+                    if sj9 >= 0 && sk9 >= 0 {
+                        let d = lo.fresh_reg()
+                        lo = d.0
+                        let pj = d.1
+                        lo = lo.emit(ir_binop_typed(pj, sj9, BinaryOp::OpMul, sk9, true, true))
+                        lo = lo.emit(ir_mark_float_reg(pj))
+                        let d2 = lo.fresh_reg()
+                        lo = d2.0
+                        let t2 = d2.1
+                        lo = lo.emit(ir_binop_typed(t2, d2x, BinaryOp::OpMul, pj, true, true))
+                        lo = lo.emit(ir_mark_float_reg(t2))
+                        if acc9 < 0 {
+                            acc9 = t2
+                        } else {
+                            let d3 = lo.fresh_reg()
+                            lo = d3.0
+                            let sum = d3.1
+                            lo = lo.emit(ir_binop_typed(sum, acc9, BinaryOp::OpAdd, t2, true, true))
+                            lo = lo.emit(ir_mark_float_reg(sum))
+                            acc9 = sum
+                        }
+                    }
+                    if hy9 >= 0 {
+                        let d = lo.fresh_reg()
+                        lo = d.0
+                        let dr = d.1
+                        lo = lo.emit(ir_binop_typed(dr, d1y, BinaryOp::OpMul, hy9, true, true))
+                        lo = lo.emit(ir_mark_float_reg(dr))
+                        if acc9 < 0 {
+                            acc9 = dr
+                        } else {
+                            let d3 = lo.fresh_reg()
+                            lo = d3.0
+                            let sum = d3.1
+                            lo = lo.emit(ir_binop_typed(sum, acc9, BinaryOp::OpAdd, dr, true, true))
+                            lo = lo.emit(ir_mark_float_reg(sum))
+                            acc9 = sum
+                        }
+                    }
+                    if syj9 >= 0 && syk9 >= 0 {
+                        let d = lo.fresh_reg()
+                        lo = d.0
+                        let pj = d.1
+                        lo = lo.emit(ir_binop_typed(pj, syj9, BinaryOp::OpMul, syk9, true, true))
+                        lo = lo.emit(ir_mark_float_reg(pj))
+                        let d2 = lo.fresh_reg()
+                        lo = d2.0
+                        let t2 = d2.1
+                        lo = lo.emit(ir_binop_typed(t2, d2y, BinaryOp::OpMul, pj, true, true))
+                        lo = lo.emit(ir_mark_float_reg(t2))
+                        if acc9 < 0 {
+                            acc9 = t2
+                        } else {
+                            let d3 = lo.fresh_reg()
+                            lo = d3.0
+                            let sum = d3.1
+                            lo = lo.emit(ir_binop_typed(sum, acc9, BinaryOp::OpAdd, t2, true, true))
+                            lo = lo.emit(ir_mark_float_reg(sum))
+                            acc9 = sum
+                        }
+                    }
+                    if sj9 >= 0 && syk9 >= 0 {
+                        let d = lo.fresh_reg()
+                        lo = d.0
+                        let pj = d.1
+                        lo = lo.emit(ir_binop_typed(pj, sj9, BinaryOp::OpMul, syk9, true, true))
+                        lo = lo.emit(ir_mark_float_reg(pj))
+                        let d2 = lo.fresh_reg()
+                        lo = d2.0
+                        let t2 = d2.1
+                        lo = lo.emit(ir_binop_typed(t2, dxy, BinaryOp::OpMul, pj, true, true))
+                        lo = lo.emit(ir_mark_float_reg(t2))
+                        if acc9 < 0 {
+                            acc9 = t2
+                        } else {
+                            let d3 = lo.fresh_reg()
+                            lo = d3.0
+                            let sum = d3.1
+                            lo = lo.emit(ir_binop_typed(sum, acc9, BinaryOp::OpAdd, t2, true, true))
+                            lo = lo.emit(ir_mark_float_reg(sum))
+                            acc9 = sum
+                        }
+                    }
+                    if sk9 >= 0 && syj9 >= 0 {
+                        let d = lo.fresh_reg()
+                        lo = d.0
+                        let pj = d.1
+                        lo = lo.emit(ir_binop_typed(pj, sk9, BinaryOp::OpMul, syj9, true, true))
+                        lo = lo.emit(ir_mark_float_reg(pj))
+                        let d2 = lo.fresh_reg()
+                        lo = d2.0
+                        let t2 = d2.1
+                        lo = lo.emit(ir_binop_typed(t2, dxy, BinaryOp::OpMul, pj, true, true))
+                        lo = lo.emit(ir_mark_float_reg(t2))
+                        if acc9 < 0 {
+                            acc9 = t2
+                        } else {
+                            let d3 = lo.fresh_reg()
+                            lo = d3.0
+                            let sum = d3.1
+                            lo = lo.emit(ir_binop_typed(sum, acc9, BinaryOp::OpAdd, t2, true, true))
+                            lo = lo.emit(ir_mark_float_reg(sum))
+                            acc9 = sum
+                        }
+                    }
+                    (*lo.so_hess).h[hid9 as usize] = acc9
+                    hk9 = hk9 + 1
+                }
+                hj9 = hj9 + 1
+            }
+        } else if lo.so_enabled {
+            lo = lo.so_clear_expr_hess()
+        }
+        var sLx: [i64; 64] = [-1; 64]
+        lo = lo.fo_combine_sens_mul(sLx, s0, d1x, xv)
+        var s1_live: i64 = 0
+        var qi: i64 = 0
+        while qi < FO_MAX_CH {
+            if s1[qi as usize] >= 0 { s1_live = 1 }
+            qi = qi + 1
+        }
+        if s1_live == 1 {
+            let s_base = lo.fo_snapshot_expr_sens()
+            var sLy: [i64; 64] = [-1; 64]
+            lo = lo.fo_combine_sens_mul(sLy, s1, d1y, yv)
+            let s_exp = lo.fo_snapshot_expr_sens()
+            lo = lo.fo_combine_sens_addsub(s_base, s_exp, false)
+        }
+        return lo.fo_emit_var_from_sens()
+    }
+
     // SO_HS rows taken below are given back when this returns, whichever
     // return it takes (see SO_HS).
     fn fo_apply_transfer_kind(
@@ -26097,7 +26392,7 @@ impl Lowerer {
         let p0 = lo.fo_lower_nth_arg_variance(args, subj)
         lo = p0.0
         let v0 = p0.1
-        if v0 < 0 && kind != 3 && kind != 4 {
+        if v0 < 0 && kind != 3 && kind != 4 && kind != 9 && kind != 13 {
             if !lo.fo_expr_has_sens() {
                 return (lo.fo_clear_expr_sens(), -1)
             }
@@ -26739,6 +27034,15 @@ impl Lowerer {
                 lo = lo.fo_combine_sens_addsub(s_base, s_exp, false)
             }
             return lo.fo_emit_var_from_sens()
+        }
+        // kind 13: atan2(y, x). Same two-argument chain as kind 9 (pow), with the
+        // atan2 partials: arg0 = y, arg1 = x, r2 = x^2 + y^2,
+        //   da/dy = x/r2, da/dx = -y/r2, d2a/dy2 = -2xy/r4, d2a/dx2 = +2xy/r4,
+        //   d2a/dydx = (y^2 - x^2)/r4.
+        // The first-order variance is Var(y) (x/r2)^2 + Var(x) (y/r2)^2 for
+        // independent arguments; the combiners handle shared fields.
+        if kind == 13 {
+            return lo.fo_apply_transfer_atan2(args, s0, s1, h0)
         }
         (lo.fo_clear_expr_sens(), -1)
     }
