@@ -1,0 +1,1 @@
+Add the AArch64 physical fault model (`AArch64Env`, `AArch64Phys`) and a 44-byte AArch64 TMR majority voter with its physical bound (`TMRVoterArm64`), with a checker executable (`aarch64-phys-check`) whose selftest runs in the Lean job and which verifies traces from ARM64 hardware (`bootstrap/model/aarch64_phys_gate.sh`).

@@ -1,0 +1,1 @@
+Madaros consistently reserves `E041` for unit mismatch in its checker, diagnostic registry and error guide. Ontology property weakening now reports `E286` with ontology-specific help, Rust `&mut` reference syntax reports `E287`, and the registry's use-after-move constructor uses `E288`. The unchanged legacy `lean_single` engine's different codes are documented explicitly (#3552).

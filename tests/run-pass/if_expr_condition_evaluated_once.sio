@@ -1,0 +1,64 @@
+//@ run-pass
+//@ expect-stdout: IF_EXPR_CONDITION_ONCE_OK
+// The condition of an if used as a VALUE is evaluated once. The variance walk
+// that follows the taken arm used to lower the condition again, so every call
+// in it ran twice and the value came from the second call (measured before the
+// fix: calls=2 for every case below, in a program with no uncertainty at all).
+var C: i64 = 0
+
+fn tick() -> i64 with Mut {
+    C = C + 1
+    C
+}
+
+fn tb() -> bool with Mut {
+    C = C + 1
+    true
+}
+
+fn id(x: i64) -> i64 { x }
+
+fn check(tag: i64, got: i64, want: i64, calls: i64) -> i64 with IO, Mut {
+    var bad: i64 = 0
+    if got != want || C != calls {
+        print("case ")
+        print_int(tag)
+        print(": value ")
+        print_int(got)
+        print(" calls ")
+        print_int(C)
+        print("\n")
+        bad = 1
+    }
+    C = 0
+    bad
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var bad: i64 = 0
+    let a = if tick() % 2 == 0 { 10 } else { 20 }
+    bad = bad + check(1, a, 20, 1)
+    let b = if tb() { 10 } else { 20 }
+    bad = bad + check(2, b, 10, 1)
+    let c = id(if tick() == 1 { 10 } else { 20 })
+    bad = bad + check(3, c, 10, 1)
+    var d = 0
+    d = if tick() == 1 { 7 } else { 8 }
+    bad = bad + check(4, d, 7, 1)
+    let e = if tick() == 1 { tick() } else { 0 }
+    bad = bad + check(5, e, 2, 2)
+    let f = if tick() == 5 { 1 } else if tick() == 2 { 2 } else { 3 }
+    bad = bad + check(6, f, 2, 2)
+    let g = if tick() > 0 { 1.5 } else { 2.5 }
+    bad = bad + check(7, (g * 2.0) as i64, 3, 1)
+    // #3572: an iterative else-if walk borrows temporary Expr copies in a
+    // Madaros-built compiler. Every arm must find its own cached condition,
+    // including the final else; stack addresses are not stable cache keys.
+    let h = if tick() == 9 { 10 } else if tick() == 9 { 20 } else if tick() == 3 { 30 } else { 40 }
+    bad = bad + check(8, h, 30, 3)
+    let j = if tick() == 9 { 10 } else if tick() == 9 { 20 } else if tick() == 9 { 30 } else { 40 }
+    bad = bad + check(9, j, 40, 3)
+    if bad != 0 { return 1 }
+    println("IF_EXPR_CONDITION_ONCE_OK")
+    0
+}

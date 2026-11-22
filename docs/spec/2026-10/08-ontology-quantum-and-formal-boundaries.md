@@ -56,8 +56,10 @@ ontology example is not a control for that route.
 
 `stdlib/ontology/elplus.sio` implements finite boolean closure surfaces.
 The dense representation stores concept subsumption and role edges in fixed
-arrays. Its `ELPLUS_MAXC`, `ELPLUS_MAXR`, and related constants bound that
-implementation. Sparse operations use their own indexing and workspace
+arrays. Its `ELPLUS_MAXC`, `ELPLUS_MAXR`, and related constants bound the
+legacy entry points (64 concepts, 8 roles, 8 role chains); the `elplus_wide_*`
+entry points use a 256-concept, 16-role, 32-chain layout, validate their
+inputs and return a status. Both run the same rule loop. Sparse operations use their own indexing and workspace
 requirements. The dense and sparse algorithms require separate conformance
 evidence when their representations or supported profiles differ. The sparse
 profile documented by this source excludes conjunctions and role hierarchy/

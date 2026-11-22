@@ -1,0 +1,410 @@
+// stdlib/molecular/ice_rules.sio -- proton configurations of a periodic water
+// framework: the Bernal-Fowler ice rules, zero net polarisation, and the
+// placement of rigid three-site water models on the result.
+//
+// WHY THIS EXISTS. A guest that carries charges (H2 with the Alavi quadrupole,
+// CO2, N2 with a quadrupole) feels the host's electrostatic field, and that
+// field is set by where the water HYDROGENS are -- which the oxygen lattice of
+// molecular::host_guest does not say. Real clathrates are proton-disordered:
+// every water donates two hydrogen bonds and accepts two (the ice rules), the
+// orientations are otherwise random, and a simulation cell must carry no net
+// dipole or the periodic images polarise one another. This module builds such
+// a configuration from the oxygen positions alone.
+//
+// THE ALGORITHM.
+//   1. Bonds: every oxygen pair (with periodic images) closer than rmax.
+//      In sII every oxygen has exactly four (checked: ir_degree_bad).
+//   2. Ice rules: the bond graph is 4-regular, so an Euler circuit exists;
+//      orienting each bond along the circuit (donor -> acceptor) gives every
+//      vertex in-degree = out-degree = 2. Hierholzer, from vertex 0.
+//   3. Disorder and polarisation: reversing a directed cycle keeps the ice
+//      rules. A random directed walk closes a cycle; a cycle that winds
+//      around the periodic cell changes the bond-winding vector
+//      W = sum over bonds of the image shift, and the bond-dipole sum is
+//      exactly a * W (the position terms cancel because in = out at every
+//      vertex). Local cycles are always accepted (they randomise); winding
+//      cycles only when they lower |W|^2, until W = 0 exactly.
+//      The parity of each component of W is fixed by the graph
+//      (sum of |shift| mod 2), so W = 0 is reachable iff that parity is even;
+//      ir_winding_parity reports it.
+//   4. Water: the two donated bonds give the H-O-H plane; the bisector is
+//      along u1 + u2 and the hydrogens sit at +-theta/2 from it at r_OH.
+//
+// WHAT IS CHECKED, AND AGAINST WHAT: tests/stdlib/molecular/test_sii_charges_ewald.sio
+// against stdlib/molecular/oracles/sii_ewald_oracle.cpp (long double, the same
+// minstd generator and the same edge order): ice-rule violations 0, W = 0,
+// the residual charge dipole of the SPC/E host, and the Ewald energies of
+// molecular::ewald on the resulting charges.
+//
+// RANDOMNESS. Park-Miller minstd (x <- 48271 x mod 2^31 - 1): exact in i64, so
+// the C++ oracle reproduces the same configuration bit for bit.
+
+module molecular::ice_rules
+
+// ============================================================================
+// 0. STATE (one framework at a time)
+// ============================================================================
+
+pub fn ir_vertex_max() -> i64 { 1024 }
+pub fn ir_edge_max() -> i64 { 2048 }
+
+var IR_NV: i64 = 0
+var IR_NE: i64 = 0
+var IR_A: f64 = 0.0
+var IR_POS: [f64; 3072] = [0.0; 3072]
+var IR_EU: [i64; 2048] = [0; 2048]
+var IR_EV: [i64; 2048] = [0; 2048]
+var IR_ES: [i64; 6144] = [0; 6144]
+var IR_DIR: [i64; 2048] = [0; 2048]
+var IR_INC: [i64; 4096] = [0; 4096]
+var IR_DEG: [i64; 1024] = [0; 1024]
+var IR_RNG: i64 = 1
+
+fn ir_rand() -> i64 with Mut, Div {
+    IR_RNG = (IR_RNG * 48271) % 2147483647
+    IR_RNG
+}
+
+// ============================================================================
+// 1. BONDS
+// ============================================================================
+
+// Bonds between the n Cartesian oxygens of one cubic cell of edge a (positions
+// in [0, a)), images included, shorter than rmax. Each bond is stored once,
+// u < v, with the image shift s so that the bond vector u -> v is
+// r_v + s a - r_u. Returns the bond count, or -1 past capacity.
+pub fn ir_build_bonds(pos: &[f64; 12288], n: i64, a: f64, rmax: f64) -> i64 with Mut, Div {
+    if n > ir_vertex_max() { return 0 - 1 }
+    IR_NV = n
+    IR_NE = 0
+    IR_A = a
+    var i: i64 = 0
+    while i < 3 * n {
+        IR_POS[i as usize] = pos[i as usize]
+        i = i + 1
+    }
+    var v0: i64 = 0
+    while v0 < n {
+        IR_DEG[v0 as usize] = 0
+        v0 = v0 + 1
+    }
+    let r2max = rmax * rmax
+    var u: i64 = 0
+    while u < n {
+        var v = u + 1
+        while v < n {
+            var sa: i64 = 0 - 1
+            while sa <= 1 {
+                var sb: i64 = 0 - 1
+                while sb <= 1 {
+                    var sc: i64 = 0 - 1
+                    while sc <= 1 {
+                        let dx = IR_POS[(3 * v) as usize] + (sa as f64) * a - IR_POS[(3 * u) as usize]
+                        let dy = IR_POS[(3 * v + 1) as usize] + (sb as f64) * a - IR_POS[(3 * u + 1) as usize]
+                        let dz = IR_POS[(3 * v + 2) as usize] + (sc as f64) * a - IR_POS[(3 * u + 2) as usize]
+                        if dx * dx + dy * dy + dz * dz < r2max {
+                            if IR_NE >= ir_edge_max() { return 0 - 1 }
+                            let e = IR_NE
+                            IR_EU[e as usize] = u
+                            IR_EV[e as usize] = v
+                            IR_ES[(3 * e) as usize] = sa
+                            IR_ES[(3 * e + 1) as usize] = sb
+                            IR_ES[(3 * e + 2) as usize] = sc
+                            IR_DIR[e as usize] = 0
+                            if IR_DEG[u as usize] < 4 { IR_INC[(4 * u + IR_DEG[u as usize]) as usize] = e }
+                            if IR_DEG[v as usize] < 4 { IR_INC[(4 * v + IR_DEG[v as usize]) as usize] = e }
+                            IR_DEG[u as usize] = IR_DEG[u as usize] + 1
+                            IR_DEG[v as usize] = IR_DEG[v as usize] + 1
+                            IR_NE = IR_NE + 1
+                        }
+                        sc = sc + 1
+                    }
+                    sb = sb + 1
+                }
+                sa = sa + 1
+            }
+            v = v + 1
+        }
+        u = u + 1
+    }
+    IR_NE
+}
+
+// Vertices whose degree is not 4.
+pub fn ir_degree_bad() -> i64 with Mut, Div {
+    var bad: i64 = 0
+    var v: i64 = 0
+    while v < IR_NV {
+        if IR_DEG[v as usize] != 4 { bad = bad + 1 }
+        v = v + 1
+    }
+    bad
+}
+
+// Parity of the bond-winding vector, fixed by the graph: sum of |shift| mod 2.
+pub fn ir_winding_parity() -> (i64, i64, i64) with Mut, Div {
+    var p0: i64 = 0
+    var p1: i64 = 0
+    var p2: i64 = 0
+    var e: i64 = 0
+    while e < IR_NE {
+        let s0 = IR_ES[(3 * e) as usize]
+        let s1 = IR_ES[(3 * e + 1) as usize]
+        let s2 = IR_ES[(3 * e + 2) as usize]
+        p0 = p0 + (if s0 < 0 { 0 - s0 } else { s0 })
+        p1 = p1 + (if s1 < 0 { 0 - s1 } else { s1 })
+        p2 = p2 + (if s2 < 0 { 0 - s2 } else { s2 })
+        e = e + 1
+    }
+    (p0 % 2, p1 % 2, p2 % 2)
+}
+
+fn ir_other(e: i64, v: i64) -> i64 {
+    if IR_EU[e as usize] == v { return IR_EV[e as usize] }
+    IR_EU[e as usize]
+}
+
+// True when v is the donor (tail) of bond e.
+fn ir_is_tail(e: i64, v: i64) -> bool {
+    (IR_EU[e as usize] == v) == (IR_DIR[e as usize] > 0)
+}
+
+// ============================================================================
+// 2. ICE RULES: EULER CIRCUIT
+// ============================================================================
+
+// Orients every bond along an Euler circuit (Hierholzer from vertex 0).
+// Returns the number of bonds left unoriented (0 on a connected graph).
+pub fn ir_euler_orient() -> i64 with Mut, Div {
+    var used: [i64; 2048] = [0; 2048]
+    var ptr: [i64; 1024] = [0; 1024]
+    var vs: [i64; 2049] = [0; 2049]
+    var nvs: i64 = 1
+    vs[0] = 0
+    var e0: i64 = 0
+    while e0 < IR_NE {
+        IR_DIR[e0 as usize] = 0
+        e0 = e0 + 1
+    }
+    while nvs > 0 {
+        let v = vs[(nvs - 1) as usize]
+        while ptr[v as usize] < IR_DEG[v as usize] && used[IR_INC[(4 * v + ptr[v as usize]) as usize] as usize] != 0 {
+            ptr[v as usize] = ptr[v as usize] + 1
+        }
+        if ptr[v as usize] == IR_DEG[v as usize] {
+            nvs = nvs - 1
+        } else {
+            let e = IR_INC[(4 * v + ptr[v as usize]) as usize]
+            used[e as usize] = 1
+            IR_DIR[e as usize] = if IR_EU[e as usize] == v { 1 } else { 0 - 1 }
+            vs[nvs as usize] = ir_other(e, v)
+            nvs = nvs + 1
+        }
+    }
+    var z: i64 = 0
+    var e: i64 = 0
+    while e < IR_NE {
+        if IR_DIR[e as usize] == 0 { z = z + 1 }
+        e = e + 1
+    }
+    z
+}
+
+// Vertices that do not donate exactly two bonds.
+pub fn ir_violations() -> i64 with Mut, Div {
+    var bad: i64 = 0
+    var v: i64 = 0
+    while v < IR_NV {
+        var o: i64 = 0
+        var k: i64 = 0
+        while k < IR_DEG[v as usize] {
+            if ir_is_tail(IR_INC[(4 * v + k) as usize], v) { o = o + 1 }
+            k = k + 1
+        }
+        if o != 2 { bad = bad + 1 }
+        v = v + 1
+    }
+    bad
+}
+
+pub fn ir_winding() -> (i64, i64, i64) with Mut, Div {
+    var w0: i64 = 0
+    var w1: i64 = 0
+    var w2: i64 = 0
+    var e: i64 = 0
+    while e < IR_NE {
+        let d = IR_DIR[e as usize]
+        w0 = w0 + d * IR_ES[(3 * e) as usize]
+        w1 = w1 + d * IR_ES[(3 * e + 1) as usize]
+        w2 = w2 + d * IR_ES[(3 * e + 2) as usize]
+        e = e + 1
+    }
+    (w0, w1, w2)
+}
+
+// ============================================================================
+// 3. DISORDER AND ZERO POLARISATION: LOOP MOVES
+// ============================================================================
+
+// nstep cycle reversals (local ones always, winding ones only when |W|^2
+// drops, or stays equal during the first nstep), continued until W = 0 or
+// 50 nstep moves. Returns (moves, local accepted, winding accepted).
+pub fn ir_depolarize(seed: i64, nstep: i64) -> (i64, i64, i64) with Mut, Div {
+    IR_RNG = (seed % 2147483646) + 1
+    var wv = ir_winding()
+    var w0 = wv.0
+    var w1 = wv.1
+    var w2 = wv.2
+    var acc_local: i64 = 0
+    var acc_wind: i64 = 0
+    var steps: i64 = 0
+    var seen: [i64; 1024] = [0; 1024]
+    var ev: [i64; 1025] = [0; 1025]
+    while (steps < nstep || w0 * w0 + w1 * w1 + w2 * w2 != 0) && steps <= 50 * nstep {
+        var s0: i64 = 0
+        while s0 < IR_NV {
+            seen[s0 as usize] = 0 - 1
+            s0 = s0 + 1
+        }
+        var v = ir_rand() % IR_NV
+        var len: i64 = 0
+        while seen[v as usize] < 0 {
+            seen[v as usize] = len
+            var o0: i64 = 0 - 1
+            var o1: i64 = 0 - 1
+            var k: i64 = 0
+            while k < IR_DEG[v as usize] {
+                let e = IR_INC[(4 * v + k) as usize]
+                if ir_is_tail(e, v) {
+                    if o0 < 0 { o0 = e } else { o1 = e }
+                }
+                k = k + 1
+            }
+            let pick = if ir_rand() % 2 == 0 { o0 } else { o1 }
+            ev[len as usize] = pick
+            len = len + 1
+            v = ir_other(pick, v)
+        }
+        let start = seen[v as usize]
+        var d0: i64 = 0
+        var d1: i64 = 0
+        var d2: i64 = 0
+        var i = start
+        while i < len {
+            let e = ev[i as usize]
+            let d = IR_DIR[e as usize]
+            d0 = d0 + d * IR_ES[(3 * e) as usize]
+            d1 = d1 + d * IR_ES[(3 * e + 1) as usize]
+            d2 = d2 + d * IR_ES[(3 * e + 2) as usize]
+            i = i + 1
+        }
+        let n0 = w0 - 2 * d0
+        let n1 = w1 - 2 * d1
+        let n2 = w2 - 2 * d2
+        let wind = d0 * d0 + d1 * d1 + d2 * d2 != 0
+        let old2 = w0 * w0 + w1 * w1 + w2 * w2
+        let new2 = n0 * n0 + n1 * n1 + n2 * n2
+        let accept = if !wind { true } else { new2 < old2 || (steps < nstep && new2 == old2) }
+        if accept {
+            var j = start
+            while j < len {
+                let e = ev[j as usize]
+                IR_DIR[e as usize] = 0 - IR_DIR[e as usize]
+                j = j + 1
+            }
+            w0 = n0
+            w1 = n1
+            w2 = n2
+            if wind { acc_wind = acc_wind + 1 } else { acc_local = acc_local + 1 }
+        }
+        steps = steps + 1
+    }
+    (steps, acc_local, acc_wind)
+}
+
+// ============================================================================
+// 4. RIGID THREE-SITE WATER ON THE ORIENTED FRAMEWORK
+// ============================================================================
+
+// For each oxygen: the oxygen and its two hydrogens, in that order, into
+// sites (Cartesian, 3 per site) and charges q. r_oh in A, theta = H-O-H angle
+// in radians (SPC/E: 1.0 A, 109.47 deg, qO = -0.8476, qH = +0.4238).
+// Returns the site count (3 n), or -1 if a vertex does not donate two bonds.
+pub fn ir_place_water(sites: &![f64; 12288], q: &![f64; 4096], r_oh: f64, theta: f64, q_o: f64, q_h: f64) -> i64 with Mut, Div {
+    let ch = cos(0.5 * theta)
+    let sh = sin(0.5 * theta)
+    var v: i64 = 0
+    while v < IR_NV {
+        var ux: [f64; 2] = [0.0; 2]
+        var uy: [f64; 2] = [0.0; 2]
+        var uz: [f64; 2] = [0.0; 2]
+        var nd: i64 = 0
+        var k: i64 = 0
+        while k < IR_DEG[v as usize] {
+            let e = IR_INC[(4 * v + k) as usize]
+            if ir_is_tail(e, v) {
+                if nd >= 2 { return 0 - 1 }
+                let sgn = if IR_EU[e as usize] == v { 1.0 } else { 0.0 - 1.0 }
+                let u = IR_EU[e as usize]
+                let w = IR_EV[e as usize]
+                let bx = sgn * (IR_POS[(3 * w) as usize] + (IR_ES[(3 * e) as usize] as f64) * IR_A - IR_POS[(3 * u) as usize])
+                let by = sgn * (IR_POS[(3 * w + 1) as usize] + (IR_ES[(3 * e + 1) as usize] as f64) * IR_A - IR_POS[(3 * u + 1) as usize])
+                let bz = sgn * (IR_POS[(3 * w + 2) as usize] + (IR_ES[(3 * e + 2) as usize] as f64) * IR_A - IR_POS[(3 * u + 2) as usize])
+                let bl = sqrt(bx * bx + by * by + bz * bz)
+                ux[nd as usize] = bx / bl
+                uy[nd as usize] = by / bl
+                uz[nd as usize] = bz / bl
+                nd = nd + 1
+            }
+            k = k + 1
+        }
+        if nd != 2 { return 0 - 1 }
+        var bx = ux[0] + ux[1]
+        var by = uy[0] + uy[1]
+        var bz = uz[0] + uz[1]
+        let bn = sqrt(bx * bx + by * by + bz * bz)
+        bx = bx / bn
+        by = by / bn
+        bz = bz / bn
+        var px = ux[0] - ux[1]
+        var py = uy[0] - uy[1]
+        var pz = uz[0] - uz[1]
+        let pn = sqrt(px * px + py * py + pz * pz)
+        px = px / pn
+        py = py / pn
+        pz = pz / pn
+        let ox = IR_POS[(3 * v) as usize]
+        let oy = IR_POS[(3 * v + 1) as usize]
+        let oz = IR_POS[(3 * v + 2) as usize]
+        let s = 3 * v
+        sites[(3 * s) as usize] = ox
+        sites[(3 * s + 1) as usize] = oy
+        sites[(3 * s + 2) as usize] = oz
+        sites[(3 * s + 3) as usize] = ox + r_oh * (ch * bx + sh * px)
+        sites[(3 * s + 4) as usize] = oy + r_oh * (ch * by + sh * py)
+        sites[(3 * s + 5) as usize] = oz + r_oh * (ch * bz + sh * pz)
+        sites[(3 * s + 6) as usize] = ox + r_oh * (ch * bx - sh * px)
+        sites[(3 * s + 7) as usize] = oy + r_oh * (ch * by - sh * py)
+        sites[(3 * s + 8) as usize] = oz + r_oh * (ch * bz - sh * pz)
+        q[s as usize] = q_o
+        q[(s + 1) as usize] = q_h
+        q[(s + 2) as usize] = q_h
+        v = v + 1
+    }
+    3 * IR_NV
+}
+
+// Reproducibility fingerprints of the current graph: (sum_e dir_e (e + 1),
+// sum_e (7 u_e + 3 v_e + 5 s_e,x) (e + 1)). The oracle prints the same two
+// numbers, so a test can assert that both sides hold the same configuration.
+pub fn ir_fingerprint() -> (i64, i64) with Mut, Div {
+    var fp: i64 = 0
+    var fe: i64 = 0
+    var e: i64 = 0
+    while e < IR_NE {
+        fp = fp + IR_DIR[e as usize] * (e + 1)
+        fe = fe + (IR_EU[e as usize] * 7 + IR_EV[e as usize] * 3 + IR_ES[(3 * e) as usize] * 5) * (e + 1)
+        e = e + 1
+    }
+    (fp, fe)
+}
