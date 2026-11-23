@@ -774,6 +774,13 @@ _run_test_case() {
                 test_output="check timed out after ${timeout_val}s"
             elif [[ $exit_code -ne 0 ]]; then
                 test_output="check exited $exit_code"
+                # Keep the first diagnostic line too (bounded): "check exited 1"
+                # alone let a manifest pin accept ANY rc=1 refusal, not the one
+                # it was audited for.
+                first_diag="$(grep -m1 -E "^error" <<<"$output" || true)"
+                if [[ -n "$first_diag" ]]; then
+                    test_output="$test_output | ${first_diag:0:200}"
+                fi
             fi
         else
             output=$(timeout "$timeout_val" "$SOUC_BIN" run "$file" 2>&1) || exit_code=$?
@@ -791,6 +798,12 @@ _run_test_case() {
                     snippet="$raw"
                 fi
                 test_output="run exited $exit_code"
+                # First diagnostic line (bounded), as for check-only above: the
+                # 160-character tail can end on a later error or a warning.
+                first_diag="$(grep -m1 -E "^error" <<<"$output" || true)"
+                if [[ -n "$first_diag" ]]; then
+                    test_output="$test_output | ${first_diag:0:200}"
+                fi
                 if [[ -n "$snippet" ]]; then
                     test_output="$test_output | $snippet"
                 fi

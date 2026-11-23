@@ -182,13 +182,49 @@ STUB
     return 1
   fi
 
+  # Manifest pins (`path|substring`, hardened_diagnostics_full_suite.txt) must
+  # tell one refusal from another with the same exit status. Each pair below
+  # is pinned to the E001 diagnostic; the `_other` case refuses with E200 and
+  # the same rc 1 and must be a fresh FAIL. The run-pass cases bury the first
+  # diagnostic under 400 bytes of later output, past the 160-character tail.
+  : > "$tmp/mlist"
+  local filler='// stub-out: warning: later output that pushes the first diagnostic out of the tail'
+  mkm() {  # mkm NAME HEADER DIAG
+    { printf '%s\n' "$2"; printf '// stub-rc: 1\n// stub-out: %s\n' "$3"
+      printf '%s\n' "$filler" "$filler" "$filler" "$filler" "$filler"
+      printf '// stub-out: typecheck: failed\nfn main() {}\n'; } > "$tmp/$1.sio"
+    printf '%s\n' "$tmp/$1.sio" >> "$tmp/mlist"
+    printf '%s|error[E001]: SELFTEST_PINNED at stdlib/x.sio:7\n' "$tmp/$1.sio" >> "$tmp/manifest"
+  }
+  : > "$tmp/manifest"
+  mkm mf_check_same  '//@ check-only' 'error[E001]: SELFTEST_PINNED at stdlib/x.sio:7 (bundle line 7)'
+  mkm mf_check_other '//@ check-only' 'error[E200]: SELFTEST_OTHER at stdlib/y.sio:9 (bundle line 9)'
+  mkm mf_run_same    '//@ run-pass'   'error[E001]: SELFTEST_PINNED at stdlib/x.sio:7 (bundle line 7)'
+  mkm mf_run_other   '//@ run-pass'   'error[E200]: SELFTEST_OTHER at stdlib/y.sio:9 (bundle line 9)'
+  junit="$tmp/junit-manifest.xml"
+  SOUNIO_TEST_SOUC_BIN="$tmp/souc" SOUNIO_TEST_JUNIT_FILE="$junit" \
+    SOUNIO_TEST_KNOWN_FAILURES_FILE="$tmp/manifest" \
+    bash "$HARNESS" --test-list "$tmp/mlist" --format junit > "$tmp/log-manifest" 2>&1 || true
+  for name in mf_check_same:xfail mf_check_other:fail mf_run_same:xfail mf_run_other:fail; do
+    want="${name#*:}"; name="${name%%:*}"
+    got="$(status_of "$junit" "$name")"
+    if [[ "$got" != "$want" ]]; then
+      echo "selftest FAILED (manifest): $name is '$got', expected '$want'" >&2
+      bad=1
+    fi
+  done
+  if [[ "$bad" -ne 0 ]]; then
+    sed -n '1,60p' "$tmp/log-manifest" >&2
+    return 1
+  fi
+
   # The ratchet's header reader must stop where the harness stops.
   printf '//@ run-pass\n//\n//@ known-failure: late\nfn main() {}\n' > "$tmp/late.sio"
   if header_lines "$tmp/late.sio" | grep -q 'known-failure'; then
     echo "selftest FAILED: header reader read past a bare // line" >&2
     return 1
   fi
-  echo "known_failure_pin_gate: selftest OK (16 harness cases x 2 modes, header rule)"
+  echo "known_failure_pin_gate: selftest OK (16 harness cases x 2 modes, 4 manifest-pin cases, header rule)"
 }
 
 selftest
