@@ -1,0 +1,493 @@
+//@ run-pass
+//@ timeout: 180
+//@ expect-stdout-contains: CIRC28_DRUG_SEMAGLUTIDE_PASS
+//
+// Semaglutide on the circ28 kernel (stdlib/darwin_pbpk/circ28_drug_semaglutide.sio):
+// a plasma-confined, albumin-bound peptide whose volume (7.7 L population, 6.8 L here)
+// is below the 8.6 L floor of the previous kernel. Parameter table, sources, the
+// absolute/apparent status of every clearance and volume, and the model: header of the module.
+//
+// FITTED / SET TO AN OBSERVABLE: only the exchange, sum of organ ps = Q (Overgaard 2019
+// Table 4, scaled to 73 kg). CL, F, ka are population estimates taken as inputs.
+// NOT FITTED: V_ss (a prediction; no scalar on the Kp), the distribution half-life.
+//
+// LINEAGE OF THE DATA (stated before the rows): Overgaard's population model was fitted to
+// nine Novo Nordisk trials, one of which (trial 1) is Ikushima 2018, the study used below.
+// For CL/F, ka and Q the Ikushima rows are therefore CONSISTENCY checks of the population
+// estimates scaled to 73 kg, not independent tests. What the PBPK structure adds and is
+// tested independently of any fit: V_ss (physiology only), the split of the volume
+// between plasma and interstitium, the shape of the profile (Cmax/Cavg, accumulation,
+// terminal half-life, Vz/F) and the time to steady state.
+//
+// CRITERION. A row with a geometric mean and CV% (inter-individual, log scale; sigma_ln =
+// sqrt(ln(1 + CV^2))): |z| <= 2 with z = ln(pred/obs)/sigma_ln. A row with a range: the
+// prediction lies inside it. A row with a population estimate and no CV: stated fold.
+// A row that fails is NOT tuned: its measured discrepancy is asserted inside a band and
+// explained. Each row's band covers the measured outcome and is written with the row.
+//
+// DISCLOSURE OF WHAT I SAW BEFORE WRITING THIS HEADER. (1) Closed forms, by hand from the
+// formulas of the module, before any run: V_plasma 3.000 L; V_ss 6.83 L (primary), 8.0 L
+// (Rodgers-Rowland albumin-ratio route), 5.87 L (r from Nordell volumes); AUC identity
+// F D / CL = 28.38 mg h/L per mg. (2) One scratch run of a single 1 mg dose BEFORE this
+// header was written showed Cmax 0.0847 mg/L, Tmax 72.8 h, t1/2 164.8 h, V_ss 6.84 L and
+// the AUC identity. Rows that use those quantities were therefore written after seeing them;
+// their criteria come from the sources (label ranges, observed CVs), not from the result.
+// Nothing else (Ikushima regimen, accumulation, budget, step checks) had been run.
+//
+// PRE-REGISTERED ROWS  (expectation; pass criterion)
+//  Structure
+//   S1  plasma volume bp x V_blood = 3.000 L (Nordell Vp 3.0 L)           identity 1e-3
+//   S2  V_ss primary ~6.83 L vs population Vc+Vp scaled to 73 kg (6.68)    pass, fold 1.15
+//   S3  V_ss primary vs Nordell Vss = Vp(1+R) + fu (VE - R Vp) = 7.24       pass, fold 1.10
+//   S4  V_ss with r from Nordell volumes (5.87) vs 6.68                     pass, fold 1.15 (sensitivity)
+//   S5  V_ss with Rodgers-Rowland albumin ratios (~8.0) vs 6.68             FAIL, fold 1.15 (ratio ~1.2)
+//  Identities (kernel scheme, exact)
+//   I1  mass balance input = eliminated + remaining, relative < 1e-6
+//   I2  input = F D (1 - exp(-ka T)) to 1e-9 (math::pure::exp in the depot)
+//   I3  AUC_inf (venous plasma, extrapolated) = F D / CL within 2e-3 (an identity of the
+//       model, NOT a validation; the residual is the difference between arterial and venous AUC
+//       for the renal term and the tail)
+//   I4  step-halving: Cmax(dt 1 h) vs Cmax(dt 0.5 h) within 2e-3; AUC at steady state with
+//       dt 2 h after 336 h vs dt 1 h within 1e-3 (the justification of the coarse steps)
+//  Kernel against the published two-compartment model (Overgaard), same CL, Q, F, ka,
+//  weight-scaled Vc, Vp (analytic): the structure check that follows from V_ss and Q
+//   K1  Cmax single dose within 15 %; K2 tmax within 15 %; K3 concentration at 24, 72, 168,
+//   336, 672 h within 20 %; K4 terminal t1/2 within 5 % of ln2/beta of the population model.
+//  Observations
+//   O1  label Tmax 1-3 days after a single dose: inside [24, 72] h. BORDERLINE (predicted
+//       ~73 h, just above 72); band [60, 85].
+//   O2  Ikushima 2018 (PMC5910468), healthy Caucasian men, 1.0 mg arm, n = 6 at steady state,
+//       mean weight 73.5 kg (model 73 kg); regimen 0.25 mg x4, 0.5 mg x4, 1.0 mg x5 weekly, SS
+//       sampled after the 13th dose, geometric mean (CV%): AUC0-168 7490 nmol h/L (17.9),
+//       Cmax 50.6 nmol/L (17.5), tmax 30 h median [24; 72], CL/F 0.032 L/h (17.9),
+//       t1/2 167 h (13.2), Vz/F 7.84 L (19.6), Racc,DC 2.31 (9.5). Expected: pass, |z| < 1 for
+//       AUC (28.4 vs 30.8 mg h/L, z about -0.5), CL/F (0.0352 vs 0.032, z about +0.5).
+//       Cmax expected 190-230 ng/mL (obs 208). tmax expected inside [24, 72]. t1/2, Vz/F, Racc
+//       expected pass.  Cmax/Cavg at steady state 1.15-1.30 against 1.135 (Ikushima) and 1.234
+//       (Kapitza 2015, PMC4418331): within fold 1.15 of both.
+//   O3  Kapitza 2015, T2D post-menopausal women, 1.0 mg SS (weight not in hand, so only the
+//       weight-free quantities): t1/2 165 h (14.1), tmax 36 h [12; 167].
+//   O4  label Css,avg 123 ng/mL at 1 mg weekly (T2D population): reproduced by the population
+//       model in closed form for a T2D 85 kg subject (CL x 1.12, F 0.847): 129 ng/mL, within 10 %.
+//       The kernel's 73 kg healthy man is NOT that population and is not compared with 123.
+//   O5  time to steady state 4-5 weeks (label): trough before dose k reaches 95 % of the final
+//       trough at k = 4 or 5.
+//
+// AFTER THE RUN (written after seeing the output, recorded for honesty): all expectations held
+// except two details. O2c: Cmax SS 187 ng/mL fell 1.4 % below the pre-registered range 190-230 (z -0.61,
+// the pass criterion holds). O1 FAILED as expected (tmax 72.8 h against 72 h); the diagnosis row shows
+// the edge lies inside the 95 % CI of ka. The AUC row O2a is 9.5 % below the observation because the
+// regimen is simulated as dosed (the 0.5 mg weeks leave a 1.7 % deficit at SS) and the population CL is
+// 73/85 scaled, not fitted to this arm.
+//
+// Marker CIRC28_DRUG_SEMAGLUTIDE_PASS.
+
+use darwin_pbpk::circ28::*
+use darwin_pbpk::circ28_drug::*
+use darwin_pbpk::circ28_drug_semaglutide::*
+use math::pure::{exp, ln}
+
+fn st_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn st_rel(tag: string, got: f64, want: f64, tol: f64) -> i32 with IO, Mut, Div, Panic {
+    let r = st_abs(got - want) / st_abs(want)
+    print("  "); print(tag); print(": got "); print(got); print(" want "); print(want); print("  rel = "); print(r)
+    if !(r <= tol) {
+        println("  [FAIL]")
+        return 1
+    }
+    println("")
+    return 0
+}
+
+// geometric-mean row: z = ln(pred/obs) / sqrt(ln(1 + CV^2)); band on z.
+fn st_row_ln(tag: string, pred: f64, obs: f64, cv: f64, expect: i32, blo: f64, bhi: f64) -> i32 with IO, Mut, Div, Panic {
+    let sg = cd_sqrt(ln(1.0 + cv * cv))
+    let z = ln(pred / obs) / sg
+    let pass = st_abs(z) <= 2.0
+    print("  "); print(tag); print(": predicted "); print(pred); print("  observed "); print(obs)
+    print("  ratio "); print(pred / obs); print("  z "); print(z)
+    if pass { print("  PASS") } else { print("  FAIL") }
+    var bad = 0
+    if z < blo || z > bhi {
+        print("  [outside the asserted band]")
+        bad = 1
+    }
+    if expect == 1 && !pass {
+        print("  [expected pass]")
+        bad = 1
+    }
+    if expect == 0 && pass {
+        print("  [expected fail]")
+        bad = 1
+    }
+    println("")
+    return bad
+}
+
+// fold row: pass if 1/fold <= pred/obs <= fold; band on the ratio.
+fn st_row_fold(tag: string, pred: f64, obs: f64, fold: f64, expect: i32, blo: f64, bhi: f64) -> i32 with IO, Mut, Div, Panic {
+    let r = pred / obs
+    let pass = r <= fold && r >= 1.0 / fold
+    print("  "); print(tag); print(": predicted "); print(pred); print("  observed "); print(obs); print("  ratio "); print(r)
+    if pass { print("  PASS") } else { print("  FAIL") }
+    var bad = 0
+    if r < blo || r > bhi {
+        print("  [outside the asserted band]")
+        bad = 1
+    }
+    if expect == 1 && !pass {
+        print("  [expected pass]")
+        bad = 1
+    }
+    if expect == 0 && pass {
+        print("  [expected fail]")
+        bad = 1
+    }
+    println("")
+    return bad
+}
+
+// range row: pass if lo <= pred <= hi; band on the prediction.
+fn st_row_rng(tag: string, pred: f64, lo: f64, hi: f64, expect: i32, blo: f64, bhi: f64) -> i32 with IO, Mut, Div, Panic {
+    let pass = pred >= lo && pred <= hi
+    print("  "); print(tag); print(": predicted "); print(pred); print("  observed range ["); print(lo); print(", "); print(hi); print("]")
+    if pass { print("  PASS") } else { print("  FAIL") }
+    var bad = 0
+    if pred < blo || pred > bhi {
+        print("  [outside the asserted band]")
+        bad = 1
+    }
+    if expect == 1 && !pass {
+        print("  [expected pass]")
+        bad = 1
+    }
+    if expect == 0 && pass {
+        print("  [expected fail]")
+        bad = 1
+    }
+    println("")
+    return bad
+}
+
+fn st_pname(i: i32) -> string {
+    if i == 0 { return "MW" }
+    if i == 1 { return "Hct (bp)" }
+    if i == 2 { return "fu" }
+    if i == 3 { return "r_int" }
+    if i == 4 { return "CL total" }
+    if i == 5 { return "CL renal" }
+    if i == 6 { return "F" }
+    if i == 7 { return "ka" }
+    return "Q (sum ps)"
+}
+
+// Grid helpers: one run per call into the shared arrays, summary scalars into m.
+fn st_single(th: &[f64; 9], m: &![f64; 64], ts: &![f64; 3000], cs: &![f64; 3000], ca: &![f64; 3000]) with Mut, Div, Panic {
+    var dk: [f64; 16] = [0.0; 16]
+    dk[0] = 1.0
+    var bal: [f64; 4] = [0.0; 4]
+    var pk: [f64; 2] = [0.0; 2]
+    let n = pep_run(th, &dk, 1, 1.0, 336.0, 4.0, 2900.0, ts, cs, ca, &!bal)
+    pep_peak(&*ts, &*cs, n, 0.0, 168.0, &!pk)
+    (*m)[0] = pk[0]
+    (*m)[1] = pk[1]
+    let lz = pep_lambda(&*ts, &*cs, n, 336.0, 840.0)
+    (*m)[2] = 0.6931471805599453 / lz
+    (*m)[3] = (*ca)[n] + (*cs)[n] / lz
+    (*m)[4] = bal[3]
+    (*m)[5] = bal[0]
+    (*m)[6] = (*cs)[pep_idx(&*ts, n, 24.0)]
+    (*m)[7] = (*cs)[pep_idx(&*ts, n, 72.0)]
+    (*m)[8] = (*cs)[pep_idx(&*ts, n, 168.0)]
+    (*m)[9] = (*cs)[pep_idx(&*ts, n, 336.0)]
+    (*m)[10] = (*cs)[pep_idx(&*ts, n, 672.0)]
+    (*m)[11] = pep_auc(&*ts, &*ca, n, 0.0, 168.0)
+}
+
+fn st_half(th: &[f64; 9], m: &![f64; 64], ts: &![f64; 3000], cs: &![f64; 3000], ca: &![f64; 3000]) with Mut, Div, Panic {
+    var dk: [f64; 16] = [0.0; 16]
+    dk[0] = 1.0
+    var bal: [f64; 4] = [0.0; 4]
+    var pk: [f64; 2] = [0.0; 2]
+    let n = pep_run(th, &dk, 1, 0.5, 336.0, 4.0, 840.0, ts, cs, ca, &!bal)
+    pep_peak(&*ts, &*cs, n, 0.0, 168.0, &!pk)
+    (*m)[12] = pk[0]
+    (*m)[13] = pk[1]
+}
+
+// Ikushima regimen: 0.25 mg x4, 0.5 mg x4, 1.0 mg x5 (13 weekly doses), 840 h of
+// follow-up after the last. dt2 selects the grid after 336 h (1 h or 2 h).
+fn st_ikushima(th: &[f64; 9], dt2: f64, base: i32, m: &![f64; 64], ts: &![f64; 3000], cs: &![f64; 3000], ca: &![f64; 3000]) with Mut, Div, Panic {
+    var dk: [f64; 16] = [0.0; 16]
+    var k: i32 = 0
+    while k < 4 {
+        dk[k] = 0.25
+        dk[k + 4] = 0.5
+        k = k + 1
+    }
+    k = 8
+    while k < 13 {
+        dk[k] = 1.0
+        k = k + 1
+    }
+    var bal: [f64; 4] = [0.0; 4]
+    var pk: [f64; 2] = [0.0; 2]
+    let n = pep_run(th, &dk, 13, 1.0, 336.0, dt2, 2856.0, ts, cs, ca, &!bal)
+    (*m)[base + 0] = pep_auc(&*ts, &*ca, n, 0.0, 168.0)
+    pep_peak(&*ts, &*cs, n, 0.0, 168.0, &!pk)
+    (*m)[base + 1] = pk[0]
+    (*m)[base + 2] = pk[1]
+    (*m)[base + 3] = pep_auc(&*ts, &*ca, n, 2016.0, 2184.0)
+    pep_peak(&*ts, &*cs, n, 2016.0, 2184.0, &!pk)
+    (*m)[base + 4] = pk[0]
+    (*m)[base + 5] = pk[1] - 2016.0
+    let lz = pep_lambda(&*ts, &*cs, n, 2352.0, 2856.0)
+    (*m)[base + 6] = 0.6931471805599453 / lz
+    (*m)[base + 7] = bal[3]
+}
+
+// 1 mg weekly x 12: trough before each dose k = 1..11 and the last interval.
+fn st_weekly(th: &[f64; 9], m: &![f64; 64], ts: &![f64; 3000], cs: &![f64; 3000], ca: &![f64; 3000]) with Mut, Div, Panic {
+    var dk: [f64; 16] = [0.0; 16]
+    var k: i32 = 0
+    while k < 12 {
+        dk[k] = 1.0
+        k = k + 1
+    }
+    var bal: [f64; 4] = [0.0; 4]
+    var pk: [f64; 2] = [0.0; 2]
+    let n = pep_run(th, &dk, 12, 1.0, 336.0, 2.0, 2016.0, ts, cs, ca, &!bal)
+    k = 1
+    while k <= 12 {
+        (*m)[30 + k - 1] = (*cs)[pep_idx(&*ts, n, 168.0 * (k as f64))]
+        k = k + 1
+    }
+    (*m)[24] = pep_auc(&*ts, &*ca, n, 1848.0, 2016.0)
+    pep_peak(&*ts, &*cs, n, 1848.0, 2016.0, &!pk)
+    (*m)[25] = pk[0]
+    (*m)[26] = pk[1] - 1848.0
+    (*m)[27] = bal[3]
+    (*m)[28] = pep_auc(&*ts, &*ca, n, 0.0, 168.0)
+}
+
+// Tmax of a single 1 mg dose for a given ka (diagnostic of O1): grid 1 h to 168 h.
+fn st_tmax(th: &[f64; 9], ka: f64, ts: &![f64; 3000], cs: &![f64; 3000], ca: &![f64; 3000]) -> f64 with Mut, Div, Panic {
+    var t2: [f64; 9] = [0.0; 9]
+    var j: i32 = 0
+    while j < 9 {
+        t2[j] = (*th)[j]
+        j = j + 1
+    }
+    t2[PT_KA] = ka
+    var dk: [f64; 16] = [0.0; 16]
+    dk[0] = 1.0
+    var bal: [f64; 4] = [0.0; 4]
+    var pk: [f64; 2] = [0.0; 2]
+    let n = pep_run(&t2, &dk, 1, 1.0, 200.0, 4.0, 200.0, ts, cs, ca, &!bal)
+    pep_peak(&*ts, &*cs, n, 0.0, 168.0, &!pk)
+    return pk[1]
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic, Epistemic {
+    var fails: i32 = 0
+    var th: [f64; 9] = [0.0; 9]
+    var u: [f64; 9] = [0.0; 9]
+    sema_theta_into(&!th, &!u)
+    var m: [f64; 64] = [0.0; 64]
+    var ts: [f64; 3000] = [0.0; 3000]
+    var cs: [f64; 3000] = [0.0; 3000]
+    var ca: [f64; 3000] = [0.0; 3000]
+    st_single(&th, &!m, &!ts, &!cs, &!ca)
+    st_half(&th, &!m, &!ts, &!cs, &!ca)
+    st_ikushima(&th, 1.0, 16, &!m, &!ts, &!cs, &!ca)
+    st_ikushima(&th, 2.0, 48, &!m, &!ts, &!cs, &!ca)
+    st_weekly(&th, &!m, &!ts, &!cs, &!ca)
+
+    let mw = th[PT_MW]
+    let nm = mw * 1.0e-6                  // mg/L per nmol/L
+    let cl = th[PT_CL]
+    let f = th[PT_F]
+    let s = sema_wt_ratio()
+
+    println("S0 parameters at the 73 kg man (value, standard uncertainty); CL and CL renal ABSOLUTE")
+    var i: i32 = 0
+    while i < 9 {
+        print("  "); print(st_pname(i)); print("  "); print(th[i]); print("  u "); println(u[i])
+        i = i + 1
+    }
+    println("S0a apparent -> absolute conversions")
+    print("  Overgaard Table 5 CL/F healthy 85 kg 0.0411 = CL 0.0348 / F 0.847 = "); println(sema_cl_ref() / sema_f())
+    print("  Overgaard Table 5 CL/F T2D 85 kg 0.0460 = 0.0348 x 1.12 / 0.847 = "); println(sema_cl_ref() * 1.12 / sema_f())
+    print("  label apparent CL 0.05 L/h x F 0.89 = absolute "); print(0.05 * 0.89); print(" (T2D, heavier; our 73 kg healthy absolute CL "); print(cl); println(")")
+    print("  label apparent V 12.5 L x F 0.89 = "); print(12.5 * 0.89); println(" L (V/F is not a volume of the model; Vss predicted below)")
+    print("  CL renal = (0.031 / F) CL = "); print(th[PT_CLREN]); print(" L/h = "); print(100.0 * th[PT_CLREN] / cl); println(" % of CL")
+    fails = fails + st_rel("Table 5 consistency: 0.0348/0.847 vs 0.0411", sema_cl_ref() / sema_f(), 0.0411, 2.0e-3)
+    fails = fails + st_rel("Table 5 consistency: 0.0348 x 1.12/0.847 vs 0.0460", sema_cl_ref() * 1.12 / sema_f(), 0.0460, 2.0e-3)
+
+    // ---- structure
+    println("S structure: volumes")
+    let vpl = pep_vplasma(&th)
+    let v0 = pep_vss(&th, 0)
+    let v1 = pep_vss(&th, 1)
+    var thn = th
+    thn[PT_RINT] = 1.4 * 3.0 / 15.2
+    let vn = pep_vss(&thn, 0)
+    let sv = pep_pow(s, sema_vexp())
+    let vpop = (sema_vc_ref() + sema_vp_ref()) * sv
+    let vnord = 3.0 * (1.0 + 1.4) + th[PT_FU] * (15.2 - 1.4 * 3.0)
+    print("  bp "); print(1.0 - th[PT_HCT]); print("  plasma volume bp V_blood "); print(vpl); print(" L  (rat B:P ~0.5 in the EPAR; venous Hct 0.47 would give 0.53)"); println("")
+    print("  V_ss primary "); print(v0); print("  Rodgers-Rowland albumin route "); print(v1); print("  r from Nordell volumes (r = "); print(thn[PT_RINT]); print(") "); println(vn)
+    print("  population (Vc+Vp) 7.69 L x (73/85)^0.923 = "); print(vpop); print("   Nordell 7.2 + 11 fu = "); println(vnord)
+    fails = fails + st_rel("S1 plasma volume = 3.0 L", vpl, 3.0, 1.0e-3)
+    fails = fails + st_row_fold("S2 V_ss primary vs population Vc+Vp (73 kg)", v0, vpop, 1.15, 1, 0.95, 1.10)
+    fails = fails + st_row_fold("S3 V_ss primary vs Nordell relation", v0, vnord, 1.10, 1, 0.90, 1.00)
+    fails = fails + st_row_fold("S4 V_ss, r from Nordell volumes, vs population", vn, vpop, 1.15, 1, 0.80, 0.95)
+    fails = fails + st_row_fold("S5 V_ss, Rodgers-Rowland albumin route, vs population", v1, vpop, 1.15, 0, 1.15, 1.30)
+    print("  Nordell relation check: 7.2 = Vp (1 + R) = "); print(3.0 * 2.4); print(", 11.0 = VE - R Vp = "); println(15.2 - 1.4 * 3.0)
+
+    // ---- identities
+    println("I identities of the scheme (single dose 1 mg, grid 1 h to 336 h then 4 h to 2900 h)")
+    let auc_cf = f / cl
+    print("  input "); print(m[5]); print("  F D (1 - exp(-ka T)) = "); println(f * (1.0 - exp(0.0 - th[PT_KA] * 2900.0)))
+    fails = fails + st_rel("I1 mass balance (error + 1)", m[4] + 1.0, 1.0, 1.0e-6)
+    fails = fails + st_rel("I2 input = F D", m[5], f * (1.0 - exp(0.0 - th[PT_KA] * 2900.0)), 1.0e-9)
+    fails = fails + st_rel("I3 AUC_inf = F D / CL (identity, not validation)", m[3], auc_cf, 2.0e-3)
+    println("I4 step halving")
+    fails = fails + st_rel("Cmax dt 1 h vs dt 0.5 h", m[0], m[12], 2.0e-3)
+    print("  tmax dt 1 h "); print(m[1]); print("  dt 0.5 h "); println(m[13])
+    if st_abs(m[1] - m[13]) > 1.0 {
+        println("  [FAIL] tmax step dependence > 1 h")
+        fails = fails + 1
+    }
+    fails = fails + st_rel("SS AUC, dt 2 h vs dt 1 h after 336 h", m[51], m[19], 1.0e-3)
+
+    // ---- kernel vs population two-compartment model at 73 kg
+    println("K kernel against the published two-compartment model (analytic, 73 kg healthy)")
+    let clp = sema_cl_ref() * pep_pow(s, sema_wexp())
+    let qp = sema_q_ref() * pep_pow(s, sema_wexp())
+    let vcp = sema_vc_ref() * sv
+    let vpp = sema_vp_ref() * sv
+    var rt: [f64; 2] = [0.0; 2]
+    pep_pop2_rates(clp, vcp, qp, vpp, &!rt)
+    print("  population alpha "); print(rt[0]); print(" /h (t1/2 "); print(0.6931471805599453 / rt[0]); print(" h)  beta "); print(rt[1]); print(" /h (t1/2 "); print(0.6931471805599453 / rt[1]); println(" h)")
+    // population Cmax / tmax by a scan with the same vertex rule at 0.5 h
+    var cpm = 0.0
+    var tpm = 0.0
+    var tt = 0.5
+    while tt <= 168.0 {
+        let c = pep_pop2(f, 1.0, th[PT_KA], clp, vcp, qp, vpp, tt)
+        if c > cpm {
+            cpm = c
+            tpm = tt
+        }
+        tt = tt + 0.5
+    }
+    print("  population Cmax "); print(1000.0 * cpm); print(" ng/mL at "); print(tpm); print(" h;  kernel Cmax "); print(1000.0 * m[0]); print(" ng/mL at "); print(m[1]); println(" h")
+    fails = fails + st_row_fold("K1 Cmax kernel vs population", m[0], cpm, 1.15, 1, 0.85, 1.15)
+    fails = fails + st_row_fold("K2 tmax kernel vs population", m[1], tpm, 1.15, 1, 0.85, 1.15)
+    fails = fails + st_row_fold("K3a conc at 24 h", m[6], pep_pop2(f, 1.0, th[PT_KA], clp, vcp, qp, vpp, 24.0), 1.20, 1, 0.8, 1.2)
+    fails = fails + st_row_fold("K3b conc at 72 h", m[7], pep_pop2(f, 1.0, th[PT_KA], clp, vcp, qp, vpp, 72.0), 1.20, 1, 0.8, 1.2)
+    fails = fails + st_row_fold("K3c conc at 168 h", m[8], pep_pop2(f, 1.0, th[PT_KA], clp, vcp, qp, vpp, 168.0), 1.20, 1, 0.8, 1.2)
+    fails = fails + st_row_fold("K3d conc at 336 h", m[9], pep_pop2(f, 1.0, th[PT_KA], clp, vcp, qp, vpp, 336.0), 1.20, 1, 0.8, 1.2)
+    fails = fails + st_row_fold("K3e conc at 672 h", m[10], pep_pop2(f, 1.0, th[PT_KA], clp, vcp, qp, vpp, 672.0), 1.20, 1, 0.8, 1.2)
+    fails = fails + st_row_fold("K4 terminal t1/2 kernel vs ln2/beta", m[2], 0.6931471805599453 / rt[1], 1.05, 1, 0.95, 1.05)
+    print("  single dose: t1/2 "); print(m[2]); print(" h  AUC0-168 "); print(m[11]); print(" mg h/L  AUC0-168/AUC_inf "); println(m[11] / m[3])
+
+    // ---- observations
+    println("O1 single dose, label")
+    fails = fails + st_row_rng("O1 Tmax single dose (h), label 1-3 days", m[1], 24.0, 72.0, 0, 60.0, 85.0)
+    let tmx_hi = st_tmax(&th, 0.027, &!ts, &!cs, &!ca)
+    let tmx_lo = st_tmax(&th, 0.0236, &!ts, &!cs, &!ca)
+    print("  O1 diagnosis: tmax at ka = 0.027 (upper 95 % CI) "); print(tmx_hi); print(" h, at ka = 0.0236 (lower) "); print(tmx_lo); println(" h; the label range edge (72 h) lies inside the ka interval")
+    if !(tmx_hi < 72.0 && tmx_lo > 72.0) {
+        println("  [FAIL] expected the label edge inside the ka interval")
+        fails = fails + 1
+    }
+    println("O2 Ikushima 2018, healthy Caucasian men, 1.0 mg, regimen 0.25x4, 0.5x4, 1.0x5 weekly")
+    let auc_ss = m[19]
+    let cmax_ss = m[20]
+    let tmax_ss = m[21]
+    let thalf_ss = m[22]
+    let auc_sd = m[16]
+    print("  AUC_SS "); print(auc_ss / nm); print(" nmol h/L  Cmax "); print(cmax_ss / nm); print(" nmol/L ("); print(1000.0 * cmax_ss); print(" ng/mL)  tmax "); print(tmax_ss); print(" h  t1/2 "); print(thalf_ss); println(" h")
+    fails = fails + st_rel("Ikushima mass balance (error + 1)", m[23] + 1.0, 1.0, 1.0e-6)
+    let clf = 1.0 / auc_ss              // L/h, CL/F = D / AUC at steady state, D = 1 mg
+    let vzf = clf / (0.6931471805599453 / thalf_ss)
+    let racc = (auc_ss / 1.0) / (auc_sd / 0.25)
+    let cavg = auc_ss / 168.0
+    fails = fails + st_row_ln("O2a AUC0-168 SS (nmol h/L)", auc_ss / nm, 7490.0, 0.179, 1, -1.0, 0.5)
+    fails = fails + st_row_ln("O2b CL/F (L/h)", clf, 0.032, 0.179, 1, -0.5, 1.0)
+    fails = fails + st_row_ln("O2c Cmax SS (nmol/L)", cmax_ss / nm, 50.6, 0.175, 1, -1.0, 1.0)
+    fails = fails + st_row_rng("O2d tmax SS (h), median 30 [24; 72]", tmax_ss, 24.0, 72.0, 1, 24.0, 72.0)
+    fails = fails + st_row_ln("O2e t1/2 (h)", thalf_ss, 167.0, 0.132, 1, -1.0, 1.0)
+    fails = fails + st_row_ln("O2f Vz/F (L)", vzf, 7.84, 0.196, 1, -1.0, 1.0)
+    fails = fails + st_row_ln("O2g Racc,DC", racc, 2.31, 0.095, 1, -2.0, 2.0)
+    print("  Cmax/Cavg at SS = "); println(cmax_ss / cavg)
+    fails = fails + st_row_fold("O2h Cmax/Cavg vs Ikushima 50.6/(7490/168)", cmax_ss / cavg, 50.6 / (7490.0 / 168.0), 1.15, 1, 0.9, 1.2)
+    fails = fails + st_row_fold("O2i Cmax/Cavg vs Kapitza 33.8/(4602/168)", cmax_ss / cavg, 33.8 / (4602.0 / 168.0), 1.15, 1, 0.8, 1.15)
+    println("O3 Kapitza 2015, T2D women, 1.0 mg, weight-free quantities")
+    fails = fails + st_row_ln("O3a t1/2 (h)", thalf_ss, 165.0, 0.141, 1, -1.0, 1.0)
+    fails = fails + st_row_rng("O3b tmax (h), median 36 [12; 167]", tmax_ss, 12.0, 167.0, 1, 12.0, 167.0)
+    println("O4 label Css,avg")
+    let css_t2d = f * 1.0 / (sema_cl_ref() * 1.12 * 168.0)      // mg/L, T2D 85 kg, F D / (CL tau)
+    print("  population model, T2D 85 kg, 1 mg weekly: "); print(1000.0 * css_t2d); println(" ng/mL (label 123)")
+    fails = fails + st_row_fold("O4 label Css,avg 123 ng/mL (closed form, T2D 85 kg)", 1000.0 * css_t2d, 123.0, 1.10, 1, 0.95, 1.10)
+    println("S7 steady state, 1 mg weekly x 12, 73 kg healthy man")
+    let auc_w = m[24]
+    print("  AUC_tau (last interval) "); print(auc_w); print(" mg h/L  F D / CL = "); print(auc_cf); print("  Cavg "); print(1000.0 * auc_w / 168.0); println(" ng/mL")
+    fails = fails + st_rel("S7a AUC_tau = F D / CL (identity)", auc_w, auc_cf, 2.0e-3)
+    print("  Cmax "); print(1000.0 * m[25]); print(" ng/mL at "); print(m[26]); print(" h after the dose; trough (168 h) "); print(1000.0 * m[41]); print(" ng/mL; trough/peak "); println(m[41] / m[25])
+    print("  accumulation AUC_tau,ss / AUC0-168,single "); print(auc_w / m[28]); print("   AUC_tau,ss / AUC_inf,single "); println(auc_w / m[3])
+    fails = fails + st_rel("S7b mass balance (error + 1)", m[27] + 1.0, 1.0, 1.0e-6)
+    var k: i32 = 1
+    var kss: i32 = 0
+    while k <= 11 {
+        let ratio = m[30 + k - 1] / m[41]
+        print("  trough before dose "); print(k + 1); print(" / final trough "); println(ratio)
+        if ratio >= 0.95 && kss == 0 { kss = k }
+        k = k + 1
+    }
+    print("  95 % of the final trough reached after "); print(kss); println(" weekly doses")
+    var okss = 0
+    if kss == 4 || kss == 5 { okss = 1 }
+    if okss == 0 {
+        println("  [FAIL] O5 time to steady state outside 4-5 weeks")
+        fails = fails + 1
+    }
+
+    // ---- budget
+    var res: [f64; 8] = [0.0; 8]
+    var ca1: [f64; 9] = [0.0; 9]
+    var ca2: [f64; 9] = [0.0; 9]
+    var ca3: [f64; 9] = [0.0; 9]
+    pep_budget(&th, &u, 1.0, &!res, &!ca1, &!ca2, &!ca3)
+    println("U uncertainty budget (first-order, independent inputs, 1 mg weekly)")
+    print("  AUC_tau,ss "); print(res[0]); print(" mg h/L  u "); print(cd_sqrt(res[3])); print("  (rel "); print(cd_sqrt(res[3]) / res[0]); println(")")
+    print("  Cmax single dose "); print(1000.0 * res[1]); print(" ng/mL  u "); print(1000.0 * cd_sqrt(res[4])); print("  (rel "); print(cd_sqrt(res[4]) / res[1]); println(")")
+    print("  Cmax steady state "); print(1000.0 * res[2]); print(" ng/mL  u "); print(1000.0 * cd_sqrt(res[5])); print("  (rel "); print(cd_sqrt(res[5]) / res[2]); println(")")
+    println("  input        share of var(AUC) %  var(Cmax single) %  var(Cmax SS) %")
+    i = 0
+    while i < 9 {
+        if u[i] > 0.0 {
+            print("  "); print(st_pname(i)); print("   "); print(100.0 * ca1[i] / res[3]); print("   "); print(100.0 * ca2[i] / res[4]); print("   "); println(100.0 * ca3[i] / res[5])
+        }
+        i = i + 1
+    }
+    fails = fails + st_rel("budget AUC equals the weekly run", res[0], auc_w, 1.0e-9)
+    // exact identity: dlnAUC/dlnF = 1, dlnAUC/dlnCL = -1 (relative variance from F and CL alone)
+    let uf = u[PT_F] / f
+    let ucl = u[PT_CL] / cl
+    print("  closed form u(AUC)/AUC = sqrt(uF^2 + uCL^2) = "); println(cd_sqrt(uf * uf + ucl * ucl))
+    fails = fails + st_rel("budget u(AUC)/AUC vs closed form", cd_sqrt(res[3]) / res[0], cd_sqrt(uf * uf + ucl * ucl), 2.0e-3)
+
+    if fails == 0 {
+        println("CIRC28_DRUG_SEMAGLUTIDE_PASS")
+        return 0
+    }
+    println("CIRC28_DRUG_SEMAGLUTIDE_FAIL")
+    return 1
+}

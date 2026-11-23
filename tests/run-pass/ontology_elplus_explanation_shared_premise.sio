@@ -1,0 +1,75 @@
+//@ run-pass
+//@ expect-stdout: ONTOLOGY_ELPLUS_SHARED_PREMISE_OK
+// Shared-premise regression for proof reconstruction. Seven nested
+// conjunctions over one stated inclusion produce a proof DAG with only eight
+// distinct facts; expanding the same premises as a tree needs 255 emissions
+// and overflows ELPLUS_EXPLAIN_MAX (128).
+
+use ontology::elplus_explain::{elplus_seed, elplus_role_closure, elplus_fixpoint_traced, elplus_trace_new, elplus_explanation_new, elplus_explain_subsumption}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    // A=0, B=1, C1..C7=2..8, top=9. C1=B&B and Cn=C(n-1)&C(n-1).
+    var ckind: [i64; 64] = [0; 64]
+    var carg1: [i64; 64] = [0; 64]
+    var carg2: [i64; 64] = [0; 64]
+    ckind[9] = 1
+    ckind[2] = 2
+    carg1[2] = 1
+    carg2[2] = 1
+    var i: i64 = 3
+    while i <= 8 {
+        ckind[i] = 2
+        carg1[i] = i - 1
+        carg2[i] = i - 1
+        i = i + 1
+    }
+
+    var exid: [i64; 512] = [0; 512]
+    i = 0
+    while i < 512 { exid[i] = 0 - 1; i = i + 1 }
+    var pack: [i64; 704] = [0; 704]
+    i = 0
+    while i < 64 {
+        pack[i] = ckind[i]
+        pack[64 + i] = carg1[i]
+        pack[128 + i] = carg2[i]
+        i = i + 1
+    }
+    i = 0
+    while i < 512 { pack[192 + i] = exid[i]; i = i + 1 }
+
+    var rclos: [bool; 64] = [false; 64]
+    elplus_role_closure(&!rclos, 1)
+    var chains: [i64; 24] = [0; 24]
+    var dims: [i64; 4] = [0; 4]
+    dims[0] = 0
+    dims[1] = 10
+    dims[2] = 10
+    dims[3] = 1
+
+    var s: [bool; 4096] = [false; 4096]
+    elplus_seed(&!s, 10, 9)
+    s[0 * 64 + 1] = true
+    var r: [bool; 32768] = [false; 32768]
+    var trace = elplus_trace_new()
+    let rounds = elplus_fixpoint_traced(&!s, &!r, &pack, &rclos, &chains, &dims, &!trace)
+    if rounds <= 0 { return 1 }
+
+    var out = elplus_explanation_new()
+    let n = elplus_explain_subsumption(&s, &r, &pack, &trace, &!out, 0, 8)
+    if n != 8 || out.count != 8 { return 20 }
+
+    // Exact DAG: the stated A <= B leaf followed by the seven conjunction
+    // introductions, each premise fact occurring only once.
+    if out.kind[0] != 0 || out.from[0] != 1 || out.rule[0] != 0 || out.witness[0] != 1 { return 21 }
+    i = 1
+    while i <= 7 {
+        let concept = i + 1
+        if out.kind[i as usize] != 0 { return 22 }
+        if out.from[i as usize] != concept { return 23 }
+        if out.rule[i as usize] != 6 || out.witness[i as usize] != concept { return 24 }
+        i = i + 1
+    }
+    println("ONTOLOGY_ELPLUS_SHARED_PREMISE_OK facts=8")
+    return 0
+}

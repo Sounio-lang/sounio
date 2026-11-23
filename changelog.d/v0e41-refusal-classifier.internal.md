@@ -1,1 +1,0 @@
-The V0-E.4.1 CI gate now accepts only clean wide-float compiler refusals. Expected diagnostics followed by crashes, timeouts, fatal logs, exit-zero anomalies, or output artifacts no longer count as passing, with adversarial controls covering each case.

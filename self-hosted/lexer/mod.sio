@@ -332,6 +332,24 @@ pub fn lexer_report_lex_error_if_any(path: string) -> bool with IO, Mut {
             print("  = help: `a+-b` could read as `a + -b` or as the uncertainty operator `a +- b`; add a space on each side of `+-`\n")
             print("          for the operator, or write `a + -b`\n")
         }
+    } else if LEXER_LEX_ERROR_KIND == 14 || LEXER_LEX_ERROR_KIND == 15 || LEXER_LEX_ERROR_KIND == 16 {
+        print("error[E289]: malformed ")
+        if LEXER_LEX_ERROR_BYTE == 2 { print("binary") } else { print("octal") }
+        print(" literal: ")
+        if LEXER_LEX_ERROR_KIND == 14 {
+            print("no digits after the prefix")
+        } else if LEXER_LEX_ERROR_KIND == 15 {
+            print("digit outside the base")
+        } else {
+            print("a float suffix on an integer base")
+        }
+        lexer_print_location(path)
+        if LEXER_LEX_ERROR_BYTE == 2 {
+            print("  = note: `0b` takes the digits 0 and 1, with `_` only between two of them (`0b1010_0101`)\n")
+        } else {
+            print("  = note: `0o` takes the digits 0 to 7, with `_` only between two of them (`0o7_55`)\n")
+        }
+        print("  = help: an integer suffix is allowed (`0b1010u8`); write a float in decimal\n")
     } else if LEXER_LEX_ERROR_KIND == 13 {
         print("error[E276]: integer literal does not fit type `")
         lexer_print_suffix_name(LEXER_LEX_ERROR_BYTE)
@@ -992,6 +1010,41 @@ fn lex_flat_sep_before_hex_digit(pos: i64, n: i64) -> bool with Mut, Panic {
     CURSOR_SOURCE[pos as usize] == 95 as i8 && pos + 1 < n && is_hex_digit(CURSOR_SOURCE[(pos + 1) as usize])
 }
 
+// ADR-015 row 5: the base a `0`-prefix letter names, for the bases the flat
+// scan reads here (`b`/`B` → 2, `o`/`O` → 8); 0 for anything else. `0x` has
+// its own branch above, which also owns the C99 hex-float case.
+fn lex_flat_radix_of(c: i8) -> i64 {
+    if c == 98 as i8 || c == 66 as i8 { return 2 }
+    if c == 111 as i8 || c == 79 as i8 { return 8 }
+    0
+}
+
+// Value of byte c as a digit of radix (2 or 8), or -1 when it is not one.
+fn lex_flat_radix_digit(c: i8, radix: i64) -> i64 {
+    if c < 48 as i8 { return 0 - 1 }
+    let d = (c - 48 as i8) as i64
+    if d < radix { return d }
+    0 - 1
+}
+
+fn lex_flat_sep_before_radix_digit(pos: i64, n: i64, radix: i64) -> bool with Mut, Panic {
+    CURSOR_SOURCE[pos as usize] == 95 as i8 && pos + 1 < n && lex_flat_radix_digit(CURSOR_SOURCE[(pos + 1) as usize], radix) >= 0
+}
+
+// ADR-015 row 6 range check for an integer suffix (codes 1..8 of
+// lex_scan_numeric_suffix_kind), the same bounds the hex and decimal emits
+// test inline. True when the literal does not fit the suffixed type.
+fn lex_flat_int_suffix_overflow(value: i64, code: i64, start: i64, end: i64) -> bool with Mut, Panic {
+    if parser_span_int_literal_overflow(start, end) { return true }
+    if code == 1 { return value > 255 || value < 0 }
+    if code == 2 { return value > 65535 || value < 0 }
+    if code == 3 { return value > 4294967295 || value < 0 }
+    if code == 5 { return value > 128 || value < 0 }
+    if code == 6 { return value > 32768 || value < 0 }
+    if code == 7 { return value > 2147483648 || value < 0 }
+    false
+}
+
 // ADR-015 row 6: numeric type suffix scanner.
 // Returns (length, suffix_kind_code) where suffix_kind_code:
 // 1=u8, 2=u16, 3=u32, 4=u64, 5=i8, 6=i16, 7=i32, 8=i64,
@@ -1377,6 +1430,61 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
                     }
                 }
                 tc = lexer_push_flat(tc, 129, start, pos, line, start_col, value)
+                if tc < 0 { break }
+                continue
+            }
+            // ADR-015 row 5: binary (`0b101`) and octal (`0o17`) integers. Before this
+            // branch the flat lexer only knew `0x`, so `0b101` lexed as `0` followed by
+            // the name `b101` (E137 "use of undeclared variable"). The Cursor scanner that
+            // did read them sits below `return tc` and is unreachable. A `_` between two
+            // digits of the base is a separator, as in the decimal and hex scans.
+            if ch == 48 as i8 && pos + 1 < n && lex_flat_radix_of(CURSOR_SOURCE[(pos + 1) as usize]) > 0 {
+                let radix = lex_flat_radix_of(CURSOR_SOURCE[(pos + 1) as usize])
+                pos = pos + 2
+                col = col + 2
+                var ndig: i64 = 0
+                while pos < n && (lex_flat_radix_digit(CURSOR_SOURCE[pos as usize], radix) >= 0 || lex_flat_sep_before_radix_digit(pos, n, radix)) {
+                    let rd = lex_flat_radix_digit(CURSOR_SOURCE[pos as usize], radix)
+                    if rd >= 0 {
+                        value = wrapping_add(wrapping_mul(value, radix), rd)
+                        ndig = ndig + 1
+                    }
+                    pos = pos + 1
+                    col = col + 1
+                }
+                // A decimal digit the base does not have (`0b102`, `0o78`) would otherwise
+                // end the literal and start a second number; a prefix with no digits
+                // (`0b`, `0o_1`) would be the value 0. Both are refused (E289).
+                if ndig == 0 {
+                    lexer_mark_lex_error(14, line, start_col, radix)
+                    break
+                }
+                if pos < n && is_digit(CURSOR_SOURCE[pos as usize]) {
+                    lexer_mark_lex_error(15, line, start_col, radix)
+                    break
+                }
+                if lexer_number_stray_underscore(pos, n) { lexer_mark_lex_error(10, line, start_col, 0) }
+                let rad_suf = lex_scan_numeric_suffix_kind(pos, n)
+                let rad_suf_len = rad_suf.0
+                let rad_suf_code = rad_suf.1
+                if rad_suf_len > 0 && rad_suf_code >= 9 {
+                    // `0b1f32` is not a float: a binary or octal literal is an integer.
+                    lexer_mark_lex_error(16, line, start_col, radix)
+                    break
+                }
+                if rad_suf_len > 0 {
+                    if lex_flat_int_suffix_overflow(value, rad_suf_code, start, pos) {
+                        lexer_mark_lex_error(13, line, start_col, rad_suf_code)
+                        break
+                    }
+                    pos = pos + rad_suf_len
+                    col = col + rad_suf_len
+                } else if parser_span_int_literal_overflow(start, pos) {
+                    lexer_mark_lex_error(6, line, start_col, start)
+                    break
+                }
+                let rad_code: i64 = if radix == 2 { 130 } else { 131 }
+                tc = lexer_push_flat(tc, rad_code, start, pos, line, start_col, value)
                 if tc < 0 { break }
                 continue
             }

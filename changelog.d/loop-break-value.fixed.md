@@ -1,0 +1,5 @@
+Fixed (Madaros): `break v` gives a `loop` expression its value. `let r = loop { i = i + 1; if i == 7 { break i * 2 } }` used to type `r` as `()` (E001 when annotated, "unresolved scalar kind" when printed): the checker skipped the value of a `break`, the `loop` was always `()`, and the lowering computed the value and dropped it. Now every `break v` of a `loop` copies `v` into the loop's result register, as each arm of an `if` does, and the `loop` has the type its breaks agree on. Int, f64, bool and string values work, including a value read from a loop-body local, a nested `loop`, and a `loop` as a function's tail.
+
+The value of a `break` is now type-checked (an undeclared name in it is E137). New refusals: `break v` inside `while` or `for` (E302); breaks of one `loop` with different types, or a valued and a bare `break` together (E308). A `break` of an f128 value is refused at lowering rather than yielding an unwidthed handle.
+
+Pins: `loop_break_value` (run-pass); `loop_break_value_in_while`, `loop_break_value_types_disagree`, `loop_break_value_mixed_bare`, `loop_break_value_is_checked`, `loop_break_value_annotation_mismatch` (compile-fail).

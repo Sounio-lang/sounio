@@ -25,7 +25,8 @@ name: Madaros Prebuilt Refresh
 #     (App permissions: Contents read/write, Pull requests read/write), or
 #   secrets.MADAROS_REFRESH_PAT
 #     (fine-grained, this repo only: Contents + Pull requests read/write).
-# With neither configured a gated refresh fails red instead of drifting quietly.
+# With neither configured a publishing run fails before the build. Explicit
+# artifact_only dispatches still build, gate and upload without publication.
 # The commit does NOT carry [skip ci]: CI Decision is required for the merge.
 
 run-name: Madaros prebuilt refresh (${{ github.event.inputs.ref || 'main' }})
@@ -38,6 +39,11 @@ on:
         description: 'Git ref to build Madaros from (default: main). Non-main refs are for verifying codegen fixes via the uploaded artifact before merge.'
         required: false
         default: main
+      artifact_only:
+        description: 'Build, gate and upload for inspection without creating a token or publishing a refresh PR.'
+        type: boolean
+        required: false
+        default: false
 
 # GITHUB_TOKEN only reads; all writes go through the refresh token (see above).
 permissions:
@@ -58,6 +64,15 @@ jobs:
           ref: ${{ github.event.inputs.ref || 'main' }}
           # The publish step authenticates with the refresh token, not this one.
           persist-credentials: false
+
+      - name: Check refresh publication configuration before building
+        id: auth
+        env:
+          PUBLISH_REQUIRED: ${{ (github.event.inputs.ref || 'main') == 'main' && github.event.inputs.artifact_only != 'true' }}
+          APP_ID: ${{ vars.MADAROS_REFRESH_APP_ID }}
+          HAS_APP_KEY: ${{ secrets.MADAROS_REFRESH_APP_PRIVATE_KEY != '' }}
+          HAS_PAT: ${{ secrets.MADAROS_REFRESH_PAT != '' }}
+        run: bash scripts/ci/madaros_refresh_auth.sh >> "$GITHUB_OUTPUT"
 
       - name: Build Madaros (seed-decoupled)
         run: |
@@ -111,7 +126,7 @@ jobs:
           fi
 
       - name: Install built Madaros as the checked-in prebuilt
-        if: steps.gate.outputs.passed == 'true' && (github.event.inputs.ref || 'main') == 'main'
+        if: steps.gate.outputs.passed == 'true' && (github.event.inputs.ref || 'main') == 'main' && github.event.inputs.artifact_only != 'true'
         run: |
           cp artifacts/self-hosted/madaros bin/madaros-linux-x86_64
           chmod +x bin/madaros-linux-x86_64
@@ -130,34 +145,20 @@ jobs:
             madaros_full_gate.sh \
             "full,enum,loop,multimodule_witness,self_parse,source_to_elf"
 
-      # Which credential opens the refresh PR. Secrets cannot appear in `if:`, so
-      # their presence is resolved here into a plain step output.
-      - name: Select the refresh token
-        id: auth
-        if: steps.gate.outputs.passed == 'true' && (github.event.inputs.ref || 'main') == 'main'
-        env:
-          APP_ID: ${{ vars.MADAROS_REFRESH_APP_ID }}
-          HAS_APP_KEY: ${{ secrets.MADAROS_REFRESH_APP_PRIVATE_KEY != '' }}
-          HAS_PAT: ${{ secrets.MADAROS_REFRESH_PAT != '' }}
-        run: |
-          if [ -n "$APP_ID" ] && [ "$HAS_APP_KEY" = true ]; then
-            echo "mode=app" >> "$GITHUB_OUTPUT"
-          elif [ "$HAS_PAT" = true ]; then
-            echo "mode=pat" >> "$GITHUB_OUTPUT"
-          else
-            echo "mode=none" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Mint the GitHub App token
         id: app-token
-        if: steps.auth.outputs.mode == 'app'
+        if: steps.gate.outputs.passed == 'true' && steps.auth.outputs.mode == 'app'
         uses: actions/create-github-app-token@v2
         with:
           app-id: ${{ vars.MADAROS_REFRESH_APP_ID }}
           private-key: ${{ secrets.MADAROS_REFRESH_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
 
       - name: Open or update the refresh PR if the prebuilt changed
-        if: steps.gate.outputs.passed == 'true' && (github.event.inputs.ref || 'main') == 'main'
+        if: steps.gate.outputs.passed == 'true' && (github.event.inputs.ref || 'main') == 'main' && github.event.inputs.artifact_only != 'true'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.MADAROS_REFRESH_PAT }}
           GH_REPO: ${{ github.repository }}

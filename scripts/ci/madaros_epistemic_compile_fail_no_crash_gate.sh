@@ -56,6 +56,8 @@ source "$ROOT_DIR/scripts/lib/classify_compile.sh"
 
 SOUC="${SOUC_BIN:-$ROOT_DIR/bin/souc}"
 BASELINE="${BASELINE:-$ROOT_DIR/tests/selfhost/madaros_epistemic_compile_fail_crashers.txt}"
+# Substitute patterns for fixtures whose own error-pattern is a lean_single code.
+MADAROS_PATTERNS="${MADAROS_PATTERNS:-$ROOT_DIR/tests/selfhost/madaros_epistemic_compile_fail_madaros_patterns.tsv}"
 TIMEOUT_SECS="${TIMEOUT_SECS:-120}"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/sounio-epi-nocrash.XXXXXX")"
 trap 'rm -rf "$WORK_DIR"' EXIT
@@ -79,7 +81,7 @@ n_corpus="$(wc -l < "$WORK_DIR/corpus.txt" | tr -d ' ')"
 [[ "$n_corpus" -gt 0 ]] || { echo "error: corpus selector matched no fixture" >&2; exit 1; }
 echo "corpus_files=$n_corpus"
 
-grep -vE '^[[:space:]]*(#|$)' "$BASELINE" | LC_ALL=C sort -u > "$WORK_DIR/pinned.txt"
+{ grep -vE '^[[:space:]]*(#|$)' "$BASELINE" || true; } | LC_ALL=C sort -u > "$WORK_DIR/pinned.txt"
 echo "pinned=$(wc -l < "$WORK_DIR/pinned.txt" | tr -d ' ')"
 
 : > "$WORK_DIR/census.tsv"
@@ -95,6 +97,12 @@ while IFS= read -r f; do
     # clean refusal for an unrelated reason is not a witness for the check the
     # fixture is about.
     want="$(sed -n 's|^//@[[:space:]]*error-pattern:[[:space:]]*\(.*\)|\1|p' "$f" | head -1)"
+    # A fixture whose own pattern is a lean_single code is held to the Madaros
+    # text in $MADAROS_PATTERNS instead: substituted, never dropped.
+    if [[ -f "$MADAROS_PATTERNS" ]]; then
+        sub="$(awk -F'\t' -v b="$base" '$1 == b { print $2; exit }' "$MADAROS_PATTERNS")"
+        [[ -n "$sub" ]] && want="$sub"
+    fi
     pat_ok="n/a"
     if [[ -n "$want" ]]; then
         if grep -Fq -- "$want" "$log"; then pat_ok="ok"; else pat_ok="MISSING:$want"; fi
@@ -115,9 +123,9 @@ awk -F'\t' '$3!="REFUSED"{print $1}' "$WORK_DIR/census.tsv" | LC_ALL=C sort -u >
 bad_unpinned="$(comm -23 "$WORK_DIR/not_refused.txt" "$WORK_DIR/pinned.txt")"
 repaired="$(comm -13 "$WORK_DIR/crashed.txt" "$WORK_DIR/pinned.txt")"
 # Scoped to unpinned rows: a pinned crasher cannot be held to its declared
-# diagnostic, and some declare a lean_single code (observe_transition_requires_plan
-# declares E200) that Madaros has no reason to emit. The pin is the statement
-# about those; the pattern is a statement about fixtures that do refuse.
+# diagnostic. A fixture that declares a lean_single code Madaros has no reason
+# to emit (observe_transition_requires_plan declares E200) is held to the
+# Madaros text in $MADAROS_PATTERNS, substituted above, once it stops crashing.
 awk -F'\t' '$5 ~ /^MISSING:/{print $1}' "$WORK_DIR/census.tsv" | LC_ALL=C sort -u > "$WORK_DIR/pat_missing.txt"
 bad_pattern="$(comm -23 "$WORK_DIR/pat_missing.txt" "$WORK_DIR/pinned.txt")"
 
