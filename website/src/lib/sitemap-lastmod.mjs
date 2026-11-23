@@ -102,7 +102,7 @@ export function assertFullGitHistory() {
 function warnShallowOnce() {
   if (globalThis.__sounioSitemapLastmodShallowWarned) return;
   globalThis.__sounioSitemapLastmodShallowWarned = true;
-  console.warn('sitemap lastmod: shallow repository; ignoring git dates and using content dates only. URLs without a content date omit <lastmod>.');
+  console.warn('\nsitemap lastmod: shallow repository; ignoring git dates and using content dates only. URLs without a content date omit <lastmod>.');
 }
 
 function loadGitDays() {
