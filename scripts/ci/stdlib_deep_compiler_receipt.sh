@@ -61,13 +61,39 @@ write_toolchain() {
  (cd "$output" && sha256sum TOOLCHAIN.txt > TOOLCHAIN.sha256)
 }
 
+# A symlink in the closure (main tracks scripts/dev/run_sio_test_suite.sh ->
+# run_sio_test_suite_v2.sh) is an input like any other: sha256sum hashes its
+# target's bytes, and SYMLINKS.txt binds the link text itself, so pointing it
+# at a different file with identical bytes is still refused.
+link_ok() {
+ local repo=$1 fixture=$2 target root resolved
+ target=$(readlink -- "$repo/$fixture") || return 1
+ [[ "$target" != /* ]] || return 1
+ root=$(realpath -e -- "$repo") || return 1
+ resolved=$(realpath -e -- "$repo/$fixture") || return 1
+ [[ "$resolved" == "$root"/* && -f "$resolved" && ! -L "$resolved" ]]
+}
+links() {
+ local repo=$1 list=$2 output=$3 fixture
+ : > "$output"
+ while IFS= read -r fixture; do
+  if [[ -L "$repo/$fixture" ]]; then
+   printf '%s -> %s\n' "$fixture" "$(readlink -- "$repo/$fixture")" >> "$output"
+  fi
+ done < "$list"
+}
+
 paths() {
  local repo=$1 output=$2 fixture
  git -C "$repo" ls-files -z -co --exclude-standard -- bin scripts self-hosted stdlib > "$work/paths.nul" || fail 'cannot enumerate source closure'
  : > "$output"
  while IFS= read -r -d '' fixture; do
  case "$fixture" in *$'\n'*|*$'\r'*|*\\*) fail 'unsupported manifest filename' ;; esac
- [[ -f "$repo/$fixture" && ! -L "$repo/$fixture" ]] || fail "source input missing, non-regular, or symlinked: $fixture"
+ if [[ -L "$repo/$fixture" ]]; then
+  link_ok "$repo" "$fixture" || fail "source symlink must be relative and resolve to a regular file inside the checkout: $fixture"
+ else
+  [[ -f "$repo/$fixture" ]] || fail "source input missing or non-regular: $fixture"
+ fi
  printf '%s\n' "$fixture" >> "$output"
  done < "$work/paths.nul"
  sort -o "$output" "$output"
@@ -88,6 +114,7 @@ prepare() {
  printf 'madaros\n' > "$output/ENGINE"
  printf 'x86_64-linux\n' > "$output/TARGET"
  paths "$repo" "$output/TRACKED_PATHS.txt"
+ links "$repo" "$output/TRACKED_PATHS.txt" "$output/SYMLINKS.txt"
  : > "$output/INPUTS.sha256"
  while IFS= read -r fixture; do
   (cd "$repo" && sha256sum -- "$fixture") >> "$output/INPUTS.sha256"
@@ -109,7 +136,7 @@ verify() {
  local repo=$1 artifact=$2 expected=$3 required line bootstrap bootstrap_sha inputs_sha toolchain_sha actual_key
  check_revision "$repo" "$expected"
  for required in RECEIPT_VERSION SOURCE_GIT_SHA ENGINE TARGET BOOTSTRAP_PATH BOOTSTRAP.sha256 \
-                TOOLCHAIN.txt TOOLCHAIN.sha256 BUILD_KEY TRACKED_PATHS.txt INPUTS.sha256 COMPILER.sha256 madaros.elf; do
+                TOOLCHAIN.txt TOOLCHAIN.sha256 BUILD_KEY TRACKED_PATHS.txt SYMLINKS.txt INPUTS.sha256 COMPILER.sha256 madaros.elf; do
  [[ -f "$artifact/$required" && ! -L "$artifact/$required" ]] || fail "missing or symlinked artifact file: $required"
  done
  printf '2\n' | cmp -s - "$artifact/RECEIPT_VERSION" || fail 'unsupported receipt version'
@@ -129,6 +156,8 @@ verify() {
  (cd "$repo" && sha256sum -c "$artifact/BOOTSTRAP.sha256") || fail 'bootstrap hash mismatch'
  paths "$repo" "$work/current-paths.txt"
  cmp -s "$work/current-paths.txt" "$artifact/TRACKED_PATHS.txt" || fail 'tracked input set differs'
+ links "$repo" "$work/current-paths.txt" "$work/current-links.txt"
+ cmp -s "$work/current-links.txt" "$artifact/SYMLINKS.txt" || fail 'source symlink set or target differs'
  : > "$work/manifest-paths.txt"
  while IFS= read -r line; do
   [[ "$line" =~ ^[0-9a-f]{64}'  '(.+)$ ]] || fail 'invalid source manifest line'
@@ -161,6 +190,11 @@ PY
  printf 'build script\n' > "$repo/scripts/ci/build_modular_madaros.sh"
  printf 'source\n' > "$repo/self-hosted/main.sio"
  printf 'stdlib\n' > "$repo/stdlib/mod.sio"
+ # twin.sio has mod.sio's bytes: retargeting alias.sio to it leaves every
+ # input hash unchanged, so only the SYMLINKS.txt binding can refuse it.
+ printf 'stdlib\n' > "$repo/stdlib/twin.sio"
+ ln -s mod.sio "$repo/stdlib/alias.sio"
+ printf 'stdlib\n' > "$work/outside.sio"
  git -c init.defaultBranch=main init -q "$repo"
  git -C "$repo" add bin scripts self-hosted stdlib
  git -C "$repo" -c commit.gpgsign=false -c core.hooksPath=/dev/null -c user.name=ReceiptFixture -c user.email=receipt-fixture@example.invalid commit -qm fixture
@@ -194,7 +228,7 @@ PY
  done
  [[ "$(grep -c 'untracked.sio' "$artifact/TRACKED_PATHS.txt")" == 1 ]] || fail 'source closure omitted an untracked compiler input'
  printf 'RECEIPT_BUILD_KEY_DIMENSIONS_PASS\n'
- for control in source-git-sha compiler-bit source-file source-set target toolchain missing-manifest; do
+ for control in source-git-sha compiler-bit source-file source-set target toolchain missing-manifest symlink-retarget symlink-escape; do
   cp -a "$artifact" "$work/$control"
   case "$control" in
    source-git-sha) printf '%040d\n' 0 > "$work/$control/SOURCE_GIT_SHA" ;;
@@ -204,6 +238,8 @@ PY
    target) printf 'aarch64-linux\n' > "$work/$control/TARGET" ;;
    toolchain) printf X >> "$work/$control/TOOLCHAIN.txt" ;;
    missing-manifest) rm "$work/$control/INPUTS.sha256" ;;
+   symlink-retarget) ln -sfn twin.sio "$repo/stdlib/alias.sio" ;;
+   symlink-escape) ln -sfn ../../outside.sio "$repo/stdlib/alias.sio" ;;
   esac
   rc=0
   "$script" verify "$repo" "$work/$control" "$sha" > "$work/$control.log" 2>&1 || rc=$?
@@ -211,6 +247,7 @@ PY
   grep -q '^STDLIB_DEEP_RECEIPT_FAIL:' "$work/$control.log" || fail "tamper lacked refusal diagnostic: $control"
   if [[ "$control" == source-file ]]; then cp "$work/original-source" "$repo/stdlib/mod.sio"; fi
   if [[ "$control" == source-set ]]; then rm "$repo/stdlib/new.sio"; fi
+  if [[ "$control" == symlink-* ]]; then ln -sfn mod.sio "$repo/stdlib/alias.sio"; fi
   printf 'RECEIPT_TAMPER_REJECTED %s\n' "$control"
  done
  "$script" verify "$repo" "$artifact" "$sha" > "$work/final-verify.log"
