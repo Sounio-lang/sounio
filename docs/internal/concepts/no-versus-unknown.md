@@ -29,7 +29,8 @@ that survives review.
 All three were found on the same day, in three unrelated subsystems, before the
 common shape was noticed.
 
-**1. Effects — `with NoSuchEffectX` compiles.**
+**1. Effects — `with NoSuchEffectX` compiles.** (Historical: refused with
+E246 since 2026-11-22; held names such as `Mod` still compile in silence.)
 `effect_name_to_id` returns `-1` for an unknown name and both collection paths
 drop it: `rc=0`, `check: OK`. The compiler is not accepting the effect; it does
 not know the word. But acceptance and ignorance emit the same result, so 2,800

@@ -49,6 +49,11 @@ declaring is not required** — and therefore nobody did.
 fn f() with NoSuchEffectX     ->  rc=0, check: OK
 ```
 
+> **Correction, 2026-11-22.** Historical. `NoSuchEffectX` was later put on the
+> held list (`effect_name_is_held`), which kept this control silent; the
+> founder removed it from the hold on 2026-11-22 and it is now refused with
+> E246 face 0 (`tests/compile-fail/effect_unknown_name_witness_unheld.sio`).
+
 An entirely invented name compiles. `effect_name_to_id` returns `-1` and both
 collection paths drop it. This is not about `Mod`: **the `with` line accepts any
 unknown name in silence**, so a declaration that does nothing is
@@ -102,7 +107,9 @@ author can say which**: write `effect Mod { }`, or discover the intent was
 
 ## Claims Forbidden
 
-- Do not describe this as implemented. `with NoSuchEffectX` compiles today.
+- Do not describe this as implemented. `with NoSuchEffectX` compiled when this
+  was written; since 2026-11-22 it is refused with E246. Held names
+  (`effect_name_is_held`, e.g. `Mod`) still compile in silence.
 - Do not treat `Mod` as decided. Its measurement returned `INDETERMINATE`; the
   founder held it out of the phase-2b enum for exactly that reason (#1963).
 - Do not read the counts above as the full set. The tail is **unmeasured**, and
