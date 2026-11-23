@@ -1,0 +1,959 @@
+// SYNTHETIC_RESEARCH_WITNESS_NOT_MEDICAL_GUIDANCE — synthetic de-identified PK parameters only
+// stdlib::llm::epistemic_clinical_pbpk — Sovereign 3-Compartment NTI PBPK ODE
+// with RK4 Discretization Error Estimates, EISA Extraction Noise, and GUM Covariance Propagation.
+//
+// AUC: the ODE is linear, so the exact AUC(T) is available in closed form
+// (AUC_blood = e_blood^T B^-1 (e^{BT} - I) x0 / v_blood). The gate certifies
+// against clinical_pbpk_auc_enclosure: the same quantity, computed as the last
+// column of exp([[B, x0], [0, 0]] T) in outward-rounded interval arithmetic
+// (stdlib/epistemic/sound_enclosure.sio), so SAFE needs a SafeAuthorization.
+// The step-doubling majorant (diff_rk4 * 16/15 + diff_rk4) is HEURISTIC, not
+// an Encl.Sound enclosure; it is kept only as a diagnostic and cross-check.
+
+use epistemic::sound_enclosure::{SoundEnclosure, SafeAuthorization, se_point, se_add, se_sub, se_mul, se_div, se_absval, se_max, se_hull, se_entire, se_lo, se_hi, se_fits_window, se_authorize_window, sa_window_lo, sa_window_hi}
+
+pub const SYNTHETIC_RESEARCH_WITNESS_NOT_MEDICAL_GUIDANCE: string = "SYNTHETIC_RESEARCH_WITNESS_NOT_MEDICAL_GUIDANCE — synthetic de-identified PK parameters only"
+
+pub const EPISTEMIC_REGIME_SAFE_AUTHORIZE: i64 = 1
+pub const EPISTEMIC_REGIME_NUMERICAL_AUTO_REFINE: i64 = 2
+pub const EPISTEMIC_REGIME_PHYSICAL_ABSTAIN_TDM: i64 = 3
+pub const EPISTEMIC_REGIME_DOUBLE_REFINE_THEN_ABSTAIN: i64 = 4
+pub const EPISTEMIC_REGIME_ALEATORY_ABSTAIN_NO_TDM: i64 = 5
+
+pub fn clinical_pbpk_scope_guard() -> string {
+    return "SYNTHETIC_RESEARCH_WITNESS_NOT_MEDICAL_GUIDANCE — synthetic de-identified PK parameters only"
+}
+
+pub fn epistemic_regime_safe_authorize() -> i64 {
+    return EPISTEMIC_REGIME_SAFE_AUTHORIZE
+}
+
+pub fn epistemic_regime_numerical_auto_refine() -> i64 {
+    return EPISTEMIC_REGIME_NUMERICAL_AUTO_REFINE
+}
+
+pub fn epistemic_regime_physical_abstain_tdm() -> i64 {
+    return EPISTEMIC_REGIME_PHYSICAL_ABSTAIN_TDM
+}
+
+pub fn epistemic_regime_double_refine_then_abstain() -> i64 {
+    return EPISTEMIC_REGIME_DOUBLE_REFINE_THEN_ABSTAIN
+}
+
+pub fn epistemic_regime_aleatory_abstain_no_tdm() -> i64 {
+    return EPISTEMIC_REGIME_ALEATORY_ABSTAIN_NO_TDM
+}
+
+pub fn auc_error_bound_is_sound() -> bool {
+    // clinical_pbpk_auc_enclosure below is an Encl.Sound enclosure (outward-
+    // rounded interval arithmetic); the step-doubling majorant is heuristic
+    // and never certifies.
+    return true
+}
+
+pub struct ClinicalPbpkParams {
+    pub v_blood: f64,
+    pub v_brain: f64,
+    pub v_periph: f64,
+    pub q_brain: f64,
+    pub q_periph: f64,
+    pub kp_brain: f64,
+    pub kp_periph: f64,
+    pub cl_hepatic: f64,
+    pub fu_plasma: f64,
+}
+
+pub struct ClinicalEpistemicPriors {
+    pub cl_var: f64,
+    pub kp_var: f64,
+    pub fu_var: f64,
+    pub rho_cl_fu: f64,
+}
+
+pub struct EpistemicDecisionReceipt {
+    pub regime: i64,
+    pub val_initial: f64,
+    pub val_final: f64,
+    pub err_initial: f64,
+    pub err_final: f64,
+    pub err_sound_initial: f64,
+    pub err_sound_final: f64,
+    pub u_physical: f64,
+    pub u_ep: f64,
+    pub u_al: f64,
+    pub auc_lower_bound: f64,
+    pub auc_upper_bound: f64,
+    pub s_cl: f64,
+    pub s_kp: f64,
+    pub s_fu: f64,
+    pub compute_refined: bool,
+    pub clinical_abstained: bool,
+    pub authorized: bool,
+}
+
+struct Rp3State {
+    blood: f64,
+    brain: f64,
+    periph: f64,
+}
+
+fn pbpk_abs(x: f64) -> f64 {
+    if x < 0.0 {
+        return 0.0 - x
+    }
+    return x
+}
+
+fn pbpk_max(a: f64, b: f64) -> f64 {
+    if a > b {
+        return a
+    }
+    return b
+}
+
+fn pbpk_sqrt(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 {
+        return 0.0
+    }
+    var y = x
+    if x < 1.0 {
+        y = 1.0
+    }
+    var i = 0
+    while i < 30 {
+        y = (y + x / y) * 0.5
+        i = i + 1
+    }
+    return y
+}
+
+struct M3 {
+    e00: f64, e01: f64, e02: f64,
+    e10: f64, e11: f64, e12: f64,
+    e20: f64, e21: f64, e22: f64,
+}
+
+fn m3_mul(a: M3, b: M3) -> M3 with Div {
+    return M3 {
+        e00: a.e00 * b.e00 + a.e01 * b.e10 + a.e02 * b.e20,
+        e01: a.e00 * b.e01 + a.e01 * b.e11 + a.e02 * b.e21,
+        e02: a.e00 * b.e02 + a.e01 * b.e12 + a.e02 * b.e22,
+        e10: a.e10 * b.e00 + a.e11 * b.e10 + a.e12 * b.e20,
+        e11: a.e10 * b.e01 + a.e11 * b.e11 + a.e12 * b.e21,
+        e12: a.e10 * b.e02 + a.e11 * b.e12 + a.e12 * b.e22,
+        e20: a.e20 * b.e00 + a.e21 * b.e10 + a.e22 * b.e20,
+        e21: a.e20 * b.e01 + a.e21 * b.e11 + a.e22 * b.e21,
+        e22: a.e20 * b.e02 + a.e21 * b.e12 + a.e22 * b.e22,
+    }
+}
+
+fn m3_norm1(m: M3) -> f64 {
+    var n1 = pbpk_abs(m.e00) + pbpk_abs(m.e10) + pbpk_abs(m.e20)
+    let n2 = pbpk_abs(m.e01) + pbpk_abs(m.e11) + pbpk_abs(m.e21)
+    let n3 = pbpk_abs(m.e02) + pbpk_abs(m.e12) + pbpk_abs(m.e22)
+    if n2 > n1 { n1 = n2 }
+    if n3 > n1 { n1 = n3 }
+    return n1
+}
+
+fn m3_det(m: M3) -> f64 {
+    return m.e00 * (m.e11 * m.e22 - m.e12 * m.e21) - m.e01 * (m.e10 * m.e22 - m.e12 * m.e20) + m.e02 * (m.e10 * m.e21 - m.e11 * m.e20)
+}
+
+fn m3_inv(m: M3) -> M3 with Div {
+    let d = m3_det(m)
+    return M3 {
+        e00: (m.e11 * m.e22 - m.e12 * m.e21) / d,
+        e01: (m.e02 * m.e21 - m.e01 * m.e22) / d,
+        e02: (m.e01 * m.e12 - m.e02 * m.e11) / d,
+        e10: (m.e12 * m.e20 - m.e10 * m.e22) / d,
+        e11: (m.e00 * m.e22 - m.e02 * m.e20) / d,
+        e12: (m.e02 * m.e10 - m.e00 * m.e12) / d,
+        e20: (m.e10 * m.e21 - m.e11 * m.e20) / d,
+        e21: (m.e01 * m.e20 - m.e00 * m.e21) / d,
+        e22: (m.e00 * m.e11 - m.e01 * m.e10) / d,
+    }
+}
+
+fn rp3_add(a: Rp3State, b: Rp3State) -> Rp3State {
+    return Rp3State {
+        blood: a.blood + b.blood,
+        brain: a.brain + b.brain,
+        periph: a.periph + b.periph,
+    }
+}
+
+fn rp3_scale(s: Rp3State, factor: f64) -> Rp3State {
+    return Rp3State {
+        blood: s.blood * factor,
+        brain: s.brain * factor,
+        periph: s.periph * factor,
+    }
+}
+
+fn pbpk_ode(st: Rp3State, p: &ClinicalPbpkParams) -> Rp3State with Div {
+    let cl_eff = p.cl_hepatic * p.fu_plasma
+    let inflow_brain = (p.q_brain / p.v_blood) * (st.brain / p.kp_brain)
+    let inflow_periph = (p.q_periph / p.v_blood) * (st.periph / p.kp_periph)
+    let outflow = ((p.q_brain + p.q_periph) / p.v_blood) * st.blood
+    let clearance = (cl_eff / p.v_blood) * st.blood
+
+    let d_blood = inflow_brain + inflow_periph - outflow - clearance
+    let d_brain = (p.q_brain / p.v_brain) * (st.blood - st.brain / p.kp_brain)
+    let d_periph = (p.q_periph / p.v_periph) * (st.blood - st.periph / p.kp_periph)
+
+    return Rp3State {
+        blood: d_blood,
+        brain: d_brain,
+        periph: d_periph,
+    }
+}
+
+fn rk4_advance(st: Rp3State, p: &ClinicalPbpkParams, dt: f64) -> Rp3State with Div {
+    let k1 = pbpk_ode(st, p)
+    let s2 = rp3_add(st, rp3_scale(k1, dt * 0.5))
+    let k2 = pbpk_ode(s2, p)
+    let s3 = rp3_add(st, rp3_scale(k2, dt * 0.5))
+    let k3 = pbpk_ode(s3, p)
+    let s4 = rp3_add(st, rp3_scale(k3, dt))
+    let k4 = pbpk_ode(s4, p)
+
+    let w = rp3_add(k1, rp3_add(rp3_scale(k2, 2.0), rp3_add(rp3_scale(k3, 2.0), k4)))
+    return rp3_add(st, rp3_scale(w, dt / 6.0))
+}
+
+pub fn clinical_pbpk_default_params() -> ClinicalPbpkParams {
+    return ClinicalPbpkParams {
+        v_blood: 5.0,
+        v_brain: 1.4,
+        v_periph: 50.0,
+        q_brain: 0.05,
+        q_periph: 87.0,
+        kp_brain: 0.08,
+        kp_periph: 0.5,
+        cl_hepatic: 12.4,
+        fu_plasma: 0.08,
+    }
+}
+
+pub fn clinical_pbpk_simulate_auc(p: &ClinicalPbpkParams, dose_mg: f64, t_end_h: f64, dt_h: f64) -> f64 with Mut, Div {
+    if p.v_blood <= 0.000000000001 {
+        return 0.0
+    }
+    if t_end_h <= 0.0 {
+        return 0.0
+    }
+    var dt_step = dt_h
+    if dt_step <= 0.000000000001 {
+        dt_step = 0.05
+    }
+    let c0 = dose_mg / p.v_blood
+    var st = Rp3State { blood: c0, brain: 0.0, periph: 0.0 }
+    var t = 0.0
+    var auc = 0.0
+    var c_prev = c0
+
+    while t < t_end_h - 0.000000000001 {
+        var dt_use = dt_step
+        if t + dt_step > t_end_h {
+            dt_use = t_end_h - t
+        }
+        st = rk4_advance(st, p, dt_use)
+        auc = auc + (c_prev + st.blood) * 0.5 * dt_use
+        c_prev = st.blood
+        t = t + dt_use
+    }
+    return auc
+}
+
+fn fdiff_step(nominal: f64, variance: f64) -> f64 with Mut, Div {
+    let h_rel = 0.000001 * pbpk_abs(nominal)
+    let h_abs = 0.01 * pbpk_sqrt(variance)
+    return pbpk_max(h_rel, h_abs)
+}
+
+pub fn rk4_auc_bound_worst_case(p: &ClinicalPbpkParams, dose_mg: f64, dt_h: f64) -> f64 with Div {
+    // Worst-case RK4 AUC enclosure via 1-norm non-expansivity (N * 5th-order
+    // Taylor remainder, plus trapezoid term). Correct but loose (~10^3 in
+    // window units); kept only as an independent cross-check of the
+    // closed-form path. Positivity first:
+    // nonpositive params void the sign conditions, so refuse to certify.
+    if p.v_blood <= 0.0 { return 1e30 }
+    if p.v_brain <= 0.0 { return 1e30 }
+    if p.v_periph <= 0.0 { return 1e30 }
+    if p.q_brain <= 0.0 { return 1e30 }
+    if p.q_periph <= 0.0 { return 1e30 }
+    if p.kp_brain <= 0.0 { return 1e30 }
+    if p.kp_periph <= 0.0 { return 1e30 }
+    if p.cl_hepatic <= 0.0 { return 1e30 }
+    if p.fu_plasma <= 0.0 { return 1e30 }
+    var dt = dt_h
+    if dt <= 0.000000000001 { dt = 0.05 }
+    let cleff = p.cl_hepatic * p.fu_plasma
+    let b11 = (p.q_brain + p.q_periph + cleff) / p.v_blood
+    let b12 = p.q_brain / (p.kp_brain * p.v_brain)
+    let b13 = p.q_periph / (p.kp_periph * p.v_periph)
+    let b21 = p.q_brain / p.v_blood
+    let b22 = (p.q_brain / p.v_brain) / p.kp_brain
+    let b31 = p.q_periph / p.v_blood
+    let b33 = (p.q_periph / p.v_periph) / p.kp_periph
+    var lam = b11 + b21 + b31
+    let c2 = b12 + b22
+    if c2 > lam { lam = c2 }
+    let c3 = b13 + b33
+    if c3 > lam { lam = c3 }
+    let hl = dt * lam
+    var term = hl * hl * hl * hl / 24.0
+    var rem = 0.0
+    var k: i64 = 5
+    while k < 200 {
+        term = term * hl / (k as f64)
+        rem = rem + term
+        if term < rem * 0.000000000001 {
+            rem = rem + term * 2.0
+            break
+        }
+        k = k + 1
+    }
+    let n_steps = 48.0 / dt + 2.0
+    let dose_abs = pbpk_abs(dose_mg)
+    let tau = rem * dose_abs
+    let point_err = n_steps * tau
+    let prop = point_err * 48.0 / p.v_blood
+    let quad = dt * dt * 48.0 / 12.0 * lam * lam * dose_abs / p.v_blood
+    return (prop + quad) * 2.0
+}
+
+fn pbpk_B_matrix(p: &ClinicalPbpkParams) -> M3 with Div {
+    let cleff = p.cl_hepatic * p.fu_plasma
+    return M3 {
+        e00: (0.0 - (p.q_brain + p.q_periph + cleff)) / p.v_blood,
+        e01: p.q_brain / (p.kp_brain * p.v_brain),
+        e02: p.q_periph / (p.kp_periph * p.v_periph),
+        e10: p.q_brain / p.v_blood,
+        e11: (0.0 - (p.q_brain / p.v_brain)) / p.kp_brain,
+        e12: 0.0,
+        e20: p.q_periph / p.v_blood,
+        e21: 0.0,
+        e22: (0.0 - (p.q_periph / p.v_periph)) / p.kp_periph,
+    }
+}
+
+pub fn clinical_pbpk_auc_closed(p: &ClinicalPbpkParams, dose_mg: f64, t_end_h: f64) -> f64 with Div {
+    // Exact AUC_blood(T) for x' = Bx: e_blood^T B^-1 (e^{BT} - I) x0 / v_blood.
+    // e^{BT} by scaling and squaring (||BT||_1 / 2^s <= 0.5), Taylor with
+    // geometric tail past ratio 1/2. Only valid when B is invertible;
+    // f64 point value for reporting and cross-checks only; certification uses
+    // clinical_pbpk_auc_enclosure, which needs no inverse.
+    let b = pbpk_B_matrix(p)
+    let lam = m3_norm1(b)
+    let bt_norm = lam * t_end_h
+    var s: i64 = 0
+    var sc = bt_norm
+    while sc > 0.5 {
+        sc = sc * 0.5
+        s = s + 1
+    }
+    var pow2: f64 = 1.0
+    var i: i64 = 0
+    while i < s {
+        pow2 = pow2 * 2.0
+        i = i + 1
+    }
+    // C = B * (T / 2^s)
+    let dtc = t_end_h / pow2
+    let c = M3 {
+        e00: b.e00 * dtc, e01: b.e01 * dtc, e02: b.e02 * dtc,
+        e10: b.e10 * dtc, e11: b.e11 * dtc, e12: b.e12 * dtc,
+        e20: b.e20 * dtc, e21: b.e21 * dtc, e22: b.e22 * dtc,
+    }
+    // series sum and term (term_0 = I)
+    var sum = M3 { e00: 1.0, e01: 0.0, e02: 0.0, e10: 0.0, e11: 1.0, e12: 0.0, e20: 0.0, e21: 0.0, e22: 1.0 }
+    var term = M3 { e00: 1.0, e01: 0.0, e02: 0.0, e10: 0.0, e11: 1.0, e12: 0.0, e20: 0.0, e21: 0.0, e22: 1.0 }
+    var k: i64 = 1
+    while k < 60 {
+        var tmp = m3_mul(term, c)
+        tmp = M3 {
+            e00: tmp.e00 / (k as f64), e01: tmp.e01 / (k as f64), e02: tmp.e02 / (k as f64),
+            e10: tmp.e10 / (k as f64), e11: tmp.e11 / (k as f64), e12: tmp.e12 / (k as f64),
+            e20: tmp.e20 / (k as f64), e21: tmp.e21 / (k as f64), e22: tmp.e22 / (k as f64),
+        }
+        term = tmp
+        sum = M3 {
+            e00: sum.e00 + term.e00, e01: sum.e01 + term.e01, e02: sum.e02 + term.e02,
+            e10: sum.e10 + term.e10, e11: sum.e11 + term.e11, e12: sum.e12 + term.e12,
+            e20: sum.e20 + term.e20, e21: sum.e21 + term.e21, e22: sum.e22 + term.e22,
+        }
+        if m3_norm1(term) < 0.000000000000000001 {
+            break
+        }
+        k = k + 1
+    }
+    // square s times
+    var m = sum
+    var q: i64 = 0
+    while q < s {
+        m = m3_mul(m, m)
+        q = q + 1
+    }
+    // w = (M - I) x0, x0 = (dose, 0, 0)
+    let w = Rp3State { blood: (m.e00 - 1.0) * dose_mg, brain: m.e10 * dose_mg, periph: m.e20 * dose_mg }
+    let b_inv = m3_inv(b)
+    let u = Rp3State {
+        blood: b_inv.e00 * w.blood + b_inv.e01 * w.brain + b_inv.e02 * w.periph,
+        brain: b_inv.e10 * w.blood + b_inv.e11 * w.brain + b_inv.e12 * w.periph,
+        periph: b_inv.e20 * w.blood + b_inv.e21 * w.brain + b_inv.e22 * w.periph,
+    }
+    return u.blood / p.v_blood
+}
+
+// ---------------------------------------------------------------------------
+// Sound AUC enclosure (lie corpus item 1, stdlib/epistemic/sound_enclosure.sio)
+// ---------------------------------------------------------------------------
+// In amount units x' = Bx, x0 = (dose, 0, 0). With the augmented matrix
+//   M = [[B, x0], [0, 0]],   exp(M T) = [[e^{BT}, integral_0^T e^{Bt} x0 dt], [0, 1]]
+// so AUC_blood(T) = (last column of exp(MT))_blood / v_blood. No B^-1 and no
+// invertibility condition. exp(MT) is computed in outward-rounded interval
+// arithmetic: scale C = M T / 2^s, Taylor to degree K, add the tail
+//   ||sum_{k>K} C^k / k!||_1 <= n^{K+1} / (K+1)! * 1 / (1 - n/(K+2))
+//                            <= 2 n^{K+1} / (K+1)!      for n = ||C||_1 <= 1
+// to every entry (|R_ij| <= ||R||_1), then square s times. Every step uses
+// se_add / se_sub / se_mul / se_div, so the result contains the exact AUC of
+// the model with the given parameters. No libm exp anywhere.
+//
+// The augmented matrix is held as (E, g): E is the 3x3 block, g the column;
+// (E1, g1)(E2, g2) = (E1 E2, E1 g2 + g1).
+
+struct IM3 {
+    a00: SoundEnclosure, a01: SoundEnclosure, a02: SoundEnclosure,
+    a10: SoundEnclosure, a11: SoundEnclosure, a12: SoundEnclosure,
+    a20: SoundEnclosure, a21: SoundEnclosure, a22: SoundEnclosure,
+}
+
+struct IV3 {
+    v0: SoundEnclosure,
+    v1: SoundEnclosure,
+    v2: SoundEnclosure,
+}
+
+fn se_dot3(a0: SoundEnclosure, a1: SoundEnclosure, a2: SoundEnclosure, b0: SoundEnclosure, b1: SoundEnclosure, b2: SoundEnclosure) -> SoundEnclosure with Mut, Panic {
+    return se_add(se_add(se_mul(a0, b0), se_mul(a1, b1)), se_mul(a2, b2))
+}
+
+fn im3_mul(a: IM3, b: IM3) -> IM3 with Mut, Panic {
+    return IM3 {
+        a00: se_dot3(a.a00, a.a01, a.a02, b.a00, b.a10, b.a20),
+        a01: se_dot3(a.a00, a.a01, a.a02, b.a01, b.a11, b.a21),
+        a02: se_dot3(a.a00, a.a01, a.a02, b.a02, b.a12, b.a22),
+        a10: se_dot3(a.a10, a.a11, a.a12, b.a00, b.a10, b.a20),
+        a11: se_dot3(a.a10, a.a11, a.a12, b.a01, b.a11, b.a21),
+        a12: se_dot3(a.a10, a.a11, a.a12, b.a02, b.a12, b.a22),
+        a20: se_dot3(a.a20, a.a21, a.a22, b.a00, b.a10, b.a20),
+        a21: se_dot3(a.a20, a.a21, a.a22, b.a01, b.a11, b.a21),
+        a22: se_dot3(a.a20, a.a21, a.a22, b.a02, b.a12, b.a22),
+    }
+}
+
+fn im3_mulv(a: IM3, v: IV3) -> IV3 with Mut, Panic {
+    return IV3 {
+        v0: se_dot3(a.a00, a.a01, a.a02, v.v0, v.v1, v.v2),
+        v1: se_dot3(a.a10, a.a11, a.a12, v.v0, v.v1, v.v2),
+        v2: se_dot3(a.a20, a.a21, a.a22, v.v0, v.v1, v.v2),
+    }
+}
+
+fn im3_add(a: IM3, b: IM3) -> IM3 with Panic {
+    return IM3 {
+        a00: se_add(a.a00, b.a00), a01: se_add(a.a01, b.a01), a02: se_add(a.a02, b.a02),
+        a10: se_add(a.a10, b.a10), a11: se_add(a.a11, b.a11), a12: se_add(a.a12, b.a12),
+        a20: se_add(a.a20, b.a20), a21: se_add(a.a21, b.a21), a22: se_add(a.a22, b.a22),
+    }
+}
+
+fn iv3_add(a: IV3, b: IV3) -> IV3 with Panic {
+    return IV3 { v0: se_add(a.v0, b.v0), v1: se_add(a.v1, b.v1), v2: se_add(a.v2, b.v2) }
+}
+
+fn im3_scale(a: IM3, c: SoundEnclosure) -> IM3 with Mut, Panic {
+    return IM3 {
+        a00: se_mul(a.a00, c), a01: se_mul(a.a01, c), a02: se_mul(a.a02, c),
+        a10: se_mul(a.a10, c), a11: se_mul(a.a11, c), a12: se_mul(a.a12, c),
+        a20: se_mul(a.a20, c), a21: se_mul(a.a21, c), a22: se_mul(a.a22, c),
+    }
+}
+
+fn iv3_scale(a: IV3, c: SoundEnclosure) -> IV3 with Mut, Panic {
+    return IV3 { v0: se_mul(a.v0, c), v1: se_mul(a.v1, c), v2: se_mul(a.v2, c) }
+}
+
+fn im3_identity() -> IM3 with Panic {
+    let one = se_point(1.0)
+    let zero = se_point(0.0)
+    return IM3 {
+        a00: one, a01: zero, a02: zero,
+        a10: zero, a11: one, a12: zero,
+        a20: zero, a21: zero, a22: one,
+    }
+}
+
+// Upper enclosure of the 1-norm (max column sum) of the augmented [[C, c], [0, 0]].
+fn aug_norm1(c: IM3, v: IV3) -> SoundEnclosure with Mut, Panic {
+    let n0 = se_add(se_add(se_absval(c.a00), se_absval(c.a10)), se_absval(c.a20))
+    let n1 = se_add(se_add(se_absval(c.a01), se_absval(c.a11)), se_absval(c.a21))
+    let n2 = se_add(se_add(se_absval(c.a02), se_absval(c.a12)), se_absval(c.a22))
+    let n3 = se_add(se_add(se_absval(v.v0), se_absval(v.v1)), se_absval(v.v2))
+    return se_max(se_max(n0, n1), se_max(n2, n3))
+}
+
+pub fn clinical_pbpk_auc_enclosure(p: &ClinicalPbpkParams, dose_mg: f64, t_end_h: f64) -> SoundEnclosure with Mut, Div, Panic {
+    // Positivity is what makes this the model's B; refuse otherwise.
+    if p.v_blood <= 0.0 { return se_entire() }
+    if p.v_brain <= 0.0 { return se_entire() }
+    if p.v_periph <= 0.0 { return se_entire() }
+    if p.q_brain <= 0.0 { return se_entire() }
+    if p.q_periph <= 0.0 { return se_entire() }
+    if p.kp_brain <= 0.0 { return se_entire() }
+    if p.kp_periph <= 0.0 { return se_entire() }
+    if p.cl_hepatic <= 0.0 { return se_entire() }
+    if p.fu_plasma <= 0.0 { return se_entire() }
+    if t_end_h <= 0.0 { return se_entire() }
+
+    // Parameters, dose and horizon are the exact inputs.
+    let zero = se_point(0.0)
+    let vb = se_point(p.v_blood)
+    let vbr = se_point(p.v_brain)
+    let vp = se_point(p.v_periph)
+    let qb = se_point(p.q_brain)
+    let qp = se_point(p.q_periph)
+    let kpb = se_point(p.kp_brain)
+    let kpp = se_point(p.kp_periph)
+    let cleff = se_mul(se_point(p.cl_hepatic), se_point(p.fu_plasma))
+    let b = IM3 {
+        a00: se_sub(zero, se_div(se_add(se_add(qb, qp), cleff), vb)),
+        a01: se_div(qb, se_mul(kpb, vbr)),
+        a02: se_div(qp, se_mul(kpp, vp)),
+        a10: se_div(qb, vb),
+        a11: se_sub(zero, se_div(se_div(qb, vbr), kpb)),
+        a12: zero,
+        a20: se_div(qp, vb),
+        a21: zero,
+        a22: se_sub(zero, se_div(se_div(qp, vp), kpp)),
+    }
+    let x0 = IV3 { v0: se_point(dose_mg), v1: zero, v2: zero }
+
+    // Choosing s needs no rigour (the norm check below does); use the f64 B.
+    var est = m3_norm1(pbpk_B_matrix(p))
+    let dose_abs = pbpk_abs(dose_mg)
+    if dose_abs > est { est = dose_abs }
+    var sc = est * t_end_h
+    var s: i64 = 0
+    var h: f64 = 1.0
+    while sc > 0.5 && s < 60 {
+        sc = sc * 0.5
+        h = h * 0.5
+        s = s + 1
+    }
+    // h = 2^-s is exact; T * h is formed in interval arithmetic anyway.
+    let tau = se_mul(se_point(t_end_h), se_point(h))
+    let c = im3_scale(b, tau)
+    let cv = iv3_scale(x0, tau)
+
+    let n = aug_norm1(c, cv)
+    if se_hi(n) > 1.0 { return se_entire() }
+
+    // Taylor to degree K.
+    let kdeg: i64 = 20
+    var e = im3_add(im3_identity(), c)
+    var g = cv
+    var term_e = c
+    var term_g = cv
+    var k: i64 = 2
+    while k <= kdeg {
+        let inv_k = se_div(se_point(1.0), se_point(k as f64))
+        term_e = im3_scale(im3_mul(term_e, c), inv_k)
+        term_g = iv3_scale(im3_mulv(c, term_g), inv_k)
+        e = im3_add(e, term_e)
+        g = iv3_add(g, term_g)
+        k = k + 1
+    }
+
+    // Tail: 2 n^{K+1} / (K+1)!, applied as [-t, t] to every entry.
+    var tail = se_point(2.0)
+    var j: i64 = 1
+    while j <= kdeg + 1 {
+        tail = se_div(se_mul(tail, n), se_point(j as f64))
+        j = j + 1
+    }
+    let sym = se_mul(se_hull(se_point(-1.0), se_point(1.0)), tail)
+    e = IM3 {
+        a00: se_add(e.a00, sym), a01: se_add(e.a01, sym), a02: se_add(e.a02, sym),
+        a10: se_add(e.a10, sym), a11: se_add(e.a11, sym), a12: se_add(e.a12, sym),
+        a20: se_add(e.a20, sym), a21: se_add(e.a21, sym), a22: se_add(e.a22, sym),
+    }
+    g = IV3 { v0: se_add(g.v0, sym), v1: se_add(g.v1, sym), v2: se_add(g.v2, sym) }
+
+    // Square s times: (E, g)^2 = (E E, E g + g).
+    var q: i64 = 0
+    while q < s {
+        g = iv3_add(im3_mulv(e, g), g)
+        e = im3_mul(e, e)
+        q = q + 1
+    }
+    return se_div(g.v0, vb)
+}
+
+// The one place a regime that authorizes is produced: it needs the token.
+fn pbpk_authorized_regime(tok: SafeAuthorization, auc_min: f64, auc_max: f64, regime: i64) -> i64 with Panic {
+    assert(sa_window_lo(tok) == auc_min)
+    assert(sa_window_hi(tok) == auc_max)
+    return regime
+}
+
+pub fn clinical_pbpk_evaluate_gate(
+    p: &ClinicalPbpkParams,
+    priors: &ClinicalEpistemicPriors,
+    dose_mg: f64,
+    dt_initial_h: f64,
+    llm_unrefined_err_auc: f64,
+    u_ep: f64,
+    u_al: f64,
+    auc_min: f64,
+    auc_max: f64
+) -> EpistemicDecisionReceipt with Mut, Div, Panic {
+    let t_end_h = 48.0
+    let val_coarse = clinical_pbpk_simulate_auc(p, dose_mg, t_end_h, dt_initial_h)
+    let dt_half = dt_initial_h * 0.5
+    let val_half = clinical_pbpk_simulate_auc(p, dose_mg, t_end_h, dt_half)
+    let diff_rk4 = pbpk_abs(val_half - val_coarse)
+    let err_ode = diff_rk4 * (16.0 / 15.0) + diff_rk4
+    let err_initial = err_ode + llm_unrefined_err_auc
+    let val_initial = val_half
+
+    var dt_eff = 0.05
+    if dt_initial_h < 0.05 {
+        dt_eff = dt_initial_h
+    }
+    // Jacobian base at the same step size as the perturbed runs; reusing
+    // val_half (possibly at dt_half) would mix discretization error into du/dx.
+    let auc_nom = clinical_pbpk_simulate_auc(p, dose_mg, t_end_h, dt_eff)
+
+    let h_cl = fdiff_step(p.cl_hepatic, priors.cl_var)
+    let p_cl = ClinicalPbpkParams {
+        v_blood: p.v_blood,
+        v_brain: p.v_brain,
+        v_periph: p.v_periph,
+        q_brain: p.q_brain,
+        q_periph: p.q_periph,
+        kp_brain: p.kp_brain,
+        kp_periph: p.kp_periph,
+        cl_hepatic: p.cl_hepatic + h_cl,
+        fu_plasma: p.fu_plasma,
+    }
+    let auc_cl = clinical_pbpk_simulate_auc(&p_cl, dose_mg, t_end_h, dt_eff)
+    let j_cl = (auc_cl - auc_nom) / h_cl
+
+    let h_kp = fdiff_step(p.kp_brain, priors.kp_var)
+    let p_kp = ClinicalPbpkParams {
+        v_blood: p.v_blood,
+        v_brain: p.v_brain,
+        v_periph: p.v_periph,
+        q_brain: p.q_brain,
+        q_periph: p.q_periph,
+        kp_brain: p.kp_brain + h_kp,
+        kp_periph: p.kp_periph,
+        cl_hepatic: p.cl_hepatic,
+        fu_plasma: p.fu_plasma,
+    }
+    let auc_kp = clinical_pbpk_simulate_auc(&p_kp, dose_mg, t_end_h, dt_eff)
+    let j_kp = (auc_kp - auc_nom) / h_kp
+
+    let h_fu = fdiff_step(p.fu_plasma, priors.fu_var)
+    let p_fu = ClinicalPbpkParams {
+        v_blood: p.v_blood,
+        v_brain: p.v_brain,
+        v_periph: p.v_periph,
+        q_brain: p.q_brain,
+        q_periph: p.q_periph,
+        kp_brain: p.kp_brain,
+        kp_periph: p.kp_periph,
+        cl_hepatic: p.cl_hepatic,
+        fu_plasma: p.fu_plasma + h_fu,
+    }
+    let auc_fu = clinical_pbpk_simulate_auc(&p_fu, dose_mg, t_end_h, dt_eff)
+    let j_fu = (auc_fu - auc_nom) / h_fu
+
+    let v_cl = j_cl * j_cl * priors.cl_var
+    let v_kp = j_kp * j_kp * priors.kp_var
+    let v_fu = j_fu * j_fu * priors.fu_var
+    let v_diag_sum = v_cl + v_kp + v_fu
+
+    var s_cl = 0.0
+    var s_kp = 0.0
+    var s_fu = 0.0
+    if v_diag_sum > 0.0000000000000000000000000000001 {
+        s_cl = v_cl / v_diag_sum
+        s_kp = v_kp / v_diag_sum
+        s_fu = v_fu / v_diag_sum
+    }
+
+    let cov_prod = priors.cl_var * priors.fu_var
+    var sd_prod = 0.0
+    if cov_prod > 0.0 {
+        sd_prod = pbpk_sqrt(cov_prod)
+    }
+    let cov_cl_fu = 2.0 * j_cl * j_fu * priors.rho_cl_fu * sd_prod
+    var var_auc = v_diag_sum + cov_cl_fu
+    if var_auc < 0.0 {
+        var_auc = 0.0
+    }
+    // Prior-parameter uncertainty is epistemic (reducible by measurement/TDM);
+    // u_ep is assay/measurement epistemic input; u_al is within-patient
+    // aleatory variability (irreducible). TDM only helps the ep part.
+    let u_priors = 1.96 * pbpk_sqrt(var_auc)
+    let u_ep_total = u_priors + u_ep
+    let u_physical = u_ep_total + u_al
+
+    // Certification runs off the sound interval enclosure of the exact AUC;
+    // the heuristic majorant is reported in err_initial/err_final and only
+    // decides whether to refine. SAFE_AUTHORIZE and NUMERICAL_AUTO_REFINE are
+    // produced only by pbpk_authorized_regime, which takes a SafeAuthorization,
+    // and the only source of one is se_authorize_window on that enclosure.
+    let auc_encl = clinical_pbpk_auc_enclosure(p, dose_mg, t_end_h)
+    let err_sound_initial = (se_hi(auc_encl) - se_lo(auc_encl)) * 0.5
+    let window_span = auc_max - auc_min
+    let err_budget = 0.05 * window_span
+    let rad_quiet = err_initial <= err_budget
+    // Negative half-widths are not uncertainties; such inputs never authorize.
+    let widths_valid = (u_ep_total >= 0.0) && (u_al >= 0.0)
+
+    var compute_refined = false
+    var val_final = val_initial
+    var err_final = err_initial
+    var err_sound_final = err_sound_initial
+    var auc_lower_bound = se_lo(auc_encl) - u_physical
+    var auc_upper_bound = se_hi(auc_encl) + u_physical
+    var regime = EPISTEMIC_REGIME_DOUBLE_REFINE_THEN_ABSTAIN
+    var clinical_abstained = false
+    var authorized = false
+
+    var fits_initial = false
+    if widths_valid {
+        fits_initial = se_fits_window(auc_encl, u_ep_total, u_al, auc_min, auc_max)
+    }
+    if fits_initial && rad_quiet {
+        let tok = se_authorize_window(auc_encl, u_ep_total, u_al, auc_min, auc_max)
+        regime = pbpk_authorized_regime(tok, auc_min, auc_max, EPISTEMIC_REGIME_SAFE_AUTHORIZE)
+        clinical_abstained = false
+        authorized = true
+    } else {
+        compute_refined = true
+        let dt_fine = 0.05
+        let dt_fine_half = 0.025
+        let val_fine_coarse = clinical_pbpk_simulate_auc(p, dose_mg, t_end_h, dt_fine)
+        let val_fine_half = clinical_pbpk_simulate_auc(p, dose_mg, t_end_h, dt_fine_half)
+        let diff_fine = pbpk_abs(val_fine_half - val_fine_coarse)
+        let err_fine_ode = diff_fine * (16.0 / 15.0) + diff_fine
+        // The closed-form enclosure does not depend on the RK4 step: refining
+        // tightens only the heuristic diagnostic, never the certificate.
+        err_sound_final = err_sound_initial
+
+        val_final = val_fine_half
+        err_final = err_fine_ode
+
+        if fits_initial {
+            let tok = se_authorize_window(auc_encl, u_ep_total, u_al, auc_min, auc_max)
+            regime = pbpk_authorized_regime(tok, auc_min, auc_max, EPISTEMIC_REGIME_NUMERICAL_AUTO_REFINE)
+            clinical_abstained = false
+            authorized = true
+        } else {
+            // Attribute the residual breach (rad already refined). Do-not-measure
+            // needs al to breach and no centre in val +- ep to fit with +- al.
+            let al_breach = (val_final - u_al < auc_min) || (val_final + u_al > auc_max)
+            let can_fit_after_measure = ((auc_max - auc_min) >= (u_al * 2.0)) && ((val_final + u_ep_total) >= (auc_min + u_al)) && ((val_final - u_ep_total) <= (auc_max - u_al))
+            if al_breach && (!can_fit_after_measure) {
+                regime = EPISTEMIC_REGIME_ALEATORY_ABSTAIN_NO_TDM
+                clinical_abstained = true
+                authorized = false
+            } else {
+                let ep_breach = (val_final - u_ep_total - u_al < auc_min) || (val_final + u_ep_total + u_al > auc_max)
+                if ep_breach {
+                    regime = EPISTEMIC_REGIME_PHYSICAL_ABSTAIN_TDM
+                    clinical_abstained = true
+                    authorized = false
+                } else {
+                    regime = EPISTEMIC_REGIME_DOUBLE_REFINE_THEN_ABSTAIN
+                    clinical_abstained = true
+                    authorized = false
+                }
+            }
+        }
+    }
+
+    return EpistemicDecisionReceipt {
+        regime: regime,
+        val_initial: val_initial,
+        val_final: val_final,
+        err_initial: err_initial,
+        err_final: err_final,
+        err_sound_initial: err_sound_initial,
+        err_sound_final: err_sound_final,
+        u_physical: u_physical,
+        u_ep: u_ep_total,
+        u_al: u_al,
+        auc_lower_bound: auc_lower_bound,
+        auc_upper_bound: auc_upper_bound,
+        s_cl: s_cl,
+        s_kp: s_kp,
+        s_fu: s_fu,
+        compute_refined: compute_refined,
+        clinical_abstained: clinical_abstained,
+        authorized: authorized,
+    }
+}
+
+pub fn clinical_pbpk_compare_naive_text_mc() -> bool with Mut, Div, Panic {
+    let p = clinical_pbpk_default_params()
+    let dose_mg = 5.0
+    let t_end_h = 48.0
+
+    // Witness 1: naive heuristic-based bounds abstain where the proven gate
+    // refines and authorizes (conflation failure, now repaired soundly).
+    let priors1 = ClinicalEpistemicPriors {
+        cl_var: 1.0,
+        kp_var: 0.0001,
+        fu_var: 0.000025,
+        rho_cl_fu: 0.0,
+    }
+    let val_est = clinical_pbpk_simulate_auc(&p, dose_mg, t_end_h, 0.05)
+    let auc_min1 = val_est - 0.5737
+    let auc_max1 = val_est + 0.5737
+    let llm_unrefined_err = 0.25
+
+    let receipt1 = clinical_pbpk_evaluate_gate(
+        &p,
+        &priors1,
+        dose_mg,
+        0.1,
+        llm_unrefined_err,
+        0.0,
+        0.0,
+        auc_min1,
+        auc_max1
+    )
+
+    let naive_lower = receipt1.val_initial - receipt1.err_initial - receipt1.u_physical
+    let naive_upper = receipt1.val_initial + receipt1.err_initial + receipt1.u_physical
+    let naive_mc_abstained = (naive_lower < auc_min1) || (naive_upper > auc_max1)
+
+    let witness1_pass = naive_mc_abstained && receipt1.compute_refined && (receipt1.regime == EPISTEMIC_REGIME_NUMERICAL_AUTO_REFINE) && receipt1.authorized && (!receipt1.clinical_abstained)
+
+    // Witness 2: Correlated Multi-Parameter Blindness
+    let u_cl = 3.0
+    let u_fu = 0.02
+    let p_cl_minus = ClinicalPbpkParams {
+        v_blood: p.v_blood,
+        v_brain: p.v_brain,
+        v_periph: p.v_periph,
+        q_brain: p.q_brain,
+        q_periph: p.q_periph,
+        kp_brain: p.kp_brain,
+        kp_periph: p.kp_periph,
+        cl_hepatic: p.cl_hepatic - u_cl,
+        fu_plasma: p.fu_plasma,
+    }
+    let p_cl_plus = ClinicalPbpkParams {
+        v_blood: p.v_blood,
+        v_brain: p.v_brain,
+        v_periph: p.v_periph,
+        q_brain: p.q_brain,
+        q_periph: p.q_periph,
+        kp_brain: p.kp_brain,
+        kp_periph: p.kp_periph,
+        cl_hepatic: p.cl_hepatic + u_cl,
+        fu_plasma: p.fu_plasma,
+    }
+    let p_fu_minus = ClinicalPbpkParams {
+        v_blood: p.v_blood,
+        v_brain: p.v_brain,
+        v_periph: p.v_periph,
+        q_brain: p.q_brain,
+        q_periph: p.q_periph,
+        kp_brain: p.kp_brain,
+        kp_periph: p.kp_periph,
+        cl_hepatic: p.cl_hepatic,
+        fu_plasma: p.fu_plasma - u_fu,
+    }
+    let p_fu_plus = ClinicalPbpkParams {
+        v_blood: p.v_blood,
+        v_brain: p.v_brain,
+        v_periph: p.v_periph,
+        q_brain: p.q_brain,
+        q_periph: p.q_periph,
+        kp_brain: p.kp_brain,
+        kp_periph: p.kp_periph,
+        cl_hepatic: p.cl_hepatic,
+        fu_plasma: p.fu_plasma + u_fu,
+    }
+    let p_joint_minus = ClinicalPbpkParams {
+        v_blood: p.v_blood,
+        v_brain: p.v_brain,
+        v_periph: p.v_periph,
+        q_brain: p.q_brain,
+        q_periph: p.q_periph,
+        kp_brain: p.kp_brain,
+        kp_periph: p.kp_periph,
+        cl_hepatic: p.cl_hepatic - u_cl,
+        fu_plasma: p.fu_plasma - u_fu,
+    }
+
+    let auc_1d_cl_m = clinical_pbpk_simulate_auc(&p_cl_minus, dose_mg, t_end_h, 0.05)
+    let auc_1d_cl_p = clinical_pbpk_simulate_auc(&p_cl_plus, dose_mg, t_end_h, 0.05)
+    let auc_1d_fu_m = clinical_pbpk_simulate_auc(&p_fu_minus, dose_mg, t_end_h, 0.05)
+    let auc_1d_fu_p = clinical_pbpk_simulate_auc(&p_fu_plus, dose_mg, t_end_h, 0.05)
+    let auc_joint_m = clinical_pbpk_simulate_auc(&p_joint_minus, dose_mg, t_end_h, 0.05)
+
+    let w2_auc_max = 4.80
+    let all_1d_below = (auc_1d_cl_m < w2_auc_max) && (auc_1d_cl_p < w2_auc_max) && (auc_1d_fu_m < w2_auc_max) && (auc_1d_fu_p < w2_auc_max)
+    let joint_spikes = auc_joint_m > w2_auc_max
+
+    let priors_uncorr = ClinicalEpistemicPriors {
+        cl_var: 9.0,
+        kp_var: 0.0001,
+        fu_var: 0.0004,
+        rho_cl_fu: 0.0,
+    }
+    let priors_corr = ClinicalEpistemicPriors {
+        cl_var: 9.0,
+        kp_var: 0.0001,
+        fu_var: 0.0004,
+        rho_cl_fu: 0.70,
+    }
+
+    let receipt_uncorr = clinical_pbpk_evaluate_gate(
+        &p,
+        &priors_uncorr,
+        dose_mg,
+        0.05,
+        0.0,
+        0.0,
+        0.0,
+        3.0,
+        6.0
+    )
+    let receipt_corr = clinical_pbpk_evaluate_gate(
+        &p,
+        &priors_corr,
+        dose_mg,
+        0.05,
+        0.0,
+        0.0,
+        0.0,
+        3.0,
+        6.0
+    )
+
+    let cov_increases = receipt_corr.u_physical > receipt_uncorr.u_physical
+    let witness2_pass = all_1d_below && joint_spikes && cov_increases
+
+    return witness1_pass && witness2_pass
+}
