@@ -7,6 +7,11 @@
 #   eq_12        cd_eq(cd_zero(12), cd_zero(12)) walked 4096 slots of c.
 #   split_12     cd_split(cd_zero(12)) indexed c[2048].
 #   embed_neg    cd_embed(cd_zero(-1), 0) shifted by a negative count.
+# join_low/join_high exercise cd_join's half-level guard directly: every
+# element is built through cd_zero, so the three probes above all panic in
+# the constructor and never reach the tower checks. Here both halves are
+# valid elements and only one half's level disagrees with the target, so a
+# regression that accepts a mismatched low or high half would escape.
 # The v2 harness has no run-fail mode (a panic is exit 1 with no message), so,
 # like scripts/ci/pbpk28_refusal_gate.sh, each probe is compiled and run here
 # and must exit with EXACTLY the panic status (1) WITHOUT printing its escape
@@ -87,5 +92,9 @@ write_probe split_12 "let r = cd_split(cd_zero(12))"
 refused split_12
 write_probe embed_neg "let r = cd_embed(cd_zero(0 - 1), 0)"
 refused embed_neg
+write_probe join_low_mismatch "let r = cd_join(cd_zero(2), cd_zero(3), 4)"
+refused join_low_mismatch
+write_probe join_high_mismatch "let r = cd_join(cd_zero(3), cd_zero(2), 4)"
+refused join_high_mismatch
 
-echo "CD_LEVEL_REFUSAL_GATE_PASS probes=3 controls=1"
+echo "CD_LEVEL_REFUSAL_GATE_PASS probes=5 controls=1"
