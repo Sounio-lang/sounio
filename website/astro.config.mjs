@@ -9,7 +9,11 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import githubDarkTheme from '@shikijs/themes/github-dark';
 import { HREFLANG, isIndexableSitemapUrl, sitemapLinks } from './src/lib/seo-locales.mjs';
-import { lastmodForUrl } from './src/lib/sitemap-lastmod.mjs';
+import { assertFullGitHistory, lastmodForUrl, omitLastmodWhenMissing } from './src/lib/sitemap-lastmod.mjs';
+
+// Before pages or the sitemap integration run. The integration swallows
+// serialize() errors, so a shallow Actions checkout has to fail here.
+assertFullGitHistory();
 import { rehypeDemoteH1 } from './src/lib/rehype-demote-h1.mjs';
 
 // Real Shiki grammar for Sounio (`sio` code fences). Previously ```sio blocks
@@ -68,7 +72,14 @@ export default defineConfig({
       filter: (page) => isIndexableSitemapUrl(page),
       serialize(item) {
         const lastmod = lastmodForUrl(item.url);
-        if (!lastmod) throw new Error(`sitemap lastmod missing for ${item.url}`);
+        if (!lastmod) {
+          // A full history with no content date and no commit day is a bug.
+          // A shallow checkout outside Actions has already ignored git dates.
+          if (!omitLastmodWhenMissing()) throw new Error(`sitemap lastmod missing for ${item.url}`);
+          const rest = { ...item, links: sitemapLinks(item.url) };
+          delete rest.lastmod;
+          return rest;
+        }
         return { ...item, lastmod, links: sitemapLinks(item.url) };
       },
       i18n: {

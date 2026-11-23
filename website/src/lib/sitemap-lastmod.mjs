@@ -64,15 +64,61 @@ function walk(dir, out = []) {
 }
 
 let gitDayByFile = null;
+let shallowRepository;
+
+/** True when this checkout cannot answer per-file commit days. A missing git binary counts as shallow. */
+export function repositoryIsShallow() {
+  if (shallowRepository !== undefined) return shallowRepository;
+  try {
+    const out = execFileSync('git', ['rev-parse', '--is-shallow-repository'], {
+      cwd: repoRoot(),
+      encoding: 'utf8',
+    }).trim();
+    shallowRepository = out === 'true';
+  } catch {
+    shallowRepository = true;
+  }
+  return shallowRepository;
+}
+
+/**
+ * A shallow checkout outside GitHub Actions has no per-file history.
+ * Sitemap entries with no content date omit <lastmod> instead of failing the build.
+ * Inside GitHub Actions a shallow checkout is an error, raised by assertFullGitHistory.
+ */
+const SHALLOW_HISTORY_ERROR = 'sitemap lastmod needs full git history; use actions/checkout fetch-depth: 0';
+
+export function omitLastmodWhenMissing() {
+  return repositoryIsShallow() && process.env.GITHUB_ACTIONS !== 'true';
+}
+
+/** Fail closed in GitHub Actions. A depth-1 checkout stamps the deploy day on every file. */
+export function assertFullGitHistory() {
+  if (repositoryIsShallow() && process.env.GITHUB_ACTIONS === 'true') {
+    throw new Error(SHALLOW_HISTORY_ERROR);
+  }
+}
+
+function warnShallowOnce() {
+  if (globalThis.__sounioSitemapLastmodShallowWarned) return;
+  globalThis.__sounioSitemapLastmodShallowWarned = true;
+  console.warn('sitemap lastmod: shallow repository; ignoring git dates and using content dates only. URLs without a content date omit <lastmod>.');
+}
 
 function loadGitDays() {
   if (gitDayByFile) return gitDayByFile;
-  gitDayByFile = new Map();
+  if (repositoryIsShallow()) {
+    assertFullGitHistory();
+    warnShallowOnce();
+    gitDayByFile = new Map();
+    return gitDayByFile;
+  }
   const output = execFileSync(
     'git',
     ['log', '--format=%cs', '--name-only', '--', 'website/src', 'website/public'],
     { cwd: repoRoot(), encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
   );
+  gitDayByFile = new Map();
   let day = null;
   for (const line of output.split('\n')) {
     if (isCalendarDate(line.trim())) {
