@@ -1,0 +1,320 @@
+// stdlib/molecular/promoter.sio -- a light guest in the small cages of a hydrate
+// whose large cages hold a rigid promoter molecule (THF in structure II): the
+// Langmuir constant with and without the promoter, and its gradient in the
+// guest's Lennard-Jones parameters.
+//
+// WHY THIS EXISTS. molecular::host_guest and molecular::langmuir treat a host
+// whose cages are either empty or hold the guest itself. Hydrogen storage at low
+// pressure uses a binary hydrate: THF fills every 5^12 6^4 cage and H2 enters
+// only the 5^12. The promoter acts on the H2 through the cage walls (dispersion
+// at about 7 A). For H2 in sII with TraPPE-UA THF that raises C of the small
+// cage by 34 % at 250 K, the same in SPC/E, TIP4P/Ice and TIP5P to 0.002 in
+// ln C, so it cancels between water models (project record 4j).
+//
+// WHAT IS CHECKED, AND AGAINST WHAT: tests/stdlib/molecular/test_promoter_oracle.sio
+// against stdlib/molecular/oracles/promoter_oracle.cpp, the same quadrature and
+// the same orientation set (to 1e-9); predictions written before the library,
+// the oracle and the test: stdlib/molecular/oracles/promoter_predictions.txt.
+//
+// METHOD. The promoter's centre is fixed at its cage centre and its orientation
+// distribution is uniform and independent of the guest. The orientation average
+// then factorises over promoter molecules:
+//   C = int_cage exp(-w_host(x)/T) prod_k < exp(-u_k(x, R)/T) >_R dx
+//       * exp(-t_prom/T),
+// where t_prom is the tail of a uniform density of promoter sites beyond the
+// cutoff. The average over R uses a deterministic set: Shoemake quaternions from
+// the Halton sequence in bases 2, 3 and 5. Gradients in (eps_H, sig_H) follow by
+// differentiating under the integral and the average.
+//
+// MODEL. As molecular::host_guest: Lorentz-Berthelot, quadratic Feynman-Hibbs
+// (the promoter is heavy: the guest's own coefficient lam = lambda^2 / 24),
+// point-centred cutoff, uniform tails, no charges on the guest. A factor xi
+// multiplies every guest-promoter well depth (xi = 1 is plain Berthelot; the
+// water-THF term of the TraPPE-UA hydrate needed xi = 1.4, Algaba et al. 2024).
+//
+// UNITS. Angstrom, kelvin (energies as E / k_B), MPa^-1 for C.
+//
+// LANGUAGE CONSTRAINTS as in molecular::lj: helpers precede callers, buffers are
+// caller-owned and written through `&!`, functions return scalars, tuples or a
+// plain struct.
+
+module molecular::promoter
+
+use math::pure::{exp, sqrt, ln, cos, sin, floor}
+use molecular::host_guest::{hg_field, hg_tail, hg_cage_of}
+use molecular::langmuir::{lg_gauss_legendre}
+
+// Promoter sites in the body frame, x y z eps sig per site, up to 16 sites.
+pub fn pr_site_max() -> i64 { 16 }
+// Orientations, a row-major 3x3 matrix each, up to 4096.
+pub fn pr_orient_max() -> i64 { 4096 }
+// Promoter centres within reach of one cage, up to 64.
+pub fn pr_centre_max() -> i64 { 64 }
+
+// Planar ring of n sites on a circle of radius r in the xy plane, site 0 at
+// (r, 0, 0) with (e0, s0), the others with (e1, s1). TraPPE-UA THF as used in
+// the project record: n = 5, r = 1.276 A (mean ring bond 1.50 A), O 55 K /
+// 2.80 A, CH2 46 K / 3.95 A. Returns n.
+pub fn pr_ring(body: &![f64; 80], n: i64, r: f64, e0: f64, s0: f64, e1: f64, s1: f64) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < n && i < pr_site_max() {
+        let t = 2.0 * 3.14159265358979323846 * (i as f64) / (n as f64)
+        body[(5 * i) as usize] = r * cos(t)
+        body[(5 * i + 1) as usize] = r * sin(t)
+        body[(5 * i + 2) as usize] = 0.0
+        body[(5 * i + 3) as usize] = if i == 0 { e0 } else { e1 }
+        body[(5 * i + 4) as usize] = if i == 0 { s0 } else { s1 }
+        i = i + 1
+    }
+    i
+}
+
+// Radical inverse of i in base b.
+pub fn pr_halton(i: i64, b: i64) -> f64 with Mut, Div {
+    var f = 1.0
+    var r = 0.0
+    var k = i
+    while k > 0 {
+        f = f / (b as f64)
+        r = r + f * ((k % b) as f64)
+        k = k / b
+    }
+    r
+}
+
+// n orientations from Shoemake's map of the Halton points (i = 1..n, bases
+// 2, 3, 5) to unit quaternions, as rotation matrices. Returns n.
+pub fn pr_orientations(rot: &![f64; 36864], n: i64) -> i64 with Mut, Div, Panic {
+    var k: i64 = 0
+    while k < n && k < pr_orient_max() {
+        let u1 = pr_halton(k + 1, 2)
+        let u2 = pr_halton(k + 1, 3)
+        let u3 = pr_halton(k + 1, 5)
+        let tp = 2.0 * 3.14159265358979323846
+        let a = sqrt(1.0 - u1) * sin(tp * u2)
+        let b = sqrt(1.0 - u1) * cos(tp * u2)
+        let c = sqrt(u1) * sin(tp * u3)
+        let d = sqrt(u1) * cos(tp * u3)
+        let o = 9 * k
+        rot[o as usize] = 1.0 - 2.0 * (c * c + d * d)
+        rot[(o + 1) as usize] = 2.0 * (b * c - a * d)
+        rot[(o + 2) as usize] = 2.0 * (b * d + a * c)
+        rot[(o + 3) as usize] = 2.0 * (b * c + a * d)
+        rot[(o + 4) as usize] = 1.0 - 2.0 * (b * b + d * d)
+        rot[(o + 5) as usize] = 2.0 * (c * d - a * b)
+        rot[(o + 6) as usize] = 2.0 * (b * d - a * c)
+        rot[(o + 7) as usize] = 2.0 * (c * d + a * b)
+        rot[(o + 8) as usize] = 1.0 - 2.0 * (b * b + c * c)
+        k = k + 1
+    }
+    k
+}
+
+// Centres of cages first..first+count-1 of `cen` and their images in the 27
+// cells around the home cell that lie within `reach` of (cx, cy, cz).
+// Returns their number.
+pub fn pr_centres(out: &![f64; 192], cen: &[f64; 192], first: i64, count: i64, a: f64,
+                  cx: f64, cy: f64, cz: f64, reach: f64) -> i64 with Mut, Div, Panic {
+    var n: i64 = 0
+    var q = first
+    while q < first + count {
+        var ix: i64 = 0 - 1
+        while ix <= 1 {
+            var iy: i64 = 0 - 1
+            while iy <= 1 {
+                var iz: i64 = 0 - 1
+                while iz <= 1 {
+                    let px = cen[(3 * q) as usize] + a * (ix as f64)
+                    let py = cen[(3 * q + 1) as usize] + a * (iy as f64)
+                    let pz = cen[(3 * q + 2) as usize] + a * (iz as f64)
+                    let r2 = (px - cx) * (px - cx) + (py - cy) * (py - cy) + (pz - cz) * (pz - cz)
+                    if sqrt(r2) < reach && n < pr_centre_max() {
+                        out[(3 * n) as usize] = px
+                        out[(3 * n + 1) as usize] = py
+                        out[(3 * n + 2) as usize] = pz
+                        n = n + 1
+                    }
+                    iz = iz + 1
+                }
+                iy = iy + 1
+            }
+            ix = ix + 1
+        }
+        q = q + 1
+    }
+    n
+}
+
+// Tail of a uniform density of promoter sites (rho_mol molecules per A^3)
+// beyond the cutoff, with its derivatives in eps_H and sig_H: (t, dt/de, dt/ds).
+pub fn pr_tail(body: &[f64; 80], nb: i64, eps_h: f64, sig_h: f64, xi: f64, rho_mol: f64, cut: f64) -> (f64, f64, f64) with Mut, Div, Panic {
+    var t = 0.0
+    var te = 0.0
+    var ts = 0.0
+    var s: i64 = 0
+    while s < nb {
+        let ex = xi * sqrt(body[(5 * s + 3) as usize] * eps_h)
+        let sx = 0.5 * (body[(5 * s + 4) as usize] + sig_h)
+        let (v, vs) = hg_tail(ex, sx, rho_mol, cut)
+        t = t + v
+        te = te + v / (2.0 * eps_h)
+        ts = ts + 0.5 * vs
+        s = s + 1
+    }
+    (t, te, ts)
+}
+
+// Per-point promoter term at (x, y, z), not wrapped: sum over promoter centres
+// of ln < exp(-u/T) >_R, and the derivatives of that sum in eps_H and sig_H.
+pub fn pr_point(x: f64, y: f64, z: f64, pc: &[f64; 192], npc: i64, body: &[f64; 80], nb: i64,
+                rot: &[f64; 36864], nor: i64, eps_h: f64, sig_h: f64, xi: f64, lam: f64, cut: f64, t: f64)
+                -> (f64, f64, f64) with Mut, Div, Panic {
+    let c2 = cut * cut
+    var lnf = 0.0
+    var ge = 0.0
+    var gs = 0.0
+    var k: i64 = 0
+    while k < npc {
+        let px = pc[(3 * k) as usize]
+        let py = pc[(3 * k + 1) as usize]
+        let pz = pc[(3 * k + 2) as usize]
+        var ss = 0.0
+        var se = 0.0
+        var sg = 0.0
+        var m: i64 = 0
+        while m < nor {
+            let o = 9 * m
+            var u = 0.0
+            var ue = 0.0
+            var us = 0.0
+            var s: i64 = 0
+            while s < nb {
+                let bx = body[(5 * s) as usize]
+                let by = body[(5 * s + 1) as usize]
+                let bz = body[(5 * s + 2) as usize]
+                let yx = px + rot[o as usize] * bx + rot[(o + 1) as usize] * by + rot[(o + 2) as usize] * bz
+                let yy = py + rot[(o + 3) as usize] * bx + rot[(o + 4) as usize] * by + rot[(o + 5) as usize] * bz
+                let yz = pz + rot[(o + 6) as usize] * bx + rot[(o + 7) as usize] * by + rot[(o + 8) as usize] * bz
+                let r2 = (x - yx) * (x - yx) + (y - yy) * (y - yy) + (z - yz) * (z - yz)
+                if r2 <= c2 {
+                    let ex = xi * sqrt(body[(5 * s + 3) as usize] * eps_h)
+                    let sx = 0.5 * (body[(5 * s + 4) as usize] + sig_h)
+                    let s2 = sx * sx
+                    let s6 = s2 * s2 * s2
+                    let s12 = s6 * s6
+                    let i2 = 1.0 / r2
+                    let i6 = i2 * i2 * i2
+                    let aa = s12 * i6 * i6
+                    let bb = s6 * i6
+                    let uu = 4.0 * ex * (aa - bb) + lam * 4.0 * ex * (132.0 * aa - 30.0 * bb) * i2
+                    u = u + uu
+                    ue = ue + uu / (2.0 * eps_h)
+                    us = us + 0.5 * (4.0 * ex * (12.0 * aa - 6.0 * bb) / sx + lam * 4.0 * ex * (1584.0 * aa - 180.0 * bb) * i2 / sx)
+                }
+                s = s + 1
+            }
+            let e = exp(0.0 - u / t)
+            ss = ss + e
+            se = se + e * (0.0 - ue / t)
+            sg = sg + e * (0.0 - us / t)
+            m = m + 1
+        }
+        lnf = lnf + ln(ss / (nor as f64))
+        ge = ge + se / ss
+        gs = gs + sg / ss
+        k = k + 1
+    }
+    (lnf, ge, gs)
+}
+
+// Langmuir constants of the guest in cage `cage` with the large cages empty
+// (c0) and holding the promoter (c1), MPa^-1, and d ln C / d(eps_H, sig_H) for
+// both.
+pub struct PrLangmuir {
+    pub c0: f64,
+    pub c1: f64,
+    pub g0e: f64,
+    pub g0s: f64,
+    pub g1e: f64,
+    pub g1s: f64,
+}
+
+// Quadrature as molecular::langmuir's deterministic Langmuir integrals: np
+// radial panels of nr Gauss-Legendre nodes on [0, rmax], nth Gauss-Legendre
+// nodes in cos(theta), 2 nth midpoints in phi; a node counts if `cage` is the
+// nearest cage centre (its Voronoi domain). host / nh: host sites from
+// hg_replicate; eps, sig the combined guest-oxygen parameters, rho the host
+// site density; pc / npc the promoter centres (pr_centres), rho_mol their
+// density for the tail.
+pub fn pr_langmuir(host: &[f64; 12288], nh: i64, cen: &[f64; 192], nc: i64, cage: i64, a: f64,
+                   pc: &[f64; 192], npc: i64, body: &[f64; 80], nb: i64, rot: &[f64; 36864], nor: i64,
+                   eps: f64, sig: f64, eps_h: f64, sig_h: f64, xi: f64, lam: f64, cut: f64, rho: f64, rho_mol: f64,
+                   t: f64, rmax: f64, np: i64, nr: i64, nth: i64) -> PrLangmuir with Mut, Div, Panic {
+    var rx: [f64; 64] = [0.0; 64]
+    var rw: [f64; 64] = [0.0; 64]
+    var tx: [f64; 64] = [0.0; 64]
+    var tw: [f64; 64] = [0.0; 64]
+    lg_gauss_legendre(nr, &!rx, &!rw)
+    lg_gauss_legendre(nth, &!tx, &!tw)
+    let nph = 2 * nth
+    let pi = 3.14159265358979323846
+    let cx = cen[(3 * cage) as usize]
+    let cy = cen[(3 * cage + 1) as usize]
+    let cz = cen[(3 * cage + 2) as usize]
+    var i0 = 0.0
+    var i1 = 0.0
+    var g0e = 0.0
+    var g0s = 0.0
+    var g1e = 0.0
+    var g1s = 0.0
+    var p: i64 = 0
+    while p < np {
+        var i: i64 = 0
+        while i < nr {
+            let r = ((p as f64) + 0.5 + 0.5 * rx[i as usize]) * rmax / (np as f64)
+            let wr = 0.5 * rw[i as usize] * rmax / (np as f64)
+            var j: i64 = 0
+            while j < nth {
+                let ct = tx[j as usize]
+                let st = sqrt(1.0 - ct * ct)
+                var k: i64 = 0
+                while k < nph {
+                    let ph = 2.0 * pi * ((k as f64) + 0.5) / (nph as f64)
+                    let x = cx + r * st * cos(ph)
+                    let y = cy + r * st * sin(ph)
+                    let z = cz + r * ct
+                    let hx = x - a * floor(x / a)
+                    let hy = y - a * floor(y / a)
+                    let hz = z - a * floor(z / a)
+                    if hg_cage_of(cen, nc, a, hx, hy, hz) == cage {
+                        let (w, we, ws) = hg_field(host, nh, hx, hy, hz, eps, sig, eps_h, lam, cut, rho)
+                        let wt = wr * tw[j as usize] * (2.0 * pi / (nph as f64)) * r * r
+                        let f0 = exp(0.0 - w / t)
+                        let (lnf, ge, gs) = pr_point(x, y, z, pc, npc, body, nb, rot, nor, eps_h, sig_h, xi, lam, cut, t)
+                        let f1 = f0 * exp(lnf)
+                        i0 = i0 + wt * f0
+                        g0e = g0e + wt * f0 * (0.0 - we / t)
+                        g0s = g0s + wt * f0 * (0.0 - ws / t)
+                        i1 = i1 + wt * f1
+                        g1e = g1e + wt * f1 * (0.0 - we / t + ge)
+                        g1s = g1s + wt * f1 * (0.0 - ws / t + gs)
+                    }
+                    k = k + 1
+                }
+                j = j + 1
+            }
+            i = i + 1
+        }
+        p = p + 1
+    }
+    let (tp, tpe, tps) = pr_tail(body, nb, eps_h, sig_h, xi, rho_mol, cut)
+    let to_mpa = 1.0e-30 / (1.380649e-23 * t) * 1.0e6
+    PrLangmuir {
+        c0: i0 * to_mpa,
+        c1: i1 * exp(0.0 - tp / t) * to_mpa,
+        g0e: g0e / i0,
+        g0s: g0s / i0,
+        g1e: g1e / i1 - tpe / t,
+        g1s: g1s / i1 - tps / t,
+    }
+}
