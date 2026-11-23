@@ -2,24 +2,26 @@
 //!
 //! This module follows the SHAPE of IEEE 1788 (empty/entire intervals,
 //! decorations, defined division by zero-spanning intervals) but is NOT a
-//! conforming IEEE 1788 implementation, for three stated reasons:
+//! conforming IEEE 1788 implementation, for two stated reasons:
 //!   1. Outward rounding is done with the predecessor/successor push of
 //!      epistemic::sound_enclosure (se_down/se_up — Rump–Zimmermann–Boldo–
 //!      Melquiond 2009), not with hardware directed roundings, which Sounio
 //!      does not expose. Every computed endpoint is pushed strictly outward.
-//!   2. Sounio f64 has no infinities, so "entire" is the finite interval
-//!      [-1e308, +1e308] (maximum ignorance over finite f64), NOT [-∞,+∞].
-//!      Results that would exceed this range cannot be represented; the
-//!      module saturates outward to entire rather than claiming infinity.
-//!   3. Transcendental functions are absent: libm exp/log are not correctly
+//!   2. Transcendental functions are absent: libm exp/log are not correctly
 //!      rounded, so enclosing with them would be a lie (cf.
 //!      epistemic::sound_enclosure's stated scope). Only sqrt is provided,
 //!      because IEEE 754 mandates a correctly rounded sqrt, and even that
 //!      endpoint is pushed outward.
 //!
+//! "Entire" really is [-inf, +inf]: Sounio f64 has infinities (finite range
+//! extends to ~1.8e308; 1.0e308 * 10.0 overflows to +inf), and the old
+//! ±1e308 sentinel did NOT contain them. The entire interval reuses
+//! epistemic::sound_enclosure::se_entire — the same construction, not a copy
+//! (lie corpus item 1d).
+//!
 //! Key concepts (IEEE 1788-flavoured, with the deviations above):
 //!   - Empty interval: {} (result of impossible constraints)
-//!   - Entire interval: [-1e308, +1e308] (maximum finite ignorance)
+//!   - Entire interval: [-inf, +inf] (maximum ignorance)
 //!   - Exception handling for division by interval spanning zero
 //!   - Decorations for tracking validity
 //!
@@ -30,9 +32,10 @@
 //!   - Rump, Zimmermann, Boldo, Melquiond — "Computing predecessor and
 //!     successor in rounding to nearest", BIT 49 (2009) 419-431
 
-// Outward rounding reuses epistemic::sound_enclosure (se_down/se_up) —
-// the same push, not a copy (lie corpus item 1d).
-use epistemic::sound_enclosure::{se_down, se_up}
+// Outward rounding and the entire interval reuse epistemic::sound_enclosure
+// (se_down/se_up/se_entire/se_lo/se_hi) — the same constructions, not
+// copies (lie corpus item 1d).
+use epistemic::sound_enclosure::{se_down, se_up, se_entire, se_lo, se_hi}
 
 // Only sqrt is imported: IEEE 754 mandates a correctly rounded sqrt, so with
 // an outward push its enclosure is rigorous. exp/log are deliberately NOT
@@ -83,14 +86,25 @@ pub fn interval_empty() -> Interval {
     }
 }
 
-// Entire interval: maximum ignorance over FINITE f64. Sounio f64 has no
-// infinities, so this is [-1e308, +1e308], not [-∞,+∞] (lie corpus item 1d).
+// Entire interval [-inf, +inf] via se_entire (1.0e308 * 10.0 overflows to
+// +inf); reused, not copied. The old ±1e308 sentinel did not contain finite
+// values above 1e308 or infinities, so it was not "entire" (item 1d).
 pub fn interval_entire() -> Interval {
+    let e = se_entire()
     return Interval {
-        lo: 0.0 - 1.0e308,
-        hi: 1.0e308,
+        lo: se_lo(e),
+        hi: se_hi(e),
         is_empty: false,
     }
+}
+
+// ±inf for the half-bounded division branches, via se_entire (reused).
+fn ieee_neg_inf() -> f64 {
+    return se_lo(se_entire())
+}
+
+fn ieee_pos_inf() -> f64 {
+    return se_hi(se_entire())
 }
 
 pub fn interval_new(lo: f64, hi: f64) -> Interval {
@@ -250,16 +264,16 @@ pub fn interval_div(x: Interval, y: Interval) -> DivisionResult with Panic {
         }
 
         if y.lo == 0.0 {
-            // [0, d] with d > 0: result is [a/d, +1e308] (finite entire end)
+            // [0, d] with d > 0: result is [a/d, +inf]
             if x.lo >= 0.0 {
                 return DivisionResult {
-                    result: interval_new(se_down(x.lo / y.hi), 1.0e308),
+                    result: interval_new(se_down(x.lo / y.hi), ieee_pos_inf()),
                     exception: 2,  // Entire result
                     decoration: dec_def(),
                 }
             } else if x.hi <= 0.0 {
                 return DivisionResult {
-                    result: interval_new(0.0 - 1.0e308, se_up(x.hi / y.hi)),
+                    result: interval_new(ieee_neg_inf(), se_up(x.hi / y.hi)),
                     exception: 2,
                     decoration: dec_def(),
                 }
@@ -267,16 +281,16 @@ pub fn interval_div(x: Interval, y: Interval) -> DivisionResult with Panic {
         }
 
         if y.hi == 0.0 {
-            // [c, 0] with c < 0: result is [-1e308, a/c] (finite entire end)
+            // [c, 0] with c < 0: result is [-inf, a/c]
             if x.lo >= 0.0 {
                 return DivisionResult {
-                    result: interval_new(0.0 - 1.0e308, se_up(x.lo / y.lo)),
+                    result: interval_new(ieee_neg_inf(), se_up(x.lo / y.lo)),
                     exception: 2,
                     decoration: dec_def(),
                 }
             } else if x.hi <= 0.0 {
                 return DivisionResult {
-                    result: interval_new(se_down(x.hi / y.lo), 1.0e308),
+                    result: interval_new(se_down(x.hi / y.lo), ieee_pos_inf()),
                     exception: 2,
                     decoration: dec_def(),
                 }
