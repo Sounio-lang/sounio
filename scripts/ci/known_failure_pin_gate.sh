@@ -201,11 +201,28 @@ STUB
   mkm mf_check_other '//@ check-only' 'error[E200]: SELFTEST_OTHER at stdlib/y.sio:9 (bundle line 9)'
   mkm mf_run_same    '//@ run-pass'   'error[E001]: SELFTEST_PINNED at stdlib/x.sio:7 (bundle line 7)'
   mkm mf_run_other   '//@ run-pass'   'error[E200]: SELFTEST_OTHER at stdlib/y.sio:9 (bundle line 9)'
+  # A new error that comes first, with the pinned diagnostic still inside the
+  # 160-character tail, is a regression, not the known failure. And a pin that
+  # ends in a line number does not match a longer number: ":7" is not ":74".
+  mkm_raw() {  # mkm_raw NAME HEADER OUT-LINE...
+    local n="$1" h="$2"; shift 2
+    { printf '%s\n// stub-rc: 1\n' "$h"; local l; for l in "$@"; do printf '// stub-out: %s\n' "$l"; done
+      printf 'fn main() {}\n'; } > "$tmp/$n.sio"
+    printf '%s\n' "$tmp/$n.sio" >> "$tmp/mlist"
+    printf '%s|error[E001]: SELFTEST_PINNED at stdlib/x.sio:7\n' "$tmp/$n.sio" >> "$tmp/manifest"
+  }
+  mkm_raw mf_run_new_first '//@ run-pass' 'error[E200]: SELFTEST_NEW at t.sio:2 (bundle line 2)' \
+    'error[E001]: SELFTEST_PINNED at stdlib/x.sio:7 (bundle line 7)' 'typecheck: failed'
+  mkm_raw mf_check_longer_line '//@ check-only' \
+    'error[E001]: SELFTEST_PINNED at stdlib/x.sio:74 (bundle line 74)' 'typecheck: failed'
+  mkm_raw mf_run_longer_line '//@ run-pass' \
+    'error[E001]: SELFTEST_PINNED at stdlib/x.sio:74 (bundle line 74)' 'typecheck: failed'
   junit="$tmp/junit-manifest.xml"
   SOUNIO_TEST_SOUC_BIN="$tmp/souc" SOUNIO_TEST_JUNIT_FILE="$junit" \
     SOUNIO_TEST_KNOWN_FAILURES_FILE="$tmp/manifest" \
     bash "$HARNESS" --test-list "$tmp/mlist" --format junit > "$tmp/log-manifest" 2>&1 || true
-  for name in mf_check_same:xfail mf_check_other:fail mf_run_same:xfail mf_run_other:fail; do
+  for name in mf_check_same:xfail mf_check_other:fail mf_run_same:xfail mf_run_other:fail \
+      mf_run_new_first:fail mf_check_longer_line:fail mf_run_longer_line:fail; do
     want="${name#*:}"; name="${name%%:*}"
     got="$(status_of "$junit" "$name")"
     if [[ "$got" != "$want" ]]; then
@@ -224,7 +241,7 @@ STUB
     echo "selftest FAILED: header reader read past a bare // line" >&2
     return 1
   fi
-  echo "known_failure_pin_gate: selftest OK (16 harness cases x 2 modes, 4 manifest-pin cases, header rule)"
+  echo "known_failure_pin_gate: selftest OK (16 harness cases x 2 modes, 7 manifest-pin cases, header rule)"
 }
 
 selftest
