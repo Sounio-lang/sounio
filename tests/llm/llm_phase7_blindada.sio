@@ -1,0 +1,414 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: LLM_PHASE7_BLINDADA_PASS
+//
+// Phase 7 Blindada Verification:
+// Test 1: 7B Global Soundness vs Pairwise Trap + Cone Refinement
+// Test 2: 7C All 4 Orthogonal (val, err, u) PBPK Regimes + Anti-Text-MC
+// Test 3: 7A Artin-Awakened Dual-Register Associator
+
+use llm::mmap::{
+    page_arena_alloc,
+    page_arena_free,
+    page_arena_is_ok,
+    page_arena_ptr,
+}
+use llm::qwen3_quant_eisa::{
+    EisaConeCert,
+    eisa_certify_global,
+    eisa_cone_refine_bf16_cpu,
+}
+use llm::epistemic_clinical_pbpk::{
+    SYNTHETIC_RESEARCH_WITNESS_NOT_MEDICAL_GUIDANCE,
+    EPISTEMIC_REGIME_SAFE_AUTHORIZE,
+    EPISTEMIC_REGIME_NUMERICAL_AUTO_REFINE,
+    EPISTEMIC_REGIME_PHYSICAL_ABSTAIN_TDM,
+    EPISTEMIC_REGIME_DOUBLE_REFINE_THEN_ABSTAIN,
+    EPISTEMIC_REGIME_ALEATORY_ABSTAIN_NO_TDM,
+    ClinicalPbpkParams,
+    ClinicalEpistemicPriors,
+    EpistemicDecisionReceipt,
+    clinical_pbpk_default_params,
+    clinical_pbpk_simulate_auc,
+    clinical_pbpk_auc_closed,
+    rk4_auc_bound_worst_case,
+    clinical_pbpk_evaluate_gate,
+    clinical_pbpk_compare_naive_text_mc,
+    auc_error_bound_is_sound,
+}
+use llm::qwen3_ossm::{
+    qwen3_ossm_dual_associator_l2,
+    qwen3_ossm_dual_step_cpu,
+}
+use tensor2::convert::{
+    f32_bits_to_f64,
+    f64_to_f32_bits,
+}
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+// ----------------------------------------------------------------------------
+// Test 1 (7B Global Soundness vs Pairwise Trap + Cone Refinement)
+// ----------------------------------------------------------------------------
+fn test_global_soundness_and_cone_refinement() -> bool with Alloc, Mut, Div, Panic, IO {
+    let n_vocab: i64 = 8
+    let in_dim: i64 = 1
+    let arena = page_arena_alloc(1024)
+    if !page_arena_is_ok(&arena) {
+        return false
+    }
+    let a_ptr = page_arena_ptr(&arena)
+    let val_ptr = a_ptr
+    let err_ptr = a_ptr + 64
+    let w_ptr = a_ptr + 128
+    let h_ptr = a_ptr + 192
+
+    // Fixture 1: Pairwise trap
+    // val[0]=10.0, err[0]=0.1
+    // val[1]=9.5, err[1]=0.1  (pairwise top1 vs top2 margin = 0.5 > 0.2 -> passes pairwise!)
+    // val[2]=8.5, err[2]=1.6  (val[2]+err[2] = 10.1 > val[0]-err[0] = 9.9 -> global trap!)
+    // true dot product: w[2]*h = 10.05 > w[0]*h = 9.95
+    var i: i64 = 0
+    while i < n_vocab {
+        let _wv = ptr_write_u32_le(val_ptr, i * 4, f64_to_f32_bits(1.0))
+        let _we = ptr_write_u32_le(err_ptr, i * 4, f64_to_f32_bits(0.1))
+        let _ww = ptr_write_u32_le(w_ptr, i * 4, f64_to_f32_bits(1.0))
+        i = i + 1
+    }
+    let _wv0 = ptr_write_u32_le(val_ptr, 0 * 4, f64_to_f32_bits(10.0))
+    let _we0 = ptr_write_u32_le(err_ptr, 0 * 4, f64_to_f32_bits(0.1))
+    let _ww0 = ptr_write_u32_le(w_ptr, 0 * 4, f64_to_f32_bits(9.95))
+
+    let _wv1 = ptr_write_u32_le(val_ptr, 1 * 4, f64_to_f32_bits(9.5))
+    let _we1 = ptr_write_u32_le(err_ptr, 1 * 4, f64_to_f32_bits(0.1))
+    let _ww1 = ptr_write_u32_le(w_ptr, 1 * 4, f64_to_f32_bits(9.5))
+
+    let _wv2 = ptr_write_u32_le(val_ptr, 2 * 4, f64_to_f32_bits(8.5))
+    let _we2 = ptr_write_u32_le(err_ptr, 2 * 4, f64_to_f32_bits(1.6))
+    let _ww2 = ptr_write_u32_le(w_ptr, 2 * 4, f64_to_f32_bits(10.05))
+
+    let _wh0 = ptr_write_u32_le(h_ptr, 0 * 4, f64_to_f32_bits(1.0))
+
+    let cert_initial = eisa_certify_global(val_ptr, err_ptr, n_vocab)
+    let initial_ok = (!cert_initial.strict_global_certified) && (cert_initial.cone_size >= 2)
+
+    let cert_refined = eisa_cone_refine_bf16_cpu(val_ptr, err_ptr, w_ptr, 4, h_ptr, n_vocab, in_dim)
+    let refined_ok = (cert_refined.bf16_rows_touched < 8) && (cert_refined.refined_top1_id == 2) && cert_refined.refined_exact
+
+    // Fixture 2: Wide-margin fixture
+    // val[0]=20.0, err[0]=0.1; all others val[i]=5.0, err[i]=0.1
+    i = 0
+    while i < n_vocab {
+        let _wv = ptr_write_u32_le(val_ptr, i * 4, f64_to_f32_bits(5.0))
+        let _we = ptr_write_u32_le(err_ptr, i * 4, f64_to_f32_bits(0.1))
+        i = i + 1
+    }
+    let _wv0_w = ptr_write_u32_le(val_ptr, 0 * 4, f64_to_f32_bits(20.0))
+    let _we0_w = ptr_write_u32_le(err_ptr, 0 * 4, f64_to_f32_bits(0.1))
+
+    let cert_wide = eisa_cone_refine_bf16_cpu(val_ptr, err_ptr, w_ptr, 4, h_ptr, n_vocab, in_dim)
+    let wide_ok = cert_wide.strict_global_certified && (cert_wide.bf16_rows_touched == 0) && (cert_wide.refined_top1_id == 0)
+
+    let _f = page_arena_free(arena)
+    initial_ok && refined_ok && wide_ok
+}
+
+// ----------------------------------------------------------------------------
+// Test 2 (7C All Orthogonal (val, err, ep, al) PBPK Regimes + Anti-Text-MC)
+// Certification runs off the closed-form enclosure: SAFE when the heuristic
+// rad is quiet, refine-authorize when it is not, abstain attribution
+// otherwise. RK4 stays only as a cross-check against the old loose bound.
+// ----------------------------------------------------------------------------
+fn abs_test(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn test_epistemic_pbpk_regimes_and_witness() -> bool with Mut, Div, Panic {
+    let p = clinical_pbpk_default_params()
+    let priors = ClinicalEpistemicPriors {
+        cl_var: 1.0,
+        kp_var: 0.0001,
+        fu_var: 0.000025,
+        rho_cl_fu: 0.0,
+    }
+    let dose_mg = 5.0
+
+    // Proven bound is honestly flagged as available.
+    let tag_ok = auc_error_bound_is_sound()
+
+    // Regime 1: Safe Authorize — closed-form enclosure (~1e-11) fits a
+    // realistic window and the heuristic rad is quiet, so no refinement.
+    let r1 = clinical_pbpk_evaluate_gate(
+        &p,
+        &priors,
+        dose_mg,
+        0.05,
+        0.0,
+        0.0,
+        0.0,
+        3.0,
+        5.0
+    )
+    let r1_ok = (r1.regime == 1) && (!r1.compute_refined) && (!r1.clinical_abstained) && r1.authorized && (r1.err_sound_initial < 0.001)
+
+    // Regime 2: Numerical Auto Refine — heuristic rad over budget prompts
+    // refinement; the proven enclosure then authorizes.
+    let r2 = clinical_pbpk_evaluate_gate(
+        &p,
+        &priors,
+        dose_mg,
+        0.1,
+        0.50,
+        0.0,
+        0.0,
+        3.0,
+        6.0
+    )
+    let r2_ok = (r2.regime == 2) && r2.compute_refined && (!r2.clinical_abstained) && r2.authorized && (r2.err_final < r2.err_initial) && (r2.err_sound_final < 0.001)
+
+    // Cross-check: RK4 (kept) stays inside the old loose bound and lands
+    // near the closed-form value (the old norm bound must exceed the
+    // observed difference, or it was not sound).
+    let auc_rk4 = clinical_pbpk_simulate_auc(&p, dose_mg, 48.0, 0.05)
+    let auc_closed = clinical_pbpk_auc_closed(&p, dose_mg, 48.0)
+    let cross_diff = abs_test(auc_rk4 - auc_closed)
+    let cross_bound = rk4_auc_bound_worst_case(&p, dose_mg, 0.05)
+    let cross_ok = (cross_diff < 0.01) && (cross_diff < cross_bound)
+
+    // Regime 3: Physical Abstain TDM. ep (priors + u_ep) breaches [3, 5] while
+    // al alone (u_al = 0) fits, so measuring again is the requested action.
+    let small_priors = ClinicalEpistemicPriors {
+        cl_var: 0.0,
+        kp_var: 0.0,
+        fu_var: 0.0,
+        rho_cl_fu: 0.0,
+    }
+    let r3 = clinical_pbpk_evaluate_gate(
+        &p,
+        &small_priors,
+        dose_mg,
+        0.05,
+        0.0,
+        1.5,
+        0.0,
+        3.0,
+        5.0
+    )
+    let r3_ok = (r3.regime == 3) && r3.compute_refined && r3.clinical_abstained && (!r3.authorized)
+
+    // Regime 4: Double Refine Then Abstain (rad-only). Window centred on the
+    // refined value with half-width below the closed-form enclosure (~5e-11);
+    // ep + al = 0 fit, so only rad breaches. Knife-edge by design.
+    let val_rf = clinical_pbpk_simulate_auc(&p, dose_mg, 48.0, 0.025)
+    let margin = 0.000000000001
+    let r4 = clinical_pbpk_evaluate_gate(
+        &p,
+        &small_priors,
+        dose_mg,
+        0.05,
+        0.0,
+        0.0,
+        0.0,
+        val_rf - margin,
+        val_rf + margin
+    )
+    let r4_ok = (r4.regime == 4) && r4.compute_refined && r4.clinical_abstained && (!r4.authorized) && (r4.err_sound_final > margin)
+
+    // Regime 5: Aleatory Abstain (no TDM). al alone breaches [3, 5] while ep
+    // alone fits: measuring again cannot help, so no new measurement is asked.
+    let r5 = clinical_pbpk_evaluate_gate(
+        &p,
+        &small_priors,
+        dose_mg,
+        0.05,
+        0.0,
+        0.0,
+        1.5,
+        3.0,
+        5.0
+    )
+    let r5_ok = (r5.regime == 5) && (r5.regime != 3) && r5.compute_refined && r5.clinical_abstained && (!r5.authorized)
+
+    // Attribution guard: same window, ep-only breach stays TDM (never regime 5).
+    let r5b = clinical_pbpk_evaluate_gate(
+        &p,
+        &small_priors,
+        dose_mg,
+        0.05,
+        0.0,
+        1.5,
+        0.0,
+        3.0,
+        5.0
+    )
+    let r5b_ok = (r5b.regime == 3) && (r5b.regime != 5)
+
+    // Al crosses alone but measurement can still help (centre in val +- ep can
+    // fit with +- al): TDM, not do-not-measure. Cut ep below the fit point
+    // and the same breach becomes do-not-measure.
+    let r6 = clinical_pbpk_evaluate_gate(
+        &p,
+        &small_priors,
+        dose_mg,
+        0.05,
+        0.0,
+        1.0,
+        1.5,
+        -10.0,
+        5.0
+    )
+    let r6_ok = (r6.regime == 3) && (r6.regime != 5)
+    let r6b = clinical_pbpk_evaluate_gate(
+        &p,
+        &small_priors,
+        dose_mg,
+        0.05,
+        0.0,
+        0.1,
+        1.5,
+        -10.0,
+        5.0
+    )
+    let r6b_ok = (r6b.regime == 5) && (r6b.regime != 3)
+
+    // Neither ep nor al crosses alone, both together do: TDM.
+    let r7 = clinical_pbpk_evaluate_gate(
+        &p,
+        &small_priors,
+        dose_mg,
+        0.05,
+        0.0,
+        0.5,
+        0.8,
+        3.0,
+        5.0
+    )
+    let r7_ok = (r7.regime == 3) && r7.clinical_abstained && (!r7.authorized)
+
+    // SYNTHETIC_RESEARCH_WITNESS_NOT_MEDICAL_GUIDANCE guard: kept verbatim in
+    // stdlib/llm/epistemic_clinical_pbpk.sio (const + header comment); not
+    // asserted here because the ARM64 backend cannot lower str_eq.
+    let witness_pass = clinical_pbpk_compare_naive_text_mc()
+
+    tag_ok && r1_ok && r2_ok && cross_ok && r3_ok && r4_ok && r5_ok && r5b_ok && r6_ok && r6b_ok && r7_ok && witness_pass
+}
+
+// ----------------------------------------------------------------------------
+// Test 3 (7A Artin-Awakened Dual-Register Associator)
+// ----------------------------------------------------------------------------
+fn test_artin_dual_associator_and_step() -> bool with Alloc, Mut, Div, Panic, IO {
+    // 8 octonion floats = 32 bytes
+    let arena = page_arena_alloc(1024)
+    if !page_arena_is_ok(&arena) {
+        return false
+    }
+    let a_ptr = page_arena_ptr(&arena)
+    let e1_ptr = a_ptr
+    let e2_ptr = a_ptr + 32
+    let e4_ptr = a_ptr + 64
+
+    let hl1_ptr = a_ptr + 96
+    let hr1_ptr = a_ptr + 128
+    let u1_ptr = a_ptr + 160
+    let dec_ptr = a_ptr + 192
+    let gate1_ptr = a_ptr + 224
+    let c_ptr = a_ptr + 256
+    let y1_ptr = a_ptr + 288
+
+    let hl2_ptr = a_ptr + 320
+    let hr2_ptr = a_ptr + 352
+    let u2_ptr = a_ptr + 384
+    let gate2_ptr = a_ptr + 416
+    let y2_ptr = a_ptr + 448
+
+    var k: i64 = 0
+    while k < 8 {
+        let _z1 = ptr_write_u32_le(e1_ptr, k * 4, 0)
+        let _z2 = ptr_write_u32_le(e2_ptr, k * 4, 0)
+        let _z4 = ptr_write_u32_le(e4_ptr, k * 4, 0)
+
+        let _zh1 = ptr_write_u32_le(hl1_ptr, k * 4, 0)
+        let _zr1 = ptr_write_u32_le(hr1_ptr, k * 4, 0)
+        let _zu1 = ptr_write_u32_le(u1_ptr, k * 4, 0)
+
+        let _zh2 = ptr_write_u32_le(hl2_ptr, k * 4, 0)
+        let _zr2 = ptr_write_u32_le(hr2_ptr, k * 4, 0)
+        let _zu2 = ptr_write_u32_le(u2_ptr, k * 4, 0)
+
+        let _zd = ptr_write_u32_le(dec_ptr, k * 4, 0)
+        let _zg1 = ptr_write_u32_le(gate1_ptr, k * 4, 0)
+        let _zg2 = ptr_write_u32_le(gate2_ptr, k * 4, 0)
+        let _zc = ptr_write_u32_le(c_ptr, k * 4, 0)
+        let _zy1 = ptr_write_u32_le(y1_ptr, k * 4, 0)
+        let _zy2 = ptr_write_u32_le(y2_ptr, k * 4, 0)
+        k = k + 1
+    }
+
+    // e1 has component 1 = 1.0
+    let _we1 = ptr_write_u32_le(e1_ptr, 1 * 4, f64_to_f32_bits(1.0))
+    // e2 has component 2 = 1.0
+    let _we2 = ptr_write_u32_le(e2_ptr, 2 * 4, f64_to_f32_bits(1.0))
+    // e4 has component 4 = 1.0
+    let _we4 = ptr_write_u32_le(e4_ptr, 4 * 4, f64_to_f32_bits(1.0))
+
+    let assoc_l2 = qwen3_ossm_dual_associator_l2(e1_ptr, e2_ptr, e4_ptr, 1)
+    let assoc_diff = abs_f64(assoc_l2 - 2.0)
+    let assoc_ok = assoc_diff < 0.00001
+
+    // Setup step registers:
+    // H_L = e1, H_R = e2, U = e4, C = e0 (component 0 = 1.0)
+    let _w_hl1 = ptr_write_u32_le(hl1_ptr, 1 * 4, f64_to_f32_bits(1.0))
+    let _w_hr1 = ptr_write_u32_le(hr1_ptr, 2 * 4, f64_to_f32_bits(1.0))
+    let _w_u1  = ptr_write_u32_le(u1_ptr,  4 * 4, f64_to_f32_bits(1.0))
+
+    let _w_hl2 = ptr_write_u32_le(hl2_ptr, 1 * 4, f64_to_f32_bits(1.0))
+    let _w_hr2 = ptr_write_u32_le(hr2_ptr, 2 * 4, f64_to_f32_bits(1.0))
+    let _w_u2  = ptr_write_u32_le(u2_ptr,  4 * 4, f64_to_f32_bits(1.0))
+
+    let _w_c = ptr_write_u32_le(c_ptr, 0 * 4, f64_to_f32_bits(1.0))
+
+    // gate1 = -10.0 (near 0, right-associative) vs gate2 = 10.0 (near 1, left-associative)
+    let _w_g1 = ptr_write_u32_le(gate1_ptr, 0 * 4, f64_to_f32_bits(0.0 - 10.0))
+    let _w_g2 = ptr_write_u32_le(gate2_ptr, 0 * 4, f64_to_f32_bits(10.0))
+
+    let s1_ok = qwen3_ossm_dual_step_cpu(hl1_ptr, hr1_ptr, u1_ptr, dec_ptr, gate1_ptr, c_ptr, y1_ptr, 1)
+    let s2_ok = qwen3_ossm_dual_step_cpu(hl2_ptr, hr2_ptr, u2_ptr, dec_ptr, gate2_ptr, c_ptr, y2_ptr, 1)
+
+    var diff_sum: f64 = 0.0
+    k = 0
+    while k < 8 {
+        let v1 = f32_bits_to_f64(ptr_read_u32_le(y1_ptr, k * 4))
+        let v2 = f32_bits_to_f64(ptr_read_u32_le(y2_ptr, k * 4))
+        diff_sum = diff_sum + abs_f64(v1 - v2)
+        k = k + 1
+    }
+    let step_distinct = s1_ok && s2_ok && (diff_sum > 0.01)
+
+    let _f = page_arena_free(arena)
+    assoc_ok && step_distinct
+}
+
+// ----------------------------------------------------------------------------
+// Main Entrypoint
+// ----------------------------------------------------------------------------
+pub fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
+    if !test_global_soundness_and_cone_refinement() {
+        println("LLM_PHASE7_BLINDADA_FAIL: test_global_soundness_and_cone_refinement failed")
+        return 1
+    }
+
+    if !test_epistemic_pbpk_regimes_and_witness() {
+        println("LLM_PHASE7_BLINDADA_FAIL: test_epistemic_pbpk_regimes_and_witness failed")
+        return 2
+    }
+
+    if !test_artin_dual_associator_and_step() {
+        println("LLM_PHASE7_BLINDADA_FAIL: test_artin_dual_associator_and_step failed")
+        return 3
+    }
+
+    println("LLM_PHASE7_BLINDADA_PASS")
+    0
+}

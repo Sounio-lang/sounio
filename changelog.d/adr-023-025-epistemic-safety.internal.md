@@ -1,1 +1,0 @@
-Records ADR-023 (checked indexing, path-conditioned obligations and proof-erased `Panic`), ADR-024 (metrological index obligations and graded `Panic ≤ ε`) and ADR-025 (epistemic decisions with flip budgets, attribution and remeasurement pricing), with their C++23 oracles. Decisions only; implementation follows in separate changes.

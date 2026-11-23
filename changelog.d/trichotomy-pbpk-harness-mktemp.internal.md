@@ -1,0 +1,1 @@
+`scripts/dev/run_sio_test_suite_v2.sh`: compile-fail outputs are now created with a portable `mktemp` template inside the run's temp directory. BSD `mktemp` only replaces trailing `X`s, so on macOS the old `/tmp/sounio-cf-XXXXXX.elf` template produced one literal file name that parallel jobs raced on.

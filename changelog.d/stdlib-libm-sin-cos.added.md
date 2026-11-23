@@ -1,1 +1,0 @@
-`math::libm` gains `libm_sin` and `libm_cos`: Cody-Waite reduction to [-pi/4, pi/4] with a three-piece pi/2 and fdlibm's minimax kernels, within 1 ulp of glibc on 423 points for |x| <= 1.6e6. Outside that domain the reduction is no longer exact (x = 1e16 would give sin ~0.232 against ~0.780), so every |x| > 1.6e6, infinities and NaN return NaN rather than a wrong finite value.

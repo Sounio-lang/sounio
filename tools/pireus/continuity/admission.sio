@@ -2,11 +2,17 @@
 // Protocol v1 is a bounded JSON object: ASCII keys, nonnegative integer values,
 // and one lowercase SHA256 context string. Unknown/duplicate keys are refused.
 use algebra::cayley_dickson::cd_sigma
-use materialize_ptx::emit_lowering_ptx
+use materialize_ptx::{emit_lowering_ptx, emit_lowering_ptx_sm, emit_lowering_ptx_wide}
 use crypto::sha256::{sha256_init, sha256_update, sha256_finalize, SHA256Digest}
+use hardware::pireus::operator_atlas::{
+    PireusOperatorAtlasClassification,
+    pireus_operator_atlas_phase_signs,
+    pireus_operator_atlas_classify,
+    pireus_operator_atlas_frozen_digest,
+}
 
 struct Document {
-    values: [i64; 18],
+    values: [i64; 21],
     seen: i64,
     context: [i64; 64],
     valid: bool,
@@ -30,6 +36,15 @@ fn key_name(i: i64) -> string {
     if i == 15 { return "context" }
     // kind=2 only. The bilinear phase code naming the proposed operator.
     if i == 16 { return "phase" }
+    // Optional, both kinds. 0 (or absent) = sign table, 1 = per-lane fixed add/sub.
+    if i == 17 { return "sign_mode" }
+    // Optional, both kinds. 0 (or absent) = one vector per block, 1 = two vectors per block.
+    if i == 18 { return "pack" }
+    // Optional, both kinds. 1 = ld.global.v2.f64 staging (load=2, SoA, pack=1 only).
+    if i == 19 { return "vector_load" }
+    // Optional, both kinds. 0, 16 (or absent) = gpu_probe.py's 16-thread block;
+    // 32, 64, 128 = the r740-only wide launch (r740_wide_launch.py), never a Spark path.
+    if i == 20 { return "block_threads" }
     "UNKNOWN"
 }
 fn whitespace(c: i64) -> bool { c == 32 || c == 9 || c == 10 || c == 13 }
@@ -39,13 +54,13 @@ fn skip(s: string, p: i64, n: i64) -> i64 with Mut {
     x
 }
 fn parse(s: string, n: i64) -> Document with Mut, Panic, Div {
-    var d = Document { values: [0; 18], seen: 0, context: [0; 64], valid: false }
+    var d = Document { values: [0; 21], seen: 0, context: [0; 64], valid: false }
     if n <= 0 || n > 4096 || str_len(s) != n { return d }
     var p = skip(s, 0, n)
     if p >= n || str_char_at(s, p) != 123 { return d }
     p = p + 1
     var count: i64 = 0
-    while count < 17 {
+    while count < 21 {
         p = skip(s, p, n)
         if p >= n || str_char_at(s, p) != 34 { return d }
         p = p + 1
@@ -58,7 +73,7 @@ fn parse(s: string, n: i64) -> Document with Mut, Panic, Div {
         if p >= n { return d }
         var key: i64 = -1
         var k: i64 = 0
-        while k < 17 {
+        while k < 21 {
             let name = key_name(k)
             if str_len(name) == p - start {
                 var same = true
@@ -171,22 +186,53 @@ fn bilinear(code: i64, x: i64, y: i64) -> i64 with Mut {
 }
 // Structure coefficient of the operator the proposal names.
 // Phase code 0 returns cd_sigma unchanged, so kind=1 is unaffected.
+// Eight hex digits of one 32-bit atlas word, most significant first.
+fn print_word_hex(value: i64) with IO, Mut, Panic {
+    var shift: i64 = 28
+    while shift >= 0 {
+        print_char(hex_char((value >> shift) & 15) as i32)
+        shift = shift - 4
+    }
+}
+fn print_words_hex(words: &[i64; 8]) with IO, Mut, Panic {
+    var w: i64 = 0
+    while w < 8 {
+        print_word_hex(words[w])
+        w = w + 1
+    }
+}
+fn atlas_origin_name(origin: i64) -> string {
+    if origin == 1 { return "V13_BASELINE" }
+    if origin == 2 { return "V13_ADMITTED" }
+    if origin == 3 { return "V1_CORPUS" }
+    "NONE"
+}
 fn sigma_phase(code: i64, a: i64, b: i64) -> i64 with Mut, Panic, Div {
     let base = cd_sigma(a as i32, b as i32, 4) as i64
     if bilinear(code, a, b) == 1 { return 0 - base }
     base
+}
+// "ptx" is the historical sm_121 mode. ptx-sm86 and ptx-sm75 select a header
+// after the same admission checks. They do not admit a new target identity.
+fn mode_sm(mode: string) -> i64 with Mut, Panic {
+    let n = str_len(mode)
+    if n == 3 && str_char_at(mode, 0) == 112 && str_char_at(mode, 1) == 116 && str_char_at(mode, 2) == 120 { return 121 }
+    if n == 8 && str_char_at(mode, 0) == 112 && str_char_at(mode, 1) == 116 && str_char_at(mode, 2) == 120 && str_char_at(mode, 3) == 45 && str_char_at(mode, 4) == 115 && str_char_at(mode, 5) == 109 && str_char_at(mode, 6) == 56 && str_char_at(mode, 7) == 54 { return 86 }
+    if n == 8 && str_char_at(mode, 0) == 112 && str_char_at(mode, 1) == 116 && str_char_at(mode, 2) == 120 && str_char_at(mode, 3) == 45 && str_char_at(mode, 4) == 115 && str_char_at(mode, 5) == 109 && str_char_at(mode, 6) == 55 && str_char_at(mode, 7) == 53 { return 75 }
+    0
 }
 fn refuse(reason: string) -> i32 with IO {
     print("{\"schema\":1,\"authority\":\"Sounio\",\"decision\":\"REFUSE\",\"reason\":\"")
     print(reason); print("\"}\n")
     1
 }
-fn main() -> i32 with IO, Mut, Panic, Div {
+fn main() -> i32 with IO, Mut, Panic, Div, Epistemic {
     if arg_count() != 2 && arg_count() != 3 { return refuse("ARGUMENTS") }
     var materialize = false
+    var sm: i64 = 121
     if arg_count() == 3 {
-        let mode = get_arg(2)
-        if str_len(mode) != 3 || str_char_at(mode, 0) != 112 || str_char_at(mode, 1) != 116 || str_char_at(mode, 2) != 120 { return refuse("MODE") }
+        sm = mode_sm(get_arg(2))
+        if sm == 0 { return refuse("MODE") }
         materialize = true
     }
     let cp = get_arg(0)
@@ -203,7 +249,10 @@ fn main() -> i32 with IO, Mut, Panic, Div {
     // 65087 = fields 0..5 and 9..15 (kind=1). 130623 adds field 16 (kind=2).
     // Fields 6,7,8 stay context-only under both masks.
     if !p.valid { return refuse("PROPOSAL_FORMAT") }
-    if p.seen != 65087 && p.seen != 130623 { return refuse("PROPOSAL_FORMAT") }
+    // Bits 17 (131072) sign_mode, 18 (262144) pack, 19 (524288) vector_load and
+    // 20 (1048576) block_threads are optional keys; absent means 0 and keeps the frozen bytes.
+    let core = p.seen & (0 - 1 - 131072 - 262144 - 524288 - 1048576)
+    if core != 65087 && core != 130623 { return refuse("PROPOSAL_FORMAT") }
     if !hash_matches(hash_text(cs, cn), &p) { return refuse("SNAPSHOT") }
     if c.values[0] != 1 || p.values[0] != 1 { return refuse("SCHEMA") }
     if c.values[1] != 701202 || p.values[1] != c.values[1] { return refuse("TARGET") }
@@ -217,8 +266,8 @@ fn main() -> i32 with IO, Mut, Panic, Div {
     let kind = p.values[9]
     if kind != 1 && kind != 2 { return refuse("KIND") }
     // The phase key is present exactly when kind is 2, and never otherwise.
-    if kind == 1 && p.seen != 65087 { return refuse("KIND_MASK") }
-    if kind == 2 && p.seen != 130623 { return refuse("KIND_MASK") }
+    if kind == 1 && core != 65087 { return refuse("KIND_MASK") }
+    if kind == 2 && core != 130623 { return refuse("KIND_MASK") }
     let phase = p.values[16]
     if kind == 2 && (phase < 0 || phase > 65535) { return refuse("PHASE_RANGE") }
     let stride = p.values[10]
@@ -227,8 +276,36 @@ fn main() -> i32 with IO, Mut, Panic, Div {
     let layout = p.values[13]
     let unroll = p.values[14]
     if stride < 1 || stride > 15 || stride % 2 != 1 || offset > 15 { return refuse("LANE_MAP") }
-    if load > 1 || layout > 1 { return refuse("GRAMMAR") }
+    // load 0 direct, 1 shuffle, 2 staged through shared memory then bar.sync.
+    if load > 2 || layout > 1 { return refuse("GRAMMAR") }
     if unroll != 1 && unroll != 2 && unroll != 4 && unroll != 8 && unroll != 16 { return refuse("UNROLL") }
+    // sign_mode=1 needs j known at compile time, so only the fully unrolled loop admits it.
+    let sign_mode = p.values[17]
+    if sign_mode > 1 { return refuse("SIGN_MODE") }
+    if sign_mode == 1 && unroll != 16 { return refuse("SIGN_MODE_UNROLL") }
+    // pack=1: each 16-thread block computes vectors 2c and 2c+1 (the launch is fixed
+    // at 16 threads by gpu_probe.py, so the pair shares the lanes, not a wider block).
+    let pack = p.values[18]
+    if pack > 1 { return refuse("PACK") }
+    // vector_load=1 loads coefficient k of vectors 2c and 2c+1 with one
+    // ld.global.v2.f64: adjacent only in SoA, and both needed only under pack.
+    let vector_load = p.values[19]
+    if vector_load > 1 { return refuse("VECTOR_LOAD") }
+    if vector_load == 1 && load != 2 { return refuse("VECTOR_LOAD_LOAD") }
+    if vector_load == 1 && layout != 1 { return refuse("VECTOR_LOAD_LAYOUT") }
+    if vector_load == 1 && pack != 1 { return refuse("VECTOR_LOAD_PACK") }
+    // block_threads: 0 or 16 is the historical 16-thread block and changes nothing.
+    // 32, 64 and 128 put threads/16 vectors in one block (32 is the full-warp pack) and
+    // exist only for the r740 launch, so the sm_121 Spark mode refuses them, and the
+    // 16-lane pack and its v2 load are refused there (the wide block replaces them).
+    let block_threads = p.values[20]
+    var wide: i64 = 0
+    if block_threads == 32 { wide = 1 }
+    if block_threads == 64 { wide = 2 }
+    if block_threads == 128 { wide = 3 }
+    if wide == 0 && block_threads != 0 && block_threads != 16 { return refuse("BLOCK_THREADS") }
+    if wide > 0 && pack != 0 { return refuse("BLOCK_THREADS_PACK") }
+    if wide > 0 && materialize && sm == 121 { return refuse("BLOCK_THREADS_TARGET") }
     var required: i64 = 39
     if load == 1 { required = required | 16 }
     if (c.values[6] & required) != required { return refuse("CAPABILITY") }
@@ -285,28 +362,82 @@ fn main() -> i32 with IO, Mut, Panic, Div {
     if materialize {
         // emit_lowering_ptx modulates the signs with the phase twist.
         // For kind=1 twist is 0 (pure Cayley-Dickson); for kind=2 twist is the operator phase.
-        emit_lowering_ptx(stride, offset, load, layout, unroll, twist)
+        if wide > 0 { emit_lowering_ptx_wide(sm, block_threads, stride, offset, load, layout, unroll, twist, sign_mode) }
+        else {
+            if sm == 121 { emit_lowering_ptx(stride, offset, load, layout, unroll, twist, sign_mode, pack, vector_load) }
+            else { emit_lowering_ptx_sm(sm, stride, offset, load, layout, unroll, twist, sign_mode, pack, vector_load) }
+        }
         return 0
     }
-    let plan_id = (((stride * 16 + offset) * 2 + load) * 2 + layout) * 32 + unroll
+    // sign_mode=0, pack=0 and load<2 keep every historical plan_id; each extension adds
+    // its own bit, and load=2 takes bit 18 instead of entering the load digit.
+    var load_digit: i64 = load
+    var staged: i64 = 0
+    if load == 2 {
+        load_digit = 0
+        staged = 1
+    }
+    let plan_id = (((stride * 16 + offset) * 2 + load_digit) * 2 + layout) * 32 + unroll + sign_mode * 65536 + pack * 131072 + staged * 262144 + vector_load * 524288 + wide * 1048576
     if kind == 2 {
-        print("{\"schema\":1,\"authority\":\"Sounio\",\"decision\":\"ADMIT\",\"kind\":\"operator\",\"phase_code\":")
+        // Receipt contract v2 (schema 2): kind=2 receipts carry the
+        // eisa_h.pireus_operator_atlas.v1 classification. The sign table is
+        // rebuilt from this engine's own sigma_phase and must equal the
+        // atlas's reading of the same phase code before anything is classified.
+        var signs: [i64; 256] = [0; 256]
+        var cell: i64 = 0
+        while cell < 256 {
+            let left = cell / 16
+            let right = cell - left * 16
+            if sigma_phase(phase, left, right) < 0 { signs[cell as usize] = 1 }
+            cell = cell + 1
+        }
+        let atlas_signs = pireus_operator_atlas_phase_signs(phase)
+        cell = 0
+        while cell < 256 {
+            if atlas_signs[cell as usize] != signs[cell as usize] { return refuse("ATLAS_TABLE") }
+            cell = cell + 1
+        }
+        let atlas = pireus_operator_atlas_classify(&signs)
+        if !atlas.valid { return refuse("ATLAS") }
+        print("{\"schema\":2,\"authority\":\"Sounio\",\"decision\":\"ADMIT\",\"kind\":\"operator\",\"phase_code\":")
         print_int(phase)
         print(",\"plan_id\":")
         print_int(plan_id)
+        if sign_mode == 1 { print(",\"sign_mode\":1") }
+        if pack == 1 { print(",\"pack\":1") }
+        if load == 2 { print(",\"load\":2") }
+        if vector_load == 1 { print(",\"vector_load\":1") }
+        if wide > 0 { print(",\"block_threads\":"); print_int(block_threads) }
         print(",\"tensor_components\":4096,\"tensor_encoding\":\"cd16-abk-offset1-v1\",\"tensor_sha256\":\"")
         print_digest(sha256_finalize(state))
         print("\",\"context_sha256\":\""); print_digest(hash_text(cs, cn))
         print("\",\"proposal_sha256\":\""); print_digest(hash_text(ps, pn))
-        // This engine establishes well-definedness only. Novelty needs the
-        // GL(4,2) atlas and is decided by eisa_h.pireus_operator_atlas.v1.
-        print("\",\"novelty\":\"NOT_CLASSIFIED\"")
+        // Novelty is relative to the 65 atlas references under GL(4,F2) x
+        // input swap x sign gauge only. N2 is bounded quotient separation;
+        // scientific/historical novelty and claim readiness stay false here.
+        print("\",\"novelty\":\"N"); print_int(atlas.level)
+        print("\",\"novelty_scope\":\"GL4_F2_X_INPUT_SWAP_X_SIGN_GAUGE_VS_V13_62_AND_V1_CORPUS_3\"")
+        print(",\"atlas_class\":"); print_int(atlas.class_id)
+        print(",\"atlas_origin\":\""); print(atlas_origin_name(atlas.origin))
+        print("\",\"canonical_table\":\""); print_words_hex(&atlas.words)
+        print("\",\"canonical_matrix\":"); print_int(atlas.matrix)
+        print(",\"canonical_swap\":"); print_int(atlas.swap)
+        print(",\"canonical_gauge\":"); print_int(atlas.gauge)
+        let atlas_digest = pireus_operator_atlas_frozen_digest()
+        print(",\"atlas_v13_semantics_sha256\":\"0a4b2c35fde7724ea687055f1d8a5628353ed35147b90ad909a7e9fd528f9f7c\"")
+        print(",\"atlas_class_digest\":\""); print_words_hex(&atlas_digest)
+        print("\",\"scientific_novelty\":false,\"historical_novelty\":false")
         print(",\"classifier\":\"eisa_h.pireus_operator_atlas.v1\"")
         print(",\"fp_parity\":\"UNMEASURED\",\"claim_ready\":false,\"formal_v13_v14\":\"OPEN\"}\n")
         return 0
     }
     print("{\"schema\":1,\"authority\":\"Sounio\",\"decision\":\"ADMIT\",\"kind\":\"lowering\",\"plan_id\":")
     print_int(plan_id)
+    if sign_mode == 1 { print(",\"sign_mode\":1") }
+    if pack == 1 { print(",\"pack\":1") }
+    if load == 2 { print(",\"load\":2") }
+    if vector_load == 1 { print(",\"vector_load\":1") }
+    if wide > 0 { print(",\"block_threads\":"); print_int(block_threads) }
     print(",\"tensor_components\":4096,\"tensor_encoding\":\"cd16-abk-offset1-v1\",\"tensor_sha256\":\"")
     print_digest(sha256_finalize(state))
     print("\",\"context_sha256\":\""); print_digest(hash_text(cs, cn))

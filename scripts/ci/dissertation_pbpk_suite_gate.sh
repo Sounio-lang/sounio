@@ -234,9 +234,12 @@ TESTS_PENDING_REGRESSION=()
 # matching compile_error_pattern (a fixed string); anything else fails.
 # Format: name|engine|src|expected_rc|diagnostic_count|timeout_s|compile_error_count|compile_error_pattern|diagnostic
 TESTS_EXPECTED_FAIL_HONEST=(
-  # Saltelli estimator output violates S_i <= S_Ti in both self-tests
-  # (rapamycin and semaglutide TEST 7; stdlib/epistemic/sobol.sio not yet
-  # repaired). See docs/dissertation/results/sobol_pce_semaglutide_v2.md.
+  # Saltelli estimator output violates the strict S_i <= S_Ti check in both
+  # self-tests (rapamycin and semaglutide TEST 7). Since the sample-matrix
+  # fix in stdlib/epistemic/sobol.sio (2026-11-14) the excesses are at
+  # sampling level (<= 0.011); the module applies no tolerance because it
+  # computes no standard error. See
+  # docs/dissertation/results/sobol_pce_semaglutide_v2.md.
   # Engine: lean_single. Madaros refuses the module at type check (E259
   # "struct field is private", measured 2026-10-06), so the recorded defect
   # is not observable there. The module reads no compiler-native variance.

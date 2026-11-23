@@ -1,1 +1,0 @@
-The multi-ontology gate now waits on each driver worker by PID instead of with a bare `wait -n`, so a reaped process substitution or an already-reaped worker can no longer report "at least one worker exited unsuccessfully" when every verdict is PASS.

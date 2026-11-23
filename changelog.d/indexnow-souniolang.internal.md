@@ -1,1 +1,0 @@
-Production deploys of souniolang.org notify IndexNow after the Vercel production deployment succeeds. The job stays green when IndexNow does not answer 200 or 202, and the sitemap snapshot is kept only after an accepted submission.
