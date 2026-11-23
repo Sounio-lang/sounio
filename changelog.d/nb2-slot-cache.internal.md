@@ -1,0 +1,1 @@
+Reuse one exact successful NB2 scalar result per likelihood slot, invalidate on reset and failures, and preserve existing numerical formulas and availability. Add bit-identity controls and paired real-profile timing receipts for both compiler pins.

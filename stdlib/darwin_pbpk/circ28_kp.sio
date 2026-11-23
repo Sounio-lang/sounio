@@ -1,0 +1,390 @@
+// stdlib/darwin_pbpk/circ28_kp.sio — Rodgers & Rowland tissue:plasma partition
+// coefficients for the 13 organs of the circ28 kernel
+//
+// Plain f64 and fixed arrays; no Knowledge types. Output is Kp, the ratio of
+// total tissue concentration to TOTAL plasma concentration, Kp_i = fu * Kpu_i,
+// for organs 1..13 in circ28 order (1 liver, 2 kidney, 3 brain, 4 heart,
+// 5 lung, 6 muscle, 7 adipose, 8 gut, 9 skin, 10 bone, 11 spleen, 12 pancreas,
+// 13 rest); index 0 is unused and 0.
+//
+// Method
+//   Rodgers T, Leahy D, Rowland M (2005) J Pharm Sci 94:1259-1276
+//       moderate-to-strong bases (a pKa >= 7): electrostatic binding to acidic
+//       phospholipids, association constant Ka derived from the blood:plasma
+//       ratio through the red-blood-cell equation.
+//   Rodgers T, Rowland M (2006) J Pharm Sci 95:1238-1257
+//       acids, very weak bases, neutrals, zwitterions: binding to tissue
+//       albumin (acids, very weak bases, zwitterions) or lipoprotein (neutrals).
+//       The 2006 abstract (PMID 16639716) assigns acidic phospholipids to
+//       "zwitterions with a highly basic functionality", proteins to the rest.
+//
+//   X, Y, Z are 1 + the ionised terms at the pH of intracellular water (7.0),
+//   plasma (7.4) and red cells (7.22); "ionised terms" = every charged species'
+//   concentration over the neutral one (monoprotic acid 10^(pH-pKa), monoprotic
+//   base 10^(pKa-pH), diprotic base 10^(pKa2-pH) + 10^(pKa1+pKa2-2pH) with pKa2
+//   the larger, zwitterion 10^(pKa_base-pH) + 10^(pH-pKa_acid)).
+//
+//   route 2 (acids, neutrals, very weak bases, zwitterions with basic pKa < 7):
+//     Kpu = fEW + fIW X/Y + [P fNL + (0.3 P + 0.7) fNP]/Y
+//           + (1/fu - 1 - [P fNLp + (0.3 P + 0.7) fNPp]/Y) * PR_T/PR_P
+//   route 1 (any basic pKa >= 7, zwitterions included):
+//     Kpu = fEW + fIW X/Y + [P fNL + (0.3 P + 0.7) fNP]/Y + Ka [AP-]_T (X-1)/Y
+//     Kpu_BC = (bp - 1 + Hct) / (Hct fu)            (red-cell : plasma water)
+//     Ka     = (Kpu_BC - fIW_BC Z/Y - [P fNL_BC + (0.3 P + 0.7) fNP_BC]/Y)
+//              * Y / ([AP-]_BC (Z-1))
+//   Adipose uses the vegetable-oil:water coefficient in place of the octanol:water
+//   one in the lipid terms (logP_vo = 1.115 logP - 1.35 unless given).
+//
+// VALIDATION (tests/run-pass/circ28_kp_rodgers_rowland.sio, section P and X1)
+//   Reproduced per tissue, to 1-4 %, against rat Kpu transcribed from the Utsey
+//   et al. 2020 repository (labelled "reported" R&R values; primary tables not
+//   opened): bisoprolol-R and acebutolol-R (strong bases), cefazolin (acid),
+//   enoxacin (zwitterion). Equations cross-checked against PK-Sim's formula text
+//   (github.com/Open-Systems-Pharmacology/PK-Sim, src/Db/Dump/PKSimDB_dump.txt
+//   lines 2991-3029) for diprotic bases and zwitterions in both routes.
+//   Changes made by that validation:
+//     - the acidic-phospholipid term uses the full ionised sum (X-1, Z-1), so for a
+//       zwitterion it includes the anionic species; the cation-only form was 17-28 %
+//       high for enoxacin;
+//     - very weak bases (basic pKa < 7) and zwitterions without a strong base use
+//       albumin, not lipoprotein; only neutrals use lipoprotein (alfentanil: rms
+//       ln error 12 % with lipoprotein, 6.6 % with albumin);
+//     - intracellular water is the R&R 2006 rat table (PK-Sim DB), not the 2005
+//       table: cefazolin rms ln error 4.7 % -> 1.3 %.
+//   Not reproduced: phenobarbital, ethoxybenzamide (script inputs pKa 7.4, fu 0.5
+//   give rms ln error 4.9 % and 3.4 %); no numerical target exists for diprotic
+//   bases (equations only).
+//
+// Clamps: a negative protein term (very lipophilic drug with fu near 1) and a
+// negative Ka (blood:plasma ratio below what the lipid terms alone give) are
+// set to 0, as in PK-Sim (Max(0; ...)).
+//
+// TISSUE COMPOSITION (fractional tissue volumes; R&R tabulate rat tissue and the
+// papers apply it unchanged to human; the 70 kg human organ volumes are in
+// circ28.sio). Default record = the R&R 2006 rat table as held in the PK-Sim
+// database (TissueComposition_PKSim, Rat), with muscle [AP-] 1.53:
+//   fEW, fNL, fNP, AR, LR   PK-Sim DB = Nagar & Korzekwa 2016 T2 = Coutinho 2024 T3
+//                           (neutral lipid / phospholipid differ in the third
+//                           decimal between the 2005 and 2006 tables; 2006 used)
+//   fIW  R&R 2006 values (PK-Sim DB): liver 0.481 kidney 0.399 brain 0.591 heart
+//        0.248 lung 0.238 muscle 0.608 adipose 0.009 gut 0.456 skin 0.276 bone 0.317
+//        spleen 0.355 pancreas 0.521. The 2005 table (heart 0.456, lung 0.446 ...)
+//        is what reproduces the 2005 bases paper; the 2006 table reproduces the
+//        2006 paper. Pass a different Circ28KpComp to the *_comp functions to use
+//        either (see the test, mk2005).
+//   [AP-] mg/g  PK-Sim DB; muscle 1.53 (2005 table; rat DB holds 1.5). The value
+//        2.42 is the human value of the R&R 2007 revision (PK-Sim DB, Human) and
+//        does not reproduce the published rat muscle Kpu (ratio 1.47 for bisoprolol).
+//   rest = muscle composition (surrogate; R&R group bone + rest).
+// Blood cells: fIW 0.603, fNL 0.0017, fNP 0.0029, [AP-] 0.5 mg/g; plasma fNL 0.0023,
+// fNP 0.0013 (R&R 2005/2006; reproduce the published values). The R&R 2007 set
+// (PK-Sim DB, Human: 0.63, 0.0012, 0.0033, 0.57; plasma 0.0032, 0.0021) belongs
+// with the 2007 muscle value 2.42 and must not be mixed with the 2005/2006 tissue
+// table: on bisoprolol it lowers kidney Kpu by 13 % against the published value.
+// pH 7.0 / 7.4 / 7.22 and Hct 0.45 as in the papers. PK-Sim is GPL-2.0; only
+// numerical values, which are the papers' data, are used here.
+
+use darwin_pbpk::circ28::*
+use math::pure::{exp}
+
+// Ionisation classes
+pub fn circ28_kp_neutral() -> i32 { return 0 }
+pub fn circ28_kp_acid() -> i32 { return 1 }          // monoprotic acid, pka1
+pub fn circ28_kp_base() -> i32 { return 2 }          // monoprotic base, pka1
+pub fn circ28_kp_dibase() -> i32 { return 3 }        // diprotic base, pka1 < pka2
+pub fn circ28_kp_zwitterion() -> i32 { return 4 }    // pka1 acidic, pka2 basic
+
+pub struct Circ28KpDrug {
+    pub logp: f64,          // octanol:water, neutral species
+    pub pka1: f64,
+    pub pka2: f64,
+    pub ion_class: i32,
+    pub fu: f64,            // unbound fraction in plasma
+    pub bp: f64,            // blood:plasma concentration ratio
+    pub logp_vo: f64,       // vegetable oil:water, used only when has_logp_vo
+    pub has_logp_vo: bool,
+}
+
+pub fn circ28_kp_drug(logp: f64, pka1: f64, pka2: f64, ion_class: i32, fu: f64, bp: f64) -> Circ28KpDrug {
+    return Circ28KpDrug { logp: logp, pka1: pka1, pka2: pka2, ion_class: ion_class, fu: fu, bp: bp, logp_vo: 0.0, has_logp_vo: false }
+}
+
+fn kp_pow10(x: f64) -> f64 with Mut, Div, Panic { return exp(x * 2.302585092994046) }
+
+pub fn circ28_kp_hct() -> f64 { return 0.45 }
+pub fn circ28_kp_ph_iw() -> f64 { return 7.0 }
+pub fn circ28_kp_ph_plasma() -> f64 { return 7.4 }
+pub fn circ28_kp_ph_rbc() -> f64 { return 7.22 }
+
+// Composition accessors (organ i in circ28 order).
+pub fn circ28_kp_few(i: i32) -> f64 {
+    if i == 1 { return 0.161 }
+    if i == 2 { return 0.273 }
+    if i == 3 { return 0.162 }
+    if i == 4 { return 0.320 }
+    if i == 5 { return 0.336 }
+    if i == 6 { return 0.118 }
+    if i == 7 { return 0.135 }
+    if i == 8 { return 0.282 }
+    if i == 9 { return 0.382 }
+    if i == 10 { return 0.100 }
+    if i == 11 { return 0.207 }
+    if i == 12 { return 0.120 }
+    return 0.118
+}
+
+pub fn circ28_kp_fiw(i: i32) -> f64 {
+    if i == 1 { return 0.481 }
+    if i == 2 { return 0.399 }
+    if i == 3 { return 0.591 }
+    if i == 4 { return 0.248 }
+    if i == 5 { return 0.238 }
+    if i == 6 { return 0.608 }
+    if i == 7 { return 0.009 }
+    if i == 8 { return 0.456 }
+    if i == 9 { return 0.276 }
+    if i == 10 { return 0.317 }
+    if i == 11 { return 0.355 }
+    if i == 12 { return 0.521 }
+    return 0.608
+}
+
+pub fn circ28_kp_fnl(i: i32) -> f64 {
+    if i == 1 { return 0.0135 }
+    if i == 2 { return 0.0121 }
+    if i == 3 { return 0.0391 }
+    if i == 4 { return 0.0135 }
+    if i == 5 { return 0.0215 }
+    if i == 6 { return 0.0100 }
+    if i == 7 { return 0.853 }
+    if i == 8 { return 0.0375 }
+    if i == 9 { return 0.0603 }
+    if i == 10 { return 0.0174 }
+    if i == 11 { return 0.0071 }
+    if i == 12 { return 0.0403 }
+    return 0.0100
+}
+
+pub fn circ28_kp_fnp(i: i32) -> f64 {
+    if i == 1 { return 0.0238 }
+    if i == 2 { return 0.0240 }
+    if i == 3 { return 0.0015 }
+    if i == 4 { return 0.0106 }
+    if i == 5 { return 0.0123 }
+    if i == 6 { return 0.0072 }
+    if i == 7 { return 0.0016 }
+    if i == 8 { return 0.0124 }
+    if i == 9 { return 0.0044 }
+    if i == 10 { return 0.0016 }
+    if i == 11 { return 0.0107 }
+    if i == 12 { return 0.0090 }
+    return 0.0072
+}
+
+// mg/g
+pub fn circ28_kp_ap(i: i32) -> f64 {
+    if i == 1 { return 4.56 }
+    if i == 2 { return 5.03 }
+    if i == 3 { return 0.40 }
+    if i == 4 { return 2.25 }
+    if i == 5 { return 3.91 }
+    if i == 6 { return 1.53 }
+    if i == 7 { return 0.40 }
+    if i == 8 { return 2.41 }
+    if i == 9 { return 1.32 }
+    if i == 10 { return 0.67 }
+    if i == 11 { return 3.18 }
+    if i == 12 { return 1.67 }
+    return 1.53
+}
+
+pub fn circ28_kp_albumin_ratio(i: i32) -> f64 {
+    if i == 1 { return 0.086 }
+    if i == 2 { return 0.130 }
+    if i == 3 { return 0.048 }
+    if i == 4 { return 0.157 }
+    if i == 5 { return 0.212 }
+    if i == 6 { return 0.064 }
+    if i == 7 { return 0.049 }
+    if i == 8 { return 0.158 }
+    if i == 9 { return 0.277 }
+    if i == 10 { return 0.100 }
+    if i == 11 { return 0.097 }
+    if i == 12 { return 0.060 }
+    return 0.064
+}
+
+pub fn circ28_kp_lipoprotein_ratio(i: i32) -> f64 {
+    if i == 1 { return 0.161 }
+    if i == 2 { return 0.137 }
+    if i == 3 { return 0.041 }
+    if i == 4 { return 0.160 }
+    if i == 5 { return 0.168 }
+    if i == 6 { return 0.059 }
+    if i == 7 { return 0.068 }
+    if i == 8 { return 0.141 }
+    if i == 9 { return 0.096 }
+    if i == 10 { return 0.050 }
+    if i == 11 { return 0.207 }
+    if i == 12 { return 0.060 }
+    return 0.059
+}
+
+// Tissue-composition record. circ28_kp_comp_default() holds the human table of
+// this module; a different record (for example the rat tables of the papers, used
+// to reproduce published values) can be passed to the *_comp functions.
+pub struct Circ28KpComp {
+    pub few: [f64; 14],
+    pub fiw: [f64; 14],
+    pub fnl: [f64; 14],
+    pub fnp: [f64; 14],
+    pub ap: [f64; 14],
+    pub ar: [f64; 14],
+    pub lr: [f64; 14],
+    pub rbc_fiw: f64,
+    pub rbc_fnl: f64,
+    pub rbc_fnp: f64,
+    pub rbc_ap: f64,
+    pub pl_fnl: f64,
+    pub pl_fnp: f64,
+}
+
+pub fn circ28_kp_comp_default() -> Circ28KpComp with Mut {
+    var c = Circ28KpComp {
+        few: [0.0; 14], fiw: [0.0; 14], fnl: [0.0; 14], fnp: [0.0; 14],
+        ap: [0.0; 14], ar: [0.0; 14], lr: [0.0; 14],
+        rbc_fiw: 0.603, rbc_fnl: 0.0017, rbc_fnp: 0.0029, rbc_ap: 0.5,
+        pl_fnl: 0.0023, pl_fnp: 0.0013
+    }
+    var i: i32 = 1
+    while i < 14 {
+        c.few[i] = circ28_kp_few(i)
+        c.fiw[i] = circ28_kp_fiw(i)
+        c.fnl[i] = circ28_kp_fnl(i)
+        c.fnp[i] = circ28_kp_fnp(i)
+        c.ap[i] = circ28_kp_ap(i)
+        c.ar[i] = circ28_kp_albumin_ratio(i)
+        c.lr[i] = circ28_kp_lipoprotein_ratio(i)
+        i = i + 1
+    }
+    return c
+}
+
+// 1 + the ionised terms at pH ph (X, Y, Z of the papers).
+fn kp_xfull(d: Circ28KpDrug, ph: f64) -> f64 with Mut, Div, Panic {
+    let c = d.ion_class
+    if c == 1 { return 1.0 + kp_pow10(ph - d.pka1) }
+    if c == 2 { return 1.0 + kp_pow10(d.pka1 - ph) }
+    if c == 3 { return 1.0 + kp_pow10(d.pka2 - ph) + kp_pow10(d.pka1 + d.pka2 - 2.0 * ph) }
+    if c == 4 { return 1.0 + kp_pow10(d.pka2 - ph) + kp_pow10(ph - d.pka1) }
+    return 1.0
+}
+
+// Route 1 (acidic phospholipid) applies when the drug has a basic pKa >= 7
+// (PK-Sim: "at least one basic pKa >= 7"; for a zwitterion the basic one).
+fn kp_strong_base(d: Circ28KpDrug) -> bool {
+    if d.ion_class == 2 { return d.pka1 >= 7.0 }
+    if d.ion_class == 3 { return d.pka2 >= 7.0 }
+    if d.ion_class == 4 { return d.pka2 >= 7.0 }
+    return false
+}
+
+// Octanol:water P for every tissue but adipose; vegetable oil:water for adipose.
+fn kp_pvo(d: Circ28KpDrug) -> f64 with Mut, Div, Panic {
+    if d.has_logp_vo { return kp_pow10(d.logp_vo) }
+    return kp_pow10(1.115 * d.logp - 1.35)
+}
+
+// Association constant with acidic phospholipids, from bp through the red-cell
+// equation (route 1 only). Clamped at 0. The AP term uses the full ionised sum
+// (X - 1, Z - 1 in the notation with the leading 1): for a zwitterion that
+// includes the anionic term, as in PK-Sim and in the Utsey et al. R code.
+pub fn circ28_kp_ka_ap_comp(d: Circ28KpDrug, c: Circ28KpComp) -> f64 with Mut, Div, Panic {
+    let p = kp_pow10(d.logp)
+    let hct = circ28_kp_hct()
+    let y = kp_xfull(d, circ28_kp_ph_plasma())
+    let z = kp_xfull(d, circ28_kp_ph_rbc())
+    let zi = z - 1.0
+    if !(zi > 0.0) { return 0.0 }
+    let kpu_bc = (d.bp - 1.0 + hct) / (hct * d.fu)
+    let lip_bc = p * c.rbc_fnl + (0.3 * p + 0.7) * c.rbc_fnp
+    let ka = (kpu_bc - c.rbc_fiw * z / y - lip_bc / y) * y / (c.rbc_ap * zi)
+    if ka < 0.0 { return 0.0 }
+    return ka
+}
+
+pub fn circ28_kp_ka_ap(d: Circ28KpDrug) -> f64 with Mut, Div, Panic {
+    return circ28_kp_ka_ap_comp(d, circ28_kp_comp_default())
+}
+
+// Kpu (tissue : unbound plasma) of organ i, 1..13, for composition c.
+pub fn circ28_kpu_rr_comp(d: Circ28KpDrug, c: Circ28KpComp, i: i32) -> f64 with Mut, Div, Panic {
+    var p = kp_pow10(d.logp)
+    if i == 7 { p = kp_pvo(d) }
+    let x = kp_xfull(d, circ28_kp_ph_iw())
+    let y = kp_xfull(d, circ28_kp_ph_plasma())
+    let lip = p * c.fnl[i] + (0.3 * p + 0.7) * c.fnp[i]
+    let base = c.few[i] + c.fiw[i] * x / y + lip / y
+    if kp_strong_base(d) {
+        let ka = circ28_kp_ka_ap_comp(d, c)
+        return base + ka * c.ap[i] * (x - 1.0) / y
+    }
+    // route 2: lipoprotein for neutrals only; albumin for acids, very weak bases
+    // (basic pKa < 7) and zwitterions without a strong base. The plasma lipid
+    // term uses the octanol P in every organ.
+    var pr = c.ar[i]
+    if d.ion_class == 0 { pr = c.lr[i] }
+    let pp = kp_pow10(d.logp)
+    let lip_p = pp * c.pl_fnl + (0.3 * pp + 0.7) * c.pl_fnp
+    var bind = 1.0 / d.fu - 1.0 - lip_p / y
+    if bind < 0.0 { bind = 0.0 }
+    return base + bind * pr
+}
+
+pub fn circ28_kpu_rr(d: Circ28KpDrug, i: i32) -> f64 with Mut, Div, Panic {
+    return circ28_kpu_rr_comp(d, circ28_kp_comp_default(), i)
+}
+
+// Kp (tissue : total plasma) for organs 1..13; index 0 unused.
+pub fn circ28_kp_rr_comp(d: Circ28KpDrug, c: Circ28KpComp) -> [f64; 14] with Mut, Div, Panic {
+    var kp: [f64; 14] = [0.0; 14]
+    var i: i32 = 1
+    while i < 14 {
+        kp[i] = d.fu * circ28_kpu_rr_comp(d, c, i)
+        i = i + 1
+    }
+    return kp
+}
+
+pub fn circ28_kp_rr(d: Circ28KpDrug) -> [f64; 14] with Mut, Div, Panic {
+    return circ28_kp_rr_comp(d, circ28_kp_comp_default())
+}
+
+// All tissue Kp multiplied by one scalar (index 0 stays 0).
+pub fn circ28_kp_scaled(kp: [f64; 14], scale: f64) -> [f64; 14] with Mut {
+    var out: [f64; 14] = [0.0; 14]
+    var i: i32 = 1
+    while i < 14 {
+        out[i] = kp[i] * scale
+        i = i + 1
+    }
+    return out
+}
+
+// The scalar s with circ28_vss_plasma(p with kp -> s*kp) = vss_target (L).
+//   vss = bp * V_blood + s * sum_i V_i (1 - vf_i) kp_i      (closed form)
+// Returns -1.0 if vss_target < bp * V_blood (the blood-only floor; no
+// non-negative scalar reaches it) and -2.0 if sum_i V_i (1 - vf_i) kp_i is not
+// positive (the scalar has no effect). At vss_target == floor the scalar is 0.
+pub fn circ28_kp_scale_for_vss(p: Circ28Params, kp: [f64; 14], vss_target: f64) -> f64 with Mut, Div {
+    let floor = p.bp * circ28_blood_volume(p)
+    if vss_target < floor { return 0.0 - 1.0 }
+    var tissue = 0.0
+    var i: i32 = 1
+    while i < 14 {
+        tissue = tissue + p.v[i] * (1.0 - p.vf[i]) * kp[i]
+        i = i + 1
+    }
+    if !(tissue > 0.0) { return 0.0 - 2.0 }
+    return (vss_target - floor) / tissue
+}

@@ -1,0 +1,549 @@
+// stdlib/darwin_pbpk/circ28_drug_semaglutide.sio — semaglutide on the circ28 kernel,
+// and the engine shared with circ28_drug_tirzepatide.sio (functions pep_*).
+//
+// WHAT THIS TESTS THAT THE PREVIOUS KERNEL COULD NOT REPRESENT. A volume of
+// distribution below 8.6 L. Semaglutide (>99 % bound to albumin, fu 0.36 %) stays
+// in plasma and the interstitial albumin space; it does not enter red cells or
+// cells. Its volume is the plasma volume (3.0 L here) plus the interstitial
+// albumin-bound pool; the published population volume (Vc + Vp) is 7.7 L.
+//
+// MODEL (the same for semaglutide and tirzepatide; only the numbers differ)
+//   bp        blood:plasma = 1 - Hct, Hct = 0.434 = red cells / total blood volume
+//             (ICRP 89 Table 2.12, 2300/5300; physiology_primary.md s.5). With the
+//             kernel blood volume 5.3 L the plasma volume is bp V_blood = 3.000 L,
+//             which is the plasma volume Nordell 2026 uses (3.0 L). Venous Hct 0.47
+//             (PK-Sim, secondary) gives bp 0.53 and bounds the uncertainty. Rat
+//             blood:plasma "approximately 0.5" (EPAR; no value for human) is the
+//             same order: Hct 0.45 in a rat would give 0.55.
+//   Kp_i      NOT Rodgers-Rowland. tissue:plasma (total, per tissue volume):
+//               Kp_i = share_i (fu + (1 - fu) r_int)
+//             share_i = interstitial fraction of the non-vascular tissue space
+//             (PK-Sim int/(1 - vas), physiology_primary.md s.4, SECONDARY source,
+//             origin not verified; brain 0.004 means albumin does not enter it); r_int
+//             = interstitial:plasma CONCENTRATION ratio of the albumin-bound drug =
+//             0.37 (PK-Sim organism-level interstitial:plasma protein ratio,
+//             physiology_primary.md s.4, SECONDARY); the free drug is at the
+//             unbound plasma concentration, hence the fu term; the cellular term is
+//             zero (Nordell 2026: peptides do not enter cells). The "rest" organ
+//             has no PK-Sim share; it takes the volume-weighted mean of the 12 others.
+//             NO scalar is fitted to V_ss: V_ss = bp V_blood + sum V_t Kp is a
+//             PREDICTION, compared in the test with (a) the population Vc + Vp and
+//             (b) the Nordell relation Vss = 7.2 + 11 fu L (see below).
+//   Exchange  permeability-limited, ONE scalar: the sum of the organ ps equals the
+//             inter-compartmental clearance Q of the population model, shared over
+//             the organs in proportion to V_t Kp (every organ then has the same
+//             equilibration time constant and the kernel behaves, for plasma, as a
+//             two-compartment model with that Q). This is the ONE fitted parameter
+//             of the exchange (status 3: set equal to the observable Q); the
+//             distribution half-life that results is a check, not a second fit.
+//             THE KERNEL HAS NO LYMPH RETURN PATH. Large molecules cross the
+//             endothelium by convection and return by lymph; here the exchange is a
+//             symmetric transfer ps (C/bp - T/Kp). That gives the right steady state
+//             and, once Q is matched, the right plasma curve, but NOT the route:
+//             (i) all organs share one time constant, whereas organ lymph flows
+//             differ by more than 100-fold (Niederalt, in gaps_D3 only, not opened
+//             here); the interstitial (peripheral) time courses are therefore not
+//             predictions; (ii) the plasma-to-interstitium flux of the bound drug is
+//             really about J_lymph r_int Cp, so a fitted Q is an effective
+//             clearance, not a measured permeability, and will not transfer to a
+//             different protein-binding state; (iii) the subcutaneous depot is
+//             modelled as draining into the venous pool, whereas the real route is
+//             lymph and capillaries of the injection site.
+//   Elimination  cl_plasma (catabolism: proteolysis and beta-oxidation, "not
+//             confined to specific organs", Jensen 2017) acts on VENOUS PLASMA. That
+//             is a simplification: the real sites are endothelium, liver, kidney and
+//             other tissues, not the venous pool. It makes the elimination site
+//             independent of the tissue distribution, which is acceptable only
+//             because the model is judged by plasma data. cl_plasma = CL_total -
+//             CL_renal; CL_renal = measured intact fraction of the dose in urine;
+//             no hepatic intrinsic clearance (clint = clform = clint_gut = 0).
+//   Dosing    subcutaneous: first-order absorption from a depot into the venous
+//             pool (circ28_step_src, state 0) at rate ka F D exp(-ka t). The mass
+//             over each step is F D (L(t0) - L(t1)) with L = exp(-ka t) from
+//             math::pure::exp (the earlier Taylor exp failed for ka t > 4), so the
+//             total input is F D (1 - exp(-ka T)) exactly. Doses at t = 168 k h.
+//
+// ABSOLUTE OR APPARENT. Every clearance and volume below is labelled.
+//   CL (population model, Overgaard 2019 Table 4): ABSOLUTE (IV data in the model;
+//     Table 5 of the same paper lists CL/F = 0.0411 for a healthy 85 kg subject =
+//     0.0348 / 0.847, which also shows that 0.0348 is the HEALTHY reference
+//     subject, although the text calls it "typical T2D").
+//   Label (Ozempic, DailyMed): "apparent clearance ~0.05 L/h", "apparent volume
+//     ~12.5 L" after SC dosing in T2D: APPARENT (CL/F, V/F). The label's 0.05 is
+//     NOT used as an absolute clearance: 0.05 x 0.89 = 0.0445 is the absolute
+//     value of that population (T2D, heavier), against which the 73 kg healthy
+//     value below is consistent only after the weight and T2D corrections.
+//   CL_renal: 3.1 % of the (SC) DOSE appears as intact drug in urine (Jensen 2017).
+//     Renal clearance = A_e / AUC_inf = 0.031 D / (F D / CL) = (0.031 / F) CL: the
+//     fraction is of the dose, not of the absorbed amount, so the apparent/absolute
+//     conversion is written out (F in the denominator).
+//
+// PARAMETERS (th[9]; value at the 73 kg reference man, u = standard uncertainty)
+//  param   value            u        status  basis and source (access)
+//  MW      4113.6           0        1       Min 2025 Drug Des Devel Ther 19:3509 PK table (PMC12052016,
+//                                            secondary table); formula weight
+//  HCT     0.434            0.0104   2       ICRP 89 Table 2.12 (FT, physiology_primary.md); u =
+//                                            |0.47 - 0.434| / sqrt(12), 0.47 = PK-Sim venous Hct (secondary)
+//  FU      0.0036           0.0010   1       EMA Ozempic EPAR, human plasma 0.36 % (gaps_D3, EPAR read by
+//                                            WebFetch extraction); u JUDGMENT (the hepatic-impairment study
+//                                            found fu < 0.5 % in all subjects); its effect is negligible
+//  RINT    0.37             0.0271   2       PK-Sim organism-level interstitial:plasma protein ratio
+//                                            (physiology_primary.md s.4, secondary); u = (0.37 - 0.276) /
+//                                            sqrt(12), 0.276 = 1.4 x 3.0 L / 15.2 L from Nordell 2026
+//  CL      0.0348 s^1.01    see code 1       Overgaard 2019 Diabetes Ther 2019 (PMID 30788808, PMC6437231, FT incl.
+//          = 0.02983 L/h                     Table 4): CL 0.0348 L/h (95 % CI 0.0327-0.0369), healthy 85 kg
+//                                            reference subject, ABSOLUTE; body-weight exponent 1.01
+//                                            (CI 0.912-1.10) applied to s = 73/85; u from CI/3.92 and the
+//                                            exponent CI in quadrature
+//  CLREN   (0.031 / F) CL   rel 0.2  2       3.1 % of dose intact in urine (Jensen 2017 Eur J Pharm Sci
+//                                            104:31, PMID 28323117, abstract only); relative u 0.2 is a
+//                                            JUDGMENT (no SD in the abstract)
+//  F       0.847            0.0250   1       Overgaard 2019 Table 4 model estimate (CI 0.798-0.896); the
+//                                            NCA in trial 7 gave 0.89 (CI 0.83-0.94), which the label also
+//                                            quotes; the model value is used because CL, F, ka and Q come
+//                                            from one fit (sensitivity: F 0.89 raises every AUC by 5 %)
+//  KA      0.0253 /h        0.000873 1       Overgaard 2019 Table 4 (CI 0.0236-0.027), healthy, 1.34 mg/mL
+//                                            product (the marketed one); IIV 37.9 %. T2D effect 0.544 on
+//                                            ka (not used: the reference is a healthy subject)
+//  Q       0.304 s^1.01     see code 3       Overgaard 2019 Table 4 (CI 0.249-0.359), ABSOLUTE, same weight
+//          = 0.2606 L/h                      exponent as CL. FITTED OBSERVABLE of the exchange (see above)
+//
+// OBSERVABLE USED TO SET A PARAMETER: Q -> sum ps. Nothing else is fitted.
+// Population estimates are taken as data. Every quantity compared with
+// observations in the test is listed there with its lineage: Overgaard's dataset
+// contains the Ikushima 2018 trial (Table 1, trial 1) used for validation, so for
+// CL, F, ka and Q those rows are consistency checks, not independent tests.
+
+use darwin_pbpk::circ28::*
+use darwin_pbpk::circ28_kp::*
+use darwin_pbpk::circ28_drug::*
+use math::pure::{exp, ln}
+
+pub const PEP_N: i32 = 9
+pub const PT_MW: i32 = 0
+pub const PT_HCT: i32 = 1
+pub const PT_FU: i32 = 2
+pub const PT_RINT: i32 = 3
+pub const PT_CL: i32 = 4      // L/h, total clearance, ABSOLUTE, plasma
+pub const PT_CLREN: i32 = 5   // L/h, renal clearance, ABSOLUTE, plasma
+pub const PT_F: i32 = 6       // absolute SC bioavailability
+pub const PT_KA: i32 = 7      // 1/h
+pub const PT_Q: i32 = 8       // L/h, inter-compartmental clearance = sum of organ ps
+
+pub const PEP_NMAX: i32 = 3000
+
+pub fn pep_pow(x: f64, y: f64) -> f64 with Mut, Div, Panic { return exp(y * ln(x)) }
+
+pub fn pep_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+// Interstitial share of the non-vascular tissue space, PK-Sim int/(1 - vas)
+// (physiology_primary.md s.4). Organ order of circ28; 13 (rest) is set by pep_share_rest.
+pub fn pep_share(i: i32) -> f64 {
+    if i == 1 { return 0.196 }
+    if i == 2 { return 0.260 }
+    if i == 3 { return 0.004 }
+    if i == 4 { return 0.116 }
+    if i == 5 { return 0.448 }
+    if i == 6 { return 0.164 }
+    if i == 7 { return 0.163 }
+    if i == 8 { return 0.098 }
+    if i == 9 { return 0.317 }
+    if i == 10 { return 0.104 }
+    if i == 11 { return 0.224 }
+    if i == 12 { return 0.150 }
+    return 0.0
+}
+
+// Volume-weighted mean share of organs 1..12 (assumption for the "rest" organ).
+pub fn pep_share_rest(p: Circ28Params) -> f64 with Mut, Div {
+    var num = 0.0
+    var den = 0.0
+    var i: i32 = 1
+    while i < 13 {
+        let vt = p.v[i] * (1.0 - p.vf[i])
+        num = num + vt * pep_share(i)
+        den = den + vt
+        i = i + 1
+    }
+    return num / den
+}
+
+// Kernel parameters. mode 0: Kp_i = share_i (fu + (1 - fu) r_int) (primary);
+// mode 1: Kp_i = (1 - fu) AR_i + fu share_i with AR_i the Rodgers-Rowland
+// tissue:plasma albumin ratio of circ28_kp (sensitivity only).
+pub fn pep_params_k(th: &[f64; 9], mode: i32) -> Circ28Params with Mut, Div, Panic {
+    var p = circ28_physiology()
+    let fu = (*th)[PT_FU]
+    let r = (*th)[PT_RINT]
+    let rest = pep_share_rest(p)
+    p.bp = 1.0 - (*th)[PT_HCT]
+    p.fu = fu
+    var i: i32 = 1
+    while i < 14 {
+        var sh = pep_share(i)
+        if i == 13 { sh = rest }
+        var kp = sh * (fu + (1.0 - fu) * r)
+        if mode == 1 { kp = (1.0 - fu) * circ28_kp_albumin_ratio(i) + fu * sh }
+        p.kp[i] = kp
+        i = i + 1
+    }
+    var sum = 0.0
+    i = 1
+    while i < 14 {
+        sum = sum + p.v[i] * (1.0 - p.vf[i]) * p.kp[i]
+        i = i + 1
+    }
+    i = 1
+    while i < 14 {
+        p.ps[i] = (*th)[PT_Q] * p.v[i] * (1.0 - p.vf[i]) * p.kp[i] / sum
+        i = i + 1
+    }
+    p.clint = 0.0
+    p.clform = 0.0
+    p.clint_gut = 0.0
+    p.cl_renal = (*th)[PT_CLREN]
+    p.cl_plasma = (*th)[PT_CL] - (*th)[PT_CLREN]
+    return p
+}
+
+pub fn pep_vss(th: &[f64; 9], mode: i32) -> f64 with Mut, Div, Panic {
+    let p = pep_params_k(th, mode)
+    return circ28_vss_plasma(p)
+}
+
+// Plasma volume of the kernel (L): bp x blood volume.
+pub fn pep_vplasma(th: &[f64; 9]) -> f64 with Mut, Div, Panic {
+    let p = pep_params_k(th, 0)
+    return p.bp * circ28_blood_volume(p)
+}
+
+fn pep_left(ka: f64, tau: f64) -> f64 with Mut, Div, Panic {
+    if tau <= 0.0 { return 1.0 }
+    return exp(0.0 - ka * tau)
+}
+
+// One run. Doses dk[k] mg at t = 168 k h, k < nd, absorbed with ka, F into the
+// venous pool. Grid: dt1 to t1 then dt2 to t_end (dt1, dt2 divide 168, t1 a
+// multiple of dt2). ts, cs, ca receive time (h), venous PLASMA concentration
+// (mg/L) and its cumulative area (mg h/L, kernel weights) at every step; bal =
+// [input, eliminated, remaining in body, relative balance error]. Returns the
+// number of steps.
+pub fn pep_run(
+    th: &[f64; 9], dk: &[f64; 16], nd: i32, dt1: f64, t1: f64, dt2: f64, t_end: f64,
+    ts: &![f64; 3000], cs: &![f64; 3000], ca: &![f64; 3000], bal: &![f64; 4]
+) -> i32 with Mut, Div, Panic {
+    let p = pep_params_k(th, 0)
+    let ka = (*th)[PT_KA]
+    let f = (*th)[PT_F]
+    var sys = circ28_sys_zero()
+    var s = circ28_state_zero()
+    var el = circ28_elim_zero()
+    var src: [f64; 28] = [0.0; 28]
+    var n: i32 = 0
+    var t = 0.0
+    var input = 0.0
+    (*ts)[0] = 0.0
+    (*cs)[0] = 0.0
+    (*ca)[0] = 0.0
+    var ph: i32 = 0
+    while ph < 2 {
+        var dt = dt1
+        var tstop = t1
+        if ph == 1 {
+            dt = dt2
+            tstop = t_end
+        }
+        circ28_prepare(p, dt, &!sys)
+        while t + 0.5 * dt < tstop {
+            if n >= 2999 {
+                t = tstop
+            } else {
+                var mass = 0.0
+                var k: i32 = 0
+                while k < nd {
+                    let tk = 168.0 * (k as f64)
+                    if tk < t + 0.5 * dt {
+                        mass = mass + f * (*dk)[k] * (pep_left(ka, t - tk) - pep_left(ka, t + dt - tk))
+                    }
+                    k = k + 1
+                }
+                src[0] = mass / dt
+                input = input + mass
+                circ28_step_src(&!s, p, &sys, &src, &!el)
+                t = t + dt
+                n = n + 1
+                (*ts)[n] = t
+                (*cs)[n] = s.x[0] / p.bp
+                (*ca)[n] = el.auc_ven / p.bp
+            }
+        }
+        ph = ph + 1
+    }
+    let elim = el.plasma + el.renal
+    let rem = circ28_total_mass(&s, p)
+    (*bal)[0] = input
+    (*bal)[1] = elim
+    (*bal)[2] = rem
+    var be = 0.0
+    if input > 0.0 { be = pep_abs(input - elim - rem) / input }
+    (*bal)[3] = be
+    return n
+}
+
+// Index of the grid point nearest to time t.
+pub fn pep_idx(ts: &[f64; 3000], n: i32, t: f64) -> i32 {
+    var best: i32 = 0
+    var bd = 1.0e30
+    var i: i32 = 0
+    while i <= n {
+        let d = pep_abs((*ts)[i] - t)
+        if d < bd {
+            bd = d
+            best = i
+        }
+        i = i + 1
+    }
+    return best
+}
+
+// Area under the plasma curve between t0 and t1 (grid points).
+pub fn pep_auc(ts: &[f64; 3000], ca: &[f64; 3000], n: i32, t0: f64, t1: f64) -> f64 {
+    return (*ca)[pep_idx(ts, n, t1)] - (*ca)[pep_idx(ts, n, t0)]
+}
+
+// Peak of the plasma curve on [t0, t1]: out = [cmax, tmax], with the vertex of the
+// parabola through the grid maximum and its neighbours when they are equally spaced.
+pub fn pep_peak(ts: &[f64; 3000], cs: &[f64; 3000], n: i32, t0: f64, t1: f64, out: &![f64; 2]) with Mut, Div {
+    var im: i32 = 0
+    var cm = 0.0 - 1.0
+    var i: i32 = 0
+    while i <= n {
+        if (*ts)[i] >= t0 && (*ts)[i] <= t1 {
+            if (*cs)[i] > cm {
+                cm = (*cs)[i]
+                im = i
+            }
+        }
+        i = i + 1
+    }
+    var cmax = cm
+    var tmax = (*ts)[im]
+    if im >= 1 && im < n {
+        let h1 = (*ts)[im] - (*ts)[im - 1]
+        let h2 = (*ts)[im + 1] - (*ts)[im]
+        if pep_abs(h1 - h2) < 1.0e-9 {
+            let den = (*cs)[im - 1] - 2.0 * (*cs)[im] + (*cs)[im + 1]
+            if den < 0.0 {
+                let off = 0.5 * ((*cs)[im - 1] - (*cs)[im + 1]) / den
+                tmax = (*ts)[im] + off * h1
+                cmax = (*cs)[im] - 0.25 * ((*cs)[im - 1] - (*cs)[im + 1]) * off
+            }
+        }
+    }
+    (*out)[0] = cmax
+    (*out)[1] = tmax
+}
+
+// Terminal rate constant (1/h): least-squares slope of ln C on t over t0 <= t <= t1.
+pub fn pep_lambda(ts: &[f64; 3000], cs: &[f64; 3000], n: i32, t0: f64, t1: f64) -> f64 with Mut, Div, Panic {
+    var sw = 0.0
+    var st = 0.0
+    var sy = 0.0
+    var stt = 0.0
+    var sty = 0.0
+    var i: i32 = 0
+    while i <= n {
+        if (*ts)[i] >= t0 && (*ts)[i] <= t1 && (*cs)[i] > 0.0 {
+            let y = ln((*cs)[i])
+            sw = sw + 1.0
+            st = st + (*ts)[i]
+            sy = sy + y
+            stt = stt + (*ts)[i] * (*ts)[i]
+            sty = sty + (*ts)[i] * y
+        }
+        i = i + 1
+    }
+    let den = sw * stt - st * st
+    return 0.0 - (sw * sty - st * sy) / den
+}
+
+// ---------------------------------------------------------------------------
+// Population two-compartment model with first-order absorption (analytic), the
+// published counterpart of the kernel: c(t) after one dose (mg/L).
+// ---------------------------------------------------------------------------
+pub fn pep_pop2(f: f64, dose: f64, ka: f64, cl: f64, vc: f64, q: f64, vp: f64, t: f64) -> f64 with Mut, Div, Panic {
+    if t <= 0.0 { return 0.0 }
+    let k10 = cl / vc
+    let k12 = q / vc
+    let k21 = q / vp
+    let sm = k10 + k12 + k21
+    let disc = cd_sqrt(sm * sm - 4.0 * k10 * k21)
+    let al = 0.5 * (sm + disc)
+    let be = 0.5 * (sm - disc)
+    let a1 = (k21 - al) / ((ka - al) * (be - al))
+    let a2 = (k21 - be) / ((ka - be) * (al - be))
+    let a3 = (k21 - ka) / ((al - ka) * (be - ka))
+    return f * dose * ka / vc * (a1 * exp(0.0 - al * t) + a2 * exp(0.0 - be * t) + a3 * exp(0.0 - ka * t))
+}
+
+// Fast and slow macro rate constants of the two-compartment model: out = [alpha, beta].
+pub fn pep_pop2_rates(cl: f64, vc: f64, q: f64, vp: f64, out: &![f64; 2]) with Mut, Div {
+    let k10 = cl / vc
+    let k12 = q / vc
+    let k21 = q / vp
+    let sm = k10 + k12 + k21
+    let disc = cd_sqrt(sm * sm - 4.0 * k10 * k21)
+    (*out)[0] = 0.5 * (sm + disc)
+    (*out)[1] = 0.5 * (sm - disc)
+}
+
+// Weekly-dose superposition of pep_pop2 at time t (nd doses of `dose`).
+pub fn pep_pop2_multi(f: f64, dose: f64, nd: i32, ka: f64, cl: f64, vc: f64, q: f64, vp: f64, t: f64) -> f64 with Mut, Div, Panic {
+    var c = 0.0
+    var k: i32 = 0
+    while k < nd {
+        c = c + pep_pop2(f, dose, ka, cl, vc, q, vp, t - 168.0 * (k as f64))
+        k = k + 1
+    }
+    return c
+}
+
+// ---------------------------------------------------------------------------
+// Semaglutide numbers
+// ---------------------------------------------------------------------------
+pub fn sema_wt_ratio() -> f64 { return 73.0 / 85.0 }
+pub fn sema_wexp() -> f64 { return 1.01 }
+pub fn sema_u_wexp() -> f64 { return 0.04796 }           // (1.10 - 0.912) / 3.92
+pub fn sema_cl_ref() -> f64 { return 0.0348 }            // healthy 85 kg, absolute
+pub fn sema_u_cl_ref() -> f64 { return 0.001071 }        // (0.0369 - 0.0327) / 3.92
+pub fn sema_q_ref() -> f64 { return 0.304 }
+pub fn sema_u_q_ref() -> f64 { return 0.02806 }          // (0.359 - 0.249) / 3.92
+pub fn sema_f() -> f64 { return 0.847 }
+pub fn sema_u_f() -> f64 { return 0.02504 }              // (0.896 - 0.798) / 3.92
+pub fn sema_ka() -> f64 { return 0.0253 }
+pub fn sema_u_ka() -> f64 { return 0.000870 }            // (0.027 - 0.0236) / 3.92
+pub fn sema_fe_urine() -> f64 { return 0.031 }           // fraction of the DOSE, intact, urine
+pub fn sema_mw() -> f64 { return 4113.6 }
+pub fn sema_vc_ref() -> f64 { return 3.59 }
+pub fn sema_vp_ref() -> f64 { return 4.10 }
+pub fn sema_vexp() -> f64 { return 0.923 }
+
+pub fn pep_hct() -> f64 { return 0.434 }
+pub fn pep_u_hct() -> f64 { return 0.010392 }            // 0.036 / sqrt(12)
+pub fn pep_rint() -> f64 { return 0.37 }
+pub fn pep_u_rint() -> f64 { return 0.02714 }            // (0.37 - 0.2763) / sqrt(12)
+
+// Fills th (values) and u (standard uncertainties) for semaglutide, 73 kg man.
+pub fn sema_theta_into(th: &![f64; 9], u: &![f64; 9]) with Mut, Div, Panic {
+    let s = sema_wt_ratio()
+    let sw = pep_pow(s, sema_wexp())
+    let lns = ln(s)
+    let cl = sema_cl_ref() * sw
+    let q = sema_q_ref() * sw
+    let ucl_a = sema_u_cl_ref() * sw
+    let ucl_b = cl * lns * sema_u_wexp()
+    let uq_a = sema_u_q_ref() * sw
+    let uq_b = q * lns * sema_u_wexp()
+    (*th)[PT_MW] = sema_mw()
+    (*th)[PT_HCT] = pep_hct()
+    (*th)[PT_FU] = 0.0036
+    (*th)[PT_RINT] = pep_rint()
+    (*th)[PT_CL] = cl
+    (*th)[PT_F] = sema_f()
+    (*th)[PT_KA] = sema_ka()
+    (*th)[PT_Q] = q
+    (*th)[PT_CLREN] = sema_fe_urine() / sema_f() * cl
+    (*u)[PT_MW] = 0.0
+    (*u)[PT_HCT] = pep_u_hct()
+    (*u)[PT_FU] = 0.0010
+    (*u)[PT_RINT] = pep_u_rint()
+    (*u)[PT_CL] = cd_sqrt(ucl_a * ucl_a + ucl_b * ucl_b)
+    (*u)[PT_F] = sema_u_f()
+    (*u)[PT_KA] = sema_u_ka()
+    (*u)[PT_Q] = cd_sqrt(uq_a * uq_a + uq_b * uq_b)
+    (*u)[PT_CLREN] = 0.2 * (*th)[PT_CLREN]
+}
+
+// ---------------------------------------------------------------------------
+// Budget: weekly dosing for 12 weeks of `dose` mg, one run per evaluation.
+// out = [AUC over the last interval (plasma, mg h/L), Cmax of the first interval,
+// Cmax of the last interval, trough at the end]. dt 1 h to 336 h, 2 h after.
+// ---------------------------------------------------------------------------
+pub fn pep_eval(th: &[f64; 9], dose: f64, out: &![f64; 4]) with Mut, Div, Panic {
+    var dk: [f64; 16] = [0.0; 16]
+    var k: i32 = 0
+    while k < 12 {
+        dk[k] = dose
+        k = k + 1
+    }
+    var ts: [f64; 3000] = [0.0; 3000]
+    var cs: [f64; 3000] = [0.0; 3000]
+    var ca: [f64; 3000] = [0.0; 3000]
+    var bal: [f64; 4] = [0.0; 4]
+    var pk: [f64; 2] = [0.0; 2]
+    let n = pep_run(th, &dk, 12, 1.0, 336.0, 2.0, 2016.0, &!ts, &!cs, &!ca, &!bal)
+    (*out)[0] = pep_auc(&ts, &ca, n, 1848.0, 2016.0)
+    pep_peak(&ts, &cs, n, 0.0, 168.0, &!pk)
+    (*out)[1] = pk[0]
+    pep_peak(&ts, &cs, n, 1848.0, 2016.0, &!pk)
+    (*out)[2] = pk[0]
+    (*out)[3] = cs[pep_idx(&ts, n, 2016.0)]
+}
+
+// Central-difference budget over the 9 parameters (independent). res layout:
+// res[0] AUC, res[1] Cmax(single), res[2] Cmax(SS), res[3] var AUC, res[4] var Cmax
+// (single), res[5] var Cmax (SS); contrib_auc[i], contrib_cs[i], contrib_css[i] are the
+// variance shares in absolute units.
+pub fn pep_budget(
+    th: &[f64; 9], u: &[f64; 9], dose: f64,
+    res: &![f64; 8], c_auc: &![f64; 9], c_cs: &![f64; 9], c_css: &![f64; 9]
+) with Mut, Div, Panic {
+    var o0: [f64; 4] = [0.0; 4]
+    var op: [f64; 4] = [0.0; 4]
+    var om: [f64; 4] = [0.0; 4]
+    pep_eval(th, dose, &!o0)
+    (*res)[0] = o0[0]
+    (*res)[1] = o0[1]
+    (*res)[2] = o0[2]
+    var va = 0.0
+    var vc = 0.0
+    var vs = 0.0
+    var i: i32 = 0
+    while i < 9 {
+        (*c_auc)[i] = 0.0
+        (*c_cs)[i] = 0.0
+        (*c_css)[i] = 0.0
+        if (*u)[i] > 0.0 {
+            var hs = 1.0e-4 * pep_abs((*th)[i])
+            if hs > 0.1 * (*u)[i] { hs = 0.1 * (*u)[i] }
+            var tp: [f64; 9] = [0.0; 9]
+            var tm: [f64; 9] = [0.0; 9]
+            var j: i32 = 0
+            while j < 9 {
+                tp[j] = (*th)[j]
+                tm[j] = (*th)[j]
+                j = j + 1
+            }
+            tp[i] = (*th)[i] + hs
+            tm[i] = (*th)[i] - hs
+            pep_eval(&tp, dose, &!op)
+            pep_eval(&tm, dose, &!om)
+            let d0 = (op[0] - om[0]) / (2.0 * hs)
+            let d1 = (op[1] - om[1]) / (2.0 * hs)
+            let d2 = (op[2] - om[2]) / (2.0 * hs)
+            (*c_auc)[i] = d0 * d0 * (*u)[i] * (*u)[i]
+            (*c_cs)[i] = d1 * d1 * (*u)[i] * (*u)[i]
+            (*c_css)[i] = d2 * d2 * (*u)[i] * (*u)[i]
+            va = va + (*c_auc)[i]
+            vc = vc + (*c_cs)[i]
+            vs = vs + (*c_css)[i]
+        }
+        i = i + 1
+    }
+    (*res)[3] = va
+    (*res)[4] = vc
+    (*res)[5] = vs
+}

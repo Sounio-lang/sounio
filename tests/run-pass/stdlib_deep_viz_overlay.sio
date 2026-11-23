@@ -1,0 +1,166 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: STDLIB_DEEP_VIZ_OVERLAY_PASS
+use collections::numeric_buffer::{NumericBuffer,numeric_buffer_new,numeric_buffer_at,numeric_buffer_set,numeric_buffer_close,numeric_matrix}
+use collections::integer_buffer::{IntegerBuffer,integer_buffer_new,integer_buffer_set,integer_buffer_close}
+use stats::regression::dynamic_count_glm::{dynamic_count_workspace,dynamic_count_fit}
+use viz::count_diagnostics::{count_diagnostic_prepare}
+use viz::scientific_document::{ScientificDocumentText,ScientificOverlayPlan,ScientificOverlayText,scientific_two_panel_plan,scientific_overlay_svg,scientific_overlay_canvas}
+use display::canvas::{Canvas,canvas_clear}
+use viz::scatter::{scatter_project}
+use io::sci_print::{println_f64_sci}
+// Optional exact native-raster export; Linux fixture only. Read once, no env logging.
+fn scientific_canvas_dump_enabled()->bool with IO,Mut,Div,Panic {
+ let data=read_file("/proc/self/environ")
+ let wanted="SOUNIO_VIZ_CANVAS_DUMP=1"
+ let wanted_len=str_len(wanted)
+ var size:i64=0;var found_end=false
+ while size<1048575 {
+  if data[size as usize]==0 {
+   if data[(size+1) as usize]==0 {found_end=true;break}
+  }
+  size=size+1
+ }
+ if !found_end {return false}
+ var at:i64=0
+ while at<size {
+  var end=at
+  while end<size {if data[end as usize]==0 {break};end=end+1}
+  if end-at==wanted_len {
+   var same=true;var j:i64=0
+   while j<wanted_len {
+    if data[(at+j) as usize]!=(str_char_at(wanted,j) as i8) {same=false}
+    j=j+1
+   }
+   if same {return true}
+  }
+  at=end+1
+ }
+ false
+}
+fn scientific_canvas_run(start:i64,length:i64,color:i64) with IO {
+ print("CANVAS_RUN ");print(start);print(" ");print(length);print(" ");println(color)
+}
+fn scientific_canvas_dump(c:&Canvas) with IO,Mut,Div,Panic {
+ if !scientific_canvas_dump_enabled() {return}
+ let width:i64=c.width;let height:i64=c.height
+ assert(width>0 && width<=4096 && height>0 && height<=4096)
+ let total:i64=width*height
+ assert(total<=16777216 && (c.pixels as i64)>0)
+ print("CANVAS_SIZE ");print(width);print(" ");println(height)
+ var start:i64=0;var color:i64=read_i64(c.pixels,0);var i:i64=1
+ while i<total {
+  let next:i64=read_i64(c.pixels,i)
+  if next!=color {scientific_canvas_run(start,i-start,color);start=i;color=next}
+  i=i+1
+ }
+ scientific_canvas_run(start,total-start,color)
+ println("CANVAS_END")
+}
+fn fit_payload(n:i64,p:i64,counts:&IntegerBuffer,means:&!NumericBuffer,observed:&!NumericBuffer,residual:&!NumericBuffer,om:&!IntegerBuffer,rm:&!IntegerBuffer)->i64 with Alloc,Mut,Div,Panic {
+ let need=dynamic_count_workspace(n,p)
+ if need.status!=0 {return 99}
+ var a=numeric_buffer_new(n*p,n*p*8);let layout=numeric_matrix(n*p,n,p,p,1,0)
+ var offsets=numeric_buffer_new(n,n*8);var initial=numeric_buffer_new(p,p*8);var beta=numeric_buffer_new(p,p*8)
+ var eta=numeric_buffer_new(n,n*8);var weighted=numeric_buffer_new(need.design_elements,need.design_elements*8)
+ var rhs=numeric_buffer_new(n,n*8);var step=numeric_buffer_new(p,p*8)
+ var qr=numeric_buffer_new(need.qr_elements,need.qr_elements*8);var stage=numeric_buffer_new(need.stage_elements,need.stage_elements*8)
+ var i:i64=0
+ while i<n {
+  if p==1 {let w=numeric_buffer_set(&!a,i,1.0)}
+  else {
+   let u=numeric_buffer_set(&!a,i*2,if i%2==0 {1.0}else{0.0})
+   let v=numeric_buffer_set(&!a,i*2+1,if i%2==1 {1.0}else{0.0})
+  }
+  i=i+1
+ }
+ let fit=dynamic_count_fit(&a,&layout,counts,&offsets,&initial,0.25,0.0,100,1e-9,
+ &!beta,means,&!eta,&!weighted,&!rhs,&!step,&!qr,&!stage)
+ var code:i64=fit.status
+ if code==0 {
+  assert(fit.rank==p && fit.rows==n && !fit.assumptions_assessed && fit.inference_status==1)
+  let data=count_diagnostic_prepare(&fit,counts,means,observed,residual,om,rm)
+  code=data.status
+  assert(data.residual_available==n && !data.inference_available)
+ }
+ numeric_buffer_close(a);numeric_buffer_close(offsets);numeric_buffer_close(initial);numeric_buffer_close(beta)
+ numeric_buffer_close(eta);numeric_buffer_close(weighted);numeric_buffer_close(rhs);numeric_buffer_close(step);numeric_buffer_close(qr);numeric_buffer_close(stage)
+ code
+}
+fn main()->i32 with IO,Alloc,Mut,Div,Panic {
+ let n:i64=1028
+ var counts=integer_buffer_new(n,n*8)
+ var means_a=numeric_buffer_new(n,n*8);var means_b=numeric_buffer_new(n,n*8)
+ var observed=numeric_buffer_new(n,n*8);var residual_a=numeric_buffer_new(n,n*8);var residual_b=numeric_buffer_new(n,n*8)
+ var all=integer_buffer_new(n,n*8);var mask_b=integer_buffer_new(n,n*8);var selected=integer_buffer_new(n,n*8);var indices=integer_buffer_new(n,n*8)
+ var i:i64=0
+ while i<n {
+  let c=integer_buffer_set(&!counts,i,(i%4)*2)
+  let s=integer_buffer_set(&!selected,i,if i%11==0 {0}else{1})
+  let j=integer_buffer_set(&!indices,i,i);i=i+1
+ }
+ let fa=fit_payload(n,2,&counts,&!means_a,&!observed,&!residual_a,&!all,&!mask_b)
+ let fb=fit_payload(n,1,&counts,&!means_b,&!observed,&!residual_b,&!all,&!mask_b)
+ assert(fa==0 && fb==0)
+ let chars:[i8;244]=[83,121,110,116,104,101,116,105,99,32,78,66,50,32,102,105,116,115,32,40,115,117,112,112,108,105,101,100,32,97,108,112,104,97,61,48,46,50,53,41,102,105,116,116,101,100,32,99,111,117,110,116,32,40,120,41,59,32,111,98,115,101,114,118,101,100,32,99,111,117,110,116,32,40,121,41,102,105,116,116,101,100,32,99,111,117,110,116,32,40,120,41,59,32,115,105,103,110,101,100,32,100,101,118,105,97,110,99,101,32,114,101,115,105,100,117,97,108,32,40,121,44,32,49,41,78,111,32,67,73,59,32,115,117,112,112,108,105,101,100,32,97,108,112,104,97,59,32,97,115,115,117,109,112,116,105,111,110,115,32,117,110,97,115,115,101,115,115,101,100,59,32,99,111,105,110,99,105,100,101,110,116,32,114,111,119,115,32,111,118,101,114,108,97,112,46,116,119,111,32,103,114,111,117,112,115,112,111,111,108,101,100,58,32,115,117,98,115,101,116,116,119,111,32,103,114,111,117,112,115,112,111,111,108,101,100,58,32,115,117,98,115,101,116]
+ var bytes=integer_buffer_new(244,244*8);i=0
+ while i<244 {let put=integer_buffer_set(&!bytes,i,chars[i as usize] as i64);i=i+1}
+ let text=ScientificDocumentText{title_start:0,title_len:40,left_start:40,left_len:36,right_start:76,right_len:49,footer_start:125,footer_len:71}
+ let labels=ScientificOverlayText{document:text,left_first_start:196,left_first_len:10,left_second_start:206,left_second_len:14,right_first_start:220,right_first_len:10,right_second_start:230,right_second_len:14}
+ let plan=scientific_two_panel_plan(1380,620,0.0,6.0,0.0,6.0,0.0,6.0,-3.0,3.0)
+ assert(plan.status==0)
+ let overlay=ScientificOverlayPlan{document:plan,left_kind:0,right_kind:0}
+ let pixels=heap_alloc(1380*620*8) as *mut i64
+ assert((pixels as i64)>0)
+ var canvas=Canvas{pixels:pixels,width:1380,height:620};canvas_clear(&!canvas,7,8,9)
+ let saved:f64=numeric_buffer_at(&residual_b,n-1)
+ let break_last=numeric_buffer_set(&!residual_b,n-1,0.0/0.0)
+ println("OVERLAY_ZERO_BEGIN")
+ let no_svg=scientific_overlay_svg(&overlay,&labels,&bytes,&means_a,&observed,&all,&means_a,&residual_a,&all,&means_b,&observed,&selected,&indices,n,&means_b,&residual_b,&selected,&indices,n)
+ println("OVERLAY_ZERO_END")
+ assert(no_svg.status==53)
+ let no_canvas=scientific_overlay_canvas(&!canvas,&overlay,&labels,&bytes,&means_a,&observed,&all,&means_a,&residual_a,&all,&means_b,&observed,&selected,&indices,n,&means_b,&residual_b,&selected,&indices,n)
+ assert(no_canvas.status==53)
+ i=0
+ while i<1380*620 {assert(read_i64(canvas.pixels,i)==(7*65536+8*256+9));i=i+1}
+ let restore=numeric_buffer_set(&!residual_b,n-1,saved)
+ let bad_labels=ScientificOverlayText{document:text,left_first_start:196,left_first_len:1000,left_second_start:206,left_second_len:14,right_first_start:220,right_first_len:10,right_second_start:230,right_second_len:14}
+ println("OVERLAY_LABEL_ZERO_BEGIN")
+ let no_legend=scientific_overlay_svg(&overlay,&bad_labels,&bytes,&means_a,&observed,&all,&means_a,&residual_a,&all,&means_b,&observed,&selected,&indices,n,&means_b,&residual_b,&selected,&indices,n)
+ println("OVERLAY_LABEL_ZERO_END")
+ assert(no_legend.status==32)
+ // Explicit connected-input-order branch; it does not sort or fit a curve.
+ let connected=ScientificOverlayPlan{document:plan,left_kind:1,right_kind:1}
+ let line_canvas=scientific_overlay_canvas(&!canvas,&connected,&labels,&bytes,&means_a,&observed,&all,&means_a,&residual_a,&all,&means_b,&observed,&selected,&indices,n,&means_b,&residual_b,&selected,&indices,n)
+ assert(line_canvas.status==0 && line_canvas.left_secondary>0 && line_canvas.right_secondary>0)
+ let drawn=scientific_overlay_canvas(&!canvas,&overlay,&labels,&bytes,&means_a,&observed,&all,&means_a,&residual_a,&all,&means_b,&observed,&selected,&indices,n,&means_b,&residual_b,&selected,&indices,n)
+ assert(drawn.status==0 && drawn.left_primary==n && drawn.right_primary==n)
+ let point=scatter_project(numeric_buffer_at(&means_a,0),0.0,0.0,6.0,0.0,6.0,plan.left.x,plan.left.y,plan.left.w,plan.left.h,true)
+ assert(point.status==0)
+ let px:i64=point.x;let py:i64=point.y;let color:i64=read_i64(canvas.pixels,py*1380+px)
+ assert(color==4633835)
+ print("OVERLAY_PIXEL ");print(px);print(" ");print(py);print(" ");println(color)
+ let lx:i64=plan.left.x;let ly:i64=plan.left.y;let w:i64=plan.left.w;let h:i64=plan.left.h;let rx:i64=plan.right.x
+ print("OVERLAY_GEOMETRY ");print(lx);print(" ");print(ly);print(" ");print(w);print(" ");print(h);print(" ");println(rx)
+ var model:i64=0
+ while model<2 {
+  i=0
+  while i<4 {
+   let mean:f64=if model==0 {numeric_buffer_at(&means_a,i)}else{numeric_buffer_at(&means_b,i)}
+   let value:f64=if model==0 {numeric_buffer_at(&residual_a,i)}else{numeric_buffer_at(&residual_b,i)}
+   print("OVERLAY_NUMERIC ");print(model);print(" ");println(i)
+   println_f64_sci(mean,15);println_f64_sci(value,15)
+   i=i+1
+  }
+  model=model+1
+ }
+ let shown=scientific_overlay_svg(&overlay,&labels,&bytes,&means_a,&observed,&all,&means_a,&residual_a,&all,&means_b,&observed,&selected,&indices,n,&means_b,&residual_b,&selected,&indices,n)
+ assert(shown.status==0 && shown.left_primary==n && shown.right_primary==n)
+ let line_svg=scientific_overlay_svg(&connected,&labels,&bytes,&means_a,&observed,&all,&means_a,&residual_a,&all,&means_b,&observed,&selected,&indices,n,&means_b,&residual_b,&selected,&indices,n)
+ assert(line_svg.status==0 && line_svg.left_secondary==line_canvas.left_secondary && line_svg.right_secondary==line_canvas.right_secondary)
+ scientific_canvas_dump(&canvas)
+ heap_free(canvas.pixels as *mut i8)
+ integer_buffer_close(counts);numeric_buffer_close(means_a);numeric_buffer_close(means_b);numeric_buffer_close(observed)
+ numeric_buffer_close(residual_a);numeric_buffer_close(residual_b);integer_buffer_close(all);integer_buffer_close(mask_b);integer_buffer_close(selected);integer_buffer_close(indices);integer_buffer_close(bytes)
+ println("STDLIB_DEEP_VIZ_OVERLAY_PASS");0
+}

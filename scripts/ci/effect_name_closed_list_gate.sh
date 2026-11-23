@@ -12,14 +12,30 @@
 #
 # This is an ACCUSATION gate. It FAILS while `souc check` of
 # docs/audit/repro/effect_unknown_name.sio (`with NomeQueNaoExiste`) still
-# exits 0. A used `with` name that is not derived from effect_name_to_id
-# is also a fail (file + line). Do not add names here. If the table
-# recognises N names, N is N — even if a recognised name has zero uses.
-# Mod is HELD: it is used and not recognised; the scan reports it.
+# exits 0, and also unless that refusal is error[E246] naming
+# NomeQueNaoExiste. Do not add names here. If the table recognises N
+# names, N is N — even if a recognised name has zero uses.
 #
-# The closed list is derived from self-hosted/check/effects.sio
-# (effect_named_id_max, effect_kind_name_len, effect_kind_name_byte,
-# name_is_confidence). It is not written by hand.
+# Every scanned `with` name is resolved the way checker_collect_effects_mut
+# resolves it (self-hosted/check/check.sio), in this order:
+#   builtin  — derived from self-hosted/check/effects.sio
+#              (effect_named_id_max, effect_kind_name_len,
+#              effect_kind_name_byte, name_is_confidence)
+#   declared — an `effect X` / `pub effect X` item in the scanned corpus.
+#              A HELD spelling counts as declared only in a file that
+#              declares it (the checker registry is per compilation); any
+#              other name counts as declared wherever the corpus declares it.
+#   held     — derived from effect_name_is_held in effects.sio. Silently
+#              dropped by the checker. This is the accused set the ratchet
+#              owns (scripts/ci/effect_name_closed_list.frozen).
+#   refused  — none of the above. The checker refuses it with E246, so it may
+#              appear only in a listed refusal witness (REFUSAL_WITNESSES in
+#              the scan below); anywhere else it fails the gate.
+# None of the lists is written by hand.
+#
+# Founder decision 2026-11-22: Foo, NomeQueNaoExiste and NoSuchEffectX left
+# the held list, so the witness above can fire again. The accusation stage is
+# a positive check from then on: silence is a failure, not a record.
 #
 # What is scanned
 # ---------------
@@ -44,6 +60,9 @@
 #   bash scripts/ci/effect_name_closed_list_gate.sh
 #   bash scripts/ci/effect_name_closed_list_gate.sh --self-test
 #   bash scripts/ci/effect_name_closed_list_gate.sh --scan-only
+#   EFFECT_NAME_CLOSED_LIST_SOUC=/path/to/madaros bash scripts/ci/effect_name_closed_list_gate.sh
+#     (accusation with a named compiler, e.g. one built from current source;
+#      the default is the committed ELF)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -72,16 +91,136 @@ mkdir -p "$OUT_DIR"
 # SOUC_BIN that points at another worktree (hazard souc-bin-poisoned).
 unset SOUC_BIN SOUNIO_SOUC_BIN || true
 SOUC_FOR_ACCUSE=""
-if [[ -x "$ROOT/bin/souc" ]]; then
+SOUC_OVERRIDE="${EFFECT_NAME_CLOSED_LIST_SOUC:-}"
+if [[ -n "$SOUC_OVERRIDE" ]]; then
+  [[ -x "$SOUC_OVERRIDE" ]] || {
+    echo "EFFECT_NAME_CLOSED_LIST_FAIL reason=souc_override_not_executable path=$SOUC_OVERRIDE" >&2
+    exit 1
+  }
+  SOUC_FOR_ACCUSE="$SOUC_OVERRIDE"
+elif [[ -x "$ROOT/bin/souc" ]]; then
   SOUC_FOR_ACCUSE="$ROOT/bin/souc"
 elif [[ -x "$ROOT/bin/madaros-linux-x86_64" ]]; then
   SOUC_FOR_ACCUSE="$ROOT/bin/madaros-linux-x86_64"
 fi
 
 use_slurm=0
-if [[ "$ACCUSE" -eq 1 ]] && command -v srun >/dev/null 2>&1 && [[ "${EFFECT_NAME_CLOSED_LIST_SLURM:-1}" != "0" ]]; then
+if [[ "$ACCUSE" -eq 1 && -z "$SOUC_OVERRIDE" ]] && command -v srun >/dev/null 2>&1 && [[ "${EFFECT_NAME_CLOSED_LIST_SLURM:-1}" != "0" ]]; then
   use_slurm=1
 fi
+
+# --- held and declared names (awk, no hand-written list) ------------------
+#
+# Held: every `return true` line of effect_name_is_held compares name_len and
+# then name_buf[0..len-1] byte by byte. Decode it; refuse a line whose indices
+# are not 0..len-1 in order, and refuse an empty result.
+derive_held_names() {
+  awk '
+    /^pub fn effect_name_is_held\(/ { inside = 1; found = 1; next }
+    inside && /^}/ { inside = 0; next }
+    inside && /return true/ {
+      line = $0
+      if (!match(line, /name_len == [0-9]+/)) { bad = 1; next }
+      want = substr(line, RSTART + 12, RLENGTH - 12) + 0
+      s = ""; idx = 0; rest = line
+      while (match(rest, /name_buf\[[0-9]+ as usize\] == [0-9]+ as i8/)) {
+        frag = substr(rest, RSTART, RLENGTH)
+        rest = substr(rest, RSTART + RLENGTH)
+        split(frag, p, /[^0-9]+/)
+        if (p[2] + 0 != idx) { bad = 1 }
+        s = s sprintf("%c", p[3] + 0)
+        idx++
+      }
+      if (idx != want || idx == 0) { bad = 1 }
+      names[++n] = s
+    }
+    END {
+      if (!found || bad || n == 0) { exit 1 }
+      out = names[1]
+      for (i = 2; i <= n; i++) out = out "," names[i]
+      print out
+    }
+  ' "$1"
+}
+
+# Declared: `effect X` / `pub effect X` at the start of a line (so `//` line
+# comments never match), outside a `/* ... */` block that opens a line.
+# Output: path<TAB>name, one per declaration.
+derive_declared_effects() {
+  awk '
+    FNR == 1 { inb = 0 }
+    {
+      line = $0
+      if (inb) { if (index(line, "*/")) inb = 0; next }
+      if (line ~ /^[ \t]*\/\*/ && !index(line, "*/")) { inb = 1; next }
+      if (match(line, /^[ \t]*(pub[ \t]+)?effect[ \t]+[A-Za-z_][A-Za-z0-9_]*/)) {
+        s = substr(line, RSTART, RLENGTH)
+        sub(/^[ \t]*(pub[ \t]+)?effect[ \t]+/, "", s)
+        print FILENAME "\t" s
+      }
+    }
+  ' "$@"
+}
+
+# The same corpus the scan reads: versioned and untracked *.sio, minus the
+# scan's SKIP_PREFIXES and *.sio.old.
+scanned_sio_list() {
+  {
+    git -C "$ROOT" ls-files -z '*.sio'
+    git -C "$ROOT" ls-files -z -o --exclude-standard '*.sio'
+  } | tr '\0' '\n' | sort -u \
+    | grep -v -E '^(archive|bootstrap|self-hosted/bootstrap|tests/compile-fail)/' \
+    | grep -v -E '\.sio\.old$' || true
+}
+
+if ! EFFECT_HELD_NAMES="$(derive_held_names "$ROOT/self-hosted/check/effects.sio")"; then
+  echo "EFFECT_NAME_CLOSED_LIST_FAIL reason=held_names_underived" >&2
+  exit 1
+fi
+
+EFFECT_DECLARED_TSV="$OUT_DIR/declared_effects.tsv"
+export -f derive_declared_effects
+(
+  cd "$ROOT"
+  scanned_sio_list | while IFS= read -r rel; do
+    if [[ -f "$rel" ]]; then printf '%s\0' "$rel"; fi
+  done | xargs -0 -r bash -c 'derive_declared_effects "$@"' _
+) | sort -u >"$EFFECT_DECLARED_TSV"
+
+# Extractor controls for the awk derivations (run in every mode).
+DECL_SELFTEST=false
+decl_tmp="$(mktemp -d "${TMPDIR:-/tmp}/eff-closed-decl.XXXXXX")"
+cat >"$decl_tmp/decl.sio" <<'SIO'
+// effect CommentedOut {}
+/*
+effect InsideBlock {}
+*/
+pub effect Declared {}
+effect Generic<T> {
+    fn op() -> i64
+}
+fn f() -> i64 with Declared { 0 }
+SIO
+decl_out="$(cd "$decl_tmp" && derive_declared_effects decl.sio | cut -f2 | tr '\n' ',')"
+[[ "$decl_out" == "Declared,Generic," ]] && DECL_SELFTEST=true
+cat >"$decl_tmp/held.sio" <<'SIO'
+pub fn effect_name_is_held(name_buf: [i8; 64], name_len: i64) -> bool {
+    if name_len == 2 && name_buf[0 as usize] == 81 as i8 && name_buf[1 as usize] == 113 as i8 { return true }
+    false
+}
+SIO
+cat >"$decl_tmp/held_bad.sio" <<'SIO'
+pub fn effect_name_is_held(name_buf: [i8; 64], name_len: i64) -> bool {
+    if name_len == 3 && name_buf[0 as usize] == 81 as i8 && name_buf[1 as usize] == 113 as i8 { return true }
+    false
+}
+SIO
+HELD_SELFTEST=false
+if [[ "$(derive_held_names "$decl_tmp/held.sio")" == "Qq" ]] \
+   && ! derive_held_names "$decl_tmp/held_bad.sio" >/dev/null; then
+  HELD_SELFTEST=true
+fi
+rm -rf "$decl_tmp"
 
 WITNESS_REL="docs/audit/repro/effect_unknown_name.sio"
 POSITIVE_REL="scripts/ci/fixtures/effect_name_closed_list/positive_io.sio"
@@ -150,6 +289,8 @@ fi
 export ROOT ARTIFACT OUT_DIR MODE ACCUSE
 export WITNESS_RC POSITIVE_RC
 export WITNESS_REL POSITIVE_REL
+export EFFECT_HELD_NAMES EFFECT_DECLARED_TSV DECL_SELFTEST HELD_SELFTEST
+export EFFECT_NAME_FROZEN="${EFFECT_NAME_FROZEN:-$ROOT/scripts/ci/effect_name_closed_list.frozen}"
 python3 - <<'PY'
 import json
 import os
@@ -442,6 +583,46 @@ print(
     f"closed={len(derived['closed_names'])} "
     f"names={','.join(derived['closed_names'])}"
 )
+held = [n for n in os.environ.get("EFFECT_HELD_NAMES", "").split(",") if n]
+if not held:
+    fail_derive("held_names_missing")
+held_set = set(held)
+declared_by_file = {}
+declared_any = set()
+with open(os.environ["EFFECT_DECLARED_TSV"], encoding="utf-8") as fh:
+    for ln in fh:
+        p, _, n = ln.rstrip("\n").partition("\t")
+        if n:
+            declared_by_file.setdefault(p, set()).add(n)
+            declared_any.add(n)
+print(f"EFFECT_NAME_CLOSED_LIST_HELD count={len(held)} names={','.join(held)}")
+print(
+    f"EFFECT_NAME_CLOSED_LIST_DECLARED count={len(declared_any)} "
+    f"names={','.join(sorted(declared_any))}"
+)
+
+
+def resolve(path: str, name: str) -> str:
+    """checker_collect_effects_mut order: builtin, user registry, held."""
+    if name in closed:
+        return "builtin"
+    if name in declared_by_file.get(path, ()):
+        return "declared"
+    if name in declared_any and name not in held_set:
+        return "declared"
+    if name in held_set:
+        return "held"
+    return "refused"
+
+
+# Files whose purpose is to be refused with E246 at an unknown name. A refused
+# name anywhere else fails the gate. Each entry must still hold a refused site.
+REFUSAL_WITNESSES = {
+    witness_rel,
+    "docs/audit/repro/effect_foo_pass_shape.sio",
+    "docs/audit/repro/effect_foo_refuse_shape.sio",
+    "tests/effects/archaeology/nosuch_drop.sio",
+}
 
 if mode == "selftest":
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="eff-closed-list-"))
@@ -506,6 +687,14 @@ if mode == "selftest":
         ("negative_comment_a_the_ignored", comment_ok and fx_comment_ok),
         ("negative_string_ignored", string_ok and fx_string_ok),
         ("negative_sio_old_ignored", old_skipped and old_would_have_counted and fx_old_ok),
+        ("declared_effect_items_extracted", os.environ.get("DECL_SELFTEST") == "true"),
+        ("held_names_decoded_and_malformed_refused", os.environ.get("HELD_SELFTEST") == "true"),
+        (
+            "resolution_order",
+            resolve("x.sio", "IO") == "builtin"
+            and resolve("x.sio", "NomeQueNaoExiste") == "refused"
+            and resolve("x.sio", "Mod") == "held",
+        ),
     ]
     print(
         "EFFECT_NAME_CLOSED_LIST_SELFTEST "
@@ -547,18 +736,31 @@ for p in extra.split(b"\0"):
             rels.append(rel)
 rels.sort()
 hits = scan_files(rels)
-unknown = [h for h in hits if h["name"] not in closed]
-known = [h for h in hits if h["name"] in closed]
+for h in hits:
+    h["resolved"] = resolve(h["path"], h["name"])
+# `unknown` is the held (silently dropped) set the ratchet owns.
+unknown = [h for h in hits if h["resolved"] == "held"]
+known = [h for h in hits if h["resolved"] in ("builtin", "declared")]
+refused = [h for h in hits if h["resolved"] == "refused"]
+declared_hits = [h for h in hits if h["resolved"] == "declared"]
 
 from collections import Counter
 
 unknown_counts = Counter(h["name"] for h in unknown)
 known_counts = Counter(h["name"] for h in known)
+refused_counts = Counter(h["name"] for h in refused)
 print(
     "EFFECT_NAME_CLOSED_LIST_SCAN "
     f"files={len(rels)} hits={len(hits)} known={len(known)} "
-    f"unknown={len(unknown)} unknown_names={len(unknown_counts)}"
+    f"declared={len(declared_hits)} held={len(unknown)} "
+    f"refused={len(refused)} unknown={len(unknown)} "
+    f"unknown_names={len(unknown_counts)}"
 )
+refused_outside = [h for h in refused if h["path"] not in REFUSAL_WITNESSES]
+refused_paths = {h["path"] for h in refused}
+stale_witnesses = sorted(p for p in REFUSAL_WITNESSES if p not in refused_paths)
+for name, count in refused_counts.most_common():
+    print(f"EFFECT_NAME_CLOSED_LIST_REFUSED name={name} count={count}")
 for name, count in unknown_counts.most_common():
     print(f"EFFECT_NAME_CLOSED_LIST_UNKNOWN name={name} count={count}")
 # Every site is in the artefact. Stdout prints every site for a rare
@@ -589,6 +791,23 @@ recorded_msgs = [
     f"unknown_used file={h['path']}:{h['line']} name={h['name']}" for h in unknown
 ]
 failed_msgs = []
+# A refused name outside a listed witness is a site the checker rejects with
+# E246: it is either a typo in live code or an unlisted witness. Both fail.
+for h in refused_outside:
+    failed_msgs.append(
+        f"refused_name_outside_witness:{h['path']}:{h['line']}:{h['name']}"
+    )
+    print(
+        "EFFECT_NAME_CLOSED_LIST_FAIL refused_name_outside_witness "
+        f"file={h['path']}:{h['line']} name={h['name']}",
+        file=sys.stderr,
+    )
+for p in stale_witnesses:
+    failed_msgs.append(f"refusal_witness_without_refused_site:{p}")
+    print(
+        f"EFFECT_NAME_CLOSED_LIST_FAIL refusal_witness_without_refused_site file={p}",
+        file=sys.stderr,
+    )
 
 accuse_status = "not_run"
 accuse_detail = {}
@@ -633,26 +852,43 @@ if accuse:
                 file=sys.stderr,
             )
         elif silence:
-            # Founder ruling 2026-08-19: the accusation is RECORDED, not fatal —
-            # the ratchet below is what makes the gate red. Failing here would
-            # block the queue on `with Mod`, a family the founder has explicitly
-            # HELD pending the E035 blast-radius measurement. The accusation is
-            # still printed in full on every run; it just no longer forces red.
-            accuse_fail = 0
+            # Until 2026-11-22 this was recorded, not fatal (founder ruling
+            # 2026-08-19): NomeQueNaoExiste was on the held list, so no
+            # compiler could refuse it and failing here would only have
+            # restated the hold. The founder removed it from the hold on
+            # 2026-11-22. A compiler that still accepts the witness is now a
+            # failure. The committed prebuilt predates that change, so it
+            # fails here until it is refreshed from source.
+            accuse_fail = 1
             accuse_status = "silence"
+            failed_msgs.append("accusation_silence")
             print(
-                "EFFECT_NAME_CLOSED_LIST_ACCUSATION accusation_silence "
+                "EFFECT_NAME_CLOSED_LIST_FAIL accusation_silence "
                 f"file={witness_rel} rc=0 "
-                "ACCUSATION: compiler accepted with NomeQueNaoExiste in silence; "
-                "recorded, not fatal — see the ratchet",
+                "compiler accepted with NomeQueNaoExiste in silence",
                 file=sys.stderr,
             )
-        else:
+        elif (
+            "error[E246]" in witness_log
+            and "unknown effect 'NomeQueNaoExiste'" in witness_log
+        ):
             accuse_pass = 1
             accuse_status = "refused"
             print(
                 "EFFECT_NAME_CLOSED_LIST_ACCUSATION status=refused "
-                f"file={witness_rel} rc={witness_rc}"
+                f"file={witness_rel} rc={witness_rc} diagnostic=E246"
+            )
+        else:
+            # Non-zero exit for some other reason (crash, timeout, a different
+            # diagnostic) is not the refusal this witness asks for.
+            accuse_fail = 1
+            accuse_status = "wrong_diagnostic"
+            failed_msgs.append("accusation_wrong_diagnostic")
+            print(
+                "EFFECT_NAME_CLOSED_LIST_FAIL accusation_wrong_diagnostic "
+                f"file={witness_rel} rc={witness_rc} "
+                "expected error[E246] unknown effect 'NomeQueNaoExiste'",
+                file=sys.stderr,
             )
     accuse_detail = {
         "status": accuse_status,
@@ -664,7 +900,7 @@ if accuse:
     }
 
 total = len(hits) + accuse_total
-passed = len(known) + accuse_pass
+passed = len(known) + (len(refused) - len(refused_outside)) + accuse_pass
 # --- RATCHET (founder ruling 2026-08-19: freeze the current set, fail the next) --
 #
 # The gate was written to FAIL while the compiler silently accepts an unknown
@@ -728,8 +964,19 @@ else:
     print("EFFECT_NAME_CLOSED_LIST_OK held=%d (accusation still printed above)"
           % _frozen_total)
 
-# The accusation itself no longer forces red; the ratchet does.
-failed = _ratchet_fail
+# A frozen name that is no longer held is refused by the checker now: its
+# entry would tolerate a family the compiler no longer tolerates. Remove it
+# from the frozen file in the same commit that unholds it.
+_stale_frozen = sorted(n for n in _frozen_names if n not in held_set)
+if _stale_frozen:
+    _ratchet_fail = 1
+    failed_msgs.append("frozen_name_not_held:" + ",".join(_stale_frozen[:6]))
+    print("EFFECT_NAME_CLOSED_LIST_FAIL frozen_name_not_held names=%s"
+          % ",".join(_stale_frozen[:6]), file=sys.stderr)
+
+# Red comes from the ratchet, a refused name outside a witness, and (since
+# 2026-11-22) an accusation that the compiler did not refuse.
+failed = _ratchet_fail + accuse_fail + len(refused_outside) + len(stale_witnesses)
 if accuse and accuse_status == "not_run" and "positive_io_check_failed" in failed_msgs:
     failed += 1
 status = "fail" if failed_msgs or failed else "pass"
@@ -752,19 +999,27 @@ emit(
             "files": len(rels),
             "hits": len(hits),
             "known": len(known),
+            "declared": len(declared_hits),
             "unknown": len(unknown),
+            "refused": len(refused),
             "known_counts": dict(known_counts),
             "unknown_counts": dict(unknown_counts),
+            "refused_counts": dict(refused_counts),
             "unknown_sites": unknown,
+            "refused_sites": refused,
         },
+        "held_names": held,
+        "declared_names": sorted(declared_any),
         "accusation": accuse_detail,
         "failures": failed_msgs[:50],
         "failure_count": len(failed_msgs),
         "kind": "check",
         "note": (
-            "ACCUSATION gate. status=fail while souc check of "
-            f"{witness_rel} exits 0, and while any used with-name is "
-            "absent from the derived closed list."
+            "ACCUSATION gate. status=fail unless souc check of "
+            f"{witness_rel} is refused with E246, when a held with-name "
+            "is new or its uses rise above the frozen total, and when a "
+            "name that is neither builtin, declared nor held is used "
+            "outside a listed refusal witness."
         ),
     },
 )

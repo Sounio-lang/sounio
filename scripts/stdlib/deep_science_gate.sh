@@ -423,6 +423,14 @@ oracle_deep_case() {
       deep_viz_forest) compare "$stem" stdlib_deep_viz_forest ;;
       deep_viz_axis_layout) compare "$stem" stdlib_deep_viz_axis_layout ;;
       deep_viz_fitted_axis) compare "$stem" stdlib_deep_viz_fitted_axis ;;
+      deep_viz_overlay_reference)
+        rc=0
+        timeout 180 "$out/$stem" --negative-selftest "$out/stdlib_deep_viz_overlay.stdout" > "$out/$stem.concordance.stdout" 2> "$out/$stem.concordance.stderr" || rc=$?
+        record concordance "$stem" "$rc" ;;
+      deep_viz_line_stream_reference)
+        rc=0
+        timeout 180 "$out/$stem" "$out/stdlib_deep_viz_line_stream.stdout" "$out/stdlib_deep_viz_reduce_runs.stdout" > "$out/$stem.concordance.stdout" 2> "$out/$stem.concordance.stderr" || rc=$?
+        record concordance "$stem" "$rc" ;;
       deep_viz_line_reduce) compare "$stem" stdlib_deep_viz_line_reduce_million ;;
       deep_viz_dynamic_plot) compare "$stem" stdlib_deep_viz_dynamic_plot ;;
       deep_viz_dynamic_fields) compare "$stem" stdlib_deep_viz_dynamic_fields ;;
@@ -571,6 +579,12 @@ record focused-gate checked-bdf "$rc"
 rc=0
 bash tests/stdlib/metrology/type_a_gate.sh "$out/metrology-type-a" > "$out/metrology-type-a.stdout" 2> "$out/metrology-type-a.stderr" || rc=$?
 record focused-gate metrology-type-a "$rc"
+
+# Dynamic named counts, byte-exact identities/joins and validated CSR.
+# Child receipt separates bootstrap numerical support from canonical privacy.
+rc=0
+MADAROS_RAW_BIN="$MADAROS_RAW_BIN" SEED_RAW_BIN="${SEED_RAW_BIN:-$repo/bin/souc-lean-single-x86_64}" timeout 1200 bash scripts/stdlib/genomics_count_identity_gate.sh "$out/genomics-count-identities" > "$out/genomics-count-identities.gate.stdout" 2> "$out/genomics-count-identities.gate.stderr" || rc=$?
+record focused-gate genomics-count-identities "$rc"
 }
 
 # Both partitions remain mandatory in CI; standalone all preserves the original order.
