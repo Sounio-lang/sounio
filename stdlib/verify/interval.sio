@@ -1,4 +1,4 @@
-// stdlib/verify/interval.sio — Epistemic Interval Arithmetic (ISO 1788-2015)
+// stdlib/verify/interval.sio — Epistemic Interval Arithmetic (set-based containment)
 //
 // Implements verified, rigorous interval arithmetic where every interval
 // carries an epistemic provenance tag and integrates with Knowledge<T>.
@@ -7,13 +7,27 @@
 // arithmetic that is:
 //   (a) in the standard library (not a package)
 //   (b) integrated with an effect-gated epistemic type system
-//   (c) ISO 1788-2015 compliant (set-based containment model)
+//   (c) set-based containment with outward rounding on every operation
 //   (d) composable with GUM §5 uncertainty propagation
 //
+// NOT claimed: full IEEE 1788-2015 compliance. There are no hardware
+// directed roundings here; outward rounding uses the predecessor/successor
+// push of epistemic::sound_enclosure (se_down/se_up), i.e. the
+// Rump–Zimmermann–Boldo–Melquiond 2009 algorithm. Transcendental functions
+// are absent from this module for the same reason (libm exp/log are not
+// correctly rounded; cf. sound_enclosure's stated scope).
+//
 // References:
-//   IEEE 1788-2015 — Standard for Interval Arithmetic
+//   IEEE 1788-2015 — Standard for Interval Arithmetic (NOT fully implemented;
+//                    see the paragraph above for the exact deviation)
 //   Moore, Kearfott, Cloud — "Introduction to Interval Analysis" (SIAM 2009)
 //   Rump — "INTLAB — INTerval LABoratory" (1999)
+//   Rump, Zimmermann, Boldo, Melquiond — "Computing predecessor and successor
+//     in rounding to nearest", BIT Numer. Math. 49 (2009) 419-431
+
+// Outward rounding reuses epistemic::sound_enclosure (se_down/se_up) —
+// the same push, not a copy (lie corpus item 1d).
+use epistemic::sound_enclosure::{se_down, se_up}
 //
 // Distinction from GUM/Knowledge<T>:
 //   Knowledge<T>  — statistical (probabilistic) uncertainty, f64 variance
@@ -51,7 +65,14 @@ pub struct Interval {
     empty:      bool,  // true iff interval represents empty set
 }
 
-// Smart constructor — enforces lo <= hi invariant
+// Smart constructor — enforces lo <= hi invariant.
+//
+// The bounds themselves are exact f64 values, so [lo, hi] contains exactly
+// what it says. What this constructor CANNOT know is whether lo/hi are
+// exact inputs (literals, data) or already-rounded computed values passed
+// by the caller. Laundering a heuristic f64 through here is the caller's
+// defect (lie corpus item 1b, needs value provenance in the type system).
+// Every value COMPUTED by this module is pushed outward with se_down/se_up.
 pub fn interval(lo: f64, hi: f64) -> Interval with Panic {
     assert(lo <= hi)
     Interval {
@@ -83,12 +104,14 @@ pub fn interval_empty() -> Interval {
     }
 }
 
-// From measurement: [v - u, v + u] where u is the expanded uncertainty
+// From measurement: [v - u, v + u] where u is the expanded uncertainty.
+// v - u and v + u are computed in f64, so both endpoints are pushed outward
+// (a bare [v-u, v+u] would exclude the true bound on a bad rounding).
 pub fn interval_from_measurement(value: f64, expanded_uncertainty: f64) -> Interval with Panic {
     assert(expanded_uncertainty >= 0.0)
     Interval {
-        lo:         value - expanded_uncertainty,
-        hi:         value + expanded_uncertainty,
+        lo:         se_down(value - expanded_uncertainty),
+        hi:         se_up(value + expanded_uncertainty),
         provenance: IV_MEASURED,
         decoration: IV_DEC_COM,
         empty:      false,
@@ -123,28 +146,31 @@ pub fn iv_overlaps(a: Interval, b: Interval) -> bool {
 }
 
 // ============================================================================
-// ARITHMETIC (ISO 1788 §9 — outward rounding, containment property)
+// ARITHMETIC (set-based containment — every endpoint pushed outward with
+// se_down/se_up, the Rump–Zimmermann–Boldo–Melquiond 2009 push shared with
+// epistemic::sound_enclosure; a round-to-nearest endpoint alone would exclude
+// the true result on a bad rounding, e.g. [0.1,0.1]+[0.2,0.2] ∌ 0.3)
 // ============================================================================
 
 // [a] + [b] = [a.lo + b.lo, a.hi + b.hi]
-pub fn iv_add(a: Interval, b: Interval) -> Interval {
+pub fn iv_add(a: Interval, b: Interval) -> Interval with Panic {
     if a.empty || b.empty { return interval_empty() }
     Interval {
-        lo:         a.lo + b.lo,
-        hi:         a.hi + b.hi,
-        provenance: IV_DERIVED,
+        lo:         se_down(a.lo + b.lo),
+        hi:         se_up(a.hi + b.hi),
+        provenance: IV_ROUNDED,
         decoration: if a.decoration < b.decoration { a.decoration } else { b.decoration },
         empty:      false,
     }
 }
 
 // [a] - [b] = [a.lo - b.hi, a.hi - b.lo]
-pub fn iv_sub(a: Interval, b: Interval) -> Interval {
+pub fn iv_sub(a: Interval, b: Interval) -> Interval with Panic {
     if a.empty || b.empty { return interval_empty() }
     Interval {
-        lo:         a.lo - b.hi,
-        hi:         a.hi - b.lo,
-        provenance: IV_DERIVED,
+        lo:         se_down(a.lo - b.hi),
+        hi:         se_up(a.hi - b.lo),
+        provenance: IV_ROUNDED,
         decoration: if a.decoration < b.decoration { a.decoration } else { b.decoration },
         empty:      false,
     }
@@ -167,16 +193,19 @@ fn f64_max4(a: f64, b: f64, c: f64, d: f64) -> f64 with Mut {
     m
 }
 
-pub fn iv_mul(a: Interval, b: Interval) -> Interval with Mut {
+pub fn iv_mul(a: Interval, b: Interval) -> Interval with Mut, Panic {
     if a.empty || b.empty { return interval_empty() }
     let p1 = a.lo * b.lo
     let p2 = a.lo * b.hi
     let p3 = a.hi * b.lo
     let p4 = a.hi * b.hi
+    // min/max of round-to-nearest products, then one outward push each end:
+    // min(RN) is within half an ulp above the true minimum, and the push
+    // moves at least a full ulp outward, so containment holds.
     Interval {
-        lo:         f64_min4(p1, p2, p3, p4),
-        hi:         f64_max4(p1, p2, p3, p4),
-        provenance: IV_DERIVED,
+        lo:         se_down(f64_min4(p1, p2, p3, p4)),
+        hi:         se_up(f64_max4(p1, p2, p3, p4)),
+        provenance: IV_ROUNDED,
         decoration: if a.decoration < b.decoration { a.decoration } else { b.decoration },
         empty:      false,
     }
@@ -195,8 +224,11 @@ pub fn iv_div(a: Interval, b: Interval) -> Interval with Mut, Div, Panic {
             empty:      true,
         }
     }
-    let b_lo_inv = 1.0 / b.hi
-    let b_hi_inv = 1.0 / b.lo
+    // The reciprocal endpoints are computed in f64: push them outward before
+    // use (for b strictly positive or strictly negative, 1/b.hi <= 1/b.lo,
+    // so lo pushes down and hi pushes up in both cases).
+    let b_lo_inv = se_down(1.0 / b.hi)
+    let b_hi_inv = se_up(1.0 / b.lo)
     let b_inv = interval(b_lo_inv, b_hi_inv)
     iv_mul(a, b_inv)
 }
@@ -272,18 +304,29 @@ pub fn iv_relative_width(a: Interval) -> f64 with Div, Mut, Panic {
 //     level 2: outer containment bound (from IEEE 1788 interval)
 // ============================================================================
 
-// Expand an Interval to accommodate an epistemic Knowledge expansion factor.
-// factor: coverage factor k (e.g. k=2.0 for 95% for normal distribution)
-pub fn iv_from_epistemic(midpoint: f64, std_dev: f64, coverage_k: f64) -> Interval with Panic, Div {
+// A probabilistic range: midpoint ± k·σ. This is deliberately NOT an
+// Interval and claims no containment: a k-sigma range misses the true value
+// with probability 1 - P(|Z| <= k). Presenting it as a guaranteed enclosure
+// was the lie (a k-sigma probability range is not a containment bound).
+// Because the type differs, a ProbRange cannot flow into any function that
+// requires an Interval.
+pub struct ProbRange {
+    mid:        f64,  // center (estimate, may itself be inexact)
+    half_width: f64,  // k * sigma, symmetric half-width
+    coverage_k: f64,  // coverage factor k (e.g. 2.0 ≈ 95% for normal)
+}
+
+// From an epistemic estimate: midpoint ± kσ as a PROBABILISTIC range.
+// midpoint == midpoint rejects NaN (NaN == NaN is false); NaN inputs panic
+// rather than minting a range around nothing.
+pub fn probrange_from_epistemic(midpoint: f64, std_dev: f64, coverage_k: f64) -> ProbRange with Panic {
+    assert(midpoint == midpoint)
     assert(std_dev >= 0.0)
     assert(coverage_k > 0.0)
-    let u_exp = std_dev * coverage_k
-    Interval {
-        lo:         midpoint - u_exp,
-        hi:         midpoint + u_exp,
-        provenance: IV_MEASURED,
-        decoration: IV_DEC_COM,
-        empty:      false,
+    ProbRange {
+        mid:         midpoint,
+        half_width:  std_dev * coverage_k,
+        coverage_k:  coverage_k,
     }
 }
 
@@ -342,17 +385,24 @@ fn test_interval_basic() -> bool with Panic, Mut, Div {
     if !iv_contains(a, 2.0) { return false }
     if iv_contains(a, 4.0)  { return false }
 
-    // Addition: [1,3]+[2,5] = [3,8]
+    // Addition: [1,3]+[2,5] = [3,8], widened strictly outward past rounding;
+    // an exact [3,8] here would prove nothing was pushed (lie corpus item 1d).
     let s = iv_add(a, b)
-    if s.lo != 3.0 || s.hi != 8.0 { return false }
+    if !(s.lo <= 3.0 && 8.0 <= s.hi) { return false }
+    if !(s.lo < 3.0 && s.hi > 8.0) { return false }
+    if s.provenance != IV_ROUNDED { return false }
 
-    // Subtraction: [1,3]-[2,5] = [-4,1]
+    // Subtraction: [1,3]-[2,5] = [-4,1], widened
     let d = iv_sub(a, b)
-    if d.lo != 0.0 - 4.0 || d.hi != 1.0 { return false }
+    if !(d.lo <= (0.0 - 4.0) && 1.0 <= d.hi) { return false }
+    if !(d.lo < (0.0 - 4.0) && d.hi > 1.0) { return false }
+    if d.provenance != IV_ROUNDED { return false }
 
-    // Multiplication: [1,3]*[2,5] = [2,15]
+    // Multiplication: [1,3]*[2,5] = [2,15], widened
     let m = iv_mul(a, b)
-    if m.lo != 2.0 || m.hi != 15.0 { return false }
+    if !(m.lo <= 2.0 && 15.0 <= m.hi) { return false }
+    if !(m.lo < 2.0 && m.hi > 15.0) { return false }
+    if m.provenance != IV_ROUNDED { return false }
 
     // Width
     let w = iv_width(a)
@@ -381,13 +431,17 @@ fn test_interval_hull() -> bool with Mut, Panic {
 }
 
 fn test_epistemic_bridge() -> bool with Panic, Div, Mut {
-    // K=2.0, σ=0.5 → expanded u = 1.0 → [9.0, 11.0]
-    let iv = iv_from_epistemic(10.0, 0.5, 2.0)
-    if iv.lo != 9.0 || iv.hi != 11.0 { return false }
+    // K=2.0, σ=0.5 → half-width 1.0 around 10.0 as a PROBABILISTIC range.
+    // This is not an Interval and never was containment (item 1d).
+    let pr = probrange_from_epistemic(10.0, 0.5, 2.0)
+    if pr.mid != 10.0 { return false }
+    if pr.half_width != 1.0 { return false }
+    if pr.coverage_k != 2.0 { return false }
 
-    // Project back: width=2.0, k=2.0 → u=0.5
-    let u = iv_to_epistemic_u(iv, 2.0)
-    let diff = u - 0.5
+    // Project back through the interval side: width=2.0, k=2.0 → u=0.5
+    let iv = interval(pr.mid - pr.half_width, pr.mid + pr.half_width)
+    let u = iv_to_epistemic_u(iv, pr.coverage_k)
+    var diff = u - 0.5
     if diff < 0.0 { diff = 0.0 - diff }
     diff < 0.0001
 }
