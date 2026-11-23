@@ -15,6 +15,8 @@ var SRC_CAP: i64 = 16777216
 // Set when a write to SRC was dropped for lack of room. Checked where IO is
 // available; append_src_lit itself has no IO in its effect row.
 var SRC_OVERFLOW: i64 = 0
+// Set by lex_all when the token buffer fills before the source ends.
+var TOKEN_OVERFLOW: i64 = 0
 // Import resolution
 var IMP_PATH: [i8; 4096] = [0; 4096]
 var IMP_RAW_PATH: [i8; 4096] = [0; 4096]
@@ -59,16 +61,16 @@ var R15_SIDE_TABLE_BSS_OFF: i64 = 0  // BSS offset of the R15 side table
 
 // Token parallel arrays (kind, start, end, int_value)
 // Keep lean_single aligned with the 1M-token modular parser/lexer path.
-var TK: [i64; 2097152] = [0; 2097152]
-var TS: [i64; 2097152] = [0; 2097152]
-var TE: [i64; 2097152] = [0; 2097152]
-var TV: [i64; 2097152] = [0; 2097152]
+var TK: [i64; 4194304] = [0; 4194304]
+var TS: [i64; 4194304] = [0; 4194304]
+var TE: [i64; 4194304] = [0; 4194304]
+var TV: [i64; 4194304] = [0; 4194304]
 // Float literal extra: frac numerator and denominator (kind=53)
-var TF: [i64; 2097152] = [0; 2097152]
-var TD: [i64; 2097152] = [0; 2097152]
+var TF: [i64; 4194304] = [0; 4194304]
+var TD: [i64; 4194304] = [0; 4194304]
 // Float literal scientific exponent (signed exp_val; 0 = no exponent)
-var TX: [i64; 2097152] = [0; 2097152]
-var TL: [i64; 2097152] = [0; 2097152]
+var TX: [i64; 4194304] = [0; 4194304]
+var TL: [i64; 4194304] = [0; 4194304]
 var TC: i64 = 0
 
 // Code output
@@ -494,7 +496,7 @@ var UNIT_DIM_TABLE:  [i64; 2048] = [0; 2048]
 // stays usable as a generic type parameter -- `struct Map<K, V>`.
 var UNIT_USER_TABLE: [i64; 2048] = [0; 2048]
 // Parallel token unit-hash array (for _suffix literals e.g. 500_mg)
-var TU: [i64; 2097152] = [0; 2097152]
+var TU: [i64; 4194304] = [0; 4194304]
 // Packed dimension vector of the current compiled expression (0 = dimensionless/unknown)
 var EXPR_UNIT_DIM: i64 = 0
 
@@ -512,14 +514,14 @@ var ETY_COUNT: i64 = 0
 // Count of Knowledge<T> ETY entries with non-zero unit dimension (dimensional epistemic sites)
 var KNOWLEDGE_UNITS_COUNT: i64 = 0
 // Per-expression epistemic state (indexed by token position)
-var EXPR_ETY:  [i64; 2097152] = [0; 2097152]
-var EXPR_CONF: [i64; 2097152] = [0; 2097152]
-var EXPR_GATE: [i64; 2097152] = [0; 2097152]
+var EXPR_ETY:  [i64; 4194304] = [0; 4194304]
+var EXPR_CONF: [i64; 4194304] = [0; 4194304]
+var EXPR_GATE: [i64; 4194304] = [0; 4194304]
 // Gen 17 D1: Belief/plausibility interval (Knightian uncertainty)
 // EXPR_BELIEF = lower confidence bound, EXPR_PLAUS = upper bound
 // Gap = EXPR_PLAUS - EXPR_BELIEF = known-unknown component (Dempster-Shafer)
-var EXPR_BELIEF: [i64; 2097152] = [0; 2097152]
-var EXPR_PLAUS:  [i64; 2097152] = [0; 2097152]
+var EXPR_BELIEF: [i64; 4194304] = [0; 4194304]
+var EXPR_PLAUS:  [i64; 4194304] = [0; 4194304]
 // Confidence gate threshold: 950 = 95.0% required for direct code emission
 var GATE_THRESHOLD: i64 = 950
 // Epistemic scope stack (variable name hash → type ID + confidence)
@@ -554,7 +556,7 @@ var CLI_DUMP_CONF_JSON: i64 = 0
 //   970  = user assertion ("asserted" constructor)
 //   1000 = physical constant ("constant" constructor)
 //   propagates through arithmetic: min(left, right) via Sweep 2
-var MEAS_CONF: [i64; 2097152] = [0; 2097152]
+var MEAS_CONF: [i64; 4194304] = [0; 4194304]
 // Gen 13: ESCOPE measurement quality (parallel to ESCOPE_CONF)
 var ESCOPE_MEAS: [i64; 65536] = [0; 65536]
 // Gen 13: count of tokens with MEAS_CONF > 0 after all passes
@@ -1467,7 +1469,7 @@ fn global_cap() -> i64 { return 2048 }
 fn max_frame_bytes() -> i64 { return 4194304 }
 fn box_page_bytes() -> i64 { return 4096 }
 fn local_bss_spill_bytes() -> i64 { return 1048576 }
-fn token_capacity() -> i64 { return 2097152 }
+fn token_capacity() -> i64 { return 4194304 }
 
 fn note_limit_error(kind: i64) with Mut {
     if LIMIT_ERROR_KIND == 0 { LIMIT_ERROR_KIND = kind }
@@ -9005,9 +9007,12 @@ fn lex_all() with IO, Mut, Panic, Div {
     LEX_ERROR_KIND = 0
     LEX_ERROR_COL = 0
     LEX_ERROR_TOK = 0
+    TOKEN_OVERFLOW = 0
     var p: i64 = 0
     var cur_line: i64 = 1
-    while p < SRC_LEN && TC + 1 < token_capacity() {
+    // One pass of this loop can push a few tokens, and the end-of-input token
+    // follows it, so stop with room to spare.
+    while p < SRC_LEN && TC + 8 < token_capacity() {
         let c = sb(p)
         // Whitespace
         // File boundary marker \x01<path>\x02 — emit TK==77 and reset line counter
@@ -9608,6 +9613,9 @@ fn lex_all() with IO, Mut, Panic, Div {
         }
         p = p + 1
     }
+    // The loop stopped on capacity, not at the end of the source: the tail of
+    // the program was never lexed. Refuse rather than parse a truncated stream.
+    if p < SRC_LEN { TOKEN_OVERFLOW = 1 }
     TK[TC as usize] = 0; TL[TC as usize] = cur_line; TC = TC + 1
     lex_enum_variant_names()
     lex_contextual_names()
@@ -51739,7 +51747,7 @@ fn write_macho_arm64(output: string) -> i64 with IO, Mut, Panic, Div {
 // declaration name, or a bare identifier in a module that declares no local,
 // parameter or binder spelled N (so `let N = N()` keeps its local).
 
-var LMR_TOK_MOD: [i64; 2097152] = [0; 2097152]
+var LMR_TOK_MOD: [i64; 4194304] = [0; 4194304]
 // Top-level free fn definitions: name token, module.
 var LMR_DEF_TOK: [i64; 65536] = [0; 65536]
 var LMR_DEF_MOD: [i64; 65536] = [0; 65536]
@@ -54336,6 +54344,12 @@ fn main() -> i64 with IO, Mut, Panic, Div {
     if precheck_knightian_conflict() != 0 { return 1 }
     if precheck_temporal_window_conflict() != 0 { return 1 }
     lex_all()
+    if TOKEN_OVERFLOW != 0 {
+        print("error: source too large: the token buffer of ")
+        print_int(token_capacity())
+        print(" tokens filled before the end of the source\n")
+        return 1
+    }
     if LEX_ERROR_LINE != 0 {
         if LEX_ERROR_KIND == 5 {
             // SIO-266: same code and wording as Madaros E273, at the opening quote.
