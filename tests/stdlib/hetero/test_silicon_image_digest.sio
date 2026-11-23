@@ -1,0 +1,71 @@
+//@ run-pass
+//@ requires: madaros
+//@ timeout: 600
+//@ expect-stdout: SILICON_IMAGE_DIGEST_OK
+// Every image hetero::silicon builds is pinned by size and by a position-sensitive
+// byte digest, h = (257 h + b) mod 1000000007 over the whole image. The expected
+// values are the output of the same digest compiled from the head of PR #3351
+// (the last state of the code before it came to main) by that branch's own
+// prebuilt Madaros. Salvaging the code onto main rewrote ten i64 constants of the
+// form `a - 9223372036854775808`, whose right operand main's checker now refuses
+// (E300), as the equal in-range value; this test is the witness that no image
+// byte moved. CPU only: it builds the images and never touches a GPU.
+
+use hetero::silicon::image::{SiImage, si_bar, si_cache, si_fma, si_fma_dest0, si_fma_src, si_ldg, si_shfl, si_amp_dmul, si_amp_mov, si_movk, si_own, si_stamp, si_sub, si_volta_mov, si_gemv_sm89, si_gemv_grid_sm89}
+
+fn digest(img: SiImage) -> i64 with Div {
+    if !img.ok { return 0 - 1 }
+    var h: i64 = 0
+    var i: i64 = 0
+    while i < img.nbytes {
+        let b = (read_i64(img.ptr as *mut i64, i / 8) >> ((i % 8) * 8)) & 255
+        h = (h * 257 + b) % 1000000007
+        i = i + 1
+    }
+    h
+}
+
+fn expect(tag: string, img: SiImage, nbytes: i64, want: i64) -> i64 with IO, Div {
+    let got = digest(img)
+    if img.nbytes == nbytes && got == want { return 0 }
+    print("MISMATCH ")
+    print(tag)
+    print(" nbytes=")
+    print_int(img.nbytes)
+    print(" digest=")
+    print_int(got)
+    print("\n")
+    1
+}
+
+fn main() with IO, Alloc, Mut, Div, Panic {
+    var bad: i64 = 0
+    bad = bad + expect("stamp", si_stamp(1, 1234567), 2600, 161933637)
+    bad = bad + expect("fma", si_fma(1, 1065353216), 2728, 783909298)
+    bad = bad + expect("fma_dest0", si_fma_dest0(1, 1065353216), 2728, 925566392)
+    bad = bad + expect("fma_src", si_fma_src(1, 1065353216), 2728, 278327086)
+    bad = bad + expect("shfl", si_shfl(1, 4), 2728, 779859676)
+    bad = bad + expect("ldg", si_ldg(1, 16), 3112, 165462328)
+    bad = bad + expect("cache0", si_cache(1, 0), 2984, 723832437)
+    bad = bad + expect("cache1", si_cache(1, 1), 2984, 520261513)
+    bad = bad + expect("sub0", si_sub(1, 0), 2728, 595108332)
+    bad = bad + expect("sub1", si_sub(1, 1), 2728, 605130659)
+    bad = bad + expect("bar", si_bar(1, 0, 1), 2728, 121778822)
+    bad = bad + expect("movk", si_movk(1), 2600, 847791542)
+    bad = bad + expect("amp_mov", si_amp_mov(), 2600, 728765517)
+    bad = bad + expect("amp_dmul", si_amp_dmul(), 2984, 144067282)
+    bad = bad + expect("volta_mov", si_volta_mov(), 2472, 62398838)
+    bad = bad + expect("own", si_own(), 2904, 409357327)
+    bad = bad + expect("gemv_1_1", si_gemv_sm89(1, 1), 2904, 935657957)
+    bad = bad + expect("gemv_576_64", si_gemv_sm89(576, 64), 2904, 696957354)
+    bad = bad + expect("gemv_1024_4096", si_gemv_sm89(1024, 4096), 2904, 77212237)
+    bad = bad + expect("grid_1_1", si_gemv_grid_sm89(1, 1), 3112, 572439288)
+    bad = bad + expect("grid_257_31", si_gemv_grid_sm89(257, 31), 3112, 563602219)
+    bad = bad + expect("grid_4096_7", si_gemv_grid_sm89(4096, 7), 3112, 180518293)
+    bad = bad + expect("grid_65535_1", si_gemv_grid_sm89(65535, 1), 3112, 958969664)
+    // Shapes the encoder must refuse.
+    if si_gemv_grid_sm89(0, 1).ok || si_gemv_grid_sm89(65536, 1).ok { bad = bad + 1 }
+    if si_gemv_grid_sm89(1, 0).ok || si_gemv_grid_sm89(1, 4097).ok { bad = bad + 1 }
+    if bad != 0 { exit(1) }
+    print("SILICON_IMAGE_DIGEST_OK\n")
+}
