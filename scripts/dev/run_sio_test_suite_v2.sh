@@ -831,7 +831,7 @@ _run_test_case() {
         local tmp_out
         local compile_exit_code=0
         local check_error_patterns=false
-        tmp_out="$(mktemp /tmp/sounio-cf-XXXXXX.elf)"
+        tmp_out="$(mktemp "$TEST_TMP/sounio-cf-XXXXXX")"
         output=$(timeout "$timeout_val" "$SOUC_BIN" compile "$file" -o "$tmp_out" 2>&1) || compile_exit_code=$?
         raw_exit=$compile_exit_code
         rm -f "$tmp_out"
