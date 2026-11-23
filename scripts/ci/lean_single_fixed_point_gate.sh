@@ -176,14 +176,22 @@ if [[ "$STAGE1_MD5" != "$STAGE2_MD5" ]]; then
   echo "[lean-single-fp] note: change; the chain still converges at stage2." >&2
 fi
 
-# Shipped binary should already be at the fixed point. We warn rather than
-# fail on divergence because it may legitimately drift in mid-development --
-# what we strictly require is that the chain itself converges.
+# The shipped seed must be the fixed point. This used to be a WARN on the
+# grounds that the seed may drift mid-development, but canonical_compiler_gate
+# already fails every PR whose seed differs from what lean_single.sio
+# reproduces, so a drift that reaches main is a defect, not development.
+# SOUNIO_LEAN_FP_ALLOW_STALE_SEED=1 keeps the old warning for a local run.
 if [[ "$SHIPPED_MD5" != "$STAGE2_MD5" ]]; then
-  echo "[lean-single-fp] WARN: the seed differs from the fixed point (stage2)." >&2
-  echo "[lean-single-fp] WARN: the chain converged, but the committed seed is not" >&2
-  echo "[lean-single-fp] WARN: what lean_single.sio reproduces. Rebuild it, or run" >&2
-  echo "[lean-single-fp] WARN: scripts/ci/canonical_compiler_gate.sh, which FAILS on this." >&2
+  echo "[lean-single-fp] the committed seed differs from the fixed point (stage2):" >&2
+  echo "[lean-single-fp]   seed   $SHIPPED_MD5" >&2
+  echo "[lean-single-fp]   stage2 $STAGE2_MD5" >&2
+  echo "[lean-single-fp] the chain converged, but the seed is not what lean_single.sio" >&2
+  echo "[lean-single-fp] reproduces. Rebuild it (docs/ops/LEAN_SINGLE_SEED_REFRESH.md)." >&2
+  if [[ "${SOUNIO_LEAN_FP_ALLOW_STALE_SEED:-0}" != "1" ]]; then
+    echo "[lean-single-fp] FAIL: stale seed" >&2
+    exit 1
+  fi
+  echo "[lean-single-fp] WARN: SOUNIO_LEAN_FP_ALLOW_STALE_SEED=1, not failing" >&2
 fi
 
 # Emit driver-self-compile-shaped lines so the umbrella's log parser

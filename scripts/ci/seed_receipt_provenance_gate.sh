@@ -23,8 +23,11 @@
 #      surface (lean_single.sio and/or the committed lean_single ELF /
 #      receipt path). Other PRs and plain main/push runs PASS without a
 #      receipt. Mutant control still runs every time.
-#   3. SOUNIO_SEED_RECEIPT_REQUIRED=1 → missing receipt always FAIL
-#      (optional later flip once a receipt is permanently on main).
+#   3. SOUNIO_SEED_RECEIPT_REQUIRED=1 (the default since 2026-11-23) → a
+#      missing receipt always FAILS. A receipt has been on main since #3707, and
+#      rule 2 alone let a pull_request run without CI_BASE_SHA (the contracts
+#      job sets none) treat a deleted receipt as "not touched" and pass.
+#      SOUNIO_SEED_RECEIPT_REQUIRED=0 restores rule 2 for a local run.
 #
 # Why not "warn forever" or "bootstrap fake receipt":
 #   Warn forever re-accumulates silent ELF swaps on non-touching paths less
@@ -61,7 +64,7 @@ SEED_DEFAULT="$ROOT_DIR/bin/souc-lean-single-x86_64"
 SEED="${SOUNIO_SEED_ELF:-${SOUNIO_CANONICAL_SOUC:-$SEED_DEFAULT}}"
 RECEIPT_DEFAULT="$ROOT_DIR/bin/souc-lean-single-x86_64.SeedReceipt.json"
 RECEIPT="${SOUNIO_SEED_RECEIPT_PATH:-$RECEIPT_DEFAULT}"
-REQUIRED="${SOUNIO_SEED_RECEIPT_REQUIRED:-0}"
+REQUIRED="${SOUNIO_SEED_RECEIPT_REQUIRED:-1}"
 CHECKER="$ROOT_DIR/scripts/dev/write_seed_receipt.py"
 EVENT_NAME="${CI_EVENT_NAME:-${GITHUB_EVENT_NAME:-}}"
 BASE_SHA="${CI_BASE_SHA:-}"
@@ -143,6 +146,26 @@ PY
 }
 
 run_mutant_control
+
+# ── Control: a missing receipt must FAIL under the default policy ──────────
+# Runs this gate once more on a receipt path that does not exist, as a
+# pull_request with no CI_BASE_SHA (what the contracts job provides). Before
+# the default became REQUIRED=1 that run printed PASS.
+run_missing_receipt_control() {
+  [[ "${SOUNIO_SEED_PROV_IN_CONTROL:-}" == "1" ]] && return 0
+  [[ "$REQUIRED" == "1" ]] || return 0
+  local out rc=0
+  out="$(SOUNIO_SEED_PROV_IN_CONTROL=1 GITHUB_EVENT_NAME=pull_request CI_EVENT_NAME=pull_request \
+    CI_BASE_SHA= SOUNIO_SEED_RECEIPT_PATH="/nonexistent/SeedReceipt.json" \
+    bash "${BASH_SOURCE[0]}" 2>&1)" || rc=$?
+  if [[ $rc -eq 0 ]]; then
+    printf '%s\n' "$out" >&2
+    die "MISSING-RECEIPT CONTROL BROKEN: a pull_request run with no receipt passed."
+  fi
+  note "MISSING-RECEIPT CONTROL ok: no receipt refused (rc=$rc)"
+}
+
+run_missing_receipt_control
 
 # True when this change set touches the lean_single seed surface.
 seed_surface_touched() {
