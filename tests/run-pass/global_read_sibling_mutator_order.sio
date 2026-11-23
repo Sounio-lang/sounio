@@ -1,0 +1,54 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: GLOBAL_READ_SIBLING_ORDER_OK
+// A helper that only reads a global may be re-lowered by the first-order
+// variance walk, while a sibling argument that writes the global is evaluated
+// once. The value and the variance must both follow left-to-right argument
+// order: `scaled` sees the global as it was when its argument was evaluated,
+// not as the sibling left it.
+var S: f64 = 1.0
+var N: i64 = 0
+
+fn scaled(x: f64) -> f64 { x * S }
+
+fn set_s(x: f64) -> f64 with Mut, Div {
+    S = 10.0
+    N = N + 1
+    x
+}
+
+fn add2(a: f64, b: f64) -> f64 { a + b }
+
+fn near(actual: f64, expected: f64) -> bool {
+    let d = actual - expected
+    if d < 0.0 { return (0.0 - d) < 0.000001 }
+    d < 0.000001
+}
+
+fn main() -> i64 with IO, Mut, Div, Epistemic {
+    var bad: i64 = 0
+    let k: Knowledge<f64> = measure(2.0, uncertainty: 1.0)
+    let v = k.value
+
+    // Reader first: it sees S = 1, so value 2 and variance 1.
+    let r = add2(scaled(v), set_s(0.0))
+    if !near(r, 2.0) { bad = bad + 1 }
+    if !near(variance_of(r), 1.0) { bad = bad + 1 }
+    if N != 1 { bad = bad + 1 }
+
+    // Writer first: the reader sees S = 10, so value 20 and variance 100.
+    S = 1.0
+    N = 0
+    let r2 = add2(set_s(0.0), scaled(v))
+    if !near(r2, 20.0) { bad = bad + 1 }
+    if !near(variance_of(r2), 100.0) { bad = bad + 1 }
+    if N != 1 { bad = bad + 1 }
+
+    if bad == 0 {
+        println("GLOBAL_READ_SIBLING_ORDER_OK")
+    } else {
+        print("GLOBAL_READ_SIBLING_ORDER_FAIL ")
+        println(bad)
+    }
+    0
+}
