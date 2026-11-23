@@ -1,0 +1,63 @@
+//@ run-pass
+//@ expect-stdout: LIE01D_IEEE_PASS
+// lie corpus item 1d: outward rounding in epistemic::interval_ieee, and the
+// finite entire. Round-to-nearest endpoints exclude the true result on a
+// bad rounding; every computed endpoint below must be strictly pushed.
+// "Entire" is [-1e308, +1e308] (finite: Sounio f64 has no infinities), and a
+// zero-spanning divisor yields it with exception 2.
+
+use epistemic::interval_ieee::{interval_new, interval_entire, interval_add,
+    interval_sub, interval_mul, interval_div, interval_sqrt, interval_width,
+    interval_point, interval_subset}
+
+fn main() -> i64 with IO, Mut, Panic {
+    var fails: i64 = 0
+
+    // Addition contains the true sum and is strictly wider than RN.
+    let s = interval_add(interval_new(0.1, 0.1), interval_new(0.2, 0.2))
+    if !(interval_subset(interval_point(0.3), s)) { fails = fails + 1 }
+    if !(interval_width(s) > 0.0) { fails = fails + 1 }
+
+    // Multiplication: RN(0.1*0.1) = 0.010000000000000002 excludes 0.01.
+    let m = interval_mul(interval_new(0.1, 0.1), interval_new(0.1, 0.1))
+    if !(interval_subset(interval_point(0.01), m)) { fails = fails + 1 }
+    if !(interval_width(m) > 0.0) { fails = fails + 1 }
+
+    // Subtraction is widened too.
+    let d = interval_sub(interval_new(1.0, 3.0), interval_new(2.0, 5.0))
+    if !(interval_width(d) > 5.0) { fails = fails + 1 }
+
+    // Normal division: [2,4]/[1,2] = [1,4], widened past the exact ends.
+    let q = interval_div(interval_new(2.0, 4.0), interval_new(1.0, 2.0))
+    if q.exception != 0 { fails = fails + 1 }
+    if !(q.result.lo < 1.0 && 4.0 < q.result.hi) { fails = fails + 1 }
+
+    // Zero divisor: empty with exception 1.
+    let z = interval_div(interval_new(1.0, 2.0), interval_new(0.0, 0.0))
+    if !z.result.is_empty { fails = fails + 1 }
+    if z.exception != 1 { fails = fails + 1 }
+
+    // Spanning divisor: finite entire with exception 2.
+    let e = interval_div(interval_new(1.0, 2.0), interval_new(0.0 - 1.0, 1.0))
+    if e.exception != 2 { fails = fails + 1 }
+    if !(e.result.lo <= (0.0 - 1.0e308) && 1.0e308 <= e.result.hi) { fails = fails + 1 }
+    // And entire() is exactly that finite range, not infinity.
+    let ent = interval_entire()
+    if !(ent.lo == (0.0 - 1.0e308) && ent.hi == 1.0e308) { fails = fails + 1 }
+    if ent.is_empty { fails = fails + 1 }
+
+    // sqrt stays rigorous: [4,9] -> [2,3], pushed strictly outward.
+    // (sqrt is correctly rounded per IEEE 754, but RN alone can still
+    // exclude the true root by half an ulp — item 1d.)
+    let r = interval_sqrt(interval_new(4.0, 9.0))
+    if r.interval.is_empty { fails = fails + 1 }
+    if !(r.interval.lo <= 2.0 && 3.0 <= r.interval.hi) { fails = fails + 1 }
+    if !(r.interval.lo < 2.0 && r.interval.hi > 3.0) { fails = fails + 1 }
+
+    if fails == 0 {
+        println("LIE01D_IEEE_PASS")
+    } else {
+        println("LIE01D_IEEE_FAIL")
+    }
+    return fails
+}
