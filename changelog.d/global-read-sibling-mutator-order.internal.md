@@ -1,0 +1,1 @@
+Add a run-pass witness that a helper reading a module-level `var` keeps left-to-right order in value and first-order variance when a sibling argument writes that global, and correct the comment in `lower_expr_relower_safe_ref` that called this case open.
