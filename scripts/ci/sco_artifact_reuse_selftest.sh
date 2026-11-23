@@ -5,8 +5,9 @@ root=$(cd "$(dirname "$0")/../.." && pwd)
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 repo="$work/repo"
-mkdir -p "$repo"/{scripts/ci,self-hosted,stdlib,bin}
+mkdir -p "$repo"/{scripts/ci,scripts/dev,self-hosted,stdlib,bin}
 cp "$root/scripts/ci/sco_step4_runtime_gate.sh" "$root/scripts/ci/stdlib_deep_compiler_receipt.sh" "$repo/scripts/ci/"
+cp "$root/scripts/dev/madaros-cache.sh" "$repo/scripts/dev/"
 printf '// fixture\n' > "$repo/self-hosted/a.sio"
 printf '// fixture\n' > "$repo/stdlib/a.sio"
 for gate in sco_corpus_gate sco_strategy_probe_gate; do

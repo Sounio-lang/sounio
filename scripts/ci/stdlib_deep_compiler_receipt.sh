@@ -8,13 +8,13 @@ work=$(mktemp -d "${TMPDIR:-/tmp}/stdlib-deep-receipt.XXXXXX")
 trap 'rm -rf -- "$work"' EXIT
 
 key() {
- local source=$1 engine=$2 target=$3 bootstrap=$4 toolchain=$5 inputs=$6 value
+ local source=$1 engine=$2 target=$3 bootstrap=$4 toolchain=$5 inputs=$6 links=$7 value
  [[ "$source" =~ ^[0-9a-f]{40}$ ]] || fail 'source key must be a full Git SHA1'
- for value in "$bootstrap" "$toolchain" "$inputs"; do
+ for value in "$bootstrap" "$toolchain" "$inputs" "$links"; do
  [[ "$value" =~ ^[0-9a-f]{64}$ ]] || fail 'input key fields must be SHA256 digests'
  done
- printf 'verified-compiler-v2\nsource=%s\nengine=%s\ntarget=%s\nbootstrap=%s\ntoolchain=%s\ninputs=%s\n' \
- "$source" "$engine" "$target" "$bootstrap" "$toolchain" "$inputs" | sha256sum | awk '{print $1}'
+ printf 'verified-compiler-v2\nsource=%s\nengine=%s\ntarget=%s\nbootstrap=%s\ntoolchain=%s\ninputs=%s\nlinks=%s\n' \
+ "$source" "$engine" "$target" "$bootstrap" "$toolchain" "$inputs" "$links" | sha256sum | awk '{print $1}'
 }
 
 check_revision() {
@@ -48,8 +48,20 @@ check_target() {
  || fail 'compiler binary is not an x86_64 Linux ELF'
 }
 
+# The build cache keys both Madaros stages on madaros_env_fingerprint (the
+# SOUNIO_* settings that change the build, plus HOSTTYPE/OSTYPE); the receipt
+# binds the producer's value so a build-flag change changes BUILD_KEY too.
+build_env_fingerprint() {
+ local repo=$1 lib="$1/scripts/dev/madaros-cache.sh"
+ [[ -f "$lib" ]] || fail 'missing scripts/dev/madaros-cache.sh for the build-environment fingerprint'
+ # shellcheck source=/dev/null
+ ( unset _SOUNIO_MADAROS_CACHE_LOADED; source "$lib" && madaros_env_fingerprint ) || fail 'cannot compute the build-environment fingerprint'
+}
+
 write_toolchain() {
- local repo=$1 output=$2
+ local repo=$1 output=$2 env_sha
+ env_sha=$(build_env_fingerprint "$repo")
+ [[ "$env_sha" =~ ^[0-9a-f]{64}$ ]] || fail 'build-environment fingerprint is not a SHA256 digest'
  {
  printf 'host_os=%s\n' "$(uname -s)"
  printf 'host_arch=%s\n' "$(uname -m)"
@@ -57,6 +69,7 @@ write_toolchain() {
  printf 'glibc=%s\n' "$(getconf GNU_LIBC_VERSION 2>/dev/null || echo unavailable)"
  printf 'bash=%s\n' "$(bash --version | head -n1)"
  printf 'build_script_sha256=%s\n' "$(sha256sum "$repo/scripts/ci/build_modular_madaros.sh" | awk '{print $1}')"
+ printf 'build_env_sha256=%s\n' "$env_sha"
  } > "$output/TOOLCHAIN.txt"
  (cd "$output" && sha256sum TOOLCHAIN.txt > TOOLCHAIN.sha256)
 }
@@ -100,7 +113,7 @@ paths() {
  [[ -s "$output" ]] || fail 'empty source closure'
 }
 prepare() {
- local repo=$1 compiler=$2 output=$3 expected=$4 fixture bootstrap bootstrap_sha inputs_sha toolchain_sha build_key
+ local repo=$1 compiler=$2 output=$3 expected=$4 fixture bootstrap bootstrap_sha inputs_sha toolchain_sha links_sha build_key
  check_revision "$repo" "$expected"
  [[ -f "$compiler" && -x "$compiler" ]] || fail 'fresh compiler is missing or not executable'
  [[ "$output" == /* ]] || fail 'artifact directory must be absolute'
@@ -128,12 +141,13 @@ prepare() {
  inputs_sha=$(sha256sum "$output/INPUTS.sha256" | awk '{print $1}')
  toolchain_sha=$(sha256sum "$output/TOOLCHAIN.txt" | awk '{print $1}')
  bootstrap_sha=$(awk 'NR == 1 {print $1}' "$output/BOOTSTRAP.sha256")
- build_key=$(key "$expected" madaros x86_64-linux "$bootstrap_sha" "$toolchain_sha" "$inputs_sha")
+ links_sha=$(sha256sum "$output/SYMLINKS.txt" | awk '{print $1}')
+ build_key=$(key "$expected" madaros x86_64-linux "$bootstrap_sha" "$toolchain_sha" "$inputs_sha" "$links_sha")
  printf '%s\n' "$build_key" > "$output/BUILD_KEY"
  printf 'STDLIB_DEEP_COMPILER_RECEIPT_PREPARED %s %s\n' "$expected" "$build_key"
 }
 verify() {
- local repo=$1 artifact=$2 expected=$3 required line bootstrap bootstrap_sha inputs_sha toolchain_sha actual_key
+ local repo=$1 artifact=$2 expected=$3 required line bootstrap bootstrap_sha inputs_sha toolchain_sha links_sha actual_key
  check_revision "$repo" "$expected"
  for required in RECEIPT_VERSION SOURCE_GIT_SHA ENGINE TARGET BOOTSTRAP_PATH BOOTSTRAP.sha256 \
                 TOOLCHAIN.txt TOOLCHAIN.sha256 BUILD_KEY TRACKED_PATHS.txt SYMLINKS.txt INPUTS.sha256 COMPILER.sha256 madaros.elf; do
@@ -153,7 +167,10 @@ verify() {
  bootstrap=$(cat "$artifact/BOOTSTRAP_PATH")
  [[ "$bootstrap" != /* && -f "$repo/$bootstrap" && ! -L "$repo/$bootstrap" ]] || fail 'bootstrap path is invalid'
  [[ "$(resolve_bootstrap "$repo")" == "$bootstrap" ]] || fail 'bootstrap path differs from the producer'
- (cd "$repo" && sha256sum -c "$artifact/BOOTSTRAP.sha256") || fail 'bootstrap hash mismatch'
+ # Regenerate the manifest for the resolved bootstrap and compare bytes: a
+ # manifest naming any other file, even a checked-out one, is refused.
+ (cd "$repo" && sha256sum -- "$bootstrap") | cmp -s - "$artifact/BOOTSTRAP.sha256" \
+  || fail 'bootstrap manifest does not match the resolved bootstrap path and bytes'
  paths "$repo" "$work/current-paths.txt"
  cmp -s "$work/current-paths.txt" "$artifact/TRACKED_PATHS.txt" || fail 'tracked input set differs'
  links "$repo" "$work/current-paths.txt" "$work/current-links.txt"
@@ -169,7 +186,8 @@ verify() {
  inputs_sha=$(sha256sum "$artifact/INPUTS.sha256" | awk '{print $1}')
  toolchain_sha=$(sha256sum "$artifact/TOOLCHAIN.txt" | awk '{print $1}')
  bootstrap_sha=$(awk 'NR == 1 {print $1}' "$artifact/BOOTSTRAP.sha256")
- actual_key=$(key "$expected" madaros x86_64-linux "$bootstrap_sha" "$toolchain_sha" "$inputs_sha")
+ links_sha=$(sha256sum "$artifact/SYMLINKS.txt" | awk '{print $1}')
+ actual_key=$(key "$expected" madaros x86_64-linux "$bootstrap_sha" "$toolchain_sha" "$inputs_sha" "$links_sha")
  [[ "$(cat "$artifact/BUILD_KEY")" == "$actual_key" ]] || fail 'compiler build key mismatch'
  printf 'STDLIB_DEEP_COMPILER_RECEIPT_VERIFIED %s %s\n' "$expected" "$actual_key"
 }
@@ -177,7 +195,8 @@ selftest() {
  # An isolated disposable Git fixture; no project index/ref is changed.
  local repo="$work/fixture" artifact="$work/artifact" sha control rc compiler base_key changed_key value
  unset SOUC_BIN SOUNIO_SOUC_BIN
- mkdir -p "$repo"/{bin,scripts/ci,self-hosted,stdlib}
+ mkdir -p "$repo"/{bin,scripts/ci,scripts/dev,self-hosted,stdlib}
+ cp "$(dirname "$script")/../dev/madaros-cache.sh" "$repo/scripts/dev/madaros-cache.sh"
  python3 - "$repo/bin/souc-linux-x86_64" <<'PY'
 import sys
 header = bytearray(64)
@@ -214,21 +233,33 @@ PY
  [[ "$rc" == 65 ]] || fail 'different-SHA reuse did not produce controlled exit65'
  grep -q '^STDLIB_DEEP_RECEIPT_FAIL:' "$work/different-sha-rerun.log" || fail 'different-SHA reuse lacked refusal diagnostic'
  printf 'RECEIPT_DIFFERENT_SHA_REUSE_REJECTED\n'
- base_key=$("$script" key "$sha" madaros x86_64-linux "$(printf b%.0s {1..64})" "$(printf c%.0s {1..64})" "$(printf d%.0s {1..64})")
- [[ "$("$script" key "$sha" madaros x86_64-linux "$(printf b%.0s {1..64})" "$(printf c%.0s {1..64})" "$(printf d%.0s {1..64})")" == "$base_key" ]] \
+ base_key=$("$script" key "$sha" madaros x86_64-linux "$(printf b%.0s {1..64})" "$(printf c%.0s {1..64})" "$(printf d%.0s {1..64})" "$(printf f%.0s {1..64})")
+ [[ "$("$script" key "$sha" madaros x86_64-linux "$(printf b%.0s {1..64})" "$(printf c%.0s {1..64})" "$(printf d%.0s {1..64})" "$(printf f%.0s {1..64})")" == "$base_key" ]] \
   || fail 'identical build inputs produced different keys'
  for value in \
-  "$("$script" key 0000000000000000000000000000000000000000 madaros x86_64-linux "$(printf b%.0s {1..64})" "$(printf c%.0s {1..64})" "$(printf d%.0s {1..64})")" \
-  "$("$script" key "$sha" lean_single x86_64-linux "$(printf b%.0s {1..64})" "$(printf c%.0s {1..64})" "$(printf d%.0s {1..64})")" \
-  "$("$script" key "$sha" madaros aarch64-linux "$(printf b%.0s {1..64})" "$(printf c%.0s {1..64})" "$(printf d%.0s {1..64})")" \
-  "$("$script" key "$sha" madaros x86_64-linux "$(printf e%.0s {1..64})" "$(printf c%.0s {1..64})" "$(printf d%.0s {1..64})")" \
-  "$("$script" key "$sha" madaros x86_64-linux "$(printf b%.0s {1..64})" "$(printf e%.0s {1..64})" "$(printf d%.0s {1..64})")" \
-  "$("$script" key "$sha" madaros x86_64-linux "$(printf b%.0s {1..64})" "$(printf c%.0s {1..64})" "$(printf e%.0s {1..64})")"; do
-  [[ "$value" != "$base_key" ]] || fail 'build key ignored a source, engine, target, bootstrap, toolchain, or input dimension'
+  "$("$script" key 0000000000000000000000000000000000000000 madaros x86_64-linux "$(printf b%.0s {1..64})" "$(printf c%.0s {1..64})" "$(printf d%.0s {1..64})" "$(printf f%.0s {1..64})")" \
+  "$("$script" key "$sha" lean_single x86_64-linux "$(printf b%.0s {1..64})" "$(printf c%.0s {1..64})" "$(printf d%.0s {1..64})" "$(printf f%.0s {1..64})")" \
+  "$("$script" key "$sha" madaros aarch64-linux "$(printf b%.0s {1..64})" "$(printf c%.0s {1..64})" "$(printf d%.0s {1..64})" "$(printf f%.0s {1..64})")" \
+  "$("$script" key "$sha" madaros x86_64-linux "$(printf e%.0s {1..64})" "$(printf c%.0s {1..64})" "$(printf d%.0s {1..64})" "$(printf f%.0s {1..64})")" \
+  "$("$script" key "$sha" madaros x86_64-linux "$(printf b%.0s {1..64})" "$(printf e%.0s {1..64})" "$(printf d%.0s {1..64})" "$(printf f%.0s {1..64})")" \
+  "$("$script" key "$sha" madaros x86_64-linux "$(printf b%.0s {1..64})" "$(printf c%.0s {1..64})" "$(printf e%.0s {1..64})" "$(printf f%.0s {1..64})")" \
+  "$("$script" key "$sha" madaros x86_64-linux "$(printf b%.0s {1..64})" "$(printf c%.0s {1..64})" "$(printf d%.0s {1..64})" "$(printf e%.0s {1..64})")"; do
+  [[ "$value" != "$base_key" ]] || fail 'build key ignored a source, engine, target, bootstrap, toolchain, input or symlink dimension'
  done
  [[ "$(grep -c 'untracked.sio' "$artifact/TRACKED_PATHS.txt")" == 1 ]] || fail 'source closure omitted an untracked compiler input'
  printf 'RECEIPT_BUILD_KEY_DIMENSIONS_PASS\n'
- for control in source-git-sha compiler-bit source-file source-set target toolchain missing-manifest symlink-retarget symlink-escape; do
+ # The key a real prepare writes moves with a build-environment flag and with an
+ # equal-byte symlink retarget, not only with the hashed bytes.
+ base_key=$(cat "$artifact/BUILD_KEY")
+ SOUNIO_RECEIPT_SELFTEST_FLAG=1 "$script" prepare "$repo" "$compiler" "$work/artifact-env" "$sha" > "$work/prepare-env.log"
+ [[ "$(cat "$work/artifact-env/BUILD_KEY")" != "$base_key" ]] || fail 'a build-environment flag left BUILD_KEY unchanged'
+ grep -q '^build_env_sha256=' "$work/artifact-env/TOOLCHAIN.txt" || fail 'TOOLCHAIN.txt lacks the build-environment fingerprint'
+ ln -sfn twin.sio "$repo/stdlib/alias.sio"
+ "$script" prepare "$repo" "$compiler" "$work/artifact-link" "$sha" > "$work/prepare-link.log"
+ ln -sfn mod.sio "$repo/stdlib/alias.sio"
+ [[ "$(cat "$work/artifact-link/BUILD_KEY")" != "$base_key" ]] || fail 'an equal-byte symlink retarget left BUILD_KEY unchanged'
+ printf 'RECEIPT_BUILD_KEY_ENV_AND_SYMLINK_PASS\n'
+ for control in source-git-sha compiler-bit source-file source-set target toolchain missing-manifest bootstrap-manifest symlink-retarget symlink-escape; do
   cp -a "$artifact" "$work/$control"
   case "$control" in
    source-git-sha) printf '%040d\n' 0 > "$work/$control/SOURCE_GIT_SHA" ;;
@@ -238,6 +269,13 @@ PY
    target) printf 'aarch64-linux\n' > "$work/$control/TARGET" ;;
    toolchain) printf X >> "$work/$control/TOOLCHAIN.txt" ;;
    missing-manifest) rm "$work/$control/INPUTS.sha256" ;;
+   # Name another checked-out file and rewrite BUILD_KEY to match it, so only
+   # the bootstrap-path binding can refuse (a stale key would refuse anyway).
+   bootstrap-manifest)
+    (cd "$repo" && sha256sum -- scripts/build.sh) > "$work/$control/BOOTSTRAP.sha256"
+    "$script" key "$sha" madaros x86_64-linux "$(awk '{print $1}' "$work/$control/BOOTSTRAP.sha256")" \
+     "$(sha256sum "$work/$control/TOOLCHAIN.txt" | awk '{print $1}')" "$(sha256sum "$work/$control/INPUTS.sha256" | awk '{print $1}')" \
+     "$(sha256sum "$work/$control/SYMLINKS.txt" | awk '{print $1}')" > "$work/$control/BUILD_KEY" ;;
    symlink-retarget) ln -sfn twin.sio "$repo/stdlib/alias.sio" ;;
    symlink-escape) ln -sfn ../../outside.sio "$repo/stdlib/alias.sio" ;;
   esac
@@ -256,7 +294,7 @@ PY
 case ${1:-} in
  prepare) [[ $# == 5 ]] || fail 'prepare REPO COMPILER ABSOLUTE_ARTIFACT_DIR EXPECTED_SHA'; prepare "$2" "$3" "$4" "$5" ;;
  verify) [[ $# == 4 ]] || fail 'verify REPO ARTIFACT_DIR EXPECTED_SHA'; verify "$2" "$3" "$4" ;;
- key) [[ $# == 7 ]] || fail 'key SOURCE_SHA ENGINE TARGET BOOTSTRAP_SHA TOOLCHAIN_SHA INPUTS_SHA'; key "$2" "$3" "$4" "$5" "$6" "$7" ;;
+ key) [[ $# == 8 ]] || fail 'key SOURCE_SHA ENGINE TARGET BOOTSTRAP_SHA TOOLCHAIN_SHA INPUTS_SHA LINKS_SHA'; key "$2" "$3" "$4" "$5" "$6" "$7" "$8" ;;
  selftest) selftest ;;
  *) fail 'expected prepare, verify or selftest' ;;
 esac
