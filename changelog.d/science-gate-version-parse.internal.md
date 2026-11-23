@@ -1,1 +1,0 @@
-The science-pipeline gate records the `souc --version` field that looks like a version (`3.0.0-rc.2`; it had recorded `(madaros` since ADR-018 changed the banner) and the binary path relative to the checkout, so a committed snapshot carries no machine-local path.

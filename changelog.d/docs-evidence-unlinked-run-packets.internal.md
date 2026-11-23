@@ -1,1 +1,0 @@
-Unreferenced Slurm receipts from 2026-10-20 and 2026-10-23 were removed: the stdlib-deep viz, foundation and compiler evidence packets, and the nb-typecheck run packet. Linked campaigns stay. The topic-registry snapshot is unchanged.

@@ -1,0 +1,168 @@
+//@ run-pass
+//@ timeout: 120
+//@ expect-stdout-contains: CIRC28_PARITY_EMIT_DONE
+//
+// Emitter for the circ28 parity gate (scripts/ci/circ28_parity_gate.sh).
+// Runs five fixed scenarios on stdlib/darwin_pbpk/circ28.sio and prints one
+// line per quantity, `KEY value`, which the gate compares with the output of
+// scripts/dissertation/run_circ28_node.mjs (website/src/lib/circ28_core.mjs).
+//
+// Number format. `println(<f64>)` prints six decimals and io::sci_print at
+// most 15 significant digits; neither round-trips a double. Each value is
+// therefore printed as `MpE`, meaning M * 2^E exactly, with M a signed integer
+// normalised to 2^52 <= |M| < 2^53 (`0p0` for zero). The normalisation uses
+// only multiplication and division by 2, which are exact, and the cast to
+// i64 is exact below 2^53, so the printed pair is the double itself bit for
+// bit (more than the 17 significant decimal digits that suffice).
+//
+//   S1 IV infusion 10 mg over 0.5 h, cl_plasma 2 L/h, dt 0.05 h, 48 h
+//   S2 IV, hepatic clint 500 (and clform 100, to exercise the `formed` tally)
+//   S3 oral, first order ka 1 /h, clint 500, clint_gut 300
+//   S4 renal clearance 5 L/h
+//   S5 stiff: 10 mg infused over a single 0.25 h step, cl_plasma 2 L/h
+// All on the drug-independent set of ck_set() in circ28_kernel_identities.sio
+// (kp list, bp 0.8, fu 0.1). Oral input in step n is 10 exp(-ka (n dt + dt/2)).
+
+use darwin_pbpk::circ28::*
+use math::pure::{exp}
+
+fn emit(tag: string, name: string, x: f64) with IO, Mut, Div {
+    print(tag); print("_"); print(name); print(" ")
+    if x == 0.0 {
+        println("0p0")
+        return
+    }
+    var a = x
+    if x < 0.0 {
+        print("-")
+        a = 0.0 - x
+    }
+    var e: i64 = 0
+    while a >= 9007199254740992.0 {
+        a = a / 2.0
+        e = e + 1
+    }
+    while a < 4503599627370496.0 {
+        a = a * 2.0
+        e = e - 1
+    }
+    let m = a as i64
+    print(m)
+    print("p")
+    if e < 0 {
+        print("-")
+        print(0 - e)
+    } else {
+        print(e)
+    }
+    println("")
+}
+
+fn ck_set() -> Circ28Params with Mut {
+    var p = circ28_physiology()
+    p.kp = [0.0, 4.0, 3.0, 0.5, 2.0, 5.0, 1.5, 3.0, 2.5, 1.0, 0.8, 2.0, 1.8, 1.2]
+    p.bp = 0.8
+    p.fu = 0.1
+    return p
+}
+
+fn step_at(t: f64, dt: f64) -> i64 {
+    return ((t / dt) + 0.5) as i64
+}
+
+// route 0: IV infusion of `dose` mg over `dur` h; route 1: oral, ka 1 /h.
+fn scenario(tag: string, p: Circ28Params, dt: f64, horizon: f64, route: i32, dose: f64, dur: f64) with IO, Mut, Div, Panic {
+    var sys = circ28_sys_zero()
+    circ28_prepare(p, dt, &!sys)
+    var s = circ28_state_zero()
+    var el = circ28_elim_zero()
+    let n_tot = step_at(horizon, dt)
+    let n_inf = step_at(dur, dt)
+    let s0 = step_at(0.5, dt)
+    let s1 = step_at(2.0, dt)
+    let s2 = step_at(8.0, dt)
+    let s3 = step_at(24.0, dt)
+    let s4 = step_at(48.0, dt)
+    var v0 = 0.0
+    var v1 = 0.0
+    var v2 = 0.0
+    var v3 = 0.0
+    var v4 = 0.0
+    var a0 = 0.0
+    var a1 = 0.0
+    var a2 = 0.0
+    var a3 = 0.0
+    var a4 = 0.0
+    var n: i64 = 0
+    while n < n_tot {
+        var ivr = 0.0
+        var oral = 0.0
+        if route == 0 {
+            if n < n_inf { ivr = dose / dur }
+        } else {
+            oral = dose * exp(0.0 - ((n as f64) * dt + 0.5 * dt))
+        }
+        circ28_step(&!s, p, &sys, ivr, oral, &!el)
+        let m = n + 1
+        if m == s0 { v0 = s.x[0]; a0 = s.x[1] }
+        if m == s1 { v1 = s.x[0]; a1 = s.x[1] }
+        if m == s2 { v2 = s.x[0]; a2 = s.x[1] }
+        if m == s3 { v3 = s.x[0]; a3 = s.x[1] }
+        if m == s4 { v4 = s.x[0]; a4 = s.x[1] }
+        n = n + 1
+    }
+    emit(tag, "cven_t0.5", v0)
+    emit(tag, "cart_t0.5", a0)
+    emit(tag, "cven_t2", v1)
+    emit(tag, "cart_t2", a1)
+    emit(tag, "cven_t8", v2)
+    emit(tag, "cart_t8", a2)
+    emit(tag, "cven_t24", v3)
+    emit(tag, "cart_t24", a3)
+    emit(tag, "cven_t48", v4)
+    emit(tag, "cart_t48", a4)
+    emit(tag, "liver_T_end", s.x[circ28_it(1)])
+    emit(tag, "adipose_T_end", s.x[circ28_it(7)])
+    emit(tag, "hepatic", el.hepatic)
+    emit(tag, "formed", el.formed)
+    emit(tag, "renal", el.renal)
+    emit(tag, "plasma", el.plasma)
+    emit(tag, "gut", el.gut)
+    emit(tag, "auc_ven", el.auc_ven)
+    emit(tag, "auc_art", el.auc_art)
+    emit(tag, "mass_end", circ28_total_mass(&s, p))
+    emit(tag, "eh", circ28_hepatic_extraction(p))
+    emit(tag, "fg", circ28_gut_availability(p))
+    emit(tag, "eg", circ28_gut_extraction(p))
+    emit(tag, "cl_splanchnic", circ28_splanchnic_clearance(p))
+    emit(tag, "vss", circ28_vss_plasma(p))
+    emit(tag, "co", circ28_cardiac_output(p))
+    emit(tag, "vb", circ28_blood_volume(p))
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var p1 = ck_set()
+    p1.cl_plasma = 2.0
+    scenario("S1", p1, 0.05, 48.0, 0, 10.0, 0.5)
+
+    var p2 = ck_set()
+    p2.clint = 500.0
+    p2.clform = 100.0
+    scenario("S2", p2, 0.05, 48.0, 0, 10.0, 0.5)
+
+    var p3 = ck_set()
+    p3.clint = 500.0
+    p3.clint_gut = 300.0
+    scenario("S3", p3, 0.05, 48.0, 1, 10.0, 0.5)
+
+    var p4 = ck_set()
+    p4.cl_renal = 5.0
+    scenario("S4", p4, 0.05, 48.0, 0, 10.0, 0.5)
+
+    var p5 = ck_set()
+    p5.cl_plasma = 2.0
+    scenario("S5", p5, 0.25, 48.0, 0, 10.0, 0.25)
+
+    println("CIRC28_PARITY_EMIT_DONE")
+    return 0
+}

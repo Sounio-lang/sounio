@@ -1,0 +1,441 @@
+//@ run-pass
+//@ timeout: 120
+//@ expect-stdout-contains: CIRC28_KP_RR_PASS
+//
+// Rodgers & Rowland tissue:plasma partition (stdlib/darwin_pbpk/circ28_kp.sio)
+// against identities that follow from the equations, and the one-scalar Vss fit.
+// Expectations were fixed before the first run.
+//
+// PUBLISHED VALUES REPRODUCED (rat, per tissue; section P). Source of the numbers:
+//   github.com/metrumresearchgroup/PBPK_PC at commit
+//   75a5944, script/script.R lines 219-270, "Rodgers and Rowland figure"), the code
+//   behind Utsey, Gastonguay, Freling 2020 Drug Metab Dispos 48:903-916
+//   (doi 10.1124/dmd.120.090498). The script calls calcKpu_RR(...) and compares with
+//   vectors it labels "reported" Kpu from the Rodgers and Rowland papers (rat). The
+//   vectors were read there; the primary tables (J Pharm Sci 2005 94:1259, 2006
+//   95:1238, both access-restricted here) were NOT opened, so these are
+//   secondary transcriptions. Drugs and the inputs as written in that script:
+//     bisoprolol-R  strong base  logP 1.87 pKa 9.4 fu 0.85 B:P 1.36
+//     acebutolol-R  strong base  logP 1.87 pKa 9.7 fu 0.79 B:P 1.09 (logP looks
+//                   copied from bisoprolol; adipose is not asserted)
+//     cefazolin     acid         logP 0.3  pKa 2.3 fu 0.16 B:P 0.55
+//     enoxacin      zwitterion   logP log10(1.26) pKa 6.1 / 8.7 fu 0.66 B:P 0.94
+//     alfentanil    pKa 6.5 (very weak base) logP 2.2 fu 0.11
+//   Inputs are printed to 2-3 digits, so agreement is judged to 3 % (4 % for
+//   acebutolol), the spread that rounding of fu and B:P alone produces (printed
+//   below as sensitivities). Not reproduced and therefore not asserted:
+//   phenobarbital and ethoxybenzamide (the script's pKa 7.4 and fu 0.5 give
+//   rms 4.9 % and 3.4 % in ln ratio; pKa 7.3 and fu 0.55 give 2.3 % and 1.0 %, a
+//   one-parameter fit, not a reproduction).
+//   Composition: the 2005 paper (bases) is reproduced with the 2005 rat table
+//   (reference record mk2005 below, from tissue_comp_R&R.csv of that repository);
+//   the 2006 paper (acids, zwitterions, very weak bases) with this module's
+//   default table (R&R 2006 rat values as held in the PK-Sim database,
+//   TissueComposition_PKSim / Rat). The two differ in intracellular water, and the
+//   data discriminate: cefazolin rms(ln) 4.7 % with the 2005 table, 1.3 % with the
+//   2006 table.
+//   Equation reference: PK-Sim (github.com/Open-Systems-Pharmacology/PK-Sim at
+//   8adb6cb, src/Db/Dump/PKSimDB_dump.txt lines 2991-3029) and the Utsey R code
+//   (script/CalcKpu_R&R.R) agree on the X/Y/Z forms, albumin for everything but
+//   neutrals, and the full ionised sum in the acidic-phospholipid term.
+//
+//   I1 limiting identity: neutral, logP = -30 (P = 0), fu = 1: the protein term
+//      is clamped to 0, so Kp_i = fEW + fIW + 0.7 fNP (the water and the water
+//      share of the neutral phospholipid), organ by organ.
+//   I2 for a neutral drug Kp does not depend on pKa.
+//   I3 Kp is affine in fu: Kp(fu) = fu (Kpu_0 - PR (1 + L)) + PR, so the
+//      intercept (fu -> 0) is the tissue:plasma protein ratio PR, lipoprotein
+//      for neutrals and albumin for acids. (Doubling fu does NOT double Kp: that
+//      holds only if PR = 0; the intercept test is the correct identity.)
+//   I4 strong base: the red-cell equation is closed, i.e. the tissue equation
+//      evaluated on red-cell composition with the derived Ka returns
+//      (bp - 1 + Hct) / (Hct fu).
+//   I5 rest equals muscle; index 0 is 0.
+//   H1 hand arithmetic, neutral logP 0 (P = 1), fu 0.5:
+//      Kp = fu [fEW + fIW + fNL + fNP + LR (1/fu - 1 - fNLp - fNPp)],
+//      fNLp = 0.0023, fNPp = 0.0013:  liver 0.4198602, brain 0.4172262;
+//      adipose with logP_vo = 0 (P = 1): 0.5331776.
+//   S  scalar fit: circ28_vss_plasma hits the target to 1e-10; below the
+//      blood-only floor the sentinel is -1.
+
+use darwin_pbpk::circ28::*
+use darwin_pbpk::circ28_kp::*
+use math::pure::{exp}
+
+fn ck_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn ck_rel(tag: string, got: f64, want: f64, tol: f64) -> i32 with IO, Mut, Div, Panic {
+    let r = ck_abs(got - want) / ck_abs(want)
+    print("  "); print(tag); print(": got "); print(got); print(" want "); print(want)
+    print("  rel x 1e12 = "); println(r * 1.0e12)
+    if !(r <= tol) {
+        println("  [FAIL]")
+        return 1
+    }
+    return 0
+}
+
+fn ck_true(tag: string, ok: bool) -> i32 with IO {
+    print("  "); print(tag)
+    if ok {
+        println(": ok")
+        return 0
+    }
+    println(": [FAIL]")
+    return 1
+}
+
+// Independent copies of the table values used by the expectations (fEW + fIW + 0.7 fNP),
+// lipoprotein ratio and albumin ratio, written out here on purpose.
+fn ex_water(i: i32) -> f64 {
+    if i == 1 { return 0.161 + 0.481 + 0.7 * 0.0238 }
+    if i == 2 { return 0.273 + 0.399 + 0.7 * 0.0240 }
+    if i == 3 { return 0.162 + 0.591 + 0.7 * 0.0015 }
+    if i == 4 { return 0.320 + 0.248 + 0.7 * 0.0106 }
+    if i == 5 { return 0.336 + 0.238 + 0.7 * 0.0123 }
+    if i == 6 { return 0.118 + 0.608 + 0.7 * 0.0072 }
+    if i == 7 { return 0.135 + 0.009 + 0.7 * 0.0016 }
+    if i == 8 { return 0.282 + 0.456 + 0.7 * 0.0124 }
+    if i == 9 { return 0.382 + 0.276 + 0.7 * 0.0044 }
+    if i == 10 { return 0.100 + 0.317 + 0.7 * 0.0016 }
+    if i == 11 { return 0.207 + 0.355 + 0.7 * 0.0107 }
+    if i == 12 { return 0.120 + 0.521 + 0.7 * 0.0090 }
+    return 0.118 + 0.608 + 0.7 * 0.0072
+}
+
+fn ex_lr(i: i32) -> f64 {
+    if i == 1 { return 0.161 }
+    if i == 2 { return 0.137 }
+    if i == 3 { return 0.041 }
+    if i == 4 { return 0.160 }
+    if i == 5 { return 0.168 }
+    if i == 6 { return 0.059 }
+    if i == 7 { return 0.068 }
+    if i == 8 { return 0.141 }
+    if i == 9 { return 0.096 }
+    if i == 10 { return 0.050 }
+    if i == 11 { return 0.207 }
+    if i == 12 { return 0.060 }
+    return 0.059
+}
+
+fn ex_ar(i: i32) -> f64 {
+    if i == 1 { return 0.086 }
+    if i == 2 { return 0.130 }
+    if i == 3 { return 0.048 }
+    if i == 4 { return 0.157 }
+    if i == 5 { return 0.212 }
+    if i == 6 { return 0.064 }
+    if i == 7 { return 0.049 }
+    if i == 8 { return 0.158 }
+    if i == 9 { return 0.277 }
+    if i == 10 { return 0.100 }
+    if i == 11 { return 0.097 }
+    if i == 12 { return 0.060 }
+    return 0.064
+}
+
+fn p10(x: f64) -> f64 with Mut, Div, Panic { return exp(x * 2.302585092994046) }
+
+// Reference composition for validation only: R&R 2005 rat table (bases paper), in
+// circ28 slot order (1 liver 2 kidney 3 brain 4 heart 5 lung 6 muscle 7 adipose
+// 8 gut 9 skin 10 bone 11 spleen 12 pancreas); slot 13 holds THYMUS here, not the
+// "rest" surrogate. Source: tissue_comp_R&R.csv in the repository named above.
+fn mk2005() -> Circ28KpComp with Mut {
+    var c = circ28_kp_comp_default()
+    c.few = [0.0, 0.161, 0.273, 0.162, 0.320, 0.336, 0.118, 0.135, 0.282, 0.382, 0.100, 0.207, 0.120, 0.150]
+    c.fiw = [0.0, 0.573, 0.483, 0.620, 0.456, 0.446, 0.630, 0.017, 0.475, 0.291, 0.346, 0.579, 0.664, 0.626]
+    c.fnl = [0.0, 0.014, 0.012, 0.039, 0.014, 0.022, 0.010, 0.853, 0.038, 0.060, 0.017, 0.0077, 0.041, 0.017]
+    c.fnp = [0.0, 0.024, 0.0242, 0.0015, 0.0111, 0.0128, 0.0072, 0.0016, 0.0125, 0.0044, 0.0017, 0.0113, 0.0093, 0.0092]
+    c.ap = [0.0, 4.56, 5.03, 0.40, 2.25, 3.91, 1.53, 0.40, 2.41, 1.32, 0.67, 3.18, 1.67, 2.30]
+    c.ar = [0.0, 0.086, 0.130, 0.048, 0.157, 0.212, 0.064, 0.049, 0.158, 0.277, 0.100, 0.097, 0.060, 0.075]
+    c.lr = [0.0, 0.161, 0.137, 0.041, 0.160, 0.168, 0.059, 0.068, 0.141, 0.096, 0.050, 0.207, 0.060, 0.075]
+    return c
+}
+
+fn ck_ln(x: f64) -> f64 with Mut, Div, Panic {
+    var y = 0.0
+    var k: i32 = 0
+    while k < 60 {
+        y = y - 1.0 + x / exp(y)
+        k = k + 1
+    }
+    return y
+}
+
+fn ck_sqrt(m: f64) -> f64 with Mut, Div, Panic {
+    if !(m > 0.0) { return 0.0 }
+    var q = 0.1
+    var k: i32 = 0
+    while k < 60 {
+        q = 0.5 * (q + m / q)
+        k = k + 1
+    }
+    return q
+}
+
+// Per-tissue comparison with published Kpu (rep > 0 only): ratio within [1-tol, 1+tol].
+fn pub_check(name: string, kp: [f64; 14], fu: f64, rep: [f64; 14], tol: f64) -> i32 with IO, Mut, Div, Panic {
+    var f: i32 = 0
+    var i: i32 = 1
+    while i < 14 {
+        if rep[i] > 0.0 {
+            let r = kp[i] / fu / rep[i]
+            print("  "); print(name); print(" slot "); print(i); print(": published "); print(rep[i])
+            print(" got "); print(kp[i] / fu); print(" ratio "); print(r)
+            if ck_abs(r - 1.0) > tol {
+                println(" [FAIL]")
+                f = f + 1
+            } else {
+                println("")
+            }
+        }
+        i = i + 1
+    }
+    return f
+}
+
+// rms of ln(got / published) over the reported tissues
+fn pub_rms(kp: [f64; 14], fu: f64, rep: [f64; 14]) -> f64 with Mut, Div, Panic {
+    var s = 0.0
+    var n = 0.0
+    var i: i32 = 1
+    while i < 14 {
+        if rep[i] > 0.0 {
+            let r = ck_ln(kp[i] / fu / rep[i])
+            s = s + r * r
+            n = n + 1.0
+        }
+        i = i + 1
+    }
+    return ck_sqrt(s / n)
+}
+
+// PK-Sim formula (PKSimDB_dump.txt 2991-3029), typed independently, organ liver
+// (slot 1) of the module default composition; ionised sums without the leading 1.
+fn pksim_liver(logp: f64, xi: f64, yi: f64, zi: f64, fu: f64, bp: f64, strong: bool, neutral: bool) -> f64 with Mut, Div, Panic {
+    let pp = p10(logp)
+    let lipl = pp * 0.0135 + (0.3 * pp + 0.7) * 0.0238
+    var r = (1.0 + xi) / (1.0 + yi) * 0.481 + 0.161 + lipl / (1.0 + yi)
+    if strong {
+        let kbc = (0.45 - 1.0 + bp) / fu / 0.45
+        let lbc = pp * 0.0017 + (0.3 * pp + 0.7) * 0.0029
+        var ka = (kbc - (1.0 + zi) / (1.0 + yi) * 0.603 - lbc / (1.0 + yi)) * (1.0 + yi) / 0.5 / zi
+        if ka < 0.0 { ka = 0.0 }
+        r = r + ka * 4.56 * xi / (1.0 + yi)
+    } else {
+        var kpr = 1.0 / fu - 1.0 - (pp * 0.0023 + (0.3 * pp + 0.7) * 0.0013) / (1.0 + yi)
+        if kpr < 0.0 { kpr = 0.0 }
+        var pr = 0.086
+        if neutral { pr = 0.161 }
+        r = r + kpr * pr
+    }
+    return r
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var fails: i32 = 0
+
+    println("I1 neutral, logP -30, fu 1: Kp_i = fEW + fIW + 0.7 fNP")
+    let d1 = circ28_kp_drug(0.0 - 30.0, 7.0, 0.0, circ28_kp_neutral(), 1.0, 1.0)
+    let k1 = circ28_kp_rr(d1)
+    var i: i32 = 1
+    while i < 14 {
+        fails = fails + ck_rel("organ", k1[i], ex_water(i), 1.0e-12)
+        i = i + 1
+    }
+
+    println("I2 neutral: independent of pKa")
+    let da = circ28_kp_drug(2.3, 3.0, 0.0, circ28_kp_neutral(), 0.07, 0.9)
+    let db = circ28_kp_drug(2.3, 11.0, 0.0, circ28_kp_neutral(), 0.07, 0.9)
+    let ka = circ28_kp_rr(da)
+    let kb = circ28_kp_rr(db)
+    i = 1
+    while i < 14 {
+        fails = fails + ck_rel("organ", ka[i], kb[i], 1.0e-15)
+        i = i + 1
+    }
+
+    println("I3 affine in fu: intercept = tissue:plasma protein ratio")
+    let n1 = circ28_kp_drug(1.5, 7.0, 0.0, circ28_kp_neutral(), 0.2, 1.0)
+    let n2 = circ28_kp_drug(1.5, 7.0, 0.0, circ28_kp_neutral(), 0.4, 1.0)
+    let kn1 = circ28_kp_rr(n1)
+    let kn2 = circ28_kp_rr(n2)
+    let c1 = circ28_kp_drug(1.5, 4.5, 0.0, circ28_kp_acid(), 0.2, 0.6)
+    let c2 = circ28_kp_drug(1.5, 4.5, 0.0, circ28_kp_acid(), 0.4, 0.6)
+    let kc1 = circ28_kp_rr(c1)
+    let kc2 = circ28_kp_rr(c2)
+    i = 1
+    while i < 14 {
+        let icn = kn1[i] - 0.2 * (kn2[i] - kn1[i]) / (0.4 - 0.2)
+        fails = fails + ck_rel("neutral intercept = LR", icn, ex_lr(i), 1.0e-9)
+        let ica = kc1[i] - 0.2 * (kc2[i] - kc1[i]) / (0.4 - 0.2)
+        fails = fails + ck_rel("acid intercept = AR", ica, ex_ar(i), 1.0e-9)
+        i = i + 1
+    }
+
+    println("I4 strong base: red-cell closure")
+    let sb = circ28_kp_drug(3.0, 9.5, 0.0, circ28_kp_base(), 0.1, 0.9)
+    let kaap = circ28_kp_ka_ap(sb)
+    print("  Ka_AP = "); println(kaap)
+    fails = fails + ck_true("Ka_AP > 0", kaap > 0.0)
+    let yy = 1.0 + p10(9.5 - 7.4)
+    let zz = 1.0 + p10(9.5 - 7.22)
+    let zc = p10(9.5 - 7.22)
+    let pp = p10(3.0)
+    let lipbc = pp * 0.0017 + (0.3 * pp + 0.7) * 0.0029
+    let kpu_bc_model = 0.603 * zz / yy + lipbc / yy + kaap * 0.5 * zc / yy
+    fails = fails + ck_rel("Kpu_BC from tissue form", kpu_bc_model, (0.9 - 1.0 + 0.45) / (0.45 * 0.1), 1.0e-12)
+    let ksb = circ28_kp_rr(sb)
+    i = 1
+    while i < 14 {
+        fails = fails + ck_true("Kp > 0 and finite", ksb[i] > 0.0 && ksb[i] < 1.0e6)
+        i = i + 1
+    }
+
+    println("I5 rest = muscle; index 0 unused")
+    fails = fails + ck_rel("rest = muscle (base)", ksb[13], ksb[6], 1.0e-15)
+    fails = fails + ck_rel("rest = muscle (neutral)", kn1[13], kn1[6], 1.0e-15)
+    fails = fails + ck_true("index 0 is 0", ksb[0] == 0.0 && kn1[0] == 0.0)
+
+    println("H1 hand arithmetic, neutral logP 0, fu 0.5")
+    let h = circ28_kp_drug(0.0, 7.0, 0.0, circ28_kp_neutral(), 0.5, 1.0)
+    let kh = circ28_kp_rr(h)
+    fails = fails + ck_rel("liver", kh[1], 0.4198602, 1.0e-12)
+    fails = fails + ck_rel("brain", kh[3], 0.4172262, 1.0e-12)
+    var hv = circ28_kp_drug(0.0, 7.0, 0.0, circ28_kp_neutral(), 0.5, 1.0)
+    hv.logp_vo = 0.0
+    hv.has_logp_vo = true
+    let khv = circ28_kp_rr(hv)
+    fails = fails + ck_rel("adipose, logP_vo 0", khv[7], 0.5331776, 1.0e-12)
+    // the default estimate logP_vo = 1.115 logP - 1.35 equals the explicit value
+    var he = circ28_kp_drug(2.0, 7.0, 0.0, circ28_kp_neutral(), 0.5, 1.0)
+    let khe = circ28_kp_rr(he)
+    he.logp_vo = 1.115 * 2.0 - 1.35
+    he.has_logp_vo = true
+    let khf = circ28_kp_rr(he)
+    fails = fails + ck_rel("adipose default = explicit vo", khe[7], khf[7], 1.0e-15)
+    fails = fails + ck_rel("liver unaffected by vo", khe[1], khf[1], 1.0e-15)
+
+    println("P published rat Kpu (secondary transcription, see header)")
+    let c5 = mk2005()
+    let c6 = circ28_kp_comp_default()
+    let bis = circ28_kp_drug(1.87, 9.4, 0.0, circ28_kp_base(), 0.85, 1.36)
+    let rbis: [f64; 14] = [0.0, 19.6, 21.4, 3.36, 10.4, 17.2, 7.73, 1.79, 11.0, 6.37, 3.61, 0.0, 0.0, 10.8]
+    fails = fails + pub_check("bisoprolol-R (2005 table)", circ28_kp_rr_comp(bis, c5), 0.85, rbis, 0.03)
+    let ace = circ28_kp_drug(1.87, 9.7, 0.0, circ28_kp_base(), 0.79, 1.09)
+    let race: [f64; 14] = [0.0, 11.0, 11.8, 2.57, 6.1, 9.67, 4.84, 0.0, 6.45, 3.85, 2.34, 0.0, 0.0, 6.45]
+    fails = fails + pub_check("acebutolol-R (2005 table)", circ28_kp_rr_comp(ace, c5), 0.79, race, 0.04)
+    let cef = circ28_kp_drug(0.3, 2.3, 0.0, circ28_kp_acid(), 0.16, 0.55)
+    let rcef: [f64; 14] = [0.0, 0.79, 1.10, 0.0, 1.23, 1.52, 0.69, 0.0, 1.28, 1.92, 0.74, 0.0, 0.0, 0.0]
+    fails = fails + pub_check("cefazolin (2006 table)", circ28_kp_rr_comp(cef, c6), 0.16, rcef, 0.03)
+    let eno = circ28_kp_drug(0.1003705451, 6.1, 8.7, circ28_kp_zwitterion(), 0.66, 0.94)
+    let reno: [f64; 14] = [0.0, 9.04, 9.88, 0.0, 4.62, 7.61, 3.74, 0.0, 0.0, 3.16, 1.74, 6.33, 0.0, 0.0]
+    fails = fails + pub_check("enoxacin (2006 table)", circ28_kp_rr_comp(eno, c6), 0.66, reno, 0.03)
+    // enoxacin with the cation-only acidic-phospholipid term (the form this module had
+    // before validation) is 17-28 % high: assert the discrimination
+    let rms_e = pub_rms(circ28_kp_rr_comp(eno, c6), 0.66, reno)
+    print("  enoxacin rms ln = "); println(rms_e)
+    fails = fails + ck_true("enoxacin rms ln < 0.02", rms_e < 0.02)
+
+    println("B1 very weak base: albumin (module) vs lipoprotein, alfentanil pKa 6.5 fu 0.11")
+    let alf = circ28_kp_drug(2.2, 6.5, 0.0, circ28_kp_base(), 0.11, 1.0)
+    let ralf: [f64; 14] = [0.0, 4.05, 4.24, 6.3, 3.97, 5.48, 2.88, 9.2, 7.33, 10.7, 0.0, 2.7, 6.71, 0.0]
+    var clp = circ28_kp_comp_default()
+    clp.ar = clp.lr
+    let rms_alb = pub_rms(circ28_kp_rr_comp(alf, c6), 0.11, ralf)
+    let rms_lip = pub_rms(circ28_kp_rr_comp(alf, clp), 0.11, ralf)
+    print("  rms ln albumin = "); print(rms_alb); print("  lipoprotein = "); println(rms_lip)
+    fails = fails + ck_true("albumin fits better than lipoprotein by > 1.5x", rms_lip > 1.5 * rms_alb)
+
+    println("B2 composition discrimination (bisoprolol, 2005 tissue table)")
+    var c7 = mk2005()
+    c7.rbc_fiw = 0.63
+    c7.rbc_fnl = 0.0012
+    c7.rbc_fnp = 0.0033
+    c7.rbc_ap = 0.57
+    c7.pl_fnl = 0.0032
+    c7.pl_fnp = 0.0021
+    let k7 = circ28_kp_rr_comp(bis, c7)
+    print("  kidney ratio with the 2007 red-cell/plasma set = "); println(k7[2] / 0.85 / 21.4)
+    fails = fails + ck_true("2007 red-cell set does not reproduce the 2005 values (ratio < 0.92)", k7[2] / 0.85 / 21.4 < 0.92)
+    var cm = mk2005()
+    cm.ap[6] = 2.42
+    let km = circ28_kp_rr_comp(bis, cm)
+    print("  muscle ratio with acidic phospholipid 2.42 = "); println(km[6] / 0.85 / 7.73)
+    fails = fails + ck_true("muscle AP 2.42 does not reproduce the 2005 value (ratio > 1.3)", km[6] / 0.85 / 7.73 > 1.3)
+
+    println("B3 input-rounding sensitivity (printed, not asserted)")
+    let bis_hi = circ28_kp_drug(1.87, 9.4, 0.0, circ28_kp_base(), 0.85, 1.365)
+    let bis_lo = circ28_kp_drug(1.87, 9.4, 0.0, circ28_kp_base(), 0.85, 1.355)
+    let kb_lo = circ28_kp_rr_comp(bis_lo, c5)
+    let kb_hi = circ28_kp_rr_comp(bis_hi, c5)
+    print("  bisoprolol kidney Kpu (published 21.4), B:P 1.355 / 1.365: ")
+    print(kb_lo[2] / 0.85); print(" / "); println(kb_hi[2] / 0.85)
+    let cef_hi = circ28_kp_drug(0.3, 2.3, 0.0, circ28_kp_acid(), 0.165, 0.55)
+    let cef_lo = circ28_kp_drug(0.3, 2.3, 0.0, circ28_kp_acid(), 0.155, 0.55)
+    let kc_hi = circ28_kp_rr_comp(cef_hi, c6)
+    let kc_lo = circ28_kp_rr_comp(cef_lo, c6)
+    print("  cefazolin heart Kpu (published 1.23), fu 0.165 / 0.155: ")
+    print(kc_hi[4] / 0.165); print(" / "); println(kc_lo[4] / 0.155)
+
+    println("X1 equation cross-check against the PK-Sim formula text (liver, default table)")
+    // diprotic base pKa 5.2 / 9.3 (strong), B:P 0.9
+    let db = circ28_kp_drug(3.2, 5.2, 9.3, circ28_kp_dibase(), 0.3, 0.9)
+    let xdb = p10(9.3 - 7.0) + p10(5.2 + 9.3 - 14.0)
+    let ydb = p10(9.3 - 7.4) + p10(5.2 + 9.3 - 14.8)
+    let zdb = p10(9.3 - 7.22) + p10(5.2 + 9.3 - 14.44)
+    fails = fails + ck_rel("diprotic strong base", circ28_kpu_rr(db, 1), pksim_liver(3.2, xdb, ydb, zdb, 0.3, 0.9, true, false), 1.0e-9)
+    // diprotic base with both pKa < 7: albumin route
+    let dw = circ28_kp_drug(2.4, 4.0, 6.5, circ28_kp_dibase(), 0.4, 1.0)
+    let xdw = p10(6.5 - 7.0) + p10(4.0 + 6.5 - 14.0)
+    let ydw = p10(6.5 - 7.4) + p10(4.0 + 6.5 - 14.8)
+    fails = fails + ck_rel("diprotic weak base (albumin)", circ28_kpu_rr(dw, 1), pksim_liver(2.4, xdw, ydw, 0.0, 0.4, 1.0, false, false), 1.0e-9)
+    // zwitterion pKa 4.1 / 8.2 (strong base)
+    let zw = circ28_kp_drug(1.1, 4.1, 8.2, circ28_kp_zwitterion(), 0.5, 0.8)
+    let xzw = p10(8.2 - 7.0) + p10(7.0 - 4.1)
+    let yzw = p10(8.2 - 7.4) + p10(7.4 - 4.1)
+    let zzw = p10(8.2 - 7.22) + p10(7.22 - 4.1)
+    fails = fails + ck_rel("zwitterion strong base", circ28_kpu_rr(zw, 1), pksim_liver(1.1, xzw, yzw, zzw, 0.5, 0.8, true, false), 1.0e-9)
+    // zwitterion with basic pKa 6.4 < 7: albumin route
+    let zv = circ28_kp_drug(1.1, 4.1, 6.4, circ28_kp_zwitterion(), 0.5, 0.8)
+    let xzv = p10(6.4 - 7.0) + p10(7.0 - 4.1)
+    let yzv = p10(6.4 - 7.4) + p10(7.4 - 4.1)
+    fails = fails + ck_rel("zwitterion weak base (albumin)", circ28_kpu_rr(zv, 1), pksim_liver(1.1, xzv, yzv, 0.0, 0.5, 0.8, false, false), 1.0e-9)
+    // very weak monoprotic base pKa 5.5: albumin (not lipoprotein)
+    let vw = circ28_kp_drug(2.0, 5.5, 0.0, circ28_kp_base(), 0.3, 1.0)
+    let xvw = p10(5.5 - 7.0)
+    let yvw = p10(5.5 - 7.4)
+    fails = fails + ck_rel("very weak base (albumin)", circ28_kpu_rr(vw, 1), pksim_liver(2.0, xvw, yvw, 0.0, 0.3, 1.0, false, false), 1.0e-9)
+
+    println("S scalar fit to a target Vss")
+    var p = circ28_physiology()
+    p.kp = [0.0, 4.0, 3.0, 0.5, 2.0, 5.0, 1.5, 3.0, 2.5, 1.0, 0.8, 2.0, 1.8, 1.2]
+    p.bp = 0.8
+    let floor = p.bp * circ28_blood_volume(p)
+    print("  floor (L) = "); println(floor)
+    let s = circ28_kp_scale_for_vss(p, p.kp, 120.0)
+    print("  scalar = "); println(s)
+    fails = fails + ck_true("scalar positive", s > 0.0)
+    var q = circ28_physiology()
+    q.bp = 0.8
+    q.kp = circ28_kp_scaled(p.kp, s)
+    fails = fails + ck_rel("Vss after scaling (L)", circ28_vss_plasma(q), 120.0, 1.0e-10)
+    fails = fails + ck_true("index 0 stays 0", q.kp[0] == 0.0)
+    let s_lo = circ28_kp_scale_for_vss(p, p.kp, 0.99 * floor)
+    fails = fails + ck_rel("sentinel below floor", s_lo, 0.0 - 1.0, 1.0e-15)
+    let s_at = circ28_kp_scale_for_vss(p, p.kp, floor)
+    fails = fails + ck_true("scalar 0 at the floor", ck_abs(s_at) < 1.0e-12)
+    let s_z = circ28_kp_scale_for_vss(p, circ28_kp_scaled(p.kp, 0.0), 120.0)
+    fails = fails + ck_rel("sentinel for zero tissue sum", s_z, 0.0 - 2.0, 1.0e-15)
+
+    if fails == 0 {
+        println("CIRC28_KP_RR_PASS")
+        return 0
+    }
+    println("CIRC28_KP_RR_FAIL")
+    return 1
+}

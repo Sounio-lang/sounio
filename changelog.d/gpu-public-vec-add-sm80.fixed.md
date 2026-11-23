@@ -1,0 +1,1 @@
+The default public PTX emitter now honours the `cuda-sm80` target instead of falling back to an older one, and `examples/kernel_vec_add.sio` is a real bounded single-block f64 vector addition with a bounds guard rather than an empty kernel. Specialised modes and existing refusals are unchanged; the scalar-literal PTX goldens are pinned explicitly to sm50.

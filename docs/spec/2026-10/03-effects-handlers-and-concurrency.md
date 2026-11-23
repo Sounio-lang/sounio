@@ -174,16 +174,20 @@ stale relative to `checker_emit_e246` and the current negative fixtures.
 **`EFF-005` — `source-observed`.** Unresolved names recognized by
 `effect_name_is_held` are deliberately exempted from that unknown-name
 diagnostic and contribute no identity. Its current transition spellings are
-`Mod`, `Compute`, `Foo`, `Exp`, `Log`, `NomeQueNaoExiste`, `Choice`, `Counter`,
-`Fetch`, `Fail`, `NoSuchEffectX`, and `Sampling`. This is a compatibility valve,
-not a definition of those effects. Built-in or already registered user names
-are resolved before the held-name test.
+`Mod`, `Compute`, `Exp`, `Log`, `Choice`, `Counter`, `Fetch`, `Fail`, and
+`Sampling`. This is a compatibility valve, not a definition of those effects.
+Built-in or already registered user names are resolved before the held-name
+test. `Foo`, `NomeQueNaoExiste` and `NoSuchEffectX` were removed from the
+valve on 2026-11-22 (founder decision): they were refusal witnesses, and
+holding them kept the witnesses silent. They now draw E246 face 0;
+`tests/compile-fail/effect_unknown_name_witness_unheld.sio` pins that.
 
 The distinction matters for tests: a program declaring `with Choice` can
 appear to enforce a user effect while its annotation is actually dropped if
-the user registry was not populated. `tests/effects/archaeology/nosuch_drop.sio`
-and `mod_pass.sio` expose historical compatibility behavior. They must not be
-used to infer that arbitrary invented names are legal. The held set's
+the user registry was not populated. `tests/effects/archaeology/mod_pass.sio`
+exposes historical compatibility behavior; `nosuch_drop.sio` did until
+2026-11-22 and is now refused with E246. Neither may be used to infer that
+arbitrary invented names are legal. The held set's
 retirement and the intended interpretation of each name remain decisions.
 
 ### 2.5 Annotation syntax and payloads

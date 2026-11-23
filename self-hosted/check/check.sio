@@ -375,6 +375,14 @@ pub struct Checker {
     pub last_literal_kind: i64,   // 0=none, 1=int, 2=float
     pub escape_provenance: i64,   // tail-expr escape provenance: 0=safe, 1=local ref escapes the frame
     pub loop_depth: i64,
+    // `break value` (spec: control and closures). 1 when the innermost enclosing
+    // loop is a `loop`, the only loop whose `break` carries a value; 0 inside
+    // `while`/`for` and outside every loop. loop_break_seen/loop_break_ty hold
+    // the type the breaks of that `loop` agreed on so far: the type of the
+    // `loop` expression. Saved and restored around every loop body.
+    pub loop_takes_value: i64,
+    pub loop_break_seen: bool,
+    pub loop_break_ty: TypeEntry,
     pub suppress_linear_consume_depth: i64,
     pub type_depth: i64,
     pub expr_depth: i64,
@@ -1455,6 +1463,9 @@ pub fn checker_new() -> Checker with Mut, Panic, Div, Alloc {
         last_literal_kind: 0,
         escape_provenance: 0,
         loop_depth: 0,
+        loop_takes_value: 0,
+        loop_break_seen: false,
+        loop_break_ty: ty_unit(),
         suppress_linear_consume_depth: 0,
         type_depth: 0,
         expr_depth: 0,
@@ -1588,6 +1599,9 @@ pub fn checker_init_in_place(raw: *mut Checker) with Mut, Panic, Div, Alloc {
     (*raw).last_literal_kind = 0
     (*raw).escape_provenance = 0
     (*raw).loop_depth = 0
+    (*raw).loop_takes_value = 0
+    (*raw).loop_break_seen = false
+    (*raw).loop_break_ty = ty_unit()
     (*raw).suppress_linear_consume_depth = 0
     (*raw).type_depth = 0
     (*raw).expr_depth = 0
@@ -1691,6 +1705,9 @@ fn checker_store_from_value(dst: *mut Checker, src: Checker) with Mut, Panic, Di
     (*dst).last_literal_float = src.last_literal_float
     (*dst).last_literal_kind = src.last_literal_kind
     (*dst).loop_depth = src.loop_depth
+    (*dst).loop_takes_value = src.loop_takes_value
+    (*dst).loop_break_seen = src.loop_break_seen
+    (*dst).loop_break_ty = src.loop_break_ty
     (*dst).suppress_linear_consume_depth = src.suppress_linear_consume_depth
     (*dst).type_depth = src.type_depth
     (*dst).expr_depth = src.expr_depth
@@ -8137,7 +8154,9 @@ fn checker_check_while_fields(c: *mut Checker, span: Span, cond: Option<Box<Expr
         return ty_error()
     }
     (*c).loop_depth = (*c).loop_depth + 1
+    let lv_saved = checker_loop_value_enter_inplace(c, 0)
     let _body_ty = checker_check_opt_block_inplace(c, body)
+    let _lv_ty = checker_loop_value_leave_inplace(c, lv_saved)
     (*c).loop_depth = (*c).loop_depth - 1
     ty_unit()
 }
@@ -9087,7 +9106,62 @@ fn checker_check_break_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
     if (*c).loop_depth == 0 {
         checker_report_error_at_inplace(c, e.span, 44, 0, 0, 0)
     }
+    // The value of `break v` used to be neither checked nor lowered: `break i * 2`
+    // compiled, the `loop` typed as `()`, and `let r = loop { .. }` had no value.
+    match e.left {
+        Some(v) => {
+            let vt = checker_check_opt_expr_inplace(c, e.left)
+            if (*c).loop_depth > 0 {
+                if (*c).loop_takes_value != 1 {
+                    checker_report_error_at_inplace(c, e.span, 302, 0, 0, 0)
+                } else {
+                    checker_loop_break_join_inplace(c, e.span, *v, vt)
+                }
+            }
+        }
+        None => {
+            if (*c).loop_depth > 0 && (*c).loop_takes_value == 1 {
+                checker_loop_break_join_inplace(c, e.span, e, ty_unit())
+            }
+        }
+    }
     ty_never()
+}
+
+// One `break` of the innermost `loop` with value type vt (`()` for a bare
+// `break`). The first break fixes the type of the `loop`; every later one must
+// be compatible with it (E308), as the arms of an `if` must agree.
+fn checker_loop_break_join_inplace(c: *mut Checker, span: Span, v: Expr, vt: TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    if is_error_or_unknown(vt) { return }
+    if !(*c).loop_break_seen {
+        (*c).loop_break_seen = true
+        (*c).loop_break_ty = vt
+        return
+    }
+    if !checker_contextual_expr_compatible(v, vt, (*c).loop_break_ty) {
+        checker_report_mismatch_inplace(c, span, 308, (*c).loop_break_ty, vt)
+    }
+}
+
+// Enter a loop body: takes_value is 1 for `loop`, 0 for `while`/`for`. Returns
+// the enclosing loop's state, which checker_loop_value_leave_inplace restores.
+fn checker_loop_value_enter_inplace(c: *mut Checker, takes_value: i64) -> (i64, bool, TypeEntry) with Mut {
+    let saved = ((*c).loop_takes_value, (*c).loop_break_seen, (*c).loop_break_ty)
+    (*c).loop_takes_value = takes_value
+    (*c).loop_break_seen = false
+    (*c).loop_break_ty = ty_unit()
+    saved
+}
+
+// Leave a loop body: the type its breaks agreed on (`()` when none carried a
+// value), then the enclosing loop's state back.
+fn checker_loop_value_leave_inplace(c: *mut Checker, saved: (i64, bool, TypeEntry)) -> TypeEntry with Mut {
+    var result = ty_unit()
+    if (*c).loop_break_seen { result = (*c).loop_break_ty }
+    (*c).loop_takes_value = saved.0
+    (*c).loop_break_seen = saved.1
+    (*c).loop_break_ty = saved.2
+    result
 }
 
 fn checker_check_continue_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
@@ -9606,6 +9680,70 @@ fn checker_is_knowledge_ident_add(e: Expr, left_ty: TypeEntry, right_ty: TypeEnt
     }
 }
 
+// Knowledge<f64> (x) Knowledge<f64> for + - * /: lowered by
+// lower_binary_expr_ref's Knowledge arm (GUM first-order variance, min
+// confidence). The lowering recognises its operands syntactically (a bound
+// name, a call, or a nested binary of those), so the checker admits exactly
+// those shapes and keeps refusing every other one with E245 rather than let an
+// unrecognised operand lower as a scalar pointer.
+fn checker_knowledge_binary_lowerable(e: Expr, left_ty: TypeEntry, right_ty: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
+    if !is_knowledge_type(left_ty) || !is_knowledge_type(right_ty) {
+        return false
+    }
+    if e.bin_op != BinaryOp::OpAdd && e.bin_op != BinaryOp::OpSub
+        && e.bin_op != BinaryOp::OpMul && e.bin_op != BinaryOp::OpDiv {
+        return false
+    }
+    // Payload must be f64 on at least one side; the other may be unresolved
+    // (a module-level `let` read inside a function is typed Knowledge<unknown>,
+    // and the f64 side pins the payload).
+    let lk = knowledge_inner(left_ty).kind
+    let rk = knowledge_inner(right_ty).kind
+    let l_f = lk == TypeKind::TyF64
+    let r_f = rk == TypeKind::TyF64
+    let l_u = is_error_or_unknown(knowledge_inner(left_ty))
+    let r_u = is_error_or_unknown(knowledge_inner(right_ty))
+    if !((l_f && (r_f || r_u)) || (r_f && l_u)) {
+        return false
+    }
+    match e.left {
+        Some(lbox) => {
+            match e.right {
+                Some(rbox) => {
+                    let lk = (*lbox).kind
+                    let rk = (*rbox).kind
+                    let l_ok = lk == ExprKind::ExprIdent || lk == ExprKind::ExprCall || lk == ExprKind::ExprBinary
+                    let r_ok = rk == ExprKind::ExprIdent || rk == ExprKind::ExprCall || rk == ExprKind::ExprBinary
+                    l_ok && r_ok
+                }
+                None => false,
+            }
+        }
+        None => false,
+    }
+}
+
+// RC-B backstop. The lowering recognises Knowledge operands syntactically; the
+// checker records every binary expression it ADMITTED as Knowledge (+ - * /)
+// in the hyper-expression span table under op_kind 21, so the lowerer can
+// refuse (hard error) a recorded span whose operands it failed to classify
+// instead of lowering two handles as scalars. A collision between spans of
+// different modules can only add a false refusal, never a silent miscompile.
+// Returns false when the table is full: the caller then keeps E245.
+fn checker_record_knowledge_binary_inplace(c: *mut Checker, span: Span) -> bool with Mut, Panic, Div {
+    let info = HyperExprInfo {
+        span_start: span.start,
+        span_end: span.end,
+        algebra_tag: 0,
+        op_kind: 21,
+        knowledge_wrapped: true,
+    }
+    let tbl = (*c).hyper_exprs
+    let add_result = tbl.add(info)
+    (*c).hyper_exprs = add_result.0
+    add_result.1 >= 0
+}
+
 // R6 Correlated (id 29): Knowledge binary arith reusing the same ExprIdent
 // requires `with Correlated`. Distinct from E230 anti-garbling (noise symbols).
 // SOUNIO_FORCE_CORRELATED=1 forces every Knowledge arith op (reachability).
@@ -9744,7 +9882,7 @@ fn checker_check_binary_operand_compat_inplace(c: *mut Checker, span: Span, op: 
     // neither. Found by instrumenting a source build: the site fifteen lines
     // below reported ignunits=1 and reskind=1 (not an error) for exactly the
     // operand pair this line was rejecting.
-    if !both_hyper && !either_cond_indep && !knowledge_ident_add && !is_error_or_unknown(left_ty) && !is_error_or_unknown(right_ty) && !compat_numeric_ignoring_units(left_ty, right_ty) {
+    if !both_hyper && !either_cond_indep && !knowledge_ident_add && !is_error_or_unknown(left_ty) && !is_error_or_unknown(right_ty) && !compat_knowledge_operands(left_ty, right_ty) && !compat_numeric_ignoring_units(left_ty, right_ty) {
         let is_arith = op == BinaryOp::OpAdd || op == BinaryOp::OpSub
             || op == BinaryOp::OpMul || op == BinaryOp::OpDiv || op == BinaryOp::OpRem
         let is_cmp = op == BinaryOp::OpEq || op == BinaryOp::OpNe
@@ -9999,7 +10137,11 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
     checker_check_binary_operand_compat_inplace(c, e.span, e.bin_op, left_ty, right_ty, knowledge_ident_add)
     if is_knowledge_type(left_ty) || is_knowledge_type(right_ty) {
         checker_store_binary_knowledge_hyper_inplace(c, e.span, e.bin_op, left_ty, right_ty)
-        checker_check_binary_knowledge_refusals_inplace(c, e.span, e.bin_op, left_ty, right_ty, correlated_same_slot_add, knowledge_ident_add)
+        var kk_admit = checker_knowledge_binary_lowerable(e, left_ty, right_ty)
+        if kk_admit && !checker_record_knowledge_binary_inplace(c, e.span) {
+            kk_admit = false
+        }
+        checker_check_binary_knowledge_refusals_inplace(c, e.span, e.bin_op, left_ty, right_ty, correlated_same_slot_add, knowledge_ident_add || kk_admit)
         return checker_finish_binary_knowledge_result_inplace(c, e.span, e.bin_op, left_ty, right_ty, correlated_same_slot_add)
     }
     if left_ty.kind == TypeKind::TyHyper && right_ty.kind == TypeKind::TyHyper {
@@ -10369,7 +10511,9 @@ fn checker_check_while_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
     checker_ns_branch_enter_inplace(c)
     // Loop body block (via the *mut spine; its type is discarded, exactly as the
     // by-value original discards body_pair.1).
+    let lv_saved = checker_loop_value_enter_inplace(c, 0)
     let _body_ty = checker_check_opt_block_inplace(c, e.block)
+    let _lv_ty = checker_loop_value_leave_inplace(c, lv_saved)
     checker_merge_ns_reassigned_inplace(c)
     (*c).loop_depth = (*c).loop_depth - 1
     ty_unit()
@@ -10387,9 +10531,11 @@ fn checker_check_loop_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
     }
     (*c).loop_depth = (*c).loop_depth + 1
     borrow_release_exclusive_borrows_mut(&!(*c).borrows)
+    let lv_saved = checker_loop_value_enter_inplace(c, 1)
     let _body_ty = checker_check_opt_block_inplace(c, e.block)
+    let loop_ty = checker_loop_value_leave_inplace(c, lv_saved)
     (*c).loop_depth = (*c).loop_depth - 1
-    ty_unit()
+    loop_ty
 }
 
 // *mut transcription of check_for_in_expr (18227). It had NO in-place case (unlike ExprWhile),
@@ -10423,7 +10569,9 @@ fn checker_check_for_in_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with
     // stale pre-loop handle -- the merge's own write was thrown away before
     // it could be read back.
     checker_ns_branch_enter_inplace(c)
+    let lv_saved = checker_loop_value_enter_inplace(c, 0)
     let _body_ty = checker_check_opt_block_inplace(c, e.block)
+    let _lv_ty = checker_loop_value_leave_inplace(c, lv_saved)
     (*c).loop_depth = (*c).loop_depth - 1
     checker_pop_const_scope_inplace(c)
     borrow_pop_scope_mut(&!(*c).borrows)
@@ -10504,6 +10652,13 @@ fn checker_check_array_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
                     if elem_ok && is_epistemic_type(elem_ty) && is_epistemic_type(first_ty) {
                         elem_ok = checker_knowledge_subsumes(c, elem_ty, first_ty)
                             && checker_knowledge_subsumes(c, first_ty, elem_ty)
+                    }
+                    if !elem_ok && elem_ty.kind == TypeKind::TyKnowledge && first_ty.kind == TypeKind::TyKnowledge {
+                        let jn = checker_knowledge_epsilon_join(c, first_ty, elem_ty)
+                        if jn.0 {
+                            elem_ok = true
+                            first_ty = jn.1
+                        }
                     }
                     if !elem_ok {
                         checker_report_mismatch_inplace(c, (*list).head.span, 20, first_ty, elem_ty)
@@ -21703,6 +21858,8 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 299 { print("handler backend v1 limit exceeded (results and operation values are i64 words; handler nesting depth at most 8)") }
     else if code == 300 { print("integer constant is out of range for the annotated type") }
     else if code == 301 { print("unit registry capacity exceeded; refusing to discard a unit dimension") }
+    else if code == 302 { print("`break` with a value is only allowed inside `loop`") }
+    else if code == 308 { print("the `break` values of this `loop` have different types") }
     else if code == 269 { print("a `where` refinement on Knowledge<T> is not enforced by this compiler yet: the predicate would be silently ignored, so it is refused") }
     else if code == 270 { print("`as string` does not convert a number, bool or char to text: no engine formats the value, so the cast is refused") }
     else if code == 263 { print("qualified call is ambiguous: this qualifier names a module you `use`d, but also collides with an unrelated struct/enum method of the same name, and the compiler cannot yet guarantee which one runs") }
@@ -21837,6 +21994,12 @@ fn print_error_help(code: i64) with IO, Mut, Panic, Div {
     }
     else if code == 45 {
         print("   |\n   = help: move `continue` inside a `while` or `loop` block\n")
+    }
+    else if code == 302 {
+        print("   |\n   = help: write the loop as `loop { .. }`, or assign the value to a `var` declared before the loop and `break` without one\n")
+    }
+    else if code == 308 {
+        print("   |\n   = help: make every `break` of the loop carry a value of the same type\n")
     }
     else if code == 46 {
         print("   |\n   = help: provide values for all fields declared in the struct definition\n")
@@ -22227,6 +22390,12 @@ fn print_error_note(code: i64) with IO, Mut, Panic, Div {
     }
     else if code == 45 {
         print("   = note: `continue` skips to the next iteration of the nearest enclosing loop\n")
+    }
+    else if code == 302 {
+        print("   = note: `while` and `for` loops are statements; only `loop` is an expression whose value a `break` supplies\n")
+    }
+    else if code == 308 {
+        print("   = note: a `loop` has one type: the first `break` fixes it and every other `break` must match (a bare `break` is `()`)\n")
     }
     else if code == 46 {
         print("   = note: struct literals must initialize all declared fields\n")
@@ -23932,6 +24101,42 @@ fn checker_knowledge_subsumes(c: *mut Checker, provided: TypeEntry, required: Ty
     }
 
     provenance_subsumes(knowledge_meta_provenance(pmeta), knowledge_meta_provenance(rmeta))
+}
+
+// Array-literal element join for epistemic elements that differ ONLY in the
+// epsilon bound (`[measure(1.0, uncertainty: 0.1), measure(3.0, uncertainty:
+// 0.2)]` carries eps=10/1000 and eps=40/1000). Mutual subsumption fails on
+// that pair by construction (a tighter bound satisfies a looser one, never the
+// reverse), yet the literal is well typed: the array's element type is the
+// WEAKEST bound that every element satisfies. Validity, provenance and
+// payload must still be mutually subsumed once epsilon is neutralised, so the
+// four-axis join check of the other axes is unchanged.
+// Returns (ok, joined element type).
+fn checker_knowledge_epsilon_join(c: *mut Checker, a: TypeEntry, b: TypeEntry) -> (bool, TypeEntry) with Mut, Panic, Div, Alloc {
+    var an = a
+    var bn = b
+    an.knowledge_epsilon = 0.0 - 1.0
+    an.knowledge_epsilon_mode = 0
+    bn.knowledge_epsilon = 0.0 - 1.0
+    bn.knowledge_epsilon_mode = 0
+    if !checker_knowledge_subsumes(c, an, bn) || !checker_knowledge_subsumes(c, bn, an) {
+        return (false, a)
+    }
+    var joined = a
+    if a.knowledge_epsilon_mode == b.knowledge_epsilon_mode && a.knowledge_epsilon >= 0.0 && b.knowledge_epsilon >= 0.0 && a.knowledge_epsilon_mode != 3 {
+        if a.knowledge_epsilon_mode == 0 {
+            joined.knowledge_epsilon = if a.knowledge_epsilon > b.knowledge_epsilon { a.knowledge_epsilon } else { b.knowledge_epsilon }
+        } else if a.knowledge_epsilon_mode == 2 {
+            joined.knowledge_epsilon = if a.knowledge_epsilon < b.knowledge_epsilon { a.knowledge_epsilon } else { b.knowledge_epsilon }
+        } else if a.knowledge_epsilon != b.knowledge_epsilon {
+            joined.knowledge_epsilon = 0.0 - 1.0
+            joined.knowledge_epsilon_mode = 0
+        }
+    } else {
+        joined.knowledge_epsilon = 0.0 - 1.0
+        joined.knowledge_epsilon_mode = 0
+    }
+    (true, joined)
 }
 
 fn checker_types_compatible_inplace(c: *mut Checker, a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div, Alloc, IO {
@@ -30347,7 +30552,7 @@ impl Checker {
                 || e.bin_op == BinaryOp::OpMul || e.bin_op == BinaryOp::OpDiv
                 || e.bin_op == BinaryOp::OpRem
             let kk_hyper = left_inner.kind == TypeKind::TyHyper && right_inner.kind == TypeKind::TyHyper
-            if kk_both && kk_arith && !kk_hyper && !correlated_same_slot_add && !checker_is_knowledge_ident_add(e, left_ty, right_ty) {
+            if kk_both && kk_arith && !kk_hyper && !correlated_same_slot_add && !checker_is_knowledge_ident_add(e, left_ty, right_ty) && !checker_knowledge_binary_lowerable(e, left_ty, right_ty) {
                 c = c.report_error_at(e.span, 245, 0, 0, 0)
             }
             var knowledge_result = knowledge_binary_result(e.bin_op, left_ty, right_ty, c.ns_table)
@@ -34435,6 +34640,34 @@ impl Checker {
         if c.loop_depth == 0 {
             c = c.report_error_at(e.span, 44, 0, 0, 0)
         }
+        // Same rules as checker_check_break_expr_inplace.
+        var has_value = false
+        var v_expr = e
+        match e.left {
+            Some(v) => {
+                has_value = true
+                v_expr = *v
+            }
+            None => {}
+        }
+        var vt = ty_unit()
+        if has_value {
+            let pair = c.check_opt_expr(e.left)
+            c = pair.0
+            vt = pair.1
+        }
+        if c.loop_depth > 0 {
+            if has_value && c.loop_takes_value != 1 {
+                c = c.report_error_at(e.span, 302, 0, 0, 0)
+            } else if c.loop_takes_value == 1 && !is_error_or_unknown(vt) {
+                if !c.loop_break_seen {
+                    c.loop_break_seen = true
+                    c.loop_break_ty = vt
+                } else if !checker_contextual_expr_compatible(v_expr, vt, c.loop_break_ty) {
+                    c = c.report_mismatch(e.span, 308, c.loop_break_ty, vt)
+                }
+            }
+        }
         (c, ty_never())
     }
 
@@ -34457,8 +34690,14 @@ impl Checker {
         type_env_bind_mut(&!c.env, e.name, ty_i64(), false)
         c.loop_depth = c.loop_depth + 1
         c.borrows = c.borrows.release_exclusive_borrows()
+        let lv_saved = (c.loop_takes_value, c.loop_break_seen, c.loop_break_ty)
+        c.loop_takes_value = 0
+        c.loop_break_seen = false
         let body_pair = c.check_opt_block(e.block)
         c = body_pair.0
+        c.loop_takes_value = lv_saved.0
+        c.loop_break_seen = lv_saved.1
+        c.loop_break_ty = lv_saved.2
         c.loop_depth = c.loop_depth - 1
         c = c.pop_const_scope()
         c.borrows = c.borrows.pop_scope()
@@ -34485,8 +34724,14 @@ impl Checker {
         // Without this, the second iteration would fail because the first
         // iteration's exclusive borrows are still active.
         c.borrows = c.borrows.release_exclusive_borrows()
+        let lv_saved = (c.loop_takes_value, c.loop_break_seen, c.loop_break_ty)
+        c.loop_takes_value = 0
+        c.loop_break_seen = false
         let body_pair = c.check_opt_block(e.block)
         c = body_pair.0
+        c.loop_takes_value = lv_saved.0
+        c.loop_break_seen = lv_saved.1
+        c.loop_break_ty = lv_saved.2
         c.loop_depth = c.loop_depth - 1
         (c, ty_unit())
     }
@@ -34502,10 +34747,18 @@ impl Checker {
         c.loop_depth = c.loop_depth + 1
         // Release exclusive borrows before checking loop body (same as while loops)
         c.borrows = c.borrows.release_exclusive_borrows()
+        let lv_saved = (c.loop_takes_value, c.loop_break_seen, c.loop_break_ty)
+        c.loop_takes_value = 1
+        c.loop_break_seen = false
         let pair = c.check_opt_block(e.block)
         c = pair.0
+        var loop_ty = ty_unit()
+        if c.loop_break_seen { loop_ty = c.loop_break_ty }
+        c.loop_takes_value = lv_saved.0
+        c.loop_break_seen = lv_saved.1
+        c.loop_break_ty = lv_saved.2
         c.loop_depth = c.loop_depth - 1
-        (c, ty_unit())
+        (c, loop_ty)
     }
 
     fn check_block_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
