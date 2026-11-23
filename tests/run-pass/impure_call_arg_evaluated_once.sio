@@ -1,0 +1,63 @@
+//@ run-pass
+//@ expect-stdout: IMPURE_CALL_ARG_ONCE_OK
+// An argument is evaluated exactly once. Madaros's first-order variance walk
+// re-lowers a call's arguments, and it counted a call to a known inline helper
+// as safe to re-lower whenever the helper's effects were within Mut/Div/Panic.
+// `with Mut` admits a write to a global, so `k3(bump(1.0), 0.5, 0.5)` ran
+// `bump` twice: C ended at 2. lean_single always gave 1. The Monte Carlo demo
+// demos/hydrogen/smr_h2_lcoh.sio drew 7 Gaussians per iteration instead of 4
+// and printed a different mean on the two engines. Now a helper is re-lowered
+// only if it writes no name it did not bind and calls only such helpers.
+var C: i64 = 0
+
+fn bump(mu: f64) -> f64 with Mut, Div {
+    C = C + 1
+    mu
+}
+
+// Writes no global itself but calls one that does.
+fn bump_via(mu: f64) -> f64 with Mut, Div {
+    mu + bump(0.0)
+}
+
+// Local mutation only: still a stateless helper.
+fn local_sum(a: f64) -> f64 with Mut, Div {
+    var s = 0.0
+    s = s + a
+    s
+}
+
+fn k3(a: f64, b: f64, c: f64) -> f64 with Mut, Div { a + b + c }
+
+fn main() -> i32 with IO, Mut, Div {
+    var bad: i64 = 0
+
+    C = 0
+    let a = k3(bump(1.0), 0.5, 0.5)
+    if C != 1 { bad = bad + 1 }
+    if a != 2.0 { bad = bad + 1 }
+
+    C = 0
+    let b = k3(0.5, 0.5, bump(2.0))
+    if C != 1 { bad = bad + 1 }
+    if b != 3.0 { bad = bad + 1 }
+
+    C = 0
+    let c = k3(bump_via(1.0), bump(1.0), 0.0)
+    if C != 2 { bad = bad + 1 }
+    if c != 2.0 { bad = bad + 1 }
+
+    C = 0
+    let d = k3(local_sum(1.0), local_sum(2.0), 0.0)
+    if C != 0 { bad = bad + 1 }
+    if d != 3.0 { bad = bad + 1 }
+
+    if bad == 0 {
+        println("IMPURE_CALL_ARG_ONCE_OK")
+    } else {
+        print("IMPURE_CALL_ARG_ONCE_FAIL ")
+        print_int(bad)
+        print("\n")
+    }
+    return 0
+}

@@ -16820,11 +16820,215 @@ fn tg_hof_call_relower_safe(callee: Name, e: &Expr) -> bool with Mut, Panic, Div
     true
 }
 
+// A call to a known inline helper is re-lowered by the variance walk, which
+// evaluates it a second time. That is only meaning-preserving if the helper
+// leaves no trace the caller can see. `with Mut` does not say so: it admits a
+// write to a global. `lcoh(rand_gaussian(..), r, rand_gaussian(..), ..)` drew
+// from the generator twice per argument, so the same program printed a
+// different Monte Carlo mean under Madaros than under lean_single.
+//
+// A helper is stateless here when every assignment in its body targets a name
+// the helper itself binds (a parameter, `let` or `var`), and every call in its
+// body is a pure math builtin or again a stateless known helper. Anything else
+// (a method call, a call through a non-name, an unknown callee, a deref store,
+// the visit budget running out) answers "not stateless": the argument is then
+// lowered once and the call carries no inlined variance, the old fallback.
+var FO_SL_LOC: [Name; 64] = [ir_empty_name(); 64]
+var FO_SL_NLOC: i64 = 0
+var FO_SL_BAD: i64 = 0
+var FO_SL_BUDGET: i64 = 0
+
+fn fo_sl_is_local(n: Name) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < FO_SL_NLOC {
+        if ir_name_eq(FO_SL_LOC[i as usize], n) { return true }
+        i = i + 1
+    }
+    false
+}
+
+fn fo_sl_add_local(n: Name) with Mut, Panic, Div {
+    if FO_SL_NLOC >= 64 {
+        FO_SL_BAD = 1
+        return
+    }
+    FO_SL_LOC[FO_SL_NLOC as usize] = n
+    FO_SL_NLOC = FO_SL_NLOC + 1
+}
+
+// The name an assignment target finally writes through: `x`, `x[i]`, `x.f`,
+// `x[i].f`. A deref store or any other shape has no such name (empty).
+fn fo_sl_target_root(e: &Expr, depth: i64) -> Name with Mut, Panic, Div {
+    if depth > 32 { return ir_empty_name() }
+    if (*e).kind == ExprKind::ExprIdent { return (*e).name }
+    if (*e).kind == ExprKind::ExprIndex || (*e).kind == ExprKind::ExprFieldAccess {
+        match (*e).left {
+            Some(l) => { return fo_sl_target_root(&(*l), depth + 1) }
+            None => { return ir_empty_name() }
+        }
+    }
+    ir_empty_name()
+}
+
+// pass 1 records every name the body binds; pass 2 flags an assignment whose
+// root is not one of them.
+fn fo_sl_expr(e: &Expr, pass: i64, depth: i64) with Mut, Panic, Div {
+    if depth > 96 {
+        FO_SL_BAD = 1
+        return
+    }
+    match (*e).left {
+        Some(x) => { fo_sl_expr(&(*x), pass, depth + 1) }
+        None => {}
+    }
+    match (*e).right {
+        Some(x) => { fo_sl_expr(&(*x), pass, depth + 1) }
+        None => {}
+    }
+    match (*e).else_expr {
+        Some(x) => { fo_sl_expr(&(*x), pass, depth + 1) }
+        None => {}
+    }
+    match (*e).block {
+        Some(b) => { fo_sl_stmts(&(*b).stmts, pass, depth + 1) }
+        None => {}
+    }
+    match (*e).handler_block {
+        Some(b) => { fo_sl_stmts(&(*b).stmts, pass, depth + 1) }
+        None => {}
+    }
+    var args = &(*e).args
+    while true {
+        match *args {
+            Some(a) => {
+                fo_sl_expr(&(*a).head, pass, depth + 1)
+                args = &(*a).tail
+            }
+            None => break
+        }
+    }
+    var arms = &(*e).arms
+    while true {
+        match *arms {
+            Some(al) => {
+                fo_sl_expr(&(*al).head.body, pass, depth + 1)
+                arms = &(*al).tail
+            }
+            None => break
+        }
+    }
+}
+
+fn fo_sl_stmts(opt: &Option<Box<StmtList>>, pass: i64, depth: i64) with Mut, Panic, Div {
+    if depth > 96 {
+        FO_SL_BAD = 1
+        return
+    }
+    var cur = opt
+    while true {
+        match *cur {
+            Some(sl) => {
+                let k = (*sl).head.kind
+                if pass == 1 && (k == StmtKind::StmtLet || k == StmtKind::StmtVar) {
+                    fo_sl_add_local((*sl).head.name)
+                }
+                if pass == 2 && k == StmtKind::StmtAssign {
+                    match (*sl).head.target {
+                        Some(t) => {
+                            let root = fo_sl_target_root(&(*t), 0)
+                            if root.len <= 0 || !fo_sl_is_local(root) { FO_SL_BAD = 1 }
+                        }
+                        None => { FO_SL_BAD = 1 }
+                    }
+                }
+                match (*sl).head.expr {
+                    Some(x) => { fo_sl_expr(&(*x), pass, depth + 1) }
+                    None => {}
+                }
+                cur = &(*sl).tail
+            }
+            None => break
+        }
+    }
+}
+
+fn fo_inline_def_of(n: Name) -> (bool, FnDef) with Mut, Panic, Div, Alloc {
+    let id = ir_intern_name(n)
+    var cur = FO_INLINE_HEAD
+    while true {
+        match cur {
+            Some(node) => {
+                if (*node).id == id { return (true, (*node).def) }
+                cur = (*node).next
+            }
+            None => break
+        }
+    }
+    let empty = lower_ident_expr_for_name(ir_empty_name(), Span { file_id: 0, start: 0, end: 0 })
+    (false, FnDef {
+        name: ir_empty_name(), params: None, return_type: None, effects: None,
+        body: Block { stmts: None, span: empty.span }, span: empty.span,
+        is_kernel: false, is_extern: false,
+    })
+}
+
+fn fo_known_helper_stateless_at(n: Name, depth: i64) -> bool with Mut, Panic, Div, Alloc {
+    if lower_name_is_pure_math_builtin(n) { return true }
+    if depth > 8 { return false }
+    if FO_SL_BUDGET <= 0 { return false }
+    FO_SL_BUDGET = FO_SL_BUDGET - 1
+    let got = fo_inline_def_of(n)
+    if !got.0 { return false }
+    let fd = got.1
+    FO_SL_NLOC = 0
+    FO_SL_BAD = 0
+    var pc = &fd.params
+    while true {
+        match *pc {
+            Some(pl) => {
+                fo_sl_add_local((*pl).head.name)
+                pc = &(*pl).tail
+            }
+            None => break
+        }
+    }
+    fo_sl_stmts(&fd.body.stmts, 1, 0)
+    fo_sl_stmts(&fd.body.stmts, 2, 0)
+    if FO_SL_BAD != 0 { return false }
+    TG_NCALLEES = 0
+    TG_NMCALLEES = 0
+    TG_OPAQUE_CALL = 0
+    tg_stmts_callees(&fd.body.stmts, 0)
+    if TG_NMCALLEES > 0 || TG_OPAQUE_CALL != 0 || TG_NCALLEES > 32 { return false }
+    let nn = TG_NCALLEES
+    var callees: [Name; 33] = [ir_empty_name(); 33]
+    var j: i64 = 0
+    while j < nn {
+        callees[j as usize] = TG_CALLEES[j as usize]
+        j = j + 1
+    }
+    j = 0
+    while j < nn {
+        if !fo_known_helper_stateless_at(callees[j as usize], depth + 1) { return false }
+        j = j + 1
+    }
+    true
+}
+
+fn fo_known_helper_stateless(n: Name) -> bool with Mut, Panic, Div, Alloc {
+    FO_SL_BUDGET = 64
+    fo_known_helper_stateless_at(n, 0)
+}
+
 fn lower_expr_relower_safe_ref(e: &Expr) -> bool with Mut, Panic, Div, Alloc {
     if (*e).kind == ExprKind::ExprCall {
         match (*e).left {
             Some(callee) => {
-                if (*callee).kind == ExprKind::ExprIdent && (lower_name_is_pure_math_builtin((*callee).name) || fo_inline_known((*callee).name)) {
+                if (*callee).kind == ExprKind::ExprIdent && lower_name_is_pure_math_builtin((*callee).name) {
+                    return lower_expr_list_relower_safe(&(*e).args)
+                }
+                if (*callee).kind == ExprKind::ExprIdent && fo_inline_known((*callee).name) {
+                    if !fo_known_helper_stateless((*callee).name) { return false }
                     return lower_expr_list_relower_safe(&(*e).args)
                 }
                 if (*callee).kind == ExprKind::ExprIdent && tg_bound_fn((*callee).name).len > 0 {
