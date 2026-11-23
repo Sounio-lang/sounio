@@ -16833,9 +16833,8 @@ fn tg_hof_call_relower_safe(callee: Name, e: &Expr) -> bool with Mut, Panic, Div
 //     of the helper itself: a by-value parameter, a `let` or a `var`. A `&`/`&!`
 //     parameter or `self` writes through to the caller, so it does not count;
 //     neither does a deref store or any other target shape;
-//   - every name it reads is such a binding or a module-level `let`/`const`; a
-//     `var` global could be changed between the two evaluations by a sibling
-//     argument;
+//   - reads are not restricted (see the ExprIdent case in fo_sl_expr for the
+//     one ordering this leaves open);
 //   - every call (in an operand, an argument, a struct-literal field, an
 //     assignment target or a match arm) is a pure math builtin or, again, a
 //     stateless known helper; a method call, a call through a non-name, a
@@ -16913,10 +16912,13 @@ fn fo_sl_expr(e: &Expr, depth: i64) with Mut, Panic, Div {
         FO_SL_BAD = 1
         return
     }
-    if k == ExprKind::ExprIdent {
-        if !fo_sl_is_local((*e).name) && !ast_is_global_const_name((*e).name) { FO_SL_BAD = 1 }
-        return
-    }
+    // A read of a module-level `var` is allowed: the re-lowered copy feeds the
+    // variance channels, not the value or any state, and refusing it removed
+    // the inlined variance of every helper that reads a parameter kept in a
+    // `var` global (6 of the 550 variance tests, e.g. knowledge_vanthoff_pressure).
+    // What stays open: if a sibling argument writes that global between the two
+    // evaluations, the variance of the call is computed from the later value.
+    if k == ExprKind::ExprIdent { return }
     if k == ExprKind::ExprCall {
         match (*e).left {
             Some(c) => {
