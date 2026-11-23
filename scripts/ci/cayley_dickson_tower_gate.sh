@@ -49,6 +49,7 @@ cat "$OUT/oracle.log"
 # oracle cases on both public multiplication routes, so this gate compares
 # numbers with the oracle instead of trusting a success marker.
 cat >"$OUT/emit_coeffs.sio" <<'EOF'
+use algebra::cayley_dickson::*
 use algebra::cayley_dickson_tower::*
 
 fn tower_vec(bits: i32, seed: i32) -> CDElement with Mut, Panic, Div {
@@ -155,6 +156,7 @@ fi
 #    so attribute the refusal by requiring successful compilation first and
 #    then an ordinary (non-crash, non-timeout) runtime failure.
 cat >"$OUT/invalid-embed.sio" <<'EOF'
+use algebra::cayley_dickson::*
 use algebra::cayley_dickson_tower::*
 
 fn main() -> i32 with IO, Mut, Div, Panic {
