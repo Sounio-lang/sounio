@@ -1,0 +1,83 @@
+// stdlib/darwin_pbpk/circ28_metab.sio — parent -> metabolite coupling on the circ28 kernel
+//
+// An engine: it holds no literature value. The metabolite is a SECOND circ28
+// system (its own Circ28Params, state, tallies and factored system). Per step:
+//   1. the parent advances one step with circ28_step;
+//   2. the parent mass converted to the metabolite in that step is read from the
+//      tallies of the parent: `formed` (mg of parent converted by the hepatic
+//      intrinsic clearance clform, which acts in liver tissue) and, optionally,
+//      a fraction gut_frac of `gut` (the parent mass eliminated in the gut wall);
+//   3. the mass is converted by the molecular-weight ratio MW_m / MW_p and fed to
+//      the metabolite as a constant mass rate over the same step, through
+//      circ28_step_src: into the metabolite's LIVER TISSUE state circ28_it(1)
+//      (the metabolite formed in the liver is exposed to its own hepatic
+//      clearance before it reaches blood: a sequential first pass), and the
+//      gut-wall part into the metabolite's GUT TISSUE state circ28_it(8) (it
+//      reaches the liver through the portal vein).
+//
+// SPLITTING AND ORDER OF ACCURACY
+//   The parent's tallies are accumulated with the weights of the second-order
+//   scheme, so the mass formed in a step is the scheme's quadrature of the
+//   formation rate over the step. The metabolite receives that mass spread
+//   uniformly over the step (a piecewise-constant rate with the exact step
+//   mean). The deviation from the true rate has zero mean over each step, so
+//   its leading effect per step is r'(t) dt^3 / 12 times the response slope,
+//   and the global error is O(dt^2): the coupling is second order, one-way
+//   (the metabolite does not act on the parent, so there is no splitting error
+//   from feedback). Mass is conserved to rounding at any dt, whatever the
+//   order: the mass given to the metabolite is exactly the mass the parent
+//   booked as formed. The order is MEASURED in tests/run-pass/circ28_metab_identities.sio.
+//
+// The caller owns both Circ28Sys values and creates them once (a Circ28Sys holds
+// [f64; 784] arrays). Both systems must be prepared with the same dt; the coupled
+// step reads dt from the parent's system and returns false (doing nothing) if
+// the two differ.
+//
+// Madaros and lean_single pitfalls respected: all arrays are local, nothing is
+// written to a module-level array, no array is passed by value.
+
+use darwin_pbpk::circ28::*
+
+// Coupling constants of one parent -> metabolite pair.
+//   mw_ratio  MW_metabolite / MW_parent
+//   gut_frac  fraction of the parent's gut-wall elimination that forms the
+//             metabolite (0 when there is no gut-wall formation)
+pub struct Circ28Coupling {
+    pub mw_ratio: f64,
+    pub gut_frac: f64,
+}
+
+pub fn circ28_coupling(mw_ratio: f64, gut_frac: f64) -> Circ28Coupling {
+    return Circ28Coupling { mw_ratio: mw_ratio, gut_frac: gut_frac }
+}
+
+// One coupled step. iv_rate (mg/h) enters the parent's venous pool and
+// oral_rate (mg/h) its gut tissue. Returns the mass (mg of metabolite) given to
+// the metabolite in this step, or a negative number if the step sizes differ.
+pub fn circ28_metab_step(
+    sp: &!Circ28State,
+    pp: Circ28Params,
+    sysp: &Circ28Sys,
+    elp: &!Circ28Elim,
+    sm: &!Circ28State,
+    pm: Circ28Params,
+    sysm: &Circ28Sys,
+    elm: &!Circ28Elim,
+    cp: Circ28Coupling,
+    iv_rate: f64,
+    oral_rate: f64
+) -> f64 with Mut, Div {
+    let dt = (*sysp).dt
+    let dd = dt - (*sysm).dt
+    if dd > 1.0e-12 || dd < 0.0 - 1.0e-12 { return 0.0 - 1.0 }
+    let formed0 = (*elp).formed
+    let gut0 = (*elp).gut
+    circ28_step(sp, pp, sysp, iv_rate, oral_rate, elp)
+    let df = (*elp).formed - formed0
+    let dg = (*elp).gut - gut0
+    var src: [f64; 28] = [0.0; 28]
+    src[3] = cp.mw_ratio * df / dt
+    src[17] = cp.mw_ratio * cp.gut_frac * dg / dt
+    circ28_step_src(sm, pm, sysm, &src, elm)
+    return (src[3] + src[17]) * dt
+}
