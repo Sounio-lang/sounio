@@ -25,3 +25,9 @@ Shipping current source surfaced what the old prebuilt hid:
   EL+ ontology drivers use `wrapping_add`/`wrapping_sub`/`wrapping_mul`, as
   ADR-031 R1 requires. Under current Madaros the plain operators trapped; the
   bits are unchanged.
+
+Rebuilt again after #2720, so the shipped prebuilt refuses an entry file with
+no `main`, or with only a bodyless `extern "C" fn main()`, with
+`error[E221]: no main` and writes no ELF. The prebuilt built before #2720
+wrote one that died with SIGILL. The seed-agreement gate now checks both
+refusals and a positive control.
