@@ -16822,27 +16822,41 @@ fn tg_hof_call_relower_safe(callee: Name, e: &Expr) -> bool with Mut, Panic, Div
 
 // A call to a known inline helper is re-lowered by the variance walk, which
 // evaluates it a second time. That is only meaning-preserving if the helper
-// leaves no trace the caller can see. `with Mut` does not say so: it admits a
-// write to a global. `lcoh(rand_gaussian(..), r, rand_gaussian(..), ..)` drew
-// from the generator twice per argument, so the same program printed a
-// different Monte Carlo mean under Madaros than under lean_single.
+// leaves no trace the caller can see and reads nothing a sibling argument can
+// change. `with Mut` does not say so: it admits a write to a global.
+// `lcoh(rand_gaussian(..), r, rand_gaussian(..), ..)` drew from the generator
+// twice per argument, so the same program printed a different Monte Carlo mean
+// under Madaros than under lean_single.
 //
-// A helper is stateless here when every assignment in its body targets a name
-// the helper itself binds (a parameter, `let` or `var`), and every call in its
-// body is a pure math builtin or again a stateless known helper. Anything else
-// (a method call, a call through a non-name, an unknown callee, a deref store,
-// the visit budget running out) answers "not stateless": the argument is then
-// lowered once and the call carries no inlined variance, the old fallback.
+// A helper is stateless here when, walking its body in lexical scope order:
+//   - every assignment's target is rooted in a name bound in an enclosing scope
+//     of the helper itself: a by-value parameter, a `let` or a `var`. A `&`/`&!`
+//     parameter or `self` writes through to the caller, so it does not count;
+//     neither does a deref store or any other target shape;
+//   - every name it reads is such a binding or a module-level `let`/`const`; a
+//     `var` global could be changed between the two evaluations by a sibling
+//     argument;
+//   - every call (in an operand, an argument, a struct-literal field, an
+//     assignment target or a match arm) is a pure math builtin or, again, a
+//     stateless known helper; a method call, a call through a non-name, a
+//     closure, an effect handler or `perform` answers "not stateless".
+// A call back into a helper whose check is in progress adds nothing: the bodies
+// on the cycle decide. Anything else, including the depth (8) or visit (64)
+// budget running out, answers "not stateless": the argument is then lowered
+// once and the call carries no inlined variance, the walk's old fallback.
 var FO_SL_LOC: [Name; 64] = [ir_empty_name(); 64]
 var FO_SL_NLOC: i64 = 0
 var FO_SL_BAD: i64 = 0
 var FO_SL_BUDGET: i64 = 0
+var FO_SL_CALLEES: [Name; 33] = [ir_empty_name(); 33]
+var FO_SL_NCALLEES: i64 = 0
+var FO_SL_STACK: [Name; 9] = [ir_empty_name(); 9]
 
 fn fo_sl_is_local(n: Name) -> bool with Mut, Panic, Div {
-    var i: i64 = 0
-    while i < FO_SL_NLOC {
+    var i: i64 = FO_SL_NLOC - 1
+    while i >= 0 {
         if ir_name_eq(FO_SL_LOC[i as usize], n) { return true }
-        i = i + 1
+        i = i - 1
     }
     false
 }
@@ -16854,6 +16868,15 @@ fn fo_sl_add_local(n: Name) with Mut, Panic, Div {
     }
     FO_SL_LOC[FO_SL_NLOC as usize] = n
     FO_SL_NLOC = FO_SL_NLOC + 1
+}
+
+fn fo_sl_note_callee(n: Name) with Mut, Panic, Div {
+    if FO_SL_NCALLEES >= 32 {
+        FO_SL_BAD = 1
+        return
+    }
+    FO_SL_CALLEES[FO_SL_NCALLEES as usize] = n
+    FO_SL_NCALLEES = FO_SL_NCALLEES + 1
 }
 
 // The name an assignment target finally writes through: `x`, `x[i]`, `x.f`,
@@ -16870,39 +16893,70 @@ fn fo_sl_target_root(e: &Expr, depth: i64) -> Name with Mut, Panic, Div {
     ir_empty_name()
 }
 
-// pass 1 records every name the body binds; pass 2 flags an assignment whose
-// root is not one of them.
-fn fo_sl_expr(e: &Expr, pass: i64, depth: i64) with Mut, Panic, Div {
+fn fo_sl_opt(opt: &Option<Box<Expr>>, depth: i64) with Mut, Panic, Div {
+    match *opt {
+        Some(x) => { fo_sl_expr(&(*x), depth + 1) }
+        None => {}
+    }
+}
+
+// Every sub-expression a value or a call can hide in. The index expressions
+// of an assignment target are walked as reads; its root is checked by the
+// caller.
+fn fo_sl_expr(e: &Expr, depth: i64) with Mut, Panic, Div {
     if depth > 96 {
         FO_SL_BAD = 1
         return
     }
-    match (*e).left {
-        Some(x) => { fo_sl_expr(&(*x), pass, depth + 1) }
-        None => {}
+    let k = (*e).kind
+    if k == ExprKind::ExprClosure || k == ExprKind::ExprHandle || k == ExprKind::ExprMethodCall {
+        FO_SL_BAD = 1
+        return
     }
-    match (*e).right {
-        Some(x) => { fo_sl_expr(&(*x), pass, depth + 1) }
-        None => {}
+    if k == ExprKind::ExprIdent {
+        if !fo_sl_is_local((*e).name) && !ast_is_global_const_name((*e).name) { FO_SL_BAD = 1 }
+        return
     }
-    match (*e).else_expr {
-        Some(x) => { fo_sl_expr(&(*x), pass, depth + 1) }
-        None => {}
+    if k == ExprKind::ExprCall {
+        match (*e).left {
+            Some(c) => {
+                if (*c).kind == ExprKind::ExprIdent {
+                    fo_sl_note_callee((*c).name)
+                } else {
+                    FO_SL_BAD = 1
+                }
+            }
+            None => { FO_SL_BAD = 1 }
+        }
+    } else {
+        fo_sl_opt(&(*e).left, depth)
     }
+    fo_sl_opt(&(*e).right, depth)
+    fo_sl_opt(&(*e).else_expr, depth)
     match (*e).block {
-        Some(b) => { fo_sl_stmts(&(*b).stmts, pass, depth + 1) }
+        Some(b) => { fo_sl_stmts(&(*b).stmts, depth + 1) }
         None => {}
     }
     match (*e).handler_block {
-        Some(b) => { fo_sl_stmts(&(*b).stmts, pass, depth + 1) }
+        Some(_b) => { FO_SL_BAD = 1 }
         None => {}
     }
     var args = &(*e).args
     while true {
         match *args {
             Some(a) => {
-                fo_sl_expr(&(*a).head, pass, depth + 1)
+                fo_sl_expr(&(*a).head, depth + 1)
                 args = &(*a).tail
+            }
+            None => break
+        }
+    }
+    var fl = &(*e).fields
+    while true {
+        match *fl {
+            Some(f) => {
+                fo_sl_expr(&(*f).head.value, depth + 1)
+                fl = &(*f).tail
             }
             None => break
         }
@@ -16911,7 +16965,10 @@ fn fo_sl_expr(e: &Expr, pass: i64, depth: i64) with Mut, Panic, Div {
     while true {
         match *arms {
             Some(al) => {
-                fo_sl_expr(&(*al).head.body, pass, depth + 1)
+                // A pattern may bind names; they are not recorded, so a read of
+                // one fails closed as a non-local read.
+                fo_sl_opt(&(*al).head.guard, depth)
+                fo_sl_expr(&(*al).head.body, depth + 1)
                 arms = &(*al).tail
             }
             None => break
@@ -16919,66 +16976,64 @@ fn fo_sl_expr(e: &Expr, pass: i64, depth: i64) with Mut, Panic, Div {
     }
 }
 
-fn fo_sl_stmts(opt: &Option<Box<StmtList>>, pass: i64, depth: i64) with Mut, Panic, Div {
+// One lexical scope: bindings made here are visible to later statements of
+// this block and its sub-blocks, and dropped when the block ends.
+fn fo_sl_stmts(opt: &Option<Box<StmtList>>, depth: i64) with Mut, Panic, Div {
     if depth > 96 {
         FO_SL_BAD = 1
         return
     }
+    let mark = FO_SL_NLOC
     var cur = opt
     while true {
         match *cur {
             Some(sl) => {
                 let k = (*sl).head.kind
-                if pass == 1 && (k == StmtKind::StmtLet || k == StmtKind::StmtVar) {
+                // The initialiser is read before the new name exists.
+                match (*sl).head.expr {
+                    Some(x) => { fo_sl_expr(&(*x), depth + 1) }
+                    None => {}
+                }
+                if k == StmtKind::StmtLet || k == StmtKind::StmtVar {
                     fo_sl_add_local((*sl).head.name)
                 }
-                if pass == 2 && k == StmtKind::StmtAssign {
+                if k == StmtKind::StmtAssign {
                     match (*sl).head.target {
                         Some(t) => {
                             let root = fo_sl_target_root(&(*t), 0)
                             if root.len <= 0 || !fo_sl_is_local(root) { FO_SL_BAD = 1 }
+                            // index expressions in the target are reads (and may call)
+                            if (*t).kind == ExprKind::ExprIndex || (*t).kind == ExprKind::ExprFieldAccess {
+                                fo_sl_opt(&(*t).left, depth)
+                                fo_sl_opt(&(*t).right, depth)
+                            }
                         }
                         None => { FO_SL_BAD = 1 }
                     }
-                }
-                match (*sl).head.expr {
-                    Some(x) => { fo_sl_expr(&(*x), pass, depth + 1) }
-                    None => {}
                 }
                 cur = &(*sl).tail
             }
             None => break
         }
     }
+    FO_SL_NLOC = mark
 }
 
-fn fo_inline_def_of(n: Name) -> (bool, FnDef) with Mut, Panic, Div, Alloc {
-    let id = ir_intern_name(n)
-    var cur = FO_INLINE_HEAD
-    while true {
-        match cur {
-            Some(node) => {
-                if (*node).id == id { return (true, (*node).def) }
-                cur = (*node).next
-            }
-            None => break
-        }
-    }
-    let empty = lower_ident_expr_for_name(ir_empty_name(), Span { file_id: 0, start: 0, end: 0 })
-    (false, FnDef {
+fn fo_sl_empty_def() -> FnDef {
+    FnDef {
         name: ir_empty_name(), params: None, return_type: None, effects: None,
-        body: Block { stmts: None, span: empty.span }, span: empty.span,
-        is_kernel: false, is_extern: false,
-    })
+        body: Block { stmts: None, span: Span { file_id: 0, start: 0, end: 0 } },
+        span: Span { file_id: 0, start: 0, end: 0 }, is_kernel: false, is_extern: false,
+    }
 }
 
-// Helpers whose check is in progress. A call back into one of them (recursion,
-// direct or mutual) adds no state of its own: whether the cycle is stateless is
-// decided by the bodies on it, which are all being checked.
-var FO_SL_STACK: [Name; 9] = [ir_empty_name(); 9]
-
-fn fo_known_helper_stateless_at(n: Name, depth: i64) -> bool with Mut, Panic, Div, Alloc {
-    if lower_name_is_pure_math_builtin(n) { return true }
+// `given`: fd0 is the definition to test (a bound function of a specialised
+// clone); otherwise n is looked up among the known inline helpers.
+// `fn_params_callable`: a call to one of the definition's own parameters (a
+// higher-order helper calling the function it was handed) is not a callee
+// here; the caller checks the functions bound to those parameters.
+fn fo_known_helper_stateless_at(n: Name, depth: i64, given: bool, fd0: FnDef, fn_params_callable: bool) -> bool with Mut, Panic, Div, Alloc {
+    if !given && lower_name_is_pure_math_builtin(n) { return true }
     if depth > 8 { return false }
     var k: i64 = 0
     while k < depth {
@@ -16987,40 +17042,71 @@ fn fo_known_helper_stateless_at(n: Name, depth: i64) -> bool with Mut, Panic, Di
     }
     if FO_SL_BUDGET <= 0 { return false }
     FO_SL_BUDGET = FO_SL_BUDGET - 1
-    let got = fo_inline_def_of(n)
-    if !got.0 { return false }
+    var fd = fd0
+    if !given {
+        let id = ir_intern_name(n)
+        var found = false
+        var cur = FO_INLINE_HEAD
+        while !found {
+            match cur {
+                Some(node) => {
+                    if (*node).id == id {
+                        fd = (*node).def
+                        found = true
+                    } else {
+                        cur = (*node).next
+                    }
+                }
+                None => break
+            }
+        }
+        if !found { return false }
+    }
     FO_SL_STACK[depth as usize] = n
-    let fd = got.1
     FO_SL_NLOC = 0
     FO_SL_BAD = 0
+    FO_SL_NCALLEES = 0
+    var pnames: [Name; 16] = [ir_empty_name(); 16]
+    var np: i64 = 0
     var pc = &fd.params
     while true {
         match *pc {
             Some(pl) => {
-                fo_sl_add_local((*pl).head.name)
+                if np < 16 {
+                    pnames[np as usize] = (*pl).head.name
+                    np = np + 1
+                }
+                // `self` and `&`/`&!`/raw-pointer parameters reach the caller's storage.
+                if !(*pl).head.is_self && !lower_type_expr_is_ref_like(&(*pl).head.ty) && (*pl).head.ty.kind != TypeExprKind::TypeRawPtr {
+                    fo_sl_add_local((*pl).head.name)
+                }
                 pc = &(*pl).tail
             }
             None => break
         }
     }
-    fo_sl_stmts(&fd.body.stmts, 1, 0)
-    fo_sl_stmts(&fd.body.stmts, 2, 0)
+    fo_sl_stmts(&fd.body.stmts, 0)
     if FO_SL_BAD != 0 { return false }
-    TG_NCALLEES = 0
-    TG_NMCALLEES = 0
-    TG_OPAQUE_CALL = 0
-    tg_stmts_callees(&fd.body.stmts, 0)
-    if TG_NMCALLEES > 0 || TG_OPAQUE_CALL != 0 || TG_NCALLEES > 32 { return false }
-    let nn = TG_NCALLEES
+    let nn = FO_SL_NCALLEES
     var callees: [Name; 33] = [ir_empty_name(); 33]
     var j: i64 = 0
     while j < nn {
-        callees[j as usize] = TG_CALLEES[j as usize]
+        callees[j as usize] = FO_SL_CALLEES[j as usize]
         j = j + 1
     }
     j = 0
     while j < nn {
-        if !fo_known_helper_stateless_at(callees[j as usize], depth + 1) { return false }
+        var skip = false
+        if fn_params_callable {
+            var q: i64 = 0
+            while q < np {
+                if ir_name_eq(pnames[q as usize], callees[j as usize]) { skip = true }
+                q = q + 1
+            }
+        }
+        if !skip {
+            if !fo_known_helper_stateless_at(callees[j as usize], depth + 1, false, fo_sl_empty_def(), false) { return false }
+        }
         j = j + 1
     }
     true
@@ -17028,7 +17114,15 @@ fn fo_known_helper_stateless_at(n: Name, depth: i64) -> bool with Mut, Panic, Di
 
 fn fo_known_helper_stateless(n: Name) -> bool with Mut, Panic, Div, Alloc {
     FO_SL_BUDGET = 64
-    fo_known_helper_stateless_at(n, 0)
+    fo_known_helper_stateless_at(n, 0, false, fo_sl_empty_def(), false)
+}
+
+// The same test for a definition in hand: the bound function of a specialised
+// clone, or a higher-order helper (whose own function parameters are checked
+// by the caller through what they are bound to).
+fn fo_def_stateless(fd: FnDef, fn_params_callable: bool) -> bool with Mut, Panic, Div, Alloc {
+    FO_SL_BUDGET = 64
+    fo_known_helper_stateless_at(fd.name, 0, true, fd, fn_params_callable)
 }
 
 fn lower_expr_relower_safe_ref(e: &Expr) -> bool with Mut, Panic, Div, Alloc {
@@ -17047,11 +17141,28 @@ fn lower_expr_relower_safe_ref(e: &Expr) -> bool with Mut, Panic, Div, Alloc {
                     let bent = tg_fn_ident_entry((*callee).name)
                     if bent >= 0 && TG_HASFN[bent as usize] != 1 && TG_RET[bent as usize] == 0 && !tg_may_draw(bent, 0) {
                         let bfd = tg_def_at(bent)
-                        if !tg_effects_have_io(&bfd.effects) { return lower_expr_list_relower_safe(&(*e).args) }
+                        // No IO and no draw is not enough: a bound function may write a global.
+                        if !tg_effects_have_io(&bfd.effects) && fo_def_stateless(bfd, false) { return lower_expr_list_relower_safe(&(*e).args) }
                     }
                     return false
                 }
                 if (*callee).kind == ExprKind::ExprIdent && tg_hof_call_relower_safe((*callee).name, e) {
+                    // The higher-order helper itself, and every function handed to it.
+                    let t = tg_find(ir_intern_name((*callee).name))
+                    if t < 0 || !fo_def_stateless(tg_def_at(t), true) { return false }
+                    var hac = &(*e).args
+                    while true {
+                        match *hac {
+                            Some(hal) => {
+                                if (*hal).head.kind == ExprKind::ExprIdent {
+                                    let ent = tg_fn_ident_entry((*hal).head.name)
+                                    if ent >= 0 && !fo_def_stateless(tg_def_at(ent), false) { return false }
+                                }
+                                hac = &(*hal).tail
+                            }
+                            None => break
+                        }
+                    }
                     return lower_expr_list_relower_safe(&(*e).args)
                 }
             }
