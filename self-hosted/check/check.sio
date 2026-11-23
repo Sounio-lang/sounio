@@ -9143,10 +9143,24 @@ fn checker_loop_break_join_inplace(c: *mut Checker, span: Span, v: Expr, vt: Typ
     }
 }
 
+// The enclosing loop's break state, saved on entry to a loop body. A named
+// struct, not an `(i64, bool, TypeEntry)` tuple: the lean_single seed that
+// builds Madaros sizes a by-value tuple holding a struct wrongly, refuses
+// `saved.2` ("tuple index out of bounds") and emits a wrong load for it.
+pub struct LoopValueSaved {
+    pub takes_value: i64,
+    pub break_seen: bool,
+    pub break_ty: TypeEntry,
+}
+
 // Enter a loop body: takes_value is 1 for `loop`, 0 for `while`/`for`. Returns
 // the enclosing loop's state, which checker_loop_value_leave_inplace restores.
-fn checker_loop_value_enter_inplace(c: *mut Checker, takes_value: i64) -> (i64, bool, TypeEntry) with Mut {
-    let saved = ((*c).loop_takes_value, (*c).loop_break_seen, (*c).loop_break_ty)
+fn checker_loop_value_enter_inplace(c: *mut Checker, takes_value: i64) -> LoopValueSaved with Mut {
+    let saved = LoopValueSaved {
+        takes_value: (*c).loop_takes_value,
+        break_seen: (*c).loop_break_seen,
+        break_ty: (*c).loop_break_ty,
+    }
     (*c).loop_takes_value = takes_value
     (*c).loop_break_seen = false
     (*c).loop_break_ty = ty_unit()
@@ -9155,12 +9169,12 @@ fn checker_loop_value_enter_inplace(c: *mut Checker, takes_value: i64) -> (i64, 
 
 // Leave a loop body: the type its breaks agreed on (`()` when none carried a
 // value), then the enclosing loop's state back.
-fn checker_loop_value_leave_inplace(c: *mut Checker, saved: (i64, bool, TypeEntry)) -> TypeEntry with Mut {
+fn checker_loop_value_leave_inplace(c: *mut Checker, saved: LoopValueSaved) -> TypeEntry with Mut {
     var result = ty_unit()
     if (*c).loop_break_seen { result = (*c).loop_break_ty }
-    (*c).loop_takes_value = saved.0
-    (*c).loop_break_seen = saved.1
-    (*c).loop_break_ty = saved.2
+    (*c).loop_takes_value = saved.takes_value
+    (*c).loop_break_seen = saved.break_seen
+    (*c).loop_break_ty = saved.break_ty
     result
 }
 
@@ -30383,6 +30397,13 @@ impl Checker {
             ExprKind::ExprForIn => c.check_for_in_expr(e)
             ExprKind::ExprDsepProof => (c, ty_dsep_proof())
             ExprKind::ExprError => (c, ty_error())
+            // perform/resume are checked by checker_check_perform_expr_inplace
+            // and checker_check_resume_expr_inplace (dispatch group B). This
+            // by-value spine has no port of them; without these arms the match
+            // was not exhaustive, the seed refused it ("match must be
+            // exhaustive") and a by-value perform/resume read an unset result.
+            ExprKind::ExprPerform => (c, ty_unknown())
+            ExprKind::ExprResume => (c, ty_unknown())
         }
         (result.0.exit_expr_depth(), result.1)
     }
@@ -34697,14 +34718,16 @@ impl Checker {
         type_env_bind_mut(&!c.env, e.name, ty_i64(), false)
         c.loop_depth = c.loop_depth + 1
         c.borrows = c.borrows.release_exclusive_borrows()
-        let lv_saved = (c.loop_takes_value, c.loop_break_seen, c.loop_break_ty)
+        let lv_saved_takes = c.loop_takes_value
+        let lv_saved_seen = c.loop_break_seen
+        let lv_saved_ty = c.loop_break_ty
         c.loop_takes_value = 0
         c.loop_break_seen = false
         let body_pair = c.check_opt_block(e.block)
         c = body_pair.0
-        c.loop_takes_value = lv_saved.0
-        c.loop_break_seen = lv_saved.1
-        c.loop_break_ty = lv_saved.2
+        c.loop_takes_value = lv_saved_takes
+        c.loop_break_seen = lv_saved_seen
+        c.loop_break_ty = lv_saved_ty
         c.loop_depth = c.loop_depth - 1
         c = c.pop_const_scope()
         c.borrows = c.borrows.pop_scope()
@@ -34731,14 +34754,16 @@ impl Checker {
         // Without this, the second iteration would fail because the first
         // iteration's exclusive borrows are still active.
         c.borrows = c.borrows.release_exclusive_borrows()
-        let lv_saved = (c.loop_takes_value, c.loop_break_seen, c.loop_break_ty)
+        let lv_saved_takes = c.loop_takes_value
+        let lv_saved_seen = c.loop_break_seen
+        let lv_saved_ty = c.loop_break_ty
         c.loop_takes_value = 0
         c.loop_break_seen = false
         let body_pair = c.check_opt_block(e.block)
         c = body_pair.0
-        c.loop_takes_value = lv_saved.0
-        c.loop_break_seen = lv_saved.1
-        c.loop_break_ty = lv_saved.2
+        c.loop_takes_value = lv_saved_takes
+        c.loop_break_seen = lv_saved_seen
+        c.loop_break_ty = lv_saved_ty
         c.loop_depth = c.loop_depth - 1
         (c, ty_unit())
     }
@@ -34754,16 +34779,18 @@ impl Checker {
         c.loop_depth = c.loop_depth + 1
         // Release exclusive borrows before checking loop body (same as while loops)
         c.borrows = c.borrows.release_exclusive_borrows()
-        let lv_saved = (c.loop_takes_value, c.loop_break_seen, c.loop_break_ty)
+        let lv_saved_takes = c.loop_takes_value
+        let lv_saved_seen = c.loop_break_seen
+        let lv_saved_ty = c.loop_break_ty
         c.loop_takes_value = 1
         c.loop_break_seen = false
         let pair = c.check_opt_block(e.block)
         c = pair.0
         var loop_ty = ty_unit()
         if c.loop_break_seen { loop_ty = c.loop_break_ty }
-        c.loop_takes_value = lv_saved.0
-        c.loop_break_seen = lv_saved.1
-        c.loop_break_ty = lv_saved.2
+        c.loop_takes_value = lv_saved_takes
+        c.loop_break_seen = lv_saved_seen
+        c.loop_break_ty = lv_saved_ty
         c.loop_depth = c.loop_depth - 1
         (c, loop_ty)
     }
