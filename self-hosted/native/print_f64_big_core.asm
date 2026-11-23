@@ -3,7 +3,9 @@
 # SIO-396 core: exact decimal expansion of a finite f64 with |x| >= 2^63.
 # in : rax = IEEE bits of |x| (sign already cleared, >= 0x43E0000000000000, finite)
 # out: rsi = pointer to first digit, rdx = length ("<digits>.000000")
-# clobbers rax rbx rcx rdx rsi rdi r8-r15; lowers rsp by 1536 (caller restores via rbp).
+# clobbers rax rbx rcx rdx rsi rdi r8-r13; lowers rsp by 1536 (caller restores via rbp).
+# rbx, r12 and r13 are callee-saved: emit_builtin_print_f64 saves them in its frame
+# and its epilogue restores them, so this core may use them freely.
         sub     rsp, 1536
         mov     rcx, rax
         shr     rcx, 52                 # biased exponent

@@ -9246,9 +9246,25 @@ pub(crate) fn emit_builtin_cos(nc: NativeCompiler) -> NativeCompiler with Mut, P
     emit_builtin_trig(nc, true)
 }
 
-// Epilogue shared by print_f64 special-value exits (#2389).
+// print_f64 writes rbx (the RuntimeContext helpers and the digit loops) and,
+// on the |x| >= 2^63 path, r12 and r13. All three are callee-saved under SysV,
+// so they are kept at [rbp-72], [rbp-80], [rbp-88] of the 96-byte frame and
+// put back by the epilogue on every exit. Checked by
+// scripts/ci/print_f64_callee_saved_gate.sh.
+fn emit_print_f64_save_callee_saved(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x48); b = emit_byte(b, 0x89); b = emit_byte(b, 0x5D); b = emit_byte(b, 0xB8)  // mov [rbp-72], rbx
+    b = emit_byte(b, 0x4C); b = emit_byte(b, 0x89); b = emit_byte(b, 0x65); b = emit_byte(b, 0xB0)  // mov [rbp-80], r12
+    b = emit_byte(b, 0x4C); b = emit_byte(b, 0x89); b = emit_byte(b, 0x6D); b = emit_byte(b, 0xA8)  // mov [rbp-88], r13
+    b
+}
+
+// Epilogue shared by every print_f64 exit (#2389, SIO-396).
 fn emit_print_f64_epilogue(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
     var b = buf
+    b = emit_byte(b, 0x48); b = emit_byte(b, 0x8B); b = emit_byte(b, 0x5D); b = emit_byte(b, 0xB8)  // mov rbx, [rbp-72]
+    b = emit_byte(b, 0x4C); b = emit_byte(b, 0x8B); b = emit_byte(b, 0x65); b = emit_byte(b, 0xB0)  // mov r12, [rbp-80]
+    b = emit_byte(b, 0x4C); b = emit_byte(b, 0x8B); b = emit_byte(b, 0x6D); b = emit_byte(b, 0xA8)  // mov r13, [rbp-88]
     b = emit_mov_rsp_rbp(b)
     b = emit_pop_rbp(b)
     b = emit_ret(b)
@@ -9629,7 +9645,8 @@ pub(crate) fn emit_builtin_print_f64(nc: NativeCompiler) -> NativeCompiler with 
 
     c.code = emit_push_rbp(c.code)
     c.code = emit_mov_rbp_rsp(c.code)
-    c.code = emit_sub_rsp_imm32(c.code, 64)
+    c.code = emit_sub_rsp_imm32(c.code, 96)
+    c.code = emit_print_f64_save_callee_saved(c.code)
 
     // rdi = f64 bit pattern
     c.code = emit_mov_reg_reg(c.code, 0, 7)           // mov rax, rdi
@@ -9897,10 +9914,8 @@ pub(crate) fn emit_builtin_print_f64(nc: NativeCompiler) -> NativeCompiler with 
     c = emit_load_runtime_context_field_rdi(c, runtime_context_field_stdout_fd())
     c = emit_write_syscall_for_target(c, c.target_os_id)
 
-    // Epilogue
-    c.code = emit_mov_rsp_rbp(c.code)
-    c.code = emit_pop_rbp(c.code)
-    c.code = emit_ret(c.code)
+    // Epilogue (restores the callee-saved registers)
+    c.code = emit_print_f64_epilogue(c.code)
     c
 }
 
