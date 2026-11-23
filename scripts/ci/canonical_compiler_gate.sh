@@ -71,7 +71,8 @@ echo "[canonical-compiler] PASS: $SOUC IS the canonical self-reproducing fixed p
 
 # Provenance leg: when a SeedReceipt is committed beside the ELF, prove it
 # names *this* source and *this* seed — not merely that the ELF self-reproduces.
-# Missing receipt → WARN+PASS (day-1 policy). See seed_receipt_provenance_gate.sh.
+# Missing receipt → FAIL (SOUNIO_SEED_RECEIPT_REQUIRED=1 by default since
+# 2026-11-23). See seed_receipt_provenance_gate.sh.
 if [[ -x "$ROOT_DIR/scripts/ci/seed_receipt_provenance_gate.sh" || -f "$ROOT_DIR/scripts/ci/seed_receipt_provenance_gate.sh" ]]; then
   # shellcheck disable=SC2093
   bash "$ROOT_DIR/scripts/ci/seed_receipt_provenance_gate.sh"
