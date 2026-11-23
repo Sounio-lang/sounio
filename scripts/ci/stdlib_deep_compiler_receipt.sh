@@ -78,9 +78,19 @@ write_toolchain() {
 # run_sio_test_suite_v2.sh) is an input like any other: sha256sum hashes its
 # target's bytes, and SYMLINKS.txt binds the link text itself, so pointing it
 # at a different file with identical bytes is still refused.
+# Read the link text raw: command substitution strips trailing newlines, which
+# would let a retarget to "name\n" hide behind an unchanged SYMLINKS.txt.
+raw_link() {
+ local target
+ target=$(readlink -- "$1"; printf x) || return 1
+ target=${target%x}
+ target=${target%$'\n'}
+ case "$target" in ''|*$'\n'*|*$'\r'*) return 1 ;; esac
+ printf '%s' "$target"
+}
 link_ok() {
  local repo=$1 fixture=$2 target root resolved
- target=$(readlink -- "$repo/$fixture") || return 1
+ target=$(raw_link "$repo/$fixture") || return 1
  [[ "$target" != /* ]] || return 1
  root=$(realpath -e -- "$repo") || return 1
  resolved=$(realpath -e -- "$repo/$fixture") || return 1
@@ -91,13 +101,13 @@ links() {
  : > "$output"
  while IFS= read -r fixture; do
   if [[ -L "$repo/$fixture" ]]; then
-   printf '%s -> %s\n' "$fixture" "$(readlink -- "$repo/$fixture")" >> "$output"
+   printf '%s -> %s\n' "$fixture" "$(raw_link "$repo/$fixture")" >> "$output"
   fi
  done < "$list"
 }
 
 paths() {
- local repo=$1 output=$2 fixture
+ local repo=$1 output=$2 fixture root
  git -C "$repo" ls-files -z -co --exclude-standard -- bin scripts self-hosted stdlib > "$work/paths.nul" || fail 'cannot enumerate source closure'
  : > "$output"
  while IFS= read -r -d '' fixture; do
@@ -111,12 +121,28 @@ paths() {
  done < "$work/paths.nul"
  sort -o "$output" "$output"
  [[ -s "$output" ]] || fail 'empty source closure'
+ # Every input, not only a final-component symlink, must resolve inside the
+ # checkout: stdlib/pkg/mod.sio under a directory symlink to elsewhere escapes.
+ root=$(realpath -e -- "$repo") || fail 'cannot resolve checkout root'
+ (cd "$repo" && tr '\n' '\0' < "$output" | xargs -0 realpath -e -z --) > "$work/resolved.nul" \
+  || fail 'cannot resolve source inputs'
+ awk -v r="$root/" 'BEGIN { RS = "\0"; bad = 0 } index($0, r) != 1 { bad = 1 } END { exit bad }' "$work/resolved.nul" \
+  || fail 'source input resolves outside the checkout'
 }
 prepare() {
  local repo=$1 compiler=$2 output=$3 expected=$4 fixture bootstrap bootstrap_sha inputs_sha toolchain_sha links_sha build_key
  check_revision "$repo" "$expected"
  [[ -f "$compiler" && -x "$compiler" ]] || fail 'fresh compiler is missing or not executable'
  [[ "$output" == /* ]] || fail 'artifact directory must be absolute'
+ # An artifact directory inside a scanned root would enumerate its own receipt
+ # files as inputs; resolve symlinks first so an alias cannot bypass this.
+ local root resolved_output scanned
+ root=$(realpath -e -- "$repo") || fail 'cannot resolve checkout root'
+ resolved_output=$(realpath -m -- "$output") || fail 'cannot resolve artifact directory'
+ for scanned in bin scripts self-hosted stdlib; do
+  [[ "$resolved_output" != "$root/$scanned" && "$resolved_output" != "$root/$scanned"/* ]] \
+   || fail "artifact directory must not be inside the scanned source root $scanned"
+ done
  mkdir -p "$output"
  [[ -z "$(find "$output" -mindepth 1 -maxdepth 1 -print -quit)" ]] || fail 'artifact directory is not empty'
  bootstrap=$(resolve_bootstrap "$repo")
@@ -160,7 +186,10 @@ verify() {
  [[ "$(wc -l < "$artifact/COMPILER.sha256" | tr -d ' ')" == 1 ]] || fail 'compiler manifest must contain one entry'
  grep -Eq '^[0-9a-f]{64}  madaros\.elf$' "$artifact/COMPILER.sha256" || fail 'invalid compiler manifest'
  (cd "$artifact" && sha256sum -c COMPILER.sha256) || fail 'compiler hash mismatch'
- (cd "$artifact" && sha256sum -c TOOLCHAIN.sha256) || fail 'toolchain receipt hash mismatch'
+ # Regenerate and compare bytes: a manifest checksumming any other unmodified
+ # artifact file would pass sha256sum -c.
+ (cd "$artifact" && sha256sum TOOLCHAIN.txt) | cmp -s - "$artifact/TOOLCHAIN.sha256" \
+  || fail 'toolchain manifest does not checksum TOOLCHAIN.txt'
  grep -Fxq "host_os=$(uname -s)" "$artifact/TOOLCHAIN.txt" || fail 'toolchain operating system differs from consumer'
  grep -Fxq "host_arch=$(uname -m)" "$artifact/TOOLCHAIN.txt" || fail 'toolchain architecture differs from consumer'
  [[ "$(wc -l < "$artifact/BOOTSTRAP.sha256" | tr -d ' ')" == 1 ]] || fail 'bootstrap manifest must contain one entry'
@@ -213,6 +242,13 @@ PY
  # input hash unchanged, so only the SYMLINKS.txt binding can refuse it.
  printf 'stdlib\n' > "$repo/stdlib/twin.sio"
  ln -s mod.sio "$repo/stdlib/alias.sio"
+ # top.sio links to a checkout file outside the scanned roots, so a twin whose
+ # name differs only by a trailing newline is not itself enumerated.
+ printf 'top\n' > "$repo/top.sio"
+ ln -s ../top.sio "$repo/stdlib/top.sio"
+ mkdir -p "$repo/stdlib/pkg" "$work/outside-pkg"
+ printf 'pkg\n' > "$repo/stdlib/pkg/mod.sio"
+ printf 'pkg\n' > "$work/outside-pkg/mod.sio"
  printf 'stdlib\n' > "$work/outside.sio"
  git -c init.defaultBranch=main init -q "$repo"
  git -C "$repo" add bin scripts self-hosted stdlib
@@ -259,7 +295,14 @@ PY
  ln -sfn mod.sio "$repo/stdlib/alias.sio"
  [[ "$(cat "$work/artifact-link/BUILD_KEY")" != "$base_key" ]] || fail 'an equal-byte symlink retarget left BUILD_KEY unchanged'
  printf 'RECEIPT_BUILD_KEY_ENV_AND_SYMLINK_PASS\n'
- for control in source-git-sha compiler-bit source-file source-set target toolchain missing-manifest bootstrap-manifest symlink-retarget symlink-escape; do
+ ln -s "$repo/bin" "$work/bin-alias"
+ for value in "$repo/bin/receipt" "$repo/stdlib/receipt" "$work/bin-alias/receipt"; do
+  rc=0
+  "$script" prepare "$repo" "$compiler" "$value" "$sha" > "$work/inside-root.log" 2>&1 || rc=$?
+  [[ "$rc" == 65 && ! -e "$value" ]] || fail "artifact directory inside a scanned root was accepted: $value ($rc)"
+ done
+ printf 'RECEIPT_ARTIFACT_INSIDE_SOURCE_ROOT_REJECTED\n'
+ for control in source-git-sha compiler-bit source-file source-set target toolchain missing-manifest bootstrap-manifest symlink-retarget symlink-escape toolchain-manifest dir-escape link-newline; do
   cp -a "$artifact" "$work/$control"
   case "$control" in
    source-git-sha) printf '%040d\n' 0 > "$work/$control/SOURCE_GIT_SHA" ;;
@@ -278,6 +321,17 @@ PY
      "$(sha256sum "$work/$control/SYMLINKS.txt" | awk '{print $1}')" > "$work/$control/BUILD_KEY" ;;
    symlink-retarget) ln -sfn twin.sio "$repo/stdlib/alias.sio" ;;
    symlink-escape) ln -sfn ../../outside.sio "$repo/stdlib/alias.sio" ;;
+   # A checksum of another unmodified file passes sha256sum -c; only the
+   # regenerate-and-compare binding refuses it (BUILD_KEY is untouched).
+   toolchain-manifest) (cd "$work/$control" && sha256sum TARGET) > "$work/$control/TOOLCHAIN.sha256" ;;
+   # Equal bytes behind a locally excluded directory symlink to outside.
+   dir-escape)
+    mv "$repo/stdlib/pkg" "$work/pkg-saved"
+    ln -s "$work/outside-pkg" "$repo/stdlib/pkg"
+    printf 'stdlib/pkg\n' >> "$repo/.git/info/exclude" ;;
+   link-newline)
+    printf 'top\n' > "$repo/top.sio"$'\n'
+    ln -sfn ../top.sio$'\n' "$repo/stdlib/top.sio" ;;
   esac
   rc=0
   "$script" verify "$repo" "$work/$control" "$sha" > "$work/$control.log" 2>&1 || rc=$?
@@ -286,6 +340,11 @@ PY
   if [[ "$control" == source-file ]]; then cp "$work/original-source" "$repo/stdlib/mod.sio"; fi
   if [[ "$control" == source-set ]]; then rm "$repo/stdlib/new.sio"; fi
   if [[ "$control" == symlink-* ]]; then ln -sfn mod.sio "$repo/stdlib/alias.sio"; fi
+  if [[ "$control" == dir-escape ]]; then
+   rm "$repo/stdlib/pkg"; mv "$work/pkg-saved" "$repo/stdlib/pkg"
+   sed -i '\|^stdlib/pkg$|d' "$repo/.git/info/exclude"
+  fi
+  if [[ "$control" == link-newline ]]; then rm "$repo/top.sio"$'\n'; ln -sfn ../top.sio "$repo/stdlib/top.sio"; fi
   printf 'RECEIPT_TAMPER_REJECTED %s\n' "$control"
  done
  "$script" verify "$repo" "$artifact" "$sha" > "$work/final-verify.log"
