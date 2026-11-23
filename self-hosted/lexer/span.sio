@@ -67,6 +67,31 @@ pub var SRCMAP_LS_OFF: [i64; 8192] = [0; 8192]
 pub var SRCMAP_LS_CNT: [i64; 8192] = [0; 8192]
 pub var SRCMAP_LS: [i64; 8388608] = [0; 8388608]
 pub var SRCMAP_LS_USED: i64 = 0
+// Bytes of a file's path that the embedded form replaces with "stdlib/":
+// the SOUNIO_STDLIB_PATH root and its slash, or 0 when the path is not under
+// that root. Set once per file in srcmap_begin_file.
+pub var SRCMAP_STDLIB_SKIP: [i64; 8192] = [0; 8192]
+
+// Length of the SOUNIO_STDLIB_PATH root that prefixes `path`, plus the
+// slashes after it; 0 when the variable is unset or `path` is not under it.
+fn srcmap_stdlib_prefix_len(path: string) -> i64 with Panic {
+    let root = read_env("SOUNIO_STDLIB_PATH")
+    var rl = str_len(root)
+    while rl > 1 && str_char_at(root, rl - 1) == 47 { rl = rl - 1 }
+    if rl == 0 || str_len(path) <= rl + 1 { return 0 }
+    var i: i64 = 0
+    while i < rl {
+        if str_char_at(path, i) != str_char_at(root, i) { return 0 }
+        i = i + 1
+    }
+    if str_char_at(path, rl) != 47 { return 0 }
+    // A root given with a trailing slash yields "<root>//<rest>": skip every
+    // slash so both spellings embed the same path.
+    var k = rl
+    while k < str_len(path) && str_char_at(path, k) == 47 { k = k + 1 }
+    if k >= str_len(path) { return 0 }
+    k
+}
 
 // Start a file. Returns its id (>= 1), or 0 when a table is full.
 pub fn srcmap_begin_file(path: string) -> i64 with Mut, Panic {
@@ -78,6 +103,7 @@ pub fn srcmap_begin_file(path: string) -> i64 with Mut, Panic {
     let id = SRCMAP_N + 1
     SRCMAP_PATH_OFF[id as usize] = SRCMAP_PATH_USED
     SRCMAP_PATH_LEN[id as usize] = n
+    SRCMAP_STDLIB_SKIP[id as usize] = srcmap_stdlib_prefix_len(path)
     var i: i64 = 0
     while i < n {
         SRCMAP_PATH_BYTES[(SRCMAP_PATH_USED + i) as usize] = str_char_at(path, i) as i8
@@ -119,6 +145,24 @@ pub fn srcmap_path_len(id: i64) -> i64 {
 
 pub fn srcmap_path_byte(id: i64, i: i64) -> i64 with Panic {
     SRCMAP_PATH_BYTES[(SRCMAP_PATH_OFF[id as usize] + i) as usize] as i64
+}
+
+// The path as written into a compiled binary. A file under the
+// SOUNIO_STDLIB_PATH root reads "stdlib/<rest>", so the binary does not
+// depend on where the stdlib is installed; any other path is unchanged.
+pub fn srcmap_embed_len(id: i64) -> i64 {
+    let n = srcmap_path_len(id)
+    if n <= 0 { return 0 }
+    let skip = SRCMAP_STDLIB_SKIP[id as usize]
+    if skip > 0 { return 7 + n - skip }
+    n
+}
+
+pub fn srcmap_embed_byte(id: i64, i: i64) -> i64 with Panic {
+    let skip = SRCMAP_STDLIB_SKIP[id as usize]
+    if skip <= 0 { return srcmap_path_byte(id, i) }
+    if i < 7 { return str_char_at("stdlib/", i) as i64 }
+    srcmap_path_byte(id, skip + i - 7)
 }
 
 // 1-based line of byte offset `off` in file `id`, or 0 when unknown.
