@@ -1,0 +1,102 @@
+name: Pireus Heartbeat
+
+on:
+  schedule:
+    # Run hourly at minute 17 (stagger from other workflows)
+    - cron: '17 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pireus-heartbeat
+  cancel-in-progress: false
+
+jobs:
+  pireus-heartbeat-monitor:
+    name: Pireus Heartbeat (GB10/sm121 Spark Pair)
+    runs-on: [self-hosted, linux, ARM64, spark, pireus-heartbeat]
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Collect Pireus heartbeat state
+        id: collect-heartbeat
+        env:
+          PIREUS_HEARTBEAT_RECEIPT_DIR: ${{ runner.temp }}/pireus-heartbeat
+          # Default: cluster-side Pireus worktree validation directory
+          # Additional WorkDirs are auto-discovered from sacct
+          PIREUS_EVIDENCE_DIRS: /workspace/.wt/pireus-integration-20260906/tools/pireus/continuity/validation
+        run: bash scripts/ci/pireus_heartbeat.sh
+        continue-on-error: true
+
+      - name: Upload heartbeat receipt
+        id: upload-receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pireus-heartbeat-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pireus-heartbeat
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Publish heartbeat summary
+        if: always()
+        shell: bash
+        run: |
+          receipt_dir="${RUNNER_TEMP}/pireus-heartbeat"
+          if [[ -f "$receipt_dir/receipt.md" ]]; then
+            cat "$receipt_dir/receipt.md" >> "$GITHUB_STEP_SUMMARY"
+          elif [[ -f "$receipt_dir/receipt.json" ]]; then
+            printf '# Pireus Heartbeat Report\n\nThe heartbeat collection completed but no markdown summary was generated.\n\n' >> "$GITHUB_STEP_SUMMARY"
+            printf '```json\n' >> "$GITHUB_STEP_SUMMARY"
+            cat "$receipt_dir/receipt.json" >> "$GITHUB_STEP_SUMMARY"
+            printf '\n```\n' >> "$GITHUB_STEP_SUMMARY"
+          else
+            printf '# Pireus Heartbeat Report\n\nNo receipt was created. See the job log for details.\n' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Report heartbeat status
+        if: always()
+        shell: bash
+        run: |
+          receipt_json="${RUNNER_TEMP}/pireus-heartbeat/receipt.json"
+          if [[ -f "$receipt_json" ]]; then
+            verdict=$(jq -r '.verdict // "UNKNOWN"' "$receipt_json")
+            echo "Pireus heartbeat verdict: $verdict"
+            
+            case "$verdict" in
+              RUNNING)
+                echo "✓ Pireus is actively running on the cluster"
+                exit 0
+                ;;
+              IDLE)
+                echo "✓ Pireus evidence present, no active jobs (healthy idle state)"
+                exit 0
+                ;;
+              NO_SLURM)
+                echo "⚠ Slurm unavailable on this runner"
+                exit 1
+                ;;
+              FAILED_JOBS)
+                echo "⚠ Pireus jobs failed in the last 26 hours"
+                exit 0
+                ;;
+              NO_EVIDENCE)
+                echo "⚠ No Pireus evidence found and no active jobs"
+                exit 0
+                ;;
+              *)
+                echo "? Unknown verdict: $verdict"
+                exit 0
+                ;;
+            esac
+          else
+            echo "✗ No receipt JSON found"
+            exit 1
+          fi

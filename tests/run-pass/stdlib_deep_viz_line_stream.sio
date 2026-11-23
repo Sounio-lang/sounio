@@ -1,0 +1,97 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: STDLIB_DEEP_VIZ_LINE_STREAM_PASS
+use collections::numeric_buffer::{numeric_buffer_new,numeric_buffer_set,numeric_buffer_close}
+use collections::integer_buffer::{integer_buffer_new,integer_buffer_at,integer_buffer_set,integer_buffer_close}
+use viz::dynamic_line_reduce::{dynamic_line_reduce,line_reducer_init,line_reduction_slot,line_reducer_feed_into,line_reducer_finish_into,line_reducer_selected,line_reducer_consumed}
+fn main()->i32 with IO,Alloc,Mut,Div,Panic {
+ let xs:[f64;17]=[-2.0,-1.0,0.0,0.0,0.25,0.5,0.75,1.0,1.25,1.5,2.0,2.5,3.0,4.0,5.0,6.0,7.0]
+ let ys:[f64;17]=[0.0,1.0,0.0,10.0,-10.0,2.0,2.0,3.0,0.0,50.0,-50.0,0.0,1.0,0.0,1.0,2.0,3.0]
+ let flags:[i64;17]=[1,1,1,1,1,0,0,1,1,1,1,1,0,1,1,1,1]
+ var x=numeric_buffer_new(17,136);var y=numeric_buffer_new(17,136)
+ var a=integer_buffer_new(17,136);var expected=integer_buffer_new(17,136)
+ var i:i64=0
+ while i<17 {
+  let vx=if flags[i as usize]==0 {0.0/0.0}else{xs[i as usize]}
+  let ignored0=numeric_buffer_set(&!x,i,vx);let ignored1=numeric_buffer_set(&!y,i,ys[i as usize])
+  let ignored2=integer_buffer_set(&!a,i,flags[i as usize]);i=i+1
+ }
+ let batch=dynamic_line_reduce(&x,&y,&a,0.0,4.0,4,&!expected)
+ assert(batch.status==0)
+ let selected:i64=batch.written
+ print("STREAM_BATCH ");println(selected)
+ i=0
+ while i<selected {let value:i64=integer_buffer_at(&expected,i);print("STREAM_INDEX ");println(value);i=i+1}
+ var cut:i64=0
+ while cut<=17 {
+  var state=line_reducer_init(0.0,4.0,4);var result=line_reduction_slot()
+  var chunk=integer_buffer_new(17,136)
+  var total:i64=0;var part:i64=0
+  while part<2 {
+   let base=if part==0 {0}else{cut};let n=if part==0 {cut}else{17-cut}
+   var cx=numeric_buffer_new(n,n*8);var cy=numeric_buffer_new(n,n*8);var ca=integer_buffer_new(n,n*8)
+   i=0
+   while i<n {
+    let j=base+i
+    let vx=if flags[j as usize]==0 {0.0/0.0}else{xs[j as usize]}
+    let ignored0=numeric_buffer_set(&!cx,i,vx);let ignored1=numeric_buffer_set(&!cy,i,ys[j as usize])
+    let ignored2=integer_buffer_set(&!ca,i,flags[j as usize]);i=i+1
+   }
+   let code=line_reducer_feed_into(&!state,&cx,&cy,&ca,&!chunk,&!result)
+   assert(code==0 && result.status==0)
+   let written:i64=result.written
+   i=0
+   while i<written {
+    let actual=integer_buffer_at(&chunk,i)
+    assert(actual==integer_buffer_at(&expected,total))
+    print("STREAM_CUT_INDEX ");print(cut);print(" ");println(actual)
+    total=total+1;i=i+1
+   }
+   numeric_buffer_close(cx);numeric_buffer_close(cy);integer_buffer_close(ca)
+   part=part+1
+  }
+  let done=line_reducer_finish_into(&!state,&!chunk,&!result)
+  assert(done==0)
+  i=0
+  while i<result.written {
+   let actual=integer_buffer_at(&chunk,i)
+   assert(actual==integer_buffer_at(&expected,total))
+   print("STREAM_CUT_INDEX ");print(cut);print(" ");println(actual)
+   total=total+1;i=i+1
+  }
+  assert(total==selected && line_reducer_selected(&state)==selected && line_reducer_consumed(&state)==17)
+  let again=line_reducer_finish_into(&!state,&!chunk,&!result)
+  assert(again==0 && result.required==0 && result.written==0)
+  let after=line_reducer_feed_into(&!state,&x,&y,&a,&!chunk,&!result)
+  assert(after==7 && result.written==0 && line_reducer_consumed(&state)==17)
+  print("STREAM_CUT_DONE ");println(cut)
+  integer_buffer_close(chunk);cut=cut+1
+ }
+ // Capacity failures preserve stream and all destination elements; retry works.
+ var state=line_reducer_init(0.0,4.0,4);var result=line_reduction_slot()
+ var cx=numeric_buffer_new(3,24);var cy=numeric_buffer_new(3,24);var ca=integer_buffer_new(3,24)
+ i=0
+ while i<3 {
+  let ignored0=numeric_buffer_set(&!cx,i,xs[i as usize]);let ignored1=numeric_buffer_set(&!cy,i,ys[i as usize])
+  let ignored2=integer_buffer_set(&!ca,i,1);i=i+1
+ }
+ var tiny=integer_buffer_new(1,8);let mark=integer_buffer_set(&!tiny,0,991)
+ let refused=line_reducer_feed_into(&!state,&cx,&cy,&ca,&!tiny,&!result)
+ assert(refused==6 && result.required==2 && result.written==0)
+ assert(line_reducer_consumed(&state)==0 && line_reducer_selected(&state)==0 && integer_buffer_at(&tiny,0)==991)
+ var enough=integer_buffer_new(4,32)
+ let retry=line_reducer_feed_into(&!state,&cx,&cy,&ca,&!enough,&!result)
+ assert(retry==0 && result.written==2 && integer_buffer_at(&enough,0)==0 && integer_buffer_at(&enough,1)==1)
+ // Bad final active sample must not consume a valid earlier row in the chunk.
+ let v0=numeric_buffer_set(&!cx,0,1.0);let v1=numeric_buffer_set(&!cx,1,2.0);let v2=numeric_buffer_set(&!cx,2,-1.0)
+ let preserve0=integer_buffer_set(&!enough,0,771);let preserve1=integer_buffer_set(&!enough,1,772)
+ let bad=line_reducer_feed_into(&!state,&cx,&cy,&ca,&!enough,&!result)
+ assert(bad==4 && result.written==0 && line_reducer_consumed(&state)==3 && line_reducer_selected(&state)==2)
+ assert(integer_buffer_at(&enough,0)==771 && integer_buffer_at(&enough,1)==772)
+ // Finish drains pending bucket to a fresh output prefix; no previous-prefix dependency.
+ let finish=line_reducer_finish_into(&!state,&!tiny,&!result)
+ assert(finish==0 && result.written==1 && integer_buffer_at(&tiny,0)==2 && line_reducer_selected(&state)==3)
+ numeric_buffer_close(cx);numeric_buffer_close(cy);integer_buffer_close(ca);integer_buffer_close(tiny);integer_buffer_close(enough)
+ numeric_buffer_close(x);numeric_buffer_close(y);integer_buffer_close(a);integer_buffer_close(expected)
+ println("STDLIB_DEEP_VIZ_LINE_STREAM_PASS");0
+}
