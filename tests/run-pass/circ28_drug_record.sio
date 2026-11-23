@@ -1,0 +1,335 @@
+//@ run-pass
+//@ timeout: 120
+//@ expect-stdout-contains: CIRC28_DRUG_RECORD_PASS
+//
+// The circ28 drug record (stdlib/darwin_pbpk/circ28_drug.sio) with a MADE-UP drug
+// (not midazolam, not any real compound): a neutral, logP 2, fu 0.2, bp 1.
+// Every identity below follows from the equations and was fixed before the run.
+//
+//  a  round trip. Values written with circ28_drug_set read back equal (a value
+//     that is the result of an expression, not a literal, included: the Madaros
+//     pitfall P3 drops the variance of such a Knowledge literal unless the value
+//     goes through an array element); variances read back are u^2; the plain
+//     arrays from circ28_drug_theta / circ28_drug_var carry the same numbers.
+//  b  oral input. circ28_oral_mass summed over a two-phase grid is fa * Dose to
+//     1e-12 (the residual is exp(-ka (T - tlag)) < 1e-100), is exactly 0 before
+//     the lag, and the kernel run delivers the same input with mass balance
+//     input = eliminated + remaining to 1e-10.
+//  c  AUC after an intravenous dose = Dose / CL. (c1) clearance by cl_plasma only:
+//     AUC_plasma = Dose / cl_plasma, from the runner on the drug's own params and
+//     from the unit-typed cd_auc_iv(dose: mg, cl: L_per_h). (c2) hepatic + gut-wall
+//     intrinsic clearance: AUC_plasma = Dose / (bp CL_blood), CL_blood from
+//     circ28_splanchnic_clearance.
+//  d  first-order uncertainty. For a drug cleared only by cl_plasma the AUC is
+//     Dose / CL, so dAUC/dCL = -Dose/CL^2 and u(AUC)/AUC = u(CL)/CL = 0.4/5 =
+//     0.08 exactly; the finite-difference u(AUC)/AUC must equal it to 1e-6, and
+//     the contribution of every other parameter (logP, fu, bp, Kp scalar, ka,
+//     all with a non-zero uncertainty) must be below 1e-6 of the variance
+//     (the AUC of such a drug does not depend on them).
+//  e  status codes and provenance strings survive the record.
+//  g  CD_PSGUT (slot 17, the gut permeability clearance). 18 slots (CD_N). Status 0:
+//     the gut keeps ps[8] = 20 Q_gut (tested in a). Set to 7 L/h (u 0.9, status
+//     derived): value, variance 0.81, status and provenance read back; theta and var
+//     arrays carry it; params.ps[8] = 7 exactly; every OTHER ps (liver ps[1] = 20 Q_h,
+//     slot 7 = 20 Q_7) is unchanged; the scalar CD_PSSC no longer moves ps[8] but
+//     still scales the others.
+//  f  unit-typed helpers: cd_half_life, cd_ka_dt, cd_clearance_from_extraction
+//     against hand values.
+// Marker CIRC28_DRUG_RECORD_PASS.
+
+use darwin_pbpk::circ28::*
+use darwin_pbpk::circ28_kp::*
+use darwin_pbpk::circ28_drug::*
+use math::pure::{exp, ln}
+
+fn tk_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn tk_rel(tag: string, got: f64, want: f64, tol: f64) -> i32 with IO, Mut, Div, Panic {
+    let r = tk_abs(got - want) / tk_abs(want)
+    print("  "); print(tag); print(": got "); print(got); print(" want "); print(want)
+    print("  rel x 1e9 = "); println(r * 1.0e9)
+    if !(r <= tol) {
+        println("  [FAIL]")
+        return 1
+    }
+    return 0
+}
+
+// The unit brand is put on plain f64 values here, in small helpers: the brand is an
+// assertion by the caller; the compiler then checks the call.
+fn tk_auc_typed(dose: f64, cl: f64) -> f64 with Div {
+    let dose_mg: mg = dose
+    let cl_typed: L_per_h = cl
+    return cd_auc_iv(dose_mg, cl_typed)
+}
+
+fn tk_half_typed(cl: f64, v: f64) -> f64 with Div {
+    let clu: L_per_h = cl
+    let vu: L = v
+    return cd_half_life(clu, vu)
+}
+
+fn tk_kadt_typed(ka: f64, dt: f64) -> f64 {
+    let kau: per_h = ka
+    let dtu: h = dt
+    return cd_ka_dt(kau, dtu)
+}
+
+fn tk_clex_typed(q: f64, e: f64) -> f64 {
+    let qu: L_per_h = q
+    return cd_clearance_from_extraction(qu, e)
+}
+
+fn tk_ivc() -> Circ28Dose {
+    return circ28_dose_iv(10.0, 0.05, 0.05, 2.0, 1.0, 60.0, 20.0, 60.0)
+}
+
+fn tk_toy() -> Circ28Drug with Mut, Div, Panic {
+    var d = circ28_drug_new()
+    let two = 2.0
+    circ28_drug_set(&!d, CD_MW, 100.0 + 50.0, 0.0, CD_STATUS_MEASURED, "toy mw")
+    circ28_drug_set(&!d, CD_LOGP, two * 1.0, 0.1, CD_STATUS_MEASURED, "toy logP")
+    circ28_drug_set(&!d, CD_ION, 0.0, 0.0, CD_STATUS_DERIVED, "neutral")
+    circ28_drug_set(&!d, CD_FU, 0.2, 0.02, CD_STATUS_MEASURED, "toy fu")
+    circ28_drug_set(&!d, CD_BP, 1.0, 0.05, CD_STATUS_MEASURED, "toy bp")
+    circ28_drug_set(&!d, CD_CLPLA, 5.0, 0.4, CD_STATUS_FITTED, "toy cl")
+    circ28_drug_set(&!d, CD_KPSC, 0.05, 0.01, CD_STATUS_FITTED, "toy kp scalar")
+    circ28_drug_set(&!d, CD_KA, 1.5, 0.2, CD_STATUS_FITTED, "toy ka")
+    circ28_drug_set(&!d, CD_FA, 0.8, 0.0, CD_STATUS_MEASURED, "toy fa")
+    circ28_drug_set(&!d, CD_TLAG, 0.3, 0.0, CD_STATUS_MEASURED, "toy tlag")
+    return d
+}
+
+fn tk_sec_a() -> i32 with IO, Mut, Div, Panic, Epistemic {
+    var fails: i32 = 0
+    let d = tk_toy()
+    println("a round trip")
+    fails = fails + tk_rel("logP value (expression 2 * 1)", circ28_drug_value(&d, CD_LOGP), 2.0, 1.0e-15)
+    fails = fails + tk_rel("logP variance", circ28_drug_variance(&d, CD_LOGP), 0.01, 1.0e-12)
+    fails = fails + tk_rel("mw value (expression 100 + 50)", circ28_drug_value(&d, CD_MW), 150.0, 1.0e-15)
+    fails = fails + tk_rel("fu value", circ28_drug_value(&d, CD_FU), 0.2, 1.0e-15)
+    fails = fails + tk_rel("fu variance", circ28_drug_variance(&d, CD_FU), 0.0004, 1.0e-12)
+    fails = fails + tk_rel("cl_plasma variance", circ28_drug_variance(&d, CD_CLPLA), 0.16, 1.0e-12)
+    fails = fails + tk_rel("ka variance", circ28_drug_variance(&d, CD_KA), 0.04, 1.0e-12)
+    let th = circ28_drug_theta(&d)
+    let vr = circ28_drug_var(&d)
+    fails = fails + tk_rel("theta[CD_BP]", th[CD_BP], 1.0, 1.0e-15)
+    fails = fails + tk_rel("var[CD_BP]", vr[CD_BP], 0.0025, 1.0e-12)
+    fails = fails + tk_rel("theta[CD_KPSC]", th[CD_KPSC], 0.05, 1.0e-15)
+    fails = fails + tk_rel("var[CD_KPSC]", vr[CD_KPSC], 0.0001, 1.0e-12)
+    // defaults of a fresh record
+    fails = fails + tk_rel("default ps scalar", th[CD_PSSC], 1.0, 1.0e-15)
+    return fails
+}
+
+// kernel parameters (own frame: lean_single returns a wrong Circ28Params from a frame that also
+// holds two [f64; 18] arrays)
+fn tk_sec_a2() -> i32 with IO, Mut, Div, Panic, Epistemic {
+    var fails: i32 = 0
+    let d = tk_toy()
+    let p = circ28_drug_params(&d)
+    fails = fails + tk_rel("params.fu", p.fu, 0.2, 1.0e-15)
+    fails = fails + tk_rel("params.cl_plasma", p.cl_plasma, 5.0, 1.0e-15)
+    fails = fails + tk_rel("params.ps[8] = 20 Q_gut", p.ps[8], 20.0 * p.q[8], 1.0e-15)
+    fails = fails + tk_rel("params.ps[1] = 20 Q_h", p.ps[1], 20.0 * circ28_q_hepatic(p), 1.0e-15)
+    let kd = circ28_kp_drug(2.0, 0.0, 0.0, 0, 0.2, 1.0)
+    let kp0 = circ28_kp_rr(kd)
+    fails = fails + tk_rel("params.kp[6] = 0.05 Kp_RR", p.kp[6], 0.05 * kp0[6], 1.0e-12)
+
+    return fails
+}
+
+fn tk_sec_e() -> i32 with IO, Mut, Div, Panic, Epistemic {
+    var fails: i32 = 0
+    let d = tk_toy()
+    println("e status and provenance")
+    if d.status[CD_CLPLA] != 3 || d.status[CD_FU] != 1 || d.status[CD_ION] != 2 || d.status[CD_CLINT] != 0 || d.status[CD_PSSC] != 0 {
+        println("  [FAIL] status codes")
+        fails = fails + 1
+    } else {
+        println("  status codes survive: cl 3, fu 1, ion 2, clint 0, pssc 0")
+    }
+    if d.prov[CD_CLPLA] != "toy cl" || d.prov[CD_FU] != "toy fu" || d.prov[CD_PSSC] != "default" {
+        println("  [FAIL] provenance strings")
+        fails = fails + 1
+    } else {
+        println("  provenance strings survive")
+    }
+
+    return fails
+}
+
+fn tk_sec_b() -> i32 with IO, Mut, Div, Panic, Epistemic {
+    var fails: i32 = 0
+    let d = tk_toy()
+    println("b oral input")
+    var tot = 0.0
+    var t = 0.0
+    var before_lag = 0.0
+    while t + 0.005 < 2.0 {
+        let m = circ28_oral_mass(1.7, 0.8, 10.0, 0.3, t, t + 0.01)
+        tot = tot + m
+        if t + 0.01 <= 0.3 { before_lag = before_lag + m }
+        t = t + 0.01
+    }
+    while t + 0.25 < 60.0 {
+        tot = tot + circ28_oral_mass(1.7, 0.8, 10.0, 0.3, t, t + 0.5)
+        t = t + 0.5
+    }
+    fails = fails + tk_rel("integral of the input = fa Dose (mg)", tot, 8.0, 1.0e-12)
+    print("  mass before the lag (mg, must be 0): "); println(before_lag)
+    if before_lag != 0.0 {
+        println("  [FAIL]")
+        fails = fails + 1
+    }
+    // a piece: [0.3, 1.3] = fa Dose (1 - exp(-1.7))
+    fails = fails + tk_rel("[tlag, tlag+1]", circ28_oral_mass(1.7, 0.8, 10.0, 0.3, 0.3, 1.3), 8.0 * (1.0 - exp(0.0 - 1.7)), 1.0e-12)
+    let oc = circ28_dose_oral(10.0, 0.05, 4.0, 1.0, 80.0, 20.0, 60.0)
+    let ro = circ28_drug_run(&d, oc)
+    fails = fails + tk_rel("kernel input = fa Dose", ro.input, 8.0, 1.0e-12)
+    print("  balance error (input - eliminated - remaining)/input: "); println(ro.balance_err)
+    if ro.balance_err > 1.0e-10 {
+        println("  [FAIL]")
+        fails = fails + 1
+    }
+
+    return fails
+}
+
+fn tk_sec_c() -> i32 with IO, Mut, Div, Panic, Epistemic {
+    var fails: i32 = 0
+    let d = tk_toy()
+    println("c AUC after an intravenous dose")
+    let ivc = tk_ivc()
+    let r1 = circ28_drug_run(&d, ivc)
+    fails = fails + tk_rel("c1 AUC_plasma (mg h / L) = Dose / cl_plasma", r1.auc_t, 10.0 / 5.0, 1.0e-6)
+    fails = fails + tk_rel("c1 unit-typed cd_auc_iv", tk_auc_typed(10.0, circ28_drug_value(&d, CD_CLPLA)), r1.auc_t, 1.0e-6)
+    fails = fails + tk_rel("c1 mass balance", r1.balance_err + 1.0, 1.0, 1.0e-10)
+    return fails
+}
+
+// c2: hepatic and gut-wall clearance (its own frame: two records and two runs in one
+// Madaros frame segfaulted at run time, measured 2026-11-15)
+fn tk_sec_c2() -> i32 with IO, Mut, Div, Panic, Epistemic {
+    var fails: i32 = 0
+    var d2 = tk_toy()
+    circ28_drug_set(&!d2, CD_CLPLA, 0.0, 0.0, CD_STATUS_UNUSED, "off")
+    circ28_drug_set(&!d2, CD_CLINT, 300.0, 30.0, CD_STATUS_FITTED, "toy clint")
+    circ28_drug_set(&!d2, CD_CLGUT, 100.0, 10.0, CD_STATUS_FITTED, "toy clgut")
+    let p2 = circ28_drug_params(&d2)
+    let clb = circ28_splanchnic_clearance(p2)
+    print("  Eh "); print(circ28_hepatic_extraction(p2)); print("  Eg "); print(circ28_gut_extraction(p2)); print("  CL_blood (L/h) "); println(clb)
+    let ivc2 = circ28_dose_iv(10.0, 0.05, 0.05, 2.0, 1.0, 80.0, 30.0, 80.0)
+    let r2 = circ28_drug_run(&d2, ivc2)
+    fails = fails + tk_rel("c2 AUC_plasma = Dose / (bp CL_blood)", r2.auc_t, 10.0 / (p2.bp * clb), 1.0e-5)
+    fails = fails + tk_rel("c2 mass balance", r2.balance_err + 1.0, 1.0, 1.0e-10)
+
+    return fails
+}
+
+fn tk_sec_d() -> i32 with IO, Mut, Div, Panic, Epistemic {
+    var fails: i32 = 0
+    let d = tk_toy()
+    println("d first-order uncertainty, drug cleared by cl_plasma only")
+    let ivc = tk_ivc()
+    let u = circ28_drug_unc(&d, ivc)
+    print("  runs "); print(u.runs); print("  AUC "); print(u.auc); print("  Cmax "); println(u.cmax)
+    let relu = (u.var_auc / (u.auc * u.auc))
+    var ru = 0.0
+    if relu > 0.0 { ru = exp(0.5 * ln(relu)) }
+    fails = fails + tk_rel("u(AUC)/AUC = u(CL)/CL = 0.08", ru, 0.08, 1.0e-6)
+    fails = fails + tk_rel("dAUC/dCL = -Dose/CL^2 = -0.4", u.sens_auc[CD_CLPLA], 0.0 - 0.4, 1.0e-6)
+    let other = u.var_auc - u.contrib_auc[CD_CLPLA]
+    print("  variance share of every other parameter: "); println(other / u.var_auc)
+    if tk_abs(other / u.var_auc) > 1.0e-6 {
+        println("  [FAIL]")
+        fails = fails + 1
+    }
+    print("  Cmax: var "); print(u.var_cmax); print("  share of cl_plasma "); print(u.contrib_cmax[CD_CLPLA] / u.var_cmax)
+    print("  of Kp scalar "); println(u.contrib_cmax[CD_KPSC] / u.var_cmax)
+    if !(u.var_cmax > 0.0) || !(u.contrib_cmax[CD_KPSC] > 0.0) {
+        println("  [FAIL] the Cmax of a bolus must depend on the distribution")
+        fails = fails + 1
+    }
+
+    return fails
+}
+
+fn tk_sec_f() -> i32 with IO, Mut, Div, Panic, Epistemic {
+    var fails: i32 = 0
+    println("f unit-typed helpers")
+    fails = fails + tk_rel("half-life ln2 V/CL (h)", tk_half_typed(12.0, 40.0), 0.6931471805599453 * 40.0 / 12.0, 1.0e-14)
+    fails = fails + tk_rel("ka dt", tk_kadt_typed(2.0, 0.25), 0.5, 1.0e-15)
+    fails = fails + tk_rel("clearance from extraction", tk_clex_typed(12.0, 0.25), 3.0, 1.0e-15)
+
+    return fails
+}
+
+fn tk_psg() -> Circ28Drug with Mut, Div, Panic {
+    var d = tk_toy()
+    circ28_drug_set(&!d, CD_PSGUT, 3.5 * 2.0, 0.9, CD_STATUS_DERIVED, "toy ps gut")
+    circ28_drug_set(&!d, CD_PSSC, 2.0, 0.0, CD_STATUS_FITTED, "toy ps scalar")
+    return d
+}
+
+// Madaros segfaults on a frame holding a record, a parameter set and two arrays: g is split.
+fn tk_sec_g1() -> i32 with IO, Mut, Div, Panic, Epistemic {
+    var fails: i32 = 0
+    let d = tk_psg()
+    println("g gut permeability slot")
+    if CD_N != 18 || CD_PSGUT != 17 {
+        println("  [FAIL] slot count")
+        fails = fails + 1
+    }
+    fails = fails + tk_rel("ps_gut value (expression 3.5 * 2)", circ28_drug_value(&d, CD_PSGUT), 7.0, 1.0e-15)
+    fails = fails + tk_rel("ps_gut variance", circ28_drug_variance(&d, CD_PSGUT), 0.81, 1.0e-12)
+    if d.status[CD_PSGUT] != 2 || d.prov[CD_PSGUT] != "toy ps gut" {
+        println("  [FAIL] ps_gut status or provenance")
+        fails = fails + 1
+    }
+    return fails
+}
+
+fn tk_sec_g2() -> i32 with IO, Mut, Div, Panic, Epistemic {
+    var fails: i32 = 0
+    let d = tk_psg()
+    let th = circ28_drug_theta(&d)
+    fails = fails + tk_rel("theta[CD_PSGUT]", th[CD_PSGUT], 7.0, 1.0e-15)
+    let vr = circ28_drug_var(&d)
+    fails = fails + tk_rel("var[CD_PSGUT]", vr[CD_PSGUT], 0.81, 1.0e-12)
+    return fails
+}
+
+fn tk_sec_g3() -> i32 with IO, Mut, Div, Panic, Epistemic {
+    var fails: i32 = 0
+    let d = tk_psg()
+    let p = circ28_drug_params(&d)
+    fails = fails + tk_rel("params.ps[8] = 7 (override, pssc 2 ignored)", p.ps[8], 7.0, 1.0e-15)
+    fails = fails + tk_rel("params.ps[7] = 20 * 2 * Q_7 (pssc still scales the rest)", p.ps[7], 40.0 * p.q[7], 1.0e-15)
+    fails = fails + tk_rel("params.ps[1] = 40 Q_h", p.ps[1], 40.0 * circ28_q_hepatic(p), 1.0e-15)
+    return fails
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic, Epistemic {
+    var fails: i32 = 0
+    fails = fails + tk_sec_a()
+    fails = fails + tk_sec_a2()
+    fails = fails + tk_sec_e()
+    fails = fails + tk_sec_b()
+    fails = fails + tk_sec_c()
+    fails = fails + tk_sec_c2()
+    fails = fails + tk_sec_d()
+    fails = fails + tk_sec_f()
+    fails = fails + tk_sec_g1()
+    fails = fails + tk_sec_g2()
+    fails = fails + tk_sec_g3()
+    if fails == 0 {
+        println("CIRC28_DRUG_RECORD_PASS")
+        return 0
+    }
+    println("CIRC28_DRUG_RECORD_FAIL")
+    return 1
+}
