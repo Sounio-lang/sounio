@@ -20,7 +20,9 @@
 #
 # Two stages:
 #   1. cheap: two fixtures that discriminate those two defects, compiled by the
-#      prebuilt and checked against their expected output;
+#      prebuilt and checked against their expected output, then the E221
+#      witnesses of #2720 (no main, bodyless extern "C" fn main: refused with
+#      `error[E221]: no main` and no ELF; a real main still builds and runs);
 #   2. full: M(S') -> MX, MX(S') -> Y, cmp Y seed. About 80 s and 7 GB of RAM
 #      for the first compile; never run two at once.
 #
@@ -86,6 +88,30 @@ got="$(cat "$W/write_file_packed_global.out")"
 [[ "$got" == "ABCDEFGHIJKLMNOP" ]] \
   || fail "write_file on a packed global wrote '$(od -An -tx1 "$W/write_file_packed_global.out" | tr -s ' ')', expected ABCDEFGHIJKLMNOP"
 say "stage 1: write_file_packed_global -> $got"
+
+# Stage 1b: E221 (#2720). An entry file with no main, or with only a bodyless
+# `extern "C" fn main()`, must be refused with the exact diagnostic and must not
+# leave an ELF behind; a prebuilt built before #2720 wrote one that died with
+# SIGILL. The positive control with a real main must still build and run, and
+# the no-main file must stay a valid library for `check` and `--emit-obj`.
+for neg in e221_no_main e221_extern_main; do
+  rc=0
+  "$MADAROS" compile "$FIXDIR/$neg.sio" -o "$W/$neg.elf" >"$W/$neg.log" 2>&1 || rc=$?
+  [[ $rc -ne 0 ]] || fail "$neg.sio compiled (rc 0); expected error[E221]: no main"
+  grep -qF 'error[E221]: no main' "$W/$neg.log" \
+    || { tail -10 "$W/$neg.log" >&2; fail "$neg.sio refused (rc $rc) without error[E221]: no main"; }
+  [[ ! -e "$W/$neg.elf" ]] || fail "$neg.sio was refused but left an ELF at $W/$neg.elf"
+  say "stage 1: $neg -> rc $rc, error[E221]: no main, no ELF"
+done
+out="$(compile_run e221_real_main)"
+[[ "$out" == "E221_REAL_MAIN_OK" ]] || fail "e221_real_main printed '$out', expected E221_REAL_MAIN_OK"
+say "stage 1: e221_real_main -> $out"
+"$MADAROS" check "$FIXDIR/e221_no_main.sio" >"$W/lib.check.log" 2>&1 \
+  || { tail -10 "$W/lib.check.log" >&2; fail "check refused the no-main library e221_no_main.sio"; }
+"$MADAROS" --emit-obj "$FIXDIR/e221_no_main.sio" -o "$W/lib.o" >"$W/lib.obj.log" 2>&1 \
+  || { tail -10 "$W/lib.obj.log" >&2; fail "--emit-obj refused the no-main library e221_no_main.sio"; }
+[[ -s "$W/lib.o" ]] || fail "--emit-obj on e221_no_main.sio wrote no object"
+say "stage 1: e221_no_main as a library -> check OK, --emit-obj OK"
 
 if [[ $CHEAP_ONLY -eq 1 ]]; then
   echo "MADAROS_PREBUILT_AGREES_WITH_SEED_CHEAP_OK"
