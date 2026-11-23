@@ -124,3 +124,16 @@ known-failure) for all 65 files.
    confusion (row 12); both reproduce without SIO-60.
 3. Fatalize E035 in imports once the ~204 missing-effect annotations are
    repaired (the 216-file broad census is kept in the task notes).
+
+## 2026-11-23: full fatality shipped
+
+`tc_mark_failed` and `note_limit_error` no longer return early for imported
+functions, so every printed `error:` fails a lean_single build. The
+self-hosted tree no longer needs the tolerance: the seed builds
+`self-hosted/compiler/main.sio` with 0 errors
+(`scripts/ci/seed_builds_madaros_without_errors_gate.sh`). Re-census on the
+3474 non-compile-fail full-suite files: 68 printed an error with exit 0 before;
+22 are tagged `requires: madaros` or `requires: slow`; the other 46 are pinned in
+`tests/known_failures/hardened_diagnostics_full_suite.txt`, each with its first
+stdlib error. E035 in imported functions is still not reported
+(`tc_effect_violation` returns before printing), so it does not fail the build.

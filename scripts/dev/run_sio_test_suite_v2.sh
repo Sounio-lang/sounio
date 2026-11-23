@@ -474,6 +474,28 @@ test_matches_filter() {
     esac
 }
 
+# Does a manifest pin (path|reason) cover this failure?
+#   known_failure_reason_matches <reason> <test_output> <first_diag>
+# A reason that starts with "error" pins a diagnostic. It must occur in the
+# first `^error` line the compiler printed, and must not end in the middle of a
+# number there: a pin "at lib.sio:61" does not match "at lib.sio:614". Matching
+# it anywhere in test_output let the 160-character tail of a run failure keep
+# the old diagnostic while a new, earlier error came first, so a regression
+# read as the known failure. Any other reason (a timeout, a program's own
+# output marker) is still looked for in the whole test_output.
+known_failure_reason_matches() {
+    local reason="$1" out="$2" diag="$3"
+    if [[ "$reason" == error* ]]; then
+        local rest="$diag"
+        while [[ "$rest" == *"$reason"* ]]; do
+            rest="${rest#*"$reason"}"
+            [[ "$rest" =~ ^[0-9] ]] || return 0
+        done
+        return 1
+    fi
+    grep -qF -- "$reason" <<<"$out"
+}
+
 # Function to run a single test
 _run_test_case() {
     local file="$1"
@@ -762,6 +784,7 @@ _run_test_case() {
     local output=""
     local exit_code=0
     local test_output=""
+    local first_diag=""
     local start_time end_time
     
     start_time=$(date +%s)
@@ -774,6 +797,13 @@ _run_test_case() {
                 test_output="check timed out after ${timeout_val}s"
             elif [[ $exit_code -ne 0 ]]; then
                 test_output="check exited $exit_code"
+                # Keep the first diagnostic line too (bounded): "check exited 1"
+                # alone let a manifest pin accept ANY rc=1 refusal, not the one
+                # it was audited for.
+                first_diag="$(grep -m1 -E "^error" <<<"$output" || true)"
+                if [[ -n "$first_diag" ]]; then
+                    test_output="$test_output | ${first_diag:0:200}"
+                fi
             fi
         else
             output=$(timeout "$timeout_val" "$SOUC_BIN" run "$file" 2>&1) || exit_code=$?
@@ -791,6 +821,12 @@ _run_test_case() {
                     snippet="$raw"
                 fi
                 test_output="run exited $exit_code"
+                # First diagnostic line (bounded), as for check-only above: the
+                # 160-character tail can end on a later error or a warning.
+                first_diag="$(grep -m1 -E "^error" <<<"$output" || true)"
+                if [[ -n "$first_diag" ]]; then
+                    test_output="$test_output | ${first_diag:0:200}"
+                fi
                 if [[ -n "$snippet" ]]; then
                     test_output="$test_output | $snippet"
                 fi
@@ -922,7 +958,7 @@ _run_test_case() {
     # so unmatched entries fall straight through to the ordinary fail path.
     if $is_known_failure && [[ $exit_code -ne 0 ]]; then
         expected_reason="${KNOWN_FAILURE_REASON_MAP[$rel_file]:-}"
-        if [[ -n "$expected_reason" ]] && ! grep -qF -- "$expected_reason" <<<"$test_output"; then
+        if [[ -n "$expected_reason" ]] && ! known_failure_reason_matches "$expected_reason" "$test_output" "$first_diag"; then
             is_known_failure=false
             test_output="known-failure reason mismatch: expected '$expected_reason', got: $test_output"
         fi
