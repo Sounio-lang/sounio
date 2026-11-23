@@ -1,0 +1,298 @@
+// Sounio controls for eisa_h.pireus_operator_atlas.v1. Exit 0 only when every
+// control passes; each failure prints ATLAS_FAIL and the run exits 1.
+// The ATLAS_CLASS lines are compared by test_operator_atlas.py with the class
+// words re-derived from the frozen V13 transcript bytes.
+use hardware::pireus::operator_atlas::{
+    PIREUS_ATLAS_CLASSES,
+    PIREUS_ATLAS_REFERENCES,
+    PIREUS_ATLAS_BASELINE_CLASSES,
+    PIREUS_ATLAS_N0,
+    PIREUS_ATLAS_N1,
+    PIREUS_ATLAS_N2,
+    PIREUS_ATLAS_ERR_DOMAIN,
+    PireusOperatorAtlasClassification,
+    pireus_operator_atlas_intact,
+    pireus_operator_atlas_class_digest,
+    pireus_operator_atlas_frozen_baseline_digest,
+    pireus_operator_atlas_frozen_digest,
+    pireus_operator_atlas_reference_word,
+    pireus_operator_atlas_corpus_signs,
+    pireus_operator_atlas_phase_signs,
+    pireus_operator_atlas_classify,
+    pireus_operator_atlas_find,
+}
+use hardware::pireus::operator_orbit_canonicalization::{
+    pireus_operator_orbit_canonical_view,
+}
+
+fn fail(label: string) -> i64 with IO {
+    print("ATLAS_FAIL "); print(label); print("\n")
+    1
+}
+
+fn unpack(class_id: i64) -> [i64; 256] with Mut, Panic, Div {
+    var signs: [i64; 256] = [0; 256]
+    var cell: i64 = 0
+    while cell < 256 {
+        let word = cell / 32
+        let bit = cell - word * 32
+        signs[cell] = (pireus_operator_atlas_reference_word(class_id, word) >> bit) & 1
+        cell = cell + 1
+    }
+    signs
+}
+
+fn words_equal(a: &[i64; 8], b: &[i64; 8]) -> bool with Mut, Panic {
+    var w: i64 = 0
+    while w < 8 {
+        if a[w] != b[w] { return false }
+        w = w + 1
+    }
+    true
+}
+
+fn reference_words(class_id: i64) -> [i64; 8] with Mut, Panic {
+    var words: [i64; 8] = [0; 8]
+    var w: i64 = 0
+    while w < 8 {
+        words[w] = pireus_operator_atlas_reference_word(class_id, w)
+        w = w + 1
+    }
+    words
+}
+
+fn parity(value: i64) -> i64 with Mut {
+    var x = value
+    var p: i64 = 0
+    while x != 0 { p = p ^ (x & 1); x = x >> 1 }
+    p
+}
+
+fn apply_matrix(code: i64, vector: i64) -> i64 with Mut {
+    var result: i64 = 0
+    var row: i64 = 0
+    while row < 4 {
+        if parity(((code >> (row * 4)) & 15) & vector) != 0 { result = result | (1 << row) }
+        row = row + 1
+    }
+    result
+}
+
+fn invertible(code: i64) -> bool with Mut, Panic {
+    var seen: [bool; 16] = [false; 16]
+    var v: i64 = 0
+    while v < 16 {
+        let image = apply_matrix(code, v)
+        if seen[image] { return false }
+        seen[image] = true
+        v = v + 1
+    }
+    true
+}
+
+// The full declared action, written here independently of the V13 code:
+// t'(l,r) = t(Ml, Mr) (operands exchanged when swap=1) XOR q(l) XOR q(r) XOR q(l^r),
+// for an arbitrary q: V -> F2 with q(0)=0 -- linear characters included.
+fn transform(signs: &[i64; 256], matrix: i64, swap: i64, gauge: i64) -> [i64; 256]
+with Mut, Panic, Div {
+    var out: [i64; 256] = [0; 256]
+    var l: i64 = 0
+    while l < 16 {
+        var r: i64 = 0
+        while r < 16 {
+            let ml = apply_matrix(matrix, l)
+            let mr = apply_matrix(matrix, r)
+            var value = signs[ml * 16 + mr]
+            if swap == 1 { value = signs[mr * 16 + ml] }
+            var ql: i64 = 0
+            var qr: i64 = 0
+            var qx: i64 = 0
+            if l > 0 { ql = (gauge >> (l - 1)) & 1 }
+            if r > 0 { qr = (gauge >> (r - 1)) & 1 }
+            if (l ^ r) > 0 { qx = (gauge >> ((l ^ r) - 1)) & 1 }
+            out[l * 16 + r] = value ^ ql ^ qr ^ qx
+            r = r + 1
+        }
+        l = l + 1
+    }
+    out
+}
+
+fn next_random(state: i64) -> i64 {
+    (state * 48271) % 2147483647
+}
+
+// Gauge-invariant counts: negative squares, non-commuting unordered pairs, and
+// non-associating ordered triples (the coboundary of the sign table).
+fn invariants(signs: &[i64; 256]) -> [i64; 3] with Mut, Panic {
+    var squares: i64 = 0
+    var commutators: i64 = 0
+    var associators: i64 = 0
+    var a: i64 = 0
+    while a < 16 {
+        squares = squares + signs[a * 16 + a]
+        var b: i64 = 0
+        while b < 16 {
+            if a < b && signs[a * 16 + b] != signs[b * 16 + a] { commutators = commutators + 1 }
+            var c: i64 = 0
+            while c < 16 {
+                let s = signs[a * 16 + b] ^ signs[(a ^ b) * 16 + c] ^
+                    signs[b * 16 + c] ^ signs[a * 16 + (b ^ c)]
+                associators = associators + s
+                c = c + 1
+            }
+            b = b + 1
+        }
+        a = a + 1
+    }
+    [squares, commutators, associators]
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div, Epistemic {
+    var failures: i64 = 0
+
+    // (1) integrity and exact reproduction of the 62 frozen V13 classes.
+    if !pireus_operator_atlas_intact() { failures = failures + fail("atlas digests") }
+    let baseline = pireus_operator_atlas_class_digest(PIREUS_ATLAS_BASELINE_CLASSES)
+    let frozen_baseline = pireus_operator_atlas_frozen_baseline_digest()
+    if !words_equal(&baseline.words, &frozen_baseline) { failures = failures + fail("v13 baseline class_digest") }
+    let short = pireus_operator_atlas_class_digest(PIREUS_ATLAS_BASELINE_CLASSES - 1)
+    if words_equal(&short.words, &frozen_baseline) { failures = failures + fail("digest insensitive to class count") }
+    let full = pireus_operator_atlas_class_digest(PIREUS_ATLAS_CLASSES)
+    let frozen_full = pireus_operator_atlas_frozen_digest()
+    if !words_equal(&full.words, &frozen_full) { failures = failures + fail("atlas class digest") }
+    var class_id: i64 = 0
+    while class_id < PIREUS_ATLAS_REFERENCES {
+        let words = reference_words(class_id)
+        print("ATLAS_CLASS "); print_int(class_id); print(" ")
+        var w: i64 = 0
+        while w < 8 { if w > 0 { print(":") } print_int(words[w]); w = w + 1 }
+        print("\n")
+        if pireus_operator_atlas_find(&words) != class_id { failures = failures + fail("class not unique") }
+        var signs = unpack(class_id)
+        if class_id >= PIREUS_ATLAS_CLASSES {
+            let member = pireus_operator_atlas_corpus_signs(class_id - PIREUS_ATLAS_CLASSES)
+            signs = member
+        }
+        let view = pireus_operator_orbit_canonical_view(&signs)
+        if !view.complete || !words_equal(&view.words, &words) {
+            failures = failures + fail("reference is not its own V13 canonical form")
+        }
+        let c = pireus_operator_atlas_classify(&signs)
+        if !c.valid || c.class_id != class_id || c.level != PIREUS_ATLAS_N0 {
+            failures = failures + fail("reference does not classify as N0 of itself")
+        }
+        class_id = class_id + 1
+    }
+    print("ATLAS_PASS reproduction references=65 v13=62\n")
+
+    // (2) invariance under the declared group, and (3) known operators in atlas.
+    var state: i64 = 20261120
+    var subjects: [i64; 7] = [0, 29, 30, 61, 63, -36077, -33825]
+    var s: i64 = 0
+    var checks: i64 = 0
+    while s < 7 {
+        let subject = subjects[s]
+        var signs: [i64; 256] = [0; 256]
+        if subject >= 0 {
+            signs = unpack(subject)
+            if subject >= PIREUS_ATLAS_CLASSES { signs = pireus_operator_atlas_corpus_signs(subject - PIREUS_ATLAS_CLASSES) }
+        } else {
+            signs = pireus_operator_atlas_phase_signs(0 - subject)
+        }
+        let base = pireus_operator_atlas_classify(&signs)
+        var k: i64 = 0
+        while k < 5 {
+            var matrix: i64 = 0
+            var found = false
+            while !found {
+                state = next_random(state)
+                matrix = state % 65536
+                found = invertible(matrix)
+            }
+            state = next_random(state)
+            let swap = state % 2
+            state = next_random(state)
+            let gauge = state % 32768
+            let moved = transform(&signs, matrix, swap, gauge)
+            let c = pireus_operator_atlas_classify(&moved)
+            checks = checks + 1
+            if !c.valid || !words_equal(&c.words, &base.words) || c.class_id != base.class_id {
+                failures = failures + fail("orbit member changed canonical class")
+            }
+            if subject >= 0 && (c.level == PIREUS_ATLAS_N2 || c.class_id != subject) {
+                failures = failures + fail("transformed atlas operator left its class")
+            }
+            k = k + 1
+        }
+        s = s + 1
+    }
+    print("ATLAS_PASS invariance transforms="); print_int(checks); print("\n")
+
+    // Phase-side equivalences: transpose and alternating twists are gauges.
+    let p2 = pireus_operator_atlas_phase_signs(2)
+    let p16 = pireus_operator_atlas_phase_signs(16)
+    let c2 = pireus_operator_atlas_classify(&p2)
+    let c16 = pireus_operator_atlas_classify(&p16)
+    if !words_equal(&c2.words, &c16.words) { failures = failures + fail("transposed phase changed class") }
+    let p0 = pireus_operator_atlas_phase_signs(0)
+    let c0 = pireus_operator_atlas_classify(&p0)
+    if c0.level != PIREUS_ATLAS_N0 || c0.class_id != PIREUS_ATLAS_CLASSES + 1 {
+        failures = failures + fail("phase 0 is not the corpus sedenion")
+    }
+    let p18 = pireus_operator_atlas_phase_signs(18)
+    let c18 = pireus_operator_atlas_classify(&p18)
+    if c18.level != PIREUS_ATLAS_N1 || c18.class_id != PIREUS_ATLAS_CLASSES + 1 {
+        failures = failures + fail("alternating twist is not a sedenion gauge")
+    }
+    print("ATLAS_PASS phase_equivalences sedenion_class=63\n")
+
+    // (4) negative controls.
+    var axis = pireus_operator_atlas_phase_signs(0)
+    axis[3] = 1
+    let ca = pireus_operator_atlas_classify(&axis)
+    if ca.valid || ca.error != PIREUS_ATLAS_ERR_DOMAIN { failures = failures + fail("axis cell admitted") }
+    var column = pireus_operator_atlas_phase_signs(0)
+    column[5 * 16] = 1
+    let cc = pireus_operator_atlas_classify(&column)
+    if cc.valid || cc.error != PIREUS_ATLAS_ERR_DOMAIN { failures = failures + fail("axis column admitted") }
+    var nonbit = unpack(0)
+    nonbit[17] = 2
+    let cn = pireus_operator_atlas_classify(&nonbit)
+    if cn.valid || cn.error != PIREUS_ATLAS_ERR_DOMAIN { failures = failures + fail("non-bit cell admitted") }
+    // A flipped diagonal cell changes the negative-square count, a class
+    // invariant, so it must leave the source class.
+    var flipped = unpack(0)
+    flipped[5 * 16 + 5] = 1 - flipped[5 * 16 + 5]
+    let cf = pireus_operator_atlas_classify(&flipped)
+    if !cf.valid || cf.class_id == 0 || cf.level == PIREUS_ATLAS_N0 { failures = failures + fail("diagonal flip kept class 0") }
+    let i0 = invariants(&flipped)
+    let source = unpack(0)
+    let i1 = invariants(&source)
+    if i0[0] == i1[0] { failures = failures + fail("diagonal flip kept squares") }
+    // A V13 member moved by a group element is N1, never N0 and never N2.
+    let moved = transform(&source, 4680, 1, 12345)
+    let cm = pireus_operator_atlas_classify(&moved)
+    if cm.level != PIREUS_ATLAS_N1 || cm.class_id != 0 { failures = failures + fail("moved class 0 not N1") }
+    print("ATLAS_PASS negatives=6\n")
+
+    // Gauge invariants of every reference, for the skeptic's cross-check of N2.
+    class_id = 0
+    while class_id < PIREUS_ATLAS_REFERENCES {
+        var signs = unpack(class_id)
+        if class_id >= PIREUS_ATLAS_CLASSES { signs = pireus_operator_atlas_corpus_signs(class_id - PIREUS_ATLAS_CLASSES) }
+        let inv = invariants(&signs)
+        print("ATLAS_INVARIANTS "); print_int(class_id)
+        print(" squares="); print_int(inv[0])
+        print(" commutators="); print_int(inv[1])
+        print(" associators="); print_int(inv[2]); print("\n")
+        class_id = class_id + 1
+    }
+
+    if failures != 0 {
+        print("ATLAS_RESULT FAIL failures="); print_int(failures); print("\n")
+        return 1
+    }
+    print("ATLAS_RESULT PASS\n")
+    0
+}

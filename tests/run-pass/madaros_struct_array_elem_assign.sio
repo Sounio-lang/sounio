@@ -1,0 +1,83 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: STRUCT_ARRAY_ELEM_ASSIGN_OK
+// Regression gate: arrays of structs. Two defects, both silent wrong values.
+//
+// (a) `var a = [mk(1.5), mk(2.5)]` (no annotation) recorded no element type, so `a[1].x` resolved no field type: a float field
+//     was read as an integer, and `println(a[1].a[0])` printed the IEEE bits (4612811918334230528 for 2.5) and `a[1].a[0] + 1.0`
+//     added to the bits. The annotated form `[S; 2]` was right.
+// (b) `a[0] = a[1]` stored the source handle, so a later write to a[0] changed a[1].
+
+struct S {
+    a: [f64; 4],
+    n: i64,
+}
+
+struct P {
+    x: f64,
+    y: f64,
+}
+
+fn mk(v: f64) -> S {
+    S { a: [v; 4], n: 1 }
+}
+
+fn bump(s: &!S) with Mut {
+    (*s).a[0] = (*s).a[0] + 100.0
+}
+
+fn chk_f(tag: i64, got: f64, want: f64) -> i64 with IO {
+    if got != want {
+        print("BAD ")
+        print(tag)
+        print(" got ")
+        print(got)
+        print(" want ")
+        print(want)
+        print("\n")
+        return 1
+    }
+    0
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var bad: i64 = 0
+
+    // (a) element type from the literal: call elements, struct literals, repeat form.
+    var a2 = [mk(1.5), mk(2.5)]
+    bad = bad + chk_f(1, a2[1].a[0], 2.5)
+    bad = bad + chk_f(1, a2[1].a[0] + 1.0, 3.5)
+    var a1 = [S { a: [1.5; 4], n: 1 }, S { a: [2.5; 4], n: 2 }]
+    bad = bad + chk_f(2, a1[1].a[0], 2.5)
+    var a3 = [mk(1.5); 2]
+    bad = bad + chk_f(3, a3[1].a[0], 1.5)
+    var ps = [P { x: 1.25, y: 2.0 }, P { x: 3.5, y: 4.0 }]
+    bad = bad + chk_f(4, ps[1].x, 3.5)
+    println(a2[1].a[0])
+
+    // (b) element assignment copies.
+    var arr: [S; 2] = [mk(0.0), mk(1.0)]
+    arr[0] = arr[1]
+    bump(&!arr[0])
+    bad = bad + chk_f(5, arr[0].a[0], 101.0)
+    bad = bad + chk_f(5, arr[1].a[0], 1.0)
+    var u = [mk(0.0), mk(1.0)]
+    u[0] = u[1]
+    bump(&!u[0])
+    bad = bad + chk_f(6, u[0].a[0], 101.0)
+    bad = bad + chk_f(6, u[1].a[0], 1.0)
+    var s2 = mk(5.0)
+    arr[1] = s2
+    s2.a[0] = 9.0
+    bad = bad + chk_f(7, arr[1].a[0], 5.0)
+    var q = [P { x: 1.0, y: 2.0 }, P { x: 3.0, y: 4.0 }]
+    q[0] = q[1]
+    q[1].x = 50.0
+    bad = bad + chk_f(8, q[0].x, 3.0)
+
+    if bad == 0 {
+        println("STRUCT_ARRAY_ELEM_ASSIGN_OK")
+        return 0
+    }
+    1
+}

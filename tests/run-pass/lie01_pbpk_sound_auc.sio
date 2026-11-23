@@ -1,0 +1,89 @@
+//@ run-pass
+//@ expect-stdout: LIE01_PBPK_SOUND_AUC_PASS
+// Lie corpus item 1, applied: the Phase 7C PBPK gate authorizes only from a
+// SafeAuthorization, and that token is minted only from a SoundEnclosure of
+// the exact AUC (interval exp of the augmented matrix, Taylor tail, outward
+// rounding; stdlib/llm/epistemic_clinical_pbpk.sio).
+//   - the enclosure is tight (< 1e-9) and contains the f64 closed form
+//   - RK4 at dt = 0.001 lands on it up to the trapezoid term dt^2/12 |f'(0)|
+//   - failed preconditions give [-inf, inf], which can never authorize
+//   - SAFE when the window fits; no authorization when the window is
+//     narrower than the enclosure, even with ep = al = 0
+//   - se_div and the exact helpers enclose what they claim
+
+use epistemic::sound_enclosure::*
+use llm::epistemic_clinical_pbpk::{
+    ClinicalEpistemicPriors,
+    ClinicalPbpkParams,
+    clinical_pbpk_default_params,
+    clinical_pbpk_auc_enclosure,
+    clinical_pbpk_auc_closed,
+    clinical_pbpk_simulate_auc,
+    clinical_pbpk_evaluate_gate,
+}
+
+fn main() -> i64 with IO, Mut, Div, Panic {
+    var fails: i64 = 0
+    let p = clinical_pbpk_default_params()
+
+    // se_div: 1/3 is not a double; the enclosure must strictly contain RN(1/3).
+    let third = se_div(se_point(1.0), se_point(3.0))
+    if !(se_lo(third) < 1.0 / 3.0 && 1.0 / 3.0 < se_hi(third)) { fails = fails + 1 }
+    let absv = se_absval(se_sub(se_point(0.0), se_point(2.0)))
+    if !(se_lo(absv) <= 2.0 && 2.0 <= se_hi(absv)) { fails = fails + 1 }
+    let hull = se_hull(se_point(-1.0), se_point(1.0))
+    if !(se_lo(hull) == -1.0 && se_hi(hull) == 1.0) { fails = fails + 1 }
+    let mx = se_max(se_point(-1.0), se_point(1.0))
+    if !(se_lo(mx) == 1.0 && se_hi(mx) == 1.0) { fails = fails + 1 }
+
+    // The enclosure at the gate horizon.
+    let e = clinical_pbpk_auc_enclosure(&p, 5.0, 48.0)
+    let width = se_hi(e) - se_lo(e)
+    if !(width > 0.0 && width < 0.000000001) { fails = fails + 1 }
+    let closed = clinical_pbpk_auc_closed(&p, 5.0, 48.0)
+    if !(se_lo(e) <= closed && closed <= se_hi(e)) { fails = fails + 1 }
+    // Independent: RK4 + trapezoid at dt = 0.001. Its quadrature term is about
+    // dt^2/12 * |f'(0)| = 1.5e-6; anything past 1e-5 means the enclosure is off.
+    let mid = (se_lo(e) + se_hi(e)) * 0.5
+    let rk4 = clinical_pbpk_simulate_auc(&p, 5.0, 48.0, 0.001)
+    var d = rk4 - mid
+    if d < 0.0 { d = 0.0 - d }
+    if !(d < 0.00001) { fails = fails + 1 }
+
+    // Failed preconditions: entire line, never fits any finite window.
+    let e0 = clinical_pbpk_auc_enclosure(&p, 5.0, 0.0)
+    if se_fits_window(e0, 0.0, 0.0, -1.0e300, 1.0e300) { fails = fails + 1 }
+    let bad = ClinicalPbpkParams {
+        v_blood: p.v_blood, v_brain: p.v_brain, v_periph: p.v_periph,
+        q_brain: p.q_brain, q_periph: p.q_periph,
+        kp_brain: p.kp_brain, kp_periph: p.kp_periph,
+        cl_hepatic: 0.0, fu_plasma: p.fu_plasma,
+    }
+    let eb = clinical_pbpk_auc_enclosure(&bad, 5.0, 48.0)
+    if se_fits_window(eb, 0.0, 0.0, -1.0e300, 1.0e300) { fails = fails + 1 }
+
+    // Gate: SAFE through the token on a fitting window.
+    let priors = ClinicalEpistemicPriors { cl_var: 1.0, kp_var: 0.0001, fu_var: 0.000025, rho_cl_fu: 0.0 }
+    let r_ok = clinical_pbpk_evaluate_gate(&p, &priors, 5.0, 0.05, 0.0, 0.0, 0.0, 3.0, 5.0)
+    if !(r_ok.regime == 1 && r_ok.authorized) { fails = fails + 1 }
+    if !(r_ok.auc_lower_bound >= 3.0 && r_ok.auc_upper_bound <= 5.0) { fails = fails + 1 }
+
+    // Gate: a window centred on the enclosure but narrower than it never
+    // authorizes, even with ep = al = 0 and after refinement.
+    let zero_priors = ClinicalEpistemicPriors { cl_var: 0.0, kp_var: 0.0, fu_var: 0.0, rho_cl_fu: 0.0 }
+    let half = width * 0.25
+    let r_tight = clinical_pbpk_evaluate_gate(&p, &zero_priors, 5.0, 0.05, 0.0, 0.0, 0.0, mid - half, mid + half)
+    if r_tight.authorized { fails = fails + 1 }
+    if r_tight.regime == 1 || r_tight.regime == 2 { fails = fails + 1 }
+
+    // Negative half-widths are not uncertainties: never authorize.
+    let r_neg = clinical_pbpk_evaluate_gate(&p, &zero_priors, 5.0, 0.05, 0.0, 0.0, -0.5, 3.0, 5.0)
+    if r_neg.authorized { fails = fails + 1 }
+
+    if fails == 0 {
+        println("LIE01_PBPK_SOUND_AUC_PASS")
+    } else {
+        println("LIE01_PBPK_SOUND_AUC_FAIL")
+    }
+    return fails
+}

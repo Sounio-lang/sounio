@@ -84,6 +84,7 @@ if(process.argv[3]==="--selftest"){
   [workflow.replace("run: bash scripts/ci/stdlib_deep_ci_decision.sh","run: true"),decision,additive],
   [workflow.replace("name: Require selected deep scientific replay\n        if: always()","name: Require selected deep scientific replay\n        if: success()"),decision,additive],
   [workflow.replace("      - full-test-suite\n",""),decision,additive],
+  [workflow.replace("      - madaros-corpus-regression\n",""),decision,additive],
   [workflow,decision.replace('        "contracts": True,\n',""),additive],
   [workflow,decision,additive.replaceAll('["stdlib-deep-science"]','["unrelated"]')],
  ];

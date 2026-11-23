@@ -1,0 +1,1 @@
+CITATION.cff and SECURITY.md name 3.0.0, the released version: CITATION.cff records the v3.0.0 Zenodo DOI (10.5281/zenodo.24448291) and preferred-citation cites it; citation_version_gate.sh also checks the preferred-citation version at a release tag.
