@@ -1,22 +1,45 @@
-//! IEEE 1788-2015 Interval Arithmetic Semantics
+//! Interval Arithmetic Semantics in the style of IEEE 1788-2015
 //!
-//! This module aligns Sounio interval arithmetic with IEEE 1788 standard,
-//! ensuring reproducibility and well-defined behavior for edge cases.
+//! This module follows the SHAPE of IEEE 1788 (empty/entire intervals,
+//! decorations, defined division by zero-spanning intervals) but is NOT a
+//! conforming IEEE 1788 implementation, for three stated reasons:
+//!   1. Outward rounding is done with the predecessor/successor push of
+//!      epistemic::sound_enclosure (se_down/se_up — Rump–Zimmermann–Boldo–
+//!      Melquiond 2009), not with hardware directed roundings, which Sounio
+//!      does not expose. Every computed endpoint is pushed strictly outward.
+//!   2. Sounio f64 has no infinities, so "entire" is the finite interval
+//!      [-1e308, +1e308] (maximum ignorance over finite f64), NOT [-∞,+∞].
+//!      Results that would exceed this range cannot be represented; the
+//!      module saturates outward to entire rather than claiming infinity.
+//!   3. Transcendental functions are absent: libm exp/log are not correctly
+//!      rounded, so enclosing with them would be a lie (cf.
+//!      epistemic::sound_enclosure's stated scope). Only sqrt is provided,
+//!      because IEEE 754 mandates a correctly rounded sqrt, and even that
+//!      endpoint is pushed outward.
 //!
-//! Key IEEE 1788 concepts:
+//! Key concepts (IEEE 1788-flavoured, with the deviations above):
 //!   - Empty interval: {} (result of impossible constraints)
-//!   - Entire interval: [-∞, +∞] (maximum ignorance)
+//!   - Entire interval: [-1e308, +1e308] (maximum finite ignorance)
 //!   - Exception handling for division by interval spanning zero
 //!   - Decorations for tracking validity
 //!
 //! References:
-//!   - IEEE 1788-2015: "Standard for Interval Arithmetic"
+//!   - IEEE 1788-2015: "Standard for Interval Arithmetic" (NOT fully
+//!     implemented; deviations are the three points above)
 //!   - IEEE 1788.1-2017: "Simplified subset (Level 1)"
+//!   - Rump, Zimmermann, Boldo, Melquiond — "Computing predecessor and
+//!     successor in rounding to nearest", BIT 49 (2009) 419-431
 
+// Outward rounding reuses epistemic::sound_enclosure (se_down/se_up) —
+// the same push, not a copy (lie corpus item 1d).
+use epistemic::sound_enclosure::{se_down, se_up}
+
+// Only sqrt is imported: IEEE 754 mandates a correctly rounded sqrt, so with
+// an outward push its enclosure is rigorous. exp/log are deliberately NOT
+// imported (libm does not correctly round them; enclosing with them would be
+// a lie — lie corpus item 1d).
 extern "C" {
     fn sqrt(x: f64) -> f64;
-    fn log(x: f64) -> f64;
-    fn exp(x: f64) -> f64;
 }
 
 fn sqrt_f64(x: f64) -> f64 {
@@ -46,13 +69,13 @@ fn max_f64(a: f64, b: f64) -> f64 {
 //   - Empty: is_empty = true
 //   - Entire: lo = -inf, hi = +inf
 //   - Point: lo == hi
-struct Interval {
+pub struct Interval {
     lo: f64,
     hi: f64,
     is_empty: bool,
 }
 
-fn interval_empty() -> Interval {
+pub fn interval_empty() -> Interval {
     return Interval {
         lo: 0.0,
         hi: 0.0,
@@ -60,7 +83,9 @@ fn interval_empty() -> Interval {
     }
 }
 
-fn interval_entire() -> Interval {
+// Entire interval: maximum ignorance over FINITE f64. Sounio f64 has no
+// infinities, so this is [-1e308, +1e308], not [-∞,+∞] (lie corpus item 1d).
+pub fn interval_entire() -> Interval {
     return Interval {
         lo: 0.0 - 1.0e308,
         hi: 1.0e308,
@@ -68,7 +93,7 @@ fn interval_entire() -> Interval {
     }
 }
 
-fn interval_new(lo: f64, hi: f64) -> Interval {
+pub fn interval_new(lo: f64, hi: f64) -> Interval {
     if lo > hi {
         // Invalid bounds -> empty
         return interval_empty()
@@ -80,7 +105,7 @@ fn interval_new(lo: f64, hi: f64) -> Interval {
     }
 }
 
-fn interval_point(x: f64) -> Interval {
+pub fn interval_point(x: f64) -> Interval {
     return Interval {
         lo: x,
         hi: x,
@@ -88,8 +113,9 @@ fn interval_point(x: f64) -> Interval {
     }
 }
 
-fn interval_symmetric(center: f64, half_width: f64) -> Interval {
-    return interval_new(center - half_width, center + half_width)
+// Computed bounds: pushed outward like every other computed value here.
+fn interval_symmetric(center: f64, half_width: f64) -> Interval with Panic {
+    return interval_new(se_down(center - half_width), se_up(center + half_width))
 }
 
 // ============================================================================
@@ -114,7 +140,7 @@ fn dec_dac() -> Decoration { return Decoration { value: 3 } }  // DAC
 fn dec_com() -> Decoration { return Decoration { value: 4 } }  // Common
 
 // Decorated interval: interval + decoration
-struct DecoratedInterval {
+pub struct DecoratedInterval {
     interval: Interval,
     decoration: Decoration,
 }
@@ -146,24 +172,26 @@ fn dec_combine(a: Decoration, b: Decoration) -> Decoration {
 // IEEE 1788 BASIC OPERATIONS
 // ============================================================================
 
-// Addition: [a, b] + [c, d] = [a+c, b+d]
-fn interval_add(x: Interval, y: Interval) -> Interval {
+// Addition: [a, b] + [c, d] = [a+c, b+d], endpoints pushed strictly outward
+// (a round-to-nearest endpoint alone excludes the true sum on a bad rounding).
+pub fn interval_add(x: Interval, y: Interval) -> Interval with Panic {
     if x.is_empty || y.is_empty {
         return interval_empty()
     }
-    return interval_new(x.lo + y.lo, x.hi + y.hi)
+    return interval_new(se_down(x.lo + y.lo), se_up(x.hi + y.hi))
 }
 
-// Subtraction: [a, b] - [c, d] = [a-d, b-c]
-fn interval_sub(x: Interval, y: Interval) -> Interval {
+// Subtraction: [a, b] - [c, d] = [a-d, b-c], endpoints pushed outward.
+pub fn interval_sub(x: Interval, y: Interval) -> Interval with Panic {
     if x.is_empty || y.is_empty {
         return interval_empty()
     }
-    return interval_new(x.lo - y.hi, x.hi - y.lo)
+    return interval_new(se_down(x.lo - y.hi), se_up(x.hi - y.lo))
 }
 
-// Multiplication: [a, b] × [c, d]
-fn interval_mul(x: Interval, y: Interval) -> Interval {
+// Multiplication: [a, b] × [c, d], min/max of round-to-nearest products
+// pushed once outward each end (same argument as verify::interval iv_mul).
+pub fn interval_mul(x: Interval, y: Interval) -> Interval with Panic {
     if x.is_empty || y.is_empty {
         return interval_empty()
     }
@@ -174,8 +202,8 @@ fn interval_mul(x: Interval, y: Interval) -> Interval {
     let p3 = x.hi * y.lo
     let p4 = x.hi * y.hi
 
-    let lo = min_f64(min_f64(p1, p2), min_f64(p3, p4))
-    let hi = max_f64(max_f64(p1, p2), max_f64(p3, p4))
+    let lo = se_down(min_f64(min_f64(p1, p2), min_f64(p3, p4)))
+    let hi = se_up(max_f64(max_f64(p1, p2), max_f64(p3, p4)))
 
     return interval_new(lo, hi)
 }
@@ -185,7 +213,7 @@ fn interval_mul(x: Interval, y: Interval) -> Interval {
 // ============================================================================
 
 // Division result with exception handling
-struct DivisionResult {
+pub struct DivisionResult {
     result: Interval,
     exception: i32,    // 0=none, 1=div_by_zero, 2=entire_result
     decoration: Decoration,
@@ -196,7 +224,9 @@ struct DivisionResult {
 // but requires careful handling:
 //   - If 0 ∈ [c, d]: result may be unbounded or split
 //   - If [c, d] = [0, 0]: result is empty (not infinity!)
-fn interval_div(x: Interval, y: Interval) -> DivisionResult {
+// All computed endpoints below are pushed strictly outward (item 1d); the
+// ±1e308 ends are exact finite sentinels, not computed values.
+pub fn interval_div(x: Interval, y: Interval) -> DivisionResult with Panic {
     if x.is_empty || y.is_empty {
         return DivisionResult {
             result: interval_empty(),
@@ -220,16 +250,16 @@ fn interval_div(x: Interval, y: Interval) -> DivisionResult {
         }
 
         if y.lo == 0.0 {
-            // [0, d] with d > 0: result is [a/d, +∞] or similar
+            // [0, d] with d > 0: result is [a/d, +1e308] (finite entire end)
             if x.lo >= 0.0 {
                 return DivisionResult {
-                    result: interval_new(x.lo / y.hi, 1.0e308),
+                    result: interval_new(se_down(x.lo / y.hi), 1.0e308),
                     exception: 2,  // Entire result
                     decoration: dec_def(),
                 }
             } else if x.hi <= 0.0 {
                 return DivisionResult {
-                    result: interval_new(0.0 - 1.0e308, x.hi / y.hi),
+                    result: interval_new(0.0 - 1.0e308, se_up(x.hi / y.hi)),
                     exception: 2,
                     decoration: dec_def(),
                 }
@@ -237,16 +267,16 @@ fn interval_div(x: Interval, y: Interval) -> DivisionResult {
         }
 
         if y.hi == 0.0 {
-            // [c, 0] with c < 0: result is [-∞, a/c] or similar
+            // [c, 0] with c < 0: result is [-1e308, a/c] (finite entire end)
             if x.lo >= 0.0 {
                 return DivisionResult {
-                    result: interval_new(0.0 - 1.0e308, x.lo / y.lo),
+                    result: interval_new(0.0 - 1.0e308, se_up(x.lo / y.lo)),
                     exception: 2,
                     decoration: dec_def(),
                 }
             } else if x.hi <= 0.0 {
                 return DivisionResult {
-                    result: interval_new(x.hi / y.lo, 1.0e308),
+                    result: interval_new(se_down(x.hi / y.lo), 1.0e308),
                     exception: 2,
                     decoration: dec_def(),
                 }
@@ -254,7 +284,7 @@ fn interval_div(x: Interval, y: Interval) -> DivisionResult {
         }
 
         // General case: 0 strictly inside [c, d]
-        // Result is entire (two disconnected pieces reunited)
+        // Result is entire (two disconnected pieces reunited; finite entire)
         return DivisionResult {
             result: interval_entire(),
             exception: 2,
@@ -263,17 +293,18 @@ fn interval_div(x: Interval, y: Interval) -> DivisionResult {
     }
 
     // Normal division: 0 ∉ [c, d]
-    // [a, b] / [c, d] = [a, b] × [1/d, 1/c]
-    let inv_lo = 1.0 / y.hi
-    let inv_hi = 1.0 / y.lo
+    // [a, b] / [c, d] = [a, b] × [1/d, 1/c], reciprocal pushed outward first
+    // (for y strictly positive or strictly negative, 1/y.hi <= 1/y.lo).
+    let inv_lo = se_down(1.0 / y.hi)
+    let inv_hi = se_up(1.0 / y.lo)
 
     let p1 = x.lo * inv_lo
     let p2 = x.lo * inv_hi
     let p3 = x.hi * inv_lo
     let p4 = x.hi * inv_hi
 
-    let lo = min_f64(min_f64(p1, p2), min_f64(p3, p4))
-    let hi = max_f64(max_f64(p1, p2), max_f64(p3, p4))
+    let lo = se_down(min_f64(min_f64(p1, p2), min_f64(p3, p4)))
+    let hi = se_up(max_f64(max_f64(p1, p2), max_f64(p3, p4)))
 
     return DivisionResult {
         result: interval_new(lo, hi),
@@ -286,8 +317,12 @@ fn interval_div(x: Interval, y: Interval) -> DivisionResult {
 // IEEE 1788 ELEMENTARY FUNCTIONS
 // ============================================================================
 
-// Square root: sqrt([a, b])
-fn interval_sqrt(x: Interval) -> DecoratedInterval {
+// Square root: sqrt([a, b]).
+// IEEE 754 mandates a correctly rounded sqrt, so RN(sqrt) is within half an
+// ulp of the true root; the outward push moves at least a full ulp, keeping
+// containment. (Without the push, sqrt's half-ulp error would already be a
+// lie — item 1d.)
+pub fn interval_sqrt(x: Interval) -> DecoratedInterval with Panic {
     if x.is_empty {
         return decorated_new(interval_empty(), dec_ill())
     }
@@ -299,51 +334,18 @@ fn interval_sqrt(x: Interval) -> DecoratedInterval {
 
     let lo = max_f64(0.0, x.lo)
     return decorated_new(
-        interval_new(sqrt_f64(lo), sqrt_f64(x.hi)),
+        interval_new(se_down(sqrt_f64(lo)), se_up(sqrt_f64(x.hi))),
         if x.lo >= 0.0 { dec_com() } else { dec_def() }
     )
 }
 
-// Exponential: exp([a, b])
-fn interval_exp(x: Interval) -> DecoratedInterval {
-    if x.is_empty {
-        return decorated_new(interval_empty(), dec_ill())
-    }
-
-    // exp is monotonically increasing
-    return decorated_new(
-        interval_new(exp(x.lo), exp(x.hi)),
-        dec_com()
-    )
-}
-
-// Natural logarithm: log([a, b])
-fn interval_log(x: Interval) -> DecoratedInterval {
-    if x.is_empty {
-        return decorated_new(interval_empty(), dec_ill())
-    }
-
-    if x.hi <= 0.0 {
-        // Entirely non-positive -> undefined
-        return decorated_new(interval_empty(), dec_ill())
-    }
-
-    var dec = dec_com()
-    var lo_val: f64 = 0.0
-
-    if x.lo <= 0.0 {
-        // Interval includes non-positive -> clamp, degrade decoration
-        lo_val = 0.0 - 1.0e308  // -infinity for log(0+)
-        dec = dec_def()
-    } else {
-        lo_val = log(x.lo)
-    }
-
-    return decorated_new(
-        interval_new(lo_val, log(x.hi)),
-        dec
-    )
-}
+// NOTE (lie corpus item 1d): interval_exp and interval_log were REMOVED from
+// this module. libm exp/log are not correctly rounded (typical error 1-2
+// ulp with no stated bound), so no fixed push can enclose them, and this
+// module states no per-function ulp bound it could cite. Exponentials
+// enclosed with an explicit Taylor tail live with the PBPK gate (cf.
+// epistemic::sound_enclosure's stated scope). Reintroduce them here only
+// with a stated, cited ulp bound and a push that covers it.
 
 // ============================================================================
 // IEEE 1788 SET OPERATIONS
@@ -380,7 +382,7 @@ fn interval_hull(x: Interval, y: Interval) -> Interval {
 // ============================================================================
 
 // Check if interval is subset of another
-fn interval_subset(x: Interval, y: Interval) -> bool {
+pub fn interval_subset(x: Interval, y: Interval) -> bool {
     if x.is_empty { return true }  // Empty is subset of everything
     if y.is_empty { return false } // Non-empty not subset of empty
 
@@ -395,7 +397,7 @@ fn interval_overlaps(x: Interval, y: Interval) -> bool {
 }
 
 // Width of interval
-fn interval_width(x: Interval) -> f64 {
+pub fn interval_width(x: Interval) -> f64 {
     if x.is_empty { return 0.0 }
     return x.hi - x.lo
 }
@@ -446,7 +448,7 @@ fn exception_from_div(result: DivisionResult) -> IntervalException {
 // TESTS
 // ============================================================================
 
-fn test_interval_add() -> bool {
+fn test_interval_add() -> bool with Panic {
     let a = interval_new(1.0, 2.0)
     let b = interval_new(3.0, 4.0)
     let c = interval_add(a, b)
@@ -457,7 +459,7 @@ fn test_interval_add() -> bool {
     return true
 }
 
-fn test_interval_mul() -> bool {
+fn test_interval_mul() -> bool with Panic {
     let a = interval_new(-2.0, 3.0)
     let b = interval_new(1.0, 2.0)
     let c = interval_mul(a, b)
@@ -470,7 +472,7 @@ fn test_interval_mul() -> bool {
     return true
 }
 
-fn test_interval_div_normal() -> bool {
+fn test_interval_div_normal() -> bool with Panic {
     let a = interval_new(2.0, 4.0)
     let b = interval_new(1.0, 2.0)
     let result = interval_div(a, b)
@@ -483,7 +485,7 @@ fn test_interval_div_normal() -> bool {
     return true
 }
 
-fn test_interval_div_by_zero() -> bool {
+fn test_interval_div_by_zero() -> bool with Panic {
     let a = interval_new(1.0, 2.0)
     let b = interval_new(0.0, 0.0)
     let result = interval_div(a, b)
@@ -495,7 +497,7 @@ fn test_interval_div_by_zero() -> bool {
     return true
 }
 
-fn test_interval_div_spanning_zero() -> bool {
+fn test_interval_div_spanning_zero() -> bool with Panic {
     let a = interval_new(1.0, 2.0)
     let b = interval_new(-1.0, 1.0)  // Spans zero
     let result = interval_div(a, b)
@@ -506,7 +508,7 @@ fn test_interval_div_spanning_zero() -> bool {
     return true
 }
 
-fn test_interval_sqrt() -> bool {
+fn test_interval_sqrt() -> bool with Panic {
     let a = interval_new(4.0, 9.0)
     let result = interval_sqrt(a)
 
