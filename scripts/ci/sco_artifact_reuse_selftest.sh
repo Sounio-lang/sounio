@@ -13,8 +13,18 @@ for gate in sco_corpus_gate sco_strategy_probe_gate; do
   printf '#!/usr/bin/env bash\nset -eu\ntest -x "${SOUC:-${SCO_MADAROS:?}}"\nprintf "%%s\\n" "%s" >> "$SCO_FIXTURE_CALLS"\n' "$gate" > "$repo/scripts/ci/$gate.sh"
 done
 printf '#!/usr/bin/env bash\necho unexpected-build > "$SCO_FIXTURE_BUILD"\nexit 99\n' > "$repo/scripts/ci/build_modular_madaros.sh"
-printf '#!/usr/bin/env bash\nexit 0\n' > "$repo/bin/compiler-fixture"
-chmod +x "$repo/bin/compiler-fixture"
+# The receipt refuses non-ELF compilers and needs a bootstrap ELF in bin/.
+# Both are inert x86_64 ELF headers: the fixture gates only test -x them.
+elf_header() {
+  printf '\177ELF\002\001\001' > "$1"
+  head -c 11 /dev/zero >> "$1"
+  printf '\076\000' >> "$1"
+  head -c 44 /dev/zero >> "$1"
+  printf '%s\n' "$2" >> "$1"
+  chmod 755 "$1"
+}
+elf_header "$repo/bin/souc-linux-x86_64" bootstrap-fixture
+elf_header "$repo/bin/compiler-fixture" compiler-fixture
 git -C "$repo" init -q
 git -C "$repo" -c user.name='CI Fixture' -c user.email='ci-fixture@example.invalid' add .
 git -C "$repo" -c user.name='CI Fixture' -c user.email='ci-fixture@example.invalid' commit -qm fixture
