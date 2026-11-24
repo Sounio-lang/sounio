@@ -13823,6 +13823,74 @@ pub fn lower_untyped_field_trace_init() with IO, Mut, Div, Panic {
     } else {
         LOWER_UNTYPED_TRACE_ON = 0
     }
+    LOWER_STRICT_FIELD_COUNT = 0
+    if read_env("SOUNIO_STRICT_FIELD") == "1" {
+        LOWER_STRICT_FIELD_ON = 1
+    } else {
+        LOWER_STRICT_FIELD_ON = 0
+    }
+}
+
+// SOUNIO_STRICT_FIELD=1: a field index the lowerer GUESSES instead of reading
+// from the receiver's type refuses the compile (E311), listed after lowering.
+// The guesses are: (1) an untyped name that sits at different indices in
+// different layouts, resolved by majority vote; (2) a name in no layout,
+// resolved by the first-byte hash; (3) a known struct without that field,
+// also hashed. Each picks a word with no warning when it is wrong (#3722,
+// shape 21 of claude/research/2026-11-23-madaros-field-name-guessing.md).
+var LOWER_STRICT_FIELD_ON: i64 = 0
+var LOWER_STRICT_FIELD_COUNT: i64 = 0
+var LOWER_STRICT_FIELD_FN: [i64; 4096] = [0; 4096]
+var LOWER_STRICT_FIELD_NAME: [i64; 4096] = [0; 4096]
+var LOWER_STRICT_FIELD_WHY: [i64; 4096] = [0; 4096]
+// Set by field_idx_from_name / field_idx_from_name_simple: 0 when the index
+// came from a layout without a vote, else the guess kind (1 vote, 2 hash of an
+// unknown name, 3 hash of a field the named struct lacks). Read by the sites
+// that turn the index into a load or a store; the first-order variance walk
+// also resolves names speculatively, and a guess there moves no data.
+var LOWER_FIELD_GUESS_WHY: i64 = 0
+
+fn lower_strict_field_note(fn_name: Name, field_name: Name, why: i64) with Mut, Panic, Div {
+    if LOWER_STRICT_FIELD_ON == 0 { return }
+    let f = ir_intern_name(fn_name)
+    let n = ir_intern_name(field_name)
+    var i: i64 = 0
+    while i < LOWER_STRICT_FIELD_COUNT {
+        if LOWER_STRICT_FIELD_FN[i as usize] == f && LOWER_STRICT_FIELD_NAME[i as usize] == n
+            && LOWER_STRICT_FIELD_WHY[i as usize] == why {
+            return
+        }
+        i = i + 1
+    }
+    if LOWER_STRICT_FIELD_COUNT >= 4096 { return }
+    LOWER_STRICT_FIELD_FN[LOWER_STRICT_FIELD_COUNT as usize] = f
+    LOWER_STRICT_FIELD_NAME[LOWER_STRICT_FIELD_COUNT as usize] = n
+    LOWER_STRICT_FIELD_WHY[LOWER_STRICT_FIELD_COUNT as usize] = why
+    LOWER_STRICT_FIELD_COUNT = LOWER_STRICT_FIELD_COUNT + 1
+}
+
+// Prints one E311 line per distinct guess and returns how many there were.
+pub fn lower_strict_field_report() -> i64 with IO, Mut, Div, Panic {
+    if LOWER_STRICT_FIELD_ON == 0 { return 0 }
+    var i: i64 = 0
+    while i < LOWER_STRICT_FIELD_COUNT {
+        let fnm = ir_name_at(LOWER_STRICT_FIELD_FN[i as usize])
+        let fld = ir_name_at(LOWER_STRICT_FIELD_NAME[i as usize])
+        print("error[E311]: the index of field `")
+        print(str_from_bytes(fld.buf, fld.len))
+        print("` in `")
+        print(str_from_bytes(fnm.buf, fnm.len))
+        let why = LOWER_STRICT_FIELD_WHY[i as usize]
+        if why == 1 {
+            print("` is not read from the receiver's type: the name sits at different indices in different structs and the lowerer would pick one by vote\n")
+        } else if why == 2 {
+            print("` is not read from the receiver's type: no struct has this field and the lowerer would hash its first byte\n")
+        } else {
+            print("` is not read from the receiver's type: the receiver's struct has no such field and the lowerer would hash its first byte\n")
+        }
+        i = i + 1
+    }
+    LOWER_STRICT_FIELD_COUNT
 }
 
 fn lower_field_name_is_ambiguous(table: &StructLayoutTable, field_name: Name) -> bool with Mut, Panic, Div {
@@ -18424,6 +18492,7 @@ impl Lowerer {
 
     fn emit_named_field(self, base_reg: i64, field_name: Name, value_reg: i64) -> Lowerer with Mut, Panic, Div, IO {
         let field_idx = self.field_idx_from_name_simple(field_name)
+        if LOWER_STRICT_FIELD_ON != 0 && LOWER_FIELD_GUESS_WHY != 0 { lower_strict_field_note(self.current_fn_name_for_trace(), field_name, LOWER_FIELD_GUESS_WHY) }
         self.emit(ir_field_set(base_reg, field_idx, value_reg, field_name))
     }
 
@@ -32376,6 +32445,7 @@ impl Lowerer {
 
     // Phase 3.2: Proper struct field index lookup via layout table
     fn field_idx_from_name(self, struct_name: Name, field_name: Name) -> i64 with Mut, Panic, Div {
+        LOWER_FIELD_GUESS_WHY = 0
         // Search layout table for the struct
         var si: i64 = 0
         while si < (*self.struct_layouts).count {
@@ -32391,6 +32461,7 @@ impl Lowerer {
                 // Named layout is present but this field is not on it. Do not
                 // consult other structs: a majority of `.end` is Span.end = 2,
                 // which is also Expr.int_val. Hash only.
+                LOWER_FIELD_GUESS_WHY = 3
                 if field_name.len <= 0 {
                     return 0
                 }
@@ -32403,6 +32474,13 @@ impl Lowerer {
         let consensual = lower_field_idx_untyped(&(*self.struct_layouts), field_name)
         if LOWER_UNTYPED_TRACE_ON != 0 {
             lower_untyped_field_trace_note(&(*self.struct_layouts), self.current_fn_name_for_trace(), field_name, consensual)
+        }
+        if LOWER_STRICT_FIELD_ON != 0 {
+            if lower_field_name_is_ambiguous(&(*self.struct_layouts), field_name) {
+                LOWER_FIELD_GUESS_WHY = 1
+            } else if consensual < 0 {
+                LOWER_FIELD_GUESS_WHY = 2
+            }
         }
         if consensual >= 0 {
             return consensual
@@ -32417,6 +32495,7 @@ impl Lowerer {
     // Phase 3.2: Lookup struct field index without needing struct name
     // Used when we don't know the struct type at the call site
     fn field_idx_from_name_simple(self, n: Name) -> i64 with Mut, Panic, Div {
+        LOWER_FIELD_GUESS_WHY = 0
         // Try numeric field access first (.0, .1, .2, ..., .15, ...). Tuple-let
         // desugaring turns `let (_, ..., v10) = f()` into a temporary tuple plus
         // `let v10 = __tup.10` (#1502), so a tuple slot name can be more than one
@@ -32444,6 +32523,13 @@ impl Lowerer {
         let consensual = lower_field_idx_untyped(&(*self.struct_layouts), n)
         if LOWER_UNTYPED_TRACE_ON != 0 {
             lower_untyped_field_trace_note(&(*self.struct_layouts), self.current_fn_name_for_trace(), n, consensual)
+        }
+        if LOWER_STRICT_FIELD_ON != 0 {
+            if lower_field_name_is_ambiguous(&(*self.struct_layouts), n) {
+                LOWER_FIELD_GUESS_WHY = 1
+            } else if consensual < 0 {
+                LOWER_FIELD_GUESS_WHY = 2
+            }
         }
         if consensual >= 0 {
             return consensual
@@ -40219,6 +40305,7 @@ impl Lowerer {
                         match base_opt {
                             Some(base_expr) => {
                                 let fidx = lo_cmp.field_idx_for_base_ref(&(*target_f128).left, (*target_f128).name)
+                                if LOWER_STRICT_FIELD_ON != 0 && LOWER_FIELD_GUESS_WHY != 0 { lower_strict_field_note(lo_cmp.current_fn_name_for_trace(), (*target_f128).name, LOWER_FIELD_GUESS_WHY) }
                                 let pair_base = lo_cmp.lower_expr_ref(&(*base_expr))
                                 var lo_f = pair_base.0
                                 let base_reg = pair_base.1
@@ -40525,6 +40612,7 @@ impl Lowerer {
                                     false
                                 }
                                 let fidx = lo.field_idx_for_base_ref(&(*target_expr).left, (*target_expr).name)
+                                if LOWER_STRICT_FIELD_ON != 0 && LOWER_FIELD_GUESS_WHY != 0 { lower_strict_field_note(lo.current_fn_name_for_trace(), (*target_expr).name, LOWER_FIELD_GUESS_WHY) }
                                 let field_word = if raw_mut_deref {
                                     lo.raw_payload_word_offset(&(*target_expr).left, (*target_expr).name, fidx)
                                 } else {
@@ -41804,6 +41892,7 @@ impl Lowerer {
                     } else {
                         field_idx
                     }
+                    if LOWER_STRICT_FIELD_ON != 0 && LOWER_FIELD_GUESS_WHY != 0 && (*list).head.name.len > 0 { lower_strict_field_note(lo.current_fn_name_for_trace(), (*list).head.name, LOWER_FIELD_GUESS_WHY) }
                     // V0-E.5.5: an f128 field initializer must produce an F128Bits
                     // handle — a bare `1.0` here is binary128, never f64 bits.
                     let field_is_f128 = struct_name.len > 0
@@ -42428,6 +42517,7 @@ impl Lowerer {
                             return lo.refuse_struct_pattern("unknown field")
                         }
                         let fidx = lo.field_idx_from_name(struct_name, fname)
+                        if LOWER_STRICT_FIELD_ON != 0 && LOWER_FIELD_GUESS_WHY != 0 { lower_strict_field_note(lo.current_fn_name_for_trace(), fname, LOWER_FIELD_GUESS_WHY) }
                         let is_float = lo.field_is_float_for_struct(struct_name, fname)
                         let pair_d = lo.fresh_reg()
                         lo = pair_d.0
@@ -47646,6 +47736,7 @@ impl Lowerer {
     // word 0 and resolve it as a GC handle — heap_alloc leaves that word 0.
     fn prepare_raw_mut_field_index(self, field_expr: &Expr, elem_idx: i64) -> RawMutIndexAddr with Mut, Panic, Div, Alloc, IO {
         let fidx = self.field_idx_for_base_ref(&(*field_expr).left, (*field_expr).name)
+        if LOWER_STRICT_FIELD_ON != 0 && LOWER_FIELD_GUESS_WHY != 0 { lower_strict_field_note(self.current_fn_name_for_trace(), (*field_expr).name, LOWER_FIELD_GUESS_WHY) }
         let word_off = self.raw_payload_word_offset(&(*field_expr).left, (*field_expr).name, fidx)
         let packed_byte = self.raw_payload_field_is_byte(&(*field_expr).left, (*field_expr).name)
         let ptr_pair = match (*field_expr).left {
@@ -47838,6 +47929,7 @@ impl Lowerer {
         } else {
             lo1.field_idx_for_base_ref(&e.left, e.name)
         }
+        if LOWER_STRICT_FIELD_ON != 0 && LOWER_FIELD_GUESS_WHY != 0 { lower_strict_field_note(lo1.current_fn_name_for_trace(), e.name, LOWER_FIELD_GUESS_WHY) }
         // Tuple desugar: let __tup = f(); let a = __tup.0 — float-element base
         // means .0/.1 are f64 even without a struct layout entry.
         var field_is_float = lo1.field_is_float_for_base_ref(&e.left, e.name) || lo1.field_is_float_by_name_simple(e.name)
