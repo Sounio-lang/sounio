@@ -935,7 +935,7 @@ fn tg_name_is_query(n: Name) -> bool with Mut, Panic, Div {
     ir_name_eq_lit(n, "variance_of") || ir_name_eq_lit(n, "covariance_of")
         || fo_merge_kind(n) >= 0
         || ir_name_eq_lit(n, "uncertainty_of") || ir_name_eq_lit(n, "sensitivity_of")
-        || ir_name_eq_lit(n, "hessian_of") || ir_name_eq_lit(n, "second_order_mean")
+        || ir_name_eq_lit(n, "hessian_of") || ir_name_eq_lit(n, "hessian_wrt") || ir_name_eq_lit(n, "second_order_mean")
         || ir_name_eq_lit(n, "correlate") || ir_name_eq_lit(n, "std_of")
         || ir_name_eq_lit(n, "confidence_of")
 }
@@ -17639,6 +17639,18 @@ fn so_name_is_hessian_of_ident(e: &Expr) -> bool with Mut, Panic, Div {
         && n.buf[4] == 105 as i8 && n.buf[5] == 97 as i8
         && n.buf[6] == 110 as i8 && n.buf[7] == 95 as i8
         && n.buf[8] == 111 as i8 && n.buf[9] == 102 as i8 { return true }
+    // `hessian_wrt` reads the same Hessian by source identity, so it must
+    // switch the second-order walk on too. Without this the builtin compiles
+    // and runs, so_enabled stays false, every slot stays -1, and the query
+    // evaluates to exactly zero with no diagnostic.
+    // "hessian_wrt" = 11 chars
+    if n.len == 11
+        && n.buf[0] == 104 as i8 && n.buf[1] == 101 as i8
+        && n.buf[2] == 115 as i8 && n.buf[3] == 115 as i8
+        && n.buf[4] == 105 as i8 && n.buf[5] == 97 as i8
+        && n.buf[6] == 110 as i8 && n.buf[7] == 95 as i8
+        && n.buf[8] == 119 as i8 && n.buf[9] == 114 as i8
+        && n.buf[10] == 116 as i8 { return true }
     // `second_order_mean` reads the same Hessian, so it must switch the
     // second-order walk on too. Without this line the builtin still compiles
     // and still runs -- so_enabled stays false, every so_expr_hess slot stays
@@ -19442,6 +19454,8 @@ impl Lowerer {
             r = self.lower_sensitivity_of_call_ref(&e.args)
         } else if kind == 4 {
             r = self.lower_hessian_of_call_ref(&e.args)
+        } else if kind == 6 {
+            r = self.lower_hessian_wrt_call_ref(&e.args)
         } else {
             r = self.lower_second_order_mean_call_ref(&e.args)
         }
@@ -19463,6 +19477,7 @@ impl Lowerer {
             if kind == 2 { print("uncertainty_of") }
             if kind == 3 { print("sensitivity_of") }
             if kind == 4 { print("hessian_of") }
+            if kind == 6 { print("hessian_wrt") }
             if kind == 5 { print("second_order_mean") }
             print(" in `")
             print(str_from_bytes((*lo.current_func).name.buf, (*lo.current_func).name.len))
@@ -23967,6 +23982,17 @@ impl Lowerer {
         && n.buf[4] == 105 as i8 && n.buf[5] == 97 as i8
         && n.buf[6] == 110 as i8 && n.buf[7] == 95 as i8
         && n.buf[8] == 111 as i8 && n.buf[9] == 102 as i8
+    }
+
+    // "hessian_wrt" = h e s s i a n _ w r t (11 bytes)
+    fn name_is_hessian_wrt(self, n: Name) -> bool with Div {
+        n.len == 11
+        && n.buf[0] == 104 as i8 && n.buf[1] == 101 as i8
+        && n.buf[2] == 115 as i8 && n.buf[3] == 115 as i8
+        && n.buf[4] == 105 as i8 && n.buf[5] == 97 as i8
+        && n.buf[6] == 110 as i8 && n.buf[7] == 95 as i8
+        && n.buf[8] == 119 as i8 && n.buf[9] == 114 as i8
+        && n.buf[10] == 116 as i8
     }
 
     // second_order_mean(expr) -> E2[f] = f(mu) + (1/2) * sum_k H_kk * sigma2_k
@@ -34421,7 +34447,7 @@ impl Lowerer {
                         || self.name_is_uncertainty_of(callee_name)
                         || self.name_is_sensitivity_of(callee_name)
                         || self.name_is_second_order_mean(callee_name)
-                        || self.name_is_hessian_of(callee_name) {
+                        || self.name_is_hessian_of(callee_name) || self.name_is_hessian_wrt(callee_name) {
                         return true
                     }
                     if (*callee_expr).kind == ExprKind::ExprIdent {
@@ -44350,6 +44376,97 @@ impl Lowerer {
         }
     }
 
+    // hessian_wrt(z, x, y): read the same upper-triangle slot hessian_of
+    // reads, but addressed by source identity, not by position. x and y are
+    // the measured sources themselves (Knowledge bindings); each resolves
+    // at compile time to the channel its own variance register was seeded
+    // with (fo_seed_from_variance keys channels by that register), so a dead
+    // measure() removed by DCE, or reordered code, cannot renumber the
+    // answer the way it renumbers hessian_of(z, j, k).
+    //
+    // Refused with E312 when a source does not resolve to exactly one
+    // channel (not a measured source, or an expression carrying several),
+    // or when z does not depend on that channel: in this algebra a zero
+    // Hessian is the claim "no second-order dependence", and handing it
+    // back for a source the value never heard of would dress a wrong
+    // answer as a right one.
+    fn lower_hessian_wrt_call_ref(self, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        fo_require_uncertainty_tracking()
+        match *args {
+            Some(list) => {
+                // Walk z FIRST and snapshot its Hessian table and sensitivity
+                // row: resolving the sources below walks them, and those
+                // walks rewrite the same tables, so reading the table after
+                // them would read the sources' (empty) Hessian, not z's.
+                let saved_loops = FO_INLINE_ALLOW_LOOPS
+                FO_INLINE_ALLOW_LOOPS = 1
+                TG_QUERY_DEPTH = TG_QUERY_DEPTH + 1
+                let pair_v = self.lower_expr_variance_ref(&(*list).head)
+                TG_QUERY_DEPTH = TG_QUERY_DEPTH - 1
+                FO_INLINE_ALLOW_LOOPS = saved_loops
+                var lo = pair_v.0
+                var hess_snap: [i64; 2080] = [-1; 2080]
+                var hi2: i64 = 0
+                while hi2 < 2080 {
+                    hess_snap[hi2 as usize] = (*lo.so_hess).h[hi2 as usize]
+                    hi2 = hi2 + 1
+                }
+                let sens_snap = lo.fo_snapshot_expr_sens()
+                // Resolve the sources: each walk leaves fo_expr_sens holding
+                // that source's own sensitivity row, whose one live channel
+                // is the source's channel.
+                var cx: i64 = 0 - 1
+                var cy: i64 = 0 - 1
+                match (*list).tail {
+                    Some(rest) => {
+                        let px = lo.lower_expr_variance_ref(&(*rest).head)
+                        lo = px.0
+                        cx = lo.fo_primary_channel()
+                        match (*rest).tail {
+                            Some(rest2) => {
+                                let py = lo.lower_expr_variance_ref(&(*rest2).head)
+                                lo = py.0
+                                cy = lo.fo_primary_channel()
+                            }
+                            _ => {}
+                        }
+                    }
+                    _ => {}
+                }
+                let depends_x = cx >= 0 && cx < FO_MAX_CH && sens_snap[cx as usize] >= 0
+                let depends_y = cy >= 0 && cy < FO_MAX_CH && sens_snap[cy as usize] >= 0
+                if !depends_x || !depends_y {
+                    print("error[E312]: hessian_wrt source is not a measured source that the value depends on\n")
+                    print("   = note: hessian_wrt(z, x, y) indexes by the measured sources themselves; a source with no channel, several channels, or no dependence from z is refused instead of reading a Hessian slot by position\n")
+                    lo = lo.report_error_at(44309)
+                    let zr = lo.emit_f64_const(0.0)
+                    var lo_z = zr.0
+                    lo_z = lo_z.emit(ir_mark_float_reg(zr.1))
+                    return (lo_z, zr.1)
+                }
+                let idx = lo.so_hess_idx(cx, cy)
+                let slot = hess_snap[idx as usize]
+                if slot >= 0 {
+                    let cp = lo.fresh_reg()
+                    lo = cp.0
+                    lo = lo.emit(ir_copy(cp.1, slot))
+                    lo = lo.emit(ir_mark_float_reg(cp.1))
+                    return (lo, cp.1)
+                }
+                let zr = lo.emit_f64_const(0.0)
+                var lo_z = zr.0
+                lo_z = lo_z.emit(ir_mark_float_reg(zr.1))
+                (lo_z, zr.1)
+            }
+            _ => {
+                let zr = self.emit_f64_const(0.0)
+                var lo_z = zr.0
+                lo_z = lo_z.emit(ir_mark_float_reg(zr.1))
+                (lo_z, zr.1)
+            }
+        }
+    }
+
     // second_order_mean(expr): E2[f] = f(mu) + (1/2) * sum_k H_kk * sigma2_k
     //
     // Built on this tree's own second-order machinery rather than imported: the
@@ -45623,7 +45740,7 @@ impl Lowerer {
             || self.name_is_covariance_of(callee_name)
             || self.name_is_uncertainty_of(callee_name)
             || self.name_is_sensitivity_of(callee_name)
-            || self.name_is_hessian_of(callee_name)
+            || self.name_is_hessian_of(callee_name) || self.name_is_hessian_wrt(callee_name)
             || self.name_is_correlate(callee_name)
             || fo_merge_kind(callee_name) >= 0
             || self.name_is_second_order_mean(callee_name)
@@ -45758,6 +45875,9 @@ impl Lowerer {
         }
         if self.name_is_hessian_of(callee_name) {
             return self.tg_checked_query(4, e)
+        }
+        if self.name_is_hessian_wrt(callee_name) {
+            return self.tg_checked_query(6, e)
         }
         if self.name_is_correlate(callee_name) {
             return self.lower_correlate_call_ref(&e.args)
