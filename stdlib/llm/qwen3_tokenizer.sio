@@ -1,0 +1,1329 @@
+// stdlib::llm::qwen3_tokenizer — Native Qwen3 Byte-Level BPE tokenizer using llm::mmap ONLY.
+//
+// Zero-dependency tokenizer loader & encoder/decoder:
+//   - Opens tokenizer.json via mapped_shard_open, validates via mapped_shard_read_u8,
+//     scans memory-mapped bytes cleanly, and closes MappedShard before returning.
+//   - All index tables and string blobs reside in OS-paged PageArenas (llm::mmap).
+//   - Supports BOTH HuggingFace merges formats: "a b" strings and ["a", "b"] pairs.
+//   - Order-independent added_tokens parser ("id" and "content" in any order), up to 256.
+//   - Hash tables with 524288 slots (mask = 524287) supporting 151,936+ vocab up to 262144
+//     vocab entries + 262144 merges + 16 MiB string blob.
+//   - Qwen3 pre-tokenization: longest-match added_tokens split before BPE +
+//     Qwen3 regex chunking (contractions, letter runs, single-digit \p{N} split 0..9,
+//     punctuation runs, newline & trailing-space rules).
+
+use llm::mmap::{
+    MappedShard,
+    PageArena,
+    mapped_shard_is_ok,
+    mapped_shard_len,
+    mapped_shard_open,
+    mapped_shard_close,
+    mapped_shard_ptr,
+    mapped_shard_read_u8,
+    page_arena_alloc,
+    page_arena_free,
+    page_arena_is_ok,
+    page_arena_ptr,
+    page_arena_len,
+}
+
+fn qt_max_vocab() -> i64 { 262144 }
+fn qt_max_merges() -> i64 { 262144 }
+fn qt_hash_slots() -> i64 { 524288 }
+fn qt_hash_mask() -> i64 { 524287 }
+fn qt_max_special() -> i64 { 256 }
+fn qt_blob_cap() -> i64 { 16777216 }
+
+fn qt_off_tok_off() -> i64 { 0 }
+fn qt_off_tok_len() -> i64 { 2097152 }
+fn qt_off_tok_id() -> i64 { 4194304 }
+fn qt_off_id_to_tok() -> i64 { 6291456 }
+fn qt_off_hash_slot() -> i64 { 8388608 }
+fn qt_off_merge_a() -> i64 { 12582912 }
+fn qt_off_merge_b() -> i64 { 14680064 }
+fn qt_off_merge_out() -> i64 { 16777216 }
+fn qt_off_pair_slot() -> i64 { 18874368 }
+fn qt_off_init_id() -> i64 { 23068672 }
+fn qt_off_rev_byte() -> i64 { 23070720 }
+fn qt_off_sp_id() -> i64 { 23074816 }
+fn qt_off_sp_off() -> i64 { 23076864 }
+fn qt_off_sp_len() -> i64 { 23078912 }
+fn qt_off_map_cp() -> i64 { 23080960 }
+fn qt_arena_bytes() -> i64 { 23083008 }
+
+pub linear struct Qwen3Tokenizer {
+    pub ok: bool,
+    pub n_vocab: i64,
+    pub n_merges: i64,
+    pub n_special: i64,
+    pub arena_ptr: i64,
+    pub arena_len: i64,
+    pub blob_ptr: i64,
+    pub blob_len: i64,
+    pub blob_cap: i64,
+}
+
+fn qt_tokenizer_empty() -> Qwen3Tokenizer {
+    Qwen3Tokenizer {
+        ok: false,
+        n_vocab: 0,
+        n_merges: 0,
+        n_special: 0,
+        arena_ptr: 0,
+        arena_len: 0,
+        blob_ptr: 0,
+        blob_len: 0,
+        blob_cap: 0,
+    }
+}
+
+pub fn qwen3_tokenizer_is_ok(tok: &Qwen3Tokenizer) -> bool {
+    tok.ok
+}
+
+pub fn qwen3_tokenizer_free(tok: Qwen3Tokenizer) -> i64 with IO, Mut {
+    let Qwen3Tokenizer {
+        ok: _,
+        n_vocab: _,
+        n_merges: _,
+        n_special: _,
+        arena_ptr,
+        arena_len,
+        blob_ptr,
+        blob_len: _,
+        blob_cap,
+    } = tok
+    var rc: i64 = 0
+    if arena_ptr > 0 && arena_len > 0 {
+        let a = PageArena { ptr: arena_ptr, len: arena_len, ok: true }
+        let r1 = page_arena_free(a)
+        if r1 != 0 { rc = r1 }
+    }
+    if blob_ptr > 0 && blob_cap > 0 {
+        let b = PageArena { ptr: blob_ptr, len: blob_cap, ok: true }
+        let r2 = page_arena_free(b)
+        if r2 != 0 { rc = r2 }
+    }
+    rc
+}
+
+fn qt_get_i64(base: i64, table_off: i64, idx: i64) -> i64 {
+    ptr_read_i64_le(base, table_off + idx * 8)
+}
+
+fn qt_set_i64(base: i64, table_off: i64, idx: i64, val: i64) with Mut {
+    let _w = ptr_write_i64_le(base, table_off + idx * 8, val)
+}
+
+fn qt_blob_put(tok: &!Qwen3Tokenizer, src_ptr: i64, from: i64, len: i64) -> i64 with Mut {
+    if len < 0 || tok.blob_len + len > tok.blob_cap {
+        return -1
+    }
+    let off = tok.blob_len
+    var i: i64 = 0
+    while i < len {
+        let _w = ptr_write_u8(tok.blob_ptr, off + i, ptr_read_u8(src_ptr, from + i))
+        i = i + 1
+    }
+    tok.blob_len = off + len
+    off
+}
+
+fn qt_hash_ptr(data_ptr: i64, from: i64, len: i64) -> i64 {
+    var h: i64 = 1469598103934665603
+    var i: i64 = 0
+    while i < len {
+        let b = ptr_read_u8(data_ptr, from + i)
+        h = wrapping_mul(h ^ b, 1099511628211)
+        i = i + 1
+    }
+    (h ^ (h >> 19)) & qt_hash_mask()
+}
+
+fn qt_pair_hash(a: i64, b: i64) -> i64 {
+    var h: i64 = 1469598103934665603
+    h = wrapping_mul(h ^ a, 1099511628211)
+    h = wrapping_mul(h ^ b, 1099511628211)
+    (h ^ (h >> 19)) & qt_hash_mask()
+}
+
+fn qt_tok_eq(tok: &Qwen3Tokenizer, ti: i64, data_ptr: i64, from: i64, len: i64) -> bool {
+    let tlen = qt_get_i64(tok.arena_ptr, qt_off_tok_len(), ti)
+    if tlen != len { return false }
+    let toff = qt_get_i64(tok.arena_ptr, qt_off_tok_off(), ti)
+    var i: i64 = 0
+    while i < len {
+        if ptr_read_u8(tok.blob_ptr, toff + i) != ptr_read_u8(data_ptr, from + i) {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+pub fn qwen3_lookup(tok: &Qwen3Tokenizer, data_ptr: i64, from: i64, len: i64) -> i64 {
+    if !tok.ok && tok.n_vocab <= 0 { return -1 }
+    let mask = qt_hash_mask()
+    var slot = qt_hash_ptr(data_ptr, from, len)
+    var guard: i64 = 0
+    let limit = qt_hash_slots()
+    while guard < limit {
+        let v = qt_get_i64(tok.arena_ptr, qt_off_hash_slot(), slot)
+        if v == 0 { return -1 }
+        let ti = v - 1
+        if qt_tok_eq(tok, ti, data_ptr, from, len) {
+            return qt_get_i64(tok.arena_ptr, qt_off_tok_id(), ti)
+        }
+        slot = (slot + 1) & mask
+        guard = guard + 1
+    }
+    -1
+}
+
+fn qt_hash_insert(tok: &!Qwen3Tokenizer, ti: i64) with Mut {
+    let mask = qt_hash_mask()
+    let off = qt_get_i64(tok.arena_ptr, qt_off_tok_off(), ti)
+    let len = qt_get_i64(tok.arena_ptr, qt_off_tok_len(), ti)
+    var slot = qt_hash_ptr(tok.blob_ptr, off, len)
+    var guard: i64 = 0
+    let limit = qt_hash_slots()
+    while guard < limit {
+        if qt_get_i64(tok.arena_ptr, qt_off_hash_slot(), slot) == 0 {
+            qt_set_i64(tok.arena_ptr, qt_off_hash_slot(), slot, ti + 1)
+            return
+        }
+        slot = (slot + 1) & mask
+        guard = guard + 1
+    }
+}
+
+fn qt_pair_rank(tok: &Qwen3Tokenizer, a: i64, b: i64) -> i64 {
+    let mask = qt_hash_mask()
+    var slot = qt_pair_hash(a, b)
+    var guard: i64 = 0
+    let limit = qt_hash_slots()
+    while guard < limit {
+        let v = qt_get_i64(tok.arena_ptr, qt_off_pair_slot(), slot)
+        if v == 0 { return -1 }
+        let r = v - 1
+        if qt_get_i64(tok.arena_ptr, qt_off_merge_a(), r) == a && qt_get_i64(tok.arena_ptr, qt_off_merge_b(), r) == b {
+            return r
+        }
+        slot = (slot + 1) & mask
+        guard = guard + 1
+    }
+    -1
+}
+
+fn qt_pair_insert(tok: &!Qwen3Tokenizer, a: i64, b: i64, rank: i64) with Mut {
+    let mask = qt_hash_mask()
+    var slot = qt_pair_hash(a, b)
+    var guard: i64 = 0
+    let limit = qt_hash_slots()
+    while guard < limit {
+        let v = qt_get_i64(tok.arena_ptr, qt_off_pair_slot(), slot)
+        if v == 0 {
+            qt_set_i64(tok.arena_ptr, qt_off_pair_slot(), slot, rank + 1)
+            return
+        }
+        let r = v - 1
+        if qt_get_i64(tok.arena_ptr, qt_off_merge_a(), r) == a && qt_get_i64(tok.arena_ptr, qt_off_merge_b(), r) == b {
+            return
+        }
+        slot = (slot + 1) & mask
+        guard = guard + 1
+    }
+}
+
+// ---- JSON scanning & decoding ----
+
+fn qt_skip_ws(data: i64, len: i64, pos: i64) -> i64 {
+    var i = pos
+    while i < len {
+        let c = ptr_read_u8(data, i)
+        if c == 32 || c == 10 || c == 13 || c == 9 {
+            i = i + 1
+        } else {
+            return i
+        }
+    }
+    i
+}
+
+fn qt_skip_ws_comma(data: i64, len: i64, pos: i64) -> i64 {
+    var i = pos
+    while i < len {
+        let c = ptr_read_u8(data, i)
+        if c == 32 || c == 10 || c == 13 || c == 9 || c == 44 {
+            i = i + 1
+        } else {
+            return i
+        }
+    }
+    i
+}
+
+fn qt_hex4(data: i64, pos: i64) -> i64 {
+    var v: i64 = 0
+    var i: i64 = 0
+    while i < 4 {
+        let c = ptr_read_u8(data, pos + i)
+        var d: i64 = 0
+        if c >= 48 && c <= 57 { d = c - 48 }
+        else if c >= 97 && c <= 102 { d = c - 87 }
+        else if c >= 65 && c <= 70 { d = c - 55 }
+        v = v * 16 + d
+        i = i + 1
+    }
+    v
+}
+
+fn qt_utf8_put(dst: i64, out: i64, cap: i64, cp: i64) -> i64 with Mut {
+    if cp < 128 {
+        if out < cap { let _w = ptr_write_u8(dst, out, cp) }
+        return 1
+    }
+    if cp < 2048 {
+        if out + 1 < cap {
+            let _w0 = ptr_write_u8(dst, out, 192 | (cp >> 6))
+            let _w1 = ptr_write_u8(dst, out + 1, 128 | (cp & 63))
+        }
+        return 2
+    }
+    if cp < 65536 {
+        if out + 2 < cap {
+            let _w0 = ptr_write_u8(dst, out, 224 | (cp >> 12))
+            let _w1 = ptr_write_u8(dst, out + 1, 128 | ((cp >> 6) & 63))
+            let _w2 = ptr_write_u8(dst, out + 2, 128 | (cp & 63))
+        }
+        return 3
+    }
+    if out + 3 < cap {
+        let _w0 = ptr_write_u8(dst, out, 240 | (cp >> 18))
+        let _w1 = ptr_write_u8(dst, out + 1, 128 | ((cp >> 12) & 63))
+        let _w2 = ptr_write_u8(dst, out + 2, 128 | ((cp >> 6) & 63))
+        let _w3 = ptr_write_u8(dst, out + 3, 128 | (cp & 63))
+    }
+    4
+}
+
+// Parse JSON string starting at opening quote data[pos] into dst[0..cap).
+// Writes next_pos into state[0] and returns decoded byte count (or -1 on error).
+fn qt_parse_json_string(data: i64, len: i64, pos: i64, dst: i64, cap: i64, state: i64) -> i64 with Mut {
+    if pos >= len || ptr_read_u8(data, pos) != 34 {
+        let _w = ptr_write_i64_le(state, 0, pos)
+        return -1
+    }
+    var i = pos + 1
+    var out: i64 = 0
+    while i < len {
+        let c = ptr_read_u8(data, i)
+        if c == 34 {
+            let _w = ptr_write_i64_le(state, 0, i + 1)
+            return out
+        }
+        if c == 92 && i + 1 < len {
+            let e = ptr_read_u8(data, i + 1)
+            if e == 110 {
+                if out < cap { let _w = ptr_write_u8(dst, out, 10) }
+                out = out + 1
+                i = i + 2
+            } else if e == 116 {
+                if out < cap { let _w = ptr_write_u8(dst, out, 9) }
+                out = out + 1
+                i = i + 2
+            } else if e == 114 {
+                if out < cap { let _w = ptr_write_u8(dst, out, 13) }
+                out = out + 1
+                i = i + 2
+            } else if e == 98 {
+                if out < cap { let _w = ptr_write_u8(dst, out, 8) }
+                out = out + 1
+                i = i + 2
+            } else if e == 102 {
+                if out < cap { let _w = ptr_write_u8(dst, out, 12) }
+                out = out + 1
+                i = i + 2
+            } else if e == 47 || e == 34 || e == 92 {
+                if out < cap { let _w = ptr_write_u8(dst, out, e) }
+                out = out + 1
+                i = i + 2
+            } else if e == 117 && i + 5 < len {
+                var cp = qt_hex4(data, i + 2)
+                var adv: i64 = 6
+                if cp >= 55296 && cp <= 56319 && i + 11 < len && ptr_read_u8(data, i + 6) == 92 && ptr_read_u8(data, i + 7) == 117 {
+                    let lo = qt_hex4(data, i + 8)
+                    if lo >= 56320 && lo <= 57343 {
+                        cp = 65536 + ((cp - 55296) << 10) + (lo - 56320)
+                        adv = 12
+                    }
+                }
+                out = out + qt_utf8_put(dst, out, cap, cp)
+                i = i + adv
+            } else {
+                if out < cap { let _w = ptr_write_u8(dst, out, e) }
+                out = out + 1
+                i = i + 2
+            }
+        } else {
+            if out < cap { let _w = ptr_write_u8(dst, out, c) }
+            out = out + 1
+            i = i + 1
+        }
+    }
+    let _w = ptr_write_i64_le(state, 0, i)
+    return 0 - 1
+}
+
+// Parse JSON integer at/after pos; writes next_pos to state[0] and returns value.
+fn qt_parse_json_int(data: i64, len: i64, pos: i64, state: i64) -> i64 with Mut {
+    var i = qt_skip_ws(data, len, pos)
+    var neg = false
+    if i < len && ptr_read_u8(data, i) == 45 {
+        neg = true
+        i = i + 1
+    }
+    var v: i64 = 0
+    while i < len {
+        let c = ptr_read_u8(data, i)
+        if c < 48 || c > 57 { break }
+        v = v * 10 + (c - 48)
+        i = i + 1
+    }
+    if neg { v = 0 - v }
+    let _w = ptr_write_i64_le(state, 0, i)
+    v
+}
+
+fn qt_skip_json_string(data: i64, len: i64, pos: i64) -> i64 {
+    if pos >= len || ptr_read_u8(data, pos) != 34 { return pos }
+    var i = pos + 1
+    while i < len {
+        let c = ptr_read_u8(data, i)
+        if c == 34 { return i + 1 }
+        if c == 92 && i + 1 < len {
+            i = i + 2
+        } else {
+            i = i + 1
+        }
+    }
+    i
+}
+
+fn qt_skip_json_value(data: i64, len: i64, pos: i64) -> i64 {
+    var i = qt_skip_ws(data, len, pos)
+    if i >= len { return i }
+    let c = ptr_read_u8(data, i)
+    if c == 34 {
+        return qt_skip_json_string(data, len, i)
+    }
+    if c == 123 || c == 91 {
+        var depth: i64 = 1
+        i = i + 1
+        while i < len && depth > 0 {
+            let b = ptr_read_u8(data, i)
+            if b == 34 {
+                i = qt_skip_json_string(data, len, i)
+            } else if b == 123 || b == 91 {
+                depth = depth + 1
+                i = i + 1
+            } else if b == 125 || b == 93 {
+                depth = depth - 1
+                i = i + 1
+            } else {
+                i = i + 1
+            }
+        }
+        return i
+    }
+    while i < len {
+        let b = ptr_read_u8(data, i)
+        if b == 44 || b == 125 || b == 93 || b == 32 || b == 10 || b == 13 || b == 9 {
+            return i
+        }
+        i = i + 1
+    }
+    i
+}
+
+fn qt_buf_eq_str(buf: i64, blen: i64, lit: string) -> bool {
+    let n = str_len(lit)
+    if blen != n { return false }
+    var i: i64 = 0
+    while i < n {
+        if ptr_read_u8(buf, i) != (str_char_at(lit, i) & 255) {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+// Find a direct key inside the JSON object at obj_pos ('{').
+// Returns the byte offset of the key's value, or -1 if not present.
+fn qt_find_obj_key(data: i64, len: i64, obj_pos: i64, key_lit: string, scratch: i64, state: i64) -> i64 with Mut {
+    var i = qt_skip_ws(data, len, obj_pos)
+    if i >= len || ptr_read_u8(data, i) != 123 { return -1 }
+    i = i + 1
+    while i < len {
+        i = qt_skip_ws_comma(data, len, i)
+        if i >= len || ptr_read_u8(data, i) == 125 { return -1 }
+        if ptr_read_u8(data, i) != 34 { return -1 }
+        let klen = qt_parse_json_string(data, len, i, scratch, 65536, state)
+        if klen < 0 { return -1 }
+        i = ptr_read_i64_le(state, 0)
+        i = qt_skip_ws(data, len, i)
+        if i >= len || ptr_read_u8(data, i) != 58 { return -1 }
+        i = qt_skip_ws(data, len, i + 1)
+        if qt_buf_eq_str(scratch, klen, key_lit) {
+            return i
+        }
+        i = qt_skip_json_value(data, len, i)
+    }
+    -1
+}
+
+// Parse added_tokens array at arr_pos ('['). Handles "id" and "content" in either order.
+fn qt_parse_added_tokens(tok: &!Qwen3Tokenizer, data: i64, len: i64, arr_pos: i64, scratch: i64, state: i64) -> bool with Mut {
+    var i = qt_skip_ws(data, len, arr_pos)
+    if i >= len || ptr_read_u8(data, i) != 91 { return false }
+    i = i + 1
+    let max_sp = qt_max_special()
+    while i < len {
+        i = qt_skip_ws_comma(data, len, i)
+        if i >= len { return false }
+        let c = ptr_read_u8(data, i)
+        if c == 93 { return true }
+        if c != 123 {
+            i = qt_skip_json_value(data, len, i)
+        } else {
+            i = i + 1
+            var id_val: i64 = -1
+            var content_len: i64 = -1
+            var content_off: i64 = -1
+            while i < len {
+                i = qt_skip_ws_comma(data, len, i)
+                if i >= len { return false }
+                let b = ptr_read_u8(data, i)
+                if b == 125 {
+                    i = i + 1
+                    break
+                }
+                if b != 34 { return false }
+                let klen = qt_parse_json_string(data, len, i, scratch, 65536, state)
+                if klen < 0 { return false }
+                i = ptr_read_i64_le(state, 0)
+                i = qt_skip_ws(data, len, i)
+                if i >= len || ptr_read_u8(data, i) != 58 { return false }
+                i = qt_skip_ws(data, len, i + 1)
+                if qt_buf_eq_str(scratch, klen, "id") {
+                    id_val = qt_parse_json_int(data, len, i, state)
+                    i = ptr_read_i64_le(state, 0)
+                } else if qt_buf_eq_str(scratch, klen, "content") {
+                    let clen = qt_parse_json_string(data, len, i, scratch, 65536, state)
+                    if clen < 0 { return false }
+                    i = ptr_read_i64_le(state, 0)
+                    if clen > 0 {
+                        let off = qt_blob_put(tok, scratch, 0, clen)
+                        if off >= 0 {
+                            content_off = off
+                            content_len = clen
+                        }
+                    }
+                } else {
+                    i = qt_skip_json_value(data, len, i)
+                }
+            }
+            if id_val >= 0 && content_len > 0 && content_off >= 0 && tok.n_special < max_sp {
+                let s = tok.n_special
+                qt_set_i64(tok.arena_ptr, qt_off_sp_id(), s, id_val)
+                qt_set_i64(tok.arena_ptr, qt_off_sp_off(), s, content_off)
+                qt_set_i64(tok.arena_ptr, qt_off_sp_len(), s, content_len)
+                tok.n_special = s + 1
+            }
+        }
+    }
+    true
+}
+
+fn qt_parse_vocab(tok: &!Qwen3Tokenizer, data: i64, len: i64, obj_pos: i64, scratch: i64, state: i64) -> bool with Mut {
+    var i = qt_skip_ws(data, len, obj_pos)
+    if i >= len || ptr_read_u8(data, i) != 123 { return false }
+    i = i + 1
+    let max_v = qt_max_vocab()
+    var ntok: i64 = 0
+    while i < len && ntok < max_v {
+        i = qt_skip_ws_comma(data, len, i)
+        if i >= len { return false }
+        let c = ptr_read_u8(data, i)
+        if c == 125 {
+            tok.n_vocab = ntok
+            return true
+        }
+        if c != 34 { return false }
+        let tlen = qt_parse_json_string(data, len, i, scratch, 65536, state)
+        if tlen < 0 { return false }
+        i = ptr_read_i64_le(state, 0)
+        i = qt_skip_ws(data, len, i)
+        if i >= len || ptr_read_u8(data, i) != 58 { return false }
+        let idv = qt_parse_json_int(data, len, i + 1, state)
+        i = ptr_read_i64_le(state, 0)
+        let off = qt_blob_put(tok, scratch, 0, tlen)
+        if off < 0 { return false }
+        qt_set_i64(tok.arena_ptr, qt_off_tok_off(), ntok, off)
+        qt_set_i64(tok.arena_ptr, qt_off_tok_len(), ntok, tlen)
+        qt_set_i64(tok.arena_ptr, qt_off_tok_id(), ntok, idv)
+        if idv >= 0 && idv < max_v {
+            qt_set_i64(tok.arena_ptr, qt_off_id_to_tok(), idv, ntok + 1)
+        }
+        qt_hash_insert(tok, ntok)
+        ntok = ntok + 1
+    }
+    tok.n_vocab = ntok
+    ntok > 0
+}
+
+fn qt_record_merge(tok: &!Qwen3Tokenizer, scratch_a: i64, len_a: i64, scratch_b: i64, len_b: i64, scratch_pair: i64, nm: i64) -> i64 with Mut {
+    let ida = qwen3_lookup(tok, scratch_a, 0, len_a)
+    let idb = qwen3_lookup(tok, scratch_b, 0, len_b)
+    if ida < 0 || idb < 0 { return nm }
+    if len_a + len_b > 131072 { return nm }
+    var k: i64 = 0
+    while k < len_a {
+        let _w = ptr_write_u8(scratch_pair, k, ptr_read_u8(scratch_a, k))
+        k = k + 1
+    }
+    k = 0
+    while k < len_b {
+        let _w = ptr_write_u8(scratch_pair, len_a + k, ptr_read_u8(scratch_b, k))
+        k = k + 1
+    }
+    let ido = qwen3_lookup(tok, scratch_pair, 0, len_a + len_b)
+    if ido < 0 { return nm }
+    qt_set_i64(tok.arena_ptr, qt_off_merge_a(), nm, ida)
+    qt_set_i64(tok.arena_ptr, qt_off_merge_b(), nm, idb)
+    qt_set_i64(tok.arena_ptr, qt_off_merge_out(), nm, ido)
+    qt_pair_insert(tok, ida, idb, nm)
+    nm + 1
+}
+
+// Supports both "a b" string merges and ["a", "b"] array pair merges.
+fn qt_parse_merges(tok: &!Qwen3Tokenizer, data: i64, len: i64, arr_pos: i64, scratch_a: i64, scratch_b: i64, scratch_pair: i64, state: i64) -> bool with Mut {
+    var i = qt_skip_ws(data, len, arr_pos)
+    if i >= len || ptr_read_u8(data, i) != 91 { return false }
+    i = i + 1
+    let max_m = qt_max_merges()
+    var nm: i64 = 0
+    while i < len && nm < max_m {
+        i = qt_skip_ws_comma(data, len, i)
+        if i >= len { return false }
+        let c = ptr_read_u8(data, i)
+        if c == 93 {
+            tok.n_merges = nm
+            return true
+        }
+        if c == 34 {
+            let rlen = qt_parse_json_string(data, len, i, scratch_a, 65536, state)
+            if rlen < 0 { return false }
+            i = ptr_read_i64_le(state, 0)
+            var sp: i64 = -1
+            var j: i64 = 0
+            while j < rlen {
+                if ptr_read_u8(scratch_a, j) == 32 {
+                    sp = j
+                    break
+                }
+                j = j + 1
+            }
+            if sp > 0 && sp + 1 < rlen {
+                let len_b = rlen - sp - 1
+                var k: i64 = 0
+                while k < len_b {
+                    let _w = ptr_write_u8(scratch_b, k, ptr_read_u8(scratch_a, sp + 1 + k))
+                    k = k + 1
+                }
+                nm = qt_record_merge(tok, scratch_a, sp, scratch_b, len_b, scratch_pair, nm)
+            }
+        } else if c == 91 {
+            i = qt_skip_ws(data, len, i + 1)
+            let len_a = qt_parse_json_string(data, len, i, scratch_a, 65536, state)
+            if len_a < 0 { return false }
+            i = ptr_read_i64_le(state, 0)
+            i = qt_skip_ws_comma(data, len, i)
+            let len_b = qt_parse_json_string(data, len, i, scratch_b, 65536, state)
+            if len_b < 0 { return false }
+            i = ptr_read_i64_le(state, 0)
+            while i < len && ptr_read_u8(data, i) != 93 {
+                i = i + 1
+            }
+            if i < len && ptr_read_u8(data, i) == 93 { i = i + 1 }
+            nm = qt_record_merge(tok, scratch_a, len_a, scratch_b, len_b, scratch_pair, nm)
+        } else {
+            return false
+        }
+    }
+    tok.n_merges = nm
+    true
+}
+
+fn qt_init_byte_tables(tok: &!Qwen3Tokenizer) with Mut {
+    var b: i64 = 0
+    while b < 512 {
+        qt_set_i64(tok.arena_ptr, qt_off_rev_byte(), b, -1)
+        b = b + 1
+    }
+    var n: i64 = 0
+    b = 0
+    while b < 256 {
+        var cp: i64 = 0
+        if (b >= 33 && b <= 126) || (b >= 161 && b <= 172) || (b >= 174 && b <= 255) {
+            cp = b
+        } else {
+            cp = 256 + n
+            n = n + 1
+        }
+        qt_set_i64(tok.arena_ptr, qt_off_map_cp(), b, cp)
+        qt_set_i64(tok.arena_ptr, qt_off_rev_byte(), cp, b)
+        qt_set_i64(tok.arena_ptr, qt_off_init_id(), b, -1)
+        b = b + 1
+    }
+}
+
+fn qt_populate_init_ids(tok: &!Qwen3Tokenizer, scratch: i64) with Mut {
+    var b: i64 = 0
+    while b < 256 {
+        let cp = qt_get_i64(tok.arena_ptr, qt_off_map_cp(), b)
+        let nb = qt_utf8_put(scratch, 0, 16, cp)
+        let id = qwen3_lookup(tok, scratch, 0, nb)
+        qt_set_i64(tok.arena_ptr, qt_off_init_id(), b, id)
+        b = b + 1
+    }
+}
+
+fn qt_parse_into(tok: &!Qwen3Tokenizer, shard: &MappedShard, work_ptr: i64) -> bool with Mut, Panic, Div {
+    let slen = mapped_shard_len(shard)
+    let s_ptr = mapped_shard_ptr(shard)
+    if s_ptr <= 0 || slen <= 2 { return false }
+
+    let scratch_a = work_ptr
+    let scratch_b = work_ptr + 65536
+    let scratch_pair = work_ptr + 131072
+    let state_ptr = work_ptr + 262000
+
+    qt_init_byte_tables(tok)
+
+    let root_pos = qt_skip_ws(s_ptr, slen, 0)
+    if root_pos >= slen || ptr_read_u8(s_ptr, root_pos) != 123 {
+        return false
+    }
+
+    let added_pos = qt_find_obj_key(s_ptr, slen, root_pos, "added_tokens", scratch_a, state_ptr)
+    if added_pos >= 0 {
+        if !qt_parse_added_tokens(tok, s_ptr, slen, added_pos, scratch_a, state_ptr) {
+            return false
+        }
+    }
+
+    let model_pos = qt_find_obj_key(s_ptr, slen, root_pos, "model", scratch_a, state_ptr)
+    if model_pos < 0 { return false }
+    let vocab_pos = qt_find_obj_key(s_ptr, slen, model_pos, "vocab", scratch_a, state_ptr)
+    let merges_pos = qt_find_obj_key(s_ptr, slen, model_pos, "merges", scratch_a, state_ptr)
+    if vocab_pos < 0 || merges_pos < 0 { return false }
+
+    if !qt_parse_vocab(tok, s_ptr, slen, vocab_pos, scratch_a, state_ptr) {
+        return false
+    }
+    tok.ok = true
+    if !qt_parse_merges(tok, s_ptr, slen, merges_pos, scratch_a, scratch_b, scratch_pair, state_ptr) {
+        tok.ok = false
+        return false
+    }
+    if tok.n_vocab <= 0 {
+        tok.ok = false
+        return false
+    }
+    qt_populate_init_ids(tok, scratch_a)
+    true
+}
+
+fn qt_load_from_shard(shard: &MappedShard) -> Qwen3Tokenizer with IO, Mut, Panic, Div {
+    if !mapped_shard_is_ok(shard) { return qt_tokenizer_empty() }
+    let slen = mapped_shard_len(shard)
+    if slen <= 2 { return qt_tokenizer_empty() }
+
+    // Validate readability through mapped_shard_read_u8 before scanning.
+    let r_first = mapped_shard_read_u8(shard, 0)
+    let r_last = mapped_shard_read_u8(shard, slen - 1)
+    if !r_first.1 || !r_last.1 { return qt_tokenizer_empty() }
+
+    let arena = page_arena_alloc(qt_arena_bytes())
+    let blob = page_arena_alloc(qt_blob_cap())
+    let work = page_arena_alloc(262144)
+
+    let allocs_ok = page_arena_is_ok(&arena) && page_arena_is_ok(&blob) && page_arena_is_ok(&work)
+    let a_ptr = page_arena_ptr(&arena)
+    let a_len = page_arena_len(&arena)
+    let b_ptr = page_arena_ptr(&blob)
+    let b_cap = page_arena_len(&blob)
+    let w_ptr = page_arena_ptr(&work)
+
+    if allocs_ok {
+        let PageArena { ptr: _ap, len: _al, ok: _ao } = arena
+        let PageArena { ptr: _bp, len: _bl, ok: _bo } = blob
+        var tok = Qwen3Tokenizer {
+            ok: false,
+            n_vocab: 0,
+            n_merges: 0,
+            n_special: 0,
+            arena_ptr: a_ptr,
+            arena_len: a_len,
+            blob_ptr: b_ptr,
+            blob_len: 0,
+            blob_cap: b_cap,
+        }
+        let ok = qt_parse_into(&!tok, shard, w_ptr)
+        let _fw = page_arena_free(work)
+        if ok {
+            return tok
+        } else {
+            let _ft = qwen3_tokenizer_free(tok)
+            return qt_tokenizer_empty()
+        }
+    } else {
+        let _fw = page_arena_free(work)
+        let _fa = page_arena_free(arena)
+        let _fb = page_arena_free(blob)
+        return qt_tokenizer_empty()
+    }
+}
+
+pub fn qwen3_tokenizer_load(path: string) -> Qwen3Tokenizer with IO, Mut, Panic, Div {
+    let shard = mapped_shard_open(path)
+    let tok = qt_load_from_shard(&shard)
+    let _c = mapped_shard_close(shard)
+    tok
+}
+
+pub fn qwen3_special_id(tok: &Qwen3Tokenizer, literal: string) -> i64 {
+    if !tok.ok { return -1 }
+    let n = str_len(literal)
+    var s: i64 = 0
+    while s < tok.n_special {
+        let slen = qt_get_i64(tok.arena_ptr, qt_off_sp_len(), s)
+        if slen == n {
+            let soff = qt_get_i64(tok.arena_ptr, qt_off_sp_off(), s)
+            var eq = true
+            var i: i64 = 0
+            while i < n {
+                if ptr_read_u8(tok.blob_ptr, soff + i) != (str_char_at(literal, i) & 255) {
+                    eq = false
+                    break
+                }
+                i = i + 1
+            }
+            if eq {
+                return qt_get_i64(tok.arena_ptr, qt_off_sp_id(), s)
+            }
+        }
+        s = s + 1
+    }
+    -1
+}
+
+// ---- Qwen3 UTF-8 & Regex Pre-Tokenization ----
+
+// Decodes one UTF-8 scalar at ptr[pos..end); packs (cp << 4) | byte_width.
+fn qt_utf8_next(ptr: i64, pos: i64, end: i64) -> i64 {
+    let b0 = ptr_read_u8(ptr, pos)
+    if b0 < 128 { return (b0 << 4) | 1 }
+    if b0 >= 194 && b0 < 224 && pos + 1 < end {
+        let b1 = ptr_read_u8(ptr, pos + 1)
+        if (b1 & 192) == 128 {
+            let cp = ((b0 & 31) << 6) | (b1 & 63)
+            return (cp << 4) | 2
+        }
+    }
+    if b0 >= 224 && b0 < 240 && pos + 2 < end {
+        let b1 = ptr_read_u8(ptr, pos + 1)
+        let b2 = ptr_read_u8(ptr, pos + 2)
+        if (b1 & 192) == 128 && (b2 & 192) == 128 {
+            let cp = ((b0 & 15) << 12) | ((b1 & 63) << 6) | (b2 & 63)
+            if cp >= 2048 && !(cp >= 55296 && cp <= 57343) {
+                return (cp << 4) | 3
+            }
+        }
+    }
+    if b0 >= 240 && b0 < 245 && pos + 3 < end {
+        let b1 = ptr_read_u8(ptr, pos + 1)
+        let b2 = ptr_read_u8(ptr, pos + 2)
+        let b3 = ptr_read_u8(ptr, pos + 3)
+        if (b1 & 192) == 128 && (b2 & 192) == 128 && (b3 & 192) == 128 {
+            let cp = ((b0 & 7) << 18) | ((b1 & 63) << 12) | ((b2 & 63) << 6) | (b3 & 63)
+            if cp >= 65536 && cp <= 1114111 {
+                return (cp << 4) | 4
+            }
+        }
+    }
+    (b0 << 4) | 1
+}
+
+fn qt_is_ws(cp: i64) -> bool {
+    if cp == 32 || cp == 9 || cp == 10 || cp == 11 || cp == 12 || cp == 13 { return true }
+    if cp == 133 || cp == 160 || cp == 5760 { return true }
+    if cp >= 8192 && cp <= 8202 { return true }
+    if cp == 8232 || cp == 8233 || cp == 8239 || cp == 8287 || cp == 12288 { return true }
+    false
+}
+
+fn qt_is_nl(cp: i64) -> bool {
+    cp == 10 || cp == 13
+}
+
+fn qt_is_digit(cp: i64) -> bool {
+    if cp >= 48 && cp <= 57 { return true }
+    if cp == 178 || cp == 179 || cp == 185 { return true }
+    if cp >= 188 && cp <= 190 { return true }
+    if cp >= 1632 && cp <= 1641 { return true }
+    if cp >= 1776 && cp <= 1785 { return true }
+    if cp >= 2406 && cp <= 2415 { return true }
+    if cp >= 65296 && cp <= 65305 { return true }
+    false
+}
+
+fn qt_is_letter(cp: i64) -> bool {
+    if (cp >= 65 && cp <= 90) || (cp >= 97 && cp <= 122) { return true }
+    if cp < 128 { return false }
+    if qt_is_ws(cp) || qt_is_digit(cp) { return false }
+    if cp == 170 || cp == 181 || cp == 186 { return true }
+    if cp >= 192 && cp <= 214 { return true }
+    if cp >= 216 && cp <= 246 { return true }
+    if cp >= 248 && cp <= 687 { return true }
+    if cp >= 880 && cp <= 8191 { return true }
+    if cp >= 12352 && cp <= 12543 { return true }
+    if cp >= 13312 && cp <= 40959 { return true }
+    if cp >= 44032 && cp <= 55215 { return true }
+    if cp >= 63744 && cp <= 64255 { return true }
+    false
+}
+
+fn qt_lower_ascii(c: i64) -> i64 {
+    if c >= 65 && c <= 90 { c + 32 } else { c }
+}
+
+// Match case-insensitive contraction after apostrophe at ptr[pos] == 39.
+fn qt_contraction_len(ptr: i64, pos: i64, end: i64) -> i64 {
+    if pos + 1 >= end { return 0 }
+    let a = qt_lower_ascii(ptr_read_u8(ptr, pos + 1))
+    if pos + 2 < end {
+        let b2 = qt_lower_ascii(ptr_read_u8(ptr, pos + 2))
+        if (a == 114 && b2 == 101) || (a == 118 && b2 == 101) || (a == 108 && b2 == 108) {
+            return 3
+        }
+    }
+    if a == 115 || a == 116 || a == 109 || a == 100 { return 2 }
+    0
+}
+
+// Qwen3 regex pre-token length at ptr[pos..end):
+// (?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+
+fn qt_chunk_len(ptr: i64, pos: i64, end: i64) -> i64 {
+    let p0 = qt_utf8_next(ptr, pos, end)
+    let cp0 = p0 >> 4
+    let w0 = p0 & 15
+
+    // 1. Contractions
+    if cp0 == 39 {
+        let cl = qt_contraction_len(ptr, pos, end)
+        if cl > 0 { return cl }
+    }
+
+    // 2a. Leading \p{L}+
+    if qt_is_letter(cp0) {
+        var j = pos + w0
+        while j < end {
+            let pk = qt_utf8_next(ptr, j, end)
+            if !qt_is_letter(pk >> 4) { break }
+            j = j + (pk & 15)
+        }
+        return j - pos
+    }
+
+    // 2b. Optional non-\r\n\p{L}\p{N} followed by \p{L}+
+    if cp0 != 13 && cp0 != 10 && !qt_is_digit(cp0) && pos + w0 < end {
+        let p1 = qt_utf8_next(ptr, pos + w0, end)
+        if qt_is_letter(p1 >> 4) {
+            var j = pos + w0 + (p1 & 15)
+            while j < end {
+                let pk = qt_utf8_next(ptr, j, end)
+                if !qt_is_letter(pk >> 4) { break }
+                j = j + (pk & 15)
+            }
+            return j - pos
+        }
+    }
+
+    // 3. Individual single digit \p{N}
+    if qt_is_digit(cp0) {
+        return w0
+    }
+
+    // 4a. Non-ws/letter/digit run + optional [\r\n]*
+    if !qt_is_ws(cp0) && !qt_is_letter(cp0) && !qt_is_digit(cp0) {
+        var j = pos + w0
+        while j < end {
+            let pk = qt_utf8_next(ptr, j, end)
+            let cpk = pk >> 4
+            if qt_is_ws(cpk) || qt_is_letter(cpk) || qt_is_digit(cpk) { break }
+            j = j + (pk & 15)
+        }
+        while j < end && qt_is_nl(ptr_read_u8(ptr, j)) {
+            j = j + 1
+        }
+        return j - pos
+    }
+
+    // 4b. Single space followed by non-ws/letter/digit run + optional [\r\n]*
+    if cp0 == 32 && pos + 1 < end {
+        let p1 = qt_utf8_next(ptr, pos + 1, end)
+        let cp1 = p1 >> 4
+        if !qt_is_ws(cp1) && !qt_is_letter(cp1) && !qt_is_digit(cp1) {
+            var j = pos + 1 + (p1 & 15)
+            while j < end {
+                let pk = qt_utf8_next(ptr, j, end)
+                let cpk = pk >> 4
+                if qt_is_ws(cpk) || qt_is_letter(cpk) || qt_is_digit(cpk) { break }
+                j = j + (pk & 15)
+            }
+            while j < end && qt_is_nl(ptr_read_u8(ptr, j)) {
+                j = j + 1
+            }
+            return j - pos
+        }
+    }
+
+    // 5, 6, 7. Whitespace runs
+    if qt_is_ws(cp0) {
+        var j = pos
+        var last_nl_end: i64 = -1
+        var last_ws_start: i64 = pos
+        while j < end {
+            let pk = qt_utf8_next(ptr, j, end)
+            let cpk = pk >> 4
+            let wk = pk & 15
+            if !qt_is_ws(cpk) { break }
+            last_ws_start = j
+            j = j + wk
+            if qt_is_nl(cpk) { last_nl_end = j }
+        }
+        // 5. \s*[\r\n]+
+        if last_nl_end > pos {
+            return last_nl_end - pos
+        }
+        // 6. \s+(?!\S)
+        if j == end {
+            return j - pos
+        }
+        if last_ws_start > pos {
+            return last_ws_start - pos
+        }
+        // 7. \s+
+        return j - pos
+    }
+
+    w0
+}
+
+fn qt_match_special_at(tok: &Qwen3Tokenizer, ptr: i64, pos: i64, end: i64) -> i64 {
+    let b0 = ptr_read_u8(ptr, pos)
+    var best_s: i64 = -1
+    var best_len: i64 = 0
+    var s: i64 = 0
+    while s < tok.n_special {
+        let slen = qt_get_i64(tok.arena_ptr, qt_off_sp_len(), s)
+        if slen > best_len && pos + slen <= end {
+            let soff = qt_get_i64(tok.arena_ptr, qt_off_sp_off(), s)
+            if ptr_read_u8(tok.blob_ptr, soff) == b0 {
+                var eq = true
+                var j: i64 = 1
+                while j < slen {
+                    if ptr_read_u8(tok.blob_ptr, soff + j) != ptr_read_u8(ptr, pos + j) {
+                        eq = false
+                        break
+                    }
+                    j = j + 1
+                }
+                if eq {
+                    best_s = s
+                    best_len = slen
+                }
+            }
+        }
+        s = s + 1
+    }
+    best_s
+}
+
+fn qt_encode_segment(tok: &Qwen3Tokenizer, src_ptr: i64, seg_start: i64, seg_end: i64, seq_ptr: i64, out_ids_ptr: i64, n_out_in: i64, out_cap: i64) -> i64 with Mut {
+    var n_out = n_out_in
+    var pos = seg_start
+    while pos < seg_end {
+        var cl = qt_chunk_len(src_ptr, pos, seg_end)
+        if cl <= 0 { cl = 1 }
+        if pos + cl > seg_end { cl = seg_end - pos }
+
+        var nseq: i64 = 0
+        var j = pos
+        while j < pos + cl {
+            let byte = ptr_read_u8(src_ptr, j)
+            let tid = qt_get_i64(tok.arena_ptr, qt_off_init_id(), byte)
+            if tid >= 0 {
+                let _w = ptr_write_i64_le(seq_ptr, nseq * 8, tid)
+                nseq = nseq + 1
+            }
+            j = j + 1
+        }
+
+        var merging = true
+        while merging && nseq > 1 {
+            merging = false
+            var best_rank: i64 = -1
+            var r: i64 = 0
+            while r + 1 < nseq {
+                let a = ptr_read_i64_le(seq_ptr, r * 8)
+                let b = ptr_read_i64_le(seq_ptr, (r + 1) * 8)
+                let rk = qt_pair_rank(tok, a, b)
+                if rk >= 0 && (best_rank < 0 || rk < best_rank) {
+                    best_rank = rk
+                }
+                r = r + 1
+            }
+            if best_rank >= 0 {
+                merging = true
+                let best_a = qt_get_i64(tok.arena_ptr, qt_off_merge_a(), best_rank)
+                let best_b = qt_get_i64(tok.arena_ptr, qt_off_merge_b(), best_rank)
+                let best_out = qt_get_i64(tok.arena_ptr, qt_off_merge_out(), best_rank)
+                var w: i64 = 0
+                r = 0
+                while r < nseq {
+                    if r + 1 < nseq && ptr_read_i64_le(seq_ptr, r * 8) == best_a && ptr_read_i64_le(seq_ptr, (r + 1) * 8) == best_b {
+                        let _w = ptr_write_i64_le(seq_ptr, w * 8, best_out)
+                        w = w + 1
+                        r = r + 2
+                    } else {
+                        let _w = ptr_write_i64_le(seq_ptr, w * 8, ptr_read_i64_le(seq_ptr, r * 8))
+                        w = w + 1
+                        r = r + 1
+                    }
+                }
+                nseq = w
+            }
+        }
+
+        var k: i64 = 0
+        while k < nseq {
+            if n_out >= out_cap { return -1 }
+            let _w = ptr_write_i64_le(out_ids_ptr, n_out * 8, ptr_read_i64_le(seq_ptr, k * 8))
+            n_out = n_out + 1
+            k = k + 1
+        }
+        pos = pos + cl
+    }
+    n_out
+}
+
+fn qt_encode_with_seq(tok: &Qwen3Tokenizer, src_ptr: i64, src_len: i64, seq_ptr: i64, out_ids_ptr: i64, out_cap: i64) -> i64 with Mut {
+    var n_out: i64 = 0
+    var seg_start: i64 = 0
+    var pos: i64 = 0
+    while pos < src_len {
+        let sp = qt_match_special_at(tok, src_ptr, pos, src_len)
+        if sp >= 0 {
+            if pos > seg_start {
+                n_out = qt_encode_segment(tok, src_ptr, seg_start, pos, seq_ptr, out_ids_ptr, n_out, out_cap)
+                if n_out < 0 { return 0 - 1 }
+            }
+            if n_out >= out_cap { return 0 - 1 }
+            let sid = qt_get_i64(tok.arena_ptr, qt_off_sp_id(), sp)
+            let _w = ptr_write_i64_le(out_ids_ptr, n_out * 8, sid)
+            n_out = n_out + 1
+            let slen = qt_get_i64(tok.arena_ptr, qt_off_sp_len(), sp)
+            pos = pos + slen
+            seg_start = pos
+        } else {
+            pos = pos + 1
+        }
+    }
+
+    if seg_start < src_len {
+        n_out = qt_encode_segment(tok, src_ptr, seg_start, src_len, seq_ptr, out_ids_ptr, n_out, out_cap)
+        if n_out < 0 { return 0 - 1 }
+    }
+    n_out
+}
+
+pub fn qwen3_encode_bytes(tok: &Qwen3Tokenizer, src_ptr: i64, src_len: i64, out_ids_ptr: i64, out_cap: i64) -> i64 with IO, Mut, Panic, Div {
+    if !tok.ok || src_len < 0 || out_ids_ptr <= 0 || out_cap < 0 { return 0 - 1 }
+    if src_len == 0 { return 0 }
+    if src_ptr <= 0 { return 0 - 1 }
+
+    let seq_cap = if src_len + 64 < 4096 { 4096 } else { src_len + 64 }
+    let seq_arena = page_arena_alloc(seq_cap * 8)
+    var res: i64 = 0 - 1
+    if page_arena_is_ok(&seq_arena) {
+        let seq_ptr = page_arena_ptr(&seq_arena)
+        res = qt_encode_with_seq(tok, src_ptr, src_len, seq_ptr, out_ids_ptr, out_cap)
+    }
+    let _fs = page_arena_free(seq_arena)
+    res
+}
+
+pub fn qwen3_encode_str(tok: &Qwen3Tokenizer, text: string, out_ids_ptr: i64, out_cap: i64) -> i64 with IO, Mut, Panic, Div {
+    if !tok.ok || out_ids_ptr <= 0 || out_cap < 0 { return 0 - 1 }
+    let n = str_len(text)
+    if n == 0 { return 0 }
+    let buf_cap = if n + 64 < 4096 { 4096 } else { n + 64 }
+    let tmp = page_arena_alloc(buf_cap)
+    var res: i64 = 0 - 1
+    if page_arena_is_ok(&tmp) {
+        let tmp_ptr = page_arena_ptr(&tmp)
+        var i: i64 = 0
+        while i < n {
+            let _w = ptr_write_u8(tmp_ptr, i, str_char_at(text, i) & 255)
+            i = i + 1
+        }
+        res = qwen3_encode_bytes(tok, tmp_ptr, n, out_ids_ptr, out_cap)
+    }
+    let _ft = page_arena_free(tmp)
+    res
+}
+
+pub fn qwen3_decode_bytes(tok: &Qwen3Tokenizer, ids_ptr: i64, n_ids: i64, out_ptr: i64, out_cap: i64) -> i64 with Mut, Panic, Div {
+    if !tok.ok || n_ids < 0 || out_ptr <= 0 || out_cap < 0 { return -1 }
+    if n_ids == 0 { return 0 }
+    if ids_ptr <= 0 { return -1 }
+
+    var out: i64 = 0
+    let max_v = qt_max_vocab()
+    var idx: i64 = 0
+    while idx < n_ids {
+        let id = ptr_read_i64_le(ids_ptr, idx * 8)
+
+        // Check special (added) tokens first: emit literal UTF-8 content.
+        var s: i64 = 0
+        var handled = false
+        while s < tok.n_special {
+            if qt_get_i64(tok.arena_ptr, qt_off_sp_id(), s) == id {
+                let soff = qt_get_i64(tok.arena_ptr, qt_off_sp_off(), s)
+                let slen = qt_get_i64(tok.arena_ptr, qt_off_sp_len(), s)
+                if out + slen > out_cap { return -1 }
+                var j: i64 = 0
+                while j < slen {
+                    let _w = ptr_write_u8(out_ptr, out + j, ptr_read_u8(tok.blob_ptr, soff + j))
+                    j = j + 1
+                }
+                out = out + slen
+                handled = true
+                break
+            }
+            s = s + 1
+        }
+
+        if !handled {
+            var ti: i64 = -1
+            if id >= 0 && id < max_v {
+                let v = qt_get_i64(tok.arena_ptr, qt_off_id_to_tok(), id)
+                if v > 0 { ti = v - 1 }
+            }
+            if ti < 0 {
+                var t: i64 = 0
+                while t < tok.n_vocab {
+                    if qt_get_i64(tok.arena_ptr, qt_off_tok_id(), t) == id {
+                        ti = t
+                        break
+                    }
+                    t = t + 1
+                }
+            }
+            if ti >= 0 {
+                let toff = qt_get_i64(tok.arena_ptr, qt_off_tok_off(), ti)
+                let tlen = qt_get_i64(tok.arena_ptr, qt_off_tok_len(), ti)
+                var k: i64 = 0
+                while k < tlen {
+                    let pk = qt_utf8_next(tok.blob_ptr, toff + k, toff + tlen)
+                    let cp = pk >> 4
+                    let adv = pk & 15
+                    if cp >= 0 && cp < 512 {
+                        let rb = qt_get_i64(tok.arena_ptr, qt_off_rev_byte(), cp)
+                        if rb >= 0 {
+                            if out >= out_cap { return -1 }
+                            let _w = ptr_write_u8(out_ptr, out, rb)
+                            out = out + 1
+                        }
+                    }
+                    k = k + adv
+                }
+            }
+        }
+        idx = idx + 1
+    }
+    out
+}
+
+fn qt_append_str(out_ptr: i64, pos: i64, out_cap: i64, lit: string) -> i64 with Mut {
+    if pos < 0 { return -1 }
+    let n = str_len(lit)
+    if pos + n > out_cap { return -1 }
+    var i: i64 = 0
+    while i < n {
+        let _w = ptr_write_u8(out_ptr, pos + i, str_char_at(lit, i) & 255)
+        i = i + 1
+    }
+    pos + n
+}
+
+fn qt_append_bytes(out_ptr: i64, pos: i64, out_cap: i64, src_ptr: i64, src_len: i64) -> i64 with Mut {
+    if pos < 0 || src_len < 0 { return -1 }
+    if pos + src_len > out_cap { return -1 }
+    if src_len == 0 { return pos }
+    if src_ptr <= 0 { return -1 }
+    var i: i64 = 0
+    while i < src_len {
+        let _w = ptr_write_u8(out_ptr, pos + i, ptr_read_u8(src_ptr, i))
+        i = i + 1
+    }
+    pos + src_len
+}
+
+pub fn qwen3_format_chat_turn_bytes(role: string, msg_ptr: i64, msg_len: i64, out_ptr: i64, pos: i64, out_cap: i64) -> i64 with Mut {
+    var p = qt_append_str(out_ptr, pos, out_cap, "<|im_start|>")
+    p = qt_append_str(out_ptr, p, out_cap, role)
+    p = qt_append_str(out_ptr, p, out_cap, "\n")
+    p = qt_append_bytes(out_ptr, p, out_cap, msg_ptr, msg_len)
+    qt_append_str(out_ptr, p, out_cap, "<|im_end|>\n")
+}
+
+pub fn qwen3_format_chat_bytes(
+    sys_ptr: i64,
+    sys_len: i64,
+    user_ptr: i64,
+    user_len: i64,
+    add_gen_prompt: bool,
+    enable_thinking: bool,
+    out_ptr: i64,
+    out_cap: i64
+) -> i64 with Mut {
+    if out_ptr <= 0 || out_cap < 0 || sys_len < 0 || user_len < 0 { return -1 }
+    var p: i64 = 0
+    if sys_len > 0 {
+        p = qwen3_format_chat_turn_bytes("system", sys_ptr, sys_len, out_ptr, p, out_cap)
+    }
+    p = qwen3_format_chat_turn_bytes("user", user_ptr, user_len, out_ptr, p, out_cap)
+    if add_gen_prompt {
+        p = qt_append_str(out_ptr, p, out_cap, "<|im_start|>assistant\n")
+        if !enable_thinking {
+            p = qt_append_str(out_ptr, p, out_cap, "<think>\n\n</think>\n\n")
+        }
+    }
+    p
+}

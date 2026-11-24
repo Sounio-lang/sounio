@@ -1,0 +1,124 @@
+// stdlib::llm::mmap — Zero-copy shard mapping & page-aligned arenas.
+//
+// Backed by native OS mmap_ro / mmap_rw / munmap_ro and unaligned little-endian
+// pointer accessors so multi-GB Safetensors shards stay out of the Sounio heap
+// and bind zero-copy to Metal (unified memory) or host-staging for PTX.
+
+use tensor2::convert::{f32_bits_to_f64}
+
+pub linear struct MappedShard {
+    pub ptr: i64,
+    pub len: i64,
+    pub ok: bool,
+}
+
+pub linear struct PageArena {
+    pub ptr: i64,
+    pub len: i64,
+    pub ok: bool,
+}
+
+pub fn mapped_shard_is_ok(s: &MappedShard) -> bool { s.ok }
+pub fn mapped_shard_ptr(s: &MappedShard) -> i64 { s.ptr }
+pub fn mapped_shard_len(s: &MappedShard) -> i64 { s.len }
+
+pub fn page_arena_is_ok(a: &PageArena) -> bool { a.ok }
+pub fn page_arena_ptr(a: &PageArena) -> i64 { a.ptr }
+pub fn page_arena_len(a: &PageArena) -> i64 { a.len }
+
+pub fn mapped_shard_open(path: string) -> MappedShard with IO, Mut, Panic {
+    let sz = file_size(path)
+    if sz <= 0 {
+        return MappedShard { ptr: 0, len: 0, ok: false }
+    }
+    let p = mmap_ro(path)
+    if p <= 0 {
+        return MappedShard { ptr: 0, len: 0, ok: false }
+    }
+    MappedShard { ptr: p, len: sz, ok: true }
+}
+
+pub fn mapped_shard_close(s: MappedShard) -> i64 with IO, Mut {
+    let MappedShard { ptr, len, ok } = s
+    if !ok || ptr <= 0 || len <= 0 {
+        return 0
+    }
+    munmap_ro(ptr, len)
+}
+
+pub fn page_arena_alloc(byte_len: i64) -> PageArena with IO, Mut {
+    if byte_len <= 0 || byte_len > 9223372036854759424 {
+        return PageArena { ptr: 0, len: 0, ok: false }
+    }
+    let rem = byte_len % 16384
+    let aligned_len = if rem == 0 { byte_len } else { byte_len + (16384 - rem) }
+    let p = mmap_rw(aligned_len)
+    if p <= 0 {
+        return PageArena { ptr: 0, len: 0, ok: false }
+    }
+    PageArena { ptr: p, len: aligned_len, ok: true }
+}
+
+pub fn page_arena_free(a: PageArena) -> i64 with IO, Mut {
+    let PageArena { ptr, len, ok } = a
+    if !ok || ptr <= 0 || len <= 0 {
+        return 0
+    }
+    munmap_ro(ptr, len)
+}
+
+fn shard_in_bounds(len: i64, byte_off: i64, width: i64) -> bool {
+    if len <= 0 || byte_off < 0 || width <= 0 || width > len { return false }
+    byte_off <= len - width
+}
+
+pub fn mapped_shard_read_u8(s: &MappedShard, byte_off: i64) -> (i64, bool) {
+    if !s.ok || !shard_in_bounds(s.len, byte_off, 1) {
+        return (0, false)
+    }
+    (ptr_read_u8(s.ptr, byte_off), true)
+}
+
+pub fn mapped_shard_read_u16_le(s: &MappedShard, byte_off: i64) -> (i64, bool) {
+    if !s.ok || !shard_in_bounds(s.len, byte_off, 2) {
+        return (0, false)
+    }
+    (ptr_read_u16_le(s.ptr, byte_off), true)
+}
+
+pub fn mapped_shard_read_u32_le(s: &MappedShard, byte_off: i64) -> (i64, bool) {
+    if !s.ok || !shard_in_bounds(s.len, byte_off, 4) {
+        return (0, false)
+    }
+    (ptr_read_u32_le(s.ptr, byte_off), true)
+}
+
+pub fn mapped_shard_read_i64_le(s: &MappedShard, byte_off: i64) -> (i64, bool) {
+    if !s.ok || !shard_in_bounds(s.len, byte_off, 8) {
+        return (0, false)
+    }
+    (ptr_read_i64_le(s.ptr, byte_off), true)
+}
+
+pub fn page_arena_read_u32_le(a: &PageArena, byte_off: i64) -> (i64, bool) {
+    if !a.ok || !shard_in_bounds(a.len, byte_off, 4) {
+        return (0, false)
+    }
+    (ptr_read_u32_le(a.ptr, byte_off), true)
+}
+
+pub fn page_arena_write_u32_le(a: &PageArena, byte_off: i64, val: i64) -> bool {
+    if !a.ok || !shard_in_bounds(a.len, byte_off, 4) {
+        return false
+    }
+    let _rc = ptr_write_u32_le(a.ptr, byte_off, val)
+    true
+}
+
+pub fn bf16_bits_to_f32_bits(u16_bits: i64) -> i64 {
+    (u16_bits & 65535) << 16
+}
+
+pub fn bf16_bits_to_f64_exact(u16_bits: i64) -> f64 with Mut {
+    f32_bits_to_f64(bf16_bits_to_f32_bits(u16_bits))
+}

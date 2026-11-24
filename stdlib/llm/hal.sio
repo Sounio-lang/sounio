@@ -1,0 +1,1311 @@
+// stdlib::llm::hal — Linear-typed GPU session HAL for Metal NoCopy (macOS ARM64)
+// and CUDA Driver API PTX (Linux x86-64 via libcuda.so.1 / SOUNIO_CUDA_DRIVER_LIB).
+
+use crypto::sha256::{sha256_compress}
+
+extern "C" {
+    fn dlopen(filename: *mut u8, flags: i32) -> *mut u8
+    fn dlsym(handle: *mut u8, symbol: *mut u8) -> *mut u8
+    fn dlclose(handle: *mut u8) -> i32
+    fn dlerror() -> *mut u8
+}
+
+fn hal_cstr(s: string) -> i64 with Alloc, Mut {
+    let n = str_len(s)
+    let buf = heap_alloc(n + 8) as i64
+    var i: i64 = 0
+    while i < n {
+        let _w = ptr_write_u8(buf, i, str_char_at(s, i))
+        i = i + 1
+    }
+    let _z = ptr_write_u8(buf, n, 0)
+    buf
+}
+
+fn hal_free_cstr(ptr: i64) {
+    if ptr != 0 {
+        heap_free(ptr as *mut u8)
+    }
+}
+
+fn hal_dlopen_str(path: string, flags: i32) -> i64 with Alloc, Mut {
+    let cs = hal_cstr(path)
+    let h = dlopen(cs as *mut u8, flags) as i64
+    hal_free_cstr(cs)
+    h
+}
+
+fn hal_dlsym_str(handle: i64, sym: string) -> i64 with Alloc, Mut {
+    let cs = hal_cstr(sym)
+    let p = dlsym(handle as *mut u8, cs as *mut u8) as i64
+    hal_free_cstr(cs)
+    p
+}
+
+pub fn hal_getenv_ptr(var_name: string) -> i64 with Alloc, Mut {
+    let main_h = dlopen(0 as *mut u8, 1) as i64
+    if main_h == 0 { return 0 }
+    let ge_raw = hal_dlsym_str(main_h, "getenv")
+    if ge_raw == 0 {
+        let _c = dlclose(main_h as *mut u8)
+        return 0
+    }
+    let ge = ge_raw as fn(i64) -> i64
+    let cs = hal_cstr(var_name)
+    let val = ge(cs)
+    hal_free_cstr(cs)
+    let _c = dlclose(main_h as *mut u8)
+    val
+}
+
+fn hal_c_i32(raw: i64) -> i64 {
+    let u = raw & 4294967295
+    if u >= 2147483648 { u - 4294967296 } else { u }
+}
+
+pub linear struct MetalSession {
+    pub lib_handle: i64,
+    pub sess_id: i64,
+    pub fn_destroy: i64,
+    pub fn_buf_nocopy: i64,
+    pub fn_buf_alloc: i64,
+    pub fn_buf_contents: i64,
+    pub fn_buf_free: i64,
+    pub fn_compile_msl: i64,
+    pub fn_cmd_begin: i64,
+    pub fn_cmd_cancel: i64,
+    pub fn_cmd_set_buf: i64,
+    pub fn_cmd_set_u64: i64,
+    pub fn_cmd_dispatch_1d: i64,
+    pub fn_cmd_commit_sync: i64,
+    pub ok: bool,
+}
+
+fn metal_session_empty() -> MetalSession {
+    MetalSession {
+        lib_handle: 0,
+        sess_id: 0,
+        fn_destroy: 0,
+        fn_buf_nocopy: 0,
+        fn_buf_alloc: 0,
+        fn_buf_contents: 0,
+        fn_buf_free: 0,
+        fn_compile_msl: 0,
+        fn_cmd_begin: 0,
+        fn_cmd_cancel: 0,
+        fn_cmd_set_buf: 0,
+        fn_cmd_set_u64: 0,
+        fn_cmd_dispatch_1d: 0,
+        fn_cmd_commit_sync: 0,
+        ok: false,
+    }
+}
+
+fn hal_append_cstr_lit(buf: i64, start: i64, lit: string) -> i64 with Mut {
+    let n = str_len(lit)
+    var i: i64 = 0
+    while i < n {
+        let _w = ptr_write_u8(buf, start + i, str_char_at(lit, i) as u8)
+        i = i + 1
+    }
+    let _z = ptr_write_u8(buf, start + n, 0)
+    start + n
+}
+
+fn hal_try_exe_rel_metal_suffix(exe_buf: i64, base_len: i64, cand_buf: i64, suffix: string) -> i64 with Mut {
+    if base_len <= 0 || base_len > 3500 { return 0 }
+    var i: i64 = 0
+    while i < base_len {
+        let _w = ptr_write_u8(cand_buf, i, ptr_read_u8(exe_buf, i))
+        i = i + 1
+    }
+    let _tot = hal_append_cstr_lit(cand_buf, base_len, suffix)
+    dlopen(cand_buf as *mut u8, 2) as i64
+}
+
+fn hal_dlopen_exe_relative_metal() -> i64 with Alloc, Mut {
+    let main_h = dlopen(0 as *mut u8, 1) as i64
+    if main_h == 0 { return 0 }
+    let fn_ns_raw = hal_dlsym_str(main_h, "_NSGetExecutablePath")
+    let _cm = dlclose(main_h as *mut u8)
+    if fn_ns_raw == 0 { return 0 }
+
+    let exe_buf = heap_alloc(4096) as i64
+    let sz_buf = heap_alloc(16) as i64
+    let cand_buf = heap_alloc(4096) as i64
+    if exe_buf == 0 || sz_buf == 0 || cand_buf == 0 {
+        if exe_buf != 0 { heap_free(exe_buf as *mut u8) }
+        if sz_buf != 0 { heap_free(sz_buf as *mut u8) }
+        if cand_buf != 0 { heap_free(cand_buf as *mut u8) }
+        return 0
+    }
+    let _wsz = ptr_write_u32_le(sz_buf, 0, 4096)
+    let ns_fn = fn_ns_raw as fn(i64, i64) -> i32
+    let rc = ns_fn(exe_buf, sz_buf)
+    var lib: i64 = 0
+    if rc == 0 {
+        var len: i64 = 0
+        while len < 4095 && ptr_read_u8(exe_buf, len) != 0 {
+            len = len + 1
+        }
+        var slash0: i64 = len - 1
+        while slash0 >= 0 && ptr_read_u8(exe_buf, slash0) != 47 {
+            slash0 = slash0 - 1
+        }
+        if slash0 > 0 {
+            lib = hal_try_exe_rel_metal_suffix(exe_buf, slash0, cand_buf, "/libsounio_metal.dylib")
+            if lib == 0 {
+                lib = hal_try_exe_rel_metal_suffix(exe_buf, slash0, cand_buf, "/artifacts/self-hosted/libsounio_metal.dylib")
+            }
+            if lib == 0 {
+                var slash1: i64 = slash0 - 1
+                while slash1 >= 0 && ptr_read_u8(exe_buf, slash1) != 47 {
+                    slash1 = slash1 - 1
+                }
+                if slash1 > 0 {
+                    lib = hal_try_exe_rel_metal_suffix(exe_buf, slash1, cand_buf, "/artifacts/self-hosted/libsounio_metal.dylib")
+                }
+            }
+        }
+    }
+    heap_free(exe_buf as *mut u8)
+    heap_free(sz_buf as *mut u8)
+    heap_free(cand_buf as *mut u8)
+    lib
+}
+
+pub fn metal_session_open(runtime_path: string) -> MetalSession with Alloc, Mut {
+    var lib: i64 = 0
+    if str_len(runtime_path) > 0 {
+        lib = hal_dlopen_str(runtime_path, 2)
+    } else {
+        let env_p = hal_getenv_ptr("SOUNIO_METAL_RUNTIME")
+        if env_p != 0 {
+            lib = dlopen(env_p as *mut u8, 2) as i64
+        }
+        if lib == 0 {
+            lib = hal_dlopen_str("./artifacts/self-hosted/libsounio_metal.dylib", 2)
+        }
+        if lib == 0 {
+            lib = hal_dlopen_exe_relative_metal()
+        }
+        if lib == 0 {
+            lib = hal_dlopen_str("libsounio_metal.dylib", 2)
+        }
+    }
+    if lib == 0 { return metal_session_empty() }
+
+    let fn_create = hal_dlsym_str(lib, "sounio_metal_session_create")
+    let fn_destroy = hal_dlsym_str(lib, "sounio_metal_session_destroy")
+    let fn_buf_nocopy = hal_dlsym_str(lib, "sounio_metal_buffer_nocopy")
+    let fn_buf_alloc = hal_dlsym_str(lib, "sounio_metal_buffer_alloc")
+    let fn_buf_contents = hal_dlsym_str(lib, "sounio_metal_buffer_contents")
+    let fn_buf_free = hal_dlsym_str(lib, "sounio_metal_buffer_free")
+    let fn_compile_msl = hal_dlsym_str(lib, "sounio_metal_compile_msl")
+    let fn_cmd_begin = hal_dlsym_str(lib, "sounio_metal_cmd_begin")
+    let fn_cmd_cancel = hal_dlsym_str(lib, "sounio_metal_cmd_cancel")
+    let fn_cmd_set_buf = hal_dlsym_str(lib, "sounio_metal_cmd_set_buffer")
+    let fn_cmd_set_u64 = hal_dlsym_str(lib, "sounio_metal_cmd_set_u64")
+    let fn_cmd_dispatch_1d = hal_dlsym_str(lib, "sounio_metal_cmd_dispatch_1d")
+    let fn_cmd_commit_sync = hal_dlsym_str(lib, "sounio_metal_cmd_commit_sync")
+
+    if fn_create == 0 || fn_destroy == 0 || fn_buf_nocopy == 0 || fn_buf_alloc == 0
+        || fn_buf_contents == 0 || fn_buf_free == 0 || fn_compile_msl == 0 || fn_cmd_begin == 0
+        || fn_cmd_cancel == 0 || fn_cmd_set_buf == 0 || fn_cmd_set_u64 == 0 || fn_cmd_dispatch_1d == 0
+        || fn_cmd_commit_sync == 0 {
+        let _c = dlclose(lib as *mut u8)
+        return metal_session_empty()
+    }
+
+    let create = fn_create as fn() -> i64
+    let sid = create()
+    if sid <= 0 {
+        let _c = dlclose(lib as *mut u8)
+        return metal_session_empty()
+    }
+
+    MetalSession {
+        lib_handle: lib,
+        sess_id: sid,
+        fn_destroy: fn_destroy,
+        fn_buf_nocopy: fn_buf_nocopy,
+        fn_buf_alloc: fn_buf_alloc,
+        fn_buf_contents: fn_buf_contents,
+        fn_buf_free: fn_buf_free,
+        fn_compile_msl: fn_compile_msl,
+        fn_cmd_begin: fn_cmd_begin,
+        fn_cmd_cancel: fn_cmd_cancel,
+        fn_cmd_set_buf: fn_cmd_set_buf,
+        fn_cmd_set_u64: fn_cmd_set_u64,
+        fn_cmd_dispatch_1d: fn_cmd_dispatch_1d,
+        fn_cmd_commit_sync: fn_cmd_commit_sync,
+        ok: true,
+    }
+}
+
+pub fn metal_session_is_ok(s: &MetalSession) -> bool { s.ok }
+
+pub fn metal_session_close(s: MetalSession) -> i64 {
+    let MetalSession {
+        lib_handle,
+        sess_id,
+        fn_destroy,
+        fn_buf_nocopy: _,
+        fn_buf_alloc: _,
+        fn_buf_contents: _,
+        fn_buf_free: _,
+        fn_compile_msl: _,
+        fn_cmd_begin: _,
+        fn_cmd_cancel: _,
+        fn_cmd_set_buf: _,
+        fn_cmd_set_u64: _,
+        fn_cmd_dispatch_1d: _,
+        fn_cmd_commit_sync: _,
+        ok,
+    } = s
+    if ok && sess_id > 0 && fn_destroy != 0 {
+        let destroy = fn_destroy as fn(i64) -> i64
+        let _rc = destroy(sess_id)
+    }
+    if lib_handle != 0 {
+        let _c = dlclose(lib_handle as *mut u8)
+    }
+    0
+}
+
+pub fn metal_buffer_nocopy(s: &MetalSession, host_ptr: i64, byte_len: i64) -> i64 {
+    if !s.ok { return 0 }
+    let f = s.fn_buf_nocopy as fn(i64, i64, i64) -> i64
+    f(s.sess_id, host_ptr, byte_len)
+}
+
+pub fn metal_buffer_alloc(s: &MetalSession, byte_len: i64) -> i64 {
+    if !s.ok || byte_len <= 0 { return 0 }
+    let f = s.fn_buf_alloc as fn(i64, i64) -> i64
+    f(s.sess_id, byte_len)
+}
+
+pub fn metal_buffer_contents(s: &MetalSession, buf_id: i64) -> i64 {
+    if !s.ok || buf_id <= 0 { return 0 }
+    let f = s.fn_buf_contents as fn(i64) -> i64
+    f(buf_id)
+}
+
+pub fn metal_buffer_free(s: &MetalSession, buf_id: i64) -> i64 {
+    if !s.ok || buf_id <= 0 { return -1 }
+    let f = s.fn_buf_free as fn(i64) -> i64
+    f(buf_id)
+}
+
+pub fn metal_compile_msl_ptr(s: &MetalSession, c_src: i64, entry: string) -> i64 with Alloc, Mut {
+    if !s.ok || c_src == 0 { return 0 }
+    let f = s.fn_compile_msl as fn(i64, i64, i64) -> i64
+    let c_entry = hal_cstr(entry)
+    let pid = f(s.sess_id, c_src, c_entry)
+    hal_free_cstr(c_entry)
+    pid
+}
+
+pub fn metal_compile_msl(s: &MetalSession, msl_src: string, entry: string) -> i64 with Alloc, Mut {
+    if !s.ok { return 0 }
+    let c_src = hal_cstr(msl_src)
+    let pid = metal_compile_msl_ptr(s, c_src, entry)
+    hal_free_cstr(c_src)
+    pid
+}
+
+pub fn metal_cmd_begin(s: &MetalSession) -> i64 {
+    if !s.ok { return 0 }
+    let f = s.fn_cmd_begin as fn(i64) -> i64
+    f(s.sess_id)
+}
+
+pub fn metal_cmd_cancel(s: &MetalSession, cid: i64) -> i64 {
+    if !s.ok || cid <= 0 { return -1 }
+    let f = s.fn_cmd_cancel as fn(i64) -> i64
+    f(cid)
+}
+
+pub fn metal_cmd_set_buf(s: &MetalSession, cid: i64, slot: i64, buf_id: i64, byte_off: i64) -> i64 {
+    if !s.ok || cid <= 0 || slot < 0 || buf_id <= 0 || byte_off < 0 { return -1 }
+    let f = s.fn_cmd_set_buf as fn(i64, i64, i64, i64) -> i64
+    f(cid, slot, buf_id, byte_off)
+}
+
+pub fn metal_cmd_set_u64(s: &MetalSession, cid: i64, slot: i64, val: i64) -> i64 {
+    if !s.ok || cid <= 0 || slot < 0 { return -1 }
+    let f = s.fn_cmd_set_u64 as fn(i64, i64, i64) -> i64
+    f(cid, slot, val)
+}
+
+pub fn metal_cmd_dispatch_1d(s: &MetalSession, cid: i64, pipe_id: i64, total_threads: i64, group_threads: i64) -> i64 {
+    if !s.ok || cid <= 0 || pipe_id <= 0 || total_threads <= 0 || group_threads <= 0 { return -1 }
+    let f = s.fn_cmd_dispatch_1d as fn(i64, i64, i64, i64) -> i64
+    f(cid, pipe_id, total_threads, group_threads)
+}
+
+pub fn metal_cmd_commit_sync(s: &MetalSession, cid: i64) -> i64 {
+    if !s.ok || cid <= 0 { return -1 }
+    let f = s.fn_cmd_commit_sync as fn(i64) -> i64
+    f(cid)
+}
+
+pub fn metal_dispatch_2buf_u64(
+    s: &MetalSession,
+    pipe_id: i64,
+    buf0: i64,
+    off0: i64,
+    buf1: i64,
+    off1: i64,
+    arg2_u64: i64,
+    total_threads: i64,
+    group_threads: i64
+) -> i64 {
+    if !s.ok || pipe_id <= 0 || buf0 <= 0 || buf1 <= 0 { return -1 }
+    let cmd_begin = s.fn_cmd_begin as fn(i64) -> i64
+    let cid = cmd_begin(s.sess_id)
+    if cid <= 0 { return -1 }
+
+    let cmd_cancel = s.fn_cmd_cancel as fn(i64) -> i64
+    let set_buf = s.fn_cmd_set_buf as fn(i64, i64, i64, i64) -> i64
+    let set_u64 = s.fn_cmd_set_u64 as fn(i64, i64, i64) -> i64
+    let disp = s.fn_cmd_dispatch_1d as fn(i64, i64, i64, i64) -> i64
+    let commit_sync = s.fn_cmd_commit_sync as fn(i64) -> i64
+
+    if set_buf(cid, 0, buf0, off0) != 0 {
+        let _c = cmd_cancel(cid)
+        return -1
+    }
+    if set_buf(cid, 1, buf1, off1) != 0 {
+        let _c = cmd_cancel(cid)
+        return -1
+    }
+    if set_u64(cid, 2, arg2_u64) != 0 {
+        let _c = cmd_cancel(cid)
+        return -1
+    }
+    if disp(cid, pipe_id, total_threads, group_threads) != 0 {
+        let _c = cmd_cancel(cid)
+        return -1
+    }
+    commit_sync(cid)
+}
+
+pub linear struct CudaDriverSession {
+    pub lib_handle: i64,
+    pub dev: i64,
+    pub ctx: i64,
+    pub fn_ctx_destroy: i64,
+    pub fn_mod_load_data: i64,
+    pub fn_mod_load_data_ex: i64,
+    pub fn_mod_unload: i64,
+    pub fn_mod_get_fn: i64,
+    pub fn_mod_get_global: i64,
+    pub fn_mem_alloc: i64,
+    pub fn_mem_free: i64,
+    pub fn_memcpy_h2d: i64,
+    pub fn_memcpy_d2h: i64,
+    pub fn_launch_kernel: i64,
+    pub fn_ctx_sync: i64,
+    pub fn_dev_get_name: i64,
+    pub fn_driver_get_ver: i64,
+    pub fn_dev_get_attr: i64,
+    pub sm_major: i64,
+    pub sm_minor: i64,
+    pub launch_scratch: i64,
+    pub ok: bool,
+}
+
+fn cuda_session_empty() -> CudaDriverSession {
+    CudaDriverSession {
+        lib_handle: 0,
+        dev: 0,
+        ctx: 0,
+        fn_ctx_destroy: 0,
+        fn_mod_load_data: 0,
+        fn_mod_load_data_ex: 0,
+        fn_mod_unload: 0,
+        fn_mod_get_fn: 0,
+        fn_mod_get_global: 0,
+        fn_mem_alloc: 0,
+        fn_mem_free: 0,
+        fn_memcpy_h2d: 0,
+        fn_memcpy_d2h: 0,
+        fn_launch_kernel: 0,
+        fn_ctx_sync: 0,
+        fn_dev_get_name: 0,
+        fn_driver_get_ver: 0,
+        fn_dev_get_attr: 0,
+        sm_major: 0,
+        sm_minor: 0,
+        launch_scratch: 0,
+        ok: false,
+    }
+}
+
+fn hal_parse_env_nonneg_i64(cstr_ptr: i64, fallback: i64) -> i64 {
+    if cstr_ptr == 0 { return fallback }
+    let b0 = ptr_read_u8(cstr_ptr, 0)
+    if b0 < 48 || b0 > 57 { return fallback }
+    var acc: i64 = 0
+    var i: i64 = 0
+    while i < 16 {
+        let ch = ptr_read_u8(cstr_ptr, i)
+        if ch < 48 || ch > 57 { break }
+        acc = acc * 10 + (ch - 48)
+        i = i + 1
+    }
+    acc
+}
+
+pub fn cuda_session_open(driver_path: string, ordinal: i64) -> CudaDriverSession with Alloc, Mut {
+    var lib: i64 = 0
+    if str_len(driver_path) > 0 {
+        lib = hal_dlopen_str(driver_path, 1)
+    } else {
+        let env_p = hal_getenv_ptr("SOUNIO_CUDA_DRIVER_LIB")
+        if env_p != 0 {
+            lib = dlopen(env_p as *mut u8, 1) as i64
+        }
+        if lib == 0 {
+            lib = hal_dlopen_str("libcuda.so.1", 1)
+        }
+    }
+    if lib == 0 { return cuda_session_empty() }
+
+    let fn_init = hal_dlsym_str(lib, "cuInit")
+    let fn_dev_get = hal_dlsym_str(lib, "cuDeviceGet")
+    let fn_ctx_create = hal_dlsym_str(lib, "cuCtxCreate_v2")
+    let fn_ctx_destroy = hal_dlsym_str(lib, "cuCtxDestroy_v2")
+    let fn_mod_load_data = hal_dlsym_str(lib, "cuModuleLoadData")
+    let fn_mod_load_data_ex = hal_dlsym_str(lib, "cuModuleLoadDataEx")
+    let fn_mod_unload = hal_dlsym_str(lib, "cuModuleUnload")
+    let fn_mod_get_fn = hal_dlsym_str(lib, "cuModuleGetFunction")
+    var fn_mod_get_global = hal_dlsym_str(lib, "cuModuleGetGlobal_v2")
+    if fn_mod_get_global == 0 {
+        fn_mod_get_global = hal_dlsym_str(lib, "cuModuleGetGlobal")
+    }
+    let fn_mem_alloc = hal_dlsym_str(lib, "cuMemAlloc_v2")
+    let fn_mem_free = hal_dlsym_str(lib, "cuMemFree_v2")
+    let fn_memcpy_h2d = hal_dlsym_str(lib, "cuMemcpyHtoD_v2")
+    let fn_memcpy_d2h = hal_dlsym_str(lib, "cuMemcpyDtoH_v2")
+    let fn_launch_kernel = hal_dlsym_str(lib, "cuLaunchKernel")
+    let fn_ctx_sync = hal_dlsym_str(lib, "cuCtxSynchronize")
+    let fn_dev_get_name = hal_dlsym_str(lib, "cuDeviceGetName")
+    let fn_driver_get_ver = hal_dlsym_str(lib, "cuDriverGetVersion")
+    let fn_dev_get_attr = hal_dlsym_str(lib, "cuDeviceGetAttribute")
+
+    if fn_init == 0 || fn_dev_get == 0 || fn_ctx_create == 0 || fn_ctx_destroy == 0
+        || fn_mod_load_data == 0 || fn_mod_unload == 0 || fn_mod_get_fn == 0
+        || fn_mem_alloc == 0 || fn_mem_free == 0 || fn_memcpy_h2d == 0
+        || fn_memcpy_d2h == 0 || fn_launch_kernel == 0 || fn_ctx_sync == 0 {
+        let _c = dlclose(lib as *mut u8)
+        return cuda_session_empty()
+    }
+
+    let cu_init = fn_init as fn(i32) -> i64
+    if hal_c_i32(cu_init(0)) != 0 {
+        let _c = dlclose(lib as *mut u8)
+        return cuda_session_empty()
+    }
+
+    var eff_ord = ordinal
+    if eff_ord < 0 {
+        let dev_env = hal_getenv_ptr("SOUNIO_CUDA_DEVICE")
+        eff_ord = hal_parse_env_nonneg_i64(dev_env, 0)
+    }
+
+    let scratch = heap_alloc(16) as i64
+    let _z0 = ptr_write_i64_le(scratch, 0, 0)
+    let cu_dev_get = fn_dev_get as fn(i64, i32) -> i64
+    if hal_c_i32(cu_dev_get(scratch, eff_ord as i32)) != 0 {
+        heap_free(scratch as *mut u8)
+        let _c = dlclose(lib as *mut u8)
+        return cuda_session_empty()
+    }
+    let dev_id = ptr_read_u32_le(scratch, 0)
+
+    var sm_major: i64 = 8
+    var sm_minor: i64 = 0
+    if fn_dev_get_attr != 0 {
+        let cu_get_attr = fn_dev_get_attr as fn(i64, i32, i32) -> i64
+        let _zm = ptr_write_i64_le(scratch, 0, 0)
+        let rc_maj = hal_c_i32(cu_get_attr(scratch, 75 as i32, dev_id as i32))
+        let q_maj = hal_c_i32(ptr_read_u32_le(scratch, 0))
+        let _zn = ptr_write_i64_le(scratch, 0, 0)
+        let rc_min = hal_c_i32(cu_get_attr(scratch, 76 as i32, dev_id as i32))
+        let q_min = hal_c_i32(ptr_read_u32_le(scratch, 0))
+        if rc_maj == 0 && rc_min == 0 && q_maj > 0 {
+            sm_major = q_maj
+            sm_minor = if q_min >= 0 { q_min } else { 0 }
+        }
+    }
+
+    let _z1 = ptr_write_i64_le(scratch, 0, 0)
+    let cu_ctx_create = fn_ctx_create as fn(i64, i32, i32) -> i64
+    if hal_c_i32(cu_ctx_create(scratch, 0 as i32, dev_id as i32)) != 0 {
+        heap_free(scratch as *mut u8)
+        let _c = dlclose(lib as *mut u8)
+        return cuda_session_empty()
+    }
+    let ctx_h = ptr_read_i64_le(scratch, 0)
+    heap_free(scratch as *mut u8)
+
+    let lscratch = heap_alloc(256) as i64
+    var zi: i64 = 0
+    while zi < 32 {
+        let _zw = ptr_write_i64_le(lscratch, zi * 8, 0)
+        zi = zi + 1
+    }
+
+    CudaDriverSession {
+        lib_handle: lib,
+        dev: dev_id,
+        ctx: ctx_h,
+        fn_ctx_destroy: fn_ctx_destroy,
+        fn_mod_load_data: fn_mod_load_data,
+        fn_mod_load_data_ex: fn_mod_load_data_ex,
+        fn_mod_unload: fn_mod_unload,
+        fn_mod_get_fn: fn_mod_get_fn,
+        fn_mod_get_global: fn_mod_get_global,
+        fn_mem_alloc: fn_mem_alloc,
+        fn_mem_free: fn_mem_free,
+        fn_memcpy_h2d: fn_memcpy_h2d,
+        fn_memcpy_d2h: fn_memcpy_d2h,
+        fn_launch_kernel: fn_launch_kernel,
+        fn_ctx_sync: fn_ctx_sync,
+        fn_dev_get_name: fn_dev_get_name,
+        fn_driver_get_ver: fn_driver_get_ver,
+        fn_dev_get_attr: fn_dev_get_attr,
+        sm_major: sm_major,
+        sm_minor: sm_minor,
+        launch_scratch: lscratch,
+        ok: true,
+    }
+}
+
+pub fn cuda_session_is_ok(s: &CudaDriverSession) -> bool { s.ok }
+
+pub fn cuda_session_close(s: CudaDriverSession) -> i64 {
+    let CudaDriverSession {
+        lib_handle,
+        dev: _,
+        ctx,
+        fn_ctx_destroy,
+        fn_mod_load_data: _,
+        fn_mod_load_data_ex: _,
+        fn_mod_unload: _,
+        fn_mod_get_fn: _,
+        fn_mod_get_global: _,
+        fn_mem_alloc: _,
+        fn_mem_free: _,
+        fn_memcpy_h2d: _,
+        fn_memcpy_d2h: _,
+        fn_launch_kernel: _,
+        fn_ctx_sync,
+        fn_dev_get_name: _,
+        fn_driver_get_ver: _,
+        fn_dev_get_attr: _,
+        sm_major: _,
+        sm_minor: _,
+        launch_scratch,
+        ok,
+    } = s
+    if launch_scratch != 0 {
+        heap_free(launch_scratch as *mut u8)
+    }
+    if ok && ctx != 0 && fn_ctx_sync != 0 {
+        let cu_sync = fn_ctx_sync as fn() -> i64
+        let _rs = hal_c_i32(cu_sync())
+    }
+    if ok && ctx != 0 && fn_ctx_destroy != 0 {
+        let cu_ctx_destroy = fn_ctx_destroy as fn(i64) -> i64
+        let _rc = hal_c_i32(cu_ctx_destroy(ctx))
+    }
+    if lib_handle != 0 {
+        let _c = dlclose(lib_handle as *mut u8)
+    }
+    0
+}
+
+pub fn cuda_module_load_ptx_ptr_ex(
+    s: &CudaDriverSession,
+    c_ptx: i64,
+    err_buf: i64,
+    err_cap: i64
+) -> i64 with Alloc, Mut {
+    if !s.ok || c_ptx == 0 { return 0 }
+    let mod_box = heap_alloc(8) as i64
+    let _z = ptr_write_i64_le(mod_box, 0, 0)
+    if s.fn_mod_load_data_ex != 0 && err_buf != 0 && err_cap > 1 {
+        let _ez = ptr_write_u8(err_buf, 0, 0)
+        // CU_JIT_ERROR_LOG_BUFFER = 5, CU_JIT_ERROR_LOG_BUFFER_SIZE_BYTES = 6
+        let opts = heap_alloc(16) as i64
+        let _o0 = ptr_write_u32_le(opts, 0, 5)
+        let _o1 = ptr_write_u32_le(opts, 4, 6)
+        let vals = heap_alloc(16) as i64
+        let _v0 = ptr_write_i64_le(vals, 0, err_buf)
+        let _v1 = ptr_write_i64_le(vals, 8, err_cap)
+        let fex = s.fn_mod_load_data_ex as fn(i64, i64, i32, i64, i64) -> i64
+        let rc_ex = hal_c_i32(fex(mod_box, c_ptx, 2 as i32, opts, vals))
+        let hmod_ex = ptr_read_i64_le(mod_box, 0)
+        heap_free(vals as *mut u8)
+        heap_free(opts as *mut u8)
+        heap_free(mod_box as *mut u8)
+        if rc_ex != 0 { return 0 }
+        return hmod_ex
+    }
+    let f = s.fn_mod_load_data as fn(i64, i64) -> i64
+    let rc = hal_c_i32(f(mod_box, c_ptx))
+    let hmod = ptr_read_i64_le(mod_box, 0)
+    heap_free(mod_box as *mut u8)
+    if rc != 0 { return 0 }
+    hmod
+}
+
+pub fn cuda_module_load_ptx_ptr(s: &CudaDriverSession, c_ptx: i64) -> i64 with Alloc, Mut {
+    if !s.ok || c_ptx == 0 { return 0 }
+    let mod_box = heap_alloc(8) as i64
+    let _z = ptr_write_i64_le(mod_box, 0, 0)
+    let f = s.fn_mod_load_data as fn(i64, i64) -> i64
+    let rc = hal_c_i32(f(mod_box, c_ptx))
+    let hmod = ptr_read_i64_le(mod_box, 0)
+    heap_free(mod_box as *mut u8)
+    if rc != 0 { return 0 }
+    hmod
+}
+
+pub fn cuda_module_load_ptx(s: &CudaDriverSession, ptx_src: string) -> i64 with Alloc, Mut {
+    if !s.ok { return 0 }
+    let c_ptx = hal_cstr(ptx_src)
+    let hmod = cuda_module_load_ptx_ptr(s, c_ptx)
+    hal_free_cstr(c_ptx)
+    hmod
+}
+
+pub fn cuda_module_unload(s: &CudaDriverSession, hmod: i64) -> i64 {
+    if !s.ok || hmod == 0 { return -1 }
+    let f = s.fn_mod_unload as fn(i64) -> i64
+    hal_c_i32(f(hmod))
+}
+
+pub fn cuda_module_get_fn(s: &CudaDriverSession, hmod: i64, entry: string) -> i64 with Alloc, Mut {
+    if !s.ok || hmod == 0 { return 0 }
+    let fn_box = heap_alloc(8) as i64
+    let _z = ptr_write_i64_le(fn_box, 0, 0)
+    let c_entry = hal_cstr(entry)
+    let f = s.fn_mod_get_fn as fn(i64, i64, i64) -> i64
+    let rc = hal_c_i32(f(fn_box, hmod, c_entry))
+    hal_free_cstr(c_entry)
+    let hfn = ptr_read_i64_le(fn_box, 0)
+    heap_free(fn_box as *mut u8)
+    if rc != 0 { return 0 }
+    hfn
+}
+
+pub fn cuda_module_get_global(s: &CudaDriverSession, hmod: i64, name: string) -> i64 with Alloc, Mut {
+    if !s.ok || hmod == 0 || s.fn_mod_get_global == 0 { return 0 }
+    let box = heap_alloc(16) as i64
+    let _z0 = ptr_write_i64_le(box, 0, 0)
+    let _z1 = ptr_write_i64_le(box, 8, 0)
+    let c_name = hal_cstr(name)
+    let f = s.fn_mod_get_global as fn(i64, i64, i64, i64) -> i64
+    let rc = hal_c_i32(f(box, box + 8, hmod, c_name))
+    hal_free_cstr(c_name)
+    let dptr = ptr_read_i64_le(box, 0)
+    heap_free(box as *mut u8)
+    if rc != 0 { return 0 }
+    dptr
+}
+
+pub fn cuda_mem_alloc(s: &CudaDriverSession, bytes: i64) -> i64 with Alloc {
+    if !s.ok || bytes <= 0 { return 0 }
+    let dptr_box = heap_alloc(8) as i64
+    let _z = ptr_write_i64_le(dptr_box, 0, 0)
+    let f = s.fn_mem_alloc as fn(i64, i64) -> i64
+    let rc = hal_c_i32(f(dptr_box, bytes))
+    let dptr = ptr_read_i64_le(dptr_box, 0)
+    heap_free(dptr_box as *mut u8)
+    if rc != 0 { return 0 }
+    dptr
+}
+
+pub fn cuda_mem_free(s: &CudaDriverSession, dptr: i64) -> i64 {
+    if !s.ok || dptr == 0 { return -1 }
+    let f = s.fn_mem_free as fn(i64) -> i64
+    hal_c_i32(f(dptr))
+}
+
+pub fn cuda_memcpy_h2d(s: &CudaDriverSession, dst_dev: i64, src_host: i64, bytes: i64) -> i64 {
+    if !s.ok || dst_dev == 0 || src_host == 0 || bytes <= 0 { return -1 }
+    let f = s.fn_memcpy_h2d as fn(i64, i64, i64) -> i64
+    let chunk_cap: i64 = 16777216
+    var off: i64 = 0
+    while off < bytes {
+        let rem = bytes - off
+        let n = if rem > chunk_cap { chunk_cap } else { rem }
+        let rc = hal_c_i32(f(dst_dev + off, src_host + off, n))
+        if rc != 0 { return rc }
+        off = off + n
+    }
+    0
+}
+
+pub fn cuda_memcpy_d2h(s: &CudaDriverSession, dst_host: i64, src_dev: i64, bytes: i64) -> i64 {
+    if !s.ok || dst_host == 0 || src_dev == 0 || bytes <= 0 { return -1 }
+    let f = s.fn_memcpy_d2h as fn(i64, i64, i64) -> i64
+    hal_c_i32(f(dst_host, src_dev, bytes))
+}
+
+pub fn cuda_launch_3param_1d(
+    s: &CudaDriverSession,
+    hfn: i64,
+    grid_x: i64,
+    block_x: i64,
+    arg0: i64,
+    arg1: i64,
+    arg2: i64
+) -> i64 with Alloc {
+    if !s.ok || hfn == 0 || grid_x <= 0 || block_x <= 0 { return -1 }
+    let vals = heap_alloc(24) as i64
+    let _w0 = ptr_write_i64_le(vals, 0, arg0)
+    let _w1 = ptr_write_i64_le(vals, 8, arg1)
+    let _w2 = ptr_write_i64_le(vals, 16, arg2)
+    let ptrs = heap_alloc(24) as i64
+    let _p0 = ptr_write_i64_le(ptrs, 0, vals)
+    let _p1 = ptr_write_i64_le(ptrs, 8, vals + 8)
+    let _p2 = ptr_write_i64_le(ptrs, 16, vals + 16)
+
+    let cu_launch = s.fn_launch_kernel as fn(i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i64
+    let rc = hal_c_i32(cu_launch(hfn, grid_x, 1, 1, block_x, 1, 1, 0, 0, ptrs, 0))
+    heap_free(ptrs as *mut u8)
+    heap_free(vals as *mut u8)
+    if rc != 0 { return rc }
+
+    let cu_sync = s.fn_ctx_sync as fn() -> i64
+    hal_c_i32(cu_sync())
+}
+
+pub fn cuda_launch_6param_1d(
+    s: &CudaDriverSession,
+    hfn: i64,
+    grid_x: i64,
+    block_x: i64,
+    a0: i64,
+    a1: i64,
+    a2: i64,
+    a3: i64,
+    a4: i64,
+    a5: i64
+) -> i64 with Alloc {
+    if !s.ok || hfn == 0 || grid_x <= 0 || block_x <= 0 { return -1 }
+    let vals = heap_alloc(48) as i64
+    let _w0 = ptr_write_i64_le(vals, 0, a0)
+    let _w1 = ptr_write_i64_le(vals, 8, a1)
+    let _w2 = ptr_write_i64_le(vals, 16, a2)
+    let _w3 = ptr_write_i64_le(vals, 24, a3)
+    let _w4 = ptr_write_i64_le(vals, 32, a4)
+    let _w5 = ptr_write_i64_le(vals, 40, a5)
+    let ptrs = heap_alloc(48) as i64
+    let _p0 = ptr_write_i64_le(ptrs, 0, vals)
+    let _p1 = ptr_write_i64_le(ptrs, 8, vals + 8)
+    let _p2 = ptr_write_i64_le(ptrs, 16, vals + 16)
+    let _p3 = ptr_write_i64_le(ptrs, 24, vals + 24)
+    let _p4 = ptr_write_i64_le(ptrs, 32, vals + 32)
+    let _p5 = ptr_write_i64_le(ptrs, 40, vals + 40)
+
+    let cu_launch = s.fn_launch_kernel as fn(i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i64
+    let rc = hal_c_i32(cu_launch(hfn, grid_x, 1, 1, block_x, 1, 1, 0, 0, ptrs, 0))
+    heap_free(ptrs as *mut u8)
+    heap_free(vals as *mut u8)
+    if rc != 0 { return rc }
+
+    let cu_sync = s.fn_ctx_sync as fn() -> i64
+    hal_c_i32(cu_sync())
+}
+
+pub fn cuda_launch_8param_1d(
+    s: &CudaDriverSession,
+    hfn: i64,
+    grid_x: i64,
+    block_x: i64,
+    a0: i64,
+    a1: i64,
+    a2: i64,
+    a3: i64,
+    a4: i64,
+    a5: i64,
+    a6: i64,
+    a7: i64
+) -> i64 with Alloc {
+    if !s.ok || hfn == 0 || grid_x <= 0 || block_x <= 0 { return -1 }
+    let vals = heap_alloc(64) as i64
+    let _w0 = ptr_write_i64_le(vals, 0, a0)
+    let _w1 = ptr_write_i64_le(vals, 8, a1)
+    let _w2 = ptr_write_i64_le(vals, 16, a2)
+    let _w3 = ptr_write_i64_le(vals, 24, a3)
+    let _w4 = ptr_write_i64_le(vals, 32, a4)
+    let _w5 = ptr_write_i64_le(vals, 40, a5)
+    let _w6 = ptr_write_i64_le(vals, 48, a6)
+    let _w7 = ptr_write_i64_le(vals, 56, a7)
+    let ptrs = heap_alloc(64) as i64
+    let _p0 = ptr_write_i64_le(ptrs, 0, vals)
+    let _p1 = ptr_write_i64_le(ptrs, 8, vals + 8)
+    let _p2 = ptr_write_i64_le(ptrs, 16, vals + 16)
+    let _p3 = ptr_write_i64_le(ptrs, 24, vals + 24)
+    let _p4 = ptr_write_i64_le(ptrs, 32, vals + 32)
+    let _p5 = ptr_write_i64_le(ptrs, 40, vals + 40)
+    let _p6 = ptr_write_i64_le(ptrs, 48, vals + 48)
+    let _p7 = ptr_write_i64_le(ptrs, 56, vals + 56)
+
+    let cu_launch = s.fn_launch_kernel as fn(i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i64
+    let rc = hal_c_i32(cu_launch(hfn, grid_x, 1, 1, block_x, 1, 1, 0, 0, ptrs, 0))
+    heap_free(ptrs as *mut u8)
+    heap_free(vals as *mut u8)
+    if rc != 0 { return rc }
+
+    let cu_sync = s.fn_ctx_sync as fn() -> i64
+    hal_c_i32(cu_sync())
+}
+
+pub fn cuda_ctx_sync(s: &CudaDriverSession) -> i64 {
+    if !s.ok || s.fn_ctx_sync == 0 { return -1 }
+    let cu_sync = s.fn_ctx_sync as fn() -> i64
+    hal_c_i32(cu_sync())
+}
+
+pub fn cuda_session_get_name_cstr(s: &CudaDriverSession, out_buf: i64, out_cap: i64) -> i64 {
+    if !s.ok || s.fn_dev_get_name == 0 || out_buf == 0 || out_cap <= 1 { return -1 }
+    let _z = ptr_write_u8(out_buf, 0, 0)
+    let f = s.fn_dev_get_name as fn(i64, i32, i32) -> i64
+    hal_c_i32(f(out_buf, out_cap as i32, s.dev as i32))
+}
+
+pub fn cuda_session_driver_version(s: &CudaDriverSession) -> i64 with Alloc {
+    if !s.ok || s.fn_driver_get_ver == 0 { return -1 }
+    let vbox = heap_alloc(8) as i64
+    let _z = ptr_write_i64_le(vbox, 0, 0)
+    let f = s.fn_driver_get_ver as fn(i64) -> i64
+    let rc = hal_c_i32(f(vbox))
+    let ver = hal_c_i32(ptr_read_u32_le(vbox, 0))
+    heap_free(vbox as *mut u8)
+    if rc != 0 { return -1 }
+    ver
+}
+
+pub fn cuda_session_sm_major(s: &CudaDriverSession) -> i64 { s.sm_major }
+
+pub fn cuda_session_sm_minor(s: &CudaDriverSession) -> i64 { s.sm_minor }
+
+pub fn cuda_session_sm_version(s: &CudaDriverSession) -> i64 with Alloc, Mut {
+    let actual = if s.sm_major > 0 { s.sm_major * 10 + s.sm_minor } else { 0 }
+    let f_env = hal_getenv_ptr("SOUNIO_CUDA_FORCE_SM")
+    let forced = hal_parse_env_nonneg_i64(f_env, 0)
+    if forced >= 60 && (actual <= 0 || forced < actual) {
+        return forced
+    }
+    actual
+}
+
+pub fn cuda_launch_set_param(s: &CudaDriverSession, idx: i64, val: i64) {
+    if s.launch_scratch != 0 && idx >= 0 && idx < 16 {
+        let _w = ptr_write_i64_le(s.launch_scratch, idx * 8, val)
+    }
+}
+
+pub fn cuda_launch_scratch_async(
+    s: &CudaDriverSession,
+    hfn: i64,
+    grid_x: i64,
+    block_x: i64,
+    shared_bytes: i64,
+    nparams: i64
+) -> i64 {
+    if !s.ok || hfn == 0 || s.launch_scratch == 0 || grid_x <= 0 || block_x <= 0 || nparams <= 0 || nparams > 16 {
+        return -1
+    }
+    let base = s.launch_scratch
+    let ptrs = base + 128
+    var i: i64 = 0
+    while i < nparams {
+        let _p = ptr_write_i64_le(ptrs, i * 8, base + i * 8)
+        i = i + 1
+    }
+    let cu_launch = s.fn_launch_kernel as fn(i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i64
+    hal_c_i32(cu_launch(hfn, grid_x, 1, 1, block_x, 1, 1, shared_bytes, 0, ptrs, 0))
+}
+
+pub fn cuda_launch_4_async(
+    s: &CudaDriverSession,
+    hfn: i64,
+    grid_x: i64,
+    block_x: i64,
+    a0: i64,
+    a1: i64,
+    a2: i64,
+    a3: i64
+) -> i64 {
+    cuda_launch_set_param(s, 0, a0)
+    cuda_launch_set_param(s, 1, a1)
+    cuda_launch_set_param(s, 2, a2)
+    cuda_launch_set_param(s, 3, a3)
+    cuda_launch_scratch_async(s, hfn, grid_x, block_x, 0, 4)
+}
+
+pub fn cuda_launch_6_async(
+    s: &CudaDriverSession,
+    hfn: i64,
+    grid_x: i64,
+    block_x: i64,
+    a0: i64,
+    a1: i64,
+    a2: i64,
+    a3: i64,
+    a4: i64,
+    a5: i64
+) -> i64 {
+    cuda_launch_set_param(s, 0, a0)
+    cuda_launch_set_param(s, 1, a1)
+    cuda_launch_set_param(s, 2, a2)
+    cuda_launch_set_param(s, 3, a3)
+    cuda_launch_set_param(s, 4, a4)
+    cuda_launch_set_param(s, 5, a5)
+    cuda_launch_scratch_async(s, hfn, grid_x, block_x, 0, 6)
+}
+
+pub fn cuda_launch_8_async(
+    s: &CudaDriverSession,
+    hfn: i64,
+    grid_x: i64,
+    block_x: i64,
+    a0: i64,
+    a1: i64,
+    a2: i64,
+    a3: i64,
+    a4: i64,
+    a5: i64,
+    a6: i64,
+    a7: i64
+) -> i64 {
+    cuda_launch_set_param(s, 0, a0)
+    cuda_launch_set_param(s, 1, a1)
+    cuda_launch_set_param(s, 2, a2)
+    cuda_launch_set_param(s, 3, a3)
+    cuda_launch_set_param(s, 4, a4)
+    cuda_launch_set_param(s, 5, a5)
+    cuda_launch_set_param(s, 6, a6)
+    cuda_launch_set_param(s, 7, a7)
+    cuda_launch_scratch_async(s, hfn, grid_x, block_x, 0, 8)
+}
+
+pub fn cuda_launch_10_async(
+    s: &CudaDriverSession,
+    hfn: i64,
+    grid_x: i64,
+    block_x: i64,
+    a0: i64,
+    a1: i64,
+    a2: i64,
+    a3: i64,
+    a4: i64,
+    a5: i64,
+    a6: i64,
+    a7: i64,
+    a8: i64,
+    a9: i64
+) -> i64 {
+    cuda_launch_set_param(s, 0, a0)
+    cuda_launch_set_param(s, 1, a1)
+    cuda_launch_set_param(s, 2, a2)
+    cuda_launch_set_param(s, 3, a3)
+    cuda_launch_set_param(s, 4, a4)
+    cuda_launch_set_param(s, 5, a5)
+    cuda_launch_set_param(s, 6, a6)
+    cuda_launch_set_param(s, 7, a7)
+    cuda_launch_set_param(s, 8, a8)
+    cuda_launch_set_param(s, 9, a9)
+    cuda_launch_scratch_async(s, hfn, grid_x, block_x, 0, 10)
+}
+
+pub fn cuda_launch_12_async(
+    s: &CudaDriverSession,
+    hfn: i64,
+    grid_x: i64,
+    block_x: i64,
+    a0: i64,
+    a1: i64,
+    a2: i64,
+    a3: i64,
+    a4: i64,
+    a5: i64,
+    a6: i64,
+    a7: i64,
+    a8: i64,
+    a9: i64,
+    a10: i64,
+    a11: i64
+) -> i64 {
+    cuda_launch_set_param(s, 0, a0)
+    cuda_launch_set_param(s, 1, a1)
+    cuda_launch_set_param(s, 2, a2)
+    cuda_launch_set_param(s, 3, a3)
+    cuda_launch_set_param(s, 4, a4)
+    cuda_launch_set_param(s, 5, a5)
+    cuda_launch_set_param(s, 6, a6)
+    cuda_launch_set_param(s, 7, a7)
+    cuda_launch_set_param(s, 8, a8)
+    cuda_launch_set_param(s, 9, a9)
+    cuda_launch_set_param(s, 10, a10)
+    cuda_launch_set_param(s, 11, a11)
+    cuda_launch_scratch_async(s, hfn, grid_x, block_x, 0, 12)
+}
+
+pub fn hal_cpu_set_ftz_daz(enable: bool) -> bool with Alloc, Mut {
+    let main_h = dlopen(0 as *mut u8, 1) as i64
+    if main_h == 0 { return false }
+    let fn_uname_raw = hal_dlsym_str(main_h, "uname")
+    var fn_feget_raw = hal_dlsym_str(main_h, "fegetenv")
+    var fn_feset_raw = hal_dlsym_str(main_h, "fesetenv")
+    var libm_h: i64 = 0
+    if fn_feget_raw == 0 || fn_feset_raw == 0 {
+        libm_h = hal_dlopen_str("libm.so.6", 1)
+        if libm_h != 0 {
+            if fn_feget_raw == 0 { fn_feget_raw = hal_dlsym_str(libm_h, "fegetenv") }
+            if fn_feset_raw == 0 { fn_feset_raw = hal_dlsym_str(libm_h, "fesetenv") }
+        }
+    }
+    if fn_uname_raw == 0 || fn_feget_raw == 0 || fn_feset_raw == 0 {
+        if libm_h != 0 { let _cm = dlclose(libm_h as *mut u8) }
+        let _c = dlclose(main_h as *mut u8)
+        return false
+    }
+
+    let uts = heap_alloc(2048) as i64
+    let fenv = heap_alloc(64) as i64
+    if uts == 0 || fenv == 0 {
+        if uts != 0 { heap_free(uts as *mut u8) }
+        if fenv != 0 { heap_free(fenv as *mut u8) }
+        if libm_h != 0 { let _cm = dlclose(libm_h as *mut u8) }
+        let _c = dlclose(main_h as *mut u8)
+        return false
+    }
+    var zi: i64 = 0
+    while zi < 256 {
+        let _zu = ptr_write_i64_le(uts, zi * 8, 0)
+        zi = zi + 1
+    }
+    zi = 0
+    while zi < 8 {
+        let _zf = ptr_write_i64_le(fenv, zi * 8, 0)
+        zi = zi + 1
+    }
+
+    let uname_fn = fn_uname_raw as fn(i64) -> i32
+    var ok = false
+    if uname_fn(uts) == 0 {
+        // Darwin sysname="Darwin", machine@1024; Linux sysname="Linux", machine@260.
+        let s0 = ptr_read_u8(uts, 0)
+        let s1 = ptr_read_u8(uts, 1)
+        let s2 = ptr_read_u8(uts, 2)
+        let s3 = ptr_read_u8(uts, 3)
+        let s4 = ptr_read_u8(uts, 4)
+        let s5 = ptr_read_u8(uts, 5)
+        let s6 = ptr_read_u8(uts, 6)
+        let is_darwin = s0 == 68 && s1 == 97 && s2 == 114 && s3 == 119 && s4 == 105 && s5 == 110 && s6 == 0
+        let is_linux = s0 == 76 && s1 == 105 && s2 == 110 && s3 == 117 && s4 == 120 && s5 == 0
+        var env_off: i64 = -1
+        var env_mask: i64 = 0
+        if is_darwin {
+            let m0 = ptr_read_u8(uts, 1024)
+            if m0 == 97 {
+                // macOS arm64: __fpsr@0, __fpcr@8; bit 24 = FZ (FTZ+DAZ)
+                env_off = 8
+                env_mask = 16777216
+            } else if m0 == 120 {
+                // macOS x86_64: __control@0, __status@2, __mxcsr@4; FTZ=0x8000 | DAZ=0x0040
+                env_off = 4
+                env_mask = 32832
+            }
+        } else if is_linux {
+            let m0 = ptr_read_u8(uts, 260)
+            if m0 == 97 {
+                // Linux aarch64: __fpcr@0, __fpsr@4; bit 24 = FZ
+                env_off = 0
+                env_mask = 16777216
+            } else if m0 == 120 {
+                // Linux x86_64: mxcsr@28; FTZ=0x8000 | DAZ=0x0040
+                env_off = 28
+                env_mask = 32832
+            }
+        }
+        if env_off >= 0 {
+            let feget = fn_feget_raw as fn(i64) -> i32
+            let feset = fn_feset_raw as fn(i64) -> i32
+            if feget(fenv) == 0 {
+                let cur = ptr_read_u32_le(fenv, env_off) as i64
+                let want = if enable { cur | env_mask } else { cur & (4294967295 ^ env_mask) }
+                let _w = ptr_write_u32_le(fenv, env_off, want as u32)
+                if feset(fenv) == 0 {
+                    zi = 0
+                    while zi < 8 {
+                        let _zf2 = ptr_write_i64_le(fenv, zi * 8, 0)
+                        zi = zi + 1
+                    }
+                    if feget(fenv) == 0 {
+                        let after = ptr_read_u32_le(fenv, env_off) as i64
+                        if enable {
+                            ok = (after & env_mask) == env_mask
+                        } else {
+                            ok = (after & env_mask) == 0
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    heap_free(uts as *mut u8)
+    heap_free(fenv as *mut u8)
+    if libm_h != 0 { let _cm = dlclose(libm_h as *mut u8) }
+    let _c = dlclose(main_h as *mut u8)
+    ok
+}
+
+fn hal_hex_nibble(v: i64) -> i64 {
+    let n = v & 15
+    if n < 10 { 48 + n } else { 87 + n }
+}
+
+pub fn hal_self_binary_sha256_hex(out_hex_65: i64) -> bool with Alloc, Mut, Panic, Div {
+    if out_hex_65 == 0 { return false }
+    let _z = ptr_write_u8(out_hex_65, 0, 0)
+    let main_h = dlopen(0 as *mut u8, 1) as i64
+    if main_h == 0 { return false }
+
+    let fn_ns_raw = hal_dlsym_str(main_h, "_NSGetExecutablePath")
+    let fn_rl_raw = hal_dlsym_str(main_h, "readlink")
+    let fn_fopen_raw = hal_dlsym_str(main_h, "fopen")
+    let fn_fread_raw = hal_dlsym_str(main_h, "fread")
+    let fn_fclose_raw = hal_dlsym_str(main_h, "fclose")
+    if fn_fopen_raw == 0 || fn_fread_raw == 0 || fn_fclose_raw == 0 {
+        let _c = dlclose(main_h as *mut u8)
+        return false
+    }
+
+    let exe_buf = heap_alloc(4096) as i64
+    let sz_buf = heap_alloc(16) as i64
+    let blk_buf = heap_alloc(64) as i64
+    if exe_buf == 0 || sz_buf == 0 || blk_buf == 0 {
+        if exe_buf != 0 { heap_free(exe_buf as *mut u8) }
+        if sz_buf != 0 { heap_free(sz_buf as *mut u8) }
+        if blk_buf != 0 { heap_free(blk_buf as *mut u8) }
+        let _c = dlclose(main_h as *mut u8)
+        return false
+    }
+    let _ze = ptr_write_u8(exe_buf, 0, 0)
+
+    var path_ok = false
+    if fn_ns_raw != 0 {
+        let _wsz = ptr_write_u32_le(sz_buf, 0, 4096)
+        let ns_fn = fn_ns_raw as fn(i64, i64) -> i32
+        if ns_fn(exe_buf, sz_buf) == 0 {
+            path_ok = true
+        }
+    } else if fn_rl_raw != 0 {
+        let c_proc = hal_cstr("/proc/self/exe")
+        let rl_fn = fn_rl_raw as fn(i64, i64, i64) -> i64
+        let rlen = rl_fn(c_proc, exe_buf, 4095)
+        hal_free_cstr(c_proc)
+        if rlen > 0 && rlen < 4096 {
+            let _zn = ptr_write_u8(exe_buf, rlen, 0)
+            path_ok = true
+        }
+    }
+
+    var ok = false
+    if path_ok {
+        let c_mode = hal_cstr("rb")
+        let fopen_fn = fn_fopen_raw as fn(i64, i64) -> i64
+        let fread_fn = fn_fread_raw as fn(i64, i64, i64, i64) -> i64
+        let fclose_fn = fn_fclose_raw as fn(i64) -> i32
+        let fp = fopen_fn(exe_buf, c_mode)
+        hal_free_cstr(c_mode)
+        if fp != 0 {
+            var h: [i64; 8] = [
+                0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+                0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
+            ]
+            var block: [u8; 64] = [0; 64]
+            var total_bytes: i64 = 0
+            var done = false
+            while !done {
+                var got: i64 = 0
+                while got < 64 {
+                    let n = fread_fn(blk_buf + got, 1, 64 - got, fp)
+                    if n <= 0 { break }
+                    got = got + n
+                }
+                total_bytes = total_bytes + got
+                if got == 64 {
+                    var bi: i64 = 0
+                    while bi < 64 {
+                        block[bi] = ptr_read_u8(blk_buf, bi) as u8
+                        bi = bi + 1
+                    }
+                    h = sha256_compress(h, block)
+                } else {
+                    var bi: i64 = 0
+                    while bi < got {
+                        block[bi] = ptr_read_u8(blk_buf, bi) as u8
+                        bi = bi + 1
+                    }
+                    block[got] = 0x80 as u8
+                    bi = got + 1
+                    while bi < 64 {
+                        block[bi] = 0 as u8
+                        bi = bi + 1
+                    }
+                    if got >= 56 {
+                        h = sha256_compress(h, block)
+                        bi = 0
+                        while bi < 64 {
+                            block[bi] = 0 as u8
+                            bi = bi + 1
+                        }
+                    }
+                    let bit_len = total_bytes * 8
+                    block[56] = ((bit_len >> 56) & 255) as u8
+                    block[57] = ((bit_len >> 48) & 255) as u8
+                    block[58] = ((bit_len >> 40) & 255) as u8
+                    block[59] = ((bit_len >> 32) & 255) as u8
+                    block[60] = ((bit_len >> 24) & 255) as u8
+                    block[61] = ((bit_len >> 16) & 255) as u8
+                    block[62] = ((bit_len >>  8) & 255) as u8
+                    block[63] = (bit_len & 255) as u8
+                    h = sha256_compress(h, block)
+                    done = true
+                }
+            }
+            let _cf = fclose_fn(fp)
+            var wi: i64 = 0
+            while wi < 8 {
+                let w = h[wi] & 0xFFFFFFFF
+                var ni: i64 = 0
+                while ni < 8 {
+                    let sh = (7 - ni) * 4
+                    let _wh = ptr_write_u8(out_hex_65, wi * 8 + ni, hal_hex_nibble(w >> sh))
+                    ni = ni + 1
+                }
+                wi = wi + 1
+            }
+            let _zt = ptr_write_u8(out_hex_65, 64, 0)
+            ok = true
+        }
+    }
+
+    heap_free(exe_buf as *mut u8)
+    heap_free(sz_buf as *mut u8)
+    heap_free(blk_buf as *mut u8)
+    let _c = dlclose(main_h as *mut u8)
+    ok
+}

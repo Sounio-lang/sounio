@@ -1,0 +1,581 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: LLM_V2_Q4_SOA_PARITY_PASS
+//
+// Phase 1B Differential Parity Test:
+//   Compares Q4_SoA_32 CPU reference (q4_soa_quantize_bf16_cpu + q4_soa_gemv_cpu)
+//   against GPU kernels (Metal qwen3_quantize_q4_soa/qwen3_gemv_q4_soa_f32 and
+//   CUDA cuda_quantize_q4_soa/cuda_gemv_q4_soa) on both aligned (64x256) and
+//   unaligned tail (17x45) shapes, including half-integer ties and zero blocks.
+
+use tensor2::convert::{
+    f64_to_f32_bits,
+    f32_bits_to_f64,
+    f64_to_bf16_bits,
+    bf16_bits_to_f64,
+    f16_bits_to_f64,
+}
+use math::pure::{sqrt}
+use llm::mmap::{
+    PageArena,
+    page_arena_alloc,
+    page_arena_free,
+    page_arena_is_ok,
+    page_arena_len,
+    page_arena_ptr,
+}
+use llm::q4_soa::{
+    q4_soa_align_up_64,
+    q4_soa_block_count,
+    q4_soa_nibbles_bytes,
+    q4_soa_scales_bytes,
+    q4_soa_rhos_bytes,
+    q4_soa_quantize_bf16_cpu,
+    q4_soa_gemv_cpu,
+    q4_soa_metal_pipelines_compile,
+    q4_soa_metal_encode_quantize,
+    q4_soa_metal_encode_gemv,
+}
+use llm::ptx_kernels_sm80::{emit_qwen3_cuda_runner_ptx_for_sm}
+use llm::hal::{
+    MetalSession,
+    CudaDriverSession,
+    hal_getenv_ptr,
+    metal_session_open,
+    metal_session_is_ok,
+    metal_session_close,
+    metal_buffer_nocopy,
+    metal_buffer_free,
+    metal_cmd_begin,
+    metal_cmd_cancel,
+    metal_cmd_commit_sync,
+    cuda_session_open,
+    cuda_session_is_ok,
+    cuda_session_close,
+    cuda_session_driver_version,
+    cuda_session_sm_version,
+    cuda_module_load_ptx_ptr_ex,
+    cuda_module_unload,
+    cuda_module_get_fn,
+    cuda_mem_alloc,
+    cuda_mem_free,
+    cuda_memcpy_h2d,
+    cuda_memcpy_d2h,
+    cuda_launch_6_async,
+    cuda_launch_8_async,
+    cuda_ctx_sync,
+}
+
+fn fill_test_case(w_ptr: i64, x_ptr: i64, rows: i64, cols: i64) with Mut, Div {
+    var r: i64 = 0
+    while r < rows {
+        var c: i64 = 0
+        while c < cols {
+            var val: f64 = 0.0
+            if r == 0 {
+                if c == 0 { val = 7.0 }
+                else if c == 1 { val = 0.5 }
+                else if c == 2 { val = -0.5 }
+                else if c == 3 { val = 1.5 }
+                else if c == 4 { val = -1.5 }
+                else if c == 5 { val = 2.5 }
+                else if c == 6 { val = -2.5 }
+                else if c == 7 { val = 3.5 }
+                else if c == 8 { val = -3.5 }
+                else if c == 9 { val = -7.0 }
+                else if c >= 32 {
+                    let sub = ((c - 32) * 19 + 5) % 31
+                    val = ((sub - 15) as f64) * 0.125
+                }
+            } else if r == 1 {
+                val = 0.0
+            } else {
+                let code = (r * 131 + c * 17 + 7) % 193
+                val = ((code - 96) as f64) * 0.03125
+            }
+            let _ww = ptr_write_u16_le(w_ptr, (r * cols + c) * 2, f64_to_bf16_bits(val))
+            c = c + 1
+        }
+        r = r + 1
+    }
+
+    var k: i64 = 0
+    while k < cols {
+        let xcode = (k * 29 + 3) % 65
+        let xv = ((xcode - 32) as f64) * 0.0625
+        let _wx = ptr_write_u32_le(x_ptr, k * 4, f64_to_f32_bits(xv))
+        k = k + 1
+    }
+}
+
+fn check_eisa_bound_cpu(
+    w_bf16_ptr: i64,
+    x_ptr: i64,
+    y_q4_ptr: i64,
+    rho_ptr: i64,
+    rows: i64,
+    cols: i64
+) -> bool with IO, Mut, Div, Panic {
+    let n_blocks = q4_soa_block_count(cols)
+    var x_norm_sq: f64 = 0.0
+    var k: i64 = 0
+    while k < cols {
+        let xv = f32_bits_to_f64(ptr_read_u32_le(x_ptr, k * 4))
+        x_norm_sq = x_norm_sq + xv * xv
+        k = k + 1
+    }
+    let x_norm = sqrt(x_norm_sq)
+
+    var r: i64 = 0
+    while r < rows {
+        var y_bf16: f64 = 0.0
+        var rho_sq: f64 = 0.0
+        var c: i64 = 0
+        while c < cols {
+            let wv = bf16_bits_to_f64(ptr_read_u16_le(w_bf16_ptr, (r * cols + c) * 2))
+            let xv = f32_bits_to_f64(ptr_read_u32_le(x_ptr, c * 4))
+            y_bf16 = y_bf16 + wv * xv
+            c = c + 1
+        }
+        var b: i64 = 0
+        while b < n_blocks {
+            let rh = f16_bits_to_f64(ptr_read_u16_le(rho_ptr, (r * n_blocks + b) * 2))
+            rho_sq = rho_sq + rh * rh
+            b = b + 1
+        }
+        let y_q4 = f32_bits_to_f64(ptr_read_u32_le(y_q4_ptr, r * 4))
+        let err = if y_q4 >= y_bf16 { y_q4 - y_bf16 } else { y_bf16 - y_q4 }
+        let bound = sqrt(rho_sq) * x_norm + 0.001
+        if err > bound {
+            print("[parity-cpu-bound-fail] row=")
+            print_int(r)
+            println("")
+            return false
+        }
+        r = r + 1
+    }
+    true
+}
+
+fn compare_gpu_vs_cpu(
+    tag: string,
+    rows: i64,
+    cols: i64,
+    cpu_nib: i64,
+    cpu_scl: i64,
+    cpu_rho: i64,
+    cpu_y: i64,
+    gpu_nib: i64,
+    gpu_scl: i64,
+    gpu_rho: i64,
+    gpu_y: i64,
+    check_rho: bool
+) -> bool with IO, Mut, Div {
+    let n_blocks = q4_soa_block_count(cols)
+    let total_blks = rows * n_blocks
+    let nib_bytes = total_blks * 16
+    var i: i64 = 0
+    while i < nib_bytes {
+        let b_cpu = ptr_read_u8(cpu_nib, i)
+        let b_gpu = ptr_read_u8(gpu_nib, i)
+        if b_cpu != b_gpu {
+            print("[parity-nib-mismatch] ")
+            print(tag)
+            print(" byte=")
+            print_int(i)
+            print(" cpu=")
+            print_int(b_cpu)
+            print(" gpu=")
+            print_int(b_gpu)
+            println("")
+            return false
+        }
+        i = i + 1
+    }
+
+    var blk: i64 = 0
+    while blk < total_blks {
+        let s_cpu = ptr_read_u16_le(cpu_scl, blk * 2)
+        let s_gpu = ptr_read_u16_le(gpu_scl, blk * 2)
+        if s_cpu != s_gpu {
+            print("[parity-scl-mismatch] ")
+            print(tag)
+            print(" blk=")
+            print_int(blk)
+            print(" cpu=")
+            print_int(s_cpu)
+            print(" gpu=")
+            print_int(s_gpu)
+            println("")
+            return false
+        }
+        if check_rho {
+            let r_cpu = ptr_read_u16_le(cpu_rho, blk * 2)
+            let r_gpu = ptr_read_u16_le(gpu_rho, blk * 2)
+            let diff = if r_cpu >= r_gpu { r_cpu - r_gpu } else { r_gpu - r_cpu }
+            if diff > 1 {
+                print("[parity-rho-mismatch] ")
+                print(tag)
+                print(" blk=")
+                print_int(blk)
+                print(" cpu=")
+                print_int(r_cpu)
+                print(" gpu=")
+                print_int(r_gpu)
+                println("")
+                return false
+            }
+        }
+        blk = blk + 1
+    }
+
+    var max_abs_diff: f64 = 0.0
+    var r: i64 = 0
+    while r < rows {
+        let yc = f32_bits_to_f64(ptr_read_u32_le(cpu_y, r * 4))
+        let yg = f32_bits_to_f64(ptr_read_u32_le(gpu_y, r * 4))
+        let d = if yc >= yg { yc - yg } else { yg - yc }
+        if d > max_abs_diff { max_abs_diff = d }
+        r = r + 1
+    }
+
+    print("[parity] ")
+    print(tag)
+    print(" rows=")
+    print_int(rows)
+    print(" cols=")
+    print_int(cols)
+    print(" max_abs_diff_x1e9=")
+    print_int((max_abs_diff * 1000000000.0) as i64)
+    println("")
+    max_abs_diff < 0.0001
+}
+
+fn run_metal_shape_inner(
+    s: &MetalSession,
+    a_host: &PageArena,
+    rows: i64,
+    cols: i64,
+    w_bytes: i64,
+    x_bytes: i64,
+    y_bytes: i64,
+    nib_bytes: i64,
+    scl_bytes: i64
+) -> bool with IO, Alloc, Mut, Div, Panic {
+    let pipes = q4_soa_metal_pipelines_compile(s)
+    if !pipes.ok { return false }
+
+    let base = page_arena_ptr(a_host)
+    let w_ptr = base
+    let x_ptr = w_ptr + w_bytes
+    let y_cpu = x_ptr + x_bytes
+    let y_gpu = y_cpu + y_bytes
+    let nib_cpu = y_gpu + y_bytes
+    let nib_gpu_r = nib_cpu + nib_bytes
+    let nib_gpu_nr = nib_gpu_r + nib_bytes
+    let scl_cpu = nib_gpu_nr + nib_bytes
+    let scl_gpu_r = scl_cpu + scl_bytes
+    let scl_gpu_nr = scl_gpu_r + scl_bytes
+    let rho_cpu = scl_gpu_nr + scl_bytes
+    let rho_gpu = rho_cpu + scl_bytes
+
+    fill_test_case(w_ptr, x_ptr, rows, cols)
+    var ok = q4_soa_quantize_bf16_cpu(w_ptr, nib_cpu, scl_cpu, rho_cpu, true, rows, cols)
+    if ok && !q4_soa_gemv_cpu(nib_cpu, scl_cpu, x_ptr, y_cpu, rows, cols) { ok = false }
+    if ok && !check_eisa_bound_cpu(w_ptr, x_ptr, y_cpu, rho_cpu, rows, cols) { ok = false }
+
+    let b_all = metal_buffer_nocopy(s, base, page_arena_len(a_host))
+    if b_all <= 0 { ok = false }
+
+    if ok {
+        let cid = metal_cmd_begin(s)
+        if cid <= 0 {
+            ok = false
+        } else {
+            let rc1 = q4_soa_metal_encode_quantize(
+                s, cid, pipes.quantize,
+                b_all, 0,
+                b_all, nib_gpu_r - base,
+                b_all, scl_gpu_r - base,
+                b_all, rho_gpu - base,
+                rows, cols, 3
+            )
+            let rc2 = q4_soa_metal_encode_quantize(
+                s, cid, pipes.quantize,
+                b_all, 0,
+                b_all, nib_gpu_nr - base,
+                b_all, scl_gpu_nr - base,
+                b_all, 0,
+                rows, cols, 1
+            )
+            if rc1 != 0 || rc2 != 0 || metal_cmd_commit_sync(s, cid) != 0 {
+                let _cc = metal_cmd_cancel(s, cid)
+                ok = false
+            }
+        }
+    }
+    if ok {
+        let cid2 = metal_cmd_begin(s)
+        if cid2 <= 0 {
+            ok = false
+        } else {
+            let rc3 = q4_soa_metal_encode_gemv(
+                s, cid2, pipes.gemv,
+                b_all, nib_gpu_r - base,
+                b_all, scl_gpu_r - base,
+                b_all, x_ptr - base,
+                b_all, y_gpu - base,
+                rows, cols
+            )
+            if rc3 != 0 || metal_cmd_commit_sync(s, cid2) != 0 {
+                let _cc2 = metal_cmd_cancel(s, cid2)
+                ok = false
+            }
+        }
+    }
+    if ok {
+        if !compare_gpu_vs_cpu("metal_rho", rows, cols, nib_cpu, scl_cpu, rho_cpu, y_cpu, nib_gpu_r, scl_gpu_r, rho_gpu, y_gpu, true) {
+            ok = false
+        }
+        if !compare_gpu_vs_cpu("metal_norho", rows, cols, nib_cpu, scl_cpu, rho_cpu, y_cpu, nib_gpu_nr, scl_gpu_nr, rho_gpu, y_gpu, false) {
+            ok = false
+        }
+    }
+    if b_all > 0 { let _fb = metal_buffer_free(s, b_all) }
+    ok
+}
+
+fn run_metal_shape(rows: i64, cols: i64, req_metal: bool) -> bool with IO, Alloc, Mut, Div, Panic {
+    let s = metal_session_open("")
+    let w_bytes = q4_soa_align_up_64(rows * cols * 2)
+    let x_bytes = q4_soa_align_up_64(cols * 4)
+    let y_bytes = q4_soa_align_up_64(rows * 4)
+    let nib_bytes = q4_soa_nibbles_bytes(rows, cols)
+    let scl_bytes = q4_soa_scales_bytes(rows, cols)
+    let rho_bytes = q4_soa_rhos_bytes(rows, cols)
+
+    var ok = true
+    if metal_session_is_ok(&s) {
+        let a_host = page_arena_alloc(w_bytes + x_bytes + y_bytes * 2 + nib_bytes * 3 + scl_bytes * 3 + rho_bytes * 2 + 256)
+        if page_arena_is_ok(&a_host) {
+            ok = run_metal_shape_inner(&s, &a_host, rows, cols, w_bytes, x_bytes, y_bytes, nib_bytes, scl_bytes)
+        } else {
+            ok = false
+        }
+        let _fa = page_arena_free(a_host)
+    } else if req_metal {
+        ok = false
+    }
+    let _cs = metal_session_close(s)
+    ok
+}
+
+fn run_cuda_shape_inner(
+    sess: &CudaDriverSession,
+    a_host: &PageArena,
+    rows: i64,
+    cols: i64,
+    w_bytes: i64,
+    x_bytes: i64,
+    y_bytes: i64,
+    nib_bytes: i64,
+    scl_bytes: i64,
+    rho_bytes: i64,
+    tag_r: string,
+    tag_nr: string,
+    target_sm: i64,
+    target_drv: i64
+) -> bool with IO, Alloc, Mut, Div, Panic {
+    let n_blocks = q4_soa_block_count(cols)
+    var ok = true
+    var hmod: i64 = 0
+    var fn_q: i64 = 0
+    var fn_g: i64 = 0
+
+    let c_ptx = emit_qwen3_cuda_runner_ptx_for_sm(target_sm, target_drv)
+    let err_buf = heap_alloc(4096) as i64
+    let _ez = ptr_write_u8(err_buf, 0, 0)
+    hmod = cuda_module_load_ptx_ptr_ex(sess, c_ptx, err_buf, 4096)
+    heap_free(c_ptx as *mut u8)
+    if hmod == 0 {
+        print("[parity-ptx-load-fail] sm=")
+        print_int(target_sm)
+        println("")
+        ok = false
+    } else {
+        fn_q = cuda_module_get_fn(sess, hmod, "cuda_quantize_q4_soa")
+        fn_g = cuda_module_get_fn(sess, hmod, "cuda_gemv_q4_soa")
+        if fn_q == 0 || fn_g == 0 { ok = false }
+    }
+    heap_free(err_buf as *mut u8)
+
+    let d_w = if ok { cuda_mem_alloc(sess, w_bytes) } else { 0 }
+    let d_x = if ok { cuda_mem_alloc(sess, x_bytes) } else { 0 }
+    let d_y = if ok { cuda_mem_alloc(sess, y_bytes) } else { 0 }
+    let d_nib = if ok { cuda_mem_alloc(sess, nib_bytes) } else { 0 }
+    let d_scl = if ok { cuda_mem_alloc(sess, scl_bytes) } else { 0 }
+    let d_rho = if ok { cuda_mem_alloc(sess, rho_bytes) } else { 0 }
+    if ok && (d_w == 0 || d_x == 0 || d_y == 0 || d_nib == 0 || d_scl == 0 || d_rho == 0) {
+        ok = false
+    }
+
+    if ok {
+        let base = page_arena_ptr(a_host)
+        let w_ptr = base
+        let x_ptr = w_ptr + w_bytes
+        let y_cpu = x_ptr + x_bytes
+        let y_gpu = y_cpu + y_bytes
+        let nib_cpu = y_gpu + y_bytes
+        let nib_gpu_r = nib_cpu + nib_bytes
+        let nib_gpu_nr = nib_gpu_r + nib_bytes
+        let scl_cpu = nib_gpu_nr + nib_bytes
+        let scl_gpu_r = scl_cpu + scl_bytes
+        let scl_gpu_nr = scl_gpu_r + scl_bytes
+        let rho_cpu = scl_gpu_nr + scl_bytes
+        let rho_gpu = rho_cpu + rho_bytes
+
+        fill_test_case(w_ptr, x_ptr, rows, cols)
+        if !q4_soa_quantize_bf16_cpu(w_ptr, nib_cpu, scl_cpu, rho_cpu, true, rows, cols) { ok = false }
+        if ok && !q4_soa_gemv_cpu(nib_cpu, scl_cpu, x_ptr, y_cpu, rows, cols) { ok = false }
+        if ok && !check_eisa_bound_cpu(w_ptr, x_ptr, y_cpu, rho_cpu, rows, cols) { ok = false }
+
+        if ok && (cuda_memcpy_h2d(sess, d_w, w_ptr, w_bytes) != 0 || cuda_memcpy_h2d(sess, d_x, x_ptr, x_bytes) != 0) {
+            ok = false
+        }
+        let q_gx = (rows * n_blocks + 255) / 256
+        let g_gx = (rows + 7) / 8
+
+        if ok && cuda_launch_8_async(sess, fn_q, q_gx, 256, d_w, d_nib, d_scl, d_rho, rows, cols, 3, 0) != 0 {
+            ok = false
+        }
+        if ok && cuda_launch_6_async(sess, fn_g, g_gx, 256, d_nib, d_scl, d_x, d_y, rows, cols) != 0 {
+            ok = false
+        }
+        if ok && cuda_ctx_sync(sess) != 0 { ok = false }
+        if ok && (
+            cuda_memcpy_d2h(sess, nib_gpu_r, d_nib, nib_bytes) != 0
+            || cuda_memcpy_d2h(sess, scl_gpu_r, d_scl, scl_bytes) != 0
+            || cuda_memcpy_d2h(sess, rho_gpu, d_rho, rho_bytes) != 0
+            || cuda_memcpy_d2h(sess, y_gpu, d_y, y_bytes) != 0
+        ) {
+            ok = false
+        }
+
+        if ok && cuda_launch_8_async(sess, fn_q, q_gx, 256, d_w, d_nib, d_scl, 0, rows, cols, 1, 0) != 0 {
+            ok = false
+        }
+        if ok && cuda_launch_6_async(sess, fn_g, g_gx, 256, d_nib, d_scl, d_x, d_y, rows, cols) != 0 {
+            ok = false
+        }
+        if ok && cuda_ctx_sync(sess) != 0 { ok = false }
+        if ok && (
+            cuda_memcpy_d2h(sess, nib_gpu_nr, d_nib, nib_bytes) != 0
+            || cuda_memcpy_d2h(sess, scl_gpu_nr, d_scl, scl_bytes) != 0
+            || cuda_memcpy_d2h(sess, y_gpu, d_y, y_bytes) != 0
+        ) {
+            ok = false
+        }
+
+        if ok {
+            if !compare_gpu_vs_cpu(tag_r, rows, cols, nib_cpu, scl_cpu, rho_cpu, y_cpu, nib_gpu_r, scl_gpu_r, rho_gpu, y_gpu, true) {
+                ok = false
+            }
+            if !compare_gpu_vs_cpu(tag_nr, rows, cols, nib_cpu, scl_cpu, rho_cpu, y_cpu, nib_gpu_nr, scl_gpu_nr, rho_gpu, y_gpu, false) {
+                ok = false
+            }
+        }
+    }
+
+    if d_w != 0 { let _f = cuda_mem_free(sess, d_w) }
+    if d_x != 0 { let _f = cuda_mem_free(sess, d_x) }
+    if d_y != 0 { let _f = cuda_mem_free(sess, d_y) }
+    if d_nib != 0 { let _f = cuda_mem_free(sess, d_nib) }
+    if d_scl != 0 { let _f = cuda_mem_free(sess, d_scl) }
+    if d_rho != 0 { let _f = cuda_mem_free(sess, d_rho) }
+    if hmod != 0 { let _u = cuda_module_unload(sess, hmod) }
+    ok
+}
+
+fn run_cuda_shape(rows: i64, cols: i64, req_cuda: bool) -> bool with IO, Alloc, Mut, Div, Panic {
+    let sess = cuda_session_open("", -1)
+    let w_bytes = q4_soa_align_up_64(rows * cols * 2)
+    let x_bytes = q4_soa_align_up_64(cols * 4)
+    let y_bytes = q4_soa_align_up_64(rows * 4)
+    let nib_bytes = q4_soa_nibbles_bytes(rows, cols)
+    let scl_bytes = q4_soa_scales_bytes(rows, cols)
+    let rho_bytes = q4_soa_rhos_bytes(rows, cols)
+
+    var ok = true
+    if cuda_session_is_ok(&sess) {
+        let native_sm = cuda_session_sm_version(&sess)
+        let native_drv = cuda_session_driver_version(&sess)
+        let a_host = page_arena_alloc(w_bytes + x_bytes + y_bytes * 2 + nib_bytes * 3 + scl_bytes * 3 + rho_bytes * 2 + 256)
+        if page_arena_is_ok(&a_host) {
+            if !run_cuda_shape_inner(&sess, &a_host, rows, cols, w_bytes, x_bytes, y_bytes, nib_bytes, scl_bytes, rho_bytes, "cuda_native_rho", "cuda_native_norho", native_sm, native_drv) {
+                ok = false
+            }
+            if ok && native_sm >= 75 && !run_cuda_shape_inner(&sess, &a_host, rows, cols, w_bytes, x_bytes, y_bytes, nib_bytes, scl_bytes, rho_bytes, "cuda_sm75_rho", "cuda_sm75_norho", 75, 11000) {
+                ok = false
+            }
+            if ok && native_sm >= 70 && !run_cuda_shape_inner(&sess, &a_host, rows, cols, w_bytes, x_bytes, y_bytes, nib_bytes, scl_bytes, rho_bytes, "cuda_sm70_rho", "cuda_sm70_norho", 70, 11000) {
+                ok = false
+            }
+        } else {
+            ok = false
+        }
+        let _fa = page_arena_free(a_host)
+    } else if req_cuda {
+        ok = false
+    }
+    let _cs = cuda_session_close(sess)
+    ok
+}
+
+fn check_cpu_only_shape(rows: i64, cols: i64) -> bool with IO, Alloc, Mut, Div, Panic {
+    let w_bytes = q4_soa_align_up_64(rows * cols * 2)
+    let x_bytes = q4_soa_align_up_64(cols * 4)
+    let y_bytes = q4_soa_align_up_64(rows * 4)
+    let nib_bytes = q4_soa_nibbles_bytes(rows, cols)
+    let scl_bytes = q4_soa_scales_bytes(rows, cols)
+    let rho_bytes = q4_soa_rhos_bytes(rows, cols)
+    let a = page_arena_alloc(w_bytes + x_bytes + y_bytes + nib_bytes + scl_bytes + rho_bytes + 64)
+    var ok = page_arena_is_ok(&a)
+    if ok {
+        let base = page_arena_ptr(&a)
+        let w_ptr = base
+        let x_ptr = w_ptr + w_bytes
+        let y_ptr = x_ptr + x_bytes
+        let nib_ptr = y_ptr + y_bytes
+        let scl_ptr = nib_ptr + nib_bytes
+        let rho_ptr = scl_ptr + scl_bytes
+        fill_test_case(w_ptr, x_ptr, rows, cols)
+        if !q4_soa_quantize_bf16_cpu(w_ptr, nib_ptr, scl_ptr, rho_ptr, true, rows, cols) { ok = false }
+        if ok && !q4_soa_gemv_cpu(nib_ptr, scl_ptr, x_ptr, y_ptr, rows, cols) { ok = false }
+        if ok && !check_eisa_bound_cpu(w_ptr, x_ptr, y_ptr, rho_ptr, rows, cols) { ok = false }
+    }
+    let _fa = page_arena_free(a)
+    ok
+}
+
+fn main() -> i64 with IO, Alloc, Mut, Div, Panic {
+    var ok = true
+    if !check_cpu_only_shape(64, 256) { ok = false }
+    if !check_cpu_only_shape(17, 45) { ok = false }
+
+    let req_m_ptr = hal_getenv_ptr("SOUNIO_REQUIRE_METAL")
+    let req_m = req_m_ptr != 0 && ptr_read_u8(req_m_ptr, 0) == 49
+    let req_c_ptr = hal_getenv_ptr("SOUNIO_REQUIRE_CUDA")
+    let req_c = req_c_ptr != 0 && ptr_read_u8(req_c_ptr, 0) == 49
+
+    if !run_metal_shape(64, 256, req_m) { ok = false }
+    if !run_metal_shape(17, 45, req_m) { ok = false }
+    if !run_cuda_shape(64, 256, req_c) { ok = false }
+    if !run_cuda_shape(17, 45, req_c) { ok = false }
+
+    if !ok {
+        println("LLM_V2_Q4_SOA_PARITY_FAIL")
+        return 1
+    }
+    println("LLM_V2_Q4_SOA_PARITY_PASS")
+    0
+}

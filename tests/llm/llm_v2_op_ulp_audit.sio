@@ -1,0 +1,2372 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: ULP_AUDIT_DONE
+//
+// Cross-Backend Metal vs PTX FP32 Divergence Localization Diagnostic.
+// Does NOT modify any production kernels. Dumps binary IEEE-754 f32 records:
+//   [magic:u32=0x554C5031 "ULP1"][tag_len:u32][tag:u8*tag_len][count:u32][f32*count]
+
+use tensor2::convert::{f32_bits_to_f64, f64_to_f32_bits, f64_to_bf16_bits}
+use llm::mmap::{
+    PageArena,
+    page_arena_alloc,
+    page_arena_free,
+    page_arena_is_ok,
+    page_arena_ptr,
+    page_arena_len,
+    mapped_shard_ptr,
+    mapped_shard_len,
+    bf16_bits_to_f64_exact,
+}
+use llm::hal::{
+    MetalSession,
+    CudaDriverSession,
+    hal_getenv_ptr,
+    hal_cpu_set_ftz_daz,
+    metal_session_open,
+    metal_session_close,
+    metal_session_is_ok,
+    metal_buffer_nocopy,
+    metal_buffer_free,
+    metal_cmd_begin,
+    metal_cmd_cancel,
+    metal_cmd_commit_sync,
+    cuda_session_is_ok,
+    cuda_session_sm_version,
+    cuda_mem_alloc,
+    cuda_mem_free,
+    cuda_memcpy_h2d,
+    cuda_memcpy_d2h,
+    cuda_ctx_sync,
+    cuda_launch_4_async,
+    cuda_launch_6_async,
+    cuda_launch_8_async,
+    cuda_launch_10_async,
+    cuda_launch_12_async,
+}
+use llm::q4_soa::{
+    Q4SoaMetalPipelines,
+    q4_soa_align_up_64,
+    q4_soa_block_count,
+    q4_soa_nibbles_bytes,
+    q4_soa_scales_bytes,
+    q4_soa_rhos_bytes,
+    q4_soa_quantize_bf16_cpu,
+    q4_soa_quantize_f32_cpu,
+    q4_soa_gemv_cpu,
+    q4_soa_metal_pipelines_compile,
+    q4_soa_metal_encode_quantize,
+    q4_soa_metal_encode_gemv,
+}
+use llm::qwen3_kernels::{
+    qwen3_metal_encode_rmsnorm,
+    qwen3_metal_encode_gemv,
+    qwen3_metal_encode_gemm,
+    qwen3_metal_encode_gemm_tc,
+    qwen3_metal_encode_gemv_bf16_qkv,
+    qwen3_metal_encode_qk_norm_rope_kv_scatter,
+    qwen3_metal_encode_paged_gqa,
+    qwen3_metal_encode_add_rmsnorm,
+    qwen3_metal_encode_gemv_bf16_gate_up_swiglu,
+    qwen3_metal_encode_swiglu,
+    qwen3_metal_encode_vec_add,
+    qwen3_metal_encode_argmax_top2,
+}
+use llm::qwen3_paged_kv::{
+    Qwen3PagedKv,
+    qwen3_kv_alloc,
+    qwen3_kv_free,
+    qwen3_kv_is_ok,
+    qwen3_kv_ensure_pos,
+    qwen3_kv_arena_ptr,
+    qwen3_kv_arena_len,
+    qwen3_kv_table_off,
+    qwen3_kv_k_layer_off,
+    qwen3_kv_v_layer_off,
+    qwen3_kv_block_size,
+    qwen3_kv_write_kv_f32_buf,
+}
+use llm::qwen3_tokenizer::{
+    Qwen3Tokenizer,
+    qwen3_tokenizer_load,
+    qwen3_tokenizer_free,
+    qwen3_tokenizer_is_ok,
+    qwen3_encode_str,
+}
+use llm::qwen3::{
+    Qwen3Config,
+    Qwen3Model,
+    Qwen3MetalRunner,
+    Qwen3CudaRunner,
+    qwen3_model_open,
+    qwen3_model_free,
+    qwen3_model_is_ok,
+    qwen3_model_cfg,
+    qwen3_model_logits_ptr,
+    qwen3_model_top2,
+    qwen3_logits_argmax,
+    qwen3_metal_runner_init,
+    qwen3_metal_runner_free,
+    qwen3_metal_runner_is_ok,
+    qwen3_cuda_runner_init,
+    qwen3_cuda_runner_init_audit,
+    qwen3_cuda_audit_reset_fma_hits,
+    qwen3_cuda_audit_read_fma_hits,
+    qwen3_cuda_runner_free,
+    qwen3_cuda_runner_is_ok,
+    qwen3_cuda_print_info,
+    qwen3_cuda_sync_logits,
+    qwen3_cpu_rmsnorm,
+    qwen3_cpu_gemv,
+    qwen3_cpu_rope,
+    qwen3_cpu_paged_gqa,
+    qwen3_cpu_swiglu,
+    qwen3_cpu_vec_add,
+    qwen3_forward_token_cpu,
+    qwen3_forward_token_metal_opt,
+    qwen3_forward_token_cuda_opt,
+}
+
+extern "C" {
+    fn dlopen(filename: *mut u8, flags: i32) -> *mut u8
+    fn dlsym(handle: *mut u8, symbol: *mut u8) -> *mut u8
+    fn dlclose(handle: *mut u8) -> i32
+}
+
+struct DumpFile {
+    libc_h: i64,
+    fp: i64,
+    fn_fwrite: i64,
+    fn_fclose: i64,
+    hdr_buf: i64,
+    ok: bool,
+}
+
+fn cstr_from_str(s: string) -> i64 with Alloc, Mut {
+    let n = str_len(s)
+    let buf = heap_alloc(n + 8) as i64
+    var i: i64 = 0
+    while i < n {
+        let _w = ptr_write_u8(buf, i, str_char_at(s, i) & 255)
+        i = i + 1
+    }
+    let _z = ptr_write_u8(buf, n, 0)
+    buf
+}
+
+fn dump_open(path_ptr: i64) -> DumpFile with Alloc, Mut {
+    let h = dlopen(0 as *mut u8, 1) as i64
+    if h == 0 {
+        return DumpFile { libc_h: 0, fp: 0, fn_fwrite: 0, fn_fclose: 0, hdr_buf: 0, ok: false }
+    }
+    let s_fopen = cstr_from_str("fopen")
+    let s_fwrite = cstr_from_str("fwrite")
+    let s_fclose = cstr_from_str("fclose")
+    let s_mode = cstr_from_str("wb")
+    let r_fopen = dlsym(h as *mut u8, s_fopen as *mut u8) as i64
+    let r_fwrite = dlsym(h as *mut u8, s_fwrite as *mut u8) as i64
+    let r_fclose = dlsym(h as *mut u8, s_fclose as *mut u8) as i64
+    heap_free(s_fopen as *mut u8)
+    heap_free(s_fwrite as *mut u8)
+    heap_free(s_fclose as *mut u8)
+    if r_fopen == 0 || r_fwrite == 0 || r_fclose == 0 {
+        heap_free(s_mode as *mut u8)
+        let _c = dlclose(h as *mut u8)
+        return DumpFile { libc_h: 0, fp: 0, fn_fwrite: 0, fn_fclose: 0, hdr_buf: 0, ok: false }
+    }
+    let fopen_fn = r_fopen as fn(i64, i64) -> i64
+    let fp = fopen_fn(path_ptr, s_mode)
+    heap_free(s_mode as *mut u8)
+    if fp == 0 {
+        let _c = dlclose(h as *mut u8)
+        return DumpFile { libc_h: 0, fp: 0, fn_fwrite: 0, fn_fclose: 0, hdr_buf: 0, ok: false }
+    }
+    let hdr_buf = heap_alloc(512) as i64
+    DumpFile { libc_h: h, fp: fp, fn_fwrite: r_fwrite, fn_fclose: r_fclose, hdr_buf: hdr_buf, ok: hdr_buf != 0 }
+}
+
+fn dump_close(df: &DumpFile) {
+    if df.fp != 0 && df.fn_fclose != 0 {
+        let fclose_fn = df.fn_fclose as fn(i64) -> i32
+        let _rc = fclose_fn(df.fp)
+    }
+    if df.hdr_buf != 0 {
+        heap_free(df.hdr_buf as *mut u8)
+    }
+    if df.libc_h != 0 {
+        let _c = dlclose(df.libc_h as *mut u8)
+    }
+}
+
+fn audit_now_ns() -> i64 with Alloc, Mut {
+    let lib = dlopen(0 as *mut u8, 1) as i64
+    if lib == 0 { return 0 }
+    let s_clk = cstr_from_str("clock_gettime")
+    let fn_clk = dlsym(lib as *mut u8, s_clk as *mut u8) as i64
+    heap_free(s_clk as *mut u8)
+    if fn_clk == 0 {
+        let _c = dlclose(lib as *mut u8)
+        return 0
+    }
+    let clock_fn = fn_clk as fn(i32, i64) -> i32
+    let scratch = heap_alloc(16) as i64
+    let rc = clock_fn(0, scratch)
+    var ns: i64 = 0
+    if rc == 0 {
+        let sec = ptr_read_i64_le(scratch, 0)
+        let nsec = ptr_read_i64_le(scratch, 8)
+        ns = sec * 1000000000 + nsec
+    }
+    heap_free(scratch as *mut u8)
+    let _c = dlclose(lib as *mut u8)
+    ns
+}
+
+fn is_f32_finite_bits(b: i64) -> bool {
+    (b & 2139095040) != 2139095040
+}
+
+fn tc_compare_f32(a_ptr: i64, b_ptr: i64, count: i64, non_finite_out: i64) -> f64 with Mut {
+    var max_diff: f64 = 0.0
+    var non_fin: i64 = 0
+    var i: i64 = 0
+    while i < count {
+        let ba = ptr_read_u32_le(a_ptr, i * 4)
+        let bb = ptr_read_u32_le(b_ptr, i * 4)
+        if !is_f32_finite_bits(ba) || !is_f32_finite_bits(bb) {
+            non_fin = non_fin + 1
+        } else {
+            let fa = f32_bits_to_f64(ba)
+            let fb = f32_bits_to_f64(bb)
+            let d = if fa > fb { fa - fb } else { fb - fa }
+            if d > max_diff { max_diff = d }
+        }
+        i = i + 1
+    }
+    if non_finite_out != 0 {
+        let _w = ptr_write_i64_le(non_finite_out, 0, non_fin)
+    }
+    max_diff
+}
+
+fn write_exact(df: &DumpFile, ptr: i64, nbytes: i64) -> bool {
+    if !df.ok || df.fp == 0 || nbytes < 0 { return false }
+    if nbytes == 0 { return true }
+    let fwrite_fn = df.fn_fwrite as fn(i64, i64, i64, i64) -> i64
+    let written = fwrite_fn(ptr, 1, nbytes, df.fp)
+    written == nbytes
+}
+
+fn append_str(buf: i64, pos: i64, s: string) -> i64 with Mut {
+    let n = str_len(s)
+    var i: i64 = 0
+    while i < n {
+        let _w = ptr_write_u8(buf, pos + i, str_char_at(s, i) & 255)
+        i = i + 1
+    }
+    pos + n
+}
+
+fn append_2d(buf: i64, pos: i64, v: i64) -> i64 with Mut, Div {
+    let d0 = v / 10
+    let d1 = v % 10
+    let _0 = ptr_write_u8(buf, pos, 48 + d0)
+    let _1 = ptr_write_u8(buf, pos + 1, 48 + d1)
+    pos + 2
+}
+
+fn dump_record_buf(df: &DumpFile, tag_ptr: i64, tag_len: i64, data_ptr: i64, count: i64) -> bool with Mut {
+    if !df.ok || tag_len <= 0 || tag_len > 256 || count <= 0 { return false }
+    // Record: [magic:u32][tag_len:u32][tag_bytes][count:u32][f32*count]
+    let hdr = df.hdr_buf
+    let _w0 = ptr_write_u32_le(hdr, 0, 1431064625) // 0x554C5031 "ULP1"
+    let _w1 = ptr_write_u32_le(hdr, 4, tag_len)
+    var i: i64 = 0
+    while i < tag_len {
+        let _wb = ptr_write_u8(hdr, 8 + i, ptr_read_u8(tag_ptr, i))
+        i = i + 1
+    }
+    let _w2 = ptr_write_u32_le(hdr, 8 + tag_len, count)
+    if !write_exact(df, hdr, 12 + tag_len) { return false }
+    write_exact(df, data_ptr, count * 4)
+}
+
+fn dump_record_str(df: &DumpFile, tag: string, data_ptr: i64, count: i64) -> bool with Alloc, Mut {
+    let n = str_len(tag)
+    let tb = heap_alloc(n + 8) as i64
+    var i: i64 = 0
+    while i < n {
+        let _w = ptr_write_u8(tb, i, str_char_at(tag, i) & 255)
+        i = i + 1
+    }
+    let ok = dump_record_buf(df, tb, n, data_ptr, count)
+    heap_free(tb as *mut u8)
+    ok
+}
+
+fn dump_layer_op(
+    df: &DumpFile,
+    prefix: string,
+    layer: i64,
+    op_name: string,
+    data_ptr: i64,
+    count: i64
+) -> bool with Alloc, Mut, Div {
+    let tb = heap_alloc(128) as i64
+    var p: i64 = 0
+    p = append_str(tb, p, prefix)
+    p = append_str(tb, p, "/l")
+    p = append_2d(tb, p, layer)
+    p = append_str(tb, p, "/")
+    p = append_str(tb, p, op_name)
+    let ok = dump_record_buf(df, tb, p, data_ptr, count)
+    heap_free(tb as *mut u8)
+    ok
+}
+
+fn dump_prefix_op(df: &DumpFile, prefix: string, op_name: string, data_ptr: i64, count: i64) -> bool with Alloc, Mut {
+    let tb = heap_alloc(128) as i64
+    var p: i64 = 0
+    p = append_str(tb, p, prefix)
+    p = append_str(tb, p, "/")
+    p = append_str(tb, p, op_name)
+    let ok = dump_record_buf(df, tb, p, data_ptr, count)
+    heap_free(tb as *mut u8)
+    ok
+}
+
+// ----------------------------------------------------------------------------
+// Model slot & shard inspection (matching private helpers in stdlib/llm/qwen3.sio)
+// ----------------------------------------------------------------------------
+
+fn slot_addr(m: &Qwen3Model, slot: i64) -> i64 {
+    page_arena_ptr(&m.arena) + m.table_off + slot * 48
+}
+
+fn slot_shard_idx(m: &Qwen3Model, slot: i64) -> i64 {
+    ptr_read_i64_le(slot_addr(m, slot), 0)
+}
+
+fn slot_data_off(m: &Qwen3Model, slot: i64) -> i64 {
+    ptr_read_i64_le(slot_addr(m, slot), 8)
+}
+
+fn slot_dtype(m: &Qwen3Model, slot: i64) -> i32 {
+    ptr_read_i64_le(slot_addr(m, slot), 16) as i32
+}
+
+fn slot_host_ptr(m: &Qwen3Model, slot: i64) -> i64 {
+    ptr_read_i64_le(slot_addr(m, slot), 40)
+}
+
+fn metal_shard_buf(rt: &Qwen3MetalRunner, sidx: i64) -> i64 {
+    if sidx == 0 { return rt.b_s0 }
+    if sidx == 1 { return rt.b_s1 }
+    if sidx == 2 { return rt.b_s2 }
+    if sidx == 3 { return rt.b_s3 }
+    if sidx == 4 { return rt.b_s4 }
+    if sidx == 5 { return rt.b_s5 }
+    if sidx == 6 { return rt.b_s6 }
+    if sidx == 7 { return rt.b_s7 }
+    0
+}
+
+fn cuda_slot_dev_ptr(m: &Qwen3Model, rt: &Qwen3CudaRunner, slot: i64) -> i64 {
+    let sidx = slot_shard_idx(m, slot)
+    let doff = slot_data_off(m, slot)
+    var base: i64 = 0
+    if sidx == 0 { base = rt.d_s0 }
+    else if sidx == 1 { base = rt.d_s1 }
+    else if sidx == 2 { base = rt.d_s2 }
+    else if sidx == 3 { base = rt.d_s3 }
+    else if sidx == 4 { base = rt.d_s4 }
+    else if sidx == 5 { base = rt.d_s5 }
+    else if sidx == 6 { base = rt.d_s6 }
+    else if sidx == 7 { base = rt.d_s7 }
+    if base == 0 { return 0 }
+    base + doff
+}
+
+// ----------------------------------------------------------------------------
+// Deterministic input generators (exact dyadic floats, identical on both hosts)
+// ----------------------------------------------------------------------------
+
+fn fill_const_f32(ptr: i64, count: i64, val: f64) with Mut {
+    let bits = f64_to_f32_bits(val)
+    var i: i64 = 0
+    while i < count {
+        let _w = ptr_write_u32_le(ptr, i * 4, bits)
+        i = i + 1
+    }
+}
+
+fn fill_const_bf16(ptr: i64, count: i64, val: f64) with Mut {
+    let bits = f64_to_bf16_bits(val)
+    var i: i64 = 0
+    while i < count {
+        let _w = ptr_write_u16_le(ptr, i * 2, bits)
+        i = i + 1
+    }
+}
+
+fn fill_det_vec_a(ptr: i64, count: i64) with Mut, Div {
+    // val(i) = ((i * 17 + 3) % 193 - 96) * 0.03125
+    var i: i64 = 0
+    while i < count {
+        let code = (i * 17 + 3) % 193
+        let v = ((code - 96) as f64) * 0.03125
+        let _w = ptr_write_u32_le(ptr, i * 4, f64_to_f32_bits(v))
+        i = i + 1
+    }
+}
+
+fn fill_det_vec_b(ptr: i64, count: i64) with Mut, Div {
+    // val(i) = ((i * 41 + 9) % 193 - 96) * 0.03125
+    var i: i64 = 0
+    while i < count {
+        let code = (i * 41 + 9) % 193
+        let v = ((code - 96) as f64) * 0.03125
+        let _w = ptr_write_u32_le(ptr, i * 4, f64_to_f32_bits(v))
+        i = i + 1
+    }
+}
+
+fn fill_det_swiglu_g(ptr: i64, count: i64) with Mut, Div {
+    // spanning [-8.0, +8.0]
+    var i: i64 = 0
+    while i < count {
+        let code = (i * 23 + 7) % 513
+        let v = ((code - 256) as f64) * 0.03125
+        let _w = ptr_write_u32_le(ptr, i * 4, f64_to_f32_bits(v))
+        i = i + 1
+    }
+}
+
+fn fill_det_swiglu_u(ptr: i64, count: i64) with Mut, Div {
+    var i: i64 = 0
+    while i < count {
+        let code = (i * 31 + 11) % 193
+        let v = ((code - 96) as f64) * 0.03125
+        let _w = ptr_write_u32_le(ptr, i * 4, f64_to_f32_bits(v))
+        i = i + 1
+    }
+}
+
+fn fill_det_kv_pos(ptr: i64, p: i64, kv_dim: i64) with Mut, Div {
+    var i: i64 = 0
+    while i < kv_dim {
+        let code = (p * 37 + i * 13 + 5) % 129
+        let v = ((code - 64) as f64) * 0.03125
+        let _w = ptr_write_u32_le(ptr, i * 4, f64_to_f32_bits(v))
+        i = i + 1
+    }
+}
+
+fn fill_embed_host(m: &Qwen3Model, tok_id: i64, dst_ptr: i64) with Mut {
+    let emb_ptr = slot_host_ptr(m, 0)
+    let emb_dt = slot_dtype(m, 0)
+    let emb_elem_b = if emb_dt == 2 { 2 } else { 4 }
+    let row_p = emb_ptr + tok_id * m.cfg.hidden * emb_elem_b
+    var i: i64 = 0
+    while i < m.cfg.hidden {
+        let v = if emb_dt == 2 {
+            bf16_bits_to_f64_exact(ptr_read_u16_le(row_p, i * 2))
+        } else {
+            f32_bits_to_f64(ptr_read_u32_le(row_p, i * 4))
+        }
+        let _w = ptr_write_u32_le(dst_ptr, i * 4, f64_to_f32_bits(v))
+        i = i + 1
+    }
+}
+
+fn copy_f32_words(dst: i64, src: i64, count: i64) with Mut {
+    var i: i64 = 0
+    while i < count {
+        let _w = ptr_write_u32_le(dst, i * 4, ptr_read_u32_le(src, i * 4))
+        i = i + 1
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Metal Part A + Part B
+// ----------------------------------------------------------------------------
+
+fn metal_commit_one(sess: &MetalSession, cid: i64) -> bool {
+    if cid <= 0 { return false }
+    metal_cmd_commit_sync(sess, cid) == 0
+}
+
+fn run_metal_part_a(
+    m: &Qwen3Model,
+    rt: &Qwen3MetalRunner,
+    df: &DumpFile,
+    tok0: i64
+) -> bool with IO, Alloc, Mut, Div, Panic {
+    let cfg = m.cfg
+    let q_dim = cfg.n_q * cfg.head_dim
+    let kv_dim = cfg.n_kv * cfg.head_dim
+    let eps_bits = f64_to_f32_bits(cfg.eps)
+    let theta_bits = f64_to_f32_bits(cfg.rope_theta)
+
+    // Iso scratch arena (PageArena nocopy)
+    // Offsets (in bytes):
+    // 0: emb_x (hidden*4)
+    // 16384: x_in (8*hidden*4)
+    // 65536: out_buf (8*vocab*4 or enough for 8*q_dim, q_dim+2*kv_dim, inter) -> 262144 bytes ok
+    // 327680: w_ones_bf16 (hidden*2 = 2048)
+    // 331776: q_work (q_dim*4 = 8192)
+    // 344064: k_work (kv_dim*4 = 4096)
+    // 352256: v_work (kv_dim*4 = 4096)
+    // 360448: g_work (inter*4 = 12288)
+    // 376832: u_work (inter*4 = 12288)
+    // 393216: out2 (hidden*4 = 4096)
+    let iso_arena = page_arena_alloc(524288)
+    var kv_iso = qwen3_kv_alloc(1, 16, 16, cfg.n_kv, cfg.head_dim)
+    var ok = page_arena_is_ok(&iso_arena) && qwen3_kv_is_ok(&kv_iso)
+
+    let p_iso = if ok { page_arena_ptr(&iso_arena) } else { 0 }
+    let off_emb: i64 = 0
+    let off_x8: i64 = 16384
+    let off_out: i64 = 65536
+    let off_w1: i64 = 327680
+    let off_q: i64 = 331776
+    let off_k: i64 = 344064
+    let off_v: i64 = 352256
+    let off_g: i64 = 360448
+    let off_u: i64 = 376832
+    let off_out2: i64 = 393216
+
+    let b_iso = if ok { metal_buffer_nocopy(&rt.sess, p_iso, page_arena_len(&iso_arena)) } else { 0 }
+    let b_kv_iso = if ok { metal_buffer_nocopy(&rt.sess, qwen3_kv_arena_ptr(&kv_iso), qwen3_kv_arena_len(&kv_iso)) } else { 0 }
+    if b_iso <= 0 || b_kv_iso <= 0 { ok = false }
+
+    // 1. iso/embed
+    if ok {
+        fill_embed_host(m, tok0, p_iso + off_emb)
+        if !dump_record_str(df, "iso/embed", p_iso + off_emb, cfg.hidden) { ok = false }
+        // 2. iso/rmsnorm_const_1
+        fill_const_bf16(p_iso + off_w1, cfg.hidden, 1.0)
+        fill_const_f32(p_iso + off_x8, cfg.hidden, 1.0)
+    }
+    if ok {
+        let cid = metal_cmd_begin(&rt.sess)
+        if qwen3_metal_encode_rmsnorm(&rt.sess, cid, rt.pipes.rmsnorm_bf16, b_iso, off_x8, b_iso, off_w1, b_iso, off_out, 1, cfg.hidden, eps_bits) != 0 || !metal_commit_one(&rt.sess, cid) { ok = false }
+        else if !dump_record_str(df, "iso/rmsnorm_const_1", p_iso + off_out, cfg.hidden) { ok = false }
+    }
+
+    // 3. iso/rmsnorm_const_1p5
+    if ok {
+        fill_const_f32(p_iso + off_x8, cfg.hidden, 1.5)
+        let cid = metal_cmd_begin(&rt.sess)
+        if qwen3_metal_encode_rmsnorm(&rt.sess, cid, rt.pipes.rmsnorm_bf16, b_iso, off_x8, b_iso, off_w1, b_iso, off_out, 1, cfg.hidden, eps_bits) != 0 || !metal_commit_one(&rt.sess, cid) { ok = false }
+        else if !dump_record_str(df, "iso/rmsnorm_const_1p5", p_iso + off_out, cfg.hidden) { ok = false }
+    }
+
+    // 4. iso/rmsnorm_real_w1
+    if ok {
+        let cid = metal_cmd_begin(&rt.sess)
+        if qwen3_metal_encode_rmsnorm(&rt.sess, cid, rt.pipes.rmsnorm_bf16, b_iso, off_emb, b_iso, off_w1, b_iso, off_out, 1, cfg.hidden, eps_bits) != 0 || !metal_commit_one(&rt.sess, cid) { ok = false }
+        else if !dump_record_str(df, "iso/rmsnorm_real_w1", p_iso + off_out, cfg.hidden) { ok = false }
+    }
+
+    // 5. iso/rmsnorm_real (slot 3)
+    if ok {
+        let s3 = metal_shard_buf(rt, slot_shard_idx(m, 3))
+        let off3 = slot_data_off(m, 3)
+        let pipe3 = if slot_dtype(m, 3) == 2 { rt.pipes.rmsnorm_bf16 } else { rt.pipes.rmsnorm_f32 }
+        let cid = metal_cmd_begin(&rt.sess)
+        if qwen3_metal_encode_rmsnorm(&rt.sess, cid, pipe3, b_iso, off_emb, s3, off3, b_iso, off_out, 1, cfg.hidden, eps_bits) != 0 || !metal_commit_one(&rt.sess, cid) { ok = false }
+        else if !dump_record_str(df, "iso/rmsnorm_real", p_iso + off_out, cfg.hidden) { ok = false }
+    }
+
+    // 6. iso/qkv_q, iso/qkv_k, iso/qkv_v (slots 4,5,6 using qwen3_gemv_bf16_qkv if bf16)
+    if ok {
+        let qs = metal_shard_buf(rt, slot_shard_idx(m, 4))
+        let qoff = slot_data_off(m, 4)
+        let qdt = slot_dtype(m, 4)
+        let ks = metal_shard_buf(rt, slot_shard_idx(m, 5))
+        let koff = slot_data_off(m, 5)
+        let vs = metal_shard_buf(rt, slot_shard_idx(m, 6))
+        let voff = slot_data_off(m, 6)
+        let cid = metal_cmd_begin(&rt.sess)
+        if qdt == 2 {
+            if qwen3_metal_encode_gemv_bf16_qkv(
+                &rt.sess, cid, rt.pipes.gemv_bf16_qkv,
+                qs, ks, vs, b_iso, b_iso,
+                qoff, koff, voff, off_emb,
+                off_out, off_out + q_dim * 4, off_out + (q_dim + kv_dim) * 4,
+                q_dim, kv_dim, cfg.hidden
+            ) != 0 || !metal_commit_one(&rt.sess, cid) { ok = false }
+        } else {
+            ok = false
+        }
+        if ok {
+            if !dump_record_str(df, "iso/qkv_q", p_iso + off_out, q_dim) { ok = false }
+            if ok && !dump_record_str(df, "iso/qkv_k", p_iso + off_out + q_dim * 4, kv_dim) { ok = false }
+            if ok && !dump_record_str(df, "iso/qkv_v", p_iso + off_out + (q_dim + kv_dim) * 4, kv_dim) { ok = false }
+        }
+    }
+
+    // 7. iso/gemv_single_q (unfused qwen3_gemv_bf16 on slot 4)
+    if ok {
+        let qs = metal_shard_buf(rt, slot_shard_idx(m, 4))
+        let qoff = slot_data_off(m, 4)
+        let qpipe = if slot_dtype(m, 4) == 2 { rt.pipes.gemv_bf16 } else { rt.pipes.gemv_f32 }
+        let cid = metal_cmd_begin(&rt.sess)
+        if qwen3_metal_encode_gemv(&rt.sess, cid, qpipe, qs, qoff, b_iso, off_emb, b_iso, off_out, q_dim, cfg.hidden) != 0 || !metal_commit_one(&rt.sess, cid) { ok = false }
+        else if !dump_record_str(df, "iso/gemv_single_q", p_iso + off_out, q_dim) { ok = false }
+    }
+
+    // 8. iso/gemm_b8_q (prefill gemm B=8, token 0 = embed(tok0), tokens 1..7 = 0)
+    if ok {
+        fill_const_f32(p_iso + off_x8, 8 * cfg.hidden, 0.0)
+        copy_f32_words(p_iso + off_x8, p_iso + off_emb, cfg.hidden)
+        let qs = metal_shard_buf(rt, slot_shard_idx(m, 4))
+        let qoff = slot_data_off(m, 4)
+        let gpipe = if slot_dtype(m, 4) == 2 { rt.pipes.gemm_bf16 } else { rt.pipes.gemm_f32 }
+        let cid = metal_cmd_begin(&rt.sess)
+        if qwen3_metal_encode_gemm(&rt.sess, cid, gpipe, qs, qoff, b_iso, off_x8, b_iso, off_out, q_dim, cfg.hidden, 8) != 0 || !metal_commit_one(&rt.sess, cid) { ok = false }
+        else if !dump_record_str(df, "iso/gemm_b8_q", p_iso + off_out, q_dim) { ok = false }
+    }
+
+    // 9-11. iso/qk_norm_rope_pos{0,5,127} (slots 8, 9)
+    let qw_s = metal_shard_buf(rt, slot_shard_idx(m, 8))
+    let qw_off = slot_data_off(m, 8)
+    let kw_s = metal_shard_buf(rt, slot_shard_idx(m, 9))
+    let kw_off = slot_data_off(m, 9)
+    let qkn_pipe = if slot_dtype(m, 8) == 2 { rt.pipes.qk_norm_rope_kv_bf16 } else { rt.pipes.qk_norm_rope_kv_f32 }
+
+    // Ensure kv_iso positions 0..7 exist
+    var kp: i64 = 0
+    while kp < 8 && ok {
+        fill_det_kv_pos(p_iso + off_k, kp, kv_dim)
+        fill_det_kv_pos(p_iso + off_v, kp, kv_dim)
+        if !qwen3_kv_write_kv_f32_buf(&!kv_iso, 0, kp, p_iso + off_k, p_iso + off_v) { ok = false }
+        kp = kp + 1
+    }
+    if ok && !qwen3_kv_ensure_pos(&!kv_iso, 127) { ok = false }
+
+    // pos=0 (use a dummy target block at pos 127 or overwrite pos 0? Wait: scatter overwrites kv_iso[pos]! Let's do gqa_seq1 and gqa_seq8 AFTER restoring kv_iso[0..7], or write kv_iso for gqa AFTER pos0/5/127!)
+    if ok {
+        fill_det_vec_a(p_iso + off_q, q_dim)
+        fill_det_vec_a(p_iso + off_k, kv_dim)
+        fill_det_vec_a(p_iso + off_v, kv_dim)
+        let cid = metal_cmd_begin(&rt.sess)
+        if qwen3_metal_encode_qk_norm_rope_kv_scatter(
+            &rt.sess, cid, qkn_pipe, b_iso, b_iso, b_iso, qw_s, kw_s, b_kv_iso,
+            off_q, off_k, off_v, qw_off, kw_off,
+            qwen3_kv_table_off(&kv_iso), qwen3_kv_k_layer_off(&kv_iso, 0), qwen3_kv_v_layer_off(&kv_iso, 0),
+            cfg.n_q, cfg.n_kv, cfg.head_dim, 0, qwen3_kv_block_size(&kv_iso), eps_bits, rt.b_rope, 0
+        ) != 0 || !metal_commit_one(&rt.sess, cid) { ok = false }
+        else {
+            if !dump_record_str(df, "iso/qk_norm_rope_pos0_q", p_iso + off_q, q_dim) { ok = false }
+            if ok && !dump_record_str(df, "iso/qk_norm_rope_pos0_k", p_iso + off_k, kv_dim) { ok = false }
+        }
+    }
+    if ok {
+        fill_det_vec_a(p_iso + off_q, q_dim)
+        fill_det_vec_a(p_iso + off_k, kv_dim)
+        fill_det_vec_a(p_iso + off_v, kv_dim)
+        let cid = metal_cmd_begin(&rt.sess)
+        if qwen3_metal_encode_qk_norm_rope_kv_scatter(
+            &rt.sess, cid, qkn_pipe, b_iso, b_iso, b_iso, qw_s, kw_s, b_kv_iso,
+            off_q, off_k, off_v, qw_off, kw_off,
+            qwen3_kv_table_off(&kv_iso), qwen3_kv_k_layer_off(&kv_iso, 0), qwen3_kv_v_layer_off(&kv_iso, 0),
+            cfg.n_q, cfg.n_kv, cfg.head_dim, 5, qwen3_kv_block_size(&kv_iso), eps_bits, rt.b_rope, 5 * cfg.head_dim * 4
+        ) != 0 || !metal_commit_one(&rt.sess, cid) { ok = false }
+        else {
+            if !dump_record_str(df, "iso/qk_norm_rope_pos5_q", p_iso + off_q, q_dim) { ok = false }
+            if ok && !dump_record_str(df, "iso/qk_norm_rope_pos5_k", p_iso + off_k, kv_dim) { ok = false }
+        }
+    }
+    if ok {
+        fill_det_vec_a(p_iso + off_q, q_dim)
+        fill_det_vec_a(p_iso + off_k, kv_dim)
+        fill_det_vec_a(p_iso + off_v, kv_dim)
+        let cid = metal_cmd_begin(&rt.sess)
+        if qwen3_metal_encode_qk_norm_rope_kv_scatter(
+            &rt.sess, cid, qkn_pipe, b_iso, b_iso, b_iso, qw_s, kw_s, b_kv_iso,
+            off_q, off_k, off_v, qw_off, kw_off,
+            qwen3_kv_table_off(&kv_iso), qwen3_kv_k_layer_off(&kv_iso, 0), qwen3_kv_v_layer_off(&kv_iso, 0),
+            cfg.n_q, cfg.n_kv, cfg.head_dim, 127, qwen3_kv_block_size(&kv_iso), eps_bits, rt.b_rope, 127 * cfg.head_dim * 4
+        ) != 0 || !metal_commit_one(&rt.sess, cid) { ok = false }
+        else {
+            if !dump_record_str(df, "iso/qk_norm_rope_pos127_q", p_iso + off_q, q_dim) { ok = false }
+        }
+    }
+
+    // 12-13. Populate deterministic kv_iso[0..7] and run iso/gqa_seq1, iso/gqa_seq8
+    kp = 0
+    while kp < 8 && ok {
+        fill_det_kv_pos(p_iso + off_k, kp, kv_dim)
+        fill_det_kv_pos(p_iso + off_v, kp, kv_dim)
+        if !qwen3_kv_write_kv_f32_buf(&!kv_iso, 0, kp, p_iso + off_k, p_iso + off_v) { ok = false }
+        kp = kp + 1
+    }
+    if ok {
+        fill_det_vec_a(p_iso + off_q, q_dim)
+        let cid = metal_cmd_begin(&rt.sess)
+        if qwen3_metal_encode_paged_gqa(
+            &rt.sess, cid, rt.pipes.paged_gqa,
+            b_iso, off_q, b_kv_iso,
+            qwen3_kv_table_off(&kv_iso), qwen3_kv_k_layer_off(&kv_iso, 0), qwen3_kv_v_layer_off(&kv_iso, 0),
+            b_iso, off_out, cfg.n_q, cfg.n_kv, cfg.head_dim, 1, qwen3_kv_block_size(&kv_iso)
+        ) != 0 || !metal_commit_one(&rt.sess, cid) { ok = false }
+        else if !dump_record_str(df, "iso/gqa_seq1", p_iso + off_out, q_dim) { ok = false }
+    }
+    if ok {
+        fill_det_vec_a(p_iso + off_q, q_dim)
+        let cid = metal_cmd_begin(&rt.sess)
+        if qwen3_metal_encode_paged_gqa(
+            &rt.sess, cid, rt.pipes.paged_gqa,
+            b_iso, off_q, b_kv_iso,
+            qwen3_kv_table_off(&kv_iso), qwen3_kv_k_layer_off(&kv_iso, 0), qwen3_kv_v_layer_off(&kv_iso, 0),
+            b_iso, off_out, cfg.n_q, cfg.n_kv, cfg.head_dim, 8, qwen3_kv_block_size(&kv_iso)
+        ) != 0 || !metal_commit_one(&rt.sess, cid) { ok = false }
+        else if !dump_record_str(df, "iso/gqa_seq8", p_iso + off_out, q_dim) { ok = false }
+    }
+
+    // 14. iso/swiglu_only
+    if ok {
+        fill_det_swiglu_g(p_iso + off_g, cfg.inter)
+        fill_det_swiglu_u(p_iso + off_u, cfg.inter)
+        let cid = metal_cmd_begin(&rt.sess)
+        if qwen3_metal_encode_swiglu(&rt.sess, cid, rt.pipes.swiglu, b_iso, off_g, b_iso, off_u, b_iso, off_out, cfg.inter) != 0 || !metal_commit_one(&rt.sess, cid) { ok = false }
+        else if !dump_record_str(df, "iso/swiglu_only", p_iso + off_out, cfg.inter) { ok = false }
+    }
+
+    // 15. iso/vec_add
+    if ok {
+        fill_det_vec_a(p_iso + off_x8, cfg.hidden)
+        fill_det_vec_b(p_iso + off_out2, cfg.hidden)
+        let cid = metal_cmd_begin(&rt.sess)
+        if qwen3_metal_encode_vec_add(&rt.sess, cid, rt.pipes.vec_add, b_iso, off_x8, b_iso, off_out2, cfg.hidden) != 0 || !metal_commit_one(&rt.sess, cid) { ok = false }
+        else if !dump_record_str(df, "iso/vec_add", p_iso + off_x8, cfg.hidden) { ok = false }
+    }
+
+    // 16. iso/add_rmsnorm_x, iso/add_rmsnorm_out (slot 10 = layer 0 post_attention_layernorm)
+    if ok {
+        fill_det_vec_a(p_iso + off_x8, cfg.hidden)
+        fill_det_vec_b(p_iso + off_out2, cfg.hidden)
+        let post_s = metal_shard_buf(rt, slot_shard_idx(m, 10))
+        let post_off = slot_data_off(m, 10)
+        let post_pipe = if slot_dtype(m, 10) == 2 { rt.pipes.add_rmsnorm_bf16 } else { rt.pipes.add_rmsnorm_f32 }
+        let cid = metal_cmd_begin(&rt.sess)
+        if qwen3_metal_encode_add_rmsnorm(&rt.sess, cid, post_pipe, b_iso, b_iso, post_s, b_iso, off_x8, off_out2, post_off, off_out, cfg.hidden, eps_bits) != 0 || !metal_commit_one(&rt.sess, cid) { ok = false }
+        else {
+            if !dump_record_str(df, "iso/add_rmsnorm_x", p_iso + off_x8, cfg.hidden) { ok = false }
+            if ok && !dump_record_str(df, "iso/add_rmsnorm_out", p_iso + off_out, cfg.hidden) { ok = false }
+        }
+    }
+
+    // 17. iso/q4_soa_gemv (rows=64, cols=cfg.hidden from slot 4 q_proj against iso/embed)
+    if ok {
+        let q4_rows: i64 = 64
+        let nib_b = q4_soa_nibbles_bytes(q4_rows, cfg.hidden)
+        let scl_b = q4_soa_scales_bytes(q4_rows, cfg.hidden)
+        let rho_b = q4_soa_rhos_bytes(q4_rows, cfg.hidden)
+        let y_b = q4_soa_align_up_64(q4_rows * 4)
+        let q4_arena = page_arena_alloc(nib_b + scl_b + rho_b + y_b + 4096)
+        let q4p = q4_soa_metal_pipelines_compile(&rt.sess)
+        var q4_ok = page_arena_is_ok(&q4_arena) && q4p.ok
+        let p_q4 = if q4_ok { page_arena_ptr(&q4_arena) } else { 0 }
+        let b_q4 = if q4_ok { metal_buffer_nocopy(&rt.sess, p_q4, page_arena_len(&q4_arena)) } else { 0 }
+        if b_q4 <= 0 { q4_ok = false }
+        if q4_ok {
+            let qs = metal_shard_buf(rt, slot_shard_idx(m, 4))
+            let qoff = slot_data_off(m, 4)
+            let is_bf16_flag: i64 = if slot_dtype(m, 4) == 2 { 1 } else { 0 }
+            let cid = metal_cmd_begin(&rt.sess)
+            if q4_soa_metal_encode_quantize(
+                &rt.sess, cid, q4p.quantize,
+                qs, qoff, b_q4, 0, b_q4, nib_b, b_q4, nib_b + scl_b,
+                q4_rows, cfg.hidden, is_bf16_flag
+            ) != 0 || q4_soa_metal_encode_gemv(
+                &rt.sess, cid, q4p.gemv,
+                b_q4, 0, b_q4, nib_b,
+                b_iso, off_emb, b_q4, nib_b + scl_b + rho_b,
+                q4_rows, cfg.hidden
+            ) != 0 || !metal_commit_one(&rt.sess, cid) {
+                q4_ok = false
+            }
+        }
+        if !q4_ok || !dump_record_str(df, "iso/q4_soa_gemv", p_q4 + nib_b + scl_b + rho_b, q4_rows) {
+            ok = false
+        }
+        if b_q4 > 0 { let _fq4b = metal_buffer_free(&rt.sess, b_q4) }
+        let _fq4a = page_arena_free(q4_arena)
+    }
+
+    // 18. Tensor Core GEMM sanity & timing (B=32, slot 4 q_proj, 20 timed iterations)
+    if ok && slot_dtype(m, 4) == 2 {
+        let b_tc: i64 = 32
+        let tc_x_b = q4_soa_align_up_64(b_tc * cfg.hidden * 4)
+        let tc_y_b = q4_soa_align_up_64(b_tc * q_dim * 4)
+        let tc_arena = page_arena_alloc(tc_x_b + tc_y_b * 2 + 4096)
+        var tc_ok = page_arena_is_ok(&tc_arena)
+        let p_tc = if tc_ok { page_arena_ptr(&tc_arena) } else { 0 }
+        let b_tc_buf = if tc_ok { metal_buffer_nocopy(&rt.sess, p_tc, page_arena_len(&tc_arena)) } else { 0 }
+        if b_tc_buf <= 0 { tc_ok = false }
+        if tc_ok {
+            let p_x = p_tc
+            let p_ys = p_tc + tc_x_b
+            let p_yt = p_ys + tc_y_b
+            fill_det_vec_a(p_x, b_tc * cfg.hidden)
+            let qs = metal_shard_buf(rt, slot_shard_idx(m, 4))
+            let qoff = slot_data_off(m, 4)
+
+            // Warmup SIMT (4 x B=8) + TC (B=32)
+            let w_cid = metal_cmd_begin(&rt.sess)
+            var ck: i64 = 0
+            while ck < 4 {
+                if qwen3_metal_encode_gemm(&rt.sess, w_cid, rt.pipes.gemm_bf16, qs, qoff, b_tc_buf, ck * 8 * cfg.hidden * 4, b_tc_buf, tc_x_b + ck * 8 * q_dim * 4, q_dim, cfg.hidden, 8) != 0 { tc_ok = false }
+                ck = ck + 1
+            }
+            if !metal_commit_one(&rt.sess, w_cid) { tc_ok = false }
+            let w_tc_cid = metal_cmd_begin(&rt.sess)
+            if qwen3_metal_encode_gemm_tc(&rt.sess, w_tc_cid, rt.pipes.gemm_bf16_tc, qs, qoff, b_tc_buf, 0, b_tc_buf, tc_x_b + tc_y_b, q_dim, cfg.hidden, b_tc) != 0 || !metal_commit_one(&rt.sess, w_tc_cid) {
+                tc_ok = false
+            }
+
+            let t0_s = audit_now_ns()
+            var it: i64 = 0
+            while it < 20 && tc_ok {
+                let cid = metal_cmd_begin(&rt.sess)
+                var c2: i64 = 0
+                while c2 < 4 {
+                    if qwen3_metal_encode_gemm(&rt.sess, cid, rt.pipes.gemm_bf16, qs, qoff, b_tc_buf, c2 * 8 * cfg.hidden * 4, b_tc_buf, tc_x_b + c2 * 8 * q_dim * 4, q_dim, cfg.hidden, 8) != 0 { tc_ok = false }
+                    c2 = c2 + 1
+                }
+                if !metal_commit_one(&rt.sess, cid) { tc_ok = false }
+                it = it + 1
+            }
+            let t1_s = audit_now_ns()
+
+            let t0_t = audit_now_ns()
+            it = 0
+            while it < 20 && tc_ok {
+                let cid = metal_cmd_begin(&rt.sess)
+                if qwen3_metal_encode_gemm_tc(&rt.sess, cid, rt.pipes.gemm_bf16_tc, qs, qoff, b_tc_buf, 0, b_tc_buf, tc_x_b + tc_y_b, q_dim, cfg.hidden, b_tc) != 0 || !metal_commit_one(&rt.sess, cid) {
+                    tc_ok = false
+                }
+                it = it + 1
+            }
+            let t1_t = audit_now_ns()
+
+            if tc_ok {
+                let nf_ptr = p_tc + tc_x_b + tc_y_b * 2
+                let max_d = tc_compare_f32(p_ys, p_yt, b_tc * q_dim, nf_ptr)
+                let non_fin = ptr_read_i64_le(nf_ptr, 0)
+                let simt_us = ((t1_s - t0_s) / 1000) / 20
+                let tc_us = ((t1_t - t0_t) / 1000) / 20
+                print("TC_SANITY metal max_abs_diff=")
+                print_f64(max_d)
+                print(" simt_us=")
+                print_int(simt_us)
+                print(" tc_us=")
+                print_int(tc_us)
+                print(" non_finite=")
+                print_int(non_fin)
+                println("")
+                if non_fin != 0 || max_d >= 0.05 { tc_ok = false }
+            }
+        }
+        if !tc_ok { ok = false }
+        if b_tc_buf > 0 { let _ftcb = metal_buffer_free(&rt.sess, b_tc_buf) }
+        let _ftca = page_arena_free(tc_arena)
+    }
+
+    if b_iso > 0 { let _fb1 = metal_buffer_free(&rt.sess, b_iso) }
+    if b_kv_iso > 0 { let _fb2 = metal_buffer_free(&rt.sess, b_kv_iso) }
+    let _fa = page_arena_free(iso_arena)
+    let _fk = qwen3_kv_free(kv_iso)
+    ok
+}
+
+fn run_metal_step_dump(
+    m: &Qwen3Model,
+    kv: &!Qwen3PagedKv,
+    rt: &Qwen3MetalRunner,
+    df: &DumpFile,
+    token_id: i64,
+    pos: i64,
+    compute_logits: bool,
+    prefix: string
+) -> bool with Alloc, Mut, Div, Panic {
+    if !qwen3_kv_ensure_pos(kv, pos) { return false }
+    let cfg = m.cfg
+    let q_dim = cfg.n_q * cfg.head_dim
+    let kv_dim = cfg.n_kv * cfg.head_dim
+    let a_base = page_arena_ptr(&m.arena)
+    let p_x = a_base + m.buf_x_off
+    let p_h = a_base + m.buf_h_off
+    let p_q = a_base + m.buf_q_off
+    let p_k = a_base + m.buf_k_off
+    let p_v = a_base + m.buf_v_off
+    let p_ao = a_base + m.buf_attn_out_off
+    let p_gate = a_base + m.buf_gate_off
+    let p_logits = a_base + m.buf_logits_off
+    let eps_bits = f64_to_f32_bits(cfg.eps)
+    let theta_bits = f64_to_f32_bits(cfg.rope_theta)
+
+    fill_embed_host(m, token_id, p_x)
+    if !dump_prefix_op(df, prefix, "embed", p_x, cfg.hidden) { return false }
+
+    if cfg.layers > 0 {
+        let s0 = metal_shard_buf(rt, slot_shard_idx(m, 3))
+        let off0 = slot_data_off(m, 3)
+        let pipe0 = if slot_dtype(m, 3) == 2 { rt.pipes.rmsnorm_bf16 } else { rt.pipes.rmsnorm_f32 }
+        let cid = metal_cmd_begin(&rt.sess)
+        if qwen3_metal_encode_rmsnorm(&rt.sess, cid, pipe0, rt.b_work, m.buf_x_off, s0, off0, rt.b_work, m.buf_h_off, 1, cfg.hidden, eps_bits) != 0 || !metal_commit_one(&rt.sess, cid) { return false }
+        if !dump_layer_op(df, prefix, 0, "in_rmsnorm", p_h, cfg.hidden) { return false }
+    }
+
+    var l: i64 = 0
+    while l < cfg.layers {
+        let sb = 3 + l * 11
+
+        // QKV GEMV
+        let qs = metal_shard_buf(rt, slot_shard_idx(m, sb + 1))
+        let qoff = slot_data_off(m, sb + 1)
+        let qdt = slot_dtype(m, sb + 1)
+        let ks = metal_shard_buf(rt, slot_shard_idx(m, sb + 2))
+        let koff = slot_data_off(m, sb + 2)
+        let kdt = slot_dtype(m, sb + 2)
+        let vs = metal_shard_buf(rt, slot_shard_idx(m, sb + 3))
+        let voff = slot_data_off(m, sb + 3)
+        let vdt = slot_dtype(m, sb + 3)
+
+        let cid_qkv = metal_cmd_begin(&rt.sess)
+        if qdt == 2 && kdt == 2 && vdt == 2 {
+            if qwen3_metal_encode_gemv_bf16_qkv(&rt.sess, cid_qkv, rt.pipes.gemv_bf16_qkv, qs, ks, vs, rt.b_work, rt.b_work, qoff, koff, voff, m.buf_h_off, m.buf_q_off, m.buf_k_off, m.buf_v_off, q_dim, kv_dim, cfg.hidden) != 0 || !metal_commit_one(&rt.sess, cid_qkv) { return false }
+        } else {
+            let qp = if qdt == 2 { rt.pipes.gemv_bf16 } else { rt.pipes.gemv_f32 }
+            let kp = if kdt == 2 { rt.pipes.gemv_bf16 } else { rt.pipes.gemv_f32 }
+            let vp = if vdt == 2 { rt.pipes.gemv_bf16 } else { rt.pipes.gemv_f32 }
+            if qwen3_metal_encode_gemv(&rt.sess, cid_qkv, qp, qs, qoff, rt.b_work, m.buf_h_off, rt.b_work, m.buf_q_off, q_dim, cfg.hidden) != 0
+                || qwen3_metal_encode_gemv(&rt.sess, cid_qkv, kp, ks, koff, rt.b_work, m.buf_h_off, rt.b_work, m.buf_k_off, kv_dim, cfg.hidden) != 0
+                || qwen3_metal_encode_gemv(&rt.sess, cid_qkv, vp, vs, voff, rt.b_work, m.buf_h_off, rt.b_work, m.buf_v_off, kv_dim, cfg.hidden) != 0
+                || !metal_commit_one(&rt.sess, cid_qkv) { return false }
+        }
+        if !dump_layer_op(df, prefix, l, "q_proj", p_q, q_dim) { return false }
+        if !dump_layer_op(df, prefix, l, "k_proj", p_k, kv_dim) { return false }
+        if !dump_layer_op(df, prefix, l, "v_proj", p_v, kv_dim) { return false }
+
+        // QK-RMSNorm + RoPE + KV scatter
+        let qws = metal_shard_buf(rt, slot_shard_idx(m, sb + 5))
+        let qwoff = slot_data_off(m, sb + 5)
+        let qwdt = slot_dtype(m, sb + 5)
+        let kws = metal_shard_buf(rt, slot_shard_idx(m, sb + 6))
+        let kwoff = slot_data_off(m, sb + 6)
+        let qkn_pipe = if qwdt == 2 { rt.pipes.qk_norm_rope_kv_bf16 } else { rt.pipes.qk_norm_rope_kv_f32 }
+        let cid_qk = metal_cmd_begin(&rt.sess)
+        if qwen3_metal_encode_qk_norm_rope_kv_scatter(
+            &rt.sess, cid_qk, qkn_pipe, rt.b_work, rt.b_work, rt.b_work, qws, kws, rt.b_kv,
+            m.buf_q_off, m.buf_k_off, m.buf_v_off, qwoff, kwoff,
+            qwen3_kv_table_off(kv), qwen3_kv_k_layer_off(kv, l), qwen3_kv_v_layer_off(kv, l),
+            cfg.n_q, cfg.n_kv, cfg.head_dim, pos, qwen3_kv_block_size(kv), eps_bits, rt.b_rope, pos * cfg.head_dim * 4
+        ) != 0 || !metal_commit_one(&rt.sess, cid_qk) { return false }
+        if !dump_layer_op(df, prefix, l, "qk_norm_rope_q", p_q, q_dim) { return false }
+        if !dump_layer_op(df, prefix, l, "qk_norm_rope_k", p_k, kv_dim) { return false }
+
+        // GQA softmax
+        let cid_gqa = metal_cmd_begin(&rt.sess)
+        if qwen3_metal_encode_paged_gqa(
+            &rt.sess, cid_gqa, rt.pipes.paged_gqa, rt.b_work, m.buf_q_off, rt.b_kv,
+            qwen3_kv_table_off(kv), qwen3_kv_k_layer_off(kv, l), qwen3_kv_v_layer_off(kv, l),
+            rt.b_work, m.buf_attn_out_off, cfg.n_q, cfg.n_kv, cfg.head_dim, pos + 1, qwen3_kv_block_size(kv)
+        ) != 0 || !metal_commit_one(&rt.sess, cid_gqa) { return false }
+        if !dump_layer_op(df, prefix, l, "gqa_softmax", p_ao, q_dim) { return false }
+
+        // O-proj
+        let os = metal_shard_buf(rt, slot_shard_idx(m, sb + 4))
+        let ooff = slot_data_off(m, sb + 4)
+        let opipe = if slot_dtype(m, sb + 4) == 2 { rt.pipes.gemv_bf16 } else { rt.pipes.gemv_f32 }
+        let cid_o = metal_cmd_begin(&rt.sess)
+        if qwen3_metal_encode_gemv(&rt.sess, cid_o, opipe, os, ooff, rt.b_work, m.buf_attn_out_off, rt.b_work, m.buf_h_off, cfg.hidden, q_dim) != 0 || !metal_commit_one(&rt.sess, cid_o) { return false }
+        if !dump_layer_op(df, prefix, l, "o_proj", p_h, cfg.hidden) { return false }
+
+        // Post add+rmsnorm
+        let ps = metal_shard_buf(rt, slot_shard_idx(m, sb + 7))
+        let poff = slot_data_off(m, sb + 7)
+        let ppipe = if slot_dtype(m, sb + 7) == 2 { rt.pipes.add_rmsnorm_bf16 } else { rt.pipes.add_rmsnorm_f32 }
+        let cid_post = metal_cmd_begin(&rt.sess)
+        if qwen3_metal_encode_add_rmsnorm(&rt.sess, cid_post, ppipe, rt.b_work, rt.b_work, ps, rt.b_work, m.buf_x_off, m.buf_h_off, poff, m.buf_h_off, cfg.hidden, eps_bits) != 0 || !metal_commit_one(&rt.sess, cid_post) { return false }
+        if !dump_layer_op(df, prefix, l, "post_residual", p_x, cfg.hidden) { return false }
+        if !dump_layer_op(df, prefix, l, "post_rmsnorm", p_h, cfg.hidden) { return false }
+
+        // MLP gate+up+swiglu
+        let gs = metal_shard_buf(rt, slot_shard_idx(m, sb + 8))
+        let goff = slot_data_off(m, sb + 8)
+        let gdt = slot_dtype(m, sb + 8)
+        let us = metal_shard_buf(rt, slot_shard_idx(m, sb + 9))
+        let uoff = slot_data_off(m, sb + 9)
+        let udt = slot_dtype(m, sb + 9)
+        let cid_mlp = metal_cmd_begin(&rt.sess)
+        if gdt == 2 && udt == 2 {
+            if qwen3_metal_encode_gemv_bf16_gate_up_swiglu(&rt.sess, cid_mlp, rt.pipes.gemv_bf16_gate_up_swiglu, gs, us, rt.b_work, rt.b_work, goff, uoff, m.buf_h_off, m.buf_gate_off, cfg.inter, cfg.hidden) != 0 || !metal_commit_one(&rt.sess, cid_mlp) { return false }
+        } else {
+            let gp = if gdt == 2 { rt.pipes.gemv_bf16 } else { rt.pipes.gemv_f32 }
+            let up = if udt == 2 { rt.pipes.gemv_bf16 } else { rt.pipes.gemv_f32 }
+            if qwen3_metal_encode_gemv(&rt.sess, cid_mlp, gp, gs, goff, rt.b_work, m.buf_h_off, rt.b_work, m.buf_gate_off, cfg.inter, cfg.hidden) != 0
+                || qwen3_metal_encode_gemv(&rt.sess, cid_mlp, up, us, uoff, rt.b_work, m.buf_h_off, rt.b_work, m.buf_up_off, cfg.inter, cfg.hidden) != 0
+                || qwen3_metal_encode_swiglu(&rt.sess, cid_mlp, rt.pipes.swiglu, rt.b_work, m.buf_gate_off, rt.b_work, m.buf_up_off, rt.b_work, m.buf_gate_off, cfg.inter) != 0
+                || !metal_commit_one(&rt.sess, cid_mlp) { return false }
+        }
+        if !dump_layer_op(df, prefix, l, "mlp_swiglu", p_gate, cfg.inter) { return false }
+
+        // Down-proj
+        let ds = metal_shard_buf(rt, slot_shard_idx(m, sb + 10))
+        let doff = slot_data_off(m, sb + 10)
+        let dpipe = if slot_dtype(m, sb + 10) == 2 { rt.pipes.gemv_bf16 } else { rt.pipes.gemv_f32 }
+        let cid_d = metal_cmd_begin(&rt.sess)
+        if qwen3_metal_encode_gemv(&rt.sess, cid_d, dpipe, ds, doff, rt.b_work, m.buf_gate_off, rt.b_work, m.buf_h_off, cfg.hidden, cfg.inter) != 0 || !metal_commit_one(&rt.sess, cid_d) { return false }
+        if !dump_layer_op(df, prefix, l, "down_proj", p_h, cfg.hidden) { return false }
+
+        // Layer residual + next in_rmsnorm (or final_rmsnorm / vec_add)
+        if l + 1 < cfg.layers {
+            let nb = 3 + (l + 1) * 11
+            let ns = metal_shard_buf(rt, slot_shard_idx(m, nb))
+            let noff = slot_data_off(m, nb)
+            let npipe = if slot_dtype(m, nb) == 2 { rt.pipes.add_rmsnorm_bf16 } else { rt.pipes.add_rmsnorm_f32 }
+            let cid_nx = metal_cmd_begin(&rt.sess)
+            if qwen3_metal_encode_add_rmsnorm(&rt.sess, cid_nx, npipe, rt.b_work, rt.b_work, ns, rt.b_work, m.buf_x_off, m.buf_h_off, noff, m.buf_h_off, cfg.hidden, eps_bits) != 0 || !metal_commit_one(&rt.sess, cid_nx) { return false }
+            if !dump_layer_op(df, prefix, l, "layer_residual", p_x, cfg.hidden) { return false }
+            if !dump_layer_op(df, prefix, l + 1, "in_rmsnorm", p_h, cfg.hidden) { return false }
+        } else if compute_logits {
+            let fs = metal_shard_buf(rt, slot_shard_idx(m, 1))
+            let foff = slot_data_off(m, 1)
+            let fpipe = if slot_dtype(m, 1) == 2 { rt.pipes.add_rmsnorm_bf16 } else { rt.pipes.add_rmsnorm_f32 }
+            let cid_fn = metal_cmd_begin(&rt.sess)
+            if qwen3_metal_encode_add_rmsnorm(&rt.sess, cid_fn, fpipe, rt.b_work, rt.b_work, fs, rt.b_work, m.buf_x_off, m.buf_h_off, foff, m.buf_h_off, cfg.hidden, eps_bits) != 0 || !metal_commit_one(&rt.sess, cid_fn) { return false }
+            if !dump_layer_op(df, prefix, l, "layer_residual", p_x, cfg.hidden) { return false }
+            if !dump_prefix_op(df, prefix, "final_rmsnorm", p_h, cfg.hidden) { return false }
+        } else {
+            let cid_va = metal_cmd_begin(&rt.sess)
+            if qwen3_metal_encode_vec_add(&rt.sess, cid_va, rt.pipes.vec_add, rt.b_work, m.buf_x_off, rt.b_work, m.buf_h_off, cfg.hidden) != 0 || !metal_commit_one(&rt.sess, cid_va) { return false }
+            if !dump_layer_op(df, prefix, l, "layer_residual", p_x, cfg.hidden) { return false }
+        }
+
+        l = l + 1
+    }
+
+    if compute_logits {
+        let lms = metal_shard_buf(rt, slot_shard_idx(m, 2))
+        let lmoff = slot_data_off(m, 2)
+        let lmpipe = if slot_dtype(m, 2) == 2 { rt.pipes.gemv_bf16 } else { rt.pipes.gemv_f32 }
+        let cid_lm = metal_cmd_begin(&rt.sess)
+        if qwen3_metal_encode_gemv(&rt.sess, cid_lm, lmpipe, lms, lmoff, rt.b_work, m.buf_h_off, rt.b_work, m.buf_logits_off, cfg.vocab, cfg.hidden) != 0
+            || qwen3_metal_encode_argmax_top2(&rt.sess, cid_lm, rt.pipes.argmax_top2, rt.b_work, m.buf_logits_off, rt.b_work, m.buf_top2_off, cfg.vocab) != 0
+            || !metal_commit_one(&rt.sess, cid_lm) { return false }
+        if !dump_prefix_op(df, prefix, "logits", p_logits, cfg.vocab) { return false }
+    }
+
+    true
+}
+
+fn run_metal_audit(m: &Qwen3Model, df: &DumpFile, ids_ptr: i64, n_prompt: i64) -> bool with IO, Alloc, Mut, Div, Panic {
+    let cfg = m.cfg
+    var kv = qwen3_kv_alloc(cfg.layers, 16, 16, cfg.n_kv, cfg.head_dim)
+    let rt = qwen3_metal_runner_init(m, &kv, "")
+    var ok = qwen3_kv_is_ok(&kv) && qwen3_metal_runner_is_ok(&rt)
+    if ok {
+        println("[backend] metal")
+        ok = run_metal_part_a(m, &rt, df, ptr_read_i64_le(ids_ptr, 0))
+    }
+
+    var plast_top1: i64 = -1
+    if ok {
+        var pi: i64 = 0
+        while pi < n_prompt && ok {
+            let tid = ptr_read_i64_le(ids_ptr, pi * 8)
+            if pi == 0 {
+                ok = run_metal_step_dump(m, &!kv, &rt, df, tid, 0, n_prompt == 1, "p0")
+            } else if pi == n_prompt - 1 {
+                ok = run_metal_step_dump(m, &!kv, &rt, df, tid, pi, true, "plast")
+            } else {
+                ok = qwen3_forward_token_metal_opt(m, &!kv, &rt, tid, pi, false)
+            }
+            pi = pi + 1
+        }
+    }
+
+    let pdec_logits_copy = page_arena_alloc(cfg.vocab * 4)
+    if !page_arena_is_ok(&pdec_logits_copy) { ok = false }
+
+    if ok {
+        let t = qwen3_model_top2(m)
+        plast_top1 = t.top1_id
+        print("[plast_top1] id=")
+        print_int(plast_top1)
+        print(" runner_up=")
+        print_int(t.runner_up_id)
+        println("")
+        ok = run_metal_step_dump(m, &!kv, &rt, df, plast_top1, n_prompt, true, "pdec0")
+    }
+
+    if ok {
+        let lp = qwen3_model_logits_ptr(m)
+        copy_f32_words(page_arena_ptr(&pdec_logits_copy), lp, cfg.vocab)
+        let t_dec = qwen3_model_top2(m)
+        print("[pdec0_top1] id=")
+        print_int(t_dec.top1_id)
+        print(" runner_up=")
+        print_int(t_dec.runner_up_id)
+        println("")
+    }
+
+    let _fr = qwen3_metal_runner_free(rt)
+    let _fk = qwen3_kv_free(kv)
+
+    // Self-consistency check on fresh KV + runner
+    if ok {
+        var kv2 = qwen3_kv_alloc(cfg.layers, 16, 16, cfg.n_kv, cfg.head_dim)
+        let rt2 = qwen3_metal_runner_init(m, &kv2, "")
+        var ok2 = qwen3_kv_is_ok(&kv2) && qwen3_metal_runner_is_ok(&rt2)
+        var pi: i64 = 0
+        while pi < n_prompt && ok2 {
+            let tid = ptr_read_i64_le(ids_ptr, pi * 8)
+            ok2 = qwen3_forward_token_metal_opt(m, &!kv2, &rt2, tid, pi, pi == n_prompt - 1)
+            pi = pi + 1
+        }
+        if ok2 {
+            let t2 = qwen3_model_top2(m)
+            if t2.top1_id != plast_top1 { ok2 = false }
+            if ok2 {
+                ok2 = qwen3_forward_token_metal_opt(m, &!kv2, &rt2, plast_top1, n_prompt, true)
+            }
+        }
+        var diff_cnt: i64 = 0
+        if ok2 {
+            let lp2 = qwen3_model_logits_ptr(m)
+            let p_saved = page_arena_ptr(&pdec_logits_copy)
+            var vi: i64 = 0
+            while vi < cfg.vocab {
+                if ptr_read_u32_le(lp2, vi * 4) != ptr_read_u32_le(p_saved, vi * 4) {
+                    diff_cnt = diff_cnt + 1
+                }
+                vi = vi + 1
+            }
+        } else {
+            diff_cnt = -1
+        }
+        print("SELF_CHECK_DIFF_COUNT=")
+        print_int(diff_cnt)
+        println("")
+        if ok2 && diff_cnt == 0 {
+            println("SELF_CHECK_EXACT_MATCH=1")
+        } else {
+            println("SELF_CHECK_EXACT_MATCH=0")
+            ok = false
+        }
+        let _fr2 = qwen3_metal_runner_free(rt2)
+        let _fk2 = qwen3_kv_free(kv2)
+    }
+
+    let _flc = page_arena_free(pdec_logits_copy)
+    ok
+}
+
+// ----------------------------------------------------------------------------
+// CUDA PTX Part A + Part B
+// ----------------------------------------------------------------------------
+
+fn run_cuda_part_a(
+    m: &Qwen3Model,
+    rt: &Qwen3CudaRunner,
+    df: &DumpFile,
+    tok0: i64
+) -> bool with IO, Alloc, Mut, Div, Panic {
+    let cfg = m.cfg
+    let q_dim = cfg.n_q * cfg.head_dim
+    let kv_dim = cfg.n_kv * cfg.head_dim
+    let eps_bits = f64_to_f32_bits(cfg.eps)
+
+    // Host staging buffer
+    let h_arena = page_arena_alloc(262144)
+    var ok = page_arena_is_ok(&h_arena)
+    let h_base = if ok { page_arena_ptr(&h_arena) } else { 0 }
+    let h_out = if ok { h_base + 131072 } else { 0 }
+
+    // Device scratch: d_a(65536), d_b(65536), d_c(65536), d_d(65536), d_w1(16384) -> 393216
+    let d_scr = if ok { cuda_mem_alloc(&rt.sess, 393216) } else { 0 }
+    if d_scr == 0 { ok = false }
+    let d_a = d_scr
+    let d_b = d_scr + 65536
+    let d_c = d_scr + 131072
+    let d_d = d_scr + 196608
+    let d_w1 = d_scr + 262144
+
+    // 1. iso/embed (via cuda_embed_lookup)
+    if ok {
+        let emb_ptr = cuda_slot_dev_ptr(m, rt, 0)
+        let emb_bf16: i64 = if slot_dtype(m, 0) == 2 { 1 } else { 0 }
+        let emb_eb: i64 = if emb_bf16 == 1 { 2 } else { 4 }
+        let row_p = emb_ptr + tok0 * cfg.hidden * emb_eb
+        if cuda_launch_4_async(&rt.sess, rt.fn_embed, (cfg.hidden + 255) / 256, 256, row_p, d_a, cfg.hidden, emb_bf16) != 0
+            || cuda_ctx_sync(&rt.sess) != 0
+            || cuda_memcpy_d2h(&rt.sess, h_base, d_a, cfg.hidden * 4) != 0 {
+            ok = false
+        } else if !dump_record_str(df, "iso/embed", h_base, cfg.hidden) { ok = false }
+        // Upload w1 = BF16(1.0)
+        if ok {
+            fill_const_bf16(h_out, cfg.hidden, 1.0)
+            if cuda_memcpy_h2d(&rt.sess, d_w1, h_out, cfg.hidden * 2) != 0 { ok = false }
+        }
+    }
+
+    // 2. iso/rmsnorm_const_1
+    if ok {
+        fill_const_f32(h_out, cfg.hidden, 1.0)
+        if cuda_memcpy_h2d(&rt.sess, d_b, h_out, cfg.hidden * 4) != 0
+            || cuda_launch_8_async(&rt.sess, rt.fn_rmsnorm, 1, 32, d_b, d_w1, d_c, 1, cfg.hidden, eps_bits, 1, 0) != 0
+            || cuda_ctx_sync(&rt.sess) != 0
+            || cuda_memcpy_d2h(&rt.sess, h_out, d_c, cfg.hidden * 4) != 0 { ok = false }
+        else if !dump_record_str(df, "iso/rmsnorm_const_1", h_out, cfg.hidden) { ok = false }
+    }
+
+    // 3. iso/rmsnorm_const_1p5
+    if ok {
+        fill_const_f32(h_out, cfg.hidden, 1.5)
+        if cuda_memcpy_h2d(&rt.sess, d_b, h_out, cfg.hidden * 4) != 0
+            || cuda_launch_8_async(&rt.sess, rt.fn_rmsnorm, 1, 32, d_b, d_w1, d_c, 1, cfg.hidden, eps_bits, 1, 0) != 0
+            || cuda_ctx_sync(&rt.sess) != 0
+            || cuda_memcpy_d2h(&rt.sess, h_out, d_c, cfg.hidden * 4) != 0 { ok = false }
+        else if !dump_record_str(df, "iso/rmsnorm_const_1p5", h_out, cfg.hidden) { ok = false }
+    }
+
+    // 4. iso/rmsnorm_real_w1 (using d_a = embed)
+    if ok {
+        if cuda_launch_8_async(&rt.sess, rt.fn_rmsnorm, 1, 32, d_a, d_w1, d_c, 1, cfg.hidden, eps_bits, 1, 0) != 0
+            || cuda_ctx_sync(&rt.sess) != 0
+            || cuda_memcpy_d2h(&rt.sess, h_out, d_c, cfg.hidden * 4) != 0 { ok = false }
+        else if !dump_record_str(df, "iso/rmsnorm_real_w1", h_out, cfg.hidden) { ok = false }
+    }
+
+    // 5. iso/rmsnorm_real (slot 3)
+    if ok {
+        let p3 = cuda_slot_dev_ptr(m, rt, 3)
+        let bf3: i64 = if slot_dtype(m, 3) == 2 { 1 } else { 0 }
+        if cuda_launch_8_async(&rt.sess, rt.fn_rmsnorm, 1, 32, d_a, p3, d_c, 1, cfg.hidden, eps_bits, bf3, 0) != 0
+            || cuda_ctx_sync(&rt.sess) != 0
+            || cuda_memcpy_d2h(&rt.sess, h_out, d_c, cfg.hidden * 4) != 0 { ok = false }
+        else if !dump_record_str(df, "iso/rmsnorm_real", h_out, cfg.hidden) { ok = false }
+    }
+
+    // 6-8. iso/qkv_q, iso/qkv_k, iso/qkv_v, iso/gemv_single_q, iso/gemm_b8_q
+    if ok {
+        let qp = cuda_slot_dev_ptr(m, rt, 4)
+        let qbf: i64 = if slot_dtype(m, 4) == 2 { 1 } else { 0 }
+        let kp = cuda_slot_dev_ptr(m, rt, 5)
+        let kbf: i64 = if slot_dtype(m, 5) == 2 { 1 } else { 0 }
+        let vp = cuda_slot_dev_ptr(m, rt, 6)
+        let vbf: i64 = if slot_dtype(m, 6) == 2 { 1 } else { 0 }
+        if cuda_launch_6_async(&rt.sess, rt.fn_gemv_bf16, (q_dim + 7) / 8, 256, qp, d_a, d_c, q_dim, cfg.hidden, qbf) != 0
+            || cuda_ctx_sync(&rt.sess) != 0
+            || cuda_memcpy_d2h(&rt.sess, h_out, d_c, q_dim * 4) != 0 { ok = false }
+        else {
+            if !dump_record_str(df, "iso/qkv_q", h_out, q_dim) { ok = false }
+        }
+        if ok {
+            if cuda_launch_6_async(&rt.sess, rt.fn_gemv_bf16, (kv_dim + 7) / 8, 256, kp, d_a, d_d, kv_dim, cfg.hidden, kbf) != 0
+                || cuda_ctx_sync(&rt.sess) != 0
+                || cuda_memcpy_d2h(&rt.sess, h_out + 16384, d_d, kv_dim * 4) != 0 { ok = false }
+            else if !dump_record_str(df, "iso/qkv_k", h_out + 16384, kv_dim) { ok = false }
+        }
+        if ok {
+            if cuda_launch_6_async(&rt.sess, rt.fn_gemv_bf16, (kv_dim + 7) / 8, 256, vp, d_a, d_d, kv_dim, cfg.hidden, vbf) != 0
+                || cuda_ctx_sync(&rt.sess) != 0
+                || cuda_memcpy_d2h(&rt.sess, h_out + 16384, d_d, kv_dim * 4) != 0 { ok = false }
+            else if !dump_record_str(df, "iso/qkv_v", h_out + 16384, kv_dim) { ok = false }
+        }
+        if ok {
+            if !dump_record_str(df, "iso/gemv_single_q", h_out, q_dim) { ok = false }
+        }
+        if ok {
+            let b8_x_b = q4_soa_align_up_64(8 * cfg.hidden * 4)
+            let b8_y_b = q4_soa_align_up_64(8 * q_dim * 4)
+            let b8_arena = page_arena_alloc(b8_x_b + b8_y_b + 4096)
+            let d_bx8 = cuda_mem_alloc(&rt.sess, b8_x_b)
+            let d_by8 = cuda_mem_alloc(&rt.sess, b8_y_b)
+            var b8_ok = page_arena_is_ok(&b8_arena) && d_bx8 != 0 && d_by8 != 0
+            if b8_ok {
+                let p_bx8 = page_arena_ptr(&b8_arena)
+                let p_by8 = p_bx8 + b8_x_b
+                fill_const_f32(p_bx8, 8 * cfg.hidden, 0.0)
+                copy_f32_words(p_bx8, h_base, cfg.hidden)
+                if cuda_memcpy_h2d(&rt.sess, d_bx8, p_bx8, 8 * cfg.hidden * 4) != 0
+                    || cuda_launch_8_async(&rt.sess, rt.fn_gemm_bf16_simt, (q_dim + 7) / 8, 256, qp, d_bx8, d_by8, q_dim, cfg.hidden, 8, qbf, 0) != 0
+                    || cuda_ctx_sync(&rt.sess) != 0
+                    || cuda_memcpy_d2h(&rt.sess, p_by8, d_by8, q_dim * 4) != 0 {
+                    b8_ok = false
+                } else if !dump_record_str(df, "iso/gemm_b8_q", p_by8, q_dim) {
+                    b8_ok = false
+                }
+            }
+            if !b8_ok { ok = false }
+            if d_bx8 != 0 { let _fbx = cuda_mem_free(&rt.sess, d_bx8) }
+            if d_by8 != 0 { let _fby = cuda_mem_free(&rt.sess, d_by8) }
+            let _fba = page_arena_free(b8_arena)
+        }
+    }
+
+    // 9-11. iso/qk_norm_rope_pos{0,5,127} (slots 8, 9)
+    let qwp = cuda_slot_dev_ptr(m, rt, 8)
+    let qw_bf: i64 = if slot_dtype(m, 8) == 2 { 1 } else { 0 }
+    let kwp = cuda_slot_dev_ptr(m, rt, 9)
+    let kw_bf: i64 = if slot_dtype(m, 9) == 2 { 1 } else { 0 }
+    let ef_packed = (eps_bits & 4294967295) | ((qw_bf | (kw_bf * 2)) << 32)
+    let k_layer0 = rt.d_k_cache
+    let v_layer0 = rt.d_v_cache
+
+    // pos=0
+    if ok {
+        fill_det_vec_a(h_out, q_dim)
+        fill_det_vec_a(h_out + 16384, kv_dim)
+        let rpos = rt.d_rope + 0 * cfg.head_dim * 4
+        if cuda_memcpy_h2d(&rt.sess, d_a, h_out, q_dim * 4) != 0
+            || cuda_memcpy_h2d(&rt.sess, d_b, h_out + 16384, kv_dim * 4) != 0
+            || cuda_memcpy_h2d(&rt.sess, d_c, h_out + 16384, kv_dim * 4) != 0
+            || cuda_launch_12_async(&rt.sess, rt.fn_qk_rope_kv, cfg.n_q + cfg.n_kv, 32, d_a, d_b, d_c, qwp, kwp, rpos, k_layer0, v_layer0, cfg.n_q, cfg.n_kv, cfg.head_dim, ef_packed) != 0
+            || cuda_ctx_sync(&rt.sess) != 0
+            || cuda_memcpy_d2h(&rt.sess, h_out, d_a, q_dim * 4) != 0
+            || cuda_memcpy_d2h(&rt.sess, h_out + 16384, d_b, kv_dim * 4) != 0 { ok = false }
+        else {
+            if !dump_record_str(df, "iso/qk_norm_rope_pos0_q", h_out, q_dim) { ok = false }
+            if ok && !dump_record_str(df, "iso/qk_norm_rope_pos0_k", h_out + 16384, kv_dim) { ok = false }
+        }
+    }
+    // pos=5
+    if ok {
+        fill_det_vec_a(h_out, q_dim)
+        fill_det_vec_a(h_out + 16384, kv_dim)
+        let rpos = rt.d_rope + 5 * cfg.head_dim * 4
+        if cuda_memcpy_h2d(&rt.sess, d_a, h_out, q_dim * 4) != 0
+            || cuda_memcpy_h2d(&rt.sess, d_b, h_out + 16384, kv_dim * 4) != 0
+            || cuda_memcpy_h2d(&rt.sess, d_c, h_out + 16384, kv_dim * 4) != 0
+            || cuda_launch_12_async(&rt.sess, rt.fn_qk_rope_kv, cfg.n_q + cfg.n_kv, 32, d_a, d_b, d_c, qwp, kwp, rpos, k_layer0, v_layer0, cfg.n_q, cfg.n_kv, cfg.head_dim, ef_packed) != 0
+            || cuda_ctx_sync(&rt.sess) != 0
+            || cuda_memcpy_d2h(&rt.sess, h_out, d_a, q_dim * 4) != 0
+            || cuda_memcpy_d2h(&rt.sess, h_out + 16384, d_b, kv_dim * 4) != 0 { ok = false }
+        else {
+            if !dump_record_str(df, "iso/qk_norm_rope_pos5_q", h_out, q_dim) { ok = false }
+            if ok && !dump_record_str(df, "iso/qk_norm_rope_pos5_k", h_out + 16384, kv_dim) { ok = false }
+        }
+    }
+    // pos=127
+    if ok {
+        fill_det_vec_a(h_out, q_dim)
+        fill_det_vec_a(h_out + 16384, kv_dim)
+        let rpos = rt.d_rope + 127 * cfg.head_dim * 4
+        if cuda_memcpy_h2d(&rt.sess, d_a, h_out, q_dim * 4) != 0
+            || cuda_memcpy_h2d(&rt.sess, d_b, h_out + 16384, kv_dim * 4) != 0
+            || cuda_memcpy_h2d(&rt.sess, d_c, h_out + 16384, kv_dim * 4) != 0
+            || cuda_launch_12_async(&rt.sess, rt.fn_qk_rope_kv, cfg.n_q + cfg.n_kv, 32, d_a, d_b, d_c, qwp, kwp, rpos, k_layer0, v_layer0, cfg.n_q, cfg.n_kv, cfg.head_dim, ef_packed) != 0
+            || cuda_ctx_sync(&rt.sess) != 0
+            || cuda_memcpy_d2h(&rt.sess, h_out, d_a, q_dim * 4) != 0 { ok = false }
+        else {
+            if !dump_record_str(df, "iso/qk_norm_rope_pos127_q", h_out, q_dim) { ok = false }
+        }
+    }
+
+    // 12-13. iso/gqa_seq1 and iso/gqa_seq8
+    var kp: i64 = 0
+    while kp < 8 && ok {
+        fill_det_kv_pos(h_out, kp, kv_dim)
+        if cuda_memcpy_h2d(&rt.sess, k_layer0 + kp * kv_dim * 4, h_out, kv_dim * 4) != 0
+            || cuda_memcpy_h2d(&rt.sess, v_layer0 + kp * kv_dim * 4, h_out, kv_dim * 4) != 0 { ok = false }
+        kp = kp + 1
+    }
+    if ok {
+        fill_det_vec_a(h_out, q_dim)
+        if cuda_memcpy_h2d(&rt.sess, d_a, h_out, q_dim * 4) != 0
+            || cuda_launch_8_async(&rt.sess, rt.fn_paged_gqa, cfg.n_q, 32, d_a, k_layer0, v_layer0, d_b, cfg.n_q, cfg.n_kv, cfg.head_dim, 1) != 0
+            || cuda_ctx_sync(&rt.sess) != 0
+            || cuda_memcpy_d2h(&rt.sess, h_out, d_b, q_dim * 4) != 0 { ok = false }
+        else if !dump_record_str(df, "iso/gqa_seq1", h_out, q_dim) { ok = false }
+    }
+    if ok {
+        fill_det_vec_a(h_out, q_dim)
+        if cuda_memcpy_h2d(&rt.sess, d_a, h_out, q_dim * 4) != 0
+            || cuda_launch_8_async(&rt.sess, rt.fn_paged_gqa, cfg.n_q, 32, d_a, k_layer0, v_layer0, d_b, cfg.n_q, cfg.n_kv, cfg.head_dim, 8) != 0
+            || cuda_ctx_sync(&rt.sess) != 0
+            || cuda_memcpy_d2h(&rt.sess, h_out, d_b, q_dim * 4) != 0 { ok = false }
+        else if !dump_record_str(df, "iso/gqa_seq8", h_out, q_dim) { ok = false }
+    }
+
+    // 14. iso/swiglu_only
+    if ok {
+        fill_det_swiglu_g(h_out, cfg.inter)
+        fill_det_swiglu_u(h_out + 16384, cfg.inter)
+        if cuda_memcpy_h2d(&rt.sess, d_a, h_out, cfg.inter * 4) != 0
+            || cuda_memcpy_h2d(&rt.sess, d_b, h_out + 16384, cfg.inter * 4) != 0
+            || cuda_launch_4_async(&rt.sess, rt.fn_swiglu, (cfg.inter + 255) / 256, 256, d_a, d_b, d_c, cfg.inter) != 0
+            || cuda_ctx_sync(&rt.sess) != 0
+            || cuda_memcpy_d2h(&rt.sess, h_out, d_c, cfg.inter * 4) != 0 { ok = false }
+        else if !dump_record_str(df, "iso/swiglu_only", h_out, cfg.inter) { ok = false }
+    }
+
+    // 15. iso/vec_add
+    if ok {
+        fill_det_vec_a(h_out, cfg.hidden)
+        fill_det_vec_b(h_out + 16384, cfg.hidden)
+        if cuda_memcpy_h2d(&rt.sess, d_a, h_out, cfg.hidden * 4) != 0
+            || cuda_memcpy_h2d(&rt.sess, d_b, h_out + 16384, cfg.hidden * 4) != 0
+            || cuda_launch_4_async(&rt.sess, rt.fn_vec_add, (cfg.hidden + 255) / 256, 256, d_a, d_b, cfg.hidden, 0) != 0
+            || cuda_ctx_sync(&rt.sess) != 0
+            || cuda_memcpy_d2h(&rt.sess, h_out, d_a, cfg.hidden * 4) != 0 { ok = false }
+        else if !dump_record_str(df, "iso/vec_add", h_out, cfg.hidden) { ok = false }
+    }
+
+    // 16. iso/add_rmsnorm_x, iso/add_rmsnorm_out
+    if ok {
+        fill_det_vec_a(h_out, cfg.hidden)
+        fill_det_vec_b(h_out + 16384, cfg.hidden)
+        let post_p = cuda_slot_dev_ptr(m, rt, 10)
+        let post_bf: i64 = if slot_dtype(m, 10) == 2 { 1 } else { 0 }
+        if cuda_memcpy_h2d(&rt.sess, d_a, h_out, cfg.hidden * 4) != 0
+            || cuda_memcpy_h2d(&rt.sess, d_b, h_out + 16384, cfg.hidden * 4) != 0
+            || cuda_launch_10_async(&rt.sess, rt.fn_add_accum_rmsnorm, 1, 32, d_a, d_b, post_p, d_c, 0, cfg.hidden, eps_bits, 0, 0, post_bf) != 0
+            || cuda_ctx_sync(&rt.sess) != 0
+            || cuda_memcpy_d2h(&rt.sess, h_out, d_a, cfg.hidden * 4) != 0
+            || cuda_memcpy_d2h(&rt.sess, h_out + 16384, d_c, cfg.hidden * 4) != 0 { ok = false }
+        else {
+            if !dump_record_str(df, "iso/add_rmsnorm_x", h_out, cfg.hidden) { ok = false }
+            if ok && !dump_record_str(df, "iso/add_rmsnorm_out", h_out + 16384, cfg.hidden) { ok = false }
+        }
+    }
+
+    // 17. iso/q4_soa_gemv (rows=64, cols=cfg.hidden from slot 4 q_proj against iso/embed)
+    if ok {
+        let q4_rows: i64 = 64
+        let n_blocks = q4_soa_block_count(cfg.hidden)
+        let nib_b = q4_soa_nibbles_bytes(q4_rows, cfg.hidden)
+        let scl_b = q4_soa_scales_bytes(q4_rows, cfg.hidden)
+        let rho_b = q4_soa_rhos_bytes(q4_rows, cfg.hidden)
+        let y_b = q4_soa_align_up_64(q4_rows * 4)
+        let d_q4 = cuda_mem_alloc(&rt.sess, nib_b + scl_b + rho_b + y_b + 4096)
+        var q4_ok = d_q4 != 0
+        if q4_ok {
+            let qp4 = cuda_slot_dev_ptr(m, rt, 4)
+            let is_bf16_flag: i64 = if slot_dtype(m, 4) == 2 { 1 } else { 0 }
+            let d_nib = d_q4
+            let d_scl = d_q4 + nib_b
+            let d_rho = d_scl + scl_b
+            let d_qy = d_rho + rho_b
+            let q_gx = (q4_rows * n_blocks + 255) / 256
+            let g_gx = (q4_rows + 7) / 8
+            if cuda_memcpy_h2d(&rt.sess, d_a, h_base, cfg.hidden * 4) != 0
+                || cuda_launch_8_async(&rt.sess, rt.fn_quantize_q4_soa, q_gx, 256, qp4, d_nib, d_scl, d_rho, q4_rows, cfg.hidden, is_bf16_flag, 0) != 0
+                || cuda_launch_6_async(&rt.sess, rt.fn_gemv_q4_soa, g_gx, 256, d_nib, d_scl, d_a, d_qy, q4_rows, cfg.hidden) != 0
+                || cuda_ctx_sync(&rt.sess) != 0
+                || cuda_memcpy_d2h(&rt.sess, h_out, d_qy, q4_rows * 4) != 0 {
+                q4_ok = false
+            } else if !dump_record_str(df, "iso/q4_soa_gemv", h_out, q4_rows) {
+                q4_ok = false
+            }
+        }
+        if !q4_ok { ok = false }
+        if d_q4 != 0 { let _fq4d = cuda_mem_free(&rt.sess, d_q4) }
+    }
+
+    // 18. Tensor Core GEMM sanity & timing (B=32, slot 4 q_proj, 20 timed iterations)
+    let sm_ver = cuda_session_sm_version(&rt.sess)
+    if ok && slot_dtype(m, 4) == 2 && sm_ver >= 75 {
+        let b_tc: i64 = 32
+        let tc_x_b = q4_soa_align_up_64(b_tc * cfg.hidden * 4)
+        let tc_y_b = q4_soa_align_up_64(b_tc * q_dim * 4)
+        let tc_arena = page_arena_alloc(tc_x_b + tc_y_b * 2 + 4096)
+        let d_tc_x = cuda_mem_alloc(&rt.sess, tc_x_b)
+        let d_tc_ys = cuda_mem_alloc(&rt.sess, tc_y_b)
+        let d_tc_yt = cuda_mem_alloc(&rt.sess, tc_y_b)
+        var tc_ok = page_arena_is_ok(&tc_arena) && d_tc_x != 0 && d_tc_ys != 0 && d_tc_yt != 0
+        if tc_ok {
+            let p_tc = page_arena_ptr(&tc_arena)
+            let p_ys = p_tc + tc_x_b
+            let p_yt = p_ys + tc_y_b
+            fill_det_vec_a(p_tc, b_tc * cfg.hidden)
+            if cuda_memcpy_h2d(&rt.sess, d_tc_x, p_tc, b_tc * cfg.hidden * 4) != 0 { tc_ok = false }
+            let qp4 = cuda_slot_dev_ptr(m, rt, 4)
+            let gx_simt = (q_dim + 7) / 8
+            let gx_tc = ((q_dim + 127) / 128) * ((b_tc + 7) / 8)
+
+            // Warmup
+            var ck: i64 = 0
+            while ck < 4 && tc_ok {
+                if cuda_launch_8_async(&rt.sess, rt.fn_gemm_bf16_simt, gx_simt, 256, qp4, d_tc_x + ck * 8 * cfg.hidden * 4, d_tc_ys + ck * 8 * q_dim * 4, q_dim, cfg.hidden, 8, 1, 0) != 0 { tc_ok = false }
+                ck = ck + 1
+            }
+            if tc_ok && cuda_ctx_sync(&rt.sess) != 0 { tc_ok = false }
+            if tc_ok && (cuda_launch_8_async(&rt.sess, rt.fn_gemm_bf16_tc, gx_tc, 256, qp4, d_tc_x, d_tc_yt, q_dim, cfg.hidden, b_tc, 1, 0) != 0 || cuda_ctx_sync(&rt.sess) != 0) {
+                tc_ok = false
+            }
+
+            let t0_s = audit_now_ns()
+            var it: i64 = 0
+            while it < 20 && tc_ok {
+                var c2: i64 = 0
+                while c2 < 4 && tc_ok {
+                    if cuda_launch_8_async(&rt.sess, rt.fn_gemm_bf16_simt, gx_simt, 256, qp4, d_tc_x + c2 * 8 * cfg.hidden * 4, d_tc_ys + c2 * 8 * q_dim * 4, q_dim, cfg.hidden, 8, 1, 0) != 0 { tc_ok = false }
+                    c2 = c2 + 1
+                }
+                if tc_ok && cuda_ctx_sync(&rt.sess) != 0 { tc_ok = false }
+                it = it + 1
+            }
+            let t1_s = audit_now_ns()
+
+            let t0_t = audit_now_ns()
+            it = 0
+            while it < 20 && tc_ok {
+                if cuda_launch_8_async(&rt.sess, rt.fn_gemm_bf16_tc, gx_tc, 256, qp4, d_tc_x, d_tc_yt, q_dim, cfg.hidden, b_tc, 1, 0) != 0 || cuda_ctx_sync(&rt.sess) != 0 {
+                    tc_ok = false
+                }
+                it = it + 1
+            }
+            let t1_t = audit_now_ns()
+
+            if tc_ok && (cuda_memcpy_d2h(&rt.sess, p_ys, d_tc_ys, b_tc * q_dim * 4) != 0 || cuda_memcpy_d2h(&rt.sess, p_yt, d_tc_yt, b_tc * q_dim * 4) != 0) {
+                tc_ok = false
+            }
+            if tc_ok {
+                let nf_ptr = p_tc + tc_x_b + tc_y_b * 2
+                let max_d = tc_compare_f32(p_ys, p_yt, b_tc * q_dim, nf_ptr)
+                let non_fin = ptr_read_i64_le(nf_ptr, 0)
+                let simt_us = ((t1_s - t0_s) / 1000) / 20
+                let tc_us = ((t1_t - t0_t) / 1000) / 20
+                print("TC_SANITY cuda max_abs_diff=")
+                print_f64(max_d)
+                print(" simt_us=")
+                print_int(simt_us)
+                print(" tc_us=")
+                print_int(tc_us)
+                print(" non_finite=")
+                print_int(non_fin)
+                println("")
+                if non_fin != 0 || max_d >= 0.05 { tc_ok = false }
+            }
+        }
+        if !tc_ok { ok = false }
+        if d_tc_x != 0 { let _ftcx = cuda_mem_free(&rt.sess, d_tc_x) }
+        if d_tc_ys != 0 { let _ftcs = cuda_mem_free(&rt.sess, d_tc_ys) }
+        if d_tc_yt != 0 { let _ftct = cuda_mem_free(&rt.sess, d_tc_yt) }
+        let _ftca = page_arena_free(tc_arena)
+    }
+
+    if d_scr != 0 { let _fc = cuda_mem_free(&rt.sess, d_scr) }
+    let _fh = page_arena_free(h_arena)
+    ok
+}
+
+fn cuda_sync_copy_and_dump(
+    rt: &Qwen3CudaRunner,
+    df: &DumpFile,
+    tag_fn_mode: i32,
+    prefix: string,
+    layer: i64,
+    op_name: string,
+    d_ptr: i64,
+    h_buf: i64,
+    count: i64
+) -> bool with Alloc, Mut, Div {
+    if cuda_ctx_sync(&rt.sess) != 0 { return false }
+    if cuda_memcpy_d2h(&rt.sess, h_buf, d_ptr, count * 4) != 0 { return false }
+    if tag_fn_mode == 0 {
+        return dump_prefix_op(df, prefix, op_name, h_buf, count)
+    }
+    dump_layer_op(df, prefix, layer, op_name, h_buf, count)
+}
+
+fn run_cuda_step_dump(
+    m: &Qwen3Model,
+    rt: &Qwen3CudaRunner,
+    df: &DumpFile,
+    token_id: i64,
+    pos: i64,
+    compute_logits: bool,
+    prefix: string
+) -> bool with Alloc, Mut, Div {
+    let cfg = m.cfg
+    let q_dim = cfg.n_q * cfg.head_dim
+    let kv_dim = rt.kv_dim
+    let a_base = page_arena_ptr(&m.arena)
+    let d_x = rt.d_work + m.buf_x_off
+    let d_h = rt.d_work + m.buf_h_off
+    let d_q = rt.d_work + m.buf_q_off
+    let d_k = rt.d_work + m.buf_k_off
+    let d_v = rt.d_work + m.buf_v_off
+    let d_ao = rt.d_work + m.buf_attn_out_off
+    let d_gate = rt.d_work + m.buf_gate_off
+    let d_up = rt.d_work + m.buf_up_off
+    let d_logits = rt.d_work + m.buf_logits_off
+    let d_top2 = rt.d_work + m.buf_top2_off
+    let h_x = a_base + m.buf_x_off
+    let h_h = a_base + m.buf_h_off
+    let h_q = a_base + m.buf_q_off
+    let h_k = a_base + m.buf_k_off
+    let h_v = a_base + m.buf_v_off
+    let h_ao = a_base + m.buf_attn_out_off
+    let h_gate = a_base + m.buf_gate_off
+    let h_logits = a_base + m.buf_logits_off
+    let eps_bits = f64_to_f32_bits(cfg.eps)
+
+    // Embed
+    let emb_ptr = cuda_slot_dev_ptr(m, rt, 0)
+    let emb_bf: i64 = if slot_dtype(m, 0) == 2 { 1 } else { 0 }
+    let emb_eb: i64 = if emb_bf == 1 { 2 } else { 4 }
+    let row_p = emb_ptr + token_id * cfg.hidden * emb_eb
+    if cuda_launch_4_async(&rt.sess, rt.fn_embed, (cfg.hidden + 255) / 256, 256, row_p, d_x, cfg.hidden, emb_bf) != 0 { return false }
+    if !cuda_sync_copy_and_dump(rt, df, 0, prefix, 0, "embed", d_x, h_x, cfg.hidden) { return false }
+
+    if cfg.layers > 0 {
+        let in0_p = cuda_slot_dev_ptr(m, rt, 3)
+        let in0_bf: i64 = if slot_dtype(m, 3) == 2 { 1 } else { 0 }
+        if cuda_launch_8_async(&rt.sess, rt.fn_rmsnorm, 1, 32, d_x, in0_p, d_h, 1, cfg.hidden, eps_bits, in0_bf, 0) != 0 { return false }
+        if !cuda_sync_copy_and_dump(rt, df, 1, prefix, 0, "in_rmsnorm", d_h, h_h, cfg.hidden) { return false }
+    }
+
+    var l: i64 = 0
+    while l < cfg.layers {
+        let sb = 3 + l * 11
+        let qp = cuda_slot_dev_ptr(m, rt, sb + 1)
+        let qbf: i64 = if slot_dtype(m, sb + 1) == 2 { 1 } else { 0 }
+        let kp = cuda_slot_dev_ptr(m, rt, sb + 2)
+        let kbf: i64 = if slot_dtype(m, sb + 2) == 2 { 1 } else { 0 }
+        let vp = cuda_slot_dev_ptr(m, rt, sb + 3)
+        let vbf: i64 = if slot_dtype(m, sb + 3) == 2 { 1 } else { 0 }
+
+        if cuda_launch_6_async(&rt.sess, rt.fn_gemv_bf16, (q_dim + 7) / 8, 256, qp, d_h, d_q, q_dim, cfg.hidden, qbf) != 0 { return false }
+        if !cuda_sync_copy_and_dump(rt, df, 1, prefix, l, "q_proj", d_q, h_q, q_dim) { return false }
+        if cuda_launch_6_async(&rt.sess, rt.fn_gemv_bf16, (kv_dim + 7) / 8, 256, kp, d_h, d_k, kv_dim, cfg.hidden, kbf) != 0 { return false }
+        if !cuda_sync_copy_and_dump(rt, df, 1, prefix, l, "k_proj", d_k, h_k, kv_dim) { return false }
+        if cuda_launch_6_async(&rt.sess, rt.fn_gemv_bf16, (kv_dim + 7) / 8, 256, vp, d_h, d_v, kv_dim, cfg.hidden, vbf) != 0 { return false }
+        if !cuda_sync_copy_and_dump(rt, df, 1, prefix, l, "v_proj", d_v, h_v, kv_dim) { return false }
+
+        let qwp = cuda_slot_dev_ptr(m, rt, sb + 5)
+        let kwp = cuda_slot_dev_ptr(m, rt, sb + 6)
+        let qw_bf: i64 = if slot_dtype(m, sb + 5) == 2 { 1 } else { 0 }
+        let kw_bf: i64 = if slot_dtype(m, sb + 6) == 2 { 1 } else { 0 }
+        let ef_packed = (eps_bits & 4294967295) | ((qw_bf | (kw_bf * 2)) << 32)
+        let rope_pos = rt.d_rope + pos * cfg.head_dim * 4
+        let layer_kv_bytes = rt.max_seq_cap * kv_dim * 4
+        let k_layer = rt.d_k_cache + l * layer_kv_bytes
+        let v_layer = rt.d_v_cache + l * layer_kv_bytes
+        let k_dst = k_layer + pos * kv_dim * 4
+        let v_dst = v_layer + pos * kv_dim * 4
+        if cuda_launch_12_async(&rt.sess, rt.fn_qk_rope_kv, cfg.n_q + cfg.n_kv, 32, d_q, d_k, d_v, qwp, kwp, rope_pos, k_dst, v_dst, cfg.n_q, cfg.n_kv, cfg.head_dim, ef_packed) != 0 { return false }
+        if !cuda_sync_copy_and_dump(rt, df, 1, prefix, l, "qk_norm_rope_q", d_q, h_q, q_dim) { return false }
+        if !cuda_sync_copy_and_dump(rt, df, 1, prefix, l, "qk_norm_rope_k", d_k, h_k, kv_dim) { return false }
+
+        if cuda_launch_8_async(&rt.sess, rt.fn_paged_gqa, cfg.n_q, 32, d_q, k_layer, v_layer, d_ao, cfg.n_q, cfg.n_kv, cfg.head_dim, pos + 1) != 0 { return false }
+        if !cuda_sync_copy_and_dump(rt, df, 1, prefix, l, "gqa_softmax", d_ao, h_ao, q_dim) { return false }
+
+        let op = cuda_slot_dev_ptr(m, rt, sb + 4)
+        let obf: i64 = if slot_dtype(m, sb + 4) == 2 { 1 } else { 0 }
+        if cuda_launch_6_async(&rt.sess, rt.fn_gemv_bf16, (cfg.hidden + 7) / 8, 256, op, d_ao, d_h, cfg.hidden, q_dim, obf) != 0 { return false }
+        if !cuda_sync_copy_and_dump(rt, df, 1, prefix, l, "o_proj", d_h, h_h, cfg.hidden) { return false }
+
+        let post_p = cuda_slot_dev_ptr(m, rt, sb + 7)
+        let post_bf: i64 = if slot_dtype(m, sb + 7) == 2 { 1 } else { 0 }
+        if cuda_launch_10_async(&rt.sess, rt.fn_add_accum_rmsnorm, 1, 32, d_x, d_h, post_p, d_h, 0, cfg.hidden, eps_bits, 0, 0, post_bf) != 0 { return false }
+        if !cuda_sync_copy_and_dump(rt, df, 1, prefix, l, "post_residual", d_x, h_x, cfg.hidden) { return false }
+        if !cuda_sync_copy_and_dump(rt, df, 1, prefix, l, "post_rmsnorm", d_h, h_h, cfg.hidden) { return false }
+
+        let gp = cuda_slot_dev_ptr(m, rt, sb + 8)
+        let gbf: i64 = if slot_dtype(m, sb + 8) == 2 { 1 } else { 0 }
+        let up = cuda_slot_dev_ptr(m, rt, sb + 9)
+        let ubf: i64 = if slot_dtype(m, sb + 9) == 2 { 1 } else { 0 }
+        if cuda_launch_6_async(&rt.sess, rt.fn_gemv_bf16, (cfg.inter + 7) / 8, 256, gp, d_h, d_gate, cfg.inter, cfg.hidden, gbf) != 0 { return false }
+        if cuda_launch_6_async(&rt.sess, rt.fn_gemv_bf16, (cfg.inter + 7) / 8, 256, up, d_h, d_up, cfg.inter, cfg.hidden, ubf) != 0 { return false }
+        if cuda_launch_4_async(&rt.sess, rt.fn_swiglu, (cfg.inter + 255) / 256, 256, d_gate, d_up, d_gate, cfg.inter) != 0 { return false }
+        if !cuda_sync_copy_and_dump(rt, df, 1, prefix, l, "mlp_swiglu", d_gate, h_gate, cfg.inter) { return false }
+
+        let dp = cuda_slot_dev_ptr(m, rt, sb + 10)
+        let dbf: i64 = if slot_dtype(m, sb + 10) == 2 { 1 } else { 0 }
+        if cuda_launch_6_async(&rt.sess, rt.fn_gemv_bf16, (cfg.hidden + 7) / 8, 256, dp, d_gate, d_h, cfg.hidden, cfg.inter, dbf) != 0 { return false }
+        if !cuda_sync_copy_and_dump(rt, df, 1, prefix, l, "down_proj", d_h, h_h, cfg.hidden) { return false }
+
+        if l + 1 < cfg.layers {
+            let ns = 3 + (l + 1) * 11
+            let nxp = cuda_slot_dev_ptr(m, rt, ns)
+            let nx_bf: i64 = if slot_dtype(m, ns) == 2 { 1 } else { 0 }
+            if cuda_launch_10_async(&rt.sess, rt.fn_add_accum_rmsnorm, 1, 32, d_x, d_h, nxp, d_h, 0, cfg.hidden, eps_bits, 0, 0, nx_bf) != 0 { return false }
+            if !cuda_sync_copy_and_dump(rt, df, 1, prefix, l, "layer_residual", d_x, h_x, cfg.hidden) { return false }
+            if !cuda_sync_copy_and_dump(rt, df, 1, prefix, l + 1, "in_rmsnorm", d_h, h_h, cfg.hidden) { return false }
+        } else if compute_logits {
+            let nwp = cuda_slot_dev_ptr(m, rt, 1)
+            let nw_bf: i64 = if slot_dtype(m, 1) == 2 { 1 } else { 0 }
+            if cuda_launch_10_async(&rt.sess, rt.fn_add_accum_rmsnorm, 1, 32, d_x, d_h, nwp, d_h, 0, cfg.hidden, eps_bits, 0, 0, nw_bf) != 0 { return false }
+            if !cuda_sync_copy_and_dump(rt, df, 1, prefix, l, "layer_residual", d_x, h_x, cfg.hidden) { return false }
+            if !cuda_sync_copy_and_dump(rt, df, 0, prefix, 0, "final_rmsnorm", d_h, h_h, cfg.hidden) { return false }
+        } else {
+            if cuda_launch_4_async(&rt.sess, rt.fn_vec_add, (cfg.hidden + 255) / 256, 256, d_x, d_h, cfg.hidden, 0) != 0 { return false }
+            if !cuda_sync_copy_and_dump(rt, df, 1, prefix, l, "layer_residual", d_x, h_x, cfg.hidden) { return false }
+        }
+
+        l = l + 1
+    }
+
+    if compute_logits {
+        let lmp = cuda_slot_dev_ptr(m, rt, 2)
+        let lm_bf: i64 = if slot_dtype(m, 2) == 2 { 1 } else { 0 }
+        if cuda_launch_6_async(&rt.sess, rt.fn_gemv_bf16, (cfg.vocab + 7) / 8, 256, lmp, d_h, d_logits, cfg.vocab, cfg.hidden, lm_bf) != 0 { return false }
+        if cuda_launch_4_async(&rt.sess, rt.fn_argmax_top2, 1, 256, d_logits, d_top2, cfg.vocab, 0) != 0 { return false }
+        if cuda_ctx_sync(&rt.sess) != 0 { return false }
+        if cuda_memcpy_d2h(&rt.sess, a_base + m.buf_top2_off, d_top2, 32) != 0 { return false }
+        if !cuda_sync_copy_and_dump(rt, df, 0, prefix, 0, "logits", d_logits, h_logits, cfg.vocab) { return false }
+    }
+
+    true
+}
+
+fn run_cuda_audit(m: &Qwen3Model, df: &DumpFile, ids_ptr: i64, n_prompt: i64) -> bool with IO, Alloc, Mut, Div, Panic {
+    let cfg = m.cfg
+    let rt = qwen3_cuda_runner_init_audit(m, 256, "", -1)
+    var ok = qwen3_cuda_runner_is_ok(&rt)
+    if ok {
+        println("[backend] cuda")
+        qwen3_cuda_print_info(&rt)
+        if !qwen3_cuda_audit_reset_fma_hits(&rt) { ok = false }
+        if ok {
+            ok = run_cuda_part_a(m, &rt, df, ptr_read_i64_le(ids_ptr, 0))
+        }
+    }
+
+    var plast_top1: i64 = -1
+    if ok {
+        var pi: i64 = 0
+        while pi < n_prompt && ok {
+            let tid = ptr_read_i64_le(ids_ptr, pi * 8)
+            if pi == 0 {
+                ok = run_cuda_step_dump(m, &rt, df, tid, 0, n_prompt == 1, "p0")
+            } else if pi == n_prompt - 1 {
+                ok = run_cuda_step_dump(m, &rt, df, tid, pi, true, "plast")
+            } else {
+                ok = qwen3_forward_token_cuda_opt(m, &rt, tid, pi, false)
+            }
+            pi = pi + 1
+        }
+    }
+
+    let pdec_logits_copy = page_arena_alloc(cfg.vocab * 4)
+    if !page_arena_is_ok(&pdec_logits_copy) { ok = false }
+
+    if ok {
+        let t = qwen3_model_top2(m)
+        plast_top1 = t.top1_id
+        print("[plast_top1] id=")
+        print_int(plast_top1)
+        print(" runner_up=")
+        print_int(t.runner_up_id)
+        println("")
+        ok = run_cuda_step_dump(m, &rt, df, plast_top1, n_prompt, true, "pdec0")
+    }
+
+    if ok {
+        let lp = qwen3_model_logits_ptr(m)
+        copy_f32_words(page_arena_ptr(&pdec_logits_copy), lp, cfg.vocab)
+        let t_dec = qwen3_model_top2(m)
+        print("[pdec0_top1] id=")
+        print_int(t_dec.top1_id)
+        print(" runner_up=")
+        print_int(t_dec.runner_up_id)
+        println("")
+    }
+
+    let fma_hits = if qwen3_cuda_runner_is_ok(&rt) { qwen3_cuda_audit_read_fma_hits(&rt) } else { -1 }
+    print("CUDA_FMA_MIN_NORM_HITS=")
+    print_int(fma_hits)
+    println("")
+
+    let _fr = qwen3_cuda_runner_free(rt)
+
+    // Self-consistency check on fresh runner
+    if ok {
+        let rt2 = qwen3_cuda_runner_init(m, 256, "", -1)
+        var ok2 = qwen3_cuda_runner_is_ok(&rt2)
+        var pi: i64 = 0
+        while pi < n_prompt && ok2 {
+            let tid = ptr_read_i64_le(ids_ptr, pi * 8)
+            ok2 = qwen3_forward_token_cuda_opt(m, &rt2, tid, pi, pi == n_prompt - 1)
+            pi = pi + 1
+        }
+        if ok2 {
+            let t2 = qwen3_model_top2(m)
+            if t2.top1_id != plast_top1 { ok2 = false }
+            if ok2 {
+                ok2 = qwen3_forward_token_cuda_opt(m, &rt2, plast_top1, n_prompt, true)
+            }
+            if ok2 {
+                ok2 = qwen3_cuda_sync_logits(m, &rt2)
+            }
+        }
+        var diff_cnt: i64 = 0
+        if ok2 {
+            let lp2 = qwen3_model_logits_ptr(m)
+            let p_saved = page_arena_ptr(&pdec_logits_copy)
+            var vi: i64 = 0
+            while vi < cfg.vocab {
+                if ptr_read_u32_le(lp2, vi * 4) != ptr_read_u32_le(p_saved, vi * 4) {
+                    diff_cnt = diff_cnt + 1
+                }
+                vi = vi + 1
+            }
+        } else {
+            diff_cnt = -1
+        }
+        print("SELF_CHECK_DIFF_COUNT=")
+        print_int(diff_cnt)
+        println("")
+        if ok2 && diff_cnt == 0 {
+            println("SELF_CHECK_EXACT_MATCH=1")
+        } else {
+            println("SELF_CHECK_EXACT_MATCH=0")
+            ok = false
+        }
+        let _fr2 = qwen3_cuda_runner_free(rt2)
+    }
+
+    let _flc = page_arena_free(pdec_logits_copy)
+    ok
+}
+
+// ----------------------------------------------------------------------------
+// CPU FTZ+DAZ Part A + Part B
+// ----------------------------------------------------------------------------
+
+fn run_cpu_part_a(
+    m: &Qwen3Model,
+    df: &DumpFile,
+    tok0: i64
+) -> bool with IO, Alloc, Mut, Div, Panic {
+    let cfg = m.cfg
+    let q_dim = cfg.n_q * cfg.head_dim
+    let kv_dim = cfg.n_kv * cfg.head_dim
+
+    let iso_arena = page_arena_alloc(524288)
+    var kv_iso = qwen3_kv_alloc(1, 16, 16, cfg.n_kv, cfg.head_dim)
+    var ok = page_arena_is_ok(&iso_arena) && qwen3_kv_is_ok(&kv_iso)
+
+    let p_iso = if ok { page_arena_ptr(&iso_arena) } else { 0 }
+    let off_emb: i64 = 0
+    let off_x8: i64 = 16384
+    let off_out: i64 = 65536
+    let off_w1: i64 = 327680
+    let off_q: i64 = 331776
+    let off_k: i64 = 344064
+    let off_v: i64 = 352256
+    let off_g: i64 = 360448
+    let off_u: i64 = 376832
+    let off_out2: i64 = 393216
+
+    // 1. iso/embed
+    if ok {
+        fill_embed_host(m, tok0, p_iso + off_emb)
+        if !dump_record_str(df, "iso/embed", p_iso + off_emb, cfg.hidden) { ok = false }
+        fill_const_bf16(p_iso + off_w1, cfg.hidden, 1.0)
+        fill_const_f32(p_iso + off_x8, cfg.hidden, 1.0)
+    }
+    // 2. iso/rmsnorm_const_1
+    if ok {
+        qwen3_cpu_rmsnorm(p_iso + off_x8, p_iso + off_w1, 2, p_iso + off_out, 1, cfg.hidden, cfg.eps)
+        if !dump_record_str(df, "iso/rmsnorm_const_1", p_iso + off_out, cfg.hidden) { ok = false }
+    }
+    // 3. iso/rmsnorm_const_1p5
+    if ok {
+        fill_const_f32(p_iso + off_x8, cfg.hidden, 1.5)
+        qwen3_cpu_rmsnorm(p_iso + off_x8, p_iso + off_w1, 2, p_iso + off_out, 1, cfg.hidden, cfg.eps)
+        if !dump_record_str(df, "iso/rmsnorm_const_1p5", p_iso + off_out, cfg.hidden) { ok = false }
+    }
+    // 4. iso/rmsnorm_real_w1
+    if ok {
+        qwen3_cpu_rmsnorm(p_iso + off_emb, p_iso + off_w1, 2, p_iso + off_out, 1, cfg.hidden, cfg.eps)
+        if !dump_record_str(df, "iso/rmsnorm_real_w1", p_iso + off_out, cfg.hidden) { ok = false }
+    }
+    // 5. iso/rmsnorm_real (slot 3)
+    if ok {
+        qwen3_cpu_rmsnorm(p_iso + off_emb, slot_host_ptr(m, 3), slot_dtype(m, 3), p_iso + off_out, 1, cfg.hidden, cfg.eps)
+        if !dump_record_str(df, "iso/rmsnorm_real", p_iso + off_out, cfg.hidden) { ok = false }
+    }
+    // 6-8. iso/qkv_q, iso/qkv_k, iso/qkv_v, iso/gemv_single_q, iso/gemm_b8_q
+    if ok {
+        qwen3_cpu_gemv(slot_host_ptr(m, 4), slot_dtype(m, 4), p_iso + off_emb, p_iso + off_out, q_dim, cfg.hidden)
+        qwen3_cpu_gemv(slot_host_ptr(m, 5), slot_dtype(m, 5), p_iso + off_emb, p_iso + off_out + q_dim * 4, kv_dim, cfg.hidden)
+        qwen3_cpu_gemv(slot_host_ptr(m, 6), slot_dtype(m, 6), p_iso + off_emb, p_iso + off_out + (q_dim + kv_dim) * 4, kv_dim, cfg.hidden)
+        if !dump_record_str(df, "iso/qkv_q", p_iso + off_out, q_dim) { ok = false }
+        if ok && !dump_record_str(df, "iso/qkv_k", p_iso + off_out + q_dim * 4, kv_dim) { ok = false }
+        if ok && !dump_record_str(df, "iso/qkv_v", p_iso + off_out + (q_dim + kv_dim) * 4, kv_dim) { ok = false }
+        if ok && !dump_record_str(df, "iso/gemv_single_q", p_iso + off_out, q_dim) { ok = false }
+        if ok && !dump_record_str(df, "iso/gemm_b8_q", p_iso + off_out, q_dim) { ok = false }
+    }
+
+    // 9-11. iso/qk_norm_rope_pos{0,5,127} (slots 8, 9)
+    let qw_p = slot_host_ptr(m, 8)
+    let qw_dt = slot_dtype(m, 8)
+    let kw_p = slot_host_ptr(m, 9)
+    let kw_dt = slot_dtype(m, 9)
+    if ok {
+        fill_det_vec_a(p_iso + off_q, q_dim)
+        fill_det_vec_a(p_iso + off_k, kv_dim)
+        qwen3_cpu_rmsnorm(p_iso + off_q, qw_p, qw_dt, p_iso + off_q, cfg.n_q, cfg.head_dim, cfg.eps)
+        qwen3_cpu_rmsnorm(p_iso + off_k, kw_p, kw_dt, p_iso + off_k, cfg.n_kv, cfg.head_dim, cfg.eps)
+        qwen3_cpu_rope(p_iso + off_q, cfg.n_q, cfg.head_dim, 0, cfg.rope_theta)
+        qwen3_cpu_rope(p_iso + off_k, cfg.n_kv, cfg.head_dim, 0, cfg.rope_theta)
+        if !dump_record_str(df, "iso/qk_norm_rope_pos0_q", p_iso + off_q, q_dim) { ok = false }
+        if ok && !dump_record_str(df, "iso/qk_norm_rope_pos0_k", p_iso + off_k, kv_dim) { ok = false }
+    }
+    if ok {
+        fill_det_vec_a(p_iso + off_q, q_dim)
+        fill_det_vec_a(p_iso + off_k, kv_dim)
+        qwen3_cpu_rmsnorm(p_iso + off_q, qw_p, qw_dt, p_iso + off_q, cfg.n_q, cfg.head_dim, cfg.eps)
+        qwen3_cpu_rmsnorm(p_iso + off_k, kw_p, kw_dt, p_iso + off_k, cfg.n_kv, cfg.head_dim, cfg.eps)
+        qwen3_cpu_rope(p_iso + off_q, cfg.n_q, cfg.head_dim, 5, cfg.rope_theta)
+        qwen3_cpu_rope(p_iso + off_k, cfg.n_kv, cfg.head_dim, 5, cfg.rope_theta)
+        if !dump_record_str(df, "iso/qk_norm_rope_pos5_q", p_iso + off_q, q_dim) { ok = false }
+        if ok && !dump_record_str(df, "iso/qk_norm_rope_pos5_k", p_iso + off_k, kv_dim) { ok = false }
+    }
+    if ok {
+        fill_det_vec_a(p_iso + off_q, q_dim)
+        fill_det_vec_a(p_iso + off_k, kv_dim)
+        qwen3_cpu_rmsnorm(p_iso + off_q, qw_p, qw_dt, p_iso + off_q, cfg.n_q, cfg.head_dim, cfg.eps)
+        qwen3_cpu_rmsnorm(p_iso + off_k, kw_p, kw_dt, p_iso + off_k, cfg.n_kv, cfg.head_dim, cfg.eps)
+        qwen3_cpu_rope(p_iso + off_q, cfg.n_q, cfg.head_dim, 127, cfg.rope_theta)
+        if !dump_record_str(df, "iso/qk_norm_rope_pos127_q", p_iso + off_q, q_dim) { ok = false }
+    }
+
+    // 12-13. iso/gqa_seq1 and iso/gqa_seq8
+    var kp: i64 = 0
+    while kp < 8 && ok {
+        if !qwen3_kv_ensure_pos(&!kv_iso, kp) { ok = false }
+        else {
+            fill_det_kv_pos(p_iso + off_k, kp, kv_dim)
+            if !qwen3_kv_write_kv_f32_buf(&!kv_iso, 0, kp, p_iso + off_k, p_iso + off_k) { ok = false }
+        }
+        kp = kp + 1
+    }
+    if ok {
+        fill_det_vec_a(p_iso + off_q, q_dim)
+        qwen3_cpu_paged_gqa(p_iso + off_q, &kv_iso, 0, p_iso + off_out, cfg.n_q, cfg.n_kv, cfg.head_dim, 0)
+        if !dump_record_str(df, "iso/gqa_seq1", p_iso + off_out, q_dim) { ok = false }
+    }
+    if ok {
+        fill_det_vec_a(p_iso + off_q, q_dim)
+        qwen3_cpu_paged_gqa(p_iso + off_q, &kv_iso, 0, p_iso + off_out, cfg.n_q, cfg.n_kv, cfg.head_dim, 7)
+        if !dump_record_str(df, "iso/gqa_seq8", p_iso + off_out, q_dim) { ok = false }
+    }
+
+    // 14. iso/swiglu_only
+    if ok {
+        fill_det_swiglu_g(p_iso + off_g, cfg.inter)
+        fill_det_swiglu_u(p_iso + off_u, cfg.inter)
+        qwen3_cpu_swiglu(p_iso + off_g, p_iso + off_u, p_iso + off_out, cfg.inter)
+        if !dump_record_str(df, "iso/swiglu_only", p_iso + off_out, cfg.inter) { ok = false }
+    }
+
+    // 15. iso/vec_add
+    if ok {
+        fill_det_vec_a(p_iso + off_x8, cfg.hidden)
+        fill_det_vec_b(p_iso + off_out2, cfg.hidden)
+        qwen3_cpu_vec_add(p_iso + off_x8, p_iso + off_out2, cfg.hidden)
+        if !dump_record_str(df, "iso/vec_add", p_iso + off_x8, cfg.hidden) { ok = false }
+    }
+
+    // 16. iso/add_rmsnorm_x, iso/add_rmsnorm_out
+    if ok {
+        fill_det_vec_a(p_iso + off_x8, cfg.hidden)
+        fill_det_vec_b(p_iso + off_out2, cfg.hidden)
+        qwen3_cpu_vec_add(p_iso + off_x8, p_iso + off_out2, cfg.hidden)
+        qwen3_cpu_rmsnorm(p_iso + off_x8, slot_host_ptr(m, 10), slot_dtype(m, 10), p_iso + off_out, 1, cfg.hidden, cfg.eps)
+        if !dump_record_str(df, "iso/add_rmsnorm_x", p_iso + off_x8, cfg.hidden) { ok = false }
+        if ok && !dump_record_str(df, "iso/add_rmsnorm_out", p_iso + off_out, cfg.hidden) { ok = false }
+    }
+
+    // 17. iso/q4_soa_gemv
+    if ok {
+        let q4_rows: i64 = 64
+        let nib_b = q4_soa_nibbles_bytes(q4_rows, cfg.hidden)
+        let scl_b = q4_soa_scales_bytes(q4_rows, cfg.hidden)
+        let rho_b = q4_soa_rhos_bytes(q4_rows, cfg.hidden)
+        let y_b = q4_soa_align_up_64(q4_rows * 4)
+        let q4_arena = page_arena_alloc(nib_b + scl_b + rho_b + y_b + 4096)
+        var q4_ok = page_arena_is_ok(&q4_arena)
+        if q4_ok {
+            let p_q4 = page_arena_ptr(&q4_arena)
+            let p_nib = p_q4
+            let p_scl = p_q4 + nib_b
+            let p_rho = p_scl + scl_b
+            let p_qy = p_rho + rho_b
+            let q_w_p = slot_host_ptr(m, 4)
+            let qok = if slot_dtype(m, 4) == 2 {
+                q4_soa_quantize_bf16_cpu(q_w_p, p_nib, p_scl, p_rho, false, q4_rows, cfg.hidden)
+            } else {
+                q4_soa_quantize_f32_cpu(q_w_p, p_nib, p_scl, p_rho, false, q4_rows, cfg.hidden)
+            }
+            if !qok || !q4_soa_gemv_cpu(p_nib, p_scl, p_iso + off_emb, p_qy, q4_rows, cfg.hidden) {
+                q4_ok = false
+            } else if !dump_record_str(df, "iso/q4_soa_gemv", p_qy, q4_rows) {
+                q4_ok = false
+            }
+        }
+        if !q4_ok { ok = false }
+        let _fq4a = page_arena_free(q4_arena)
+    }
+
+    let _fa = page_arena_free(iso_arena)
+    let _fk = qwen3_kv_free(kv_iso)
+    ok
+}
+
+fn cpu_logits_top2_ids(lp: i64, vocab: i64, top1_out: i64, top2_out: i64) with Mut {
+    var best_i: i64 = 0
+    var second_i: i64 = if vocab > 1 { 1 } else { 0 }
+    var best_v = f32_bits_to_f64(ptr_read_u32_le(lp, 0))
+    var second_v = best_v
+    if vocab > 1 {
+        let v1 = f32_bits_to_f64(ptr_read_u32_le(lp, 4))
+        if v1 > best_v {
+            second_i = 0
+            second_v = best_v
+            best_i = 1
+            best_v = v1
+        } else {
+            second_i = 1
+            second_v = v1
+        }
+    }
+    var i: i64 = 2
+    while i < vocab {
+        let v = f32_bits_to_f64(ptr_read_u32_le(lp, i * 4))
+        if v > best_v {
+            second_i = best_i
+            second_v = best_v
+            best_i = i
+            best_v = v
+        } else if v > second_v {
+            second_i = i
+            second_v = v
+        }
+        i = i + 1
+    }
+    let _w1 = ptr_write_i64_le(top1_out, 0, best_i)
+    let _w2 = ptr_write_i64_le(top2_out, 0, second_i)
+}
+
+fn run_cpu_step_dump(
+    m: &Qwen3Model,
+    kv: &!Qwen3PagedKv,
+    df: &DumpFile,
+    token_id: i64,
+    pos: i64,
+    compute_logits: bool,
+    prefix: string
+) -> bool with Alloc, Mut, Div, Panic {
+    if !qwen3_kv_ensure_pos(kv, pos) { return false }
+    let cfg = m.cfg
+    let q_dim = cfg.n_q * cfg.head_dim
+    let kv_dim = cfg.n_kv * cfg.head_dim
+    let a_base = page_arena_ptr(&m.arena)
+    let p_x = a_base + m.buf_x_off
+    let p_h = a_base + m.buf_h_off
+    let p_q = a_base + m.buf_q_off
+    let p_k = a_base + m.buf_k_off
+    let p_v = a_base + m.buf_v_off
+    let p_ao = a_base + m.buf_attn_out_off
+    let p_gate = a_base + m.buf_gate_off
+    let p_up = a_base + m.buf_up_off
+    let p_logits = a_base + m.buf_logits_off
+
+    fill_embed_host(m, token_id, p_x)
+    if !dump_prefix_op(df, prefix, "embed", p_x, cfg.hidden) { return false }
+
+    if cfg.layers > 0 {
+        qwen3_cpu_rmsnorm(p_x, slot_host_ptr(m, 3), slot_dtype(m, 3), p_h, 1, cfg.hidden, cfg.eps)
+        if !dump_layer_op(df, prefix, 0, "in_rmsnorm", p_h, cfg.hidden) { return false }
+    }
+
+    var l: i64 = 0
+    while l < cfg.layers {
+        let sb = 3 + l * 11
+        qwen3_cpu_gemv(slot_host_ptr(m, sb + 1), slot_dtype(m, sb + 1), p_h, p_q, q_dim, cfg.hidden)
+        qwen3_cpu_gemv(slot_host_ptr(m, sb + 2), slot_dtype(m, sb + 2), p_h, p_k, kv_dim, cfg.hidden)
+        qwen3_cpu_gemv(slot_host_ptr(m, sb + 3), slot_dtype(m, sb + 3), p_h, p_v, kv_dim, cfg.hidden)
+        if !dump_layer_op(df, prefix, l, "q_proj", p_q, q_dim) { return false }
+        if !dump_layer_op(df, prefix, l, "k_proj", p_k, kv_dim) { return false }
+        if !dump_layer_op(df, prefix, l, "v_proj", p_v, kv_dim) { return false }
+
+        qwen3_cpu_rmsnorm(p_q, slot_host_ptr(m, sb + 5), slot_dtype(m, sb + 5), p_q, cfg.n_q, cfg.head_dim, cfg.eps)
+        qwen3_cpu_rmsnorm(p_k, slot_host_ptr(m, sb + 6), slot_dtype(m, sb + 6), p_k, cfg.n_kv, cfg.head_dim, cfg.eps)
+        qwen3_cpu_rope(p_q, cfg.n_q, cfg.head_dim, pos, cfg.rope_theta)
+        qwen3_cpu_rope(p_k, cfg.n_kv, cfg.head_dim, pos, cfg.rope_theta)
+        if !qwen3_kv_write_kv_f32_buf(kv, l, pos, p_k, p_v) { return false }
+        if !dump_layer_op(df, prefix, l, "qk_norm_rope_q", p_q, q_dim) { return false }
+        if !dump_layer_op(df, prefix, l, "qk_norm_rope_k", p_k, kv_dim) { return false }
+
+        qwen3_cpu_paged_gqa(p_q, kv, l, p_ao, cfg.n_q, cfg.n_kv, cfg.head_dim, pos)
+        if !dump_layer_op(df, prefix, l, "gqa_softmax", p_ao, q_dim) { return false }
+
+        qwen3_cpu_gemv(slot_host_ptr(m, sb + 4), slot_dtype(m, sb + 4), p_ao, p_h, cfg.hidden, q_dim)
+        if !dump_layer_op(df, prefix, l, "o_proj", p_h, cfg.hidden) { return false }
+
+        qwen3_cpu_vec_add(p_x, p_h, cfg.hidden)
+        qwen3_cpu_rmsnorm(p_x, slot_host_ptr(m, sb + 7), slot_dtype(m, sb + 7), p_h, 1, cfg.hidden, cfg.eps)
+        if !dump_layer_op(df, prefix, l, "post_residual", p_x, cfg.hidden) { return false }
+        if !dump_layer_op(df, prefix, l, "post_rmsnorm", p_h, cfg.hidden) { return false }
+
+        qwen3_cpu_gemv(slot_host_ptr(m, sb + 8), slot_dtype(m, sb + 8), p_h, p_gate, cfg.inter, cfg.hidden)
+        qwen3_cpu_gemv(slot_host_ptr(m, sb + 9), slot_dtype(m, sb + 9), p_h, p_up, cfg.inter, cfg.hidden)
+        qwen3_cpu_swiglu(p_gate, p_up, p_gate, cfg.inter)
+        if !dump_layer_op(df, prefix, l, "mlp_swiglu", p_gate, cfg.inter) { return false }
+
+        qwen3_cpu_gemv(slot_host_ptr(m, sb + 10), slot_dtype(m, sb + 10), p_gate, p_h, cfg.hidden, cfg.inter)
+        if !dump_layer_op(df, prefix, l, "down_proj", p_h, cfg.hidden) { return false }
+
+        if l + 1 < cfg.layers {
+            qwen3_cpu_vec_add(p_x, p_h, cfg.hidden)
+            qwen3_cpu_rmsnorm(p_x, slot_host_ptr(m, 3 + (l + 1) * 11), slot_dtype(m, 3 + (l + 1) * 11), p_h, 1, cfg.hidden, cfg.eps)
+            if !dump_layer_op(df, prefix, l, "layer_residual", p_x, cfg.hidden) { return false }
+            if !dump_layer_op(df, prefix, l + 1, "in_rmsnorm", p_h, cfg.hidden) { return false }
+        } else if compute_logits {
+            qwen3_cpu_vec_add(p_x, p_h, cfg.hidden)
+            qwen3_cpu_rmsnorm(p_x, slot_host_ptr(m, 1), slot_dtype(m, 1), p_h, 1, cfg.hidden, cfg.eps)
+            if !dump_layer_op(df, prefix, l, "layer_residual", p_x, cfg.hidden) { return false }
+            if !dump_prefix_op(df, prefix, "final_rmsnorm", p_h, cfg.hidden) { return false }
+        } else {
+            qwen3_cpu_vec_add(p_x, p_h, cfg.hidden)
+            if !dump_layer_op(df, prefix, l, "layer_residual", p_x, cfg.hidden) { return false }
+        }
+
+        l = l + 1
+    }
+
+    if compute_logits {
+        qwen3_cpu_gemv(slot_host_ptr(m, 2), slot_dtype(m, 2), p_h, p_logits, cfg.vocab, cfg.hidden)
+        if !dump_prefix_op(df, prefix, "logits", p_logits, cfg.vocab) { return false }
+    }
+
+    true
+}
+
+fn run_cpu_audit(m: &Qwen3Model, df: &DumpFile, ids_ptr: i64, n_prompt: i64) -> bool with IO, Alloc, Mut, Div, Panic {
+    let cfg = m.cfg
+    let _ftz = hal_cpu_set_ftz_daz(true)
+    var kv = qwen3_kv_alloc(cfg.layers, 16, 16, cfg.n_kv, cfg.head_dim)
+    var ok = qwen3_kv_is_ok(&kv)
+    if ok {
+        println("[backend] cpu")
+        ok = run_cpu_part_a(m, df, ptr_read_i64_le(ids_ptr, 0))
+    }
+
+    var plast_top1: i64 = -1
+    if ok {
+        var pi: i64 = 0
+        while pi < n_prompt && ok {
+            let tid = ptr_read_i64_le(ids_ptr, pi * 8)
+            if pi == 0 {
+                ok = run_cpu_step_dump(m, &!kv, df, tid, 0, n_prompt == 1, "p0")
+            } else if pi == n_prompt - 1 {
+                ok = run_cpu_step_dump(m, &!kv, df, tid, pi, true, "plast")
+            } else {
+                ok = qwen3_forward_token_cpu(m, &!kv, tid, pi)
+            }
+            pi = pi + 1
+        }
+    }
+
+    let t2_buf = heap_alloc(16) as i64
+    let pdec_logits_copy = page_arena_alloc(cfg.vocab * 4)
+    if t2_buf == 0 || !page_arena_is_ok(&pdec_logits_copy) { ok = false }
+
+    if ok {
+        let lp = qwen3_model_logits_ptr(m)
+        cpu_logits_top2_ids(lp, cfg.vocab, t2_buf, t2_buf + 8)
+        plast_top1 = ptr_read_i64_le(t2_buf, 0)
+        let plast_top2 = ptr_read_i64_le(t2_buf, 8)
+        print("[plast_top1] id=")
+        print_int(plast_top1)
+        print(" runner_up=")
+        print_int(plast_top2)
+        println("")
+        ok = run_cpu_step_dump(m, &!kv, df, plast_top1, n_prompt, true, "pdec0")
+    }
+
+    if ok {
+        let lp = qwen3_model_logits_ptr(m)
+        copy_f32_words(page_arena_ptr(&pdec_logits_copy), lp, cfg.vocab)
+        cpu_logits_top2_ids(lp, cfg.vocab, t2_buf, t2_buf + 8)
+        print("[pdec0_top1] id=")
+        print_int(ptr_read_i64_le(t2_buf, 0))
+        print(" runner_up=")
+        print_int(ptr_read_i64_le(t2_buf, 8))
+        println("")
+    }
+
+    let _fk = qwen3_kv_free(kv)
+
+    let sc_env = hal_getenv_ptr("SOUNIO_AUDIT_CPU_SELF_CHECK")
+    let do_cpu_sc = sc_env != 0 && ptr_read_u8(sc_env, 0) == 49
+    // Self-consistency check on fresh KV via qwen3_forward_token_cpu
+    if ok && do_cpu_sc {
+        var kv2 = qwen3_kv_alloc(cfg.layers, 16, 16, cfg.n_kv, cfg.head_dim)
+        var ok2 = qwen3_kv_is_ok(&kv2)
+        var pi: i64 = 0
+        while pi < n_prompt && ok2 {
+            let tid = ptr_read_i64_le(ids_ptr, pi * 8)
+            ok2 = qwen3_forward_token_cpu(m, &!kv2, tid, pi)
+            pi = pi + 1
+        }
+        if ok2 {
+            let t2 = qwen3_logits_argmax(m)
+            if t2 != plast_top1 { ok2 = false }
+            if ok2 {
+                ok2 = qwen3_forward_token_cpu(m, &!kv2, plast_top1, n_prompt)
+            }
+        }
+        var diff_cnt: i64 = 0
+        if ok2 {
+            let lp2 = qwen3_model_logits_ptr(m)
+            let p_saved = page_arena_ptr(&pdec_logits_copy)
+            var vi: i64 = 0
+            while vi < cfg.vocab {
+                if ptr_read_u32_le(lp2, vi * 4) != ptr_read_u32_le(p_saved, vi * 4) {
+                    diff_cnt = diff_cnt + 1
+                }
+                vi = vi + 1
+            }
+        } else {
+            diff_cnt = -1
+        }
+        print("SELF_CHECK_DIFF_COUNT=")
+        print_int(diff_cnt)
+        println("")
+        if ok2 && diff_cnt == 0 {
+            println("SELF_CHECK_EXACT_MATCH=1")
+        } else {
+            println("SELF_CHECK_EXACT_MATCH=0")
+            ok = false
+        }
+        let _fk2 = qwen3_kv_free(kv2)
+    }
+
+    if t2_buf != 0 { heap_free(t2_buf as *mut u8) }
+    let _flc = page_arena_free(pdec_logits_copy)
+    ok
+}
+
+fn cstr_copy(dst: i64, src_ptr: i64, fallback: string) -> i64 with Mut {
+    if src_ptr != 0 && ptr_read_u8(src_ptr, 0) != 0 {
+        var i: i64 = 0
+        while i < 4090 {
+            let b = ptr_read_u8(src_ptr, i)
+            let _w = ptr_write_u8(dst, i, b)
+            if b == 0 { return i }
+            i = i + 1
+        }
+        let _z = ptr_write_u8(dst, 4090, 0)
+        return 4090
+    }
+    let n = str_len(fallback)
+    var i: i64 = 0
+    while i < n {
+        let _w = ptr_write_u8(dst, i, str_char_at(fallback, i) & 255)
+        i = i + 1
+    }
+    let _z = ptr_write_u8(dst, n, 0)
+    n
+}
+
+fn join_tok_json(dst: i64, dir_ptr: i64, dlen: i64) with Mut {
+    var i: i64 = 0
+    while i < dlen {
+        let _w = ptr_write_u8(dst, i, ptr_read_u8(dir_ptr, i))
+        i = i + 1
+    }
+    var p = dlen
+    if p > 0 && ptr_read_u8(dst, p - 1) != 47 {
+        let _w = ptr_write_u8(dst, p, 47)
+        p = p + 1
+    }
+    let suf = "tokenizer.json"
+    var j: i64 = 0
+    let sn = str_len(suf)
+    while j < sn {
+        let _w = ptr_write_u8(dst, p + j, str_char_at(suf, j) & 255)
+        j = j + 1
+    }
+    let _z = ptr_write_u8(dst, p + sn, 0)
+}
+
+fn main() -> i64 with IO, Alloc, Mut, Div, Panic {
+    let bp_env = hal_getenv_ptr("SOUNIO_AUDIT_BACKEND")
+    let use_cpu = bp_env != 0
+        && ptr_read_u8(bp_env, 0) == 99
+        && ptr_read_u8(bp_env, 1) == 112
+        && ptr_read_u8(bp_env, 2) == 117
+        && ptr_read_u8(bp_env, 3) == 0
+    let probe_sess = metal_session_open("")
+    let use_metal = (!use_cpu) && metal_session_is_ok(&probe_sess)
+    let _cp = metal_session_close(probe_sess)
+
+    let model_buf = heap_alloc(4096) as i64
+    let tok_buf = heap_alloc(4096) as i64
+    let out_buf = heap_alloc(4096) as i64
+    let default_dir = if use_metal {
+        "/Users/demetriosagourakis/sounio-research/checkpoints/Qwen3-0.6B"
+    } else {
+        "/tmp/models/Qwen3-0.6B"
+    }
+    let dlen = cstr_copy(model_buf, hal_getenv_ptr("SOUNIO_MODEL_DIR"), default_dir)
+    join_tok_json(tok_buf, model_buf, dlen)
+    let _olen = cstr_copy(out_buf, hal_getenv_ptr("SOUNIO_ULP_OUT"), "/tmp/ulp_dump.bin")
+
+    let model_str = (model_buf as *mut u8) as string
+    let tok_str = (tok_buf as *mut u8) as string
+
+    let m = qwen3_model_open(model_str)
+    let tok = qwen3_tokenizer_load(tok_str)
+    let df = dump_open(out_buf)
+
+    let ids_arena = page_arena_alloc(8192)
+    var ok = qwen3_model_is_ok(&m) && qwen3_tokenizer_is_ok(&tok) && df.ok && page_arena_is_ok(&ids_arena)
+
+    var n_prompt: i64 = 0
+    if ok {
+        let ids_ptr = page_arena_ptr(&ids_arena)
+        n_prompt = qwen3_encode_str(&tok, "Explain why the sky is blue.", ids_ptr, 1024)
+        if n_prompt <= 0 { ok = false }
+        if ok {
+            print("[prompt] tokens=")
+            print_int(n_prompt)
+            print(" ids=[")
+            var ti: i64 = 0
+            while ti < n_prompt {
+                if ti > 0 { print(",") }
+                print_int(ptr_read_i64_le(ids_ptr, ti * 8))
+                ti = ti + 1
+            }
+            println("]")
+            ok = if use_cpu {
+                run_cpu_audit(&m, &df, ids_ptr, n_prompt)
+            } else if use_metal {
+                run_metal_audit(&m, &df, ids_ptr, n_prompt)
+            } else {
+                run_cuda_audit(&m, &df, ids_ptr, n_prompt)
+            }
+        }
+    } else {
+        println("ULP_AUDIT_INIT_FAIL")
+    }
+
+    dump_close(&df)
+    heap_free(model_buf as *mut u8)
+    heap_free(tok_buf as *mut u8)
+    heap_free(out_buf as *mut u8)
+    let _fi = page_arena_free(ids_arena)
+    let _ft = qwen3_tokenizer_free(tok)
+    let _fm = qwen3_model_free(m)
+
+    if !ok {
+        println("ULP_AUDIT_FAIL")
+        return 1
+    }
+    println("ULP_AUDIT_DONE")
+    0
+}

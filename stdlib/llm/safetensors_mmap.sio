@@ -1,0 +1,698 @@
+// stdlib::llm::safetensors_mmap — Zero-copy Safetensors & multi-shard index
+// reader backed exclusively by llm::mmap.
+//
+// Parses the 8-byte little-endian header length + JSON header and HuggingFace
+// `model.safetensors.index.json` weight_map directly from a MappedShard
+// without copying tensors onto the Sounio heap. Supports full 64-bit offsets
+// (> 2 GiB shards) and decodes F32/BF16/F16/F64/I64/U8/I32 views.
+
+use llm::mmap::{
+    MappedShard,
+    mapped_shard_is_ok,
+    mapped_shard_ptr,
+    mapped_shard_len,
+    mapped_shard_read_i64_le,
+    bf16_bits_to_f64_exact,
+}
+
+pub fn st_mm_dtype_f32() -> i32 { 1 }
+pub fn st_mm_dtype_bf16() -> i32 { 2 }
+pub fn st_mm_dtype_f16() -> i32 { 3 }
+pub fn st_mm_dtype_f64() -> i32 { 4 }
+pub fn st_mm_dtype_i64() -> i32 { 5 }
+pub fn st_mm_dtype_u8() -> i32 { 6 }
+pub fn st_mm_dtype_i32() -> i32 { 7 }
+
+pub fn st_mm_dtype_bytes(dtype: i32) -> i64 {
+    if dtype == 1 { return 4 }
+    if dtype == 2 { return 2 }
+    if dtype == 3 { return 2 }
+    if dtype == 4 { return 8 }
+    if dtype == 5 { return 8 }
+    if dtype == 6 { return 1 }
+    if dtype == 7 { return 4 }
+    0
+}
+
+pub struct StMmapHeader {
+    pub hdr_len: i64,
+    pub data_base_off: i64,
+    pub ok: bool,
+}
+
+pub struct StTensorView {
+    pub found: bool,
+    pub dtype: i32,
+    pub rank: i32,
+    pub d0: i64,
+    pub d1: i64,
+    pub d2: i64,
+    pub d3: i64,
+    pub count: i64,
+    pub data_off: i64,
+    pub byte_len: i64,
+    pub host_ptr: i64,
+}
+
+pub fn st_view_dim(v: &StTensorView, axis: i64) -> i64 {
+    if axis == 0 { return v.d0 }
+    if axis == 1 { return v.d1 }
+    if axis == 2 { return v.d2 }
+    if axis == 3 { return v.d3 }
+    0
+}
+
+struct StMmJsonKv {
+    status: i32,
+    k_off: i64,
+    k_len: i64,
+    v_start: i64,
+    v_end: i64,
+}
+
+struct StMmShape {
+    ok: bool,
+    rank: i32,
+    count: i64,
+    d0: i64,
+    d1: i64,
+    d2: i64,
+    d3: i64,
+}
+
+fn st_mm_header_bad() -> StMmapHeader {
+    StMmapHeader { hdr_len: 0, data_base_off: 0, ok: false }
+}
+
+fn st_mm_view_empty() -> StTensorView {
+    StTensorView {
+        found: false,
+        dtype: 0,
+        rank: 0,
+        d0: 0,
+        d1: 0,
+        d2: 0,
+        d3: 0,
+        count: 0,
+        data_off: 0,
+        byte_len: 0,
+        host_ptr: 0,
+    }
+}
+
+fn st_mm_kv_err() -> StMmJsonKv {
+    StMmJsonKv { status: 0, k_off: 0, k_len: 0, v_start: 0, v_end: 0 }
+}
+
+fn st_mm_kv_end() -> StMmJsonKv {
+    StMmJsonKv { status: 2, k_off: 0, k_len: 0, v_start: 0, v_end: 0 }
+}
+
+/// Compare `len` raw bytes at `base_ptr + off` against `s` without heap allocation.
+pub fn st_bytes_eq_str(base_ptr: i64, off: i64, len: i64, s: string) -> bool with Mut {
+    if base_ptr <= 0 || off < 0 || len < 0 { return false }
+    if len != str_len(s) { return false }
+    var i: i64 = 0
+    while i < len {
+        let b = ptr_read_u8(base_ptr, off + i)
+        let c = str_char_at(s, i) & 255
+        if b != c { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn st_mm_skip_ws(ptr: i64, pos: i64, limit: i64) -> i64 with Mut {
+    var i = pos
+    while i < limit {
+        let c = ptr_read_u8(ptr, i)
+        if c != 32 && c != 9 && c != 10 && c != 13 {
+            return i
+        }
+        i = i + 1
+    }
+    i
+}
+
+fn st_mm_skip_string(ptr: i64, pos: i64, limit: i64) -> i64 with Mut {
+    if pos < 0 || pos >= limit { return -1 }
+    if ptr_read_u8(ptr, pos) != 34 { return -1 }
+    var i = pos + 1
+    while i < limit {
+        let c = ptr_read_u8(ptr, i)
+        if c == 92 {
+            i = i + 2
+        } else if c == 34 {
+            return i + 1
+        } else {
+            i = i + 1
+        }
+    }
+    -1
+}
+
+fn st_mm_skip_value(ptr: i64, pos: i64, limit: i64) -> i64 with Mut {
+    var i = st_mm_skip_ws(ptr, pos, limit)
+    if i >= limit { return -1 }
+    let first = ptr_read_u8(ptr, i)
+    if first == 34 {
+        return st_mm_skip_string(ptr, i, limit)
+    }
+    if first == 123 || first == 91 {
+        var depth: i64 = 1
+        i = i + 1
+        while i < limit && depth > 0 {
+            let c = ptr_read_u8(ptr, i)
+            if c == 34 {
+                let nxt = st_mm_skip_string(ptr, i, limit)
+                if nxt < 0 { return -1 }
+                i = nxt
+            } else if c == 123 || c == 91 {
+                depth = depth + 1
+                i = i + 1
+            } else if c == 125 || c == 93 {
+                depth = depth - 1
+                i = i + 1
+            } else {
+                i = i + 1
+            }
+        }
+        if depth != 0 { return -1 }
+        return i
+    }
+    let start = i
+    while i < limit {
+        let c = ptr_read_u8(ptr, i)
+        if c == 44 || c == 125 || c == 93 || c == 32 || c == 9 || c == 10 || c == 13 {
+            break
+        }
+        i = i + 1
+    }
+    if i == start { return -1 }
+    i
+}
+
+fn st_mm_next_kv(ptr: i64, pos: i64, limit: i64) -> StMmJsonKv with Mut {
+    var p = st_mm_skip_ws(ptr, pos, limit)
+    if p >= limit { return st_mm_kv_err() }
+    if ptr_read_u8(ptr, p) == 44 {
+        p = st_mm_skip_ws(ptr, p + 1, limit)
+        if p >= limit { return st_mm_kv_err() }
+    }
+    let c = ptr_read_u8(ptr, p)
+    if c == 125 { return st_mm_kv_end() }
+    if c != 34 { return st_mm_kv_err() }
+    let k_after = st_mm_skip_string(ptr, p, limit)
+    if k_after < 0 { return st_mm_kv_err() }
+    let k_off = p + 1
+    let k_len = k_after - p - 2
+    p = st_mm_skip_ws(ptr, k_after, limit)
+    if p >= limit || ptr_read_u8(ptr, p) != 58 { return st_mm_kv_err() }
+    let v_start = st_mm_skip_ws(ptr, p + 1, limit)
+    let v_end = st_mm_skip_value(ptr, v_start, limit)
+    if v_end < 0 { return st_mm_kv_err() }
+    StMmJsonKv {
+        status: 1,
+        k_off: k_off,
+        k_len: k_len,
+        v_start: v_start,
+        v_end: v_end,
+    }
+}
+
+pub fn st_bytes_eq_buf(base_ptr: i64, off: i64, len: i64, name_ptr: i64, name_len: i64) -> bool with Mut {
+    if base_ptr <= 0 || off < 0 || len < 0 || name_ptr <= 0 || name_len < 0 { return false }
+    if len != name_len { return false }
+    var i: i64 = 0
+    while i < len {
+        let b = ptr_read_u8(base_ptr, off + i)
+        let c = ptr_read_u8(name_ptr, i)
+        if b != c { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn st_mm_find_obj_field_bytes(
+    ptr: i64,
+    obj_start: i64,
+    obj_end: i64,
+    name_ptr: i64,
+    name_len: i64,
+    skip_meta: bool
+) -> (i64, i64, bool) with Mut {
+    var p = st_mm_skip_ws(ptr, obj_start, obj_end)
+    if p >= obj_end || ptr_read_u8(ptr, p) != 123 { return (0, 0, false) }
+    p = p + 1
+    while p < obj_end {
+        let kv = st_mm_next_kv(ptr, p, obj_end)
+        if kv.status != 1 { return (0, 0, false) }
+        if !(skip_meta && st_bytes_eq_str(ptr, kv.k_off, kv.k_len, "__metadata__")) {
+            if st_bytes_eq_buf(ptr, kv.k_off, kv.k_len, name_ptr, name_len) {
+                return (kv.v_start, kv.v_end, true)
+            }
+        }
+        p = kv.v_end
+    }
+    (0, 0, false)
+}
+
+fn st_mm_find_obj_field(
+    ptr: i64,
+    obj_start: i64,
+    obj_end: i64,
+    key: string,
+    skip_meta: bool
+) -> (i64, i64, bool) with Mut {
+    var p = st_mm_skip_ws(ptr, obj_start, obj_end)
+    if p >= obj_end || ptr_read_u8(ptr, p) != 123 { return (0, 0, false) }
+    p = p + 1
+    while p < obj_end {
+        let kv = st_mm_next_kv(ptr, p, obj_end)
+        if kv.status != 1 { return (0, 0, false) }
+        if !(skip_meta && st_bytes_eq_str(ptr, kv.k_off, kv.k_len, "__metadata__")) {
+            if st_bytes_eq_str(ptr, kv.k_off, kv.k_len, key) {
+                return (kv.v_start, kv.v_end, true)
+            }
+        }
+        p = kv.v_end
+    }
+    (0, 0, false)
+}
+
+fn st_mm_parse_u64(ptr: i64, pos: i64, limit: i64) -> (i64, i64, bool) with Mut {
+    var i = st_mm_skip_ws(ptr, pos, limit)
+    if i >= limit { return (0, i, false) }
+    let c0 = ptr_read_u8(ptr, i)
+    if c0 < 48 || c0 > 57 { return (0, i, false) }
+    var v: i64 = 0
+    while i < limit {
+        let c = ptr_read_u8(ptr, i)
+        if c < 48 || c > 57 { break }
+        let d = c - 48
+        if v > 922337203685477580 || (v == 922337203685477580 && d > 7) {
+            return (0, i, false)
+        }
+        v = v * 10 + d
+        i = i + 1
+    }
+    (v, i, true)
+}
+
+fn st_mm_mul_checked(a: i64, b: i64) -> (i64, bool) with Mut {
+    if a < 0 || b < 0 { return (0, false) }
+    if a == 0 || b == 0 { return (0, true) }
+    if a <= 2147483647 && b <= 2147483647 {
+        return (a * b, true)
+    }
+    var x = a
+    var y = b
+    var acc: i64 = 0
+    while y > 0 {
+        if (y & 1) != 0 {
+            if acc > 9223372036854775807 - x {
+                return (0, false)
+            }
+            acc = acc + x
+        }
+        y = y >> 1
+        if y > 0 {
+            if x > 4611686018427387903 {
+                return (0, false)
+            }
+            x = x << 1
+        }
+    }
+    (acc, true)
+}
+
+fn st_mm_dtype_from_slice(ptr: i64, off: i64, len: i64) -> i32 with Mut {
+    if st_bytes_eq_str(ptr, off, len, "F32") { return st_mm_dtype_f32() }
+    if st_bytes_eq_str(ptr, off, len, "BF16") { return st_mm_dtype_bf16() }
+    if st_bytes_eq_str(ptr, off, len, "F16") { return st_mm_dtype_f16() }
+    if st_bytes_eq_str(ptr, off, len, "F64") { return st_mm_dtype_f64() }
+    if st_bytes_eq_str(ptr, off, len, "I64") { return st_mm_dtype_i64() }
+    if st_bytes_eq_str(ptr, off, len, "U8") { return st_mm_dtype_u8() }
+    if st_bytes_eq_str(ptr, off, len, "I32") { return st_mm_dtype_i32() }
+    0
+}
+
+/// Parse the 8-byte little-endian header length and validate JSON framing.
+pub fn st_mmap_parse_header(shard: &MappedShard) -> StMmapHeader with Mut {
+    if !mapped_shard_is_ok(shard) { return st_mm_header_bad() }
+    let ptr = mapped_shard_ptr(shard)
+    let len = mapped_shard_len(shard)
+    if ptr <= 0 || len < 10 { return st_mm_header_bad() }
+    let r = mapped_shard_read_i64_le(shard, 0)
+    if !r.1 { return st_mm_header_bad() }
+    let hdr_len = r.0
+    if hdr_len < 2 || hdr_len > len - 8 {
+        return st_mm_header_bad()
+    }
+    let hend = 8 + hdr_len
+    let first = st_mm_skip_ws(ptr, 8, hend)
+    if first >= hend || ptr_read_u8(ptr, first) != 123 {
+        return st_mm_header_bad()
+    }
+    StMmapHeader {
+        hdr_len: hdr_len,
+        data_base_off: hend,
+        ok: true,
+    }
+}
+
+fn st_mm_shape_bad() -> StMmShape {
+    StMmShape { ok: false, rank: 0, count: 0, d0: 0, d1: 0, d2: 0, d3: 0 }
+}
+
+fn st_mm_parse_shape(ptr: i64, v_start: i64, v_end: i64) -> StMmShape with Mut {
+    if ptr_read_u8(ptr, v_start) != 91 { return st_mm_shape_bad() }
+    var sp = v_start + 1
+    var rank: i32 = 0
+    var count: i64 = 1
+    var d0: i64 = 0
+    var d1: i64 = 0
+    var d2: i64 = 0
+    var d3: i64 = 0
+    while sp < v_end {
+        sp = st_mm_skip_ws(ptr, sp, v_end)
+        if sp >= v_end { return st_mm_shape_bad() }
+        let sc = ptr_read_u8(ptr, sp)
+        if sc == 93 {
+            return StMmShape {
+                ok: true,
+                rank: rank,
+                count: count,
+                d0: d0,
+                d1: d1,
+                d2: d2,
+                d3: d3,
+            }
+        }
+        if sc == 44 {
+            sp = sp + 1
+        } else {
+            let dr = st_mm_parse_u64(ptr, sp, v_end)
+            if !dr.2 { return st_mm_shape_bad() }
+            if rank == 0 { d0 = dr.0 }
+            else if rank == 1 { d1 = dr.0 }
+            else if rank == 2 { d2 = dr.0 }
+            else if rank == 3 { d3 = dr.0 }
+            let mr = st_mm_mul_checked(count, dr.0)
+            if !mr.1 { return st_mm_shape_bad() }
+            count = mr.0
+            rank = rank + 1
+            sp = dr.1
+        }
+    }
+    st_mm_shape_bad()
+}
+
+fn st_mm_parse_offsets(ptr: i64, v_start: i64, v_end: i64) -> (i64, i64, bool) with Mut {
+    if ptr_read_u8(ptr, v_start) != 91 { return (0, 0, false) }
+    let r0 = st_mm_parse_u64(ptr, v_start + 1, v_end)
+    if !r0.2 { return (0, 0, false) }
+    var op = st_mm_skip_ws(ptr, r0.1, v_end)
+    if op >= v_end || ptr_read_u8(ptr, op) != 44 { return (0, 0, false) }
+    let r1 = st_mm_parse_u64(ptr, op + 1, v_end)
+    if !r1.2 { return (0, 0, false) }
+    op = st_mm_skip_ws(ptr, r1.1, v_end)
+    if op >= v_end || ptr_read_u8(ptr, op) != 93 { return (0, 0, false) }
+    (r0.0, r1.0, true)
+}
+
+fn st_mm_parse_tensor_obj(
+    shard_ptr: i64,
+    shard_len: i64,
+    data_base_off: i64,
+    obj_start: i64,
+    obj_end: i64
+) -> StTensorView with Mut {
+    var p = st_mm_skip_ws(shard_ptr, obj_start, obj_end)
+    if p >= obj_end || ptr_read_u8(shard_ptr, p) != 123 { return st_mm_view_empty() }
+    p = p + 1
+
+    var dtype: i32 = 0
+    var has_dtype = false
+    var rank: i32 = 0
+    var d0: i64 = 0
+    var d1: i64 = 0
+    var d2: i64 = 0
+    var d3: i64 = 0
+    var count: i64 = 0
+    var has_shape = false
+    var begin: i64 = 0
+    var end_off: i64 = 0
+    var has_offsets = false
+
+    while p < obj_end {
+        let kv = st_mm_next_kv(shard_ptr, p, obj_end)
+        if kv.status == 0 { return st_mm_view_empty() }
+        if kv.status == 2 { break }
+        if st_bytes_eq_str(shard_ptr, kv.k_off, kv.k_len, "dtype") {
+            if ptr_read_u8(shard_ptr, kv.v_start) != 34 || kv.v_end < kv.v_start + 2 {
+                return st_mm_view_empty()
+            }
+            let dt = st_mm_dtype_from_slice(shard_ptr, kv.v_start + 1, kv.v_end - kv.v_start - 2)
+            if dt <= 0 { return st_mm_view_empty() }
+            dtype = dt
+            has_dtype = true
+        } else if st_bytes_eq_str(shard_ptr, kv.k_off, kv.k_len, "shape") {
+            let sr = st_mm_parse_shape(shard_ptr, kv.v_start, kv.v_end)
+            if !sr.ok { return st_mm_view_empty() }
+            d0 = sr.d0
+            d1 = sr.d1
+            d2 = sr.d2
+            d3 = sr.d3
+            rank = sr.rank
+            count = sr.count
+            has_shape = true
+        } else if st_bytes_eq_str(shard_ptr, kv.k_off, kv.k_len, "data_offsets") {
+            let or = st_mm_parse_offsets(shard_ptr, kv.v_start, kv.v_end)
+            if !or.2 { return st_mm_view_empty() }
+            begin = or.0
+            end_off = or.1
+            has_offsets = true
+        }
+        p = kv.v_end
+    }
+
+    if !has_dtype || !has_shape || !has_offsets || dtype <= 0 {
+        return st_mm_view_empty()
+    }
+    if begin < 0 || end_off < begin || end_off > shard_len - data_base_off {
+        return st_mm_view_empty()
+    }
+    let byte_len = end_off - begin
+    let eb = st_mm_dtype_bytes(dtype)
+    if eb <= 0 { return st_mm_view_empty() }
+    let expected = st_mm_mul_checked(count, eb)
+    if !expected.1 || expected.0 != byte_len {
+        return st_mm_view_empty()
+    }
+    let data_off = data_base_off + begin
+    StTensorView {
+        found: true,
+        dtype: dtype,
+        rank: rank,
+        d0: d0,
+        d1: d1,
+        d2: d2,
+        d3: d3,
+        count: count,
+        data_off: data_off,
+        byte_len: byte_len,
+        host_ptr: shard_ptr + data_off,
+    }
+}
+
+/// Find tensor `name` in the parsed header (skipping `__metadata__`) and return a zero-copy view.
+pub fn st_mmap_find_tensor(shard: &MappedShard, hdr: &StMmapHeader, name: string) -> StTensorView with Mut {
+    if !mapped_shard_is_ok(shard) || !hdr.ok || str_len(name) <= 0 {
+        return st_mm_view_empty()
+    }
+    let ptr = mapped_shard_ptr(shard)
+    let slen = mapped_shard_len(shard)
+    if ptr <= 0 || hdr.hdr_len < 2 || hdr.data_base_off != 8 + hdr.hdr_len || hdr.data_base_off > slen {
+        return st_mm_view_empty()
+    }
+    let r = st_mm_find_obj_field(ptr, 8, hdr.data_base_off, name, true)
+    if !r.2 { return st_mm_view_empty() }
+    st_mm_parse_tensor_obj(ptr, slen, hdr.data_base_off, r.0, r.1)
+}
+
+/// Find tensor `(name_ptr, name_len)` in the parsed header (skipping `__metadata__`) and return a zero-copy view.
+pub fn st_mmap_find_tensor_bytes(
+    shard: &MappedShard,
+    hdr: &StMmapHeader,
+    name_ptr: i64,
+    name_len: i64
+) -> StTensorView with Mut {
+    if !mapped_shard_is_ok(shard) || !hdr.ok || name_ptr <= 0 || name_len <= 0 {
+        return st_mm_view_empty()
+    }
+    let ptr = mapped_shard_ptr(shard)
+    let slen = mapped_shard_len(shard)
+    if ptr <= 0 || hdr.hdr_len < 2 || hdr.data_base_off != 8 + hdr.hdr_len || hdr.data_base_off > slen {
+        return st_mm_view_empty()
+    }
+    let r = st_mm_find_obj_field_bytes(ptr, 8, hdr.data_base_off, name_ptr, name_len, true)
+    if !r.2 { return st_mm_view_empty() }
+    st_mm_parse_tensor_obj(ptr, slen, hdr.data_base_off, r.0, r.1)
+}
+
+/// Resolve `tensor_name` inside `model.safetensors.index.json` weight_map to `(off, len, ok)` in `idx`.
+pub fn st_index_resolve_shard_bytes(idx: &MappedShard, tensor_name: string) -> (i64, i64, bool) with Mut {
+    if !mapped_shard_is_ok(idx) || str_len(tensor_name) <= 0 {
+        return (0, 0, false)
+    }
+    let ptr = mapped_shard_ptr(idx)
+    let limit = mapped_shard_len(idx)
+    if ptr <= 0 || limit < 2 { return (0, 0, false) }
+    let wm = st_mm_find_obj_field(ptr, 0, limit, "weight_map", false)
+    if !wm.2 { return (0, 0, false) }
+    let val = st_mm_find_obj_field(ptr, wm.0, wm.1, tensor_name, false)
+    if !val.2 { return (0, 0, false) }
+    if ptr_read_u8(ptr, val.0) != 34 || val.1 < val.0 + 2 {
+        return (0, 0, false)
+    }
+    (val.0 + 1, val.1 - val.0 - 2, true)
+}
+
+/// Resolve `(name_ptr, name_len)` inside `model.safetensors.index.json` weight_map to `(off, len, ok)` in `idx`.
+pub fn st_index_resolve_shard_by_bytes(
+    idx: &MappedShard,
+    name_ptr: i64,
+    name_len: i64
+) -> (i64, i64, bool) with Mut {
+    if !mapped_shard_is_ok(idx) || name_ptr <= 0 || name_len <= 0 {
+        return (0, 0, false)
+    }
+    let ptr = mapped_shard_ptr(idx)
+    let limit = mapped_shard_len(idx)
+    if ptr <= 0 || limit < 2 { return (0, 0, false) }
+    let wm = st_mm_find_obj_field(ptr, 0, limit, "weight_map", false)
+    if !wm.2 { return (0, 0, false) }
+    let val = st_mm_find_obj_field_bytes(ptr, wm.0, wm.1, name_ptr, name_len, false)
+    if !val.2 { return (0, 0, false) }
+    if ptr_read_u8(ptr, val.0) != 34 || val.1 < val.0 + 2 {
+        return (0, 0, false)
+    }
+    (val.0 + 1, val.1 - val.0 - 2, true)
+}
+
+/// Match `tensor_name`'s mapped shard against `shard0` (returns 0) or `shard1` (returns 1), else -1.
+pub fn st_index_match_shard_2(
+    idx: &MappedShard,
+    tensor_name: string,
+    shard0: string,
+    shard1: string
+) -> i32 with Mut {
+    let r = st_index_resolve_shard_bytes(idx, tensor_name)
+    if !r.2 { return -1 }
+    let ptr = mapped_shard_ptr(idx)
+    if st_bytes_eq_str(ptr, r.0, r.1, shard0) { return 0 }
+    if st_bytes_eq_str(ptr, r.0, r.1, shard1) { return 1 }
+    -1
+}
+
+fn st_mm_f32_bits_to_f64(b: i64) -> f64 with Mut {
+    let bits = b & 4294967295
+    let sign = (bits >> 31) & 1
+    var exp = (bits >> 23) & 255
+    var mant = bits & 8388607
+    if exp == 255 {
+        if mant != 0 { return bits_to_f64((sign << 63) | 9219994337134243840 | 1125899906842624) }
+        return bits_to_f64((sign << 63) | 9218868437227405312)
+    }
+    if exp == 0 {
+        if mant == 0 { return bits_to_f64(sign << 63) }
+        exp = 1
+        while (mant & 8388608) == 0 {
+            mant = mant << 1
+            exp = exp - 1
+        }
+        mant = mant & 8388607
+    }
+    let e64 = exp - 127 + 1023
+    bits_to_f64((sign << 63) | (e64 << 52) | (mant << 29))
+}
+
+fn st_mm_f16_bits_to_f64(b: i64) -> f64 with Mut {
+    let bits = b & 65535
+    let sign = (bits >> 15) & 1
+    var exp = (bits >> 10) & 31
+    var mant = bits & 1023
+    if exp == 31 {
+        if mant != 0 { return st_mm_f32_bits_to_f64((sign << 31) | 2143289344 | 4194304) }
+        return st_mm_f32_bits_to_f64((sign << 31) | 2139095040)
+    }
+    if exp == 0 {
+        if mant == 0 { return st_mm_f32_bits_to_f64(sign << 31) }
+        exp = 1
+        while (mant & 1024) == 0 {
+            mant = mant << 1
+            exp = exp - 1
+        }
+        mant = mant & 1023
+    }
+    st_mm_f32_bits_to_f64((sign << 31) | ((exp - 15 + 127) << 23) | (mant << 13))
+}
+
+/// Read raw 16-bit BF16 pattern at element index `idx` directly from `v.host_ptr`.
+pub fn st_view_read_bf16_bits(v: &StTensorView, idx: i64) -> (i64, bool) {
+    if !v.found || v.host_ptr <= 0 || v.dtype != st_mm_dtype_bf16() {
+        return (0, false)
+    }
+    if idx < 0 || idx >= v.count {
+        return (0, false)
+    }
+    let byte_off = idx * 2
+    if byte_off + 2 > v.byte_len {
+        return (0, false)
+    }
+    (ptr_read_u16_le(v.host_ptr, byte_off), true)
+}
+
+/// Decode element `idx` from any supported Safetensors dtype to exact `f64`.
+pub fn st_view_read_f64(v: &StTensorView, idx: i64) -> (f64, bool) with Mut {
+    if !v.found || v.host_ptr <= 0 || idx < 0 || idx >= v.count {
+        return (0.0, false)
+    }
+    let eb = st_mm_dtype_bytes(v.dtype)
+    if eb <= 0 { return (0.0, false) }
+    let byte_off = idx * eb
+    if byte_off + eb > v.byte_len {
+        return (0.0, false)
+    }
+    if v.dtype == 1 {
+        let bits = ptr_read_u32_le(v.host_ptr, byte_off)
+        return (st_mm_f32_bits_to_f64(bits), true)
+    }
+    if v.dtype == 2 {
+        let bits = ptr_read_u16_le(v.host_ptr, byte_off)
+        return (bf16_bits_to_f64_exact(bits), true)
+    }
+    if v.dtype == 3 {
+        let bits = ptr_read_u16_le(v.host_ptr, byte_off)
+        return (st_mm_f16_bits_to_f64(bits), true)
+    }
+    if v.dtype == 4 {
+        let bits = ptr_read_i64_le(v.host_ptr, byte_off)
+        return (bits_to_f64(bits), true)
+    }
+    if v.dtype == 5 {
+        let val = ptr_read_i64_le(v.host_ptr, byte_off)
+        return (val as f64, true)
+    }
+    if v.dtype == 6 {
+        let val = ptr_read_u8(v.host_ptr, byte_off)
+        return (val as f64, true)
+    }
+    if v.dtype == 7 {
+        var w = ptr_read_u32_le(v.host_ptr, byte_off)
+        if (w & 2147483648) != 0 { w = w - 4294967296 }
+        return (w as f64, true)
+    }
+    (0.0, false)
+}

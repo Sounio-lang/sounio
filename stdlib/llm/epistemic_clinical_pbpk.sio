@@ -1,0 +1,516 @@
+// SYNTHETIC_RESEARCH_WITNESS_NOT_MEDICAL_GUIDANCE — synthetic de-identified PK parameters only
+// stdlib::llm::epistemic_clinical_pbpk — Sovereign 3-Compartment NTI PBPK ODE
+// with RK4 Discretization Error Bounds, EISA Extraction Noise, and GUM Covariance Propagation.
+
+pub const SYNTHETIC_RESEARCH_WITNESS_NOT_MEDICAL_GUIDANCE: string = "SYNTHETIC_RESEARCH_WITNESS_NOT_MEDICAL_GUIDANCE — synthetic de-identified PK parameters only"
+
+pub const EPISTEMIC_REGIME_SAFE_AUTHORIZE: i64 = 1
+pub const EPISTEMIC_REGIME_NUMERICAL_AUTO_REFINE: i64 = 2
+pub const EPISTEMIC_REGIME_PHYSICAL_ABSTAIN_TDM: i64 = 3
+pub const EPISTEMIC_REGIME_DOUBLE_REFINE_THEN_ABSTAIN: i64 = 4
+
+pub fn clinical_pbpk_scope_guard() -> string {
+    return "SYNTHETIC_RESEARCH_WITNESS_NOT_MEDICAL_GUIDANCE — synthetic de-identified PK parameters only"
+}
+
+pub fn epistemic_regime_safe_authorize() -> i64 {
+    return EPISTEMIC_REGIME_SAFE_AUTHORIZE
+}
+
+pub fn epistemic_regime_numerical_auto_refine() -> i64 {
+    return EPISTEMIC_REGIME_NUMERICAL_AUTO_REFINE
+}
+
+pub fn epistemic_regime_physical_abstain_tdm() -> i64 {
+    return EPISTEMIC_REGIME_PHYSICAL_ABSTAIN_TDM
+}
+
+pub fn epistemic_regime_double_refine_then_abstain() -> i64 {
+    return EPISTEMIC_REGIME_DOUBLE_REFINE_THEN_ABSTAIN
+}
+
+pub struct ClinicalPbpkParams {
+    pub v_blood: f64,
+    pub v_brain: f64,
+    pub v_periph: f64,
+    pub q_brain: f64,
+    pub q_periph: f64,
+    pub kp_brain: f64,
+    pub kp_periph: f64,
+    pub cl_hepatic: f64,
+    pub fu_plasma: f64,
+}
+
+pub struct ClinicalEpistemicPriors {
+    pub cl_var: f64,
+    pub kp_var: f64,
+    pub fu_var: f64,
+    pub rho_cl_fu: f64,
+}
+
+pub struct EpistemicDecisionReceipt {
+    pub regime: i64,
+    pub val_initial: f64,
+    pub val_final: f64,
+    pub err_initial: f64,
+    pub err_final: f64,
+    pub u_physical: f64,
+    pub auc_lower_bound: f64,
+    pub auc_upper_bound: f64,
+    pub s_cl: f64,
+    pub s_kp: f64,
+    pub s_fu: f64,
+    pub compute_refined: bool,
+    pub clinical_abstained: bool,
+    pub authorized: bool,
+}
+
+struct Rp3State {
+    blood: f64,
+    brain: f64,
+    periph: f64,
+}
+
+fn pbpk_abs(x: f64) -> f64 {
+    if x < 0.0 {
+        return 0.0 - x
+    }
+    return x
+}
+
+fn pbpk_max(a: f64, b: f64) -> f64 {
+    if a > b {
+        return a
+    }
+    return b
+}
+
+fn pbpk_sqrt(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 {
+        return 0.0
+    }
+    var y = x
+    if x < 1.0 {
+        y = 1.0
+    }
+    var i = 0
+    while i < 30 {
+        y = (y + x / y) * 0.5
+        i = i + 1
+    }
+    return y
+}
+
+fn rp3_add(a: Rp3State, b: Rp3State) -> Rp3State {
+    return Rp3State {
+        blood: a.blood + b.blood,
+        brain: a.brain + b.brain,
+        periph: a.periph + b.periph,
+    }
+}
+
+fn rp3_scale(s: Rp3State, factor: f64) -> Rp3State {
+    return Rp3State {
+        blood: s.blood * factor,
+        brain: s.brain * factor,
+        periph: s.periph * factor,
+    }
+}
+
+fn pbpk_ode(st: Rp3State, p: &ClinicalPbpkParams) -> Rp3State with Div {
+    let cl_eff = p.cl_hepatic * p.fu_plasma
+    let inflow_brain = (p.q_brain / p.v_blood) * (st.brain / p.kp_brain)
+    let inflow_periph = (p.q_periph / p.v_blood) * (st.periph / p.kp_periph)
+    let outflow = ((p.q_brain + p.q_periph) / p.v_blood) * st.blood
+    let clearance = (cl_eff / p.v_blood) * st.blood
+
+    let d_blood = inflow_brain + inflow_periph - outflow - clearance
+    let d_brain = (p.q_brain / p.v_brain) * (st.blood - st.brain / p.kp_brain)
+    let d_periph = (p.q_periph / p.v_periph) * (st.blood - st.periph / p.kp_periph)
+
+    return Rp3State {
+        blood: d_blood,
+        brain: d_brain,
+        periph: d_periph,
+    }
+}
+
+fn rk4_advance(st: Rp3State, p: &ClinicalPbpkParams, dt: f64) -> Rp3State with Div {
+    let k1 = pbpk_ode(st, p)
+    let s2 = rp3_add(st, rp3_scale(k1, dt * 0.5))
+    let k2 = pbpk_ode(s2, p)
+    let s3 = rp3_add(st, rp3_scale(k2, dt * 0.5))
+    let k3 = pbpk_ode(s3, p)
+    let s4 = rp3_add(st, rp3_scale(k3, dt))
+    let k4 = pbpk_ode(s4, p)
+
+    let w = rp3_add(k1, rp3_add(rp3_scale(k2, 2.0), rp3_add(rp3_scale(k3, 2.0), k4)))
+    return rp3_add(st, rp3_scale(w, dt / 6.0))
+}
+
+pub fn clinical_pbpk_default_params() -> ClinicalPbpkParams {
+    return ClinicalPbpkParams {
+        v_blood: 5.0,
+        v_brain: 1.4,
+        v_periph: 50.0,
+        q_brain: 0.05,
+        q_periph: 87.0,
+        kp_brain: 0.08,
+        kp_periph: 0.5,
+        cl_hepatic: 12.4,
+        fu_plasma: 0.08,
+    }
+}
+
+pub fn clinical_pbpk_simulate_auc(p: &ClinicalPbpkParams, dose_mg: f64, t_end_h: f64, dt_h: f64) -> f64 with Mut, Div {
+    if p.v_blood <= 0.000000000001 {
+        return 0.0
+    }
+    if t_end_h <= 0.0 {
+        return 0.0
+    }
+    var dt_step = dt_h
+    if dt_step <= 0.000000000001 {
+        dt_step = 0.05
+    }
+    let c0 = dose_mg / p.v_blood
+    var st = Rp3State { blood: c0, brain: 0.0, periph: 0.0 }
+    var t = 0.0
+    var auc = 0.0
+    var c_prev = c0
+
+    while t < t_end_h - 0.000000000001 {
+        var dt_use = dt_step
+        if t + dt_step > t_end_h {
+            dt_use = t_end_h - t
+        }
+        st = rk4_advance(st, p, dt_use)
+        auc = auc + (c_prev + st.blood) * 0.5 * dt_use
+        c_prev = st.blood
+        t = t + dt_use
+    }
+    return auc
+}
+
+fn fdiff_step(nominal: f64, variance: f64) -> f64 with Mut, Div {
+    let h_rel = 0.000001 * pbpk_abs(nominal)
+    let h_abs = 0.01 * pbpk_sqrt(variance)
+    return pbpk_max(h_rel, h_abs)
+}
+
+pub fn clinical_pbpk_evaluate_gate(
+    p: &ClinicalPbpkParams,
+    priors: &ClinicalEpistemicPriors,
+    dose_mg: f64,
+    dt_initial_h: f64,
+    llm_unrefined_err_auc: f64,
+    auc_min: f64,
+    auc_max: f64
+) -> EpistemicDecisionReceipt with Mut, Div {
+    let t_end_h = 48.0
+    let val_coarse = clinical_pbpk_simulate_auc(p, dose_mg, t_end_h, dt_initial_h)
+    let dt_half = dt_initial_h * 0.5
+    let val_half = clinical_pbpk_simulate_auc(p, dose_mg, t_end_h, dt_half)
+    let diff_rk4 = pbpk_abs(val_half - val_coarse)
+    let err_ode = diff_rk4 * (16.0 / 15.0) + diff_rk4
+    let err_initial = err_ode + llm_unrefined_err_auc
+    let val_initial = val_half
+
+    var dt_eff = 0.05
+    if dt_initial_h < 0.05 {
+        dt_eff = dt_initial_h
+    }
+    let auc_nom = val_half
+
+    let h_cl = fdiff_step(p.cl_hepatic, priors.cl_var)
+    let p_cl = ClinicalPbpkParams {
+        v_blood: p.v_blood,
+        v_brain: p.v_brain,
+        v_periph: p.v_periph,
+        q_brain: p.q_brain,
+        q_periph: p.q_periph,
+        kp_brain: p.kp_brain,
+        kp_periph: p.kp_periph,
+        cl_hepatic: p.cl_hepatic + h_cl,
+        fu_plasma: p.fu_plasma,
+    }
+    let auc_cl = clinical_pbpk_simulate_auc(&p_cl, dose_mg, t_end_h, dt_eff)
+    let j_cl = (auc_cl - auc_nom) / h_cl
+
+    let h_kp = fdiff_step(p.kp_brain, priors.kp_var)
+    let p_kp = ClinicalPbpkParams {
+        v_blood: p.v_blood,
+        v_brain: p.v_brain,
+        v_periph: p.v_periph,
+        q_brain: p.q_brain,
+        q_periph: p.q_periph,
+        kp_brain: p.kp_brain + h_kp,
+        kp_periph: p.kp_periph,
+        cl_hepatic: p.cl_hepatic,
+        fu_plasma: p.fu_plasma,
+    }
+    let auc_kp = clinical_pbpk_simulate_auc(&p_kp, dose_mg, t_end_h, dt_eff)
+    let j_kp = (auc_kp - auc_nom) / h_kp
+
+    let h_fu = fdiff_step(p.fu_plasma, priors.fu_var)
+    let p_fu = ClinicalPbpkParams {
+        v_blood: p.v_blood,
+        v_brain: p.v_brain,
+        v_periph: p.v_periph,
+        q_brain: p.q_brain,
+        q_periph: p.q_periph,
+        kp_brain: p.kp_brain,
+        kp_periph: p.kp_periph,
+        cl_hepatic: p.cl_hepatic,
+        fu_plasma: p.fu_plasma + h_fu,
+    }
+    let auc_fu = clinical_pbpk_simulate_auc(&p_fu, dose_mg, t_end_h, dt_eff)
+    let j_fu = (auc_fu - auc_nom) / h_fu
+
+    let v_cl = j_cl * j_cl * priors.cl_var
+    let v_kp = j_kp * j_kp * priors.kp_var
+    let v_fu = j_fu * j_fu * priors.fu_var
+    let v_diag_sum = v_cl + v_kp + v_fu
+
+    var s_cl = 0.0
+    var s_kp = 0.0
+    var s_fu = 0.0
+    if v_diag_sum > 0.0000000000000000000000000000001 {
+        s_cl = v_cl / v_diag_sum
+        s_kp = v_kp / v_diag_sum
+        s_fu = v_fu / v_diag_sum
+    }
+
+    let cov_prod = priors.cl_var * priors.fu_var
+    var sd_prod = 0.0
+    if cov_prod > 0.0 {
+        sd_prod = pbpk_sqrt(cov_prod)
+    }
+    let cov_cl_fu = 2.0 * j_cl * j_fu * priors.rho_cl_fu * sd_prod
+    var var_auc = v_diag_sum + cov_cl_fu
+    if var_auc < 0.0 {
+        var_auc = 0.0
+    }
+    let u_physical = 1.96 * pbpk_sqrt(var_auc)
+
+    let window_span = auc_max - auc_min
+    let err_budget = 0.05 * window_span
+    let phys_inside = (val_initial - u_physical >= auc_min) && (val_initial + u_physical <= auc_max)
+    let unrefined_inside = (val_initial - err_initial - u_physical >= auc_min) && (val_initial + err_initial + u_physical <= auc_max)
+
+    var err_unsafe = false
+    if err_initial > err_budget {
+        err_unsafe = true
+    } else {
+        if phys_inside && (!unrefined_inside) {
+            err_unsafe = true
+        }
+    }
+
+    var compute_refined = false
+    var val_final = val_initial
+    var err_final = err_initial
+    var auc_lower_bound = val_final - err_final - u_physical
+    var auc_upper_bound = val_final + err_final + u_physical
+    var regime = EPISTEMIC_REGIME_SAFE_AUTHORIZE
+    var clinical_abstained = false
+    var authorized = false
+
+    if err_unsafe {
+        compute_refined = true
+        let dt_fine = 0.05
+        let dt_fine_half = 0.025
+        let val_fine_coarse = clinical_pbpk_simulate_auc(p, dose_mg, t_end_h, dt_fine)
+        let val_fine_half = clinical_pbpk_simulate_auc(p, dose_mg, t_end_h, dt_fine_half)
+        let diff_fine = pbpk_abs(val_fine_half - val_fine_coarse)
+        let err_fine_ode = diff_fine * (16.0 / 15.0) + diff_fine
+
+        val_final = val_fine_half
+        err_final = err_fine_ode
+        auc_lower_bound = val_final - err_final - u_physical
+        auc_upper_bound = val_final + err_final + u_physical
+
+        if auc_lower_bound >= auc_min && auc_upper_bound <= auc_max {
+            regime = EPISTEMIC_REGIME_NUMERICAL_AUTO_REFINE
+            clinical_abstained = false
+            authorized = true
+        } else {
+            regime = EPISTEMIC_REGIME_DOUBLE_REFINE_THEN_ABSTAIN
+            clinical_abstained = true
+            authorized = false
+        }
+    } else {
+        compute_refined = false
+        val_final = val_initial
+        err_final = err_initial
+        auc_lower_bound = val_final - err_final - u_physical
+        auc_upper_bound = val_final + err_final + u_physical
+
+        if auc_lower_bound >= auc_min && auc_upper_bound <= auc_max {
+            regime = EPISTEMIC_REGIME_SAFE_AUTHORIZE
+            clinical_abstained = false
+            authorized = true
+        } else {
+            regime = EPISTEMIC_REGIME_PHYSICAL_ABSTAIN_TDM
+            clinical_abstained = true
+            authorized = false
+        }
+    }
+
+    return EpistemicDecisionReceipt {
+        regime: regime,
+        val_initial: val_initial,
+        val_final: val_final,
+        err_initial: err_initial,
+        err_final: err_final,
+        u_physical: u_physical,
+        auc_lower_bound: auc_lower_bound,
+        auc_upper_bound: auc_upper_bound,
+        s_cl: s_cl,
+        s_kp: s_kp,
+        s_fu: s_fu,
+        compute_refined: compute_refined,
+        clinical_abstained: clinical_abstained,
+        authorized: authorized,
+    }
+}
+
+pub fn clinical_pbpk_compare_naive_text_mc() -> bool with Mut, Div {
+    let p = clinical_pbpk_default_params()
+    let dose_mg = 5.0
+    let t_end_h = 48.0
+
+    // Witness 1: Conflation Failure
+    let priors1 = ClinicalEpistemicPriors {
+        cl_var: 1.0,
+        kp_var: 0.0001,
+        fu_var: 0.000025,
+        rho_cl_fu: 0.0,
+    }
+    let val_est = clinical_pbpk_simulate_auc(&p, dose_mg, t_end_h, 0.05)
+    let auc_min1 = val_est - 0.5737
+    let auc_max1 = val_est + 0.5737
+    let llm_unrefined_err = 0.25
+
+    let receipt1 = clinical_pbpk_evaluate_gate(
+        &p,
+        &priors1,
+        dose_mg,
+        0.1,
+        llm_unrefined_err,
+        auc_min1,
+        auc_max1
+    )
+
+    let naive_lower = receipt1.val_initial - receipt1.err_initial - receipt1.u_physical
+    let naive_upper = receipt1.val_initial + receipt1.err_initial + receipt1.u_physical
+    let naive_mc_abstained = (naive_lower < auc_min1) || (naive_upper > auc_max1)
+
+    let witness1_pass = naive_mc_abstained && receipt1.compute_refined && (receipt1.regime == EPISTEMIC_REGIME_NUMERICAL_AUTO_REFINE) && receipt1.authorized && (!receipt1.clinical_abstained)
+
+    // Witness 2: Correlated Multi-Parameter Blindness
+    let u_cl = 3.0
+    let u_fu = 0.02
+    let p_cl_minus = ClinicalPbpkParams {
+        v_blood: p.v_blood,
+        v_brain: p.v_brain,
+        v_periph: p.v_periph,
+        q_brain: p.q_brain,
+        q_periph: p.q_periph,
+        kp_brain: p.kp_brain,
+        kp_periph: p.kp_periph,
+        cl_hepatic: p.cl_hepatic - u_cl,
+        fu_plasma: p.fu_plasma,
+    }
+    let p_cl_plus = ClinicalPbpkParams {
+        v_blood: p.v_blood,
+        v_brain: p.v_brain,
+        v_periph: p.v_periph,
+        q_brain: p.q_brain,
+        q_periph: p.q_periph,
+        kp_brain: p.kp_brain,
+        kp_periph: p.kp_periph,
+        cl_hepatic: p.cl_hepatic + u_cl,
+        fu_plasma: p.fu_plasma,
+    }
+    let p_fu_minus = ClinicalPbpkParams {
+        v_blood: p.v_blood,
+        v_brain: p.v_brain,
+        v_periph: p.v_periph,
+        q_brain: p.q_brain,
+        q_periph: p.q_periph,
+        kp_brain: p.kp_brain,
+        kp_periph: p.kp_periph,
+        cl_hepatic: p.cl_hepatic,
+        fu_plasma: p.fu_plasma - u_fu,
+    }
+    let p_fu_plus = ClinicalPbpkParams {
+        v_blood: p.v_blood,
+        v_brain: p.v_brain,
+        v_periph: p.v_periph,
+        q_brain: p.q_brain,
+        q_periph: p.q_periph,
+        kp_brain: p.kp_brain,
+        kp_periph: p.kp_periph,
+        cl_hepatic: p.cl_hepatic,
+        fu_plasma: p.fu_plasma + u_fu,
+    }
+    let p_joint_minus = ClinicalPbpkParams {
+        v_blood: p.v_blood,
+        v_brain: p.v_brain,
+        v_periph: p.v_periph,
+        q_brain: p.q_brain,
+        q_periph: p.q_periph,
+        kp_brain: p.kp_brain,
+        kp_periph: p.kp_periph,
+        cl_hepatic: p.cl_hepatic - u_cl,
+        fu_plasma: p.fu_plasma - u_fu,
+    }
+
+    let auc_1d_cl_m = clinical_pbpk_simulate_auc(&p_cl_minus, dose_mg, t_end_h, 0.05)
+    let auc_1d_cl_p = clinical_pbpk_simulate_auc(&p_cl_plus, dose_mg, t_end_h, 0.05)
+    let auc_1d_fu_m = clinical_pbpk_simulate_auc(&p_fu_minus, dose_mg, t_end_h, 0.05)
+    let auc_1d_fu_p = clinical_pbpk_simulate_auc(&p_fu_plus, dose_mg, t_end_h, 0.05)
+    let auc_joint_m = clinical_pbpk_simulate_auc(&p_joint_minus, dose_mg, t_end_h, 0.05)
+
+    let w2_auc_max = 4.80
+    let all_1d_below = (auc_1d_cl_m < w2_auc_max) && (auc_1d_cl_p < w2_auc_max) && (auc_1d_fu_m < w2_auc_max) && (auc_1d_fu_p < w2_auc_max)
+    let joint_spikes = auc_joint_m > w2_auc_max
+
+    let priors_uncorr = ClinicalEpistemicPriors {
+        cl_var: 9.0,
+        kp_var: 0.0001,
+        fu_var: 0.0004,
+        rho_cl_fu: 0.0,
+    }
+    let priors_corr = ClinicalEpistemicPriors {
+        cl_var: 9.0,
+        kp_var: 0.0001,
+        fu_var: 0.0004,
+        rho_cl_fu: 0.70,
+    }
+
+    let receipt_uncorr = clinical_pbpk_evaluate_gate(
+        &p,
+        &priors_uncorr,
+        dose_mg,
+        0.05,
+        0.0,
+        3.0,
+        6.0
+    )
+    let receipt_corr = clinical_pbpk_evaluate_gate(
+        &p,
+        &priors_corr,
+        dose_mg,
+        0.05,
+        0.0,
+        3.0,
+        6.0
+    )
+
+    let cov_increases = receipt_corr.u_physical > receipt_uncorr.u_physical
+    let witness2_pass = all_1d_below && joint_spikes && cov_increases
+
+    return witness1_pass && witness2_pass
+}

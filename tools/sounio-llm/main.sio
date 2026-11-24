@@ -1,0 +1,716 @@
+// tools/sounio-llm/main.sio — Sovereign CLI for Sounio LLM (Qwen3 + O-SSM).
+//
+// Standalone native binary compiled by bin/sounio-llm.
+// Zero dependencies on test suites. Honors all flags via direct CLI parsing.
+
+use llm::mmap::{
+    page_arena_alloc,
+    page_arena_free,
+    page_arena_is_ok,
+    page_arena_ptr,
+}
+use llm::qwen3::{
+    Qwen3Model,
+    qwen3_model_open,
+    qwen3_model_free,
+    qwen3_model_is_ok,
+    qwen3_model_cfg,
+}
+use llm::qwen3_paged_kv::{
+    qwen3_kv_alloc,
+    qwen3_kv_free,
+    qwen3_kv_is_ok,
+}
+use llm::qwen3_tokenizer::{
+    qwen3_tokenizer_is_ok,
+    qwen3_tokenizer_load,
+    qwen3_tokenizer_free,
+}
+use llm::hal::{
+    metal_session_open,
+    metal_session_close,
+    metal_session_is_ok,
+    cuda_session_open,
+    cuda_session_close,
+    cuda_session_is_ok,
+}
+use llm::qwen3_ossm::{
+    qwen3_ossm_state_alloc,
+    qwen3_ossm_state_free,
+    qwen3_ossm_state_is_ok,
+}
+use llm::sounio_llm_cli::{
+    SounioLlmRunCfg,
+    sounio_llm_run_chat_generation,
+    sounio_llm_run_chat_generation_q,
+    sounio_llm_run_bench_prompts,
+    sounio_llm_run_chat_generation_cuda_q,
+    sounio_llm_run_bench_prompts_cuda,
+}
+use tensor2::convert::{f32_bits_to_f64}
+
+fn print_version() with IO {
+    print("sounio-llm 0.80.0 (Sounio Sovereign LLM Engine: Qwen3 GQA + Non-Associative O-SSM)\n")
+}
+
+fn print_help() with IO {
+    print("Usage: sounio-llm [OPTIONS]\n\n")
+    print("Options:\n")
+    print("  --help                 Show this help message and exit\n")
+    print("  --version              Show version and exit\n")
+    print("  --model-dir <DIR>      Path to Qwen3 Safetensors model directory\n")
+    print("  --tokenizer <FILE>     Path to tokenizer JSON file\n")
+    print("  --prompt <STR>         Prompt text (default: soma)\n")
+    print("  --system <STR>         System prompt text (default: none)\n")
+    print("  --think                Enable thinking tokens <think>...</think>\n")
+    print("  --no-think             Disable thinking tokens\n")
+    print("  --temp <FLOAT>         Sampling temperature (default: 0.0)\n")
+    print("  --top-p <FLOAT>        Nucleus sampling top-p (default: 0.0)\n")
+    print("  --seed <INT>           RNG seed (default: 42)\n")
+    print("  --max-tokens <INT>     Maximum generated tokens (default: 16)\n")
+    print("  --max-seq <INT>        Maximum sequence length (default: 2048)\n")
+    print("  --backend <auto|metal|cuda|cpu>  Compute backend (default: auto)\n")
+    print("  --prefill <simt|tensor_core>     Prefill GEMM mode (default: simt)\n")
+    print("  --quant <bf16|q4|q4_eisa|q8_eisa|q4_eisa_adaptive|q8_eisa_adaptive|q4_cone|q8_cone|q8_conformal|q8_mlp_conformal|q8_scrub|q8_exact_scrub|q4_conformal|q4_scrub|q4_exact_scrub>\n")
+    print("                         Quantization mode (default: bf16; q4 = Q4_SoA_32 fast weights-only; conformal/scrub modes are [experimental]; *_exact_scrub = exact rollback + tail scrub)\n")
+    print("  --conformal-mode <flip_exact|overtake>  Conformal certificate variant (default: flip_exact)\n")
+    print("  --conformal-alpha <0.01|0.05>  Prompt-level conformal error budget alpha (default: 0.01)\n")
+    print("  --conformal-q <FLOAT>  Override calibrated conformal q threshold (use 0.0 with SOUNIO_SCRUB_MAX_STREAK for speculative control)\n")
+    print("  --fast-no-guarantee    Speed-tuned heuristic q=0.55 threshold (no guarantee; overrides --conformal-alpha)\n")
+    print("  --bench-prompts <FILE> Persistent single-init multi-prompt benchmark over newline-separated prompts\n")
+    print("  --ossm-every <INT>     Interleave O-SSM every N layers (default: 0)\n")
+    print("  --ossm-weights <FILE>  Path to O-SSM sidecar weights Safetensors\n")
+    print("  --raw                  Send raw prompt without ChatML wrapping\n")
+    print("  --dump-logits          Dump top logits after execution\n")
+}
+
+fn cstr_len(p: i64) -> i64 with Mut {
+    var i: i64 = 0
+    while ptr_read_u8(p, i) != 0 {
+        i = i + 1
+    }
+    i
+}
+
+fn cstr_eq_literal(p: i64, lit: string) -> bool with Mut {
+    let lit_len = str_len(lit)
+    var i: i64 = 0
+    while i < lit_len {
+        let b = ptr_read_u8(p, i)
+        if b == 0 { return false }
+        if (b as i32) != (str_char_at(lit, i) as i32) { return false }
+        i = i + 1
+    }
+    ptr_read_u8(p, lit_len) == 0
+}
+
+fn parse_i64_cstr(p: i64) -> i64 with Mut {
+    var val: i64 = 0
+    var i: i64 = 0
+    var neg = false
+    let b0 = ptr_read_u8(p, 0)
+    if b0 == 45 {
+        neg = true
+        i = 1
+    }
+    while true {
+        let b = ptr_read_u8(p, i)
+        if b < 48 || b > 57 { break }
+        val = val * 10 + ((b - 48) as i64)
+        i = i + 1
+    }
+    if neg { 0 - val } else { val }
+}
+
+fn parse_f64_cstr(p: i64) -> f64 with Mut, Div {
+    var int_part: i64 = 0
+    var i: i64 = 0
+    var neg = false
+    let b0 = ptr_read_u8(p, 0)
+    if b0 == 45 {
+        neg = true
+        i = 1
+    }
+    while true {
+        let b = ptr_read_u8(p, i)
+        if b < 48 || b > 57 { break }
+        int_part = int_part * 10 + ((b - 48) as i64)
+        i = i + 1
+    }
+    var res = int_part as f64
+    if ptr_read_u8(p, i) == 46 {
+        i = i + 1
+        var frac_div: f64 = 10.0
+        while true {
+            let b = ptr_read_u8(p, i)
+            if b < 48 || b > 57 { break }
+            let d = (b - 48) as f64
+            res = res + d / frac_div
+            frac_div = frac_div * 10.0
+            i = i + 1
+        }
+    }
+    if neg { 0.0 - res } else { res }
+}
+
+fn dump_model_logits(m: &Qwen3Model) with IO, Mut {
+    let logits_base = page_arena_ptr(&m.arena) + m.buf_logits_off
+    let vocab_size = m.cfg.vocab
+    println("--- Top-5 Model Logits ---")
+    var rank: i64 = 0
+    var last_max: f64 = 1e30
+    while rank < 5 {
+        var best_v = -1e30
+        var best_tok: i64 = -1
+        var vi: i64 = 0
+        while vi < vocab_size {
+            let v = f32_bits_to_f64(ptr_read_u32_le(logits_base, vi * 4))
+            if v < last_max && v > best_v {
+                best_v = v
+                best_tok = vi
+            }
+            vi = vi + 1
+        }
+        if best_tok >= 0 {
+            print("  Rank ")
+            print_int(rank)
+            print(": token_id=")
+            print_int(best_tok)
+            print(" logit=")
+            print_f64(best_v)
+            print("\n")
+            last_max = best_v
+        }
+        rank = rank + 1
+    }
+}
+
+pub fn main(argc: i32, argv: i64) -> i32 with IO, Mut, Panic, Div, Alloc {
+    var model_dir_p: i64 = 0
+    var tok_path_p: i64 = 0
+    var prompt_p: i64 = 0
+    var system_p: i64 = 0
+    var enable_thinking = true
+    var temp: f64 = 0.0
+    var top_p: f64 = 0.0
+    var seed: i64 = 42
+    var max_tokens: i64 = 16
+    var max_seq: i64 = 2048
+    var backend_mode: i64 = 0
+    var quant_mode: i64 = 0
+    var conf_kind: i64 = 0
+    var conformal_mode: i64 = 0
+    var conformal_alpha_05 = false
+    var conformal_q: f64 = -1.0
+    var fast_no_guarantee = false
+    var bench_prompts_p: i64 = 0
+    var ossm_every: i64 = 0
+    var ossm_weights_p: i64 = 0
+    var raw_prompt = false
+    var dump_logits = false
+    var use_tensor_core_prefill = false
+
+    var ai: i64 = 1
+    let n_args = argc as i64
+    while ai < n_args {
+        let p = ptr_read_i64_le(argv, ai * 8)
+        if cstr_eq_literal(p, "--help") || cstr_eq_literal(p, "-h") {
+            print_help()
+            return 0
+        } else if cstr_eq_literal(p, "--version") || cstr_eq_literal(p, "-v") {
+            print_version()
+            return 0
+        } else if cstr_eq_literal(p, "--model-dir") {
+            ai = ai + 1
+            if ai >= n_args {
+                println("sounio-llm: error: --model-dir requires a value")
+                return 1
+            }
+            model_dir_p = ptr_read_i64_le(argv, ai * 8)
+        } else if cstr_eq_literal(p, "--tokenizer") {
+            ai = ai + 1
+            if ai >= n_args {
+                println("sounio-llm: error: --tokenizer requires a value")
+                return 1
+            }
+            tok_path_p = ptr_read_i64_le(argv, ai * 8)
+        } else if cstr_eq_literal(p, "--prompt") {
+            ai = ai + 1
+            if ai >= n_args {
+                println("sounio-llm: error: --prompt requires a value")
+                return 1
+            }
+            prompt_p = ptr_read_i64_le(argv, ai * 8)
+        } else if cstr_eq_literal(p, "--system") {
+            ai = ai + 1
+            if ai >= n_args {
+                println("sounio-llm: error: --system requires a value")
+                return 1
+            }
+            system_p = ptr_read_i64_le(argv, ai * 8)
+        } else if cstr_eq_literal(p, "--think") {
+            enable_thinking = true
+        } else if cstr_eq_literal(p, "--no-think") {
+            enable_thinking = false
+        } else if cstr_eq_literal(p, "--temp") {
+            ai = ai + 1
+            if ai >= n_args {
+                println("sounio-llm: error: --temp requires a value")
+                return 1
+            }
+            temp = parse_f64_cstr(ptr_read_i64_le(argv, ai * 8))
+        } else if cstr_eq_literal(p, "--top-p") {
+            ai = ai + 1
+            if ai >= n_args {
+                println("sounio-llm: error: --top-p requires a value")
+                return 1
+            }
+            top_p = parse_f64_cstr(ptr_read_i64_le(argv, ai * 8))
+        } else if cstr_eq_literal(p, "--seed") {
+            ai = ai + 1
+            if ai >= n_args {
+                println("sounio-llm: error: --seed requires a value")
+                return 1
+            }
+            seed = parse_i64_cstr(ptr_read_i64_le(argv, ai * 8))
+        } else if cstr_eq_literal(p, "--max-tokens") {
+            ai = ai + 1
+            if ai >= n_args {
+                println("sounio-llm: error: --max-tokens requires a value")
+                return 1
+            }
+            max_tokens = parse_i64_cstr(ptr_read_i64_le(argv, ai * 8))
+        } else if cstr_eq_literal(p, "--max-seq") {
+            ai = ai + 1
+            if ai >= n_args {
+                println("sounio-llm: error: --max-seq requires a value")
+                return 1
+            }
+            max_seq = parse_i64_cstr(ptr_read_i64_le(argv, ai * 8))
+        } else if cstr_eq_literal(p, "--backend") {
+            ai = ai + 1
+            if ai >= n_args {
+                println("sounio-llm: error: --backend requires a value")
+                return 1
+            }
+            let bp = ptr_read_i64_le(argv, ai * 8)
+            if cstr_eq_literal(bp, "metal") { backend_mode = 1 }
+            else if cstr_eq_literal(bp, "cpu") { backend_mode = 2 }
+            else if cstr_eq_literal(bp, "cuda") { backend_mode = 3 }
+            else if cstr_eq_literal(bp, "auto") { backend_mode = 0 }
+            else {
+                println("sounio-llm: error: invalid --backend (expected auto|metal|cuda|cpu)")
+                return 1
+            }
+        } else if cstr_eq_literal(p, "--quant") {
+            ai = ai + 1
+            if ai >= n_args {
+                println("sounio-llm: error: --quant requires a value")
+                return 1
+            }
+            let qp = ptr_read_i64_le(argv, ai * 8)
+            if cstr_eq_literal(qp, "bf16") {
+                quant_mode = 0
+                conf_kind = 0
+            } else if cstr_eq_literal(qp, "q4") {
+                quant_mode = 22
+                conf_kind = 0
+            } else if cstr_eq_literal(qp, "q4_eisa") {
+                quant_mode = 1
+                conf_kind = 0
+            } else if cstr_eq_literal(qp, "q8_eisa") {
+                quant_mode = 2
+                conf_kind = 0
+            } else if cstr_eq_literal(qp, "q4_eisa_adaptive") {
+                quant_mode = 3
+                conf_kind = 0
+            } else if cstr_eq_literal(qp, "q8_eisa_adaptive") {
+                quant_mode = 4
+                conf_kind = 0
+            } else if cstr_eq_literal(qp, "q4_cone") {
+                quant_mode = 5
+                conf_kind = 0
+            } else if cstr_eq_literal(qp, "q8_cone") {
+                quant_mode = 6
+                conf_kind = 0
+            } else if cstr_eq_literal(qp, "q8_conformal") {
+                conf_kind = 1
+            } else if cstr_eq_literal(qp, "q8_mlp_conformal") {
+                conf_kind = 2
+            } else if cstr_eq_literal(qp, "q8_scrub") {
+                conf_kind = 3
+            } else if cstr_eq_literal(qp, "q8_exact_scrub") {
+                conf_kind = 4
+            } else if cstr_eq_literal(qp, "q4_conformal") {
+                conf_kind = 5
+            } else if cstr_eq_literal(qp, "q4_scrub") {
+                conf_kind = 6
+            } else if cstr_eq_literal(qp, "q4_exact_scrub") {
+                conf_kind = 7
+            } else {
+                println("sounio-llm: error: invalid --quant mode")
+                return 1
+            }
+        } else if cstr_eq_literal(p, "--conformal-mode") {
+            ai = ai + 1
+            if ai >= n_args {
+                println("sounio-llm: error: --conformal-mode requires a value")
+                return 1
+            }
+            let cmp = ptr_read_i64_le(argv, ai * 8)
+            if cstr_eq_literal(cmp, "flip_exact") { conformal_mode = 0 }
+            else if cstr_eq_literal(cmp, "overtake") { conformal_mode = 1 }
+            else {
+                println("sounio-llm: error: invalid --conformal-mode (expected flip_exact|overtake)")
+                return 1
+            }
+        } else if cstr_eq_literal(p, "--conformal-alpha") {
+            ai = ai + 1
+            if ai >= n_args {
+                println("sounio-llm: error: --conformal-alpha requires a value")
+                return 1
+            }
+            let cap = ptr_read_i64_le(argv, ai * 8)
+            if cstr_eq_literal(cap, "0.01") { conformal_alpha_05 = false }
+            else if cstr_eq_literal(cap, "0.05") { conformal_alpha_05 = true }
+            else {
+                println("sounio-llm: error: invalid --conformal-alpha (expected 0.01|0.05)")
+                return 1
+            }
+        } else if cstr_eq_literal(p, "--conformal-q") {
+            ai = ai + 1
+            if ai >= n_args {
+                println("sounio-llm: error: --conformal-q requires a value")
+                return 1
+            }
+            conformal_q = parse_f64_cstr(ptr_read_i64_le(argv, ai * 8))
+            if conformal_q < 0.0 {
+                println("sounio-llm: error: --conformal-q must be >= 0.0")
+                return 1
+            }
+        } else if cstr_eq_literal(p, "--fast-no-guarantee") {
+            fast_no_guarantee = true
+        } else if cstr_eq_literal(p, "--bench-prompts") {
+            ai = ai + 1
+            if ai >= n_args {
+                println("sounio-llm: error: --bench-prompts requires a value")
+                return 1
+            }
+            bench_prompts_p = ptr_read_i64_le(argv, ai * 8)
+        } else if cstr_eq_literal(p, "--ossm-every") {
+            ai = ai + 1
+            if ai >= n_args {
+                println("sounio-llm: error: --ossm-every requires a value")
+                return 1
+            }
+            ossm_every = parse_i64_cstr(ptr_read_i64_le(argv, ai * 8))
+        } else if cstr_eq_literal(p, "--ossm-weights") {
+            ai = ai + 1
+            if ai >= n_args {
+                println("sounio-llm: error: --ossm-weights requires a value")
+                return 1
+            }
+            ossm_weights_p = ptr_read_i64_le(argv, ai * 8)
+        } else if cstr_eq_literal(p, "--raw") {
+            raw_prompt = true
+        } else if cstr_eq_literal(p, "--dump-logits") {
+            dump_logits = true
+        } else if cstr_eq_literal(p, "--prefill") {
+            ai = ai + 1
+            if ai >= n_args {
+                println("sounio-llm: error: --prefill requires a value")
+                return 1
+            }
+            let pv = ptr_read_i64_le(argv, ai * 8)
+            if cstr_eq_literal(pv, "simt") {
+                use_tensor_core_prefill = false
+            } else if cstr_eq_literal(pv, "tensor_core") {
+                use_tensor_core_prefill = true
+            } else {
+                println("sounio-llm: error: --prefill must be simt or tensor_core")
+                return 1
+            }
+        } else if ptr_read_u8(p, 0) == 45 {
+            println("sounio-llm: error: unknown CLI flag")
+            return 1
+        }
+        ai = ai + 1
+    }
+
+    if conf_kind == 1 {
+        if conformal_mode == 0 {
+            quant_mode = if conformal_alpha_05 { 8 } else { 7 }
+        } else {
+            quant_mode = if conformal_alpha_05 { 9 } else { 10 }
+        }
+    } else if conf_kind == 2 {
+        quant_mode = if conformal_alpha_05 { 12 } else { 11 }
+    } else if conf_kind == 3 {
+        quant_mode = if conformal_alpha_05 { 14 } else { 13 }
+    } else if conf_kind == 4 {
+        quant_mode = 15
+    } else if conf_kind == 5 {
+        quant_mode = if conformal_alpha_05 { 17 } else { 16 }
+    } else if conf_kind == 6 {
+        quant_mode = if conformal_alpha_05 { 19 } else { 18 }
+    } else if conf_kind == 7 {
+        quant_mode = if conformal_alpha_05 { 21 } else { 20 }
+    }
+    if fast_no_guarantee && conformal_q < 0.0 {
+        conformal_q = 0.55
+    }
+
+    var use_metal = false
+    var use_cuda = false
+    if backend_mode == 1 {
+        let msess = metal_session_open("")
+        let mok = metal_session_is_ok(&msess)
+        let _c = metal_session_close(msess)
+        if !mok {
+            println("sounio-llm: error: --backend metal requested but Metal runtime unavailable")
+            return 1
+        }
+        use_metal = true
+    } else if backend_mode == 3 {
+        use_cuda = true
+    } else if backend_mode == 0 {
+        let msess = metal_session_open("")
+        if metal_session_is_ok(&msess) {
+            use_metal = true
+        }
+        let _c = metal_session_close(msess)
+        if !use_metal {
+            let csess = cuda_session_open("", -1)
+            if cuda_session_is_ok(&csess) {
+                use_cuda = true
+            }
+            let _cc = cuda_session_close(csess)
+        }
+    }
+
+    let model_dir: string = if model_dir_p != 0 {
+        (model_dir_p as *mut u8) as string
+    } else {
+        "/tmp/sounio_llm_phase4_model"
+    }
+
+    let tok_buf = page_arena_alloc(4096)
+    var tok_path: string = "/tmp/sounio_llm_phase4_tok.json"
+    if tok_path_p != 0 {
+        tok_path = (tok_path_p as *mut u8) as string
+    } else if model_dir_p != 0 && page_arena_is_ok(&tok_buf) {
+        let tb_ptr = page_arena_ptr(&tok_buf)
+        let md_len = cstr_len(model_dir_p)
+        var cpi: i64 = 0
+        while cpi < md_len {
+            let _w = ptr_write_u8(tb_ptr, cpi, ptr_read_u8(model_dir_p, cpi))
+            cpi = cpi + 1
+        }
+        let lit = "/tokenizer.json"
+        let lit_len = str_len(lit)
+        var li: i64 = 0
+        while li < lit_len {
+            let _w = ptr_write_u8(tb_ptr, cpi, str_char_at(lit, li) as u8)
+            cpi = cpi + 1
+            li = li + 1
+        }
+        let _w0 = ptr_write_u8(tb_ptr, cpi, 0)
+        tok_path = (tb_ptr as *mut u8) as string
+    }
+
+    let out_cap: i64 = 65536
+    let text_arena = page_arena_alloc(out_cap + 64)
+    let tok = qwen3_tokenizer_load(tok_path)
+    let m = qwen3_model_open(model_dir)
+    var ret_code: i32 = 1
+
+    if page_arena_is_ok(&text_arena) && qwen3_tokenizer_is_ok(&tok) && qwen3_model_is_ok(&m) {
+        let t_ptr = page_arena_ptr(&text_arena)
+        let out_text_ptr = t_ptr
+        let out_len_ptr = t_ptr + out_cap
+
+        let default_prompt_ptr = t_ptr + out_cap + 16
+        let _wp0 = ptr_write_u8(default_prompt_ptr, 0, 115) // ascii s
+        let _wp1 = ptr_write_u8(default_prompt_ptr, 1, 111) // ascii o
+        let _wp2 = ptr_write_u8(default_prompt_ptr, 2, 109) // ascii m
+        let _wp3 = ptr_write_u8(default_prompt_ptr, 3, 97)  // ascii a
+        let _wp4 = ptr_write_u8(default_prompt_ptr, 4, 0)
+
+        let user_ptr = if prompt_p != 0 { prompt_p } else { default_prompt_ptr }
+        let user_len = cstr_len(user_ptr)
+
+        let sys_ptr = if system_p != 0 { system_p } else { 0 }
+        let sys_len = if system_p != 0 { cstr_len(system_p) } else { 0 }
+
+        let cfg_m = qwen3_model_cfg(&m)
+        let max_seq_cap = if max_seq > 16 { max_seq } else { 16 }
+        let block_size: i64 = 16
+        let max_blocks = (max_seq_cap + block_size - 1) / block_size
+        var kv = qwen3_kv_alloc(cfg_m.layers, max_blocks, block_size, cfg_m.n_kv, cfg_m.head_dim)
+        var ossm = qwen3_ossm_state_alloc(cfg_m.layers, cfg_m.hidden)
+
+        if qwen3_kv_is_ok(&kv) && qwen3_ossm_state_is_ok(&ossm) {
+            let ossm_weights_len = if ossm_weights_p != 0 { cstr_len(ossm_weights_p) } else { 0 }
+            let run_cfg = SounioLlmRunCfg {
+                use_metal: use_metal,
+                enable_thinking: enable_thinking,
+                max_tokens: max_tokens,
+                max_seq: max_seq,
+                temp: temp,
+                top_p: top_p,
+                seed: seed,
+                ossm_every: ossm_every,
+                quant_mode: quant_mode,
+                stream_stdout: false,
+                raw_prompt: raw_prompt,
+                ossm_weights_ptr: ossm_weights_p,
+                ossm_weights_len: ossm_weights_len,
+                use_tensor_core_prefill: use_tensor_core_prefill,
+                ok: true,
+            }
+
+            let _z0 = ptr_write_i64_le(out_len_ptr, 0, 0)
+            if bench_prompts_p != 0 {
+                let bench_path = (bench_prompts_p as *mut u8) as string
+                if use_cuda {
+                    ret_code = sounio_llm_run_bench_prompts_cuda(
+                        &tok,
+                        &m,
+                        &!kv,
+                        sys_ptr,
+                        sys_len,
+                        bench_path,
+                        &run_cfg,
+                        conformal_q
+                    )
+                } else {
+                    ret_code = sounio_llm_run_bench_prompts(
+                        &tok,
+                        &m,
+                        &!kv,
+                        &!ossm,
+                        sys_ptr,
+                        sys_len,
+                        bench_path,
+                        &run_cfg,
+                        conformal_q
+                    )
+                }
+            } else {
+                let stats = if use_cuda {
+                    sounio_llm_run_chat_generation_cuda_q(
+                        &tok,
+                        &m,
+                        &!kv,
+                        sys_ptr,
+                        sys_len,
+                        user_ptr,
+                        user_len,
+                        &run_cfg,
+                        conformal_q,
+                        out_text_ptr,
+                        out_cap - 128,
+                        out_len_ptr
+                    )
+                } else {
+                    sounio_llm_run_chat_generation_q(
+                        &tok,
+                        &m,
+                        &!kv,
+                        &!ossm,
+                        sys_ptr,
+                        sys_len,
+                        user_ptr,
+                        user_len,
+                        &run_cfg,
+                        conformal_q,
+                        out_text_ptr,
+                        out_cap - 128,
+                        out_len_ptr
+                    )
+                }
+
+                if stats.ok && (max_tokens <= 0 || stats.generated_tokens > 0) {
+                    let hist_s = if use_tensor_core_prefill && (use_metal || use_cuda) && quant_mode != 22 { "VENDOR_PREFILL" } else { "UNCOMPARED" }
+                    if stats.uncertified_count > 0 && stats.verified_exact_count == 0 {
+                        print("[provenance exactness=UNCERTIFIED history=")
+                        print(hist_s)
+                        println("]")
+                    } else if stats.verified_exact_count > 0 && stats.uncertified_count == 0 {
+                        print("[provenance exactness=VERIFIED_EXACT history=")
+                        print(hist_s)
+                        println("]")
+                    } else if stats.verified_exact_count == 0 && stats.uncertified_count == 0 && quant_mode == 22 {
+                        print("[provenance exactness=UNCERTIFIED history=")
+                        print(hist_s)
+                        println("]")
+                    } else {
+                        print("[provenance exactness=MIXED history=")
+                        print(hist_s)
+                        print(" verified_exact=")
+                        print_int(stats.verified_exact_count)
+                        print(" uncertified=")
+                        print_int(stats.uncertified_count)
+                        println("]")
+                    }
+                    let out_len = ptr_read_i64_le(out_len_ptr, 0)
+                    var oi: i64 = 0
+                    while oi < out_len {
+                        print_char(ptr_read_u8(out_text_ptr, oi) as i32)
+                        oi = oi + 1
+                    }
+
+                    print("\n[sounio-llm: prompt_tokens=")
+                    print_int(stats.prompt_tokens)
+                    print(" gen_tokens=")
+                    print_int(stats.generated_tokens)
+                    print(" top1_margin=")
+                    print_f64(stats.top1_margin)
+                    print(" last_assoc_l2=")
+                    print_f64(stats.last_associator_l2)
+                    print(" prefill_ms=")
+                    print_f64(stats.prefill_ms)
+                    print(" decode_ms=")
+                    print_f64(stats.decode_ms)
+                    print(" decode_tok_per_sec=")
+                    print_f64(stats.decode_tok_per_sec)
+                    print(" elapsed_ms=")
+                    print_f64(stats.elapsed_ms)
+                    print(" tok_per_sec=")
+                    print_f64(stats.tok_per_sec)
+                    print(" certified=")
+                    print_int(stats.certified_count)
+                    print(" escalated=")
+                    print_int(stats.escalated_count)
+                    print(" verified_exact=")
+                    print_int(stats.verified_exact_count)
+                    print(" uncertified=")
+                    print_int(stats.uncertified_count)
+                    print(" last_combined_err=")
+                    print_f64(stats.last_combined_err)
+                    print("]\n")
+
+                    if dump_logits {
+                        dump_model_logits(&m)
+                    }
+                    ret_code = 0
+                } else {
+                    println("sounio-llm: error: generation failed (ok=false or 0 tokens emitted)")
+                }
+            }
+        } else {
+            println("sounio-llm: error: failed to allocate KV cache or OSSM state")
+        }
+
+        let _of = qwen3_ossm_state_free(ossm)
+        let _kf = qwen3_kv_free(kv)
+    } else {
+        println("sounio-llm: error: failed to initialize model, tokenizer or arena")
+    }
+
+    let _af = page_arena_free(text_arena)
+    let _tbf = page_arena_free(tok_buf)
+    let _mf = qwen3_model_free(m)
+    let _tkf = qwen3_tokenizer_free(tok)
+    ret_code
+}

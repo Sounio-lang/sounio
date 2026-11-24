@@ -1,0 +1,156 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: LLM_V2_PROVENANCE_PASS
+//
+// Phase 1B/3 Provenance Test:
+//   Verifies that serve.sio SSE chunks and full completion payloads include
+//   explicit per-token provenance labels (VERIFIED_EXACT | UNCERTIFIED).
+
+use llm::mmap::{
+    PageArena,
+    page_arena_alloc,
+    page_arena_free,
+    page_arena_is_ok,
+    page_arena_ptr,
+}
+use llm::hal::{hal_self_binary_sha256_hex}
+use llm::serve::{
+    SV_EXACTNESS_UNCERTIFIED,
+    SV_EXACTNESS_VERIFIED_EXACT,
+    SV_HISTORY_UNCOMPARED,
+    SV_HISTORY_VENDOR_PREFILL,
+    SV_HISTORY_CROSS_BACKEND_IDENTICAL,
+    SV_HISTORY_CROSS_BACKEND_DIVERGENT,
+    sv_float_model_contract,
+    sv_exactness_label,
+    sv_history_label,
+    sv_pack_provenance,
+    sv_sse_token_provenance,
+    sv_completion_body_provenance,
+}
+use llm::sounio_llm_cli::{sounio_llm_float_model_contract}
+
+fn contains_str(buf: i64, len: i64, pat: string) -> bool with Mut {
+    let plen = str_len(pat)
+    if plen == 0 { return true }
+    var i: i64 = 0
+    while i + plen <= len {
+        var matched = true
+        var j: i64 = 0
+        while j < plen {
+            if ptr_read_u8(buf, i + j) != (str_char_at(pat, j) & 255) {
+                matched = false
+                j = plen
+            } else {
+                j = j + 1
+            }
+        }
+        if matched { return true }
+        i = i + 1
+    }
+    false
+}
+
+fn check_balanced_json(buf: i64, start: i64, len: i64) -> bool with Mut {
+    var braces: i64 = 0
+    var brackets: i64 = 0
+    var in_str = false
+    var esc = false
+    var i = start
+    while i < len {
+        let c = ptr_read_u8(buf, i)
+        if esc {
+            esc = false
+        } else if in_str {
+            if c == 92 { esc = true }
+            else if c == 34 { in_str = false }
+        } else {
+            if c == 34 { in_str = true }
+            else if c == 123 { braces = braces + 1 }
+            else if c == 125 {
+                braces = braces - 1
+                if braces < 0 { return false }
+            } else if c == 91 { brackets = brackets + 1 }
+            else if c == 93 {
+                brackets = brackets - 1
+                if brackets < 0 { return false }
+            }
+        }
+        i = i + 1
+    }
+    !in_str && !esc && braces == 0 && brackets == 0
+}
+
+fn check_provenance_api(arena: &PageArena) -> bool with Alloc, Mut, Div, Panic, IO {
+    var ok = true
+    if str_len(sv_exactness_label(SV_EXACTNESS_VERIFIED_EXACT)) != 14 { ok = false }
+    if str_len(sv_exactness_label(SV_EXACTNESS_UNCERTIFIED)) != 11 { ok = false }
+    if str_len(sv_history_label(SV_HISTORY_UNCOMPARED)) != 10 { ok = false }
+    if str_len(sv_history_label(SV_HISTORY_VENDOR_PREFILL)) != 14 { ok = false }
+    if str_len(sv_history_label(SV_HISTORY_CROSS_BACKEND_IDENTICAL)) != 23 { ok = false }
+    if str_len(sv_history_label(SV_HISTORY_CROSS_BACKEND_DIVERGENT)) != 23 { ok = false }
+    if str_len(sv_float_model_contract()) != 56 { ok = false }
+    if str_len(sounio_llm_float_model_contract()) != 56 { ok = false }
+
+    let base = page_arena_ptr(arena)
+    let sse_buf = base
+    let body_buf = base + 2048
+    let txt_buf = base + 6144
+    let tok_ids = txt_buf + 256
+    let provs = tok_ids + 64
+    let sha_buf = provs + 64
+    if !hal_self_binary_sha256_hex(sha_buf) { ok = false }
+
+    // "hi"
+    let _t0 = ptr_write_u8(txt_buf, 0, 104)
+    let _t1 = ptr_write_u8(txt_buf, 1, 105)
+
+    // SSE chunk for token 42 (VERIFIED_EXACT + UNCOMPARED)
+    let p_exact_uncomp = sv_pack_provenance(SV_EXACTNESS_VERIFIED_EXACT, SV_HISTORY_UNCOMPARED)
+    let sse_len1 = sv_sse_token_provenance(sse_buf as *mut u8, 0, 7, "qwen3-0.6b", txt_buf as *mut u8, 2, 42, p_exact_uncomp)
+    if !contains_str(sse_buf, sse_len1, "\"token_id\":42,\"exactness\":\"VERIFIED_EXACT\",\"history\":\"UNCOMPARED\"") { ok = false }
+    if !check_balanced_json(sse_buf, 6, sse_len1 - 2) { ok = false }
+
+    // SSE chunk for token 99 (UNCERTIFIED + VENDOR_PREFILL)
+    let p_uncert_vend = sv_pack_provenance(SV_EXACTNESS_UNCERTIFIED, SV_HISTORY_VENDOR_PREFILL)
+    let sse_len2 = sv_sse_token_provenance(sse_buf as *mut u8, 0, 8, "qwen3-0.6b", txt_buf as *mut u8, 2, 99, p_uncert_vend)
+    if !contains_str(sse_buf, sse_len2, "\"token_id\":99,\"exactness\":\"UNCERTIFIED\",\"history\":\"VENDOR_PREFILL\"") { ok = false }
+    if !check_balanced_json(sse_buf, 6, sse_len2 - 2) { ok = false }
+
+    // SSE chunk for token 7 (VERIFIED_EXACT + CROSS_BACKEND_DIVERGENT)
+    let p_exact_div = sv_pack_provenance(SV_EXACTNESS_VERIFIED_EXACT, SV_HISTORY_CROSS_BACKEND_DIVERGENT)
+    let sse_len3 = sv_sse_token_provenance(sse_buf as *mut u8, 0, 9, "qwen3-0.6b", txt_buf as *mut u8, 2, 7, p_exact_div)
+    if !contains_str(sse_buf, sse_len3, "\"token_id\":7,\"exactness\":\"VERIFIED_EXACT\",\"history\":\"CROSS_BACKEND_DIVERGENT\"") { ok = false }
+    if !check_balanced_json(sse_buf, 6, sse_len3 - 2) { ok = false }
+
+    // Full completion body with mixed per-token exactness/history + run header fields
+    let _i0 = ptr_write_i64_le(tok_ids, 0, 42)
+    let _i1 = ptr_write_i64_le(tok_ids, 8, 99)
+    let _p0 = ptr_write_i64_le(provs, 0, p_exact_uncomp)
+    let _p1 = ptr_write_i64_le(provs, 8, p_uncert_vend)
+
+    let body_len = sv_completion_body_provenance(body_buf as *mut u8, 9, "qwen3-0.6b", txt_buf as *mut u8, 2, "stop", 12, 2, tok_ids, provs)
+    if !contains_str(body_buf, body_len, "\"binary_sha256\":\"") { ok = false }
+    if !contains_str(body_buf, body_len, "\"float_model\":\"binary32, round-to-nearest-even, FTZ+DAZ, fixed op order\"") { ok = false }
+    if !contains_str(body_buf, body_len, "\"token_provenance\":[{\"token_id\":42,\"exactness\":\"VERIFIED_EXACT\",\"history\":\"UNCOMPARED\"},{\"token_id\":99,\"exactness\":\"UNCERTIFIED\",\"history\":\"VENDOR_PREFILL\"}]") {
+        ok = false
+    }
+    if !check_balanced_json(body_buf, 0, body_len) { ok = false }
+    ok
+}
+
+fn main() -> i64 with Alloc, Mut, Div, Panic, IO {
+    let arena = page_arena_alloc(8192)
+    let ok = if page_arena_is_ok(&arena) {
+        check_provenance_api(&arena)
+    } else {
+        false
+    }
+    let _f = page_arena_free(arena)
+    if !ok {
+        println("LLM_V2_PROVENANCE_FAIL")
+        return 1
+    }
+    println("LLM_V2_PROVENANCE_PASS")
+    0
+}
