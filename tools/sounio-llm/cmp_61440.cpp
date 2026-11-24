@@ -140,8 +140,22 @@ struct Sha256 {
 struct RunHeader {
   std::string binary_sha256;
   std::string float_model;
+  std::string backend;
   std::string raw;
 };
+
+std::string_view backend_family(std::string_view b) {
+  if (b.starts_with("cuda")) return "cuda";
+  if (b.starts_with("metal")) return "metal";
+  return b;
+}
+
+std::string_view verdict_label(bool identical, bool same_backend) {
+  if (same_backend) {
+    return identical ? "KERNEL_REVISION_IDENTICAL" : "KERNEL_REVISION_DIVERGENT";
+  }
+  return identical ? "CROSS_BACKEND_IDENTICAL" : "CROSS_BACKEND_DIVERGENT";
+}
 
 struct TokenTuple {
   int64_t t1 = 0;
@@ -260,7 +274,9 @@ RunHeader parse_run_header(std::string_view line, std::string_view path) {
     throw FormatError(std::string(path) + ":1: float_model=\"" + std::string(*fm) +
                       "\" != expected \"" + std::string(kExpectedFloatModel) + "\"");
   }
-  return RunHeader{std::string(*sha), std::string(*fm), std::string(line)};
+  const auto bk = find_unquoted_kv(line, "backend");
+  return RunHeader{std::string(*sha), std::string(*fm), bk ? std::string(*bk) : std::string{},
+                   std::string(line)};
 }
 
 std::string compute_token_cols_sha256(const std::map<int64_t, PromptRow>& rows) {
@@ -391,6 +407,9 @@ struct CompareResult {
   std::string ref_token_cols_sha256;
   std::string cand_token_cols_sha256;
   std::string float_model;
+  std::string ref_backend;
+  std::string cand_backend;
+  bool same_backend = false;
 };
 
 CompareResult run_compare(const std::string& ref_path, const std::string& cand_path,
@@ -417,6 +436,11 @@ CompareResult run_compare(const std::string& ref_path, const std::string& cand_p
   res.ref_token_cols_sha256 = ref.token_cols_sha256;
   res.cand_token_cols_sha256 = cand.token_cols_sha256;
   res.float_model = ref.header.float_model;
+  res.ref_backend = ref.header.backend;
+  res.cand_backend = cand.header.backend;
+  const std::string_view rf = backend_family(res.ref_backend);
+  const std::string_view cf = backend_family(res.cand_backend);
+  res.same_backend = (!rf.empty() && rf == cf);
 
   struct AnnotatedRow {
     int64_t pidx = 0;
@@ -518,8 +542,7 @@ CompareResult run_compare(const std::string& ref_path, const std::string& cand_p
       }
       if (any_step_diff) prompt_history_diverged = true;
       if (!out_path.empty()) {
-        arow.histories.push_back(prompt_history_diverged ? "CROSS_BACKEND_DIVERGENT"
-                                                         : "CROSS_BACKEND_IDENTICAL");
+        arow.histories.push_back(verdict_label(!prompt_history_diverged, res.same_backend));
       }
     }
     if (!out_path.empty()) annotated.push_back(std::move(arow));
@@ -543,7 +566,7 @@ CompareResult run_compare(const std::string& ref_path, const std::string& cand_p
         << " ref_token_cols_sha256=" << res.ref_token_cols_sha256
         << " cand_token_cols_sha256=" << res.cand_token_cols_sha256
         << " float_model=\"" << res.float_model << "\""
-        << " verdict=" << (res.identical ? "CROSS_BACKEND_IDENTICAL" : "CROSS_BACKEND_DIVERGENT");
+        << " verdict=" << verdict_label(res.identical, res.same_backend);
     if (!res.first_divergent_op.empty()) {
       out << " first_divergent_op=" << res.first_divergent_op;
     }
@@ -584,7 +607,7 @@ void print_compare_result(const CompareResult& res) {
             << " max_margin_drift=" << (res.max_margin_non_finite ? -1.0 : res.max_margin_drift)
             << " max_margin_bit_delta=" << res.max_margin_bit_delta
             << " total_cuda_fma_min_norm_hits=" << res.total_fma_hits
-            << " verdict=" << (res.identical ? "CROSS_BACKEND_IDENTICAL" : "CROSS_BACKEND_DIVERGENT");
+            << " verdict=" << verdict_label(res.identical, res.same_backend);
   if (!res.first_divergent_op.empty()) {
     std::cout << " first_divergent_op=" << res.first_divergent_op;
   }
@@ -648,6 +671,14 @@ int run_selftest() {
         "# run_header binary_sha256=" + std::string(64, 'a') +
         " float_model=\"binary32, round-to-nearest-even, FTZ+DAZ, fixed op order\" "
         "backend=metal prefill=simt\n";
+    const std::string hdr_cuda =
+        "# run_header binary_sha256=" + std::string(64, 'b') +
+        " float_model=\"binary32, round-to-nearest-even, FTZ+DAZ, fixed op order\" "
+        "backend=cuda_audit prefill=simt\n";
+    const std::string hdr_cuda_q4 =
+        "# run_header binary_sha256=" + std::string(64, 'c') +
+        " float_model=\"binary32, round-to-nearest-even, FTZ+DAZ, fixed op order\" "
+        "backend=cuda_q4 prefill=simt\n";
     const std::string bad_fm_hdr =
         "# run_header binary_sha256=" + std::string(64, 'a') +
         " float_model=\"binary32, fast-math\" backend=metal prefill=simt\n";
@@ -655,6 +686,8 @@ int run_selftest() {
         "0\t8\t1\t0\t10:11:1065353216:1056964608:1056964608:exactness=VERIFIED_EXACT:history=UNCOMPARED\n";
     const std::string illegal_ident_row =
         "0\t8\t1\t0\t10:11:1065353216:1056964608:1056964608:exactness=VERIFIED_EXACT:history=CROSS_BACKEND_IDENTICAL\n";
+    const std::string illegal_krev_row =
+        "0\t8\t1\t0\t10:11:1065353216:1056964608:1056964608:exactness=VERIFIED_EXACT:history=KERNEL_REVISION_IDENTICAL\n";
     const std::string illegal_vend_row =
         "0\t8\t1\t0\t10:11:1065353216:1056964608:1056964608:exactness=VERIFIED_EXACT:history=VENDOR_PREFILL\n";
     const std::string nolabel_row = "0\t8\t1\t0\t10:11:1065353216:1056964608:1056964608\n";
@@ -671,35 +704,52 @@ int run_selftest() {
     };
 
     const std::string p_good = write_f("good.tsv", hdr + uncomp_row);
+    const std::string p_good_cuda = write_f("good_cuda.tsv", hdr_cuda + uncomp_row);
+    const std::string p_good_q4_a = write_f("good_q4_a.tsv", hdr_cuda_q4 + uncomp_row);
+    const std::string p_good_q4_b = write_f("good_q4_b.tsv", hdr_cuda_q4 + uncomp_row);
     const std::string p_bad_ref_ident = write_f("ref_ident.tsv", hdr + illegal_ident_row);
+    const std::string p_bad_krev_ident = write_f("krev_ident.tsv", hdr_cuda_q4 + illegal_krev_row);
     const std::string p_bad_cand_vend = write_f("cand_vend.tsv", hdr + illegal_vend_row);
     const std::string p_bad_nohdr = write_f("nohdr.tsv", uncomp_row);
     const std::string p_bad_fm = write_f("badfm.tsv", bad_fm_hdr + uncomp_row);
     const std::string p_bad_nolbl = write_f("nolbl.tsv", hdr + nolabel_row);
-    const std::string p_tok_diff = write_f("tokdiff.tsv", hdr + tok_diff_row);
-    const std::string p_margin_diff = write_f("margindiff.tsv", hdr + margin_diff_row);
+    const std::string p_tok_diff = write_f("tokdiff.tsv", hdr_cuda + tok_diff_row);
+    const std::string p_margin_diff = write_f("margindiff.tsv", hdr_cuda + margin_diff_row);
 
     bool ok = true;
-    ok &= expect_format_fail("ref_claims_cross_backend_identical", p_bad_ref_ident, p_good);
+    ok &= expect_format_fail("ref_claims_cross_backend_identical", p_bad_ref_ident, p_good_cuda);
     ok &= expect_format_fail("cand_claims_cross_backend_identical", p_good, p_bad_ref_ident);
-    ok &= expect_format_fail("single_backend_claims_vendor_prefill", p_bad_cand_vend, p_good);
-    ok &= expect_format_fail("missing_header", p_bad_nohdr, p_good);
-    ok &= expect_format_fail("wrong_float_model", p_bad_fm, p_good);
-    ok &= expect_format_fail("missing_labels", p_bad_nolbl, p_good);
+    ok &= expect_format_fail("single_claims_kernel_revision_identical", p_bad_krev_ident, p_good_q4_b);
+    ok &= expect_format_fail("single_backend_claims_vendor_prefill", p_bad_cand_vend, p_good_cuda);
+    ok &= expect_format_fail("missing_header", p_bad_nohdr, p_good_cuda);
+    ok &= expect_format_fail("wrong_float_model", p_bad_fm, p_good_cuda);
+    ok &= expect_format_fail("missing_labels", p_bad_nolbl, p_good_cuda);
     if (!ok) {
       cleanup();
       return 1;
     }
 
     const std::string out_match = (tmp / "out_match.tsv").string();
-    const auto r_match = run_compare(p_good, p_good, out_match);
-    if (!r_match.identical || r_match.token_mismatches != 0 || r_match.margin_bit_mismatches != 0) {
-      std::cerr << "SELFTEST FAIL: valid UNCOMPARED match failed\n";
+    const auto r_match = run_compare(p_good, p_good_cuda, out_match);
+    if (!r_match.identical || r_match.same_backend || r_match.token_mismatches != 0 ||
+        r_match.margin_bit_mismatches != 0 ||
+        verdict_label(r_match.identical, r_match.same_backend) != "CROSS_BACKEND_IDENTICAL") {
+      std::cerr << "SELFTEST FAIL: cross-backend UNCOMPARED match failed\n";
       cleanup();
       return 1;
     }
-    std::cout << "SELFTEST_POS [match]: verdict=CROSS_BACKEND_IDENTICAL sha="
+    std::cout << "SELFTEST_POS [cross_backend]: verdict=CROSS_BACKEND_IDENTICAL sha="
               << r_match.ref_token_cols_sha256 << '\n';
+
+    const auto r_krev = run_compare(p_good_q4_a, p_good_q4_b, "");
+    if (!r_krev.identical || !r_krev.same_backend ||
+        verdict_label(r_krev.identical, r_krev.same_backend) != "KERNEL_REVISION_IDENTICAL") {
+      std::cerr << "SELFTEST FAIL: same-backend KERNEL_REVISION_IDENTICAL match failed\n";
+      cleanup();
+      return 1;
+    }
+    std::cout << "SELFTEST_POS [same_backend]: verdict=KERNEL_REVISION_IDENTICAL sha="
+              << r_krev.ref_token_cols_sha256 << '\n';
 
     const std::string out_tok_div = (tmp / "out_tok_div.tsv").string();
     const auto r_tdiv = run_compare(p_good, p_tok_diff, out_tok_div);
