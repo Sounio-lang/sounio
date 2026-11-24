@@ -188,7 +188,7 @@ struct LowerLocalStack {
 var MERGE_X: [i64; 8] = [-1; 8]
 var MERGE_V: [i64; 64] = [-1; 64]
 var MERGE_RHS: [i64; 8] = [-1; 8]
-var MERGE_NAME: [Name; 8] = [ir_empty_name(); 8]
+var MERGE_NAME: [Name; 8]
 
 // ADR-016 contests of measured values (lower_contest_let_ref): a `let` bound to
 // contest(x1, ..., xn) or to retract(c, x, because: "...") records the sources,
@@ -197,7 +197,7 @@ var MERGE_NAME: [Name; 8] = [ir_empty_name(); 8]
 // contest read those sources. Keyed by function, so a name in another function
 // never matches.
 var CONTEST_N: i64 = 0
-var CONTEST_NAME: [Name; 64] = [ir_empty_name(); 64]
+var CONTEST_NAME: [Name; 64]
 var CONTEST_FN: [i64; 64] = [-1; 64]
 var CONTEST_LIST: [i64; 64] = [0; 64]
 var CONTEST_MASK: [i64; 64] = [0; 64]
@@ -413,9 +413,9 @@ var FO_STEP_BASE_SLOT: i64 = 0 - 1
 var FO_STEP_NF: i64 = 0
 var FO_STEP_NIDX: i64 = 0 - 1
 var FO_STEP_FIDX: [i64; 4] = [-1; 4]
-var FO_STEP_FNAME: [Name; 4] = [ir_empty_name(); 4]
-var FO_STEP_NNAME: Name = ir_empty_name()
-var FO_STEP_FN: Name = ir_empty_name()
+var FO_STEP_FNAME: [Name; 4]
+var FO_STEP_NNAME: Name
+var FO_STEP_FN: Name
 var FO_STEP_ZERO: i64 = 0
 var FO_STEP_ZVAL: i64 = 0
 var FO_STEP_ZS: [i64; 64] = [-1; 64]
@@ -475,7 +475,7 @@ var TG_MODULE: [i64; 768] = [0 - 1; 768]
 var TG_COUNT: i64 = 0
 let TG_MAX: i64 = 512
 var TG_ID: [i64; 768] = [0; 768]
-var TG_NAME: [Name; 768] = [ir_empty_name(); 768]
+var TG_NAME: [Name; 768]
 var TG_NF: [i64; 768] = [0; 768]
 // Bit p set: declared (non-self) parameter p carries a tangent (f64 or
 // Knowledge). Bit p of TG_KMASK: that parameter is a Knowledge.
@@ -1167,11 +1167,11 @@ fn tg_stmts_nonstraight(opt: &Option<Box<StmtList>>, depth: i64) -> bool with Mu
 
 // Collect the names called by the body into `out` (up to 32), for the
 // transitive may-draw question.
-var TG_CALLEES: [Name; 33] = [ir_empty_name(); 33]
+var TG_CALLEES: [Name; 33]
 var TG_NCALLEES: i64 = 0
 // Methods called (by short name, a method call or `Type::f`), and whether the
 // body calls something that is not a name (a field, a call result).
-var TG_MCALLEES: [Name; 33] = [ir_empty_name(); 33]
+var TG_MCALLEES: [Name; 33]
 var TG_NMCALLEES: i64 = 0
 var TG_OPAQUE_CALL: i64 = 0
 
@@ -1649,7 +1649,7 @@ var FO_LOOP_SCOPE: [i64; 64] = [0; 64]
 // local whose residual was never written adds no residual channel.
 var FO_RESID_NZ: [i64; 128] = [0; 128]
 var FO_LATE_DONE: [i64; 64] = [0; 64]
-var TG_DROP_NAME: Name = ir_empty_name()
+var TG_DROP_NAME: Name
 var TG_TAINT_N: i64 = 0
 var TG_TAINT: [i64; 128] = [0; 128]
 var TG_TAINT_CALLEE: [i64; 128] = [0; 128]
@@ -2837,7 +2837,7 @@ fn fo_array_base_tracked(base: i64) -> bool with Mut, Panic, Div {
 // variance. Without this, variance_of(r.cl0) keys the reference's own
 // register and reads 0 while variance_of(p.cl0) is live.
 var FO_REF_ALIAS_COUNT: i64 = 0
-var FO_REF_ALIAS_NAME: [Name; 64] = [ir_empty_name(); 64]
+var FO_REF_ALIAS_NAME: [Name; 64]
 var FO_REF_ALIAS_BASE: [i64; 64] = [0 - 1; 64]
 
 fn fo_ref_alias_reset() with Mut {
@@ -2900,7 +2900,7 @@ var FO_LOGN_ACTIVE: i64 = 0
 var FO_LOGN_U: i64 = 0 - 1
 var FO_LOGN_V: i64 = 0 - 1
 var FO_LOGN_COUNT: i64 = 0
-var FO_LOGN_NAME: [Name; 64] = [ir_empty_name(); 64]
+var FO_LOGN_NAME: [Name; 64]
 var FO_LOGN_LU: [i64; 64] = [0 - 1; 64]
 var FO_LOGN_LV: [i64; 64] = [0 - 1; 64]
 
@@ -10682,7 +10682,58 @@ fn lowerer_loop_rgn_finalize_mut(lo: &! Lowerer) with Mut, Panic, Div, IO {
 // BSS slot (lowerer_preseed_external_bss_globals_mut dedups by name); the
 // first module's initializer wins, as for the folded words
 // (ast_global_var_init_count).
+// E309: a module-level initializer that was neither folded into BSS words nor
+// deferred to `main`'s entry would leave its global zero-filled. Refused here,
+// after the module's last parse, because an imported pure fn folds only once
+// its module is registered (scripts/ci/madaros_global_init_identity_gate.sh).
+fn lowerer_refuse_dropped_global_inits_mut(lo: &! Lowerer) with Mut, Panic, Div, Alloc, IO {
+    if ast_global_init_drop_overflowed() {
+        print("error[E309]: the initializer of a module-level global can be neither evaluated at compile time nor run before `main`: more than 4096 such initializers, so some would not even be named; the compile is refused\n")
+        lowerer_mark_hard_error(lo)
+        return
+    }
+    var fi: i64 = 0
+    while fi < (*(*lo).module).fn_count {
+        let slot = ir_fn_get(&(*(*lo).module), fi)
+        if slot.compile_strategy == IR_STRATEGY_BSS_GLOBAL && slot.name.len > 0 {
+            if ast_global_init_dropped(slot.name) {
+                print("error[E309]: the initializer of a module-level global can be neither evaluated at compile time nor run before `main`: `")
+                lower_print_name(slot.name)
+                print("` would silently start as zero, so the compile is refused\n")
+                lowerer_mark_hard_error(lo)
+            } else if ast_global_deferred_block_ambiguous(slot.name) {
+                print("error[E309]: the initializer of a module-level global can be neither evaluated at compile time nor run before `main`: `")
+                lower_print_name(slot.name)
+                print("` has a closed array initializer in two modules, and one would overwrite the other at `main`'s entry\n")
+                lowerer_mark_hard_error(lo)
+            }
+        }
+        fi = fi + 1
+    }
+}
+
+// Fixed-array globals with a closed initializer: run the statements the parser
+// built for them (parser/items.sio items_defer_global_array_init).
+fn lowerer_emit_deferred_global_blocks_mut(lo: &! Lowerer) with Mut, Panic, Div, Alloc, IO {
+    if ast_global_deferred_block_overflowed() {
+        print("error[E309]: the initializer of a module-level global can be neither evaluated at compile time nor run before `main`: more than 4096 array initializers need run-time evaluation, and the rest would be left zero\n")
+        lowerer_mark_hard_error(lo)
+        return
+    }
+    var k: i64 = 0
+    while k < ast_global_deferred_block_count() {
+        let p = ast_global_deferred_block_ptr(k) as *mut Expr
+        if p != (0 as *mut Expr) {
+            let pair = (*lo).lower_expr_ref(&(*p))
+            (*lo) = pair.0
+        }
+        k = k + 1
+    }
+}
+
 fn lowerer_emit_deferred_global_inits_mut(lo: &! Lowerer) with Mut, Panic, Div, Alloc, IO {
+    lowerer_refuse_dropped_global_inits_mut(lo)
+    lowerer_emit_deferred_global_blocks_mut(lo)
     let total = ast_global_deferred_init_count()
     if ast_global_deferred_init_overflowed() {
         print("error: more than 16384 module-level initializers need run-time evaluation; the rest would be left zero, so the compile is refused (#2355)\n")
@@ -16897,13 +16948,13 @@ fn tg_hof_call_relower_safe(callee: Name, e: &Expr) -> bool with Mut, Panic, Div
 // on the cycle decide. Anything else, including the depth (8) or visit (64)
 // budget running out, answers "not stateless": the argument is then lowered
 // once and the call carries no inlined variance, the walk's old fallback.
-var FO_SL_LOC: [Name; 64] = [ir_empty_name(); 64]
+var FO_SL_LOC: [Name; 64]
 var FO_SL_NLOC: i64 = 0
 var FO_SL_BAD: i64 = 0
 var FO_SL_BUDGET: i64 = 0
-var FO_SL_CALLEES: [Name; 33] = [ir_empty_name(); 33]
+var FO_SL_CALLEES: [Name; 33]
 var FO_SL_NCALLEES: i64 = 0
-var FO_SL_STACK: [Name; 9] = [ir_empty_name(); 9]
+var FO_SL_STACK: [Name; 9]
 
 fn fo_sl_is_local(n: Name) -> bool with Mut, Panic, Div {
     var i: i64 = FO_SL_NLOC - 1
