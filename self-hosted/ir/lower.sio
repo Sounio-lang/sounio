@@ -3191,8 +3191,62 @@ fn lower_raw_ptr_field_pointee(type_name: Name, field_name: Name) -> Name with M
     ir_empty_name()
 }
 
+// Referent of a field declared `&S` or `&!S`, for TYPING only. With `t: &!Tbl`
+// in `struct Lw`, `(*(*lo).t).count` had no owner type: the field's named type
+// is empty for a reference type expression, so `count` fell through to the
+// first struct that has a field of that name. A program that also declared an
+// unrelated `struct X { pad: i64, count: i64 }` stored 3 at X's offset of
+// `count` (8) instead of Tbl's (0) and printed 0, with exit 0 (measured
+// 2026-11-23, tests/run-pass/lean_single_deep_chain_stores.sio).
+// Kept apart from LOWER_RAW_FIELD_*: that table also decides the raw-pointer
+// deref code path (expr_is_raw_mut_deref_ref), and a reference field must keep
+// the code path it has; only its type was missing.
+var LOWER_REF_FIELD_COUNT: i64 = 0
+var LOWER_REF_FIELD_TYPE: [i64; 4096] = [0; 4096]
+var LOWER_REF_FIELD_NAME: [i64; 4096] = [0; 4096]
+var LOWER_REF_FIELD_PTE: [i64; 4096] = [0; 4096]
+
+fn lower_ref_field_note(type_name: Name, field_name: Name, ty: &TypeExpr) with Mut, Panic, Div {
+    if (*ty).kind != TypeExprKind::TypeReference && (*ty).kind != TypeExprKind::TypeRefMut { return }
+    let pte = lower_opt_type_named_name(&(*ty).inner)
+    if pte.len <= 0 { return }
+    let tid = ir_intern_name(type_name)
+    let fid = ir_intern_name(field_name)
+    let pid = ir_intern_name(pte)
+    var i: i64 = 0
+    while i < LOWER_REF_FIELD_COUNT {
+        if LOWER_REF_FIELD_TYPE[i as usize] == tid && LOWER_REF_FIELD_NAME[i as usize] == fid {
+            if LOWER_REF_FIELD_PTE[i as usize] != pid { LOWER_REF_FIELD_PTE[i as usize] = 0 - 1 }
+            return
+        }
+        i = i + 1
+    }
+    if LOWER_REF_FIELD_COUNT >= 4096 { return }
+    LOWER_REF_FIELD_TYPE[LOWER_REF_FIELD_COUNT as usize] = tid
+    LOWER_REF_FIELD_NAME[LOWER_REF_FIELD_COUNT as usize] = fid
+    LOWER_REF_FIELD_PTE[LOWER_REF_FIELD_COUNT as usize] = pid
+    LOWER_REF_FIELD_COUNT = LOWER_REF_FIELD_COUNT + 1
+}
+
+fn lower_ref_field_referent(type_name: Name, field_name: Name) -> Name with Mut, Panic, Div {
+    if type_name.len <= 0 { return ir_empty_name() }
+    let tid = ir_intern_name(type_name)
+    let fid = ir_intern_name(field_name)
+    var i: i64 = 0
+    while i < LOWER_REF_FIELD_COUNT {
+        if LOWER_REF_FIELD_TYPE[i as usize] == tid && LOWER_REF_FIELD_NAME[i as usize] == fid {
+            let pid = LOWER_REF_FIELD_PTE[i as usize]
+            if pid <= 0 { return ir_empty_name() }
+            return ir_name_at(pid)
+        }
+        i = i + 1
+    }
+    ir_empty_name()
+}
+
 fn lower_kn_field_note(type_name: Name, field_name: Name, ty: &TypeExpr) with Mut, Panic, Div {
     lower_raw_ptr_field_note(type_name, field_name, ty)
+    lower_ref_field_note(type_name, field_name, ty)
     // SIO-557: every struct declaration walk funnels through here, so one
     // hook records raw-ptr byte fields for all of them.
     lower_byteptr_field_note(type_name, field_name, ty)
@@ -33367,6 +33421,9 @@ impl Lowerer {
                                 // `(*(*c).structs)` -- a field declared `*mut S`.
                                 let raw_inner = lower_raw_ptr_field_pointee(owner_type, (*operand).name)
                                 if raw_inner.len > 0 { return raw_inner }
+                                // `(*(*lo).t)` -- a field declared `&!S` or `&S`.
+                                let ref_inner = lower_ref_field_referent(owner_type, (*operand).name)
+                                if ref_inner.len > 0 { return ref_inner }
                             }
                             None => {}
                         }
