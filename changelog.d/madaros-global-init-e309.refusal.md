@@ -18,3 +18,9 @@ initializer.
 The global-init identity gate now pins the refusal for the shadow and
 ambiguous fixtures and for the three scoping-off controls that used to read a
 zero.
+
+`stdlib/physics/em.sio` no longer declares a module-level `C`. Its
+initializer called `speed_of_light_approx()`, which does not fold when
+`constants::physical` is parsed after `em`. In that case `C` read the
+same-named global of `physics::sr` by name, which happened to hold the
+same value. The module now calls the constant where it is used.
