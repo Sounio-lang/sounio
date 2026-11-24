@@ -98,6 +98,15 @@ std::string fmt_u32(uint32_t u) {
   return os.str();
 }
 
+int64_t ulp_delta(uint32_t a, uint32_t b) noexcept {
+  auto to_ordered = [](uint32_t u) -> int64_t {
+    if ((u & 0x80000000u) != 0u) return -static_cast<int64_t>(u & 0x7fffffffu);
+    return static_cast<int64_t>(u & 0x7fffffffu);
+  };
+  int64_t d = to_ordered(a) - to_ordered(b);
+  return d < 0 ? -d : d;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -171,7 +180,8 @@ int main(int argc, char** argv) {
         for (size_t d = 0; d < diffs.size() && d < 5; ++d) {
           const size_t idx = diffs[d];
           std::cout << "    diff[" << idx << "]: ref=" << fmt_u32(rop.words[idx])
-                    << " vs " << label << "=" << fmt_u32(top.words[idx]) << '\n';
+                    << " vs " << label << "=" << fmt_u32(top.words[idx])
+                    << " ulp_delta=" << ulp_delta(rop.words[idx], top.words[idx]) << '\n';
         }
       }
       if (tgt.backend_id == 3 && tgt.fma_hits_total == 0) {
