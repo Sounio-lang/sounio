@@ -5684,6 +5684,7 @@ fn checker_collect_runtime_builtins_inplace(c: *mut Checker) with Mut, Panic, Di
     checker_bind_import_unknown_inplace(c, make_name("sensitivity_of"))
     checker_bind_import_unknown_inplace(c, make_name("uncertainty_of"))
     checker_bind_import_unknown_inplace(c, make_name("hessian_of"))
+    checker_bind_import_unknown_inplace(c, make_name("hessian_wrt"))
     checker_bind_import_unknown_inplace(c, make_name("chain_to_knowledge_into"))
     // syscall6: raw syscall builtin emitted by native codegen (no .sio
     // definition). Same E137 preflight hazard as print_f64 above for any
@@ -12618,6 +12619,7 @@ fn call_expr_should_bridge_by_value(e: Expr) -> bool with Mut, Panic, Div, Alloc
     if call_expr_is_builtin_uncertainty_of(e.left) { return true }
     if call_expr_is_builtin_sensitivity_of(e.left) { return true }
     if call_expr_is_builtin_hessian_of(e.left) { return true }
+    if call_expr_is_builtin_hessian_wrt(e.left) { return true }
     if call_expr_is_builtin_second_order_mean(e.left) { return true }
     if call_expr_is_builtin_correlate(e.left) { return true }
     if call_expr_contest_witness_kind(e.left) >= 0 { return true }
@@ -13329,6 +13331,8 @@ fn epistemic_index_literal(opt: Option<Box<Expr> >) -> (bool, i64) with Mut, Pan
 }
 
 fn checker_check_hessian_metric_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    // Deprecated positional form: warn at every call site (W047).
+    checker_report_warning_at_inplace(c, e.span, 47, 0, 0, 0)
     // hessian_of(expr, j, k) -> f64. THREE arguments, and j,k inside 0..64.
     //
     // It used to require only the first. hessian_of(x*x) then type-checked,
@@ -13363,6 +13367,42 @@ fn checker_check_hessian_metric_expr_inplace(c: *mut Checker, e: Expr) -> TypeEn
                 if lit_idx2_7937.1 < 0 || lit_idx2_7937.1 >= 64 {
                     checker_report_error_at_inplace(c, e.span, 242, lit_idx2_7937.1, 64, 0)
                 }
+            }
+        }
+    }
+    checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+    ty_f64()
+}
+
+// hessian_wrt(z, x, y) -> f64. THREE arguments. x and y are the measured
+// sources themselves (Knowledge bindings), resolved by the lowerer to their
+// channels by source identity. A non-Knowledge source argument is refused
+// here with E312; a Knowledge source that z does not depend on (or that
+// carries no single channel) is refused by the lowerer with the same code,
+// where the channels actually live.
+fn checker_check_hessian_wrt_metric_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let first_arg = expr_list_head(e.args)
+    let second_arg = expr_list_second(e.args)
+    let third_arg = expr_list_third(e.args)
+    match first_arg {
+        None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        Some(_) => {}
+    }
+    match second_arg {
+        None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        Some(xarg) => {
+            let xty = checker_check_opt_expr_inplace(c, Some(xarg))
+            if !is_error_or_unknown(xty) && !is_knowledge_type(xty) {
+                checker_report_error_at_inplace(c, e.span, 312, 0, 0, 0)
+            }
+        }
+    }
+    match third_arg {
+        None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        Some(yarg) => {
+            let yty = checker_check_opt_expr_inplace(c, Some(yarg))
+            if !is_error_or_unknown(yty) && !is_knowledge_type(yty) {
+                checker_report_error_at_inplace(c, e.span, 312, 0, 0, 0)
             }
         }
     }
@@ -14836,6 +14876,9 @@ fn checker_check_call_metric_forms_inplace(c: *mut Checker, e: Expr) -> (bool, T
     }
     if call_expr_is_builtin_hessian_of(e.left) {
         return (true, checker_check_hessian_metric_expr_inplace(c, e))
+    }
+    if call_expr_is_builtin_hessian_wrt(e.left) {
+        return (true, checker_check_hessian_wrt_metric_expr_inplace(c, e))
     }
     // E2 is a mean, not a spread: it type-checks as the variance-family
     // metric -- one expression argument, f64 result, same as variance_of.
@@ -21878,6 +21921,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 250 { print("call to an `extern \"C\"` function the native backend does not implement") }
     else if code == 242 { print("epistemic channel index is out of range") }
     else if code == 232 { print("the same array local initialises two fields; the value copy is shallow, so they would be one array -- give each field its own literal") }
+    else if code == 312 { print("hessian_wrt source is not a measured source that the value depends on: the source must be a Knowledge binding from measure() (or Knowledge(...)) and the value must depend on it") }
     else if code == 306 { print("retract needs `because:` with a non-empty string literal: leaving a contest is explicit and its reason is recorded (ADR-016, decision 4.3)") }
     else if code == 305 { print("the consistency policy of meet must be a positive numeric literal: an E_n limit is a declared modelling choice, not a value computed at run time (ADR-016)") }
     else if code == 243 { print("the correlation coefficient must be a compile-time literal; a runtime value silently becomes 0.0, which asserts independence") }
@@ -22672,6 +22716,10 @@ fn print_warning_message(code: i64) with IO, Mut, Panic, Div {
         print("boolean equality on uncertain value: exact == ignores uncertainty\n")
         print("   = help: use ep_eq_prob + ep_decide (epistemic::uncertain_eq) or claim exactness")
     }
+    else if code == 47 {
+        print("hessian_of(z, j, k) is deprecated: positional channel indices are silently renumbered when a dead measure() is removed or code is reordered\n")
+        print("   = help: use hessian_wrt(z, x, y), which indexes second derivatives by the measured sources themselves\n")
+    }
     else if code == 46 {
         print("refinement predicate could not be represented and is NOT being checked\n")
         print("   = note: this checker represents `<var> <cmp> <literal>` and conjunctions of those\n")
@@ -23074,6 +23122,19 @@ fn call_expr_is_builtin_hessian_of(opt: Option<Box<Expr> >) -> bool with Mut, Pa
                 return false
             }
             name_matches_str10((*expr).name, 104, 101, 115, 115, 105, 97, 110, 95, 111, 102)
+        }
+        None => false
+    }
+}
+
+fn call_expr_is_builtin_hessian_wrt(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent {
+                return false
+            }
+            // "hessian_wrt" (11 bytes)
+            name_matches_str11((*expr).name, 104, 101, 115, 115, 105, 97, 110, 95, 119, 114, 116)
         }
         None => false
     }
