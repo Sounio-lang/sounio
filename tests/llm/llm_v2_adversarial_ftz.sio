@@ -1,0 +1,1496 @@
+// Acceptance test: Option A adversarial subnormal / FTZ+DAZ op-level parity test
+// Tests inputs constructed to land inside [2^-149, 2^-126), on exact 2^-126,
+// and on subnormal DAZ inputs across CPU FTZ+DAZ, Metal (M5 Max), and CUDA (L4, GB10, RTX 8000).
+// Verifies 0 subnormal outputs, FMA_MIN_NORM_HITS > 0 on CUDA, and bit-exact u32 equality.
+
+use llm::bf16_kernels::{bf16_cstr_append}
+use llm::mmap::{
+    page_arena_alloc,
+    page_arena_free,
+    page_arena_is_ok,
+    page_arena_ptr,
+}
+use llm::hal::{
+    hal_getenv_ptr,
+    hal_self_binary_sha256_hex,
+    hal_cpu_set_ftz_daz,
+    MetalSession,
+    metal_session_open,
+    metal_session_is_ok,
+    metal_session_close,
+    metal_compile_msl_ptr,
+    metal_buffer_nocopy,
+    metal_buffer_free,
+    metal_cmd_begin,
+    metal_cmd_cancel,
+    metal_cmd_set_buf,
+    metal_cmd_set_u64,
+    metal_cmd_dispatch_1d,
+    metal_cmd_commit_sync,
+    CudaDriverSession,
+    cuda_session_open,
+    cuda_session_is_ok,
+    cuda_session_close,
+    cuda_session_sm_version,
+    cuda_session_driver_version,
+    cuda_module_load_ptx_ptr_ex,
+    cuda_module_unload,
+    cuda_module_get_fn,
+    cuda_module_get_global,
+    cuda_mem_alloc,
+    cuda_mem_free,
+    cuda_memcpy_h2d,
+    cuda_memcpy_d2h,
+    cuda_ctx_sync,
+    cuda_launch_3param_1d,
+    cuda_launch_6param_1d,
+    cuda_launch_8param_1d,
+}
+use llm::qwen3_kernels::{emit_qwen3_kernels_msl_cstr}
+use llm::ptx_kernels_sm80::{emit_qwen3_cuda_audit_ptx_for_sm}
+use llm::qwen3::{
+    f32_ftz_mul,
+    f32_ftz_div,
+    f32_ftz_sqrt,
+    f32_ftz_fma,
+    sounio_exp_f32_cpu,
+    qwen3_cpu_rmsnorm,
+    qwen3_cpu_gemv,
+    qwen3_cpu_vec_add,
+}
+
+extern "C" {
+    fn dlopen(filename: *mut u8, flags: i32) -> *mut u8
+    fn dlsym(handle: *mut u8, symbol: *mut u8) -> *mut u8
+    fn dlclose(handle: *mut u8) -> i32
+}
+
+fn adv_cstr(s: string) -> i64 with Alloc, Mut {
+    let n = str_len(s)
+    let buf = heap_alloc(n + 8) as i64
+    var i: i64 = 0
+    while i < n {
+        let _w = ptr_write_u8(buf, i, str_char_at(s, i))
+        i = i + 1
+    }
+    let _z = ptr_write_u8(buf, n, 0)
+    buf
+}
+
+fn adv_cstr_eq(p: i64, s: string) -> bool {
+    if p == 0 { return false }
+    let n = str_len(s)
+    var i: i64 = 0
+    while i < n {
+        if (ptr_read_u8(p, i) as i32) != (str_char_at(s, i) as i32) {
+            return false
+        }
+        i = i + 1
+    }
+    ptr_read_u8(p, n) == 0
+}
+
+fn adv_cstr_len(p: i64) -> i64 {
+    if p == 0 { return 0 }
+    var i: i64 = 0
+    while ptr_read_u8(p, i) != 0 {
+        i = i + 1
+    }
+    i
+}
+
+fn adv_zero_f32_buf(ptr: i64, n_elems: i64) with Mut {
+    var i: i64 = 0
+    while i < n_elems {
+        let _w = ptr_write_u32_le(ptr, i * 4, 0)
+        i = i + 1
+    }
+}
+
+fn adv_copy_bytes(dst: i64, src: i64, n_bytes: i64) with Mut {
+    var i: i64 = 0
+    while i < n_bytes {
+        let _w = ptr_write_u8(dst, i, ptr_read_u8(src, i))
+        i = i + 1
+    }
+}
+
+fn adv_is_subnormal_u32(bits: i64) -> bool {
+    let mag = bits & 0x7FFFFFFF
+    mag != 0 && mag < 0x00800000
+}
+
+fn adv_pow2_neg_f64(exp_neg: i64) -> f64 {
+    var v: f64 = 1.0
+    var i: i64 = 0
+    while i < exp_neg {
+        v = v * 0.5
+        i = i + 1
+    }
+    v
+}
+
+// ---------- Adversarial Input Builders (all exact u32 bit patterns) ----------
+
+fn build_mul_inputs(a_ptr: i64, b_ptr: i64, n: i64) with Mut, Div {
+    var i: i64 = 0
+    while i < n {
+        var a_u: i64 = 0
+        var b_u: i64 = 0
+        if i < 128 {
+            let sign_a = if (i & 1) == 1 { 0x80000000 } else { 0 }
+            let sign_b = if ((i >> 1) & 1) == 1 { 0x80000000 } else { 0 }
+            a_u = sign_a | 0x20000000
+            let exp_shift = i % 22
+            let b_exp = (63 - exp_shift) << 23
+            let mant = ((i * 65537) & 0x7FFFFF)
+            let safe_mant = if exp_shift == 0 && mant > 0x7FFFFE { 0x7FFFF0 } else { mant }
+            b_u = sign_b | b_exp | safe_mant
+        } else if i < 256 {
+            let k = i - 128
+            let sign = if (k & 1) == 1 { 0x80000000 } else { 0 }
+            if k < 16 {
+                a_u = sign | 0x20000000
+                b_u = 0x20000000
+            } else if k < 48 {
+                let step = k - 15
+                a_u = sign | 0x20000000
+                b_u = 0x20000000 - step - 1
+            } else if k < 80 {
+                let step = k - 47
+                a_u = sign | 0x20000000
+                b_u = 0x20000000 + step
+            } else {
+                a_u = sign | ((127 - 100) << 23) | ((k * 1021) & 0x7FFFFF)
+                let b_exp = if (k & 2) == 0 { (127 - 26) << 23 } else { (127 - 28) << 23 }
+                b_u = b_exp
+            }
+        } else if i < 384 {
+            let k = i - 256
+            let sign_a = if (k & 1) == 1 { 0x80000000 } else { 0 }
+            let sign_b = if ((k >> 1) & 1) == 1 { 0x80000000 } else { 0 }
+            let sub = if k == 0 {
+                1
+            } else if k == 1 {
+                0x00400000
+            } else if k == 2 {
+                0x007FFFFF
+            } else {
+                1 + ((k * 65497) % 0x007FFFFE)
+            }
+            a_u = sign_a | sub
+            b_u = sign_b | (if (k & 4) == 0 { 0x5F800000 } else { 0x71800000 })
+        } else {
+            let k = i - 384
+            let sign_a = if (k & 1) == 1 { 0x80000000 } else { 0 }
+            let sign_b = if ((k >> 1) & 1) == 1 { 0x80000000 } else { 0 }
+            a_u = sign_a | (1 + ((k * 31337) & 0x007FFFFE))
+            b_u = sign_b | (if (k & 4) == 0 { 0x3F800000 } else { (1 + ((k * 7919) & 0x007FFFFE)) })
+        }
+        let _wa = ptr_write_u32_le(a_ptr, i * 4, a_u)
+        let _wb = ptr_write_u32_le(b_ptr, i * 4, b_u)
+        i = i + 1
+    }
+}
+
+fn build_fma_inputs(a_ptr: i64, b_ptr: i64, c_ptr: i64, n: i64) with Mut, Div {
+    var i: i64 = 0
+    while i < n {
+        var a_u: i64 = 0
+        var b_u: i64 = 0
+        var c_u: i64 = 0
+        if i < 128 {
+            let k = i
+            let sign = if (k & 1) == 1 { 0x80000000 } else { 0 }
+            let kind = (k >> 1) % 4
+            if kind == 0 {
+                a_u = sign | 0x20000000
+                b_u = 0x20000000
+                c_u = 0
+            } else if kind == 1 {
+                a_u = 0x3F800000
+                b_u = sign | 0x01000000
+                c_u = (sign ^ 0x80000000) | 0x00800000
+            } else if kind == 2 {
+                a_u = sign | 0x20C00000
+                b_u = 0x20000000
+                c_u = (sign ^ 0x80000000) | 0x01000000
+            } else {
+                a_u = sign | ((127 - 100) << 23)
+                b_u = (127 - 26) << 23
+                c_u = 0
+            }
+        } else if i < 256 {
+            let k = i - 128
+            let s_ab = if (k & 1) == 1 { 0x80000000 } else { 0 }
+            a_u = s_ab | (0x1F800000 + ((k * 4099) & 0x3FFFFF))
+            b_u = 0x1F800000
+            let mode = (k >> 1) % 3
+            if mode == 0 {
+                c_u = 0
+            } else if mode == 1 {
+                c_u = 0x00800000
+            } else {
+                a_u = 0x1F800000
+                b_u = 0x1F800000
+                c_u = 0x80800000
+            }
+        } else if i < 384 {
+            let k = (i - 256) + 1
+            let sign = if (k & 1) == 1 { 0x80000000 } else { 0 }
+            a_u = sign | (0x20000000 + k)
+            b_u = 0x20000000
+            c_u = (sign ^ 0x80000000) | 0x00800000
+        } else {
+            let k = i - 384
+            let mode = k % 4
+            if mode == 0 {
+                a_u = 0x00400000 + (k & 0x3FFF)
+                b_u = 0x5F800000
+                c_u = 0x00800000
+            } else if mode == 1 {
+                a_u = 0x5F800000
+                b_u = 0x80000001 + (k & 0x3FFF)
+                c_u = 0x3F800000
+            } else if mode == 2 {
+                a_u = 0x1F800000
+                b_u = 0x1F800000
+                c_u = 0x007FFFFF
+            } else {
+                a_u = 0xA0000000
+                b_u = 0x20000000
+                c_u = 0x007FFFFF - (k & 0x3FFF)
+            }
+        }
+        let _wa = ptr_write_u32_le(a_ptr, i * 4, a_u)
+        let _wb = ptr_write_u32_le(b_ptr, i * 4, b_u)
+        let _wc = ptr_write_u32_le(c_ptr, i * 4, c_u)
+        i = i + 1
+    }
+}
+
+fn build_add_inputs(a_ptr: i64, b_ptr: i64, n: i64) with Mut, Div {
+    var i: i64 = 0
+    while i < n {
+        var a_u: i64 = 0
+        var b_u: i64 = 0
+        if i < 128 {
+            let k = (i + 1) * 65000
+            let clamped = if k >= 0x00800000 { 0x007FFFFF } else { k }
+            a_u = 0x00800000 + clamped
+            b_u = 0x80800000
+        } else if i < 256 {
+            let k = (i - 128 + 1) * 65000
+            let clamped = if k >= 0x00800000 { 0x007FFFFF } else { k }
+            a_u = 0x80800000 + clamped
+            b_u = 0x00800000
+        } else if i < 384 {
+            let k = i - 256
+            if k < 64 {
+                a_u = 0x01000000
+                b_u = 0x80800000 + (k * 1000)
+            } else {
+                a_u = 0x01000000
+                b_u = 0x80800000 - ((k - 63) * 1000)
+            }
+        } else {
+            let k = i - 384
+            let mode = k % 4
+            if mode == 0 {
+                a_u = 0x00000001 + (k * 4099)
+                b_u = 0x00000000
+            } else if mode == 1 {
+                a_u = 0x80000001 + (k * 4099)
+                b_u = 0x80000000
+            } else if mode == 2 {
+                a_u = 0x807FFFFF
+                b_u = 0x00000000
+            } else {
+                a_u = 0x007FFFFF
+                b_u = 0x00800000
+            }
+        }
+        let _wa = ptr_write_u32_le(a_ptr, i * 4, a_u)
+        let _wb = ptr_write_u32_le(b_ptr, i * 4, b_u)
+        i = i + 1
+    }
+}
+
+fn build_div_inputs(a_ptr: i64, b_ptr: i64, n: i64) with Mut, Div {
+    var i: i64 = 0
+    while i < n {
+        var a_u: i64 = 0
+        var b_u: i64 = 0
+        if i < 128 {
+            let sign = if (i & 1) == 1 { 0x80000000 } else { 0 }
+            a_u = sign | 0x00800000
+            let exp_off = (i / 4) << 23
+            b_u = (0x3F800000 + exp_off) | ((i & 3) + 1)
+        } else if i < 256 {
+            let k = i - 128
+            let sign = if (k & 1) == 1 { 0x80000000 } else { 0 }
+            if k < 64 {
+                a_u = sign | (0x01000000 - (k + 2))
+                b_u = 0x40000000
+            } else {
+                a_u = sign | (0x01000000 + (k - 64))
+                b_u = 0x40000000
+            }
+        } else if i < 384 {
+            let k = i - 256
+            let sign = if (k & 1) == 1 { 0x80000000 } else { 0 }
+            if (k & 2) == 0 {
+                a_u = sign | (1 + ((k * 31337) & 0x007FFFFE))
+                b_u = (127 - 100) << 23
+            } else {
+                a_u = sign | 0x3F800000
+                b_u = (if (k & 4) == 0 { 0 } else { 0x80000000 }) | (1 + ((k * 17111) & 0x007FFFFE))
+            }
+        } else {
+            let k = i - 384
+            a_u = 0x00800000 + k * 4096
+            b_u = 0x3F800000 + ((k + 1) * 65536)
+        }
+        let _wa = ptr_write_u32_le(a_ptr, i * 4, a_u)
+        let _wb = ptr_write_u32_le(b_ptr, i * 4, b_u)
+        i = i + 1
+    }
+}
+
+fn build_exp_inputs(x_ptr: i64, n: i64) with Mut, Div {
+    var i: i64 = 0
+    while i < n {
+        var u: i64 = 0
+        if i < 128 {
+            u = 0xC2AEAC10 + i
+        } else if i < 384 {
+            let k = i - 128
+            if k == 255 {
+                u = 0xC2D00000
+            } else {
+                u = 0xC2AE0000 + k * 8704
+            }
+        } else {
+            let k = i - 384
+            if k < 64 {
+                let sign = if (k & 1) == 1 { 0x80000000 } else { 0 }
+                u = sign | (1 + ((k * 65497) & 0x007FFFFE))
+            } else if k < 96 {
+                u = 0xC2AEAC48 + (k - 64)
+            } else {
+                let m = k % 5
+                if m == 0 {
+                    u = 0xC2D00000
+                } else if m == 1 {
+                    u = 0xC2CE8F5C
+                } else if m == 2 {
+                    u = 0xC2BE0000
+                } else if m == 3 {
+                    u = 0xC2B00000
+                } else {
+                    u = 0xC2AE0000
+                }
+            }
+        }
+        let _wx = ptr_write_u32_le(x_ptr, i * 4, u)
+        i = i + 1
+    }
+}
+
+fn build_rsqrt_inputs(x_ptr: i64, n: i64) with Mut, Div {
+    var i: i64 = 0
+    while i < n {
+        var u: i64 = 0
+        if i < 128 {
+            if i == 0 {
+                u = 0x00000000
+            } else if i == 1 {
+                u = 0x80000000
+            } else if i == 127 {
+                u = 0x007FFFFF
+            } else {
+                u = 1 + ((i - 2) * 65535)
+            }
+        } else if i < 256 {
+            u = 0x00800000 + (i - 128)
+        } else if i < 384 {
+            let k = i - 256
+            let e = k % 16
+            u = ((1 + e) << 23) | ((k * 65497) & 0x7FFFFF)
+        } else {
+            let k = i - 384
+            let m = k % 6
+            if m == 0 {
+                u = 0x00800000
+            } else if m == 1 {
+                u = 0x01800000
+            } else if m == 2 {
+                u = 0x1F800000
+            } else if m == 3 {
+                u = 0x3F800000
+            } else if m == 4 {
+                u = 0x7E800000
+            } else {
+                u = 0x7F7FFFFF
+            }
+        }
+        let _wx = ptr_write_u32_le(x_ptr, i * 4, u)
+        i = i + 1
+    }
+}
+
+fn build_gemv_inputs(w_ptr: i64, x_ptr: i64, out_dim: i64, in_dim: i64) with Mut, Div {
+    adv_zero_f32_buf(x_ptr, in_dim)
+    let _x0 = ptr_write_u32_le(x_ptr, 0 * 4, 0x3F800000)
+    let _x1 = ptr_write_u32_le(x_ptr, 1 * 4, 0xBF800000)
+    let _x2 = ptr_write_u32_le(x_ptr, 2 * 4, 0x20000000)
+    let _x3 = ptr_write_u32_le(x_ptr, 3 * 4, 0x1F800000)
+    let _x64 = ptr_write_u32_le(x_ptr, 64 * 4, 0x3F800000)
+    let _x128 = ptr_write_u32_le(x_ptr, 128 * 4, 0x3F800000)
+    let _x129 = ptr_write_u32_le(x_ptr, 129 * 4, 0xBF800000)
+    let _x130 = ptr_write_u32_le(x_ptr, 130 * 4, 0x20000000)
+    let _x131 = ptr_write_u32_le(x_ptr, 131 * 4, 0x5F800000)
+    let _x192 = ptr_write_u32_le(x_ptr, 192 * 4, 0x3F800000)
+
+    adv_zero_f32_buf(w_ptr, out_dim * in_dim)
+    var r: i64 = 0
+    while r < out_dim {
+        let base = r * in_dim
+        let mode = r % 4
+        if mode == 0 {
+            let _w2 = ptr_write_u32_le(w_ptr, (base + 2) * 4, 0x20000000)
+            let _w130 = ptr_write_u32_le(w_ptr, (base + 130) * 4, 0xA0000000)
+            let _w3 = ptr_write_u32_le(w_ptr, (base + 3) * 4, 0x1F800000)
+            let _w131 = ptr_write_u32_le(w_ptr, (base + 131) * 4, 0x00400000 + (r & 0xFF))
+        } else if mode == 1 {
+            let k = (r / 4) + 1
+            let _w0 = ptr_write_u32_le(w_ptr, (base + 0) * 4, 0x00800000 + k * 1024)
+            let _w64 = ptr_write_u32_le(w_ptr, (base + 64) * 4, 0x80800000)
+        } else if mode == 2 {
+            let k = (r / 4) + 1
+            let _w0 = ptr_write_u32_le(w_ptr, (base + 0) * 4, 0x00800000 + k * 512)
+            let _w128 = ptr_write_u32_le(w_ptr, (base + 128) * 4, 0x80800000)
+        } else {
+            let sign = if ((r >> 2) & 1) == 1 { 0x80000000 } else { 0 }
+            let _w2 = ptr_write_u32_le(w_ptr, (base + 2) * 4, sign | 0x20000000)
+            let _w3 = ptr_write_u32_le(w_ptr, (base + 3) * 4, 0x1F800000)
+        }
+        r = r + 1
+    }
+}
+
+fn build_rmsnorm_batch(batch_idx: i64, x_ptr: i64, w_ptr: i64, n_rows: i64, dim: i64) with Mut, Div {
+    adv_zero_f32_buf(x_ptr, n_rows * dim)
+    adv_zero_f32_buf(w_ptr, dim)
+    var j: i64 = 0
+    while j < dim {
+        var wu: i64 = 0x3F800000
+        if batch_idx == 1 && (j & 3) == 1 {
+            wu = 0x00800000
+        } else if batch_idx == 3 && (j & 3) == 2 {
+            wu = 0x00400000 + j * 1024
+        } else if batch_idx == 3 && (j & 3) == 3 {
+            wu = 0x1F800000
+        }
+        let _ww = ptr_write_u32_le(w_ptr, j * 4, wu)
+        j = j + 1
+    }
+
+    var r: i64 = 0
+    while r < n_rows {
+        let base = r * dim
+        if batch_idx == 0 {
+            var c: i64 = 0
+            while c < dim {
+                var xu: i64 = 0x1F800000
+                if (r & 1) == 0 && c == 0 {
+                    xu = 0x20000000
+                } else if (c & 7) == 1 {
+                    xu = 0x00400000 + ((r * 37 + c) & 0xFFFF)
+                } else if (c & 7) == 2 {
+                    xu = 0x807FFFFF
+                }
+                let _wx = ptr_write_u32_le(x_ptr, (base + c) * 4, xu)
+                c = c + 1
+            }
+        } else if batch_idx == 1 {
+            var c: i64 = 0
+            while c < dim {
+                let sign = if (c & 1) == 1 { 0x80000000 } else { 0 }
+                let xu = if (c & 3) == 0 {
+                    sign | 0x20000000
+                } else if (c & 3) == 1 {
+                    sign | 0x1F800000
+                } else {
+                    sign | (0x00000001 + ((r * 131 + c) * 1024))
+                }
+                let _wx = ptr_write_u32_le(x_ptr, (base + c) * 4, xu)
+                c = c + 1
+            }
+        } else if batch_idx == 2 {
+            var c: i64 = 0
+            while c < dim {
+                let sign = if ((r + c) & 1) == 1 { 0x80000000 } else { 0 }
+                let xu = if r < 4 {
+                    sign | 0x20000000
+                } else if c < 4 {
+                    sign | 0x22000000
+                } else {
+                    sign | (0x1F800000 + (c & 3) * 0x00200000)
+                }
+                let _wx = ptr_write_u32_le(x_ptr, (base + c) * 4, xu)
+                c = c + 1
+            }
+        } else {
+            var c: i64 = 0
+            while c < dim {
+                let xu = if (c & 3) == 0 {
+                    0x20000000 + (r & 7) * 0x00100000
+                } else if (c & 3) == 1 {
+                    0x80000001 + c * 4096
+                } else {
+                    0x1F800000
+                }
+                let _wx = ptr_write_u32_le(x_ptr, (base + c) * 4, xu)
+                c = c + 1
+            }
+        }
+        r = r + 1
+    }
+}
+
+// ---------- Binary & Text Reporting Helpers ----------
+
+fn adv_open_c_fns(out_tbl: i64) -> i64 with Alloc, Mut {
+    let mh = dlopen(0 as *mut u8, 1) as i64
+    if mh == 0 { return 0 }
+    let s_fo = adv_cstr("fopen")
+    let s_fw = adv_cstr("fwrite")
+    let s_fc = adv_cstr("fclose")
+    let s_fs = adv_cstr("fseek")
+    let _w0 = ptr_write_i64_le(out_tbl, 0, dlsym(mh as *mut u8, s_fo as *mut u8) as i64)
+    let _w1 = ptr_write_i64_le(out_tbl, 8, dlsym(mh as *mut u8, s_fw as *mut u8) as i64)
+    let _w2 = ptr_write_i64_le(out_tbl, 16, dlsym(mh as *mut u8, s_fc as *mut u8) as i64)
+    let _w3 = ptr_write_i64_le(out_tbl, 24, dlsym(mh as *mut u8, s_fs as *mut u8) as i64)
+    heap_free(s_fo as *mut u8)
+    heap_free(s_fw as *mut u8)
+    heap_free(s_fc as *mut u8)
+    heap_free(s_fs as *mut u8)
+    mh
+}
+
+fn adv_analyze_and_print_op(
+    name: string,
+    out_ptr: i64,
+    n: i64,
+    fma_hits: i64,
+    out_sub_total: i64
+) with IO, Mut, Div {
+    var subs: i64 = 0
+    var zp: i64 = 0
+    var zn: i64 = 0
+    var i: i64 = 0
+    while i < n {
+        let u = ptr_read_u32_le(out_ptr, i * 4)
+        if adv_is_subnormal_u32(u) {
+            subs = subs + 1
+        }
+        if u == 0 {
+            zp = zp + 1
+        } else if u == 0x80000000 {
+            zn = zn + 1
+        }
+        i = i + 1
+    }
+    let prev = ptr_read_i64_le(out_sub_total, 0)
+    let _w = ptr_write_i64_le(out_sub_total, 0, prev + subs)
+
+    print("ADV_OP op=")
+    print(name)
+    print(" n=")
+    print_int(n)
+    print(" subnormals=")
+    print_int(subs)
+    print(" zero_pos=")
+    print_int(zp)
+    print(" zero_neg=")
+    print_int(zn)
+    print(" fma_hits=")
+    print_int(fma_hits)
+    println("")
+}
+
+fn adv_write_record(
+    fwrite_fn_ptr: i64,
+    fp: i64,
+    name: string,
+    out_ptr: i64,
+    n: i64,
+    fma_hits: i64
+) -> bool with Alloc, Mut {
+    if fp == 0 || fwrite_fn_ptr == 0 { return true }
+    let fwrite_fn = fwrite_fn_ptr as fn(i64, i64, i64, i64) -> i64
+    let hdr = heap_alloc(16) as i64
+    let nlen = str_len(name)
+    let _w0 = ptr_write_u32_le(hdr, 0, nlen)
+    let _w1 = ptr_write_u32_le(hdr, 4, n)
+    let _w2 = ptr_write_i64_le(hdr, 8, fma_hits)
+    let _wr0 = fwrite_fn(hdr, 4, 1, fp)
+    let c_name = adv_cstr(name)
+    let _wr1 = fwrite_fn(c_name, 1, nlen, fp)
+    heap_free(c_name as *mut u8)
+    let _wr2 = fwrite_fn(hdr + 4, 4, 1, fp)
+    let _wr3 = fwrite_fn(hdr + 8, 8, 1, fp)
+    let _wr4 = fwrite_fn(out_ptr, 4, n, fp)
+    heap_free(hdr as *mut u8)
+    true
+}
+
+// ---------- Production MSL + Adversarial Op Source ----------
+
+fn emit_adv_msl_cstr() -> i64 with Alloc, Mut {
+    let base_msl = emit_qwen3_kernels_msl_cstr()
+    if base_msl == 0 { return 0 }
+    let base_len = adv_cstr_len(base_msl)
+    let buf = heap_alloc(base_len + 16384) as i64
+    adv_copy_bytes(buf, base_msl, base_len)
+    heap_free(base_msl as *mut u8)
+    var p = base_len
+
+    p = bf16_cstr_append(buf, p, "\nkernel void adv_mul_f32(\n")
+    p = bf16_cstr_append(buf, p, "    device const float* a [[buffer(0)]], device const float* b [[buffer(1)]],\n")
+    p = bf16_cstr_append(buf, p, "    device float* out [[buffer(2)]], constant ulong& n [[buffer(3)]],\n")
+    p = bf16_cstr_append(buf, p, "    uint gid [[thread_position_in_grid]]) {\n")
+    p = bf16_cstr_append(buf, p, "    if ((ulong)gid >= n) return;\n")
+    p = bf16_cstr_append(buf, p, "    out[gid] = a[gid] * b[gid];\n}\n\n")
+
+    p = bf16_cstr_append(buf, p, "kernel void adv_fma_f32(\n")
+    p = bf16_cstr_append(buf, p, "    device const float* a [[buffer(0)]], device const float* b [[buffer(1)]],\n")
+    p = bf16_cstr_append(buf, p, "    device const float* c [[buffer(2)]], device float* out [[buffer(3)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& n [[buffer(4)]], uint gid [[thread_position_in_grid]]) {\n")
+    p = bf16_cstr_append(buf, p, "    if ((ulong)gid >= n) return;\n")
+    p = bf16_cstr_append(buf, p, "    out[gid] = fma(a[gid], b[gid], c[gid]);\n}\n\n")
+
+    p = bf16_cstr_append(buf, p, "kernel void adv_div_f32(\n")
+    p = bf16_cstr_append(buf, p, "    device const float* a [[buffer(0)]], device const float* b [[buffer(1)]],\n")
+    p = bf16_cstr_append(buf, p, "    device float* out [[buffer(2)]], constant ulong& n [[buffer(3)]],\n")
+    p = bf16_cstr_append(buf, p, "    uint gid [[thread_position_in_grid]]) {\n")
+    p = bf16_cstr_append(buf, p, "    if ((ulong)gid >= n) return;\n")
+    p = bf16_cstr_append(buf, p, "    out[gid] = a[gid] / b[gid];\n}\n\n")
+
+    p = bf16_cstr_append(buf, p, "kernel void adv_exp_f32(\n")
+    p = bf16_cstr_append(buf, p, "    device const float* x [[buffer(0)]], device float* out [[buffer(1)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& n [[buffer(2)]], uint gid [[thread_position_in_grid]]) {\n")
+    p = bf16_cstr_append(buf, p, "    if ((ulong)gid >= n) return;\n")
+    p = bf16_cstr_append(buf, p, "    out[gid] = sounio_exp_f32(x[gid]);\n}\n\n")
+
+    p = bf16_cstr_append(buf, p, "kernel void adv_rsqrt_f32(\n")
+    p = bf16_cstr_append(buf, p, "    device const float* x [[buffer(0)]], device float* out [[buffer(1)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& n [[buffer(2)]], uint gid [[thread_position_in_grid]]) {\n")
+    p = bf16_cstr_append(buf, p, "    if ((ulong)gid >= n) return;\n")
+    p = bf16_cstr_append(buf, p, "    out[gid] = 1.0f / sqrt(x[gid]);\n}\n")
+    buf
+}
+
+// ---------- Production Audit PTX + Adversarial Op Kernels ----------
+
+fn emit_adv_ptx_cstr(sm_ver: i64, driver_ver: i64) -> i64 with Alloc, Mut, Div {
+    let base_ptx = emit_qwen3_cuda_audit_ptx_for_sm(sm_ver, driver_ver)
+    if base_ptx == 0 { return 0 }
+    let base_len = adv_cstr_len(base_ptx)
+    let buf = heap_alloc(base_len + 16384) as i64
+    adv_copy_bytes(buf, base_ptx, base_len)
+    heap_free(base_ptx as *mut u8)
+    var p = base_len
+
+    p = bf16_cstr_append(buf, p, "\n.visible .entry adv_mul_f32(\n")
+    p = bf16_cstr_append(buf, p, "    .param .u64 p_a, .param .u64 p_b, .param .u64 p_out,\n")
+    p = bf16_cstr_append(buf, p, "    .param .u64 p_n, .param .u64 p_d0, .param .u64 p_d1\n) {\n")
+    p = bf16_cstr_append(buf, p, "    .reg .pred %p<2>; .reg .b32 %r<4>; .reg .b64 %rd<8>; .reg .f32 %f<4>;\n")
+    p = bf16_cstr_append(buf, p, "    ld.param.u64 %rd1, [p_a]; ld.param.u64 %rd2, [p_b]; ld.param.u64 %rd3, [p_out]; ld.param.u64 %rd4, [p_n];\n")
+    p = bf16_cstr_append(buf, p, "    mov.u32 %r1, %ctaid.x; mov.u32 %r2, %ntid.x; mov.u32 %r3, %tid.x; mad.lo.u32 %r1, %r1, %r2, %r3;\n")
+    p = bf16_cstr_append(buf, p, "    cvt.u64.u32 %rd5, %r1; setp.ge.u64 %p1, %rd5, %rd4; @%p1 bra L_AM_EX;\n")
+    p = bf16_cstr_append(buf, p, "    shl.b64 %rd6, %rd5, 2; add.u64 %rd7, %rd1, %rd6; ld.global.f32 %f1, [%rd7];\n")
+    p = bf16_cstr_append(buf, p, "    add.u64 %rd7, %rd2, %rd6; ld.global.f32 %f2, [%rd7];\n")
+    p = bf16_cstr_append(buf, p, "    mul.rn.ftz.f32 %f3, %f1, %f2;\n")
+    p = bf16_cstr_append(buf, p, "    add.u64 %rd7, %rd3, %rd6; st.global.f32 [%rd7], %f3;\n")
+    p = bf16_cstr_append(buf, p, "L_AM_EX:\n    ret;\n}\n\n")
+
+    p = bf16_cstr_append(buf, p, ".visible .entry adv_fma_f32(\n")
+    p = bf16_cstr_append(buf, p, "    .param .u64 p_a, .param .u64 p_b, .param .u64 p_c,\n")
+    p = bf16_cstr_append(buf, p, "    .param .u64 p_out, .param .u64 p_n, .param .u64 p_d0\n) {\n")
+    p = bf16_cstr_append(buf, p, "    .reg .pred %p<3>; .reg .b32 %r<6>; .reg .b64 %rd<10>; .reg .f32 %f<5>;\n")
+    p = bf16_cstr_append(buf, p, "    ld.param.u64 %rd1, [p_a]; ld.param.u64 %rd2, [p_b]; ld.param.u64 %rd3, [p_c];\n")
+    p = bf16_cstr_append(buf, p, "    ld.param.u64 %rd4, [p_out]; ld.param.u64 %rd5, [p_n];\n")
+    p = bf16_cstr_append(buf, p, "    mov.u32 %r1, %ctaid.x; mov.u32 %r2, %ntid.x; mov.u32 %r3, %tid.x; mad.lo.u32 %r1, %r1, %r2, %r3;\n")
+    p = bf16_cstr_append(buf, p, "    cvt.u64.u32 %rd6, %r1; setp.ge.u64 %p1, %rd6, %rd5; @%p1 bra L_AF_EX;\n")
+    p = bf16_cstr_append(buf, p, "    shl.b64 %rd7, %rd6, 2; add.u64 %rd8, %rd1, %rd7; ld.global.f32 %f1, [%rd8];\n")
+    p = bf16_cstr_append(buf, p, "    add.u64 %rd8, %rd2, %rd7; ld.global.f32 %f2, [%rd8];\n")
+    p = bf16_cstr_append(buf, p, "    add.u64 %rd8, %rd3, %rd7; ld.global.f32 %f3, [%rd8];\n")
+    p = bf16_cstr_append(buf, p, "    fma.rn.ftz.f32 %f4, %f1, %f2, %f3;\n")
+    p = bf16_cstr_append(buf, p, "    mov.b32 %r4, %f4; and.b32 %r4, %r4, 0x7fffffff; setp.eq.u32 %p2, %r4, 0x00800000;\n")
+    p = bf16_cstr_append(buf, p, "    @%p2 atom.global.add.u64 %rd9, [g_fma_min_norm_hits], 1;\n")
+    p = bf16_cstr_append(buf, p, "    add.u64 %rd8, %rd4, %rd7; st.global.f32 [%rd8], %f4;\n")
+    p = bf16_cstr_append(buf, p, "L_AF_EX:\n    ret;\n}\n\n")
+
+    p = bf16_cstr_append(buf, p, ".visible .entry adv_div_f32(\n")
+    p = bf16_cstr_append(buf, p, "    .param .u64 p_a, .param .u64 p_b, .param .u64 p_out,\n")
+    p = bf16_cstr_append(buf, p, "    .param .u64 p_n, .param .u64 p_d0, .param .u64 p_d1\n) {\n")
+    p = bf16_cstr_append(buf, p, "    .reg .pred %p<2>; .reg .b32 %r<4>; .reg .b64 %rd<8>; .reg .f32 %f<4>;\n")
+    p = bf16_cstr_append(buf, p, "    ld.param.u64 %rd1, [p_a]; ld.param.u64 %rd2, [p_b]; ld.param.u64 %rd3, [p_out]; ld.param.u64 %rd4, [p_n];\n")
+    p = bf16_cstr_append(buf, p, "    mov.u32 %r1, %ctaid.x; mov.u32 %r2, %ntid.x; mov.u32 %r3, %tid.x; mad.lo.u32 %r1, %r1, %r2, %r3;\n")
+    p = bf16_cstr_append(buf, p, "    cvt.u64.u32 %rd5, %r1; setp.ge.u64 %p1, %rd5, %rd4; @%p1 bra L_AD_EX;\n")
+    p = bf16_cstr_append(buf, p, "    shl.b64 %rd6, %rd5, 2; add.u64 %rd7, %rd1, %rd6; ld.global.f32 %f1, [%rd7];\n")
+    p = bf16_cstr_append(buf, p, "    add.u64 %rd7, %rd2, %rd6; ld.global.f32 %f2, [%rd7];\n")
+    p = bf16_cstr_append(buf, p, "    div.rn.ftz.f32 %f3, %f1, %f2;\n")
+    p = bf16_cstr_append(buf, p, "    add.u64 %rd7, %rd3, %rd6; st.global.f32 [%rd7], %f3;\n")
+    p = bf16_cstr_append(buf, p, "L_AD_EX:\n    ret;\n}\n\n")
+
+    p = bf16_cstr_append(buf, p, ".visible .entry adv_exp_f32(\n")
+    p = bf16_cstr_append(buf, p, "    .param .u64 p_x, .param .u64 p_out, .param .u64 p_n\n) {\n")
+    p = bf16_cstr_append(buf, p, "    .reg .pred %p<2>; .reg .b32 %r<4>; .reg .b64 %rd<8>; .reg .f32 %f<3>;\n")
+    p = bf16_cstr_append(buf, p, "    ld.param.u64 %rd1, [p_x]; ld.param.u64 %rd2, [p_out]; ld.param.u64 %rd3, [p_n];\n")
+    p = bf16_cstr_append(buf, p, "    mov.u32 %r1, %ctaid.x; mov.u32 %r2, %ntid.x; mov.u32 %r3, %tid.x; mad.lo.u32 %r1, %r1, %r2, %r3;\n")
+    p = bf16_cstr_append(buf, p, "    cvt.u64.u32 %rd4, %r1; setp.ge.u64 %p1, %rd4, %rd3; @%p1 bra L_AE_EX;\n")
+    p = bf16_cstr_append(buf, p, "    shl.b64 %rd5, %rd4, 2; add.u64 %rd6, %rd1, %rd5; ld.global.f32 %f1, [%rd6];\n")
+    p = bf16_cstr_append(buf, p, "    call.uni (%f2), sounio_exp_f32, (%f1);\n")
+    p = bf16_cstr_append(buf, p, "    add.u64 %rd6, %rd2, %rd5; st.global.f32 [%rd6], %f2;\n")
+    p = bf16_cstr_append(buf, p, "L_AE_EX:\n    ret;\n}\n\n")
+
+    p = bf16_cstr_append(buf, p, ".visible .entry adv_rsqrt_f32(\n")
+    p = bf16_cstr_append(buf, p, "    .param .u64 p_x, .param .u64 p_out, .param .u64 p_n\n) {\n")
+    p = bf16_cstr_append(buf, p, "    .reg .pred %p<2>; .reg .b32 %r<4>; .reg .b64 %rd<8>; .reg .f32 %f<4>;\n")
+    p = bf16_cstr_append(buf, p, "    ld.param.u64 %rd1, [p_x]; ld.param.u64 %rd2, [p_out]; ld.param.u64 %rd3, [p_n];\n")
+    p = bf16_cstr_append(buf, p, "    mov.u32 %r1, %ctaid.x; mov.u32 %r2, %ntid.x; mov.u32 %r3, %tid.x; mad.lo.u32 %r1, %r1, %r2, %r3;\n")
+    p = bf16_cstr_append(buf, p, "    cvt.u64.u32 %rd4, %r1; setp.ge.u64 %p1, %rd4, %rd3; @%p1 bra L_AR_EX;\n")
+    p = bf16_cstr_append(buf, p, "    shl.b64 %rd5, %rd4, 2; add.u64 %rd6, %rd1, %rd5; ld.global.f32 %f1, [%rd6];\n")
+    p = bf16_cstr_append(buf, p, "    sqrt.rn.ftz.f32 %f2, %f1; div.rn.ftz.f32 %f3, 0f3F800000, %f2;\n")
+    p = bf16_cstr_append(buf, p, "    add.u64 %rd6, %rd2, %rd5; st.global.f32 [%rd6], %f3;\n")
+    p = bf16_cstr_append(buf, p, "L_AR_EX:\n    ret;\n}\n")
+    buf
+}
+
+// ---------- Dispatch Helpers (using offsets into ONE page-aligned Metal arena) ----------
+
+fn metal_run_2buf(s: &MetalSession, pipe: i64, m_buf: i64, o0: i64, o1: i64, n: i64) -> i64 {
+    let cid = metal_cmd_begin(s)
+    if cid <= 0 { return -1 }
+    if metal_cmd_set_buf(s, cid, 0, m_buf, o0) != 0
+        || metal_cmd_set_buf(s, cid, 1, m_buf, o1) != 0
+        || metal_cmd_set_u64(s, cid, 2, n) != 0
+        || metal_cmd_dispatch_1d(s, cid, pipe, n, 64) != 0 {
+        let _c = metal_cmd_cancel(s, cid)
+        return -1
+    }
+    metal_cmd_commit_sync(s, cid)
+}
+
+fn metal_run_3buf(s: &MetalSession, pipe: i64, m_buf: i64, o0: i64, o1: i64, o2: i64, n: i64) -> i64 {
+    let cid = metal_cmd_begin(s)
+    if cid <= 0 { return -1 }
+    if metal_cmd_set_buf(s, cid, 0, m_buf, o0) != 0
+        || metal_cmd_set_buf(s, cid, 1, m_buf, o1) != 0
+        || metal_cmd_set_buf(s, cid, 2, m_buf, o2) != 0
+        || metal_cmd_set_u64(s, cid, 3, n) != 0
+        || metal_cmd_dispatch_1d(s, cid, pipe, n, 64) != 0 {
+        let _c = metal_cmd_cancel(s, cid)
+        return -1
+    }
+    metal_cmd_commit_sync(s, cid)
+}
+
+fn metal_run_4buf(s: &MetalSession, pipe: i64, m_buf: i64, o0: i64, o1: i64, o2: i64, o3: i64, n: i64) -> i64 {
+    let cid = metal_cmd_begin(s)
+    if cid <= 0 { return -1 }
+    if metal_cmd_set_buf(s, cid, 0, m_buf, o0) != 0
+        || metal_cmd_set_buf(s, cid, 1, m_buf, o1) != 0
+        || metal_cmd_set_buf(s, cid, 2, m_buf, o2) != 0
+        || metal_cmd_set_buf(s, cid, 3, m_buf, o3) != 0
+        || metal_cmd_set_u64(s, cid, 4, n) != 0
+        || metal_cmd_dispatch_1d(s, cid, pipe, n, 64) != 0 {
+        let _c = metal_cmd_cancel(s, cid)
+        return -1
+    }
+    metal_cmd_commit_sync(s, cid)
+}
+
+fn metal_run_vec_add(s: &MetalSession, pipe: i64, m_buf: i64, oa: i64, ob: i64, n: i64) -> i64 {
+    let cid = metal_cmd_begin(s)
+    if cid <= 0 { return -1 }
+    if metal_cmd_set_buf(s, cid, 0, m_buf, 0) != 0
+        || metal_cmd_set_u64(s, cid, 1, oa) != 0
+        || metal_cmd_set_buf(s, cid, 2, m_buf, 0) != 0
+        || metal_cmd_set_u64(s, cid, 3, ob) != 0
+        || metal_cmd_set_u64(s, cid, 4, n) != 0
+        || metal_cmd_dispatch_1d(s, cid, pipe, n, 64) != 0 {
+        let _c = metal_cmd_cancel(s, cid)
+        return -1
+    }
+    metal_cmd_commit_sync(s, cid)
+}
+
+fn metal_run_gemv_f32(s: &MetalSession, pipe: i64, m_buf: i64, ow: i64, ox: i64, oy: i64, out_dim: i64, in_dim: i64) -> i64 with Div {
+    let cid = metal_cmd_begin(s)
+    if cid <= 0 { return -1 }
+    let ng = (out_dim + 31) / 32
+    if metal_cmd_set_buf(s, cid, 0, m_buf, 0) != 0
+        || metal_cmd_set_u64(s, cid, 1, ow) != 0
+        || metal_cmd_set_buf(s, cid, 2, m_buf, 0) != 0
+        || metal_cmd_set_u64(s, cid, 3, ox) != 0
+        || metal_cmd_set_buf(s, cid, 4, m_buf, 0) != 0
+        || metal_cmd_set_u64(s, cid, 5, oy) != 0
+        || metal_cmd_set_u64(s, cid, 6, out_dim) != 0
+        || metal_cmd_set_u64(s, cid, 7, in_dim) != 0
+        || metal_cmd_dispatch_1d(s, cid, pipe, ng * 256, 256) != 0 {
+        let _c = metal_cmd_cancel(s, cid)
+        return -1
+    }
+    metal_cmd_commit_sync(s, cid)
+}
+
+fn cuda_reset_fma_hits(s: &CudaDriverSession, d_hits: i64, zero_box: i64) -> bool {
+    if d_hits == 0 { return false }
+    let _w = ptr_write_i64_le(zero_box, 0, 0)
+    cuda_memcpy_h2d(s, d_hits, zero_box, 8) == 0
+}
+
+fn cuda_read_fma_hits(s: &CudaDriverSession, d_hits: i64, out_box: i64) -> i64 {
+    if d_hits == 0 { return -1 }
+    let _rc0 = cuda_ctx_sync(s)
+    if cuda_memcpy_d2h(s, out_box, d_hits, 8) != 0 { return -1 }
+    ptr_read_i64_le(out_box, 0)
+}
+
+// ---------- Per-Backend Suites ----------
+
+fn run_cpu_suite(
+    p_fw: i64,
+    fp: i64,
+    wbase: i64,
+    n_elem: i64,
+    gemv_rows: i64,
+    gemv_cols: i64,
+    rms_rows: i64,
+    rms_dim: i64,
+    sub_total_box: i64
+) -> bool with IO, Alloc, Mut, Div, Panic {
+    let buf_a = wbase + 0
+    let buf_b = wbase + 4096
+    let buf_c = wbase + 8192
+    let buf_out = wbase + 12288
+    let gemv_x = wbase + 16384
+    let gemv_y = wbase + 20480
+    let rms_x = wbase + 24576
+    let rms_w = wbase + 32768
+    let rms_all_out = wbase + 36864
+    let gemv_w = wbase + 69632
+
+    build_mul_inputs(buf_a, buf_b, n_elem)
+    var i: i64 = 0
+    while i < n_elem {
+        let r = f32_ftz_mul(ptr_read_u32_le(buf_a, i * 4), ptr_read_u32_le(buf_b, i * 4))
+        let _wo = ptr_write_u32_le(buf_out, i * 4, r)
+        i = i + 1
+    }
+    adv_analyze_and_print_op("adv/mul_subnorm", buf_out, n_elem, 0, sub_total_box)
+    let _w0 = adv_write_record(p_fw, fp, "adv/mul_subnorm", buf_out, n_elem, 0)
+
+    build_fma_inputs(buf_a, buf_b, buf_c, n_elem)
+    i = 0
+    while i < n_elem {
+        let r = f32_ftz_fma(ptr_read_u32_le(buf_a, i * 4), ptr_read_u32_le(buf_b, i * 4), ptr_read_u32_le(buf_c, i * 4))
+        let _wo = ptr_write_u32_le(buf_out, i * 4, r)
+        i = i + 1
+    }
+    adv_analyze_and_print_op("adv/fma_subnorm", buf_out, n_elem, 0, sub_total_box)
+    let _w1 = adv_write_record(p_fw, fp, "adv/fma_subnorm", buf_out, n_elem, 0)
+
+    build_add_inputs(buf_a, buf_b, n_elem)
+    qwen3_cpu_vec_add(buf_a, buf_b, n_elem)
+    adv_analyze_and_print_op("adv/add_cancel_subnorm", buf_a, n_elem, 0, sub_total_box)
+    let _w2 = adv_write_record(p_fw, fp, "adv/add_cancel_subnorm", buf_a, n_elem, 0)
+
+    build_div_inputs(buf_a, buf_b, n_elem)
+    i = 0
+    while i < n_elem {
+        let r = f32_ftz_div(ptr_read_u32_le(buf_a, i * 4), ptr_read_u32_le(buf_b, i * 4))
+        let _wo = ptr_write_u32_le(buf_out, i * 4, r)
+        i = i + 1
+    }
+    adv_analyze_and_print_op("adv/div_subnorm", buf_out, n_elem, 0, sub_total_box)
+    let _w3 = adv_write_record(p_fw, fp, "adv/div_subnorm", buf_out, n_elem, 0)
+
+    build_exp_inputs(buf_a, n_elem)
+    i = 0
+    while i < n_elem {
+        let r = sounio_exp_f32_cpu(ptr_read_u32_le(buf_a, i * 4))
+        let _wo = ptr_write_u32_le(buf_out, i * 4, r)
+        i = i + 1
+    }
+    adv_analyze_and_print_op("adv/exp_subnorm", buf_out, n_elem, 0, sub_total_box)
+    let _w4 = adv_write_record(p_fw, fp, "adv/exp_subnorm", buf_out, n_elem, 0)
+
+    build_rsqrt_inputs(buf_a, n_elem)
+    i = 0
+    while i < n_elem {
+        let sq = f32_ftz_sqrt(ptr_read_u32_le(buf_a, i * 4))
+        let r = f32_ftz_div(0x3F800000, sq)
+        let _wo = ptr_write_u32_le(buf_out, i * 4, r)
+        i = i + 1
+    }
+    adv_analyze_and_print_op("adv/rsqrt_flt_min", buf_out, n_elem, 0, sub_total_box)
+    let _w5 = adv_write_record(p_fw, fp, "adv/rsqrt_flt_min", buf_out, n_elem, 0)
+
+    build_gemv_inputs(gemv_w, gemv_x, gemv_rows, gemv_cols)
+    qwen3_cpu_gemv(gemv_w, 0, gemv_x, gemv_y, gemv_rows, gemv_cols)
+    adv_analyze_and_print_op("adv/gemv_fma_subnorm", gemv_y, gemv_rows, 0, sub_total_box)
+    let _w6 = adv_write_record(p_fw, fp, "adv/gemv_fma_subnorm", gemv_y, gemv_rows, 0)
+
+    var bi: i64 = 0
+    while bi < 4 {
+        build_rmsnorm_batch(bi, rms_x, rms_w, rms_rows, rms_dim)
+        var eps_v: f64 = 0.0
+        if bi == 0 {
+            eps_v = adv_pow2_neg_f64(126)
+        } else if bi == 1 {
+            eps_v = adv_pow2_neg_f64(20)
+        } else if bi == 2 {
+            eps_v = 0.0
+        } else {
+            eps_v = adv_pow2_neg_f64(123)
+        }
+        let out_slice = rms_all_out + bi * rms_rows * rms_dim * 4
+        qwen3_cpu_rmsnorm(rms_x, rms_w, 0, out_slice, rms_rows, rms_dim, eps_v)
+        bi = bi + 1
+    }
+    adv_analyze_and_print_op("adv/rmsnorm_tiny", rms_all_out, 4 * rms_rows * rms_dim, 0, sub_total_box)
+    let _w7 = adv_write_record(p_fw, fp, "adv/rmsnorm_tiny", rms_all_out, 4 * rms_rows * rms_dim, 0)
+    true
+}
+
+fn run_metal_suite(
+    sess: &MetalSession,
+    p_fw: i64,
+    fp: i64,
+    wbase: i64,
+    arena_bytes: i64,
+    n_elem: i64,
+    gemv_rows: i64,
+    gemv_cols: i64,
+    rms_rows: i64,
+    rms_dim: i64,
+    sub_total_box: i64
+) -> bool with IO, Alloc, Mut, Div {
+    let msl_src = emit_adv_msl_cstr()
+    let p_mul = metal_compile_msl_ptr(sess, msl_src, "adv_mul_f32")
+    let p_fma = metal_compile_msl_ptr(sess, msl_src, "adv_fma_f32")
+    let p_div = metal_compile_msl_ptr(sess, msl_src, "adv_div_f32")
+    let p_exp = metal_compile_msl_ptr(sess, msl_src, "adv_exp_f32")
+    let p_rsq = metal_compile_msl_ptr(sess, msl_src, "adv_rsqrt_f32")
+    let p_vadd = metal_compile_msl_ptr(sess, msl_src, "qwen3_vec_add_f32")
+    let p_gemv = metal_compile_msl_ptr(sess, msl_src, "qwen3_gemv_f32")
+    let p_rms = metal_compile_msl_ptr(sess, msl_src, "qwen3_rmsnorm_f32")
+    heap_free(msl_src as *mut u8)
+
+    if p_mul <= 0 || p_fma <= 0 || p_div <= 0 || p_exp <= 0 || p_rsq <= 0 || p_vadd <= 0 || p_gemv <= 0 || p_rms <= 0 {
+        println("ADV_METAL_COMPILE_FAIL")
+        return false
+    }
+
+    let m_buf = metal_buffer_nocopy(sess, wbase, arena_bytes)
+    if m_buf <= 0 {
+        println("ADV_METAL_BUF_FAIL")
+        return false
+    }
+
+    let off_a: i64 = 0
+    let off_b: i64 = 4096
+    let off_c: i64 = 8192
+    let off_out: i64 = 12288
+    let off_gx: i64 = 16384
+    let off_gy: i64 = 20480
+    let off_rx: i64 = 24576
+    let off_rw: i64 = 32768
+    let off_ro: i64 = 36864
+    let off_gw: i64 = 69632
+
+    let buf_a = wbase + off_a
+    let buf_b = wbase + off_b
+    let buf_c = wbase + off_c
+    let buf_out = wbase + off_out
+    let gemv_x = wbase + off_gx
+    let gemv_y = wbase + off_gy
+    let rms_x = wbase + off_rx
+    let rms_w = wbase + off_rw
+    let rms_all_out = wbase + off_ro
+    let gemv_w = wbase + off_gw
+
+    var ok = true
+    build_mul_inputs(buf_a, buf_b, n_elem)
+    if metal_run_3buf(sess, p_mul, m_buf, off_a, off_b, off_out, n_elem) != 0 { ok = false }
+    adv_analyze_and_print_op("adv/mul_subnorm", buf_out, n_elem, 0, sub_total_box)
+    let _w0 = adv_write_record(p_fw, fp, "adv/mul_subnorm", buf_out, n_elem, 0)
+
+    build_fma_inputs(buf_a, buf_b, buf_c, n_elem)
+    if metal_run_4buf(sess, p_fma, m_buf, off_a, off_b, off_c, off_out, n_elem) != 0 { ok = false }
+    adv_analyze_and_print_op("adv/fma_subnorm", buf_out, n_elem, 0, sub_total_box)
+    let _w1 = adv_write_record(p_fw, fp, "adv/fma_subnorm", buf_out, n_elem, 0)
+
+    build_add_inputs(buf_a, buf_b, n_elem)
+    if metal_run_vec_add(sess, p_vadd, m_buf, off_a, off_b, n_elem) != 0 { ok = false }
+    adv_analyze_and_print_op("adv/add_cancel_subnorm", buf_a, n_elem, 0, sub_total_box)
+    let _w2 = adv_write_record(p_fw, fp, "adv/add_cancel_subnorm", buf_a, n_elem, 0)
+
+    build_div_inputs(buf_a, buf_b, n_elem)
+    if metal_run_3buf(sess, p_div, m_buf, off_a, off_b, off_out, n_elem) != 0 { ok = false }
+    adv_analyze_and_print_op("adv/div_subnorm", buf_out, n_elem, 0, sub_total_box)
+    let _w3 = adv_write_record(p_fw, fp, "adv/div_subnorm", buf_out, n_elem, 0)
+
+    build_exp_inputs(buf_a, n_elem)
+    if metal_run_2buf(sess, p_exp, m_buf, off_a, off_out, n_elem) != 0 { ok = false }
+    adv_analyze_and_print_op("adv/exp_subnorm", buf_out, n_elem, 0, sub_total_box)
+    let _w4 = adv_write_record(p_fw, fp, "adv/exp_subnorm", buf_out, n_elem, 0)
+
+    build_rsqrt_inputs(buf_a, n_elem)
+    if metal_run_2buf(sess, p_rsq, m_buf, off_a, off_out, n_elem) != 0 { ok = false }
+    adv_analyze_and_print_op("adv/rsqrt_flt_min", buf_out, n_elem, 0, sub_total_box)
+    let _w5 = adv_write_record(p_fw, fp, "adv/rsqrt_flt_min", buf_out, n_elem, 0)
+
+    build_gemv_inputs(gemv_w, gemv_x, gemv_rows, gemv_cols)
+    if metal_run_gemv_f32(sess, p_gemv, m_buf, off_gw, off_gx, off_gy, gemv_rows, gemv_cols) != 0 { ok = false }
+    adv_analyze_and_print_op("adv/gemv_fma_subnorm", gemv_y, gemv_rows, 0, sub_total_box)
+    let _w6 = adv_write_record(p_fw, fp, "adv/gemv_fma_subnorm", gemv_y, gemv_rows, 0)
+
+    var bi: i64 = 0
+    while bi < 4 {
+        build_rmsnorm_batch(bi, rms_x, rms_w, rms_rows, rms_dim)
+        var eps_bits: i64 = 0
+        if bi == 0 {
+            eps_bits = 0x00800000
+        } else if bi == 1 {
+            eps_bits = 0x35800000
+        } else if bi == 2 {
+            eps_bits = 0
+        } else {
+            eps_bits = 0x02000000
+        }
+        let cid = metal_cmd_begin(sess)
+        let off_b_slice = off_ro + bi * rms_rows * rms_dim * 4
+        let tot = rms_rows * 32
+        let grp = if tot < 128 { 32 } else { 128 }
+        if cid <= 0
+            || metal_cmd_set_buf(sess, cid, 0, m_buf, 0) != 0
+            || metal_cmd_set_u64(sess, cid, 1, off_rx) != 0
+            || metal_cmd_set_buf(sess, cid, 2, m_buf, 0) != 0
+            || metal_cmd_set_u64(sess, cid, 3, off_rw) != 0
+            || metal_cmd_set_buf(sess, cid, 4, m_buf, 0) != 0
+            || metal_cmd_set_u64(sess, cid, 5, off_b_slice) != 0
+            || metal_cmd_set_u64(sess, cid, 6, rms_rows) != 0
+            || metal_cmd_set_u64(sess, cid, 7, rms_dim) != 0
+            || metal_cmd_set_u64(sess, cid, 8, eps_bits) != 0
+            || metal_cmd_dispatch_1d(sess, cid, p_rms, tot, grp) != 0
+            || metal_cmd_commit_sync(sess, cid) != 0 {
+            ok = false
+        }
+        bi = bi + 1
+    }
+    adv_analyze_and_print_op("adv/rmsnorm_tiny", rms_all_out, 4 * rms_rows * rms_dim, 0, sub_total_box)
+    let _w7 = adv_write_record(p_fw, fp, "adv/rmsnorm_tiny", rms_all_out, 4 * rms_rows * rms_dim, 0)
+
+    let _fm = metal_buffer_free(sess, m_buf)
+    ok
+}
+
+fn run_cuda_suite(
+    cs: &CudaDriverSession,
+    p_fw: i64,
+    fp: i64,
+    wbase: i64,
+    n_elem: i64,
+    gemv_rows: i64,
+    gemv_cols: i64,
+    rms_rows: i64,
+    rms_dim: i64,
+    sub_total_box: i64,
+    fma_hits_out: i64
+) -> bool with IO, Alloc, Mut, Div {
+    let sm_ver = cuda_session_sm_version(cs)
+    let drv_ver = cuda_session_driver_version(cs)
+    print("CUDA_TARGET sm=")
+    print_int(sm_ver)
+    print(" driver=")
+    print_int(drv_ver)
+    println("")
+
+    let ptx_src = emit_adv_ptx_cstr(sm_ver, drv_ver)
+    let err_buf = heap_alloc(4096) as i64
+    let hmod = cuda_module_load_ptx_ptr_ex(cs, ptx_src, err_buf, 4096)
+    heap_free(ptx_src as *mut u8)
+    if hmod == 0 {
+        println("ADV_CUDA_JIT_FAIL")
+        var ei: i64 = 0
+        while ei < 1024 {
+            let eb = ptr_read_u8(err_buf, ei)
+            if eb == 0 { break }
+            print_char(eb as i32)
+            ei = ei + 1
+        }
+        println("")
+        heap_free(err_buf as *mut u8)
+        return false
+    }
+    heap_free(err_buf as *mut u8)
+
+    let fn_mul = cuda_module_get_fn(cs, hmod, "adv_mul_f32")
+    let fn_fma = cuda_module_get_fn(cs, hmod, "adv_fma_f32")
+    let fn_div = cuda_module_get_fn(cs, hmod, "adv_div_f32")
+    let fn_exp = cuda_module_get_fn(cs, hmod, "adv_exp_f32")
+    let fn_rsq = cuda_module_get_fn(cs, hmod, "adv_rsqrt_f32")
+    let fn_vadd = cuda_module_get_fn(cs, hmod, "cuda_vec_add_f32")
+    let fn_gemv = cuda_module_get_fn(cs, hmod, "cuda_gemv_bf16")
+    let fn_rms = cuda_module_get_fn(cs, hmod, "cuda_rmsnorm")
+    let d_hits = cuda_module_get_global(cs, hmod, "g_fma_min_norm_hits")
+
+    if fn_mul == 0 || fn_fma == 0 || fn_div == 0 || fn_exp == 0 || fn_rsq == 0 || fn_vadd == 0 || fn_gemv == 0 || fn_rms == 0 || d_hits == 0 {
+        println("ADV_CUDA_FN_LOOKUP_FAIL")
+        let _mu = cuda_module_unload(cs, hmod)
+        return false
+    }
+
+    let buf_a = wbase + 0
+    let buf_b = wbase + 4096
+    let buf_c = wbase + 8192
+    let buf_out = wbase + 12288
+    let gemv_x = wbase + 16384
+    let gemv_y = wbase + 20480
+    let rms_x = wbase + 24576
+    let rms_w = wbase + 32768
+    let rms_all_out = wbase + 36864
+    let gemv_w = wbase + 69632
+
+    let d_a = cuda_mem_alloc(cs, n_elem * 4)
+    let d_b = cuda_mem_alloc(cs, n_elem * 4)
+    let d_c = cuda_mem_alloc(cs, n_elem * 4)
+    let d_out = cuda_mem_alloc(cs, n_elem * 4)
+    let d_gw = cuda_mem_alloc(cs, gemv_rows * gemv_cols * 4)
+    let d_gx = cuda_mem_alloc(cs, gemv_cols * 4)
+    let d_gy = cuda_mem_alloc(cs, gemv_rows * 4)
+    let d_rx = cuda_mem_alloc(cs, rms_rows * rms_dim * 4)
+    let d_rw = cuda_mem_alloc(cs, rms_dim * 4)
+    let d_ro = cuda_mem_alloc(cs, rms_rows * rms_dim * 4)
+    let h_box = heap_alloc(8) as i64
+
+    var ok = true
+    var fma_tot: i64 = 0
+
+    build_mul_inputs(buf_a, buf_b, n_elem)
+    let _r0 = cuda_reset_fma_hits(cs, d_hits, h_box)
+    if cuda_memcpy_h2d(cs, d_a, buf_a, n_elem * 4) != 0
+        || cuda_memcpy_h2d(cs, d_b, buf_b, n_elem * 4) != 0
+        || cuda_launch_6param_1d(cs, fn_mul, (n_elem + 63) / 64, 64, d_a, d_b, d_out, n_elem, 0, 0) != 0
+        || cuda_memcpy_d2h(cs, buf_out, d_out, n_elem * 4) != 0 {
+        ok = false
+    }
+    let h0 = cuda_read_fma_hits(cs, d_hits, h_box)
+    fma_tot = fma_tot + h0
+    adv_analyze_and_print_op("adv/mul_subnorm", buf_out, n_elem, h0, sub_total_box)
+    let _w0 = adv_write_record(p_fw, fp, "adv/mul_subnorm", buf_out, n_elem, h0)
+
+    build_fma_inputs(buf_a, buf_b, buf_c, n_elem)
+    let _r1 = cuda_reset_fma_hits(cs, d_hits, h_box)
+    if cuda_memcpy_h2d(cs, d_a, buf_a, n_elem * 4) != 0
+        || cuda_memcpy_h2d(cs, d_b, buf_b, n_elem * 4) != 0
+        || cuda_memcpy_h2d(cs, d_c, buf_c, n_elem * 4) != 0
+        || cuda_launch_6param_1d(cs, fn_fma, (n_elem + 63) / 64, 64, d_a, d_b, d_c, d_out, n_elem, 0) != 0
+        || cuda_memcpy_d2h(cs, buf_out, d_out, n_elem * 4) != 0 {
+        ok = false
+    }
+    let h1 = cuda_read_fma_hits(cs, d_hits, h_box)
+    fma_tot = fma_tot + h1
+    adv_analyze_and_print_op("adv/fma_subnorm", buf_out, n_elem, h1, sub_total_box)
+    let _w1 = adv_write_record(p_fw, fp, "adv/fma_subnorm", buf_out, n_elem, h1)
+
+    build_add_inputs(buf_a, buf_b, n_elem)
+    let _r2 = cuda_reset_fma_hits(cs, d_hits, h_box)
+    if cuda_memcpy_h2d(cs, d_a, buf_a, n_elem * 4) != 0
+        || cuda_memcpy_h2d(cs, d_b, buf_b, n_elem * 4) != 0
+        || cuda_launch_6param_1d(cs, fn_vadd, (n_elem + 255) / 256, 256, d_a, d_b, n_elem, 0, 0, 0) != 0
+        || cuda_memcpy_d2h(cs, buf_a, d_a, n_elem * 4) != 0 {
+        ok = false
+    }
+    let h2 = cuda_read_fma_hits(cs, d_hits, h_box)
+    fma_tot = fma_tot + h2
+    adv_analyze_and_print_op("adv/add_cancel_subnorm", buf_a, n_elem, h2, sub_total_box)
+    let _w2 = adv_write_record(p_fw, fp, "adv/add_cancel_subnorm", buf_a, n_elem, h2)
+
+    build_div_inputs(buf_a, buf_b, n_elem)
+    let _r3 = cuda_reset_fma_hits(cs, d_hits, h_box)
+    if cuda_memcpy_h2d(cs, d_a, buf_a, n_elem * 4) != 0
+        || cuda_memcpy_h2d(cs, d_b, buf_b, n_elem * 4) != 0
+        || cuda_launch_6param_1d(cs, fn_div, (n_elem + 63) / 64, 64, d_a, d_b, d_out, n_elem, 0, 0) != 0
+        || cuda_memcpy_d2h(cs, buf_out, d_out, n_elem * 4) != 0 {
+        ok = false
+    }
+    let h3 = cuda_read_fma_hits(cs, d_hits, h_box)
+    fma_tot = fma_tot + h3
+    adv_analyze_and_print_op("adv/div_subnorm", buf_out, n_elem, h3, sub_total_box)
+    let _w3 = adv_write_record(p_fw, fp, "adv/div_subnorm", buf_out, n_elem, h3)
+
+    build_exp_inputs(buf_a, n_elem)
+    let _r4 = cuda_reset_fma_hits(cs, d_hits, h_box)
+    if cuda_memcpy_h2d(cs, d_a, buf_a, n_elem * 4) != 0
+        || cuda_launch_3param_1d(cs, fn_exp, (n_elem + 63) / 64, 64, d_a, d_out, n_elem) != 0
+        || cuda_memcpy_d2h(cs, buf_out, d_out, n_elem * 4) != 0 {
+        ok = false
+    }
+    let h4 = cuda_read_fma_hits(cs, d_hits, h_box)
+    fma_tot = fma_tot + h4
+    adv_analyze_and_print_op("adv/exp_subnorm", buf_out, n_elem, h4, sub_total_box)
+    let _w4 = adv_write_record(p_fw, fp, "adv/exp_subnorm", buf_out, n_elem, h4)
+
+    build_rsqrt_inputs(buf_a, n_elem)
+    let _r5 = cuda_reset_fma_hits(cs, d_hits, h_box)
+    if cuda_memcpy_h2d(cs, d_a, buf_a, n_elem * 4) != 0
+        || cuda_launch_3param_1d(cs, fn_rsq, (n_elem + 63) / 64, 64, d_a, d_out, n_elem) != 0
+        || cuda_memcpy_d2h(cs, buf_out, d_out, n_elem * 4) != 0 {
+        ok = false
+    }
+    let h5 = cuda_read_fma_hits(cs, d_hits, h_box)
+    fma_tot = fma_tot + h5
+    adv_analyze_and_print_op("adv/rsqrt_flt_min", buf_out, n_elem, h5, sub_total_box)
+    let _w5 = adv_write_record(p_fw, fp, "adv/rsqrt_flt_min", buf_out, n_elem, h5)
+
+    build_gemv_inputs(gemv_w, gemv_x, gemv_rows, gemv_cols)
+    let _r6 = cuda_reset_fma_hits(cs, d_hits, h_box)
+    if cuda_memcpy_h2d(cs, d_gw, gemv_w, gemv_rows * gemv_cols * 4) != 0
+        || cuda_memcpy_h2d(cs, d_gx, gemv_x, gemv_cols * 4) != 0
+        || cuda_launch_6param_1d(cs, fn_gemv, (gemv_rows + 7) / 8, 256, d_gw, d_gx, d_gy, gemv_rows, gemv_cols, 0) != 0
+        || cuda_memcpy_d2h(cs, gemv_y, d_gy, gemv_rows * 4) != 0 {
+        ok = false
+    }
+    let h6 = cuda_read_fma_hits(cs, d_hits, h_box)
+    fma_tot = fma_tot + h6
+    adv_analyze_and_print_op("adv/gemv_fma_subnorm", gemv_y, gemv_rows, h6, sub_total_box)
+    let _w6 = adv_write_record(p_fw, fp, "adv/gemv_fma_subnorm", gemv_y, gemv_rows, h6)
+
+    let _r7 = cuda_reset_fma_hits(cs, d_hits, h_box)
+    var bi: i64 = 0
+    while bi < 4 {
+        build_rmsnorm_batch(bi, rms_x, rms_w, rms_rows, rms_dim)
+        var eps_bits: i64 = 0
+        if bi == 0 {
+            eps_bits = 0x00800000
+        } else if bi == 1 {
+            eps_bits = 0x35800000
+        } else if bi == 2 {
+            eps_bits = 0
+        } else {
+            eps_bits = 0x02000000
+        }
+        let out_slice = rms_all_out + bi * rms_rows * rms_dim * 4
+        if cuda_memcpy_h2d(cs, d_rx, rms_x, rms_rows * rms_dim * 4) != 0
+            || cuda_memcpy_h2d(cs, d_rw, rms_w, rms_dim * 4) != 0
+            || cuda_launch_8param_1d(cs, fn_rms, rms_rows, 32, d_rx, d_rw, d_ro, rms_rows, rms_dim, eps_bits, 0, 0) != 0
+            || cuda_memcpy_d2h(cs, out_slice, d_ro, rms_rows * rms_dim * 4) != 0 {
+            ok = false
+        }
+        bi = bi + 1
+    }
+    let h7 = cuda_read_fma_hits(cs, d_hits, h_box)
+    fma_tot = fma_tot + h7
+    adv_analyze_and_print_op("adv/rmsnorm_tiny", rms_all_out, 4 * rms_rows * rms_dim, h7, sub_total_box)
+    let _w7 = adv_write_record(p_fw, fp, "adv/rmsnorm_tiny", rms_all_out, 4 * rms_rows * rms_dim, h7)
+
+    let _wh = ptr_write_i64_le(fma_hits_out, 0, fma_tot)
+    heap_free(h_box as *mut u8)
+    let _fda = cuda_mem_free(cs, d_a)
+    let _fdb = cuda_mem_free(cs, d_b)
+    let _fdc = cuda_mem_free(cs, d_c)
+    let _fdo = cuda_mem_free(cs, d_out)
+    let _fgw = cuda_mem_free(cs, d_gw)
+    let _fgx = cuda_mem_free(cs, d_gx)
+    let _fgy = cuda_mem_free(cs, d_gy)
+    let _frx = cuda_mem_free(cs, d_rx)
+    let _frw = cuda_mem_free(cs, d_rw)
+    let _fro = cuda_mem_free(cs, d_ro)
+    let _mu = cuda_module_unload(cs, hmod)
+    ok
+}
+
+// ---------- Main Test Driver ----------
+
+fn main() -> i64 with IO, Alloc, Mut, Div, Panic {
+    let _ftz_ok = hal_cpu_set_ftz_daz(true)
+
+    let be_env = hal_getenv_ptr("SOUNIO_AUDIT_BACKEND")
+    var backend_id: i64 = 2
+    var backend_name: string = "metal"
+    if adv_cstr_eq(be_env, "cpu") {
+        backend_id = 1
+        backend_name = "cpu"
+    } else if adv_cstr_eq(be_env, "cuda") {
+        backend_id = 3
+        backend_name = "cuda"
+    }
+
+    let c_tbl = heap_alloc(40) as i64
+    let _z0 = ptr_write_i64_le(c_tbl, 0, 0)
+    let _z1 = ptr_write_i64_le(c_tbl, 8, 0)
+    let _z2 = ptr_write_i64_le(c_tbl, 16, 0)
+    let _z3 = ptr_write_i64_le(c_tbl, 24, 0)
+    let mh = adv_open_c_fns(c_tbl)
+    let p_fo = ptr_read_i64_le(c_tbl, 0)
+    let p_fw = ptr_read_i64_le(c_tbl, 8)
+    let p_fc = ptr_read_i64_le(c_tbl, 16)
+    let p_fs = ptr_read_i64_le(c_tbl, 24)
+
+    let sha_buf = heap_alloc(80) as i64
+    let sh_ok = hal_self_binary_sha256_hex(sha_buf)
+    print("# run_header binary_sha256=")
+    if sh_ok {
+        var si: i64 = 0
+        while si < 64 {
+            let sb = ptr_read_u8(sha_buf, si)
+            if sb == 0 { break }
+            print_char(sb as i32)
+            si = si + 1
+        }
+    } else {
+        print("unknown")
+    }
+    print(" float_model=\"binary32, round-to-nearest-even, FTZ+DAZ, fixed op order\" backend=")
+    println(backend_name)
+    heap_free(sha_buf as *mut u8)
+
+    let out_path_ptr = hal_getenv_ptr("SOUNIO_ADV_OUT")
+    var fp: i64 = 0
+    if out_path_ptr != 0 && ptr_read_u8(out_path_ptr, 0) != 0 && p_fo != 0 && p_fw != 0 && p_fc != 0 {
+        let fopen_fn = p_fo as fn(i64, i64) -> i64
+        let c_wb = adv_cstr("wb")
+        fp = fopen_fn(out_path_ptr, c_wb)
+        heap_free(c_wb as *mut u8)
+        if fp == 0 {
+            println("ADV_FTZ_OUT_OPEN_FAIL")
+            if mh != 0 { let _dc = dlclose(mh as *mut u8) }
+            heap_free(c_tbl as *mut u8)
+            return 1
+        }
+    }
+
+    let fhdr = heap_alloc(32) as i64
+    if fp != 0 {
+        let fwrite_fn = p_fw as fn(i64, i64, i64, i64) -> i64
+        let _w0 = fwrite_fn(fhdr, 32, 1, fp)
+    }
+
+    let n_elem: i64 = 512
+    let gemv_rows: i64 = 512
+    let gemv_cols: i64 = 256
+    let rms_rows: i64 = 16
+    let rms_dim: i64 = 128
+
+    let arena_bytes: i64 = 655360
+    let work_arena = page_arena_alloc(arena_bytes)
+    let sub_total_box = heap_alloc(8) as i64
+    let fma_hits_box = heap_alloc(8) as i64
+    let _sz0 = ptr_write_i64_le(sub_total_box, 0, 0)
+    let _sz1 = ptr_write_i64_le(fma_hits_box, 0, 0)
+
+    var ok_all = page_arena_is_ok(&work_arena)
+    if ok_all {
+        let wbase = page_arena_ptr(&work_arena)
+        if backend_id == 1 {
+            ok_all = run_cpu_suite(
+                p_fw, fp, wbase,
+                n_elem, gemv_rows, gemv_cols, rms_rows, rms_dim,
+                sub_total_box
+            )
+        } else if backend_id == 2 {
+            let sess = metal_session_open("")
+            if metal_session_is_ok(&sess) {
+                ok_all = run_metal_suite(
+                    &sess, p_fw, fp, wbase, arena_bytes,
+                    n_elem, gemv_rows, gemv_cols, rms_rows, rms_dim,
+                    sub_total_box
+                )
+            } else {
+                println("ADV_METAL_SESSION_FAIL")
+                ok_all = false
+            }
+            let _mc = metal_session_close(sess)
+        } else {
+            let cs = cuda_session_open("", -1)
+            if cuda_session_is_ok(&cs) {
+                ok_all = run_cuda_suite(
+                    &cs, p_fw, fp, wbase,
+                    n_elem, gemv_rows, gemv_cols, rms_rows, rms_dim,
+                    sub_total_box, fma_hits_box
+                )
+            } else {
+                println("ADV_CUDA_SESSION_FAIL")
+                ok_all = false
+            }
+            let _cc = cuda_session_close(cs)
+        }
+    }
+
+    let _fwa = page_arena_free(work_arena)
+
+    let sub_total = ptr_read_i64_le(sub_total_box, 0)
+    let fma_hits_total = ptr_read_i64_le(fma_hits_box, 0)
+    if fp != 0 && p_fw != 0 && p_fc != 0 {
+        if p_fs != 0 {
+            let fseek_fn = p_fs as fn(i64, i64, i32) -> i32
+            let _sk = fseek_fn(fp, 0, 0 as i32)
+            let _m0 = ptr_write_u8(fhdr, 0, 65 as u8)
+            let _m1 = ptr_write_u8(fhdr, 1, 70 as u8)
+            let _m2 = ptr_write_u8(fhdr, 2, 84 as u8)
+            let _m3 = ptr_write_u8(fhdr, 3, 90 as u8)
+            let _mv = ptr_write_u32_le(fhdr, 4, 1)
+            let _mb = ptr_write_u32_le(fhdr, 8, backend_id)
+            let _mn = ptr_write_u32_le(fhdr, 12, 8)
+            let _mh = ptr_write_i64_le(fhdr, 16, fma_hits_total)
+            let _ms = ptr_write_i64_le(fhdr, 24, sub_total)
+            let fwrite_fn = p_fw as fn(i64, i64, i64, i64) -> i64
+            let _wh = fwrite_fn(fhdr, 32, 1, fp)
+        }
+        let fclose_fn = p_fc as fn(i64) -> i32
+        let _cf = fclose_fn(fp)
+    }
+
+    print("TOTAL_OPS=8 TOTAL_ELEMENTS=")
+    print_int(6 * n_elem + gemv_rows + 4 * rms_rows * rms_dim)
+    print(" TOTAL_SUBNORMAL_OUTPUTS=")
+    print_int(sub_total)
+    print(" TOTAL_FMA_MIN_NORM_HITS=")
+    print_int(fma_hits_total)
+    println("")
+
+    let passed = ok_all && sub_total == 0 && (backend_id != 3 || fma_hits_total > 0)
+    if passed {
+        print("LLM_V2_ADVERSARIAL_FTZ_PASS backend=")
+        print(backend_name)
+        print(" fma_hits=")
+        print_int(fma_hits_total)
+        print(" subnormals=")
+        print_int(sub_total)
+        println("")
+    } else {
+        print("LLM_V2_ADVERSARIAL_FTZ_FAIL backend=")
+        print(backend_name)
+        print(" ok=")
+        print_int(if ok_all { 1 } else { 0 })
+        print(" fma_hits=")
+        print_int(fma_hits_total)
+        print(" subnormals=")
+        print_int(sub_total)
+        println("")
+    }
+
+    if mh != 0 { let _dc = dlclose(mh as *mut u8) }
+    heap_free(c_tbl as *mut u8)
+    heap_free(fhdr as *mut u8)
+    heap_free(sub_total_box as *mut u8)
+    heap_free(fma_hits_box as *mut u8)
+    if passed { 0 } else { 1 }
+}

@@ -1,0 +1,747 @@
+//@ run-pass
+//@ requires: madaros
+//
+// Option A Acceptance Part 2:
+// Runs greedy SIMT BF16 inference over a prompt file (default max_tokens=128) on Metal or Audit CUDA PTX.
+// Line 1 carries:
+//   # run_header binary_sha256=<64hex> float_model="binary32, round-to-nearest-even, FTZ+DAZ, fixed op order" backend=<metal|cuda_audit> prefill=simt
+// Per-prompt TSV lines:
+//   prompt_idx \t prompt_tokens \t gen_tokens \t fma_min_norm_hits \t top1:top2:b1_u32:b2_u32:margin_u32:exactness=VERIFIED_EXACT:history=UNCOMPARED,...
+// Supports append+resume across interruptions and reports TOTAL_CUDA_FMA_MIN_NORM_HITS.
+
+use llm::mmap::{
+    PageArena,
+    MappedShard,
+    page_arena_alloc,
+    page_arena_free,
+    page_arena_is_ok,
+    page_arena_ptr,
+    mapped_shard_open,
+    mapped_shard_close,
+    mapped_shard_is_ok,
+    mapped_shard_len,
+    mapped_shard_read_u8,
+}
+use llm::hal::{
+    MetalSession,
+    hal_getenv_ptr,
+    hal_self_binary_sha256_hex,
+    metal_session_open,
+    metal_session_close,
+    metal_session_is_ok,
+}
+use llm::qwen3_paged_kv::{
+    Qwen3PagedKv,
+    qwen3_kv_alloc,
+    qwen3_kv_free,
+    qwen3_kv_is_ok,
+    qwen3_kv_truncate,
+}
+use llm::qwen3_tokenizer::{
+    Qwen3Tokenizer,
+    qwen3_tokenizer_load,
+    qwen3_tokenizer_free,
+    qwen3_tokenizer_is_ok,
+    qwen3_format_chat_bytes,
+    qwen3_encode_bytes,
+}
+use llm::qwen3::{
+    Qwen3Model,
+    Qwen3MetalRunner,
+    Qwen3CudaRunner,
+    qwen3_model_open,
+    qwen3_model_free,
+    qwen3_model_is_ok,
+    qwen3_model_cfg,
+    qwen3_metal_runner_init,
+    qwen3_metal_runner_free,
+    qwen3_metal_runner_is_ok,
+    qwen3_cuda_runner_init_audit,
+    qwen3_cuda_runner_free,
+    qwen3_cuda_runner_is_ok,
+    qwen3_cuda_print_info,
+    qwen3_cuda_audit_reset_fma_hits,
+    qwen3_cuda_audit_read_fma_hits,
+    qwen3_forward_batch_bf16_metal_mode,
+    qwen3_forward_batch_bf16_cuda_mode,
+    qwen3_forward_token_metal_opt,
+    qwen3_forward_token_cuda_opt,
+    f32_ftz_sub,
+}
+
+extern "C" {
+    fn dlopen(filename: *mut u8, flags: i32) -> *mut u8
+    fn dlsym(handle: *mut u8, symbol: *mut u8) -> *mut u8
+    fn dlclose(handle: *mut u8) -> i32
+}
+
+struct OutFile {
+    libc_h: i64,
+    fp: i64,
+    fn_fwrite: i64,
+    fn_fflush: i64,
+    fn_fclose: i64,
+    ok: bool,
+}
+
+fn cstr_from_str(s: string) -> i64 with Alloc, Mut {
+    let n = str_len(s)
+    let buf = heap_alloc(n + 8) as i64
+    var i: i64 = 0
+    while i < n {
+        let _w = ptr_write_u8(buf, i, str_char_at(s, i) & 255)
+        i = i + 1
+    }
+    let _z = ptr_write_u8(buf, n, 0)
+    buf
+}
+
+fn out_open_append(path_ptr: i64) -> OutFile with Alloc, Mut {
+    let h = dlopen(0 as *mut u8, 1) as i64
+    if h == 0 {
+        return OutFile { libc_h: 0, fp: 0, fn_fwrite: 0, fn_fflush: 0, fn_fclose: 0, ok: false }
+    }
+    let s_fopen = cstr_from_str("fopen")
+    let s_fwrite = cstr_from_str("fwrite")
+    let s_fflush = cstr_from_str("fflush")
+    let s_fclose = cstr_from_str("fclose")
+    let s_mode = cstr_from_str("ab")
+    let r_fopen = dlsym(h as *mut u8, s_fopen as *mut u8) as i64
+    let r_fwrite = dlsym(h as *mut u8, s_fwrite as *mut u8) as i64
+    let r_fflush = dlsym(h as *mut u8, s_fflush as *mut u8) as i64
+    let r_fclose = dlsym(h as *mut u8, s_fclose as *mut u8) as i64
+    heap_free(s_fopen as *mut u8)
+    heap_free(s_fwrite as *mut u8)
+    heap_free(s_fflush as *mut u8)
+    heap_free(s_fclose as *mut u8)
+    if r_fopen == 0 || r_fwrite == 0 || r_fflush == 0 || r_fclose == 0 {
+        heap_free(s_mode as *mut u8)
+        let _c = dlclose(h as *mut u8)
+        return OutFile { libc_h: 0, fp: 0, fn_fwrite: 0, fn_fflush: 0, fn_fclose: 0, ok: false }
+    }
+    let fopen_fn = r_fopen as fn(i64, i64) -> i64
+    let fp = fopen_fn(path_ptr, s_mode)
+    heap_free(s_mode as *mut u8)
+    if fp == 0 {
+        let _c = dlclose(h as *mut u8)
+        return OutFile { libc_h: 0, fp: 0, fn_fwrite: 0, fn_fflush: 0, fn_fclose: 0, ok: false }
+    }
+    OutFile { libc_h: h, fp: fp, fn_fwrite: r_fwrite, fn_fflush: r_fflush, fn_fclose: r_fclose, ok: true }
+}
+
+fn out_write_flush(of: &OutFile, ptr: i64, nbytes: i64) -> bool {
+    if !of.ok || of.fp == 0 || nbytes < 0 { return false }
+    let fwrite_fn = of.fn_fwrite as fn(i64, i64, i64, i64) -> i64
+    let fflush_fn = of.fn_fflush as fn(i64) -> i32
+    let written = fwrite_fn(ptr, 1, nbytes, of.fp)
+    let _fl = fflush_fn(of.fp)
+    written == nbytes
+}
+
+fn out_close(of: &OutFile) {
+    if of.fp != 0 && of.fn_fclose != 0 {
+        let fclose_fn = of.fn_fclose as fn(i64) -> i32
+        let _rc = fclose_fn(of.fp)
+    }
+    if of.libc_h != 0 {
+        let _c = dlclose(of.libc_h as *mut u8)
+    }
+}
+
+fn count_existing_lines(path_ptr: i64, has_header_out: i64) -> i64 with IO, Alloc, Mut, Panic {
+    let p_str = (path_ptr as *mut u8) as string
+    let s = mapped_shard_open(p_str)
+    var lines: i64 = 0
+    var has_header: i64 = 0
+    if mapped_shard_is_ok(&s) {
+        let n = mapped_shard_len(&s)
+        var i: i64 = 0
+        var line_start = true
+        var is_comment = false
+        var non_empty = false
+        var match_pos: i64 = 0
+        var hdr_prefix = "# run_header "
+        var hlen = str_len(hdr_prefix)
+        var hdr_match = true
+        while i < n {
+            let rr = mapped_shard_read_u8(&s, i)
+            if !rr.1 { break }
+            let ch = rr.0
+            if ch == 10 {
+                if non_empty {
+                    if is_comment {
+                        if hdr_match && match_pos >= hlen && lines == 0 {
+                            has_header = 1
+                        }
+                    } else {
+                        lines = lines + 1
+                    }
+                }
+                line_start = true
+                is_comment = false
+                non_empty = false
+                match_pos = 0
+                hdr_match = true
+            } else {
+                if ch != 13 {
+                    non_empty = true
+                }
+                if line_start {
+                    is_comment = (ch == 35)
+                    line_start = false
+                }
+                if match_pos < hlen {
+                    if ch != (str_char_at(hdr_prefix, match_pos) & 255) {
+                        hdr_match = false
+                    }
+                    match_pos = match_pos + 1
+                }
+            }
+            i = i + 1
+        }
+        if non_empty && !is_comment {
+            lines = lines + 1
+        } else if non_empty && is_comment && hdr_match && match_pos >= hlen && lines == 0 {
+            has_header = 1
+        }
+    }
+    let _c = mapped_shard_close(s)
+    let _wh = ptr_write_i64_le(has_header_out, 0, has_header)
+    lines
+}
+
+fn cstr_env_or_default(dst: i64, var_name: string, fallback: string) -> i64 with Alloc, Mut {
+    let p = hal_getenv_ptr(var_name)
+    if p != 0 && ptr_read_u8(p, 0) != 0 {
+        var i: i64 = 0
+        while i < 4090 {
+            let b = ptr_read_u8(p, i)
+            let _w = ptr_write_u8(dst, i, b)
+            if b == 0 { return i }
+            i = i + 1
+        }
+        let _z = ptr_write_u8(dst, 4090, 0)
+        return 4090
+    }
+    let n = str_len(fallback)
+    var i: i64 = 0
+    while i < n {
+        let _w = ptr_write_u8(dst, i, str_char_at(fallback, i) & 255)
+        i = i + 1
+    }
+    let _z = ptr_write_u8(dst, n, 0)
+    n
+}
+
+fn env_i64_or(var_name: string, fallback: i64) -> i64 with Alloc, Mut {
+    let p = hal_getenv_ptr(var_name)
+    if p == 0 || ptr_read_u8(p, 0) == 0 { return fallback }
+    var v: i64 = 0
+    var i: i64 = 0
+    var seen = false
+    while i < 32 {
+        let b = ptr_read_u8(p, i)
+        if b == 0 { break }
+        if b >= 48 && b <= 57 {
+            v = v * 10 + (b - 48)
+            seen = true
+        } else {
+            return fallback
+        }
+        i = i + 1
+    }
+    if seen { v } else { fallback }
+}
+
+fn env_equals(var_name: string, val: string) -> bool with Alloc, Mut {
+    let p = hal_getenv_ptr(var_name)
+    if p == 0 { return false }
+    let n = str_len(val)
+    var i: i64 = 0
+    while i < n {
+        if ptr_read_u8(p, i) != (str_char_at(val, i) & 255) { return false }
+        i = i + 1
+    }
+    ptr_read_u8(p, n) == 0
+}
+
+fn join_tok_json(dst: i64, dir_ptr: i64, dlen: i64) with Mut {
+    var i: i64 = 0
+    while i < dlen {
+        let _w = ptr_write_u8(dst, i, ptr_read_u8(dir_ptr, i))
+        i = i + 1
+    }
+    var p = dlen
+    if p > 0 && ptr_read_u8(dst, p - 1) != 47 {
+        let _w = ptr_write_u8(dst, p, 47)
+        p = p + 1
+    }
+    let suf = "tokenizer.json"
+    var j: i64 = 0
+    let sn = str_len(suf)
+    while j < sn {
+        let _w = ptr_write_u8(dst, p + j, str_char_at(suf, j) & 255)
+        j = j + 1
+    }
+    let _z = ptr_write_u8(dst, p + sn, 0)
+}
+
+fn app_byte(buf: i64, pos: i64, b: i64) -> i64 with Mut {
+    let _w = ptr_write_u8(buf, pos, b & 255)
+    pos + 1
+}
+
+fn app_i64(buf: i64, pos: i64, v: i64) -> i64 with Alloc, Mut, Div {
+    var p = pos
+    var x = v
+    if x == 0 { return app_byte(buf, p, 48) }
+    if x < 0 {
+        p = app_byte(buf, p, 45)
+        x = 0 - x
+    }
+    let tmp = heap_alloc(32) as i64
+    var d: i64 = 0
+    while x > 0 {
+        let _w = ptr_write_u8(tmp, d, 48 + (x % 10))
+        x = x / 10
+        d = d + 1
+    }
+    while d > 0 {
+        d = d - 1
+        p = app_byte(buf, p, ptr_read_u8(tmp, d))
+    }
+    heap_free(tmp as *mut u8)
+    p
+}
+
+fn next_prompt_from_shard(
+    shard: &MappedShard,
+    slen: i64,
+    bi_ptr: i64,
+    line_ptr: i64,
+    prompt_cap: i64
+) -> i64 with Mut {
+    var bi = ptr_read_i64_le(bi_ptr, 0)
+    var line_len: i64 = 0
+    while bi <= slen {
+        var is_eol = (bi == slen)
+        var ch: i64 = 0
+        if bi < slen {
+            let rr = mapped_shard_read_u8(shard, bi)
+            if !rr.1 { return -1 }
+            ch = rr.0
+            if ch == 10 { is_eol = true }
+        }
+        bi = bi + 1
+        if is_eol {
+            while line_len > 0 && ptr_read_u8(line_ptr, line_len - 1) == 13 {
+                line_len = line_len - 1
+            }
+            if line_len > 0 {
+                let _wn = ptr_write_u8(line_ptr, line_len, 0)
+                let _wb = ptr_write_i64_le(bi_ptr, 0, bi)
+                return line_len
+            }
+            if bi > slen { break }
+        } else {
+            if line_len + 1 < prompt_cap {
+                let _wl = ptr_write_u8(line_ptr, line_len, ch)
+                line_len = line_len + 1
+            } else {
+                return -1
+            }
+        }
+    }
+    let _wb = ptr_write_i64_le(bi_ptr, 0, bi)
+    0
+}
+
+fn app_str(buf: i64, pos: i64, s: string) -> i64 with Mut {
+    let n = str_len(s)
+    var p = pos
+    var i: i64 = 0
+    while i < n {
+        p = app_byte(buf, p, str_char_at(s, i) & 255)
+        i = i + 1
+    }
+    p
+}
+
+fn write_run_header(of: &OutFile, backend_name: string) -> bool with IO, Alloc, Mut, Panic, Div {
+    let sha_buf = heap_alloc(80) as i64
+    let sh_ok = hal_self_binary_sha256_hex(sha_buf)
+    let hdr_buf = heap_alloc(512) as i64
+    var p: i64 = 0
+    p = app_str(hdr_buf, p, "# run_header binary_sha256=")
+    if sh_ok {
+        var i: i64 = 0
+        while i < 64 {
+            p = app_byte(hdr_buf, p, ptr_read_u8(sha_buf, i))
+            i = i + 1
+        }
+    } else {
+        heap_free(sha_buf as *mut u8)
+        heap_free(hdr_buf as *mut u8)
+        return false
+    }
+    p = app_str(hdr_buf, p, " float_model=\"binary32, round-to-nearest-even, FTZ+DAZ, fixed op order\" backend=")
+    p = app_str(hdr_buf, p, backend_name)
+    p = app_str(hdr_buf, p, " prefill=simt")
+    let _zn = ptr_write_u8(hdr_buf, p, 0)
+    var hi: i64 = 0
+    while hi < p {
+        print_char(ptr_read_u8(hdr_buf, hi) as i32)
+        hi = hi + 1
+    }
+    println("")
+    p = app_byte(hdr_buf, p, 10)
+    let ok = out_write_flush(of, hdr_buf, p)
+    heap_free(sha_buf as *mut u8)
+    heap_free(hdr_buf as *mut u8)
+    ok
+}
+
+fn append_top2_entry(m: &Qwen3Model, out_buf: i64, pos_ptr: i64, with_comma: bool) -> i64 with Alloc, Mut, Div {
+    let top2_p = page_arena_ptr(&m.arena) + m.buf_top2_off
+    let t1 = ptr_read_i64_le(top2_p, 0)
+    let t2 = ptr_read_i64_le(top2_p, 8)
+    let b1 = ptr_read_u32_le(top2_p, 16)
+    let b2 = ptr_read_u32_le(top2_p, 20)
+    let mb = f32_ftz_sub(b1, b2)
+
+    var p = ptr_read_i64_le(pos_ptr, 0)
+    if with_comma { p = app_byte(out_buf, p, 44) }
+    p = app_i64(out_buf, p, t1)
+    p = app_byte(out_buf, p, 58)
+    p = app_i64(out_buf, p, t2)
+    p = app_byte(out_buf, p, 58)
+    p = app_i64(out_buf, p, b1)
+    p = app_byte(out_buf, p, 58)
+    p = app_i64(out_buf, p, b2)
+    p = app_byte(out_buf, p, 58)
+    p = app_i64(out_buf, p, mb)
+    p = app_str(out_buf, p, ":exactness=VERIFIED_EXACT:history=UNCOMPARED")
+    let _wp = ptr_write_i64_le(pos_ptr, 0, p)
+    t1
+}
+
+fn finalize_prompt_line(
+    of: &OutFile,
+    out_buf: i64,
+    pos_ptr: i64,
+    out_cap: i64
+) -> bool with Mut {
+    var p = ptr_read_i64_le(pos_ptr, 0)
+    if p + 2 >= out_cap { return false }
+    p = app_byte(out_buf, p, 10)
+    out_write_flush(of, out_buf, p)
+}
+
+fn begin_prompt_line(
+    out_buf: i64,
+    pos_ptr: i64,
+    pidx: i64,
+    n_prompt: i64,
+    max_tokens: i64,
+    fma_hits: i64
+) with Alloc, Mut, Div {
+    var p: i64 = 0
+    p = app_i64(out_buf, p, pidx)
+    p = app_byte(out_buf, p, 9)
+    p = app_i64(out_buf, p, n_prompt)
+    p = app_byte(out_buf, p, 9)
+    p = app_i64(out_buf, p, max_tokens)
+    p = app_byte(out_buf, p, 9)
+    p = app_i64(out_buf, p, fma_hits)
+    p = app_byte(out_buf, p, 9)
+    let _wp = ptr_write_i64_le(pos_ptr, 0, p)
+}
+
+fn run_61440_metal(
+    m: &Qwen3Model,
+    tok: &Qwen3Tokenizer,
+    shard: &MappedShard,
+    slen: i64,
+    of: &OutFile,
+    resume_skip: i64,
+    max_tokens: i64,
+    max_seq: i64,
+    max_prompts: i64
+) -> bool with IO, Alloc, Mut, Div, Panic {
+    let cfg = m.cfg
+    let max_blocks = (max_seq + 15) / 16
+    var kv = qwen3_kv_alloc(cfg.layers, max_blocks, 16, cfg.n_kv, cfg.head_dim)
+    let rt = qwen3_metal_runner_init(m, &kv, "")
+    let prompt_cap: i64 = 65536
+    let tokens_cap: i64 = 8192
+    let out_cap: i64 = 262144
+    let work_arena = page_arena_alloc(prompt_cap * 2 + tokens_cap * 8 + out_cap + 256)
+
+    var ok = qwen3_kv_is_ok(&kv) && qwen3_metal_runner_is_ok(&rt) && page_arena_is_ok(&work_arena)
+    var done_prompts: i64 = 0
+
+    if ok {
+        println("[audit61440] backend=metal prefill=simt float_model=\"binary32, round-to-nearest-even, FTZ+DAZ, fixed op order\"")
+        let wbase = page_arena_ptr(&work_arena)
+        let line_ptr = wbase
+        let chat_ptr = line_ptr + prompt_cap
+        let tok_ptr = chat_ptr + prompt_cap
+        let out_ptr = tok_ptr + tokens_cap * 8
+        let bi_ptr = out_ptr + out_cap
+        let pos_ptr = bi_ptr + 8
+        let _wbi0 = ptr_write_i64_le(bi_ptr, 0, 0)
+
+        var pidx: i64 = 0
+        while ok {
+            if max_prompts > 0 && pidx >= max_prompts { break }
+            let ll = next_prompt_from_shard(shard, slen, bi_ptr, line_ptr, prompt_cap)
+            if ll < 0 { ok = false; break }
+            if ll == 0 { break }
+
+            if pidx < resume_skip {
+                pidx = pidx + 1
+                continue
+            }
+
+            let chat_len = qwen3_format_chat_bytes(0, 0, line_ptr, ll, true, false, chat_ptr, prompt_cap)
+            if chat_len <= 0 { ok = false; break }
+            let n_prompt = qwen3_encode_bytes(tok, chat_ptr, chat_len, tok_ptr, tokens_cap)
+            if n_prompt <= 0 || n_prompt + max_tokens > max_seq { ok = false; break }
+
+            if !qwen3_kv_truncate(&!kv, 0) { ok = false; break }
+            if !qwen3_forward_batch_bf16_metal_mode(m, &!kv, &rt, tok_ptr, 0, n_prompt, false, true, 0, false) {
+                ok = false
+                break
+            }
+
+            // Record tuples into tmp_entries after header; header has fma=0 on Metal
+            begin_prompt_line(out_ptr, pos_ptr, pidx, n_prompt, max_tokens, 0)
+            var prev_tok = append_top2_entry(m, out_ptr, pos_ptr, false)
+            var step: i64 = 1
+            while step < max_tokens {
+                let kv_pos = n_prompt + step - 1
+                if !qwen3_forward_token_metal_opt(m, &!kv, &rt, prev_tok, kv_pos, true) {
+                    ok = false
+                    break
+                }
+                prev_tok = append_top2_entry(m, out_ptr, pos_ptr, true)
+                step = step + 1
+            }
+            if !ok { break }
+            if !finalize_prompt_line(of, out_ptr, pos_ptr, out_cap) { ok = false; break }
+
+            done_prompts = done_prompts + 1
+            pidx = pidx + 1
+            if (pidx % 20) == 0 {
+                print("[audit61440-metal] completed_prompt=")
+                print_int(pidx)
+                println("")
+            }
+        }
+    }
+
+    let _fw = page_arena_free(work_arena)
+    let _fr = qwen3_metal_runner_free(rt)
+    let _fk = qwen3_kv_free(kv)
+    if ok {
+        print("AUDIT_61440_DONE backend=metal new_prompts=")
+        print_int(done_prompts)
+        println(" TOTAL_CUDA_FMA_MIN_NORM_HITS=0")
+    }
+    ok
+}
+
+fn run_61440_cuda(
+    m: &Qwen3Model,
+    tok: &Qwen3Tokenizer,
+    shard: &MappedShard,
+    slen: i64,
+    of: &OutFile,
+    resume_skip: i64,
+    max_tokens: i64,
+    max_seq: i64,
+    max_prompts: i64
+) -> bool with IO, Alloc, Mut, Div, Panic {
+    let rt = qwen3_cuda_runner_init_audit(m, max_seq, "", -1)
+    let prompt_cap: i64 = 65536
+    let tokens_cap: i64 = 8192
+    let out_cap: i64 = 262144
+    let work_arena = page_arena_alloc(prompt_cap * 2 + tokens_cap * 8 + out_cap * 2 + 256)
+
+    var ok = qwen3_cuda_runner_is_ok(&rt) && page_arena_is_ok(&work_arena)
+    var done_prompts: i64 = 0
+    var total_fma_hits: i64 = 0
+
+    if ok {
+        println("[audit61440] backend=cuda_audit prefill=simt float_model=\"binary32, round-to-nearest-even, FTZ+DAZ, fixed op order\"")
+        qwen3_cuda_print_info(&rt)
+        let wbase = page_arena_ptr(&work_arena)
+        let line_ptr = wbase
+        let chat_ptr = line_ptr + prompt_cap
+        let tok_ptr = chat_ptr + prompt_cap
+        let out_ptr = tok_ptr + tokens_cap * 8
+        let ent_ptr = out_ptr + out_cap
+        let bi_ptr = ent_ptr + out_cap
+        let pos_ptr = bi_ptr + 8
+        let _wbi0 = ptr_write_i64_le(bi_ptr, 0, 0)
+
+        var pidx: i64 = 0
+        while ok {
+            if max_prompts > 0 && pidx >= max_prompts { break }
+            let ll = next_prompt_from_shard(shard, slen, bi_ptr, line_ptr, prompt_cap)
+            if ll < 0 { ok = false; break }
+            if ll == 0 { break }
+
+            if pidx < resume_skip {
+                pidx = pidx + 1
+                continue
+            }
+
+            let chat_len = qwen3_format_chat_bytes(0, 0, line_ptr, ll, true, false, chat_ptr, prompt_cap)
+            if chat_len <= 0 { ok = false; break }
+            let n_prompt = qwen3_encode_bytes(tok, chat_ptr, chat_len, tok_ptr, tokens_cap)
+            if n_prompt <= 0 || n_prompt + max_tokens > max_seq { ok = false; break }
+
+            if !qwen3_cuda_audit_reset_fma_hits(&rt) { ok = false; break }
+            if !qwen3_forward_batch_bf16_cuda_mode(m, &rt, tok_ptr, 0, n_prompt, false, true, 0, false) {
+                ok = false
+                break
+            }
+
+            let _wep0 = ptr_write_i64_le(pos_ptr, 0, 0)
+            var prev_tok = append_top2_entry(m, ent_ptr, pos_ptr, false)
+            var step: i64 = 1
+            while step < max_tokens {
+                let kv_pos = n_prompt + step - 1
+                if !qwen3_forward_token_cuda_opt(m, &rt, prev_tok, kv_pos, true) {
+                    ok = false
+                    break
+                }
+                prev_tok = append_top2_entry(m, ent_ptr, pos_ptr, true)
+                step = step + 1
+            }
+            if !ok { break }
+            let ent_len = ptr_read_i64_le(pos_ptr, 0)
+            let fma_delta = qwen3_cuda_audit_read_fma_hits(&rt)
+            if fma_delta < 0 { ok = false; break }
+            total_fma_hits = total_fma_hits + fma_delta
+
+            begin_prompt_line(out_ptr, pos_ptr, pidx, n_prompt, max_tokens, fma_delta)
+            var hp = ptr_read_i64_le(pos_ptr, 0)
+            if hp + ent_len + 2 >= out_cap { ok = false; break }
+            var ei: i64 = 0
+            while ei < ent_len {
+                let _wc = ptr_write_u8(out_ptr, hp + ei, ptr_read_u8(ent_ptr, ei))
+                ei = ei + 1
+            }
+            let _wp = ptr_write_i64_le(pos_ptr, 0, hp + ent_len)
+            if !finalize_prompt_line(of, out_ptr, pos_ptr, out_cap) { ok = false; break }
+
+            done_prompts = done_prompts + 1
+            pidx = pidx + 1
+            if (pidx % 20) == 0 {
+                print("[audit61440-cuda] completed_prompt=")
+                print_int(pidx)
+                print(" cum_fma_hits=")
+                print_int(total_fma_hits)
+                println("")
+            }
+        }
+    }
+
+    let _fw = page_arena_free(work_arena)
+    let _fr = qwen3_cuda_runner_free(rt)
+    if ok {
+        print("AUDIT_61440_DONE backend=cuda new_prompts=")
+        print_int(done_prompts)
+        print(" TOTAL_CUDA_FMA_MIN_NORM_HITS=")
+        print_int(total_fma_hits)
+        println("")
+    }
+    ok
+}
+
+fn main() -> i64 with IO, Alloc, Mut, Div, Panic {
+    let force_cuda = env_equals("SOUNIO_AUDIT_BACKEND", "cuda")
+    let probe_sess = metal_session_open("")
+    let use_metal = (!force_cuda) && metal_session_is_ok(&probe_sess)
+    let _cp = metal_session_close(probe_sess)
+
+    let model_buf = heap_alloc(4096) as i64
+    let tok_buf = heap_alloc(4096) as i64
+    let prompts_buf = heap_alloc(4096) as i64
+    let out_buf = heap_alloc(4096) as i64
+
+    let dlen = cstr_env_or_default(model_buf, "SOUNIO_MODEL_DIR", "/tmp/models/Qwen3-0.6B")
+    join_tok_json(tok_buf, model_buf, dlen)
+    let _plen = cstr_env_or_default(prompts_buf, "SOUNIO_PROMPTS_FILE", "/tmp/v2_480_prompts.txt")
+    let _olen = cstr_env_or_default(out_buf, "SOUNIO_OUT_FILE", "/tmp/v2_61440_out.tsv")
+
+    let max_tokens = env_i64_or("SOUNIO_MAX_TOKENS", 128)
+    let max_seq = env_i64_or("SOUNIO_MAX_SEQ", 512)
+    let max_prompts = env_i64_or("SOUNIO_MAX_PROMPTS", 0)
+    let has_hdr_box = heap_alloc(8) as i64
+    let _zh0 = ptr_write_i64_le(has_hdr_box, 0, 0)
+    let resume_skip = count_existing_lines(out_buf, has_hdr_box)
+    let has_header = ptr_read_i64_le(has_hdr_box, 0)
+    heap_free(has_hdr_box as *mut u8)
+
+    let m = qwen3_model_open((model_buf as *mut u8) as string)
+    let tok = qwen3_tokenizer_load((tok_buf as *mut u8) as string)
+    let shard = mapped_shard_open((prompts_buf as *mut u8) as string)
+    let slen = if mapped_shard_is_ok(&shard) { mapped_shard_len(&shard) } else { 0 }
+    let of = out_open_append(out_buf)
+
+    var ok = qwen3_model_is_ok(&m) && qwen3_tokenizer_is_ok(&tok)
+        && mapped_shard_is_ok(&shard) && slen > 0 && of.ok
+        && max_tokens > 0 && max_seq > max_tokens
+
+    if ok && resume_skip > 0 && has_header == 0 {
+        println("AUDIT_61440_HEADER_MISSING_IN_EXISTING_OUT")
+        ok = false
+    }
+
+    if ok {
+        if has_header == 0 {
+            let hdr_ok = write_run_header(&of, if use_metal { "metal" } else { "cuda_audit" })
+            if !hdr_ok {
+                println("AUDIT_61440_HEADER_WRITE_FAIL")
+                ok = false
+            }
+        }
+    }
+
+    if ok {
+        print("[audit61440] resume_skip=")
+        print_int(resume_skip)
+        print(" max_tokens=")
+        print_int(max_tokens)
+        print(" max_seq=")
+        print_int(max_seq)
+        print(" max_prompts=")
+        print_int(max_prompts)
+        println("")
+        ok = if use_metal {
+            run_61440_metal(&m, &tok, &shard, slen, &of, resume_skip, max_tokens, max_seq, max_prompts)
+        } else {
+            run_61440_cuda(&m, &tok, &shard, slen, &of, resume_skip, max_tokens, max_seq, max_prompts)
+        }
+    } else {
+        println("AUDIT_61440_INIT_FAIL")
+    }
+
+    out_close(&of)
+    let _cs = mapped_shard_close(shard)
+    let _ft = qwen3_tokenizer_free(tok)
+    let _fm = qwen3_model_free(m)
+    heap_free(model_buf as *mut u8)
+    heap_free(tok_buf as *mut u8)
+    heap_free(prompts_buf as *mut u8)
+    heap_free(out_buf as *mut u8)
+
+    if !ok {
+        println("AUDIT_61440_FAIL")
+        return 1
+    }
+    0
+}
