@@ -2042,44 +2042,80 @@ pub fn ast_global_init_refusal_code(k: i64) -> i64 with Panic { GLOBAL_INIT_OVF_
 pub fn ast_global_init_refusal_count() -> i64 { GLOBAL_INIT_OVF_COUNT }
 pub fn ast_global_init_refusal_hash(k: i64) -> i64 with Panic { GLOBAL_INIT_OVF_HASH[k as usize] }
 
-// True at lower time when a module-level initializer of this name was dropped
-// by some parse (E309 entry) and no parse since folded it into BSS words or
-// deferred it. The final state is read from the init tables themselves: a
-// later load can renumber files, so matching the entry by span is not enough.
+// E309 drop table: one entry per (name, module) whose initializer a parse
+// neither folded nor deferred. Reset with the other init tables at each parse
+// session (ast_reset_global_var_inits), so what lower reads is the last
+// session's state, keyed by the same module serials as the fold and defer
+// tables. A full table latches GLOBAL_DROP_OVERFLOW and lower refuses the
+// compile: an unrecorded drop would otherwise start its global at zero.
+pub var GLOBAL_DROP_HASH: [i64; 4096] = [0; 4096]
+pub var GLOBAL_DROP_MOD: [i64; 4096] = [0; 4096]
+pub var GLOBAL_DROP_COUNT: i64 = 0
+pub var GLOBAL_DROP_OVERFLOW: i64 = 0
+
+pub fn ast_record_global_init_drop(name: Name) with Mut, Div {
+    let h = ast_name_hash(name)
+    var k: i64 = 0
+    while k < GLOBAL_DROP_COUNT {
+        if GLOBAL_DROP_HASH[k as usize] == h && GLOBAL_DROP_MOD[k as usize] == GLOBAL_VAR_INIT_CUR_MOD { return }
+        k = k + 1
+    }
+    if GLOBAL_DROP_COUNT >= 4096 {
+        GLOBAL_DROP_OVERFLOW = 1
+        return
+    }
+    GLOBAL_DROP_HASH[GLOBAL_DROP_COUNT as usize] = h
+    GLOBAL_DROP_MOD[GLOBAL_DROP_COUNT as usize] = GLOBAL_VAR_INIT_CUR_MOD
+    GLOBAL_DROP_COUNT = GLOBAL_DROP_COUNT + 1
+}
+
+pub fn ast_global_init_drop_overflowed() -> bool { GLOBAL_DROP_OVERFLOW != 0 }
+
+// True at lower time when some module dropped the initializer of a global of
+// this name and no parse of that SAME module folded or deferred it since. A
+// same-named global folded in another module does not cancel it.
 pub fn ast_global_init_dropped(name: Name) -> bool with Mut, Panic, Div {
     let h = ast_name_hash(name)
-    var seen = false
     var k: i64 = 0
-    while k < GLOBAL_INIT_OVF_COUNT {
-        if GLOBAL_INIT_OVF_HASH[k as usize] == h && GLOBAL_INIT_OVF_CODE[k as usize] == 309 {
-            seen = true
+    while k < GLOBAL_DROP_COUNT {
+        if GLOBAL_DROP_HASH[k as usize] == h {
+            let m = GLOBAL_DROP_MOD[k as usize]
+            var kept = ast_gvi_count_in(name, m) > 0
+            var d: i64 = 0
+            while !kept && d < GLOBAL_DEFERRED_INIT_COUNT {
+                if GLOBAL_DEFERRED_INIT_HASHES[d as usize] == h && GLOBAL_DEFERRED_INIT_MODS[d as usize] == m { kept = true }
+                d = d + 1
+            }
+            var b: i64 = 0
+            while !kept && b < GLOBAL_DEFERRED_BLOCK_COUNT {
+                if GLOBAL_DEFERRED_BLOCK_HASHES[b as usize] == h && GLOBAL_DEFERRED_BLOCK_MODS[b as usize] == m { kept = true }
+                b = b + 1
+            }
+            if !kept { return true }
         }
         k = k + 1
     }
-    if !seen { return false }
-    if ast_gvi_first_mod(name) >= 0 { return false }
-    var d: i64 = 0
-    while d < GLOBAL_DEFERRED_INIT_COUNT {
-        if GLOBAL_DEFERRED_INIT_HASHES[d as usize] == h { return false }
-        d = d + 1
-    }
-    var b: i64 = 0
-    while b < GLOBAL_DEFERRED_BLOCK_COUNT {
-        if GLOBAL_DEFERRED_BLOCK_HASHES[b as usize] == h { return false }
-        b = b + 1
-    }
-    true
+    false
 }
 
-// A module is parsed more than once in one compile (preflight, then the
-// lowering load). An initializer that could not be folded on an earlier parse,
-// because an imported pure fn was not registered yet, may fold on a later one;
-// the later parse withdraws the E309 refusal instead of leaving it standing.
-pub fn ast_global_init_refusal_withdraw(name: Name, item_span: Span) with Mut, Div {
-    let k = ast_global_init_overflow_index(name, item_span)
-    if k >= 0 && GLOBAL_INIT_OVF_CODE[k as usize] == 309 {
-        GLOBAL_INIT_OVF_CODE[k as usize] = 0
+// True when closed array initializers for this name were deferred by two
+// different modules. Each block writes the bare name at `main`'s entry, so the
+// last one would overwrite the other's global; lower refuses instead.
+pub fn ast_global_deferred_block_ambiguous(name: Name) -> bool with Mut, Panic, Div {
+    let h = ast_name_hash(name)
+    var first_mod: i64 = 0 - 1
+    var b: i64 = 0
+    while b < GLOBAL_DEFERRED_BLOCK_COUNT {
+        if GLOBAL_DEFERRED_BLOCK_HASHES[b as usize] == h {
+            if first_mod < 0 {
+                first_mod = GLOBAL_DEFERRED_BLOCK_MODS[b as usize]
+            } else if GLOBAL_DEFERRED_BLOCK_MODS[b as usize] != first_mod {
+                return true
+            }
+        }
+        b = b + 1
     }
+    false
 }
 
 // Index of the recorded overflow for this declaration, or -1.
@@ -2242,6 +2278,9 @@ pub fn ast_global_decl_opt_inner_hash_of(name: Name) -> i64 with Div {
 
 pub fn ast_reset_global_var_inits() with Mut {
     GLOBAL_DEFERRED_BLOCK_COUNT = 0
+    GLOBAL_DEFERRED_BLOCK_OVERFLOW = 0
+    GLOBAL_DROP_COUNT = 0
+    GLOBAL_DROP_OVERFLOW = 0
     GLOBAL_DECL_TYPE_COUNT = 0
     GLOBAL_DECL_TYPE_OVERFLOW = 0
     GLOBAL_DEFERRED_INIT_COUNT = 0

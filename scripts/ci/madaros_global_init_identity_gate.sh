@@ -118,7 +118,7 @@ expect_refused() {
   fi
   local g
   for g in "$@"; do
-    grep -Fq -- "nor run before \`main\`: \`$g\` would silently start as zero" "$log" || {
+    grep -Fq -- "nor run before \`main\`: \`$g\`" "$log" || {
       tail -n 25 "$log" >&2 || true
       fail "$label: no E309 for $g"
     }
@@ -200,6 +200,30 @@ grep -Fq -- "$AMBIG_WARN" "$WORK/ambiguous.log" || {
   fail "ambiguous: compile log lacks $AMBIG_WARN"
 }
 echo "$TAG PASS(ambiguous): a name two other modules define is reported, and the initializer is refused (E309), not zero-filled"
+
+# --- aggregate / dropfold: the deferred-array path keeps module identity -------
+# Two modules with a same-named closed struct-array global: each would be
+# written by name at `main`'s entry and the second overwrote the first (43 43).
+expect_refused aggregate "$FIX/aggregate/main.sio" T
+# A fold of `X` in one module used to cancel the refusal of another module's
+# unevaluable `X` (it read 5, not 9).
+expect_refused dropfold "$FIX/dropfold/main.sio" X
+echo "$TAG PASS(aggregate, dropfold): a same-named deferred array in two modules and a drop shadowed by another module's fold are refused (E309)"
+
+# --- capacity: past the E309 table's 4096 entries the compile is refused ------
+# The table latches an overflow instead of dropping an entry; the refusal must
+# not depend on the other 4096 already being refused.
+CAP="$WORK/capacity.sio"
+{
+  echo 'fn impure() -> i64 with IO { 7 }'
+  for i in $(seq 0 4096); do echo "var G$i: i64 = impure()"; done
+  printf 'fn main() -> i64 with IO {\n    print_int(G4096)\n    print("\\n")\n    0\n}\n'
+} >"$CAP"
+if "$RAW" compile "$CAP" -o "$WORK/capacity.elf" >"$WORK/capacity.log" 2>&1; then
+  fail "capacity: 4097 unevaluable initializers compiled"
+fi
+grep -Fq -- "more than 4096 such initializers" "$WORK/capacity.log" || fail "capacity: no E309 overflow refusal"
+echo "$TAG PASS(capacity): 4097 unevaluable initializers latch the E309 overflow and refuse"
 
 # --- positive controls: scoping off => the defects are back -------------------
 # A green gate must be able to go red. With the old bare-name table the fixtures
