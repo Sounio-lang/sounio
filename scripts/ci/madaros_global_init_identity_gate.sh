@@ -118,7 +118,7 @@ expect_refused() {
   fi
   local g
   for g in "$@"; do
-    grep -Fq -- "error[E309]: the initializer of module-level \`$g\`" "$log" || {
+    grep -Fq -- "nor run before \`main\`: \`$g\` would silently start as zero" "$log" || {
       tail -n 25 "$log" >&2 || true
       fail "$label: no E309 for $g"
     }
