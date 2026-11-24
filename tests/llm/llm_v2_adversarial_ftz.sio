@@ -808,7 +808,7 @@ fn emit_adv_msl_cstr() -> i64 with Alloc, Mut {
     p = bf16_cstr_append(buf, p, "    device float* out [[buffer(2)]], constant ulong& n [[buffer(3)]],\n")
     p = bf16_cstr_append(buf, p, "    uint gid [[thread_position_in_grid]]) {\n")
     p = bf16_cstr_append(buf, p, "    if ((ulong)gid >= n) return;\n")
-    p = bf16_cstr_append(buf, p, "    out[gid] = a[gid] / b[gid];\n}\n\n")
+    p = bf16_cstr_append(buf, p, "    out[gid] = precise::divide(a[gid], b[gid]);\n}\n\n")
 
     p = bf16_cstr_append(buf, p, "kernel void adv_exp_f32(\n")
     p = bf16_cstr_append(buf, p, "    device const float* x [[buffer(0)]], device float* out [[buffer(1)]],\n")
@@ -820,13 +820,26 @@ fn emit_adv_msl_cstr() -> i64 with Alloc, Mut {
     p = bf16_cstr_append(buf, p, "    device const float* x [[buffer(0)]], device float* out [[buffer(1)]],\n")
     p = bf16_cstr_append(buf, p, "    constant ulong& n [[buffer(2)]], uint gid [[thread_position_in_grid]]) {\n")
     p = bf16_cstr_append(buf, p, "    if ((ulong)gid >= n) return;\n")
-    p = bf16_cstr_append(buf, p, "    out[gid] = 1.0f / sqrt(x[gid]);\n}\n\n")
+    p = bf16_cstr_append(buf, p, "    out[gid] = precise::divide(1.0f, precise::sqrt(x[gid]));\n}\n\n")
 
     p = bf16_cstr_append(buf, p, "kernel void adv_sqrt_f32(\n")
     p = bf16_cstr_append(buf, p, "    device const float* x [[buffer(0)]], device float* out [[buffer(1)]],\n")
     p = bf16_cstr_append(buf, p, "    constant ulong& n [[buffer(2)]], uint gid [[thread_position_in_grid]]) {\n")
     p = bf16_cstr_append(buf, p, "    if ((ulong)gid >= n) return;\n")
-    p = bf16_cstr_append(buf, p, "    out[gid] = sqrt(x[gid]);\n}\n")
+    p = bf16_cstr_append(buf, p, "    out[gid] = precise::sqrt(x[gid]);\n}\n\n")
+
+    p = bf16_cstr_append(buf, p, "kernel void adv_div_fast_f32(\n")
+    p = bf16_cstr_append(buf, p, "    device const float* a [[buffer(0)]], device const float* b [[buffer(1)]],\n")
+    p = bf16_cstr_append(buf, p, "    device float* out [[buffer(2)]], constant ulong& n [[buffer(3)]],\n")
+    p = bf16_cstr_append(buf, p, "    uint gid [[thread_position_in_grid]]) {\n")
+    p = bf16_cstr_append(buf, p, "    if ((ulong)gid >= n) return;\n")
+    p = bf16_cstr_append(buf, p, "    out[gid] = fast::divide(a[gid], b[gid]);\n}\n\n")
+
+    p = bf16_cstr_append(buf, p, "kernel void adv_sqrt_fast_f32(\n")
+    p = bf16_cstr_append(buf, p, "    device const float* x [[buffer(0)]], device float* out [[buffer(1)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& n [[buffer(2)]], uint gid [[thread_position_in_grid]]) {\n")
+    p = bf16_cstr_append(buf, p, "    if ((ulong)gid >= n) return;\n")
+    p = bf16_cstr_append(buf, p, "    out[gid] = fast::sqrt(x[gid]);\n}\n")
     buf
 }
 
@@ -915,7 +928,31 @@ fn emit_adv_ptx_cstr(sm_ver: i64, driver_ver: i64) -> i64 with Alloc, Mut, Div {
     p = bf16_cstr_append(buf, p, "    shl.b64 %rd5, %rd4, 2; add.u64 %rd6, %rd1, %rd5; ld.global.f32 %f1, [%rd6];\n")
     p = bf16_cstr_append(buf, p, "    sqrt.rn.ftz.f32 %f2, %f1;\n")
     p = bf16_cstr_append(buf, p, "    add.u64 %rd6, %rd2, %rd5; st.global.f32 [%rd6], %f2;\n")
-    p = bf16_cstr_append(buf, p, "L_AS_EX:\n    ret;\n}\n")
+    p = bf16_cstr_append(buf, p, "L_AS_EX:\n    ret;\n}\n\n")
+
+    p = bf16_cstr_append(buf, p, ".visible .entry adv_div_approx_f32(\n")
+    p = bf16_cstr_append(buf, p, "    .param .u64 p_a, .param .u64 p_b, .param .u64 p_out,\n")
+    p = bf16_cstr_append(buf, p, "    .param .u64 p_n, .param .u64 p_d0, .param .u64 p_d1\n) {\n")
+    p = bf16_cstr_append(buf, p, "    .reg .pred %p<2>; .reg .b32 %r<4>; .reg .b64 %rd<8>; .reg .f32 %f<4>;\n")
+    p = bf16_cstr_append(buf, p, "    ld.param.u64 %rd1, [p_a]; ld.param.u64 %rd2, [p_b]; ld.param.u64 %rd3, [p_out]; ld.param.u64 %rd4, [p_n];\n")
+    p = bf16_cstr_append(buf, p, "    mov.u32 %r1, %ctaid.x; mov.u32 %r2, %ntid.x; mov.u32 %r3, %tid.x; mad.lo.u32 %r1, %r1, %r2, %r3;\n")
+    p = bf16_cstr_append(buf, p, "    cvt.u64.u32 %rd5, %r1; setp.ge.u64 %p1, %rd5, %rd4; @%p1 bra L_ADA_EX;\n")
+    p = bf16_cstr_append(buf, p, "    shl.b64 %rd6, %rd5, 2; add.u64 %rd7, %rd1, %rd6; ld.global.f32 %f1, [%rd7];\n")
+    p = bf16_cstr_append(buf, p, "    add.u64 %rd7, %rd2, %rd6; ld.global.f32 %f2, [%rd7];\n")
+    p = bf16_cstr_append(buf, p, "    div.approx.ftz.f32 %f3, %f1, %f2;\n")
+    p = bf16_cstr_append(buf, p, "    add.u64 %rd7, %rd3, %rd6; st.global.f32 [%rd7], %f3;\n")
+    p = bf16_cstr_append(buf, p, "L_ADA_EX:\n    ret;\n}\n\n")
+
+    p = bf16_cstr_append(buf, p, ".visible .entry adv_sqrt_approx_f32(\n")
+    p = bf16_cstr_append(buf, p, "    .param .u64 p_x, .param .u64 p_out, .param .u64 p_n\n) {\n")
+    p = bf16_cstr_append(buf, p, "    .reg .pred %p<2>; .reg .b32 %r<4>; .reg .b64 %rd<8>; .reg .f32 %f<3>;\n")
+    p = bf16_cstr_append(buf, p, "    ld.param.u64 %rd1, [p_x]; ld.param.u64 %rd2, [p_out]; ld.param.u64 %rd3, [p_n];\n")
+    p = bf16_cstr_append(buf, p, "    mov.u32 %r1, %ctaid.x; mov.u32 %r2, %ntid.x; mov.u32 %r3, %tid.x; mad.lo.u32 %r1, %r1, %r2, %r3;\n")
+    p = bf16_cstr_append(buf, p, "    cvt.u64.u32 %rd4, %r1; setp.ge.u64 %p1, %rd4, %rd3; @%p1 bra L_ASA_EX;\n")
+    p = bf16_cstr_append(buf, p, "    shl.b64 %rd5, %rd4, 2; add.u64 %rd6, %rd1, %rd5; ld.global.f32 %f1, [%rd6];\n")
+    p = bf16_cstr_append(buf, p, "    sqrt.approx.ftz.f32 %f2, %f1;\n")
+    p = bf16_cstr_append(buf, p, "    add.u64 %rd6, %rd2, %rd5; st.global.f32 [%rd6], %f2;\n")
+    p = bf16_cstr_append(buf, p, "L_ASA_EX:\n    ret;\n}\n")
     buf
 }
 
@@ -1161,12 +1198,13 @@ fn run_metal_suite(
     sub_total_box: i64
 ) -> bool with IO, Alloc, Mut, Div {
     let msl_src = emit_adv_msl_cstr()
+    let approx_mode = adv_cstr_eq(hal_getenv_ptr("SOUNIO_ADV_APPROX"), "1")
     let p_mul = metal_compile_msl_ptr(sess, msl_src, "adv_mul_f32")
     let p_fma = metal_compile_msl_ptr(sess, msl_src, "adv_fma_f32")
-    let p_div = metal_compile_msl_ptr(sess, msl_src, "adv_div_f32")
+    let p_div = metal_compile_msl_ptr(sess, msl_src, if approx_mode { "adv_div_fast_f32" } else { "adv_div_f32" })
     let p_exp = metal_compile_msl_ptr(sess, msl_src, "adv_exp_f32")
     let p_rsq = metal_compile_msl_ptr(sess, msl_src, "adv_rsqrt_f32")
-    let p_sqt = metal_compile_msl_ptr(sess, msl_src, "adv_sqrt_f32")
+    let p_sqt = metal_compile_msl_ptr(sess, msl_src, if approx_mode { "adv_sqrt_fast_f32" } else { "adv_sqrt_f32" })
     let p_vadd = metal_compile_msl_ptr(sess, msl_src, "qwen3_vec_add_f32")
     let p_gemv = metal_compile_msl_ptr(sess, msl_src, "qwen3_gemv_f32")
     let p_rms = metal_compile_msl_ptr(sess, msl_src, "qwen3_rmsnorm_f32")
@@ -1336,12 +1374,13 @@ fn run_cuda_suite(
     }
     heap_free(err_buf as *mut u8)
 
+    let approx_mode = adv_cstr_eq(hal_getenv_ptr("SOUNIO_ADV_APPROX"), "1")
     let fn_mul = cuda_module_get_fn(cs, hmod, "adv_mul_f32")
     let fn_fma = cuda_module_get_fn(cs, hmod, "adv_fma_f32")
-    let fn_div = cuda_module_get_fn(cs, hmod, "adv_div_f32")
+    let fn_div = cuda_module_get_fn(cs, hmod, if approx_mode { "adv_div_approx_f32" } else { "adv_div_f32" })
     let fn_exp = cuda_module_get_fn(cs, hmod, "adv_exp_f32")
     let fn_rsq = cuda_module_get_fn(cs, hmod, "adv_rsqrt_f32")
-    let fn_sqt = cuda_module_get_fn(cs, hmod, "adv_sqrt_f32")
+    let fn_sqt = cuda_module_get_fn(cs, hmod, if approx_mode { "adv_sqrt_approx_f32" } else { "adv_sqrt_f32" })
     let fn_vadd = cuda_module_get_fn(cs, hmod, "cuda_vec_add_f32")
     let fn_gemv = cuda_module_get_fn(cs, hmod, "cuda_gemv_bf16")
     let fn_rms = cuda_module_get_fn(cs, hmod, "cuda_rmsnorm")

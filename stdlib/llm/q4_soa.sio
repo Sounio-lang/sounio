@@ -1,0 +1,536 @@
+// stdlib::llm::q4_soa — Q4_SoA_32 Structure-of-Arrays Quantization & Kernels.
+//
+// Canonical GPU-coalesced layout for 32-weight symmetric 4-bit blocks:
+//   nibbles : [rows * n_blocks * 16] bytes  (base & row_stride 16B-aligned)
+//   scales  : [rows * n_blocks * 2]  bytes  (contiguous IEEE binary16 bits)
+//   rhos    : [rows * n_blocks * 2]  bytes  (optional upward f16 L2 error norm)
+//
+// Numeric semantics match Q4_EISA:
+//   scale = f16(max_abs / 7.0)
+//   q     = clamp(round(w / scale), -8, 7), stored unsigned as q + 8 in [0..15]
+//   byte j in [0..15] packs elem 2*j in low nibble and 2*j+1 in high nibble.
+
+use tensor2::convert::{
+    f64_to_f16_bits,
+    f16_bits_to_f64,
+    bf16_bits_to_f64,
+    f32_bits_to_f64,
+    f64_to_f32_bits,
+}
+use math::pure::{sqrt}
+use llm::bf16_kernels::{bf16_cstr_append}
+use llm::qwen3_quant_eisa::{compute_rho_bits_upward}
+use llm::hal::{
+    MetalSession,
+    hal_cpu_set_ftz_daz,
+    metal_compile_msl_ptr,
+    metal_cmd_set_buf,
+    metal_cmd_set_u64,
+    metal_cmd_dispatch_1d,
+}
+
+pub fn q4_soa_align_up_64(n: i64) -> i64 {
+    if n <= 0 { return 0 }
+    ((n + 63) >> 6) << 6
+}
+
+pub fn q4_soa_block_count(cols: i64) -> i64 {
+    if cols <= 0 { return 0 }
+    (cols + 31) >> 5
+}
+
+pub fn q4_soa_nibbles_bytes(rows: i64, cols: i64) -> i64 {
+    if rows <= 0 || cols <= 0 { return 0 }
+    q4_soa_align_up_64(rows * q4_soa_block_count(cols) * 16)
+}
+
+pub fn q4_soa_scales_bytes(rows: i64, cols: i64) -> i64 {
+    if rows <= 0 || cols <= 0 { return 0 }
+    q4_soa_align_up_64(rows * q4_soa_block_count(cols) * 2)
+}
+
+pub fn q4_soa_rhos_bytes(rows: i64, cols: i64) -> i64 {
+    q4_soa_scales_bytes(rows, cols)
+}
+
+fn q4_soa_round_i64(x: f64) -> i64 {
+    if x >= 0.0 {
+        (x + 0.5) as i64
+    } else {
+        (x - 0.5) as i64
+    }
+}
+
+fn q4_soa_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn q4_soa_read_weight(src_ptr: i64, idx: i64, is_bf16: bool) -> f64 with Mut {
+    if is_bf16 {
+        bf16_bits_to_f64(ptr_read_u16_le(src_ptr, idx * 2))
+    } else {
+        f32_bits_to_f64(ptr_read_u32_le(src_ptr, idx * 4))
+    }
+}
+
+pub fn q4_soa_quantize_cpu(
+    src_ptr: i64,
+    is_bf16: bool,
+    nib_ptr: i64,
+    scales_ptr: i64,
+    rhos_ptr: i64,
+    emit_rho: bool,
+    out_dim: i64,
+    in_dim: i64
+) -> bool with Mut, Div, Panic {
+    if src_ptr == 0 || nib_ptr == 0 || scales_ptr == 0 || out_dim <= 0 || in_dim <= 0 {
+        return false
+    }
+    if emit_rho && rhos_ptr == 0 {
+        return false
+    }
+    let n_blocks = q4_soa_block_count(in_dim)
+    var r: i64 = 0
+    while r < out_dim {
+        let row_end = (r + 1) * in_dim
+        var b: i64 = 0
+        while b < n_blocks {
+            let blk_id = r * n_blocks + b
+            let base_w_idx = r * in_dim + b * 32
+            var max_abs: f64 = 0.0
+            var k: i64 = 0
+            while k < 32 {
+                let idx = base_w_idx + k
+                if idx < row_end {
+                    let a = q4_soa_abs(q4_soa_read_weight(src_ptr, idx, is_bf16))
+                    if a > max_abs { max_abs = a }
+                }
+                k = k + 1
+            }
+
+            let s_bits = if max_abs == 0.0 { 0 } else { f64_to_f16_bits(max_abs / 7.0) & 65535 }
+            let s_f16 = f16_bits_to_f64(s_bits)
+
+            var sum_sq_err: f64 = 0.0
+            let nib_blk_off = blk_id * 16
+            var j: i64 = 0
+            while j < 16 {
+                let k0 = base_w_idx + 2 * j
+                let k1 = k0 + 1
+                let w0 = if k0 < row_end { q4_soa_read_weight(src_ptr, k0, is_bf16) } else { 0.0 }
+                let w1 = if k1 < row_end { q4_soa_read_weight(src_ptr, k1, is_bf16) } else { 0.0 }
+
+                var q0: i64 = 0
+                var q1: i64 = 0
+                if s_f16 != 0.0 {
+                    let r0 = q4_soa_round_i64(w0 / s_f16)
+                    q0 = if r0 < -8 { -8 } else if r0 > 7 { 7 } else { r0 }
+                    let r1 = q4_soa_round_i64(w1 / s_f16)
+                    q1 = if r1 < -8 { -8 } else if r1 > 7 { 7 } else { r1 }
+                }
+                if emit_rho {
+                    let diff0 = w0 - s_f16 * (q0 as f64)
+                    let diff1 = w1 - s_f16 * (q1 as f64)
+                    sum_sq_err = sum_sq_err + diff0 * diff0 + diff1 * diff1
+                }
+
+                let lo = (q0 + 8) & 15
+                let hi = (q1 + 8) & 15
+                let _wb = ptr_write_u8(nib_ptr, nib_blk_off + j, lo | (hi << 4))
+                j = j + 1
+            }
+
+            let _ws = ptr_write_u16_le(scales_ptr, blk_id * 2, s_bits)
+            if emit_rho {
+                let rho_bits = compute_rho_bits_upward(sqrt(sum_sq_err))
+                let _wr = ptr_write_u16_le(rhos_ptr, blk_id * 2, rho_bits)
+            }
+            b = b + 1
+        }
+        r = r + 1
+    }
+    true
+}
+
+pub fn q4_soa_quantize_bf16_cpu(
+    src_bf16_ptr: i64,
+    nib_ptr: i64,
+    scales_ptr: i64,
+    rhos_ptr: i64,
+    emit_rho: bool,
+    out_dim: i64,
+    in_dim: i64
+) -> bool with Mut, Div, Panic {
+    q4_soa_quantize_cpu(src_bf16_ptr, true, nib_ptr, scales_ptr, rhos_ptr, emit_rho, out_dim, in_dim)
+}
+
+pub fn q4_soa_quantize_f32_cpu(
+    src_f32_ptr: i64,
+    nib_ptr: i64,
+    scales_ptr: i64,
+    rhos_ptr: i64,
+    emit_rho: bool,
+    out_dim: i64,
+    in_dim: i64
+) -> bool with Mut, Div, Panic {
+    q4_soa_quantize_cpu(src_f32_ptr, false, nib_ptr, scales_ptr, rhos_ptr, emit_rho, out_dim, in_dim)
+}
+
+fn q4_f32_daz_bits(b: i64) -> i64 {
+    let u = b & 4294967295
+    if ((u >> 23) & 255) == 0 { return u & 2147483648 }
+    u
+}
+
+fn q4_f64_to_f32_bits_ftz(v: f64) -> i64 with Mut {
+    let b = f64_to_f32_bits(v) & 4294967295
+    if ((b >> 23) & 255) == 0 { return b & 2147483648 }
+    b
+}
+
+fn q4_f32_ftz_add(a_bits: i64, b_bits: i64) -> i64 with Mut {
+    let da = f32_bits_to_f64(q4_f32_daz_bits(a_bits))
+    let db = f32_bits_to_f64(q4_f32_daz_bits(b_bits))
+    q4_f64_to_f32_bits_ftz(da + db)
+}
+
+fn q4_f32_ftz_mul(a_bits: i64, b_bits: i64) -> i64 with Mut {
+    let da = f32_bits_to_f64(q4_f32_daz_bits(a_bits))
+    let db = f32_bits_to_f64(q4_f32_daz_bits(b_bits))
+    q4_f64_to_f32_bits_ftz(da * db)
+}
+
+fn q4_f32_ftz_fma(a_bits: i64, b_bits: i64, c_bits: i64) -> i64 with Mut {
+    let ua = q4_f32_daz_bits(a_bits)
+    let ub = q4_f32_daz_bits(b_bits)
+    let uc = q4_f32_daz_bits(c_bits)
+    let ea = (ua >> 23) & 255
+    let eb = (ub >> 23) & 255
+    let ec = (uc >> 23) & 255
+    let da = f32_bits_to_f64(ua)
+    let db = f32_bits_to_f64(ub)
+    let dc = f32_bits_to_f64(uc)
+    if ea == 255 || eb == 255 || ec == 255 {
+        return q4_f64_to_f32_bits_ftz(da * db + dc)
+    }
+    let p = da * db
+    let s = p + dc
+    let v = s - p
+    let e = (p - (s - v)) + (dc - v)
+    var su = f64_to_bits(s)
+    let se = (su >> 52) & 2047
+    if se != 2047 && e != 0.0 && (su & 1) == 0 {
+        if (s > 0.0 && e > 0.0) || (s < 0.0 && e < 0.0) {
+            su = su + 1
+        } else {
+            su = su - 1
+        }
+    }
+    q4_f64_to_f32_bits_ftz(bits_to_f64(su))
+}
+
+fn q4_warp_sum_f32(v: &![i64; 32]) -> i64 with Mut {
+    var next: [i64; 32] = [0; 32]
+    var d: i64 = 16
+    while d >= 1 {
+        var i: i64 = 0
+        while i < 32 {
+            next[i as usize] = q4_f32_ftz_add((*v)[i as usize], (*v)[(i ^ d) as usize])
+            i = i + 1
+        }
+        var j: i64 = 0
+        while j < 32 {
+            (*v)[j as usize] = next[j as usize]
+            j = j + 1
+        }
+        d = d / 2
+    }
+    (*v)[0 as usize]
+}
+
+pub fn q4_soa_gemv_cpu(
+    nib_ptr: i64,
+    scales_ptr: i64,
+    x_f32_ptr: i64,
+    y_f32_ptr: i64,
+    out_dim: i64,
+    in_dim: i64
+) -> bool with Alloc, Mut, Div {
+    if nib_ptr == 0 || scales_ptr == 0 || x_f32_ptr == 0 || y_f32_ptr == 0 || out_dim <= 0 || in_dim <= 0 {
+        return false
+    }
+    let _ftz = hal_cpu_set_ftz_daz(true)
+    let n_blocks = q4_soa_block_count(in_dim)
+    var accs: [i64; 32] = [0; 32]
+    var r: i64 = 0
+    while r < out_dim {
+        var lane: i64 = 0
+        while lane < 32 {
+            var acc: i64 = 0
+            var b = lane
+            while b < n_blocks {
+                let blk_id = r * n_blocks + b
+                let s_bits = q4_f64_to_f32_bits_ftz(f16_bits_to_f64(ptr_read_u16_le(scales_ptr, blk_id * 2)))
+                let nib_blk_off = blk_id * 16
+                let base_k = b * 32
+                var dot_b: i64 = 0
+                var j: i64 = 0
+                while j < 16 {
+                    let bv = ptr_read_u8(nib_ptr, nib_blk_off + j)
+                    let w0 = (bv & 15) - 8
+                    let w1 = ((bv >> 4) & 15) - 8
+                    let k0 = base_k + 2 * j
+                    if k0 < in_dim {
+                        let q0_bits = q4_f64_to_f32_bits_ftz(w0 as f64)
+                        let x0_bits = q4_f32_daz_bits(ptr_read_u32_le(x_f32_ptr, k0 * 4))
+                        dot_b = q4_f32_ftz_fma(q0_bits, x0_bits, dot_b)
+                    }
+                    if k0 + 1 < in_dim {
+                        let q1_bits = q4_f64_to_f32_bits_ftz(w1 as f64)
+                        let x1_bits = q4_f32_daz_bits(ptr_read_u32_le(x_f32_ptr, (k0 + 1) * 4))
+                        dot_b = q4_f32_ftz_fma(q1_bits, x1_bits, dot_b)
+                    }
+                    j = j + 1
+                }
+                acc = q4_f32_ftz_fma(s_bits, dot_b, acc)
+                b = b + 32
+            }
+            accs[lane as usize] = acc
+            lane = lane + 1
+        }
+        let sum_bits = q4_warp_sum_f32(&!accs)
+        let _wy = ptr_write_u32_le(y_f32_ptr, r * 4, sum_bits)
+        r = r + 1
+    }
+    true
+}
+
+// =========================================================================
+// Metal Q4_SoA_32 Vectorized Kernels (uint4 + contiguous f16 scale)
+// =========================================================================
+
+pub struct Q4SoaMetalPipelines {
+    pub quantize: i64,
+    pub gemv: i64,
+    pub ok: bool,
+}
+
+pub fn q4_soa_metal_pipelines_empty() -> Q4SoaMetalPipelines {
+    Q4SoaMetalPipelines {
+        quantize: 0,
+        gemv: 0,
+        ok: false,
+    }
+}
+
+pub fn emit_q4_soa_msl_cstr() -> i64 with Alloc, Mut {
+    let buf = heap_alloc(16384) as i64
+    var p: i64 = 0
+    p = bf16_cstr_append(buf, p, "// Sounio v2 Float Model: binary32, round-to-nearest-even, FTZ+DAZ, fixed op order\n")
+    p = bf16_cstr_append(buf, p, "// Exclusion: fma(a, b, c) with |exact(a*b + c)| in (2^-126 - 2^-150, 2^-126)\n")
+    p = bf16_cstr_append(buf, p, "#include <metal_stdlib>\nusing namespace metal;\n")
+    p = bf16_cstr_append(buf, p, "#pragma clang fp contract(off)\n\n")
+    p = bf16_cstr_append(buf, p, "inline float sounio_warp_sum_f32(float v) {\n")
+    p = bf16_cstr_append(buf, p, "    v = v + simd_shuffle_xor(v, 16);\n")
+    p = bf16_cstr_append(buf, p, "    v = v + simd_shuffle_xor(v, 8);\n")
+    p = bf16_cstr_append(buf, p, "    v = v + simd_shuffle_xor(v, 4);\n")
+    p = bf16_cstr_append(buf, p, "    v = v + simd_shuffle_xor(v, 2);\n")
+    p = bf16_cstr_append(buf, p, "    v = v + simd_shuffle_xor(v, 1);\n")
+    p = bf16_cstr_append(buf, p, "    return v;\n}\n\n")
+    p = bf16_cstr_append(buf, p, "kernel void qwen3_quantize_q4_soa(\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* src_base [[buffer(0)]],\n")
+    p = bf16_cstr_append(buf, p, "    device uchar* nib_base [[buffer(1)]],\n")
+    p = bf16_cstr_append(buf, p, "    device uchar* scl_base [[buffer(2)]],\n")
+    p = bf16_cstr_append(buf, p, "    device uchar* rho_base [[buffer(3)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& src_off [[buffer(4)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& nib_off [[buffer(5)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& scl_off [[buffer(6)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& rho_off [[buffer(7)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& out_dim [[buffer(8)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& in_dim [[buffer(9)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& flags [[buffer(10)]],\n")
+    p = bf16_cstr_append(buf, p, "    uint gid [[thread_position_in_grid]]) {\n")
+    p = bf16_cstr_append(buf, p, "    ulong n_blocks = (in_dim + 31ul) / 32ul;\n")
+    p = bf16_cstr_append(buf, p, "    ulong blk_id = (ulong)gid;\n")
+    p = bf16_cstr_append(buf, p, "    if (blk_id >= out_dim * n_blocks) return;\n")
+    p = bf16_cstr_append(buf, p, "    ulong r = blk_id / n_blocks;\n")
+    p = bf16_cstr_append(buf, p, "    ulong b = blk_id % n_blocks;\n")
+    p = bf16_cstr_append(buf, p, "    bool is_bf16 = ((flags & 1ul) != 0ul);\n")
+    p = bf16_cstr_append(buf, p, "    bool emit_rho = ((flags & 2ul) != 0ul);\n")
+    p = bf16_cstr_append(buf, p, "    ulong row_base = r * in_dim;\n")
+    p = bf16_cstr_append(buf, p, "    ulong blk_k0 = b * 32ul;\n")
+    p = bf16_cstr_append(buf, p, "    device const ushort* src_bf16 = (device const ushort*)(src_base + src_off);\n")
+    p = bf16_cstr_append(buf, p, "    device const float* src_f32 = (device const float*)(src_base + src_off);\n")
+    p = bf16_cstr_append(buf, p, "    float max_abs = 0.0f;\n")
+    p = bf16_cstr_append(buf, p, "    for (ulong k = 0ul; k < 32ul; ++k) {\n")
+    p = bf16_cstr_append(buf, p, "        ulong kk = blk_k0 + k;\n")
+    p = bf16_cstr_append(buf, p, "        if (kk < in_dim) {\n")
+    p = bf16_cstr_append(buf, p, "            float w = is_bf16 ? as_type<float>(((uint)src_bf16[row_base + kk]) << 16) : src_f32[row_base + kk];\n")
+    p = bf16_cstr_append(buf, p, "            max_abs = fmax(max_abs, fabs(w));\n")
+    p = bf16_cstr_append(buf, p, "        }\n    }\n")
+    p = bf16_cstr_append(buf, p, "    ushort s_bits = (max_abs == 0.0f) ? (ushort)0 : as_type<ushort>(half(precise::divide(max_abs, 7.0f)));\n")
+    p = bf16_cstr_append(buf, p, "    float s = float(as_type<half>(s_bits));\n")
+    p = bf16_cstr_append(buf, p, "    float inv_s = (s > 0.0f) ? precise::divide(1.0f, s) : 0.0f;\n")
+    p = bf16_cstr_append(buf, p, "    float sum_sq = 0.0f;\n")
+    p = bf16_cstr_append(buf, p, "    uint words[4] = {0u, 0u, 0u, 0u};\n")
+    p = bf16_cstr_append(buf, p, "    for (uint wi = 0u; wi < 4u; ++wi) {\n")
+    p = bf16_cstr_append(buf, p, "        uint packed = 0u;\n")
+    p = bf16_cstr_append(buf, p, "        for (uint pi = 0u; pi < 4u; ++pi) {\n")
+    p = bf16_cstr_append(buf, p, "            ulong k0 = blk_k0 + (ulong)(wi * 8u + pi * 2u);\n")
+    p = bf16_cstr_append(buf, p, "            float w0 = (k0 < in_dim) ? (is_bf16 ? as_type<float>(((uint)src_bf16[row_base + k0]) << 16) : src_f32[row_base + k0]) : 0.0f;\n")
+    p = bf16_cstr_append(buf, p, "            float w1 = (k0 + 1ul < in_dim) ? (is_bf16 ? as_type<float>(((uint)src_bf16[row_base + k0 + 1ul]) << 16) : src_f32[row_base + k0 + 1ul]) : 0.0f;\n")
+    p = bf16_cstr_append(buf, p, "            float u0 = w0 * inv_s; float u1 = w1 * inv_s;\n")
+    p = bf16_cstr_append(buf, p, "            int q0 = (s > 0.0f) ? clamp((int)(u0 + (u0 >= 0.0f ? 0.5f : -0.5f)), -8, 7) : 0;\n")
+    p = bf16_cstr_append(buf, p, "            int q1 = (s > 0.0f) ? clamp((int)(u1 + (u1 >= 0.0f ? 0.5f : -0.5f)), -8, 7) : 0;\n")
+    p = bf16_cstr_append(buf, p, "            if (emit_rho) { float d0 = w0 - s * float(q0); float d1 = w1 - s * float(q1); sum_sq = fma(d0, d0, sum_sq); sum_sq = fma(d1, d1, sum_sq); }\n")
+    p = bf16_cstr_append(buf, p, "            uint bv = (uint)((q0 + 8) & 15) | ((uint)((q1 + 8) & 15) << 4);\n")
+    p = bf16_cstr_append(buf, p, "            packed = packed | (bv << (pi * 8u));\n")
+    p = bf16_cstr_append(buf, p, "        }\n        words[wi] = packed;\n    }\n")
+    p = bf16_cstr_append(buf, p, "    device uint4* dst_nib = (device uint4*)(nib_base + nib_off);\n")
+    p = bf16_cstr_append(buf, p, "    dst_nib[blk_id] = uint4(words[0], words[1], words[2], words[3]);\n")
+    p = bf16_cstr_append(buf, p, "    device ushort* dst_scl = (device ushort*)(scl_base + scl_off);\n")
+    p = bf16_cstr_append(buf, p, "    dst_scl[blk_id] = s_bits;\n")
+    p = bf16_cstr_append(buf, p, "    if (emit_rho) {\n")
+    p = bf16_cstr_append(buf, p, "        float l2 = precise::sqrt(sum_sq);\n")
+    p = bf16_cstr_append(buf, p, "        ushort rho_bits = (l2 > 0.0f) ? max((ushort)1, as_type<ushort>(half(l2))) : (ushort)0;\n")
+    p = bf16_cstr_append(buf, p, "        while (rho_bits < (ushort)31743 && float(as_type<half>(rho_bits)) < l2) { rho_bits = rho_bits + (ushort)1; }\n")
+    p = bf16_cstr_append(buf, p, "        device ushort* dst_rho = (device ushort*)(rho_base + rho_off);\n")
+    p = bf16_cstr_append(buf, p, "        dst_rho[blk_id] = rho_bits;\n")
+    p = bf16_cstr_append(buf, p, "    }\n}\n\n")
+
+    p = bf16_cstr_append(buf, p, "inline float q4_soa_word_dot(uint p4, device const float* xp, float dot) {\n")
+    p = bf16_cstr_append(buf, p, "    for (uint j = 0u; j < 8u; ++j) {\n")
+    p = bf16_cstr_append(buf, p, "        int q = (int)((p4 >> (4u * j)) & 15u) - 8;\n")
+    p = bf16_cstr_append(buf, p, "        dot = fma(float(q), xp[j], dot);\n")
+    p = bf16_cstr_append(buf, p, "    }\n")
+    p = bf16_cstr_append(buf, p, "    return dot;\n}\n\n")
+
+    p = bf16_cstr_append(buf, p, "kernel void qwen3_gemv_q4_soa_f32(\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* nib_base [[buffer(0)]],\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* scl_base [[buffer(1)]],\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* x_base [[buffer(2)]],\n")
+    p = bf16_cstr_append(buf, p, "    device uchar* y_base [[buffer(3)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& nib_off [[buffer(4)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& scl_off [[buffer(5)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& x_off [[buffer(6)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& y_off [[buffer(7)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& out_dim [[buffer(8)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& in_dim [[buffer(9)]],\n")
+    p = bf16_cstr_append(buf, p, "    uint gid [[thread_position_in_grid]], uint tid [[thread_index_in_threadgroup]]) {\n")
+    p = bf16_cstr_append(buf, p, "    ulong g = (ulong)gid >> 8;\n")
+    p = bf16_cstr_append(buf, p, "    ulong sg = (ulong)tid >> 5; ulong lane = (ulong)tid & 31ul;\n")
+    p = bf16_cstr_append(buf, p, "    ulong row = g * 8ul + sg;\n")
+    p = bf16_cstr_append(buf, p, "    if (row >= out_dim) return;\n")
+    p = bf16_cstr_append(buf, p, "    ulong n_blocks = (in_dim + 31ul) / 32ul;\n")
+    p = bf16_cstr_append(buf, p, "    device const float* in_x = (device const float*)(x_base + x_off);\n")
+    p = bf16_cstr_append(buf, p, "    device float* out_y = (device float*)(y_base + y_off);\n")
+    p = bf16_cstr_append(buf, p, "    device const uint4* n4_ptr = (device const uint4*)(nib_base + nib_off) + row * n_blocks;\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* nb_ptr = (device const uchar*)(nib_base + nib_off) + row * n_blocks * 16ul;\n")
+    p = bf16_cstr_append(buf, p, "    device const ushort* s_ptr = (device const ushort*)(scl_base + scl_off) + row * n_blocks;\n")
+    p = bf16_cstr_append(buf, p, "    float acc = 0.0f;\n")
+    p = bf16_cstr_append(buf, p, "    for (ulong b = lane; b < n_blocks; b = b + 32ul) {\n")
+    p = bf16_cstr_append(buf, p, "        float s = float(as_type<half>(s_ptr[b]));\n")
+    p = bf16_cstr_append(buf, p, "        ulong blk_k0 = b << 5;\n")
+    p = bf16_cstr_append(buf, p, "        float dot = 0.0f;\n")
+    p = bf16_cstr_append(buf, p, "        if (blk_k0 + 32ul <= in_dim) {\n")
+    p = bf16_cstr_append(buf, p, "            uint4 w = n4_ptr[b];\n")
+    p = bf16_cstr_append(buf, p, "            device const float* xp = in_x + blk_k0;\n")
+    p = bf16_cstr_append(buf, p, "            dot = q4_soa_word_dot(w.x, xp, dot);\n")
+    p = bf16_cstr_append(buf, p, "            dot = q4_soa_word_dot(w.y, xp + 8, dot);\n")
+    p = bf16_cstr_append(buf, p, "            dot = q4_soa_word_dot(w.z, xp + 16, dot);\n")
+    p = bf16_cstr_append(buf, p, "            dot = q4_soa_word_dot(w.w, xp + 24, dot);\n")
+    p = bf16_cstr_append(buf, p, "        } else {\n")
+    p = bf16_cstr_append(buf, p, "            device const uchar* bp = nb_ptr + b * 16ul;\n")
+    p = bf16_cstr_append(buf, p, "            for (ulong k = 0ul; k < 32ul && blk_k0 + k < in_dim; ++k) {\n")
+    p = bf16_cstr_append(buf, p, "                uint bv = (uint)bp[k >> 1];\n")
+    p = bf16_cstr_append(buf, p, "                int q = (int)((bv >> ((uint)(k & 1ul) * 4u)) & 15u) - 8;\n")
+    p = bf16_cstr_append(buf, p, "                dot = fma(float(q), in_x[blk_k0 + k], dot);\n")
+    p = bf16_cstr_append(buf, p, "            }\n")
+    p = bf16_cstr_append(buf, p, "        }\n")
+    p = bf16_cstr_append(buf, p, "        acc = fma(s, dot, acc);\n")
+    p = bf16_cstr_append(buf, p, "    }\n")
+    p = bf16_cstr_append(buf, p, "    float sum = sounio_warp_sum_f32(acc);\n")
+    p = bf16_cstr_append(buf, p, "    if (lane == 0ul) out_y[row] = sum;\n}\n\n")
+    buf
+}
+
+pub fn q4_soa_metal_pipelines_compile(s: &MetalSession) -> Q4SoaMetalPipelines with Alloc, Mut {
+    if !s.ok { return q4_soa_metal_pipelines_empty() }
+    let c_msl = emit_q4_soa_msl_cstr()
+    if c_msl == 0 { return q4_soa_metal_pipelines_empty() }
+    let p_quant = metal_compile_msl_ptr(s, c_msl, "qwen3_quantize_q4_soa")
+    let p_gemv = metal_compile_msl_ptr(s, c_msl, "qwen3_gemv_q4_soa_f32")
+    heap_free(c_msl as *mut u8)
+    if p_quant <= 0 || p_gemv <= 0 {
+        return q4_soa_metal_pipelines_empty()
+    }
+    Q4SoaMetalPipelines {
+        quantize: p_quant,
+        gemv: p_gemv,
+        ok: true,
+    }
+}
+
+pub fn q4_soa_metal_encode_quantize(
+    s: &MetalSession,
+    cid: i64,
+    pipe: i64,
+    src_buf: i64,
+    src_off: i64,
+    nib_buf: i64,
+    nib_off: i64,
+    scl_buf: i64,
+    scl_off: i64,
+    rho_buf: i64,
+    rho_off: i64,
+    out_dim: i64,
+    in_dim: i64,
+    flags: i64
+) -> i64 with Div {
+    let n_blocks = q4_soa_block_count(in_dim)
+    let total_blks = out_dim * n_blocks
+    let group: i64 = 256
+    let total_threads = ((total_blks + group - 1) / group) * group
+    let _b0 = metal_cmd_set_buf(s, cid, 0, src_buf, 0)
+    let _b1 = metal_cmd_set_buf(s, cid, 1, nib_buf, 0)
+    let _b2 = metal_cmd_set_buf(s, cid, 2, scl_buf, 0)
+    let _b3 = metal_cmd_set_buf(s, cid, 3, rho_buf, 0)
+    let _u4 = metal_cmd_set_u64(s, cid, 4, src_off)
+    let _u5 = metal_cmd_set_u64(s, cid, 5, nib_off)
+    let _u6 = metal_cmd_set_u64(s, cid, 6, scl_off)
+    let _u7 = metal_cmd_set_u64(s, cid, 7, rho_off)
+    let _u8 = metal_cmd_set_u64(s, cid, 8, out_dim)
+    let _u9 = metal_cmd_set_u64(s, cid, 9, in_dim)
+    let _u10 = metal_cmd_set_u64(s, cid, 10, flags)
+    metal_cmd_dispatch_1d(s, cid, pipe, total_threads, group)
+}
+
+pub fn q4_soa_metal_encode_gemv(
+    s: &MetalSession,
+    cid: i64,
+    pipe: i64,
+    nib_buf: i64,
+    nib_off: i64,
+    scl_buf: i64,
+    scl_off: i64,
+    x_buf: i64,
+    x_off: i64,
+    y_buf: i64,
+    y_off: i64,
+    out_dim: i64,
+    in_dim: i64
+) -> i64 with Div {
+    let n_groups = (out_dim + 7) / 8
+    let total_threads = n_groups * 256
+    let _b0 = metal_cmd_set_buf(s, cid, 0, nib_buf, 0)
+    let _b1 = metal_cmd_set_buf(s, cid, 1, scl_buf, 0)
+    let _b2 = metal_cmd_set_buf(s, cid, 2, x_buf, 0)
+    let _b3 = metal_cmd_set_buf(s, cid, 3, y_buf, 0)
+    let _u4 = metal_cmd_set_u64(s, cid, 4, nib_off)
+    let _u5 = metal_cmd_set_u64(s, cid, 5, scl_off)
+    let _u6 = metal_cmd_set_u64(s, cid, 6, x_off)
+    let _u7 = metal_cmd_set_u64(s, cid, 7, y_off)
+    let _u8 = metal_cmd_set_u64(s, cid, 8, out_dim)
+    let _u9 = metal_cmd_set_u64(s, cid, 9, in_dim)
+    metal_cmd_dispatch_1d(s, cid, pipe, total_threads, 256)
+}

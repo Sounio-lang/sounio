@@ -1,0 +1,2049 @@
+// stdlib::llm::qwen3_kernels — High-performance GPU kernels for Qwen3 model family.
+// Implements Metal (Apple Silicon Unified Memory) and PTX (CUDA Driver API)
+// for QK-RMSNorm, RoPE, BF16/F32 GEMV, SwiGLU, and Paged GQA.
+
+use llm::bf16_kernels::{bf16_cstr_append}
+use llm::ptx_kernels_sm80::{emit_qwen3_ptx_sm80_cstr}
+use llm::hal::{
+    MetalSession,
+    metal_compile_msl_ptr,
+    metal_cmd_begin,
+    metal_cmd_cancel,
+    metal_cmd_set_buf,
+    metal_cmd_set_u64,
+    metal_cmd_dispatch_1d,
+    metal_cmd_commit_sync,
+    CudaDriverSession,
+    cuda_launch_6param_1d,
+    cuda_launch_8param_1d,
+}
+
+pub struct Qwen3MetalPipelines {
+    pub rmsnorm_bf16: i64,
+    pub rmsnorm_f32: i64,
+    pub rope: i64,
+    pub gemv_bf16: i64,
+    pub gemv_f32: i64,
+    pub swiglu: i64,
+    pub paged_gqa: i64,
+    pub vec_add: i64,
+    pub kv_scatter: i64,
+    pub argmax_top2: i64,
+    pub gemm_bf16: i64,
+    pub gemm_f32: i64,
+    pub rope_batch: i64,
+    pub kv_scatter_batch: i64,
+    pub paged_gqa_batch: i64,
+    pub argmax_top2_batch: i64,
+    pub qk_norm_rope_kv_bf16: i64,
+    pub qk_norm_rope_kv_f32: i64,
+    pub add_rmsnorm_bf16: i64,
+    pub add_rmsnorm_f32: i64,
+    pub gemv_bf16_qkv: i64,
+    pub gemv_bf16_gate_up_swiglu: i64,
+    pub rope_table: i64,
+    pub rope_batch_table: i64,
+    pub gemm_bf16_tc: i64,
+    pub ok: bool,
+}
+
+pub fn qwen3_metal_pipelines_empty() -> Qwen3MetalPipelines {
+    Qwen3MetalPipelines {
+        rmsnorm_bf16: 0,
+        rmsnorm_f32: 0,
+        rope: 0,
+        gemv_bf16: 0,
+        gemv_f32: 0,
+        swiglu: 0,
+        paged_gqa: 0,
+        vec_add: 0,
+        kv_scatter: 0,
+        argmax_top2: 0,
+        gemm_bf16: 0,
+        gemm_f32: 0,
+        rope_batch: 0,
+        kv_scatter_batch: 0,
+        paged_gqa_batch: 0,
+        argmax_top2_batch: 0,
+        qk_norm_rope_kv_bf16: 0,
+        qk_norm_rope_kv_f32: 0,
+        add_rmsnorm_bf16: 0,
+        add_rmsnorm_f32: 0,
+        gemv_bf16_qkv: 0,
+        gemv_bf16_gate_up_swiglu: 0,
+        rope_table: 0,
+        rope_batch_table: 0,
+        gemm_bf16_tc: 0,
+        ok: false,
+    }
+}
+
+pub fn emit_qwen3_kernels_msl_cstr() -> i64 with Alloc, Mut {
+    let buf = heap_alloc(393216) as i64
+    if buf == 0 { return 0 }
+    var p: i64 = 0
+    p = bf16_cstr_append(buf, p, "// Sounio v2 Float Model: binary32, round-to-nearest-even, FTZ+DAZ, fixed op order\n")
+    p = bf16_cstr_append(buf, p, "// Exclusion: fma(a, b, c) with |exact(a*b + c)| in (2^-126 - 2^-150, 2^-126)\n")
+    p = bf16_cstr_append(buf, p, "#include <metal_stdlib>\nusing namespace metal;\n")
+    p = bf16_cstr_append(buf, p, "#pragma clang fp contract(off)\n\n")
+    p = bf16_cstr_append(buf, p, "inline float sounio_warp_sum_f32(float v) {\n")
+    p = bf16_cstr_append(buf, p, "    v = v + simd_shuffle_xor(v, 16);\n")
+    p = bf16_cstr_append(buf, p, "    v = v + simd_shuffle_xor(v, 8);\n")
+    p = bf16_cstr_append(buf, p, "    v = v + simd_shuffle_xor(v, 4);\n")
+    p = bf16_cstr_append(buf, p, "    v = v + simd_shuffle_xor(v, 2);\n")
+    p = bf16_cstr_append(buf, p, "    v = v + simd_shuffle_xor(v, 1);\n")
+    p = bf16_cstr_append(buf, p, "    return v;\n}\n\n")
+    p = bf16_cstr_append(buf, p, "inline float sounio_exp_f32(float x) {\n")
+    p = bf16_cstr_append(buf, p, "    if (!(x == x)) return x;\n")
+    p = bf16_cstr_append(buf, p, "    if (x <= as_type<float>(0xc2aeac50u)) return 0.0f;\n")
+    p = bf16_cstr_append(buf, p, "    if (x >= as_type<float>(0x42b17218u)) return as_type<float>(0x7f800000u);\n")
+    p = bf16_cstr_append(buf, p, "    float t = fma(x, as_type<float>(0x3fb8aa3bu), as_type<float>(0x4b400000u));\n")
+    p = bf16_cstr_append(buf, p, "    int k = (int)as_type<uint>(t) - 0x4b400000;\n")
+    p = bf16_cstr_append(buf, p, "    float kf = t - as_type<float>(0x4b400000u);\n")
+    p = bf16_cstr_append(buf, p, "    float r = fma(kf, as_type<float>(0xbf317200u), x);\n")
+    p = bf16_cstr_append(buf, p, "    r = fma(kf, as_type<float>(0xb5bfbe8eu), r);\n")
+    p = bf16_cstr_append(buf, p, "    float p = fma(as_type<float>(0x3ab6da02u), r, as_type<float>(0x3c091d98u));\n")
+    p = bf16_cstr_append(buf, p, "    p = fma(p, r, as_type<float>(0x3d2aaa2fu));\n")
+    p = bf16_cstr_append(buf, p, "    p = fma(p, r, as_type<float>(0x3e2aaa48u));\n")
+    p = bf16_cstr_append(buf, p, "    p = fma(p, r, as_type<float>(0x3f000000u));\n")
+    p = bf16_cstr_append(buf, p, "    p = fma(p, r, as_type<float>(0x3f800000u));\n")
+    p = bf16_cstr_append(buf, p, "    p = fma(p, r, as_type<float>(0x3f800000u));\n")
+    p = bf16_cstr_append(buf, p, "    int k1 = k >> 1;\n")
+    p = bf16_cstr_append(buf, p, "    int k2 = k - k1;\n")
+    p = bf16_cstr_append(buf, p, "    float s1 = as_type<float>((uint)((k1 + 127) << 23));\n")
+    p = bf16_cstr_append(buf, p, "    float s2 = as_type<float>((uint)((k2 + 127) << 23));\n")
+    p = bf16_cstr_append(buf, p, "    return (p * s1) * s2;\n}\n\n")
+
+    // 1. qwen3_rmsnorm_bf16
+    p = bf16_cstr_append(buf, p, "kernel void qwen3_rmsnorm_bf16(\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* x_base [[buffer(0)]], constant ulong& x_off [[buffer(1)]],\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* w_base [[buffer(2)]], constant ulong& w_off [[buffer(3)]],\n")
+    p = bf16_cstr_append(buf, p, "    device uchar* out_base [[buffer(4)]], constant ulong& out_off [[buffer(5)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& n_groups [[buffer(6)]], constant ulong& dim [[buffer(7)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& eps_bits [[buffer(8)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {\n")
+    p = bf16_cstr_append(buf, p, "    ulong g = (ulong)gid >> 5;\n")
+    p = bf16_cstr_append(buf, p, "    if (g >= n_groups) return;\n")
+    p = bf16_cstr_append(buf, p, "    device const float* x = (device const float*)(x_base + x_off) + g * dim;\n")
+    p = bf16_cstr_append(buf, p, "    device const ushort* w = (device const ushort*)(w_base + w_off);\n")
+    p = bf16_cstr_append(buf, p, "    device float* out = (device float*)(out_base + out_off) + g * dim;\n")
+    p = bf16_cstr_append(buf, p, "    float eps = as_type<float>((uint)eps_bits);\n")
+    p = bf16_cstr_append(buf, p, "    float sum_sq = 0.0f;\n")
+    p = bf16_cstr_append(buf, p, "    for (ulong i = lane; i < dim; i = i + 32) { float v = x[i]; sum_sq = fma(v, v, sum_sq); }\n")
+    p = bf16_cstr_append(buf, p, "    sum_sq = sounio_warp_sum_f32(sum_sq);\n")
+    p = bf16_cstr_append(buf, p, "    float inv_rms = precise::divide(1.0f, precise::sqrt(precise::divide(sum_sq, float(dim)) + eps));\n")
+    p = bf16_cstr_append(buf, p, "    for (ulong i = lane; i < dim; i = i + 32) {\n")
+    p = bf16_cstr_append(buf, p, "        float weight = as_type<float>(((uint)w[i]) << 16);\n")
+    p = bf16_cstr_append(buf, p, "        out[i] = (x[i] * inv_rms) * weight;\n")
+    p = bf16_cstr_append(buf, p, "    }\n}\n\n")
+
+    // 2. qwen3_rmsnorm_f32
+    p = bf16_cstr_append(buf, p, "kernel void qwen3_rmsnorm_f32(\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* x_base [[buffer(0)]], constant ulong& x_off [[buffer(1)]],\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* w_base [[buffer(2)]], constant ulong& w_off [[buffer(3)]],\n")
+    p = bf16_cstr_append(buf, p, "    device uchar* out_base [[buffer(4)]], constant ulong& out_off [[buffer(5)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& n_groups [[buffer(6)]], constant ulong& dim [[buffer(7)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& eps_bits [[buffer(8)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {\n")
+    p = bf16_cstr_append(buf, p, "    ulong g = (ulong)gid >> 5;\n")
+    p = bf16_cstr_append(buf, p, "    if (g >= n_groups) return;\n")
+    p = bf16_cstr_append(buf, p, "    device const float* x = (device const float*)(x_base + x_off) + g * dim;\n")
+    p = bf16_cstr_append(buf, p, "    device const float* w = (device const float*)(w_base + w_off);\n")
+    p = bf16_cstr_append(buf, p, "    device float* out = (device float*)(out_base + out_off) + g * dim;\n")
+    p = bf16_cstr_append(buf, p, "    float eps = as_type<float>((uint)eps_bits);\n")
+    p = bf16_cstr_append(buf, p, "    float sum_sq = 0.0f;\n")
+    p = bf16_cstr_append(buf, p, "    for (ulong i = lane; i < dim; i = i + 32) { float v = x[i]; sum_sq = fma(v, v, sum_sq); }\n")
+    p = bf16_cstr_append(buf, p, "    sum_sq = sounio_warp_sum_f32(sum_sq);\n")
+    p = bf16_cstr_append(buf, p, "    float inv_rms = precise::divide(1.0f, precise::sqrt(precise::divide(sum_sq, float(dim)) + eps));\n")
+    p = bf16_cstr_append(buf, p, "    for (ulong i = lane; i < dim; i = i + 32) {\n")
+    p = bf16_cstr_append(buf, p, "        float weight = w[i];\n")
+    p = bf16_cstr_append(buf, p, "        out[i] = (x[i] * inv_rms) * weight;\n")
+    p = bf16_cstr_append(buf, p, "    }\n}\n\n")
+
+    // 3. qwen3_rope_f32
+    p = bf16_cstr_append(buf, p, "kernel void qwen3_rope_f32(\n")
+    p = bf16_cstr_append(buf, p, "    device uchar* v_base [[buffer(0)]], constant ulong& v_off [[buffer(1)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& n_heads [[buffer(2)]], constant ulong& head_dim [[buffer(3)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& pos [[buffer(4)]], constant ulong& theta_bits [[buffer(5)]],\n")
+    p = bf16_cstr_append(buf, p, "    uint gid [[thread_position_in_grid]]) {\n")
+    p = bf16_cstr_append(buf, p, "    ulong hdim = head_dim / 2;\n")
+    p = bf16_cstr_append(buf, p, "    if (hdim == 0 || (ulong)gid >= n_heads * hdim) return;\n")
+    p = bf16_cstr_append(buf, p, "    ulong h = (ulong)gid / hdim;\n")
+    p = bf16_cstr_append(buf, p, "    ulong j = (ulong)gid % hdim;\n")
+    p = bf16_cstr_append(buf, p, "    float theta = as_type<float>((uint)theta_bits);\n")
+    p = bf16_cstr_append(buf, p, "    float freq = pow(theta, precise::divide(-float(2 * j), float(head_dim)));\n")
+    p = bf16_cstr_append(buf, p, "    float angle = float(pos) * freq;\n")
+    p = bf16_cstr_append(buf, p, "    float cos_a = cos(angle);\n")
+    p = bf16_cstr_append(buf, p, "    float sin_a = sin(angle);\n")
+    p = bf16_cstr_append(buf, p, "    device float* head_ptr = (device float*)(v_base + v_off) + h * head_dim;\n")
+    p = bf16_cstr_append(buf, p, "    float x0 = head_ptr[j];\n")
+    p = bf16_cstr_append(buf, p, "    float x1 = head_ptr[j + hdim];\n")
+    p = bf16_cstr_append(buf, p, "    head_ptr[j] = x0 * cos_a - x1 * sin_a;\n")
+    p = bf16_cstr_append(buf, p, "    head_ptr[j + hdim] = x1 * cos_a + x0 * sin_a;\n}\n\n")
+
+    // 3b. qwen3_rope_table_f32 (deterministic host RoPE table)
+    p = bf16_cstr_append(buf, p, "kernel void qwen3_rope_table_f32(\n")
+    p = bf16_cstr_append(buf, p, "    device uchar* v_base [[buffer(0)]], constant ulong& v_off [[buffer(1)]],\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* rope_base [[buffer(2)]], constant ulong& rope_off [[buffer(3)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& n_heads [[buffer(4)]], constant ulong& head_dim [[buffer(5)]],\n")
+    p = bf16_cstr_append(buf, p, "    uint gid [[thread_position_in_grid]]) {\n")
+    p = bf16_cstr_append(buf, p, "    ulong hdim = head_dim / 2;\n")
+    p = bf16_cstr_append(buf, p, "    if (hdim == 0 || (ulong)gid >= n_heads * hdim) return;\n")
+    p = bf16_cstr_append(buf, p, "    ulong h = (ulong)gid / hdim;\n")
+    p = bf16_cstr_append(buf, p, "    ulong j = (ulong)gid % hdim;\n")
+    p = bf16_cstr_append(buf, p, "    device const float* rp = (device const float*)(rope_base + rope_off);\n")
+    p = bf16_cstr_append(buf, p, "    float cos_a = rp[j]; float sin_a = rp[j + hdim];\n")
+    p = bf16_cstr_append(buf, p, "    device float* head_ptr = (device float*)(v_base + v_off) + h * head_dim;\n")
+    p = bf16_cstr_append(buf, p, "    float x0 = head_ptr[j]; float x1 = head_ptr[j + hdim];\n")
+    p = bf16_cstr_append(buf, p, "    head_ptr[j] = (x0 * cos_a) - (x1 * sin_a);\n")
+    p = bf16_cstr_append(buf, p, "    head_ptr[j + hdim] = (x1 * cos_a) + (x0 * sin_a);\n}\n\n")
+
+    // Inline BF16/F32 load + 4-accumulator FMA helpers (0-ULP alignment-independent schedule)
+    p = bf16_cstr_append(buf, p, "inline float4 qwen3_load_bf16_4(device const ushort* c, ulong k, bool al) {\n")
+    p = bf16_cstr_append(buf, p, "    if (al) {\n")
+    p = bf16_cstr_append(buf, p, "        ulong w4 = *((device const ulong*)(c + k));\n")
+    p = bf16_cstr_append(buf, p, "        uint wl = (uint)w4; uint wh = (uint)(w4 >> 32);\n")
+    p = bf16_cstr_append(buf, p, "        return float4(as_type<float>(wl << 16), as_type<float>(wl & 0xFFFF0000u), as_type<float>(wh << 16), as_type<float>(wh & 0xFFFF0000u));\n")
+    p = bf16_cstr_append(buf, p, "    }\n")
+    p = bf16_cstr_append(buf, p, "    return float4(as_type<float>(((uint)c[k+0])<<16), as_type<float>(((uint)c[k+1])<<16), as_type<float>(((uint)c[k+2])<<16), as_type<float>(((uint)c[k+3])<<16));\n")
+    p = bf16_cstr_append(buf, p, "}\n\n")
+
+    p = bf16_cstr_append(buf, p, "inline float qwen3_bf16_row_dot_tg(device const ushort* row_w, threadgroup const float* tg_x, ulong in_dim, ulong lane) {\n")
+    p = bf16_cstr_append(buf, p, "    float a0 = 0.0f; float a1 = 0.0f; float a2 = 0.0f; float a3 = 0.0f;\n")
+    p = bf16_cstr_append(buf, p, "    bool al = ((((ulong)row_w) & 7ul) == 0);\n")
+    p = bf16_cstr_append(buf, p, "    for (ulong k = (ulong)lane * 4ul; k + 3ul < in_dim; k = k + 128ul) {\n")
+    p = bf16_cstr_append(buf, p, "        float4 wv = qwen3_load_bf16_4(row_w, k, al);\n")
+    p = bf16_cstr_append(buf, p, "        a0 = fma(wv.x, tg_x[k + 0], a0); a1 = fma(wv.y, tg_x[k + 1], a1);\n")
+    p = bf16_cstr_append(buf, p, "        a2 = fma(wv.z, tg_x[k + 2], a2); a3 = fma(wv.w, tg_x[k + 3], a3);\n")
+    p = bf16_cstr_append(buf, p, "    }\n")
+    p = bf16_cstr_append(buf, p, "    for (ulong kt = (in_dim & ~3ULL) + (ulong)lane; kt < in_dim; kt = kt + 32ul) {\n")
+    p = bf16_cstr_append(buf, p, "        a0 = fma(as_type<float>(((uint)row_w[kt]) << 16), tg_x[kt], a0);\n")
+    p = bf16_cstr_append(buf, p, "    }\n    return sounio_warp_sum_f32((a0 + a1) + (a2 + a3));\n}\n\n")
+
+    p = bf16_cstr_append(buf, p, "inline float qwen3_bf16_row_dot_dev(device const ushort* row_w, device const float* in_x, ulong in_dim, ulong lane) {\n")
+    p = bf16_cstr_append(buf, p, "    float a0 = 0.0f; float a1 = 0.0f; float a2 = 0.0f; float a3 = 0.0f;\n")
+    p = bf16_cstr_append(buf, p, "    bool al = ((((ulong)row_w) & 7ul) == 0);\n")
+    p = bf16_cstr_append(buf, p, "    for (ulong k = (ulong)lane * 4ul; k + 3ul < in_dim; k = k + 128ul) {\n")
+    p = bf16_cstr_append(buf, p, "        float4 wv = qwen3_load_bf16_4(row_w, k, al);\n")
+    p = bf16_cstr_append(buf, p, "        a0 = fma(wv.x, in_x[k + 0], a0); a1 = fma(wv.y, in_x[k + 1], a1);\n")
+    p = bf16_cstr_append(buf, p, "        a2 = fma(wv.z, in_x[k + 2], a2); a3 = fma(wv.w, in_x[k + 3], a3);\n")
+    p = bf16_cstr_append(buf, p, "    }\n")
+    p = bf16_cstr_append(buf, p, "    for (ulong kt = (in_dim & ~3ULL) + (ulong)lane; kt < in_dim; kt = kt + 32ul) {\n")
+    p = bf16_cstr_append(buf, p, "        a0 = fma(as_type<float>(((uint)row_w[kt]) << 16), in_x[kt], a0);\n")
+    p = bf16_cstr_append(buf, p, "    }\n    return sounio_warp_sum_f32((a0 + a1) + (a2 + a3));\n}\n\n")
+
+    p = bf16_cstr_append(buf, p, "inline float qwen3_f32_row_dot_tg(device const float* row_w, threadgroup const float* tg_x, ulong in_dim, ulong lane) {\n")
+    p = bf16_cstr_append(buf, p, "    float a0 = 0.0f; float a1 = 0.0f; float a2 = 0.0f; float a3 = 0.0f;\n")
+    p = bf16_cstr_append(buf, p, "    for (ulong k = (ulong)lane * 4ul; k + 3ul < in_dim; k = k + 128ul) {\n")
+    p = bf16_cstr_append(buf, p, "        a0 = fma(row_w[k + 0], tg_x[k + 0], a0); a1 = fma(row_w[k + 1], tg_x[k + 1], a1);\n")
+    p = bf16_cstr_append(buf, p, "        a2 = fma(row_w[k + 2], tg_x[k + 2], a2); a3 = fma(row_w[k + 3], tg_x[k + 3], a3);\n")
+    p = bf16_cstr_append(buf, p, "    }\n")
+    p = bf16_cstr_append(buf, p, "    for (ulong kt = (in_dim & ~3ULL) + (ulong)lane; kt < in_dim; kt = kt + 32ul) {\n")
+    p = bf16_cstr_append(buf, p, "        a0 = fma(row_w[kt], tg_x[kt], a0);\n")
+    p = bf16_cstr_append(buf, p, "    }\n    return sounio_warp_sum_f32((a0 + a1) + (a2 + a3));\n}\n\n")
+
+    p = bf16_cstr_append(buf, p, "inline float qwen3_f32_row_dot_dev(device const float* row_w, device const float* in_x, ulong in_dim, ulong lane) {\n")
+    p = bf16_cstr_append(buf, p, "    float a0 = 0.0f; float a1 = 0.0f; float a2 = 0.0f; float a3 = 0.0f;\n")
+    p = bf16_cstr_append(buf, p, "    for (ulong k = (ulong)lane * 4ul; k + 3ul < in_dim; k = k + 128ul) {\n")
+    p = bf16_cstr_append(buf, p, "        a0 = fma(row_w[k + 0], in_x[k + 0], a0); a1 = fma(row_w[k + 1], in_x[k + 1], a1);\n")
+    p = bf16_cstr_append(buf, p, "        a2 = fma(row_w[k + 2], in_x[k + 2], a2); a3 = fma(row_w[k + 3], in_x[k + 3], a3);\n")
+    p = bf16_cstr_append(buf, p, "    }\n")
+    p = bf16_cstr_append(buf, p, "    for (ulong kt = (in_dim & ~3ULL) + (ulong)lane; kt < in_dim; kt = kt + 32ul) {\n")
+    p = bf16_cstr_append(buf, p, "        a0 = fma(row_w[kt], in_x[kt], a0);\n")
+    p = bf16_cstr_append(buf, p, "    }\n    return sounio_warp_sum_f32((a0 + a1) + (a2 + a3));\n}\n\n")
+
+    // 4. qwen3_gemv_bf16 (K-chunked swizzled tg_x4[288] + 4-row/SIMD + 4-acc FMA)
+    p = bf16_cstr_append(buf, p, "kernel void qwen3_gemv_bf16(\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* w_base [[buffer(0)]], constant ulong& w_off [[buffer(1)]],\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* x_base [[buffer(2)]], constant ulong& x_off [[buffer(3)]],\n")
+    p = bf16_cstr_append(buf, p, "    device uchar* y_base [[buffer(4)]], constant ulong& y_off [[buffer(5)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& out_dim [[buffer(6)]], constant ulong& in_dim [[buffer(7)]],\n")
+    p = bf16_cstr_append(buf, p, "    uint gid [[thread_position_in_grid]], uint tid [[thread_index_in_threadgroup]]) {\n")
+    p = bf16_cstr_append(buf, p, "    threadgroup float4 tg_x4[288];\n")
+    p = bf16_cstr_append(buf, p, "    threadgroup float* tg_x = (threadgroup float*)tg_x4;\n")
+    p = bf16_cstr_append(buf, p, "    ulong n_groups = (out_dim + 31) / 32; ulong g = (ulong)gid >> 8;\n")
+    p = bf16_cstr_append(buf, p, "    if (g >= n_groups) return;\n")
+    p = bf16_cstr_append(buf, p, "    ulong sg = (ulong)tid >> 5; ulong lane = (ulong)tid & 31ul;\n")
+    p = bf16_cstr_append(buf, p, "    ulong r0 = g * 32ul + sg; ulong r1 = r0 + 8ul; ulong r2 = r0 + 16ul; ulong r3 = r0 + 24ul;\n")
+    p = bf16_cstr_append(buf, p, "    bool has0 = (r0 < out_dim); bool has1 = (r1 < out_dim); bool has2 = (r2 < out_dim); bool has3 = (r3 < out_dim);\n")
+    p = bf16_cstr_append(buf, p, "    device const float* in_x = (device const float*)(x_base + x_off);\n")
+    p = bf16_cstr_append(buf, p, "    device float* out_y = (device float*)(y_base + y_off);\n")
+    p = bf16_cstr_append(buf, p, "    device const ushort* rw0 = has0 ? ((device const ushort*)(w_base + w_off) + r0 * in_dim) : (device const ushort*)w_base;\n")
+    p = bf16_cstr_append(buf, p, "    device const ushort* rw1 = has1 ? ((device const ushort*)(w_base + w_off) + r1 * in_dim) : (device const ushort*)w_base;\n")
+    p = bf16_cstr_append(buf, p, "    device const ushort* rw2 = has2 ? ((device const ushort*)(w_base + w_off) + r2 * in_dim) : (device const ushort*)w_base;\n")
+    p = bf16_cstr_append(buf, p, "    device const ushort* rw3 = has3 ? ((device const ushort*)(w_base + w_off) + r3 * in_dim) : (device const ushort*)w_base;\n")
+    p = bf16_cstr_append(buf, p, "    float a0=0.0f, a1=0.0f, a2=0.0f, a3=0.0f; float b0=0.0f, b1=0.0f, b2=0.0f, b3=0.0f;\n")
+    p = bf16_cstr_append(buf, p, "    float d0=0.0f, d1=0.0f, d2=0.0f, d3=0.0f; float e0=0.0f, e1=0.0f, e2=0.0f, e3=0.0f;\n")
+    p = bf16_cstr_append(buf, p, "    for (ulong k_base = 0; k_base < in_dim; k_base = k_base + 1024ul) {\n")
+    p = bf16_cstr_append(buf, p, "        ulong chunk_k = min(1024ul, in_dim - k_base);\n")
+    p = bf16_cstr_append(buf, p, "        for (ulong k = (ulong)tid; k < chunk_k; k = k + 256ul) { tg_x[k + ((k >> 5) << 2)] = in_x[k_base + k]; }\n")
+    p = bf16_cstr_append(buf, p, "        threadgroup_barrier(mem_flags::mem_threadgroup);\n")
+    p = bf16_cstr_append(buf, p, "        device const ushort* c0 = rw0 + k_base; device const ushort* c1 = rw1 + k_base;\n")
+    p = bf16_cstr_append(buf, p, "        device const ushort* c2 = rw2 + k_base; device const ushort* c3 = rw3 + k_base;\n")
+    p = bf16_cstr_append(buf, p, "        bool al0 = has0 && ((((ulong)c0) & 7ul) == 0); bool al1 = has1 && ((((ulong)c1) & 7ul) == 0);\n")
+    p = bf16_cstr_append(buf, p, "        bool al2 = has2 && ((((ulong)c2) & 7ul) == 0); bool al3 = has3 && ((((ulong)c3) & 7ul) == 0);\n")
+    p = bf16_cstr_append(buf, p, "        for (ulong k = (ulong)lane * 4ul; k + 3ul < chunk_k; k = k + 128ul) {\n")
+    p = bf16_cstr_append(buf, p, "            ulong u = k >> 2; float4 x4 = tg_x4[u + (u >> 3)];\n")
+    p = bf16_cstr_append(buf, p, "            if (has0) { float4 wv = qwen3_load_bf16_4(c0, k, al0); a0 = fma(wv.x, x4.x, a0); a1 = fma(wv.y, x4.y, a1); a2 = fma(wv.z, x4.z, a2); a3 = fma(wv.w, x4.w, a3); }\n")
+    p = bf16_cstr_append(buf, p, "            if (has1) { float4 wv = qwen3_load_bf16_4(c1, k, al1); b0 = fma(wv.x, x4.x, b0); b1 = fma(wv.y, x4.y, b1); b2 = fma(wv.z, x4.z, b2); b3 = fma(wv.w, x4.w, b3); }\n")
+    p = bf16_cstr_append(buf, p, "            if (has2) { float4 wv = qwen3_load_bf16_4(c2, k, al2); d0 = fma(wv.x, x4.x, d0); d1 = fma(wv.y, x4.y, d1); d2 = fma(wv.z, x4.z, d2); d3 = fma(wv.w, x4.w, d3); }\n")
+    p = bf16_cstr_append(buf, p, "            if (has3) { float4 wv = qwen3_load_bf16_4(c3, k, al3); e0 = fma(wv.x, x4.x, e0); e1 = fma(wv.y, x4.y, e1); e2 = fma(wv.z, x4.z, e2); e3 = fma(wv.w, x4.w, e3); }\n")
+    p = bf16_cstr_append(buf, p, "        }\n")
+    p = bf16_cstr_append(buf, p, "        for (ulong kt = (chunk_k & ~3ULL) + (ulong)lane; kt < chunk_k; kt = kt + 32ul) {\n")
+    p = bf16_cstr_append(buf, p, "            float xt = tg_x[kt + ((kt >> 5) << 2)];\n")
+    p = bf16_cstr_append(buf, p, "            if (has0) a0 = fma(as_type<float>(((uint)c0[kt]) << 16), xt, a0);\n")
+    p = bf16_cstr_append(buf, p, "            if (has1) b0 = fma(as_type<float>(((uint)c1[kt]) << 16), xt, b0);\n")
+    p = bf16_cstr_append(buf, p, "            if (has2) d0 = fma(as_type<float>(((uint)c2[kt]) << 16), xt, d0);\n")
+    p = bf16_cstr_append(buf, p, "            if (has3) e0 = fma(as_type<float>(((uint)c3[kt]) << 16), xt, e0);\n")
+    p = bf16_cstr_append(buf, p, "        }\n")
+    p = bf16_cstr_append(buf, p, "        threadgroup_barrier(mem_flags::mem_threadgroup);\n")
+    p = bf16_cstr_append(buf, p, "    }\n")
+    p = bf16_cstr_append(buf, p, "    if (has0) { float s0 = sounio_warp_sum_f32((a0 + a1) + (a2 + a3)); if (lane == 0) out_y[r0] = s0; }\n")
+    p = bf16_cstr_append(buf, p, "    if (has1) { float s1 = sounio_warp_sum_f32((b0 + b1) + (b2 + b3)); if (lane == 0) out_y[r1] = s1; }\n")
+    p = bf16_cstr_append(buf, p, "    if (has2) { float s2 = sounio_warp_sum_f32((d0 + d1) + (d2 + d3)); if (lane == 0) out_y[r2] = s2; }\n")
+    p = bf16_cstr_append(buf, p, "    if (has3) { float s3 = sounio_warp_sum_f32((e0 + e1) + (e2 + e3)); if (lane == 0) out_y[r3] = s3; }\n}\n\n")
+
+    // 5. qwen3_gemv_f32 (K-chunked swizzled tg_x4[288] + 4-row/SIMD + 4-acc FMA)
+    p = bf16_cstr_append(buf, p, "kernel void qwen3_gemv_f32(\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* w_base [[buffer(0)]], constant ulong& w_off [[buffer(1)]],\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* x_base [[buffer(2)]], constant ulong& x_off [[buffer(3)]],\n")
+    p = bf16_cstr_append(buf, p, "    device uchar* y_base [[buffer(4)]], constant ulong& y_off [[buffer(5)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& out_dim [[buffer(6)]], constant ulong& in_dim [[buffer(7)]],\n")
+    p = bf16_cstr_append(buf, p, "    uint gid [[thread_position_in_grid]], uint tid [[thread_index_in_threadgroup]]) {\n")
+    p = bf16_cstr_append(buf, p, "    threadgroup float4 tg_x4[288];\n")
+    p = bf16_cstr_append(buf, p, "    threadgroup float* tg_x = (threadgroup float*)tg_x4;\n")
+    p = bf16_cstr_append(buf, p, "    ulong n_groups = (out_dim + 31) / 32; ulong g = (ulong)gid >> 8;\n")
+    p = bf16_cstr_append(buf, p, "    if (g >= n_groups) return;\n")
+    p = bf16_cstr_append(buf, p, "    ulong sg = (ulong)tid >> 5; ulong lane = (ulong)tid & 31ul;\n")
+    p = bf16_cstr_append(buf, p, "    ulong r0 = g * 32ul + sg; ulong r1 = r0 + 8ul; ulong r2 = r0 + 16ul; ulong r3 = r0 + 24ul;\n")
+    p = bf16_cstr_append(buf, p, "    bool has0 = (r0 < out_dim); bool has1 = (r1 < out_dim); bool has2 = (r2 < out_dim); bool has3 = (r3 < out_dim);\n")
+    p = bf16_cstr_append(buf, p, "    device const float* in_x = (device const float*)(x_base + x_off);\n")
+    p = bf16_cstr_append(buf, p, "    device float* out_y = (device float*)(y_base + y_off);\n")
+    p = bf16_cstr_append(buf, p, "    device const float* rw0 = has0 ? ((device const float*)(w_base + w_off) + r0 * in_dim) : (device const float*)w_base;\n")
+    p = bf16_cstr_append(buf, p, "    device const float* rw1 = has1 ? ((device const float*)(w_base + w_off) + r1 * in_dim) : (device const float*)w_base;\n")
+    p = bf16_cstr_append(buf, p, "    device const float* rw2 = has2 ? ((device const float*)(w_base + w_off) + r2 * in_dim) : (device const float*)w_base;\n")
+    p = bf16_cstr_append(buf, p, "    device const float* rw3 = has3 ? ((device const float*)(w_base + w_off) + r3 * in_dim) : (device const float*)w_base;\n")
+    p = bf16_cstr_append(buf, p, "    float a0=0.0f, a1=0.0f, a2=0.0f, a3=0.0f; float b0=0.0f, b1=0.0f, b2=0.0f, b3=0.0f;\n")
+    p = bf16_cstr_append(buf, p, "    float d0=0.0f, d1=0.0f, d2=0.0f, d3=0.0f; float e0=0.0f, e1=0.0f, e2=0.0f, e3=0.0f;\n")
+    p = bf16_cstr_append(buf, p, "    for (ulong k_base = 0; k_base < in_dim; k_base = k_base + 1024ul) {\n")
+    p = bf16_cstr_append(buf, p, "        ulong chunk_k = min(1024ul, in_dim - k_base);\n")
+    p = bf16_cstr_append(buf, p, "        for (ulong k = (ulong)tid; k < chunk_k; k = k + 256ul) { tg_x[k + ((k >> 5) << 2)] = in_x[k_base + k]; }\n")
+    p = bf16_cstr_append(buf, p, "        threadgroup_barrier(mem_flags::mem_threadgroup);\n")
+    p = bf16_cstr_append(buf, p, "        device const float* c0 = rw0 + k_base; device const float* c1 = rw1 + k_base;\n")
+    p = bf16_cstr_append(buf, p, "        device const float* c2 = rw2 + k_base; device const float* c3 = rw3 + k_base;\n")
+    p = bf16_cstr_append(buf, p, "        for (ulong k = (ulong)lane * 4ul; k + 3ul < chunk_k; k = k + 128ul) {\n")
+    p = bf16_cstr_append(buf, p, "            ulong u = k >> 2; float4 x4 = tg_x4[u + (u >> 3)];\n")
+    p = bf16_cstr_append(buf, p, "            if (has0) { a0 = fma(c0[k+0], x4.x, a0); a1 = fma(c0[k+1], x4.y, a1); a2 = fma(c0[k+2], x4.z, a2); a3 = fma(c0[k+3], x4.w, a3); }\n")
+    p = bf16_cstr_append(buf, p, "            if (has1) { b0 = fma(c1[k+0], x4.x, b0); b1 = fma(c1[k+1], x4.y, b1); b2 = fma(c1[k+2], x4.z, b2); b3 = fma(c1[k+3], x4.w, b3); }\n")
+    p = bf16_cstr_append(buf, p, "            if (has2) { d0 = fma(c2[k+0], x4.x, d0); d1 = fma(c2[k+1], x4.y, d1); d2 = fma(c2[k+2], x4.z, d2); d3 = fma(c2[k+3], x4.w, d3); }\n")
+    p = bf16_cstr_append(buf, p, "            if (has3) { e0 = fma(c3[k+0], x4.x, e0); e1 = fma(c3[k+1], x4.y, e1); e2 = fma(c3[k+2], x4.z, e2); e3 = fma(c3[k+3], x4.w, e3); }\n")
+    p = bf16_cstr_append(buf, p, "        }\n")
+    p = bf16_cstr_append(buf, p, "        for (ulong kt = (chunk_k & ~3ULL) + (ulong)lane; kt < chunk_k; kt = kt + 32ul) {\n")
+    p = bf16_cstr_append(buf, p, "            float xt = tg_x[kt + ((kt >> 5) << 2)];\n")
+    p = bf16_cstr_append(buf, p, "            if (has0) a0 = fma(c0[kt], xt, a0);\n")
+    p = bf16_cstr_append(buf, p, "            if (has1) b0 = fma(c1[kt], xt, b0);\n")
+    p = bf16_cstr_append(buf, p, "            if (has2) d0 = fma(c2[kt], xt, d0);\n")
+    p = bf16_cstr_append(buf, p, "            if (has3) e0 = fma(c3[kt], xt, e0);\n")
+    p = bf16_cstr_append(buf, p, "        }\n")
+    p = bf16_cstr_append(buf, p, "        threadgroup_barrier(mem_flags::mem_threadgroup);\n")
+    p = bf16_cstr_append(buf, p, "    }\n")
+    p = bf16_cstr_append(buf, p, "    if (has0) { float s0 = sounio_warp_sum_f32((a0 + a1) + (a2 + a3)); if (lane == 0) out_y[r0] = s0; }\n")
+    p = bf16_cstr_append(buf, p, "    if (has1) { float s1 = sounio_warp_sum_f32((b0 + b1) + (b2 + b3)); if (lane == 0) out_y[r1] = s1; }\n")
+    p = bf16_cstr_append(buf, p, "    if (has2) { float s2 = sounio_warp_sum_f32((d0 + d1) + (d2 + d3)); if (lane == 0) out_y[r2] = s2; }\n")
+    p = bf16_cstr_append(buf, p, "    if (has3) { float s3 = sounio_warp_sum_f32((e0 + e1) + (e2 + e3)); if (lane == 0) out_y[r3] = s3; }\n}\n\n")
+
+    // 6. qwen3_swiglu_f32
+    p = bf16_cstr_append(buf, p, "kernel void qwen3_swiglu_f32(\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* g_base [[buffer(0)]], constant ulong& g_off [[buffer(1)]],\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* u_base [[buffer(2)]], constant ulong& u_off [[buffer(3)]],\n")
+    p = bf16_cstr_append(buf, p, "    device uchar* o_base [[buffer(4)]], constant ulong& o_off [[buffer(5)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& inter_dim [[buffer(6)]], uint gid [[thread_position_in_grid]]) {\n")
+    p = bf16_cstr_append(buf, p, "    if ((ulong)gid >= inter_dim) return;\n")
+    p = bf16_cstr_append(buf, p, "    device const float* g_ptr = (device const float*)(g_base + g_off);\n")
+    p = bf16_cstr_append(buf, p, "    device const float* u_ptr = (device const float*)(u_base + u_off);\n")
+    p = bf16_cstr_append(buf, p, "    device float* o_ptr = (device float*)(o_base + o_off);\n")
+    p = bf16_cstr_append(buf, p, "    float g = g_ptr[gid];\n")
+    p = bf16_cstr_append(buf, p, "    float u = u_ptr[gid];\n")
+    p = bf16_cstr_append(buf, p, "    float silu_g = precise::divide(g, 1.0f + sounio_exp_f32(-g));\n")
+    p = bf16_cstr_append(buf, p, "    o_ptr[gid] = silu_g * u;\n}\n\n")
+
+    // Inline 32-lane SIMD Paged GQA helper
+    p = bf16_cstr_append(buf, p, "inline void qwen3_paged_gqa_head_simd(\n")
+    p = bf16_cstr_append(buf, p, "    device const float* q_vec, device const uchar* kv_base, device const uint* table,\n")
+    p = bf16_cstr_append(buf, p, "    ulong k_layer_off, ulong v_layer_off, device float* out_vec,\n")
+    p = bf16_cstr_append(buf, p, "    ulong n_kv, ulong kv_h, ulong head_dim, ulong seq_len, ulong block_size, uint lane) {\n")
+    p = bf16_cstr_append(buf, p, "    float scale = precise::divide(1.0f, precise::sqrt(float(head_dim)));\n")
+    p = bf16_cstr_append(buf, p, "    uint n_chunks = (uint)((min(head_dim, 256ul) + 31ul) >> 5);\n")
+    p = bf16_cstr_append(buf, p, "    float q_reg[8]; float acc_reg[8];\n")
+    p = bf16_cstr_append(buf, p, "    for (uint c = 0; c < n_chunks; ++c) {\n")
+    p = bf16_cstr_append(buf, p, "        ulong d = (ulong)lane + (ulong)(c << 5);\n")
+    p = bf16_cstr_append(buf, p, "        q_reg[c] = (d < head_dim) ? q_vec[d] : 0.0f;\n")
+    p = bf16_cstr_append(buf, p, "        acc_reg[c] = 0.0f;\n    }\n")
+    p = bf16_cstr_append(buf, p, "    float max_s = -INFINITY; float l = 0.0f;\n")
+    p = bf16_cstr_append(buf, p, "    for (ulong pos = 0; pos < seq_len; ++pos) {\n")
+    p = bf16_cstr_append(buf, p, "        uint phys_blk = table[pos / block_size];\n")
+    p = bf16_cstr_append(buf, p, "        if (phys_blk == 0xFFFFFFFFu) continue;\n")
+    p = bf16_cstr_append(buf, p, "        ulong slot = pos % block_size;\n")
+    p = bf16_cstr_append(buf, p, "        ulong kv_elem_idx = (((ulong)phys_blk * block_size + slot) * n_kv + kv_h) * head_dim;\n")
+    p = bf16_cstr_append(buf, p, "        device const float* k_vec = (device const float*)(kv_base + k_layer_off) + kv_elem_idx;\n")
+    p = bf16_cstr_append(buf, p, "        device const float* v_vec = (device const float*)(kv_base + v_layer_off) + kv_elem_idx;\n")
+    p = bf16_cstr_append(buf, p, "        float part = 0.0f;\n")
+    p = bf16_cstr_append(buf, p, "        for (uint c = 0; c < n_chunks; ++c) {\n")
+    p = bf16_cstr_append(buf, p, "            ulong d = (ulong)lane + (ulong)(c << 5);\n")
+    p = bf16_cstr_append(buf, p, "            if (d < head_dim) part = fma(q_reg[c], k_vec[d], part);\n        }\n")
+    p = bf16_cstr_append(buf, p, "        float s = sounio_warp_sum_f32(part) * scale;\n")
+    p = bf16_cstr_append(buf, p, "        if (l == 0.0f) {\n")
+    p = bf16_cstr_append(buf, p, "            max_s = s; l = 1.0f;\n")
+    p = bf16_cstr_append(buf, p, "            for (uint c = 0; c < n_chunks; ++c) { ulong d = (ulong)lane + (ulong)(c << 5); acc_reg[c] = (d < head_dim) ? v_vec[d] : 0.0f; }\n")
+    p = bf16_cstr_append(buf, p, "        } else if (s > max_s) {\n")
+    p = bf16_cstr_append(buf, p, "            float alpha = sounio_exp_f32(max_s - s); l = fma(l, alpha, 1.0f);\n")
+    p = bf16_cstr_append(buf, p, "            for (uint c = 0; c < n_chunks; ++c) { ulong d = (ulong)lane + (ulong)(c << 5); float vv = (d < head_dim) ? v_vec[d] : 0.0f; acc_reg[c] = fma(acc_reg[c], alpha, vv); }\n")
+    p = bf16_cstr_append(buf, p, "            max_s = s;\n")
+    p = bf16_cstr_append(buf, p, "        } else {\n")
+    p = bf16_cstr_append(buf, p, "            float beta = sounio_exp_f32(s - max_s); l = l + beta;\n")
+    p = bf16_cstr_append(buf, p, "            for (uint c = 0; c < n_chunks; ++c) { ulong d = (ulong)lane + (ulong)(c << 5); float vv = (d < head_dim) ? v_vec[d] : 0.0f; acc_reg[c] = fma(beta, vv, acc_reg[c]); }\n")
+    p = bf16_cstr_append(buf, p, "        }\n    }\n")
+    p = bf16_cstr_append(buf, p, "    if (l > 0.0f) {\n")
+    p = bf16_cstr_append(buf, p, "        float inv_l = precise::divide(1.0f, l);\n")
+    p = bf16_cstr_append(buf, p, "        for (uint c = 0; c < n_chunks; ++c) { ulong d = (ulong)lane + (ulong)(c << 5); if (d < head_dim) out_vec[d] = acc_reg[c] * inv_l; }\n")
+    p = bf16_cstr_append(buf, p, "    } else {\n")
+    p = bf16_cstr_append(buf, p, "        for (uint c = 0; c < n_chunks; ++c) { ulong d = (ulong)lane + (ulong)(c << 5); if (d < head_dim) out_vec[d] = 0.0f; }\n")
+    p = bf16_cstr_append(buf, p, "    }\n}\n\n")
+
+    // 7. qwen3_paged_gqa_f32 (32-lane SIMD per head)
+    p = bf16_cstr_append(buf, p, "kernel void qwen3_paged_gqa_f32(\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* q_base [[buffer(0)]], constant ulong& q_off [[buffer(1)]],\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* kv_base [[buffer(2)]], constant ulong& table_off [[buffer(3)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& k_layer_off [[buffer(4)]], constant ulong& v_layer_off [[buffer(5)]],\n")
+    p = bf16_cstr_append(buf, p, "    device uchar* out_base [[buffer(6)]], constant ulong& out_off [[buffer(7)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& n_q [[buffer(8)]], constant ulong& n_kv [[buffer(9)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& head_dim [[buffer(10)]], constant ulong& seq_len [[buffer(11)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& block_size [[buffer(12)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {\n")
+    p = bf16_cstr_append(buf, p, "    ulong q_h = (ulong)gid >> 5;\n")
+    p = bf16_cstr_append(buf, p, "    if (q_h >= n_q || n_kv == 0 || head_dim == 0 || block_size == 0) return;\n")
+    p = bf16_cstr_append(buf, p, "    ulong kv_h = q_h / (n_q / n_kv);\n")
+    p = bf16_cstr_append(buf, p, "    device const float* q_vec = (device const float*)(q_base + q_off) + q_h * head_dim;\n")
+    p = bf16_cstr_append(buf, p, "    device const uint* table = (device const uint*)(kv_base + table_off);\n")
+    p = bf16_cstr_append(buf, p, "    device float* out_vec = (device float*)(out_base + out_off) + q_h * head_dim;\n")
+    p = bf16_cstr_append(buf, p, "    qwen3_paged_gqa_head_simd(q_vec, kv_base, table, k_layer_off, v_layer_off, out_vec, n_kv, kv_h, head_dim, seq_len, block_size, lane);\n")
+    p = bf16_cstr_append(buf, p, "}\n\n")
+
+    // 8. qwen3_vec_add_f32
+    p = bf16_cstr_append(buf, p, "kernel void qwen3_vec_add_f32(\n")
+    p = bf16_cstr_append(buf, p, "    device uchar* a_base [[buffer(0)]], constant ulong& a_off [[buffer(1)]],\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* b_base [[buffer(2)]], constant ulong& b_off [[buffer(3)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& len [[buffer(4)]], uint gid [[thread_position_in_grid]]) {\n")
+    p = bf16_cstr_append(buf, p, "    if ((ulong)gid >= len) return;\n")
+    p = bf16_cstr_append(buf, p, "    device float* a = (device float*)(a_base + a_off);\n")
+    p = bf16_cstr_append(buf, p, "    device const float* b = (device const float*)(b_base + b_off);\n")
+    p = bf16_cstr_append(buf, p, "    a[gid] = a[gid] + b[gid];\n}\n\n")
+
+    // 9. qwen3_kv_scatter_f32
+    p = bf16_cstr_append(buf, p, "kernel void qwen3_kv_scatter_f32(\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* k_src_base [[buffer(0)]], constant ulong& k_src_off [[buffer(1)]],\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* v_src_base [[buffer(2)]], constant ulong& v_src_off [[buffer(3)]],\n")
+    p = bf16_cstr_append(buf, p, "    device uchar* kv_base [[buffer(4)]], constant ulong& table_off [[buffer(5)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& k_layer_off [[buffer(6)]], constant ulong& v_layer_off [[buffer(7)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& n_kv_dim [[buffer(8)]], constant ulong& pos [[buffer(9)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& block_size [[buffer(10)]], uint gid [[thread_position_in_grid]]) {\n")
+    p = bf16_cstr_append(buf, p, "    if ((ulong)gid >= n_kv_dim || block_size == 0) return;\n")
+    p = bf16_cstr_append(buf, p, "    uint phys_blk = ((device const uint*)(kv_base + table_off))[pos / block_size];\n")
+    p = bf16_cstr_append(buf, p, "    if (phys_blk == 0xFFFFFFFFu) return;\n")
+    p = bf16_cstr_append(buf, p, "    ulong slot = pos % block_size;\n")
+    p = bf16_cstr_append(buf, p, "    ulong dst_idx = (ulong)phys_blk * block_size * n_kv_dim + slot * n_kv_dim + (ulong)gid;\n")
+    p = bf16_cstr_append(buf, p, "    ((device float*)(kv_base + k_layer_off))[dst_idx] = ((device const float*)(k_src_base + k_src_off))[gid];\n")
+    p = bf16_cstr_append(buf, p, "    ((device float*)(kv_base + v_layer_off))[dst_idx] = ((device const float*)(v_src_base + v_src_off))[gid];\n}\n")
+    p = bf16_cstr_append(buf, p, "\n")
+    p = bf16_cstr_append(buf, p, "// 10. qwen3_argmax_top2_f32\n")
+    p = bf16_cstr_append(buf, p, "kernel void qwen3_argmax_top2_f32(\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* logits_base [[buffer(0)]], constant ulong& logits_off [[buffer(1)]],\n")
+    p = bf16_cstr_append(buf, p, "    device uchar* out_base [[buffer(2)]], constant ulong& out_off [[buffer(3)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& vocab [[buffer(4)]], uint lane [[thread_index_in_simdgroup]]) {\n")
+    p = bf16_cstr_append(buf, p, "    threadgroup float tv1[32]; threadgroup float tv2[32];\n")
+    p = bf16_cstr_append(buf, p, "    threadgroup ulong ti1[32]; threadgroup ulong ti2[32];\n")
+    p = bf16_cstr_append(buf, p, "    device const float* lg = (device const float*)(logits_base + logits_off);\n")
+    p = bf16_cstr_append(buf, p, "    float v1 = -INFINITY; float v2 = -INFINITY;\n")
+    p = bf16_cstr_append(buf, p, "    ulong i1 = 0xFFFFFFFFFFFFFFFFul; ulong i2 = 0xFFFFFFFFFFFFFFFFul;\n")
+    p = bf16_cstr_append(buf, p, "    for (ulong i = (ulong)lane; i < vocab; i = i + 32) {\n")
+    p = bf16_cstr_append(buf, p, "        float v = lg[i];\n")
+    p = bf16_cstr_append(buf, p, "        if (v > v1) { v2 = v1; i2 = i1; v1 = v; i1 = i; }\n")
+    p = bf16_cstr_append(buf, p, "        else if (v > v2) { v2 = v; i2 = i; }\n")
+    p = bf16_cstr_append(buf, p, "    }\n")
+    p = bf16_cstr_append(buf, p, "    tv1[lane] = v1; tv2[lane] = v2; ti1[lane] = i1; ti2[lane] = i2;\n")
+    p = bf16_cstr_append(buf, p, "    threadgroup_barrier(mem_flags::mem_threadgroup);\n")
+    p = bf16_cstr_append(buf, p, "    if (lane == 0) {\n")
+    p = bf16_cstr_append(buf, p, "        float b1 = -INFINITY; float b2 = -INFINITY;\n")
+    p = bf16_cstr_append(buf, p, "        ulong j1 = 0xFFFFFFFFFFFFFFFFul; ulong j2 = 0xFFFFFFFFFFFFFFFFul;\n")
+    p = bf16_cstr_append(buf, p, "        for (uint l = 0; l < 64; ++l) {\n")
+    p = bf16_cstr_append(buf, p, "            float v = (l < 32) ? tv1[l] : tv2[l - 32];\n")
+    p = bf16_cstr_append(buf, p, "            ulong ix = (l < 32) ? ti1[l] : ti2[l - 32];\n")
+    p = bf16_cstr_append(buf, p, "            if (ix == 0xFFFFFFFFFFFFFFFFul) continue;\n")
+    p = bf16_cstr_append(buf, p, "            if (v > b1 || (v == b1 && ix < j1)) { b2 = b1; j2 = j1; b1 = v; j1 = ix; }\n")
+    p = bf16_cstr_append(buf, p, "            else if (v > b2 || (v == b2 && ix < j2)) { b2 = v; j2 = ix; }\n")
+    p = bf16_cstr_append(buf, p, "        }\n")
+    p = bf16_cstr_append(buf, p, "        device ulong* o_ids = (device ulong*)(out_base + out_off);\n")
+    p = bf16_cstr_append(buf, p, "        device uint* o_bits = (device uint*)(out_base + out_off + 16);\n")
+    p = bf16_cstr_append(buf, p, "        o_ids[0] = j1; o_ids[1] = j2;\n")
+    p = bf16_cstr_append(buf, p, "        o_bits[0] = as_type<uint>(b1); o_bits[1] = as_type<uint>(b2);\n")
+    p = bf16_cstr_append(buf, p, "    }\n}\n\n")
+
+    // 11. qwen3_gemm_bf16 (TILE_ROWS=8, 1 row/SIMD, TILE_K=128, exact 4-acc FMA + tail)
+    p = bf16_cstr_append(buf, p, "kernel void qwen3_gemm_bf16(\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* w_base [[buffer(0)]], constant ulong& w_off [[buffer(1)]],\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* x_base [[buffer(2)]], constant ulong& x_off [[buffer(3)]],\n")
+    p = bf16_cstr_append(buf, p, "    device uchar* y_base [[buffer(4)]], constant ulong& y_off [[buffer(5)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& out_dim [[buffer(6)]], constant ulong& in_dim [[buffer(7)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& n_toks [[buffer(8)]], uint gid [[thread_position_in_grid]], uint tid [[thread_index_in_threadgroup]]) {\n")
+    p = bf16_cstr_append(buf, p, "    threadgroup float4 tg_x4[288];\n")
+    p = bf16_cstr_append(buf, p, "    threadgroup float* tg_x = (threadgroup float*)tg_x4;\n")
+    p = bf16_cstr_append(buf, p, "    ulong n_groups = (out_dim + 7ul) / 8ul; ulong g = (ulong)gid >> 8;\n")
+    p = bf16_cstr_append(buf, p, "    if (g >= n_groups || n_toks == 0) return;\n")
+    p = bf16_cstr_append(buf, p, "    ulong sg = (ulong)tid >> 5; ulong lane = (ulong)tid & 31ul;\n")
+    p = bf16_cstr_append(buf, p, "    ulong B = (n_toks > 8ul) ? 8ul : n_toks;\n")
+    p = bf16_cstr_append(buf, p, "    ulong row0 = g * 8ul + sg; bool has0 = (row0 < out_dim);\n")
+    p = bf16_cstr_append(buf, p, "    device const float* in_x = (device const float*)(x_base + x_off);\n")
+    p = bf16_cstr_append(buf, p, "    device float* out_y = (device float*)(y_base + y_off);\n")
+    p = bf16_cstr_append(buf, p, "    device const ushort* rw0 = has0 ? ((device const ushort*)(w_base + w_off) + row0 * in_dim) : (device const ushort*)w_base;\n")
+    p = bf16_cstr_append(buf, p, "    float a0[8]; float a1[8]; float a2[8]; float a3[8];\n")
+    p = bf16_cstr_append(buf, p, "    for (ulong bb = 0ul; bb < 8ul; ++bb) { a0[bb] = 0.0f; a1[bb] = 0.0f; a2[bb] = 0.0f; a3[bb] = 0.0f; }\n")
+    p = bf16_cstr_append(buf, p, "    ulong swz = lane + (lane >> 3); ulong k_lane = lane << 2;\n")
+    p = bf16_cstr_append(buf, p, "    for (ulong k_base = 0; k_base < in_dim; k_base = k_base + 128ul) {\n")
+    p = bf16_cstr_append(buf, p, "        ulong chunk_k = min(128ul, in_dim - k_base);\n")
+    p = bf16_cstr_append(buf, p, "        ulong total_load = B << 7;\n")
+    p = bf16_cstr_append(buf, p, "        for (ulong idx = (ulong)tid; idx < total_load; idx = idx + 256ul) {\n")
+    p = bf16_cstr_append(buf, p, "            ulong bb = idx >> 7; ulong kk = idx & 127ul;\n")
+    p = bf16_cstr_append(buf, p, "            tg_x[bb * 144ul + kk + ((kk >> 5) << 2)] = (kk < chunk_k) ? in_x[bb * in_dim + k_base + kk] : 0.0f;\n")
+    p = bf16_cstr_append(buf, p, "        }\n")
+    p = bf16_cstr_append(buf, p, "        threadgroup_barrier(mem_flags::mem_threadgroup);\n")
+    p = bf16_cstr_append(buf, p, "        if (has0) {\n")
+    p = bf16_cstr_append(buf, p, "            device const ushort* c0 = rw0 + k_base;\n")
+    p = bf16_cstr_append(buf, p, "            bool al0 = ((((ulong)c0) & 7ul) == 0);\n")
+    p = bf16_cstr_append(buf, p, "            if (k_lane + 3ul < chunk_k) {\n")
+    p = bf16_cstr_append(buf, p, "                float4 wv = qwen3_load_bf16_4(c0, k_lane, al0);\n")
+    p = bf16_cstr_append(buf, p, "                for (ulong bb = 0ul; bb < B; ++bb) {\n")
+    p = bf16_cstr_append(buf, p, "                    float4 x = tg_x4[bb * 36ul + swz];\n")
+    p = bf16_cstr_append(buf, p, "                    a0[bb] = fma(wv.x, x.x, a0[bb]); a1[bb] = fma(wv.y, x.y, a1[bb]);\n")
+    p = bf16_cstr_append(buf, p, "                    a2[bb] = fma(wv.z, x.z, a2[bb]); a3[bb] = fma(wv.w, x.w, a3[bb]);\n")
+    p = bf16_cstr_append(buf, p, "                }\n")
+    p = bf16_cstr_append(buf, p, "            }\n")
+    p = bf16_cstr_append(buf, p, "            for (ulong kt = (chunk_k & ~3ULL) + (ulong)lane; kt < chunk_k; kt = kt + 32ul) {\n")
+    p = bf16_cstr_append(buf, p, "                ulong tx = kt + ((kt >> 5) << 2);\n")
+    p = bf16_cstr_append(buf, p, "                float wt = as_type<float>(((uint)c0[kt]) << 16);\n")
+    p = bf16_cstr_append(buf, p, "                for (ulong bb = 0ul; bb < B; ++bb) { a0[bb] = fma(wt, tg_x[bb * 144ul + tx], a0[bb]); }\n")
+    p = bf16_cstr_append(buf, p, "            }\n")
+    p = bf16_cstr_append(buf, p, "        }\n")
+    p = bf16_cstr_append(buf, p, "        threadgroup_barrier(mem_flags::mem_threadgroup);\n    }\n")
+    p = bf16_cstr_append(buf, p, "    for (ulong bb = 0ul; bb < B; ++bb) {\n")
+    p = bf16_cstr_append(buf, p, "        float r = sounio_warp_sum_f32((a0[bb] + a1[bb]) + (a2[bb] + a3[bb]));\n")
+    p = bf16_cstr_append(buf, p, "        if (has0 && lane == 0ul) out_y[bb * out_dim + row0] = r;\n")
+    p = bf16_cstr_append(buf, p, "    }\n}\n\n")
+
+    // 12. qwen3_gemm_f32 (TILE_ROWS=8, 1 row/SIMD, TILE_K=128, exact 4-acc FMA + tail)
+    p = bf16_cstr_append(buf, p, "kernel void qwen3_gemm_f32(\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* w_base [[buffer(0)]], constant ulong& w_off [[buffer(1)]],\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* x_base [[buffer(2)]], constant ulong& x_off [[buffer(3)]],\n")
+    p = bf16_cstr_append(buf, p, "    device uchar* y_base [[buffer(4)]], constant ulong& y_off [[buffer(5)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& out_dim [[buffer(6)]], constant ulong& in_dim [[buffer(7)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& n_toks [[buffer(8)]], uint gid [[thread_position_in_grid]], uint tid [[thread_index_in_threadgroup]]) {\n")
+    p = bf16_cstr_append(buf, p, "    threadgroup float4 tg_x4[288];\n")
+    p = bf16_cstr_append(buf, p, "    threadgroup float* tg_x = (threadgroup float*)tg_x4;\n")
+    p = bf16_cstr_append(buf, p, "    ulong n_groups = (out_dim + 7ul) / 8ul; ulong g = (ulong)gid >> 8;\n")
+    p = bf16_cstr_append(buf, p, "    if (g >= n_groups || n_toks == 0) return;\n")
+    p = bf16_cstr_append(buf, p, "    ulong sg = (ulong)tid >> 5; ulong lane = (ulong)tid & 31ul;\n")
+    p = bf16_cstr_append(buf, p, "    ulong B = (n_toks > 8ul) ? 8ul : n_toks;\n")
+    p = bf16_cstr_append(buf, p, "    ulong row0 = g * 8ul + sg; bool has0 = (row0 < out_dim);\n")
+    p = bf16_cstr_append(buf, p, "    device const float* in_x = (device const float*)(x_base + x_off);\n")
+    p = bf16_cstr_append(buf, p, "    device float* out_y = (device float*)(y_base + y_off);\n")
+    p = bf16_cstr_append(buf, p, "    device const float* rw0 = has0 ? ((device const float*)(w_base + w_off) + row0 * in_dim) : (device const float*)w_base;\n")
+    p = bf16_cstr_append(buf, p, "    float a0[8]; float a1[8]; float a2[8]; float a3[8];\n")
+    p = bf16_cstr_append(buf, p, "    for (ulong bb = 0ul; bb < 8ul; ++bb) { a0[bb] = 0.0f; a1[bb] = 0.0f; a2[bb] = 0.0f; a3[bb] = 0.0f; }\n")
+    p = bf16_cstr_append(buf, p, "    ulong swz = lane + (lane >> 3); ulong k_lane = lane << 2;\n")
+    p = bf16_cstr_append(buf, p, "    for (ulong k_base = 0; k_base < in_dim; k_base = k_base + 128ul) {\n")
+    p = bf16_cstr_append(buf, p, "        ulong chunk_k = min(128ul, in_dim - k_base);\n")
+    p = bf16_cstr_append(buf, p, "        ulong total_load = B << 7;\n")
+    p = bf16_cstr_append(buf, p, "        for (ulong idx = (ulong)tid; idx < total_load; idx = idx + 256ul) {\n")
+    p = bf16_cstr_append(buf, p, "            ulong bb = idx >> 7; ulong kk = idx & 127ul;\n")
+    p = bf16_cstr_append(buf, p, "            tg_x[bb * 144ul + kk + ((kk >> 5) << 2)] = (kk < chunk_k) ? in_x[bb * in_dim + k_base + kk] : 0.0f;\n")
+    p = bf16_cstr_append(buf, p, "        }\n")
+    p = bf16_cstr_append(buf, p, "        threadgroup_barrier(mem_flags::mem_threadgroup);\n")
+    p = bf16_cstr_append(buf, p, "        if (has0) {\n")
+    p = bf16_cstr_append(buf, p, "            device const float* c0 = rw0 + k_base;\n")
+    p = bf16_cstr_append(buf, p, "            if (k_lane + 3ul < chunk_k) {\n")
+    p = bf16_cstr_append(buf, p, "                for (ulong bb = 0ul; bb < B; ++bb) {\n")
+    p = bf16_cstr_append(buf, p, "                    float4 x = tg_x4[bb * 36ul + swz];\n")
+    p = bf16_cstr_append(buf, p, "                    a0[bb] = fma(c0[k_lane+0], x.x, a0[bb]); a1[bb] = fma(c0[k_lane+1], x.y, a1[bb]);\n")
+    p = bf16_cstr_append(buf, p, "                    a2[bb] = fma(c0[k_lane+2], x.z, a2[bb]); a3[bb] = fma(c0[k_lane+3], x.w, a3[bb]);\n")
+    p = bf16_cstr_append(buf, p, "                }\n")
+    p = bf16_cstr_append(buf, p, "            }\n")
+    p = bf16_cstr_append(buf, p, "            for (ulong kt = (chunk_k & ~3ULL) + (ulong)lane; kt < chunk_k; kt = kt + 32ul) {\n")
+    p = bf16_cstr_append(buf, p, "                ulong tx = kt + ((kt >> 5) << 2);\n")
+    p = bf16_cstr_append(buf, p, "                float wt = c0[kt];\n")
+    p = bf16_cstr_append(buf, p, "                for (ulong bb = 0ul; bb < B; ++bb) { a0[bb] = fma(wt, tg_x[bb * 144ul + tx], a0[bb]); }\n")
+    p = bf16_cstr_append(buf, p, "            }\n")
+    p = bf16_cstr_append(buf, p, "        }\n")
+    p = bf16_cstr_append(buf, p, "        threadgroup_barrier(mem_flags::mem_threadgroup);\n    }\n")
+    p = bf16_cstr_append(buf, p, "    for (ulong bb = 0ul; bb < B; ++bb) {\n")
+    p = bf16_cstr_append(buf, p, "        float r = sounio_warp_sum_f32((a0[bb] + a1[bb]) + (a2[bb] + a3[bb]));\n")
+    p = bf16_cstr_append(buf, p, "        if (has0 && lane == 0ul) out_y[bb * out_dim + row0] = r;\n")
+    p = bf16_cstr_append(buf, p, "    }\n}\n\n")
+
+    // 13. qwen3_rope_batch_f32
+    p = bf16_cstr_append(buf, p, "kernel void qwen3_rope_batch_f32(\n")
+    p = bf16_cstr_append(buf, p, "    device uchar* v_base [[buffer(0)]], constant ulong& v_off [[buffer(1)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& n_heads [[buffer(2)]], constant ulong& head_dim [[buffer(3)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& pos_start [[buffer(4)]], constant ulong& theta_bits [[buffer(5)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& n_toks [[buffer(6)]], uint gid [[thread_position_in_grid]]) {\n")
+    p = bf16_cstr_append(buf, p, "    ulong hdim = head_dim / 2;\n")
+    p = bf16_cstr_append(buf, p, "    ulong per_tok = n_heads * hdim;\n")
+    p = bf16_cstr_append(buf, p, "    if (hdim == 0 || per_tok == 0 || (ulong)gid >= n_toks * per_tok) return;\n")
+    p = bf16_cstr_append(buf, p, "    ulong b = (ulong)gid / per_tok;\n")
+    p = bf16_cstr_append(buf, p, "    ulong rem = (ulong)gid % per_tok;\n")
+    p = bf16_cstr_append(buf, p, "    ulong h = rem / hdim;\n")
+    p = bf16_cstr_append(buf, p, "    ulong j = rem % hdim;\n")
+    p = bf16_cstr_append(buf, p, "    float theta = as_type<float>((uint)theta_bits);\n")
+    p = bf16_cstr_append(buf, p, "    float freq = pow(theta, precise::divide(-float(2 * j), float(head_dim)));\n")
+    p = bf16_cstr_append(buf, p, "    float angle = float(pos_start + b) * freq;\n")
+    p = bf16_cstr_append(buf, p, "    float cos_a = cos(angle);\n")
+    p = bf16_cstr_append(buf, p, "    float sin_a = sin(angle);\n")
+    p = bf16_cstr_append(buf, p, "    device float* head_ptr = (device float*)(v_base + v_off) + (b * n_heads + h) * head_dim;\n")
+    p = bf16_cstr_append(buf, p, "    float x0 = head_ptr[j]; float x1 = head_ptr[j + hdim];\n")
+    p = bf16_cstr_append(buf, p, "    head_ptr[j] = x0 * cos_a - x1 * sin_a;\n")
+    p = bf16_cstr_append(buf, p, "    head_ptr[j + hdim] = x1 * cos_a + x0 * sin_a;\n}\n\n")
+
+    // 13b. qwen3_rope_batch_table_f32 (deterministic host RoPE table)
+    p = bf16_cstr_append(buf, p, "kernel void qwen3_rope_batch_table_f32(\n")
+    p = bf16_cstr_append(buf, p, "    device uchar* v_base [[buffer(0)]], constant ulong& v_off [[buffer(1)]],\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* rope_base [[buffer(2)]], constant ulong& rope_off [[buffer(3)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& n_heads [[buffer(4)]], constant ulong& head_dim [[buffer(5)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& pos_start [[buffer(6)]], constant ulong& n_toks [[buffer(7)]],\n")
+    p = bf16_cstr_append(buf, p, "    uint gid [[thread_position_in_grid]]) {\n")
+    p = bf16_cstr_append(buf, p, "    ulong hdim = head_dim / 2; ulong per_tok = n_heads * hdim;\n")
+    p = bf16_cstr_append(buf, p, "    if (hdim == 0 || per_tok == 0 || (ulong)gid >= n_toks * per_tok) return;\n")
+    p = bf16_cstr_append(buf, p, "    ulong b = (ulong)gid / per_tok; ulong rem = (ulong)gid % per_tok;\n")
+    p = bf16_cstr_append(buf, p, "    ulong h = rem / hdim; ulong j = rem % hdim;\n")
+    p = bf16_cstr_append(buf, p, "    device const float* rp = (device const float*)(rope_base + rope_off) + (pos_start + b) * head_dim;\n")
+    p = bf16_cstr_append(buf, p, "    float cos_a = rp[j]; float sin_a = rp[j + hdim];\n")
+    p = bf16_cstr_append(buf, p, "    device float* head_ptr = (device float*)(v_base + v_off) + (b * n_heads + h) * head_dim;\n")
+    p = bf16_cstr_append(buf, p, "    float x0 = head_ptr[j]; float x1 = head_ptr[j + hdim];\n")
+    p = bf16_cstr_append(buf, p, "    head_ptr[j] = (x0 * cos_a) - (x1 * sin_a);\n")
+    p = bf16_cstr_append(buf, p, "    head_ptr[j + hdim] = (x1 * cos_a) + (x0 * sin_a);\n}\n\n")
+    p = bf16_cstr_append(buf, p, "kernel void qwen3_kv_scatter_batch_f32(\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* k_src_base [[buffer(0)]], constant ulong& k_src_off [[buffer(1)]],\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* v_src_base [[buffer(2)]], constant ulong& v_src_off [[buffer(3)]],\n")
+    p = bf16_cstr_append(buf, p, "    device uchar* kv_base [[buffer(4)]], constant ulong& table_off [[buffer(5)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& k_layer_off [[buffer(6)]], constant ulong& v_layer_off [[buffer(7)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& n_kv_dim [[buffer(8)]], constant ulong& pos_and_ntoks [[buffer(9)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& block_size [[buffer(10)]], uint gid [[thread_position_in_grid]]) {\n")
+    p = bf16_cstr_append(buf, p, "    ulong pos0 = pos_and_ntoks & 0xFFFFFFFFul;\n")
+    p = bf16_cstr_append(buf, p, "    ulong n_toks = pos_and_ntoks >> 32;\n")
+    p = bf16_cstr_append(buf, p, "    if (n_kv_dim == 0 || block_size == 0 || (ulong)gid >= n_toks * n_kv_dim) return;\n")
+    p = bf16_cstr_append(buf, p, "    ulong b = (ulong)gid / n_kv_dim;\n")
+    p = bf16_cstr_append(buf, p, "    ulong d = (ulong)gid % n_kv_dim;\n")
+    p = bf16_cstr_append(buf, p, "    ulong pos = pos0 + b;\n")
+    p = bf16_cstr_append(buf, p, "    uint phys_blk = ((device const uint*)(kv_base + table_off))[pos / block_size];\n")
+    p = bf16_cstr_append(buf, p, "    if (phys_blk == 0xFFFFFFFFu) return;\n")
+    p = bf16_cstr_append(buf, p, "    ulong slot = pos % block_size;\n")
+    p = bf16_cstr_append(buf, p, "    ulong dst_idx = (ulong)phys_blk * block_size * n_kv_dim + slot * n_kv_dim + d;\n")
+    p = bf16_cstr_append(buf, p, "    ((device float*)(kv_base + k_layer_off))[dst_idx] = ((device const float*)(k_src_base + k_src_off))[gid];\n")
+    p = bf16_cstr_append(buf, p, "    ((device float*)(kv_base + v_layer_off))[dst_idx] = ((device const float*)(v_src_base + v_src_off))[gid];\n}\n\n")
+
+    // 15. qwen3_paged_gqa_batch_f32 (32-lane SIMD per head)
+    p = bf16_cstr_append(buf, p, "kernel void qwen3_paged_gqa_batch_f32(\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* q_base [[buffer(0)]], constant ulong& q_off [[buffer(1)]],\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* kv_base [[buffer(2)]], constant ulong& table_off [[buffer(3)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& k_layer_off [[buffer(4)]], constant ulong& v_layer_off [[buffer(5)]],\n")
+    p = bf16_cstr_append(buf, p, "    device uchar* out_base [[buffer(6)]], constant ulong& out_off [[buffer(7)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& n_q [[buffer(8)]], constant ulong& n_kv [[buffer(9)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& head_dim [[buffer(10)]], constant ulong& pos_and_ntoks [[buffer(11)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& block_size [[buffer(12)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {\n")
+    p = bf16_cstr_append(buf, p, "    ulong pos0 = pos_and_ntoks & 0xFFFFFFFFul;\n")
+    p = bf16_cstr_append(buf, p, "    ulong n_toks = pos_and_ntoks >> 32;\n")
+    p = bf16_cstr_append(buf, p, "    ulong idx = (ulong)gid >> 5;\n")
+    p = bf16_cstr_append(buf, p, "    if (n_q == 0 || n_kv == 0 || head_dim == 0 || block_size == 0 || idx >= n_toks * n_q) return;\n")
+    p = bf16_cstr_append(buf, p, "    ulong b = idx / n_q; ulong q_h = idx % n_q;\n")
+    p = bf16_cstr_append(buf, p, "    ulong kv_h = q_h / (n_q / n_kv);\n")
+    p = bf16_cstr_append(buf, p, "    ulong seq_len = pos0 + b + 1;\n")
+    p = bf16_cstr_append(buf, p, "    device const float* q_vec = (device const float*)(q_base + q_off) + (b * n_q + q_h) * head_dim;\n")
+    p = bf16_cstr_append(buf, p, "    device const uint* table = (device const uint*)(kv_base + table_off);\n")
+    p = bf16_cstr_append(buf, p, "    device float* out_vec = (device float*)(out_base + out_off) + (b * n_q + q_h) * head_dim;\n")
+    p = bf16_cstr_append(buf, p, "    qwen3_paged_gqa_head_simd(q_vec, kv_base, table, k_layer_off, v_layer_off, out_vec, n_kv, kv_h, head_dim, seq_len, block_size, lane);\n")
+    p = bf16_cstr_append(buf, p, "}\n\n")
+
+    // 16. qwen3_argmax_top2_batch_f32
+    p = bf16_cstr_append(buf, p, "kernel void qwen3_argmax_top2_batch_f32(\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* logits_base [[buffer(0)]], constant ulong& logits_off [[buffer(1)]],\n")
+    p = bf16_cstr_append(buf, p, "    device uchar* out_base [[buffer(2)]], constant ulong& out_off [[buffer(3)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& vocab [[buffer(4)]], constant ulong& n_toks [[buffer(5)]],\n")
+    p = bf16_cstr_append(buf, p, "    uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {\n")
+    p = bf16_cstr_append(buf, p, "    ulong b = (ulong)gid >> 5;\n")
+    p = bf16_cstr_append(buf, p, "    if (b >= n_toks) return;\n")
+    p = bf16_cstr_append(buf, p, "    threadgroup float tv1[32]; threadgroup float tv2[32];\n")
+    p = bf16_cstr_append(buf, p, "    threadgroup ulong ti1[32]; threadgroup ulong ti2[32];\n")
+    p = bf16_cstr_append(buf, p, "    device const float* lg = (device const float*)(logits_base + logits_off) + b * vocab;\n")
+    p = bf16_cstr_append(buf, p, "    float v1 = -INFINITY; float v2 = -INFINITY;\n")
+    p = bf16_cstr_append(buf, p, "    ulong i1 = 0xFFFFFFFFFFFFFFFFul; ulong i2 = 0xFFFFFFFFFFFFFFFFul;\n")
+    p = bf16_cstr_append(buf, p, "    for (ulong i = (ulong)lane; i < vocab; i = i + 32) {\n")
+    p = bf16_cstr_append(buf, p, "        float v = lg[i];\n")
+    p = bf16_cstr_append(buf, p, "        if (v > v1) { v2 = v1; i2 = i1; v1 = v; i1 = i; }\n")
+    p = bf16_cstr_append(buf, p, "        else if (v > v2) { v2 = v; i2 = i; }\n")
+    p = bf16_cstr_append(buf, p, "    }\n")
+    p = bf16_cstr_append(buf, p, "    tv1[lane] = v1; tv2[lane] = v2; ti1[lane] = i1; ti2[lane] = i2;\n")
+    p = bf16_cstr_append(buf, p, "    threadgroup_barrier(mem_flags::mem_threadgroup);\n")
+    p = bf16_cstr_append(buf, p, "    if (lane == 0) {\n")
+    p = bf16_cstr_append(buf, p, "        float b1 = -INFINITY; float b2 = -INFINITY;\n")
+    p = bf16_cstr_append(buf, p, "        ulong j1 = 0xFFFFFFFFFFFFFFFFul; ulong j2 = 0xFFFFFFFFFFFFFFFFul;\n")
+    p = bf16_cstr_append(buf, p, "        for (uint l = 0; l < 64; ++l) {\n")
+    p = bf16_cstr_append(buf, p, "            float v = (l < 32) ? tv1[l] : tv2[l - 32];\n")
+    p = bf16_cstr_append(buf, p, "            ulong ix = (l < 32) ? ti1[l] : ti2[l - 32];\n")
+    p = bf16_cstr_append(buf, p, "            if (ix == 0xFFFFFFFFFFFFFFFFul) continue;\n")
+    p = bf16_cstr_append(buf, p, "            if (v > b1 || (v == b1 && ix < j1)) { b2 = b1; j2 = j1; b1 = v; j1 = ix; }\n")
+    p = bf16_cstr_append(buf, p, "            else if (v > b2 || (v == b2 && ix < j2)) { b2 = v; j2 = ix; }\n")
+    p = bf16_cstr_append(buf, p, "        }\n")
+    p = bf16_cstr_append(buf, p, "        device ulong* o_ids = (device ulong*)(out_base + out_off + b * 32);\n")
+    p = bf16_cstr_append(buf, p, "        device uint* o_bits = (device uint*)(out_base + out_off + b * 32 + 16);\n")
+    p = bf16_cstr_append(buf, p, "        o_ids[0] = j1; o_ids[1] = j2;\n")
+    p = bf16_cstr_append(buf, p, "        o_bits[0] = as_type<uint>(b1); o_bits[1] = as_type<uint>(b2);\n")
+    p = bf16_cstr_append(buf, p, "    }\n}\n\n")
+
+    // Inline F2 helper: QK-RMSNorm + half-split RoPE (from table) + Paged KV Scatter
+    p = bf16_cstr_append(buf, p, "inline void qwen3_qk_norm_rope_scatter_head(\n")
+    p = bf16_cstr_append(buf, p, "    device float* vec, device const float* v_head,\n")
+    p = bf16_cstr_append(buf, p, "    device const ushort* w_bf16, device const float* w_f32, bool is_bf16,\n")
+    p = bf16_cstr_append(buf, p, "    device uchar* kv_base, ulong table_off, ulong k_layer_off, ulong v_layer_off,\n")
+    p = bf16_cstr_append(buf, p, "    device const float* rp, ulong n_kv, ulong kh, ulong head_dim, ulong pos, ulong block_size,\n")
+    p = bf16_cstr_append(buf, p, "    float eps, uint lane, bool is_k) {\n")
+    p = bf16_cstr_append(buf, p, "    float sum_sq = 0.0f;\n")
+    p = bf16_cstr_append(buf, p, "    for (ulong d = (ulong)lane; d < head_dim; d = d + 32ul) { float x = vec[d]; sum_sq = fma(x, x, sum_sq); }\n")
+    p = bf16_cstr_append(buf, p, "    sum_sq = sounio_warp_sum_f32(sum_sq);\n")
+    p = bf16_cstr_append(buf, p, "    float inv_rms = precise::divide(1.0f, precise::sqrt(precise::divide(sum_sq, float(head_dim)) + eps));\n")
+    p = bf16_cstr_append(buf, p, "    bool write_kv = false;\n")
+    p = bf16_cstr_append(buf, p, "    device float* k_dst = (device float*)(kv_base + k_layer_off);\n")
+    p = bf16_cstr_append(buf, p, "    device float* v_dst = (device float*)(kv_base + v_layer_off);\n")
+    p = bf16_cstr_append(buf, p, "    ulong kv_head_base = 0ul;\n")
+    p = bf16_cstr_append(buf, p, "    if (is_k) {\n")
+    p = bf16_cstr_append(buf, p, "        uint phys_blk = ((device const uint*)(kv_base + table_off))[pos / block_size];\n")
+    p = bf16_cstr_append(buf, p, "        if (phys_blk != 0xFFFFFFFFu) {\n")
+    p = bf16_cstr_append(buf, p, "            ulong slot = pos % block_size;\n")
+    p = bf16_cstr_append(buf, p, "            kv_head_base = ((ulong)phys_blk * block_size + slot) * (n_kv * head_dim) + kh * head_dim;\n")
+    p = bf16_cstr_append(buf, p, "            write_kv = true;\n        }\n    }\n")
+    p = bf16_cstr_append(buf, p, "    ulong hdim = head_dim >> 1;\n")
+    p = bf16_cstr_append(buf, p, "    for (ulong j = (ulong)lane; j < hdim; j = j + 32ul) {\n")
+    p = bf16_cstr_append(buf, p, "        float w0 = is_bf16 ? as_type<float>(((uint)w_bf16[j]) << 16) : w_f32[j];\n")
+    p = bf16_cstr_append(buf, p, "        float w1 = is_bf16 ? as_type<float>(((uint)w_bf16[j + hdim]) << 16) : w_f32[j + hdim];\n")
+    p = bf16_cstr_append(buf, p, "        float x0 = (vec[j] * inv_rms) * w0; float x1 = (vec[j + hdim] * inv_rms) * w1;\n")
+    p = bf16_cstr_append(buf, p, "        float cos_a = rp[j]; float sin_a = rp[j + hdim];\n")
+    p = bf16_cstr_append(buf, p, "        float r0 = (x0 * cos_a) - (x1 * sin_a); float r1 = (x1 * cos_a) + (x0 * sin_a);\n")
+    p = bf16_cstr_append(buf, p, "        vec[j] = r0; vec[j + hdim] = r1;\n")
+    p = bf16_cstr_append(buf, p, "        if (write_kv) {\n")
+    p = bf16_cstr_append(buf, p, "            k_dst[kv_head_base + j] = r0; k_dst[kv_head_base + j + hdim] = r1;\n")
+    p = bf16_cstr_append(buf, p, "            v_dst[kv_head_base + j] = v_head[j]; v_dst[kv_head_base + j + hdim] = v_head[j + hdim];\n")
+    p = bf16_cstr_append(buf, p, "        }\n    }\n}\n\n")
+
+    // 17. qwen3_qk_norm_rope_kv_scatter_bf16 (F2)
+    p = bf16_cstr_append(buf, p, "kernel void qwen3_qk_norm_rope_kv_scatter_bf16(\n")
+    p = bf16_cstr_append(buf, p, "    device uchar* q_base [[buffer(0)]], device uchar* k_base [[buffer(1)]],\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* v_base [[buffer(2)]], device const uchar* qw_base [[buffer(3)]],\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* kw_base [[buffer(4)]], device uchar* kv_base [[buffer(5)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& q_off [[buffer(6)]], constant ulong& k_off [[buffer(7)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& v_off [[buffer(8)]], constant ulong& qw_off [[buffer(9)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& kw_off [[buffer(10)]], constant ulong& table_off [[buffer(11)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& k_layer_off [[buffer(12)]], constant ulong& v_layer_off [[buffer(13)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& n_q [[buffer(14)]], constant ulong& n_kv [[buffer(15)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& head_dim [[buffer(16)]], constant ulong& pos [[buffer(17)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& block_size [[buffer(18)]], constant ulong& eps_bits [[buffer(19)]],\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* rope_base [[buffer(20)]], constant ulong& rope_off [[buffer(21)]],\n")
+    p = bf16_cstr_append(buf, p, "    uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {\n")
+    p = bf16_cstr_append(buf, p, "    ulong g = (ulong)gid >> 5;\n")
+    p = bf16_cstr_append(buf, p, "    if (g >= n_q + n_kv || head_dim < 2 || block_size == 0) return;\n")
+    p = bf16_cstr_append(buf, p, "    bool is_k = (g >= n_q); ulong kh = is_k ? (g - n_q) : 0ul;\n")
+    p = bf16_cstr_append(buf, p, "    device float* vec = is_k ? ((device float*)(k_base + k_off) + kh * head_dim) : ((device float*)(q_base + q_off) + g * head_dim);\n")
+    p = bf16_cstr_append(buf, p, "    device const float* v_head = (device const float*)(v_base + v_off) + kh * head_dim;\n")
+    p = bf16_cstr_append(buf, p, "    device const ushort* w_bf16 = is_k ? (device const ushort*)(kw_base + kw_off) : (device const ushort*)(qw_base + qw_off);\n")
+    p = bf16_cstr_append(buf, p, "    device const float* rp = (device const float*)(rope_base + rope_off);\n")
+    p = bf16_cstr_append(buf, p, "    qwen3_qk_norm_rope_scatter_head(vec, v_head, w_bf16, (device const float*)w_bf16, true, kv_base, table_off, k_layer_off, v_layer_off, rp, n_kv, kh, head_dim, pos, block_size, as_type<float>((uint)eps_bits), lane, is_k);\n")
+    p = bf16_cstr_append(buf, p, "}\n\n")
+
+    // 18. qwen3_qk_norm_rope_kv_scatter_f32 (F2)
+    p = bf16_cstr_append(buf, p, "kernel void qwen3_qk_norm_rope_kv_scatter_f32(\n")
+    p = bf16_cstr_append(buf, p, "    device uchar* q_base [[buffer(0)]], device uchar* k_base [[buffer(1)]],\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* v_base [[buffer(2)]], device const uchar* qw_base [[buffer(3)]],\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* kw_base [[buffer(4)]], device uchar* kv_base [[buffer(5)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& q_off [[buffer(6)]], constant ulong& k_off [[buffer(7)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& v_off [[buffer(8)]], constant ulong& qw_off [[buffer(9)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& kw_off [[buffer(10)]], constant ulong& table_off [[buffer(11)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& k_layer_off [[buffer(12)]], constant ulong& v_layer_off [[buffer(13)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& n_q [[buffer(14)]], constant ulong& n_kv [[buffer(15)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& head_dim [[buffer(16)]], constant ulong& pos [[buffer(17)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& block_size [[buffer(18)]], constant ulong& eps_bits [[buffer(19)]],\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* rope_base [[buffer(20)]], constant ulong& rope_off [[buffer(21)]],\n")
+    p = bf16_cstr_append(buf, p, "    uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {\n")
+    p = bf16_cstr_append(buf, p, "    ulong g = (ulong)gid >> 5;\n")
+    p = bf16_cstr_append(buf, p, "    if (g >= n_q + n_kv || head_dim < 2 || block_size == 0) return;\n")
+    p = bf16_cstr_append(buf, p, "    bool is_k = (g >= n_q); ulong kh = is_k ? (g - n_q) : 0ul;\n")
+    p = bf16_cstr_append(buf, p, "    device float* vec = is_k ? ((device float*)(k_base + k_off) + kh * head_dim) : ((device float*)(q_base + q_off) + g * head_dim);\n")
+    p = bf16_cstr_append(buf, p, "    device const float* v_head = (device const float*)(v_base + v_off) + kh * head_dim;\n")
+    p = bf16_cstr_append(buf, p, "    device const float* w_f32 = is_k ? (device const float*)(kw_base + kw_off) : (device const float*)(qw_base + qw_off);\n")
+    p = bf16_cstr_append(buf, p, "    device const float* rp = (device const float*)(rope_base + rope_off);\n")
+    p = bf16_cstr_append(buf, p, "    qwen3_qk_norm_rope_scatter_head(vec, v_head, (device const ushort*)w_f32, w_f32, false, kv_base, table_off, k_layer_off, v_layer_off, rp, n_kv, kh, head_dim, pos, block_size, as_type<float>((uint)eps_bits), lane, is_k);\n")
+    p = bf16_cstr_append(buf, p, "}\n\n")
+
+    // 19. qwen3_add_rmsnorm_bf16 (F4a: single 32-lane warp for 0-ULP cross-backend identity)
+    p = bf16_cstr_append(buf, p, "kernel void qwen3_add_rmsnorm_bf16(\n")
+    p = bf16_cstr_append(buf, p, "    device uchar* x_base [[buffer(0)]], device const uchar* h_base [[buffer(1)]],\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* w_base [[buffer(2)]], device uchar* out_base [[buffer(3)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& x_off [[buffer(4)]], constant ulong& h_off [[buffer(5)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& w_off [[buffer(6)]], constant ulong& out_off [[buffer(7)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& dim [[buffer(8)]], constant ulong& eps_bits [[buffer(9)]],\n")
+    p = bf16_cstr_append(buf, p, "    uint lane [[thread_index_in_threadgroup]]) {\n")
+    p = bf16_cstr_append(buf, p, "    if (lane >= 32u || dim == 0) return;\n")
+    p = bf16_cstr_append(buf, p, "    device float* x = (device float*)(x_base + x_off);\n")
+    p = bf16_cstr_append(buf, p, "    device const float* h = (device const float*)(h_base + h_off);\n")
+    p = bf16_cstr_append(buf, p, "    device const ushort* w = (device const ushort*)(w_base + w_off);\n")
+    p = bf16_cstr_append(buf, p, "    device float* out = (device float*)(out_base + out_off);\n")
+    p = bf16_cstr_append(buf, p, "    float sq = 0.0f;\n")
+    p = bf16_cstr_append(buf, p, "    for (ulong i = (ulong)lane; i < dim; i = i + 32ul) { float v = x[i] + h[i]; x[i] = v; sq = fma(v, v, sq); }\n")
+    p = bf16_cstr_append(buf, p, "    sq = sounio_warp_sum_f32(sq);\n")
+    p = bf16_cstr_append(buf, p, "    float inv_rms = precise::divide(1.0f, precise::sqrt(precise::divide(sq, float(dim)) + as_type<float>((uint)eps_bits)));\n")
+    p = bf16_cstr_append(buf, p, "    for (ulong i = (ulong)lane; i < dim; i = i + 32ul) {\n")
+    p = bf16_cstr_append(buf, p, "        out[i] = (x[i] * inv_rms) * as_type<float>(((uint)w[i]) << 16);\n")
+    p = bf16_cstr_append(buf, p, "    }\n}\n\n")
+
+    // 20. qwen3_add_rmsnorm_f32 (F4a: single 32-lane warp for 0-ULP cross-backend identity)
+    p = bf16_cstr_append(buf, p, "kernel void qwen3_add_rmsnorm_f32(\n")
+    p = bf16_cstr_append(buf, p, "    device uchar* x_base [[buffer(0)]], device const uchar* h_base [[buffer(1)]],\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* w_base [[buffer(2)]], device uchar* out_base [[buffer(3)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& x_off [[buffer(4)]], constant ulong& h_off [[buffer(5)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& w_off [[buffer(6)]], constant ulong& out_off [[buffer(7)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& dim [[buffer(8)]], constant ulong& eps_bits [[buffer(9)]],\n")
+    p = bf16_cstr_append(buf, p, "    uint lane [[thread_index_in_threadgroup]]) {\n")
+    p = bf16_cstr_append(buf, p, "    if (lane >= 32u || dim == 0) return;\n")
+    p = bf16_cstr_append(buf, p, "    device float* x = (device float*)(x_base + x_off);\n")
+    p = bf16_cstr_append(buf, p, "    device const float* h = (device const float*)(h_base + h_off);\n")
+    p = bf16_cstr_append(buf, p, "    device const float* w = (device const float*)(w_base + w_off);\n")
+    p = bf16_cstr_append(buf, p, "    device float* out = (device float*)(out_base + out_off);\n")
+    p = bf16_cstr_append(buf, p, "    float sq = 0.0f;\n")
+    p = bf16_cstr_append(buf, p, "    for (ulong i = (ulong)lane; i < dim; i = i + 32ul) { float v = x[i] + h[i]; x[i] = v; sq = fma(v, v, sq); }\n")
+    p = bf16_cstr_append(buf, p, "    sq = sounio_warp_sum_f32(sq);\n")
+    p = bf16_cstr_append(buf, p, "    float inv_rms = precise::divide(1.0f, precise::sqrt(precise::divide(sq, float(dim)) + as_type<float>((uint)eps_bits)));\n")
+    p = bf16_cstr_append(buf, p, "    for (ulong i = (ulong)lane; i < dim; i = i + 32ul) { out[i] = (x[i] * inv_rms) * w[i]; }\n")
+    p = bf16_cstr_append(buf, p, "}\n\n")
+
+    // 21. qwen3_gemv_bf16_qkv (F1-BF16: K-chunked swizzled tg_x4[288] + 4-row/SIMD register reuse + 1-add tree)
+    p = bf16_cstr_append(buf, p, "kernel void qwen3_gemv_bf16_qkv(\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* wq_base [[buffer(0)]], device const uchar* wk_base [[buffer(1)]],\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* wv_base [[buffer(2)]], device const uchar* x_base [[buffer(3)]],\n")
+    p = bf16_cstr_append(buf, p, "    device uchar* out_base [[buffer(4)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& wq_off [[buffer(5)]], constant ulong& wk_off [[buffer(6)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& wv_off [[buffer(7)]], constant ulong& x_off [[buffer(8)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& yq_off [[buffer(9)]], constant ulong& yk_off [[buffer(10)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& yv_off [[buffer(11)]], constant ulong& q_dim [[buffer(12)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& kv_dim [[buffer(13)]], constant ulong& in_dim [[buffer(14)]],\n")
+    p = bf16_cstr_append(buf, p, "    uint gid [[thread_position_in_grid]], uint tid [[thread_index_in_threadgroup]]) {\n")
+    p = bf16_cstr_append(buf, p, "    threadgroup float4 tg_x4[288];\n")
+    p = bf16_cstr_append(buf, p, "    threadgroup float* tg_x = (threadgroup float*)tg_x4;\n")
+    p = bf16_cstr_append(buf, p, "    ulong total_out = q_dim + 2ul * kv_dim;\n")
+    p = bf16_cstr_append(buf, p, "    ulong n_groups = (total_out + 31) / 32; ulong g = (ulong)gid >> 8;\n")
+    p = bf16_cstr_append(buf, p, "    if (g >= n_groups) return;\n")
+    p = bf16_cstr_append(buf, p, "    ulong sg = (ulong)tid >> 5; ulong lane = (ulong)tid & 31ul;\n")
+    p = bf16_cstr_append(buf, p, "    ulong r0 = g * 32ul + sg; ulong r1 = r0 + 8ul; ulong r2 = r0 + 16ul; ulong r3 = r0 + 24ul;\n")
+    p = bf16_cstr_append(buf, p, "    bool has0 = (r0 < total_out); bool has1 = (r1 < total_out); bool has2 = (r2 < total_out); bool has3 = (r3 < total_out);\n")
+    p = bf16_cstr_append(buf, p, "    device const ushort* rw0 = (device const ushort*)wq_base; device float* dst0 = (device float*)out_base; ulong lr0 = 0ul;\n")
+    p = bf16_cstr_append(buf, p, "    device const ushort* rw1 = (device const ushort*)wq_base; device float* dst1 = (device float*)out_base; ulong lr1 = 0ul;\n")
+    p = bf16_cstr_append(buf, p, "    device const ushort* rw2 = (device const ushort*)wq_base; device float* dst2 = (device float*)out_base; ulong lr2 = 0ul;\n")
+    p = bf16_cstr_append(buf, p, "    device const ushort* rw3 = (device const ushort*)wq_base; device float* dst3 = (device float*)out_base; ulong lr3 = 0ul;\n")
+    p = bf16_cstr_append(buf, p, "    if (has0) {\n")
+    p = bf16_cstr_append(buf, p, "        if (r0 < q_dim) { lr0 = r0; rw0 = (device const ushort*)(wq_base + wq_off) + lr0 * in_dim; dst0 = (device float*)(out_base + yq_off); }\n")
+    p = bf16_cstr_append(buf, p, "        else if (r0 < q_dim + kv_dim) { lr0 = r0 - q_dim; rw0 = (device const ushort*)(wk_base + wk_off) + lr0 * in_dim; dst0 = (device float*)(out_base + yk_off); }\n")
+    p = bf16_cstr_append(buf, p, "        else { lr0 = r0 - q_dim - kv_dim; rw0 = (device const ushort*)(wv_base + wv_off) + lr0 * in_dim; dst0 = (device float*)(out_base + yv_off); }\n")
+    p = bf16_cstr_append(buf, p, "    }\n")
+    p = bf16_cstr_append(buf, p, "    if (has1) {\n")
+    p = bf16_cstr_append(buf, p, "        if (r1 < q_dim) { lr1 = r1; rw1 = (device const ushort*)(wq_base + wq_off) + lr1 * in_dim; dst1 = (device float*)(out_base + yq_off); }\n")
+    p = bf16_cstr_append(buf, p, "        else if (r1 < q_dim + kv_dim) { lr1 = r1 - q_dim; rw1 = (device const ushort*)(wk_base + wk_off) + lr1 * in_dim; dst1 = (device float*)(out_base + yk_off); }\n")
+    p = bf16_cstr_append(buf, p, "        else { lr1 = r1 - q_dim - kv_dim; rw1 = (device const ushort*)(wv_base + wv_off) + lr1 * in_dim; dst1 = (device float*)(out_base + yv_off); }\n")
+    p = bf16_cstr_append(buf, p, "    }\n")
+    p = bf16_cstr_append(buf, p, "    if (has2) {\n")
+    p = bf16_cstr_append(buf, p, "        if (r2 < q_dim) { lr2 = r2; rw2 = (device const ushort*)(wq_base + wq_off) + lr2 * in_dim; dst2 = (device float*)(out_base + yq_off); }\n")
+    p = bf16_cstr_append(buf, p, "        else if (r2 < q_dim + kv_dim) { lr2 = r2 - q_dim; rw2 = (device const ushort*)(wk_base + wk_off) + lr2 * in_dim; dst2 = (device float*)(out_base + yk_off); }\n")
+    p = bf16_cstr_append(buf, p, "        else { lr2 = r2 - q_dim - kv_dim; rw2 = (device const ushort*)(wv_base + wv_off) + lr2 * in_dim; dst2 = (device float*)(out_base + yv_off); }\n")
+    p = bf16_cstr_append(buf, p, "    }\n")
+    p = bf16_cstr_append(buf, p, "    if (has3) {\n")
+    p = bf16_cstr_append(buf, p, "        if (r3 < q_dim) { lr3 = r3; rw3 = (device const ushort*)(wq_base + wq_off) + lr3 * in_dim; dst3 = (device float*)(out_base + yq_off); }\n")
+    p = bf16_cstr_append(buf, p, "        else if (r3 < q_dim + kv_dim) { lr3 = r3 - q_dim; rw3 = (device const ushort*)(wk_base + wk_off) + lr3 * in_dim; dst3 = (device float*)(out_base + yk_off); }\n")
+    p = bf16_cstr_append(buf, p, "        else { lr3 = r3 - q_dim - kv_dim; rw3 = (device const ushort*)(wv_base + wv_off) + lr3 * in_dim; dst3 = (device float*)(out_base + yv_off); }\n")
+    p = bf16_cstr_append(buf, p, "    }\n")
+    p = bf16_cstr_append(buf, p, "    device const float* in_x = (device const float*)(x_base + x_off);\n")
+    p = bf16_cstr_append(buf, p, "    float a0=0.0f, a1=0.0f, a2=0.0f, a3=0.0f; float b0=0.0f, b1=0.0f, b2=0.0f, b3=0.0f;\n")
+    p = bf16_cstr_append(buf, p, "    float d0=0.0f, d1=0.0f, d2=0.0f, d3=0.0f; float e0=0.0f, e1=0.0f, e2=0.0f, e3=0.0f;\n")
+    p = bf16_cstr_append(buf, p, "    for (ulong k_base = 0; k_base < in_dim; k_base = k_base + 1024ul) {\n")
+    p = bf16_cstr_append(buf, p, "        ulong chunk_k = min(1024ul, in_dim - k_base);\n")
+    p = bf16_cstr_append(buf, p, "        for (ulong k = (ulong)tid; k < chunk_k; k = k + 256ul) { tg_x[k + ((k >> 5) << 2)] = in_x[k_base + k]; }\n")
+    p = bf16_cstr_append(buf, p, "        threadgroup_barrier(mem_flags::mem_threadgroup);\n")
+    p = bf16_cstr_append(buf, p, "        device const ushort* c0 = rw0 + k_base; device const ushort* c1 = rw1 + k_base;\n")
+    p = bf16_cstr_append(buf, p, "        device const ushort* c2 = rw2 + k_base; device const ushort* c3 = rw3 + k_base;\n")
+    p = bf16_cstr_append(buf, p, "        bool al0 = has0 && ((((ulong)c0) & 7ul) == 0); bool al1 = has1 && ((((ulong)c1) & 7ul) == 0);\n")
+    p = bf16_cstr_append(buf, p, "        bool al2 = has2 && ((((ulong)c2) & 7ul) == 0); bool al3 = has3 && ((((ulong)c3) & 7ul) == 0);\n")
+    p = bf16_cstr_append(buf, p, "        for (ulong k = (ulong)lane * 4ul; k + 3ul < chunk_k; k = k + 128ul) {\n")
+    p = bf16_cstr_append(buf, p, "            ulong u = k >> 2; float4 x4 = tg_x4[u + (u >> 3)];\n")
+    p = bf16_cstr_append(buf, p, "            if (has0) { float4 wv = qwen3_load_bf16_4(c0, k, al0); a0 = fma(wv.x, x4.x, a0); a1 = fma(wv.y, x4.y, a1); a2 = fma(wv.z, x4.z, a2); a3 = fma(wv.w, x4.w, a3); }\n")
+    p = bf16_cstr_append(buf, p, "            if (has1) { float4 wv = qwen3_load_bf16_4(c1, k, al1); b0 = fma(wv.x, x4.x, b0); b1 = fma(wv.y, x4.y, b1); b2 = fma(wv.z, x4.z, b2); b3 = fma(wv.w, x4.w, b3); }\n")
+    p = bf16_cstr_append(buf, p, "            if (has2) { float4 wv = qwen3_load_bf16_4(c2, k, al2); d0 = fma(wv.x, x4.x, d0); d1 = fma(wv.y, x4.y, d1); d2 = fma(wv.z, x4.z, d2); d3 = fma(wv.w, x4.w, d3); }\n")
+    p = bf16_cstr_append(buf, p, "            if (has3) { float4 wv = qwen3_load_bf16_4(c3, k, al3); e0 = fma(wv.x, x4.x, e0); e1 = fma(wv.y, x4.y, e1); e2 = fma(wv.z, x4.z, e2); e3 = fma(wv.w, x4.w, e3); }\n")
+    p = bf16_cstr_append(buf, p, "        }\n")
+    p = bf16_cstr_append(buf, p, "        for (ulong kt = (chunk_k & ~3ULL) + (ulong)lane; kt < chunk_k; kt = kt + 32ul) {\n")
+    p = bf16_cstr_append(buf, p, "            float xt = tg_x[kt + ((kt >> 5) << 2)];\n")
+    p = bf16_cstr_append(buf, p, "            if (has0) a0 = fma(as_type<float>(((uint)c0[kt]) << 16), xt, a0);\n")
+    p = bf16_cstr_append(buf, p, "            if (has1) b0 = fma(as_type<float>(((uint)c1[kt]) << 16), xt, b0);\n")
+    p = bf16_cstr_append(buf, p, "            if (has2) d0 = fma(as_type<float>(((uint)c2[kt]) << 16), xt, d0);\n")
+    p = bf16_cstr_append(buf, p, "            if (has3) e0 = fma(as_type<float>(((uint)c3[kt]) << 16), xt, e0);\n")
+    p = bf16_cstr_append(buf, p, "        }\n")
+    p = bf16_cstr_append(buf, p, "        threadgroup_barrier(mem_flags::mem_threadgroup);\n")
+    p = bf16_cstr_append(buf, p, "    }\n")
+    p = bf16_cstr_append(buf, p, "    if (has0) { float s0 = sounio_warp_sum_f32((a0 + a1) + (a2 + a3)); if (lane == 0) dst0[lr0] = s0; }\n")
+    p = bf16_cstr_append(buf, p, "    if (has1) { float s1 = sounio_warp_sum_f32((b0 + b1) + (b2 + b3)); if (lane == 0) dst1[lr1] = s1; }\n")
+    p = bf16_cstr_append(buf, p, "    if (has2) { float s2 = sounio_warp_sum_f32((d0 + d1) + (d2 + d3)); if (lane == 0) dst2[lr2] = s2; }\n")
+    p = bf16_cstr_append(buf, p, "    if (has3) { float s3 = sounio_warp_sum_f32((e0 + e1) + (e2 + e3)); if (lane == 0) dst3[lr3] = s3; }\n}\n\n")
+
+    // 22. qwen3_gemv_bf16_gate_up_swiglu (F3-BF16: swizzled tg_x4[288] + 4-acc FMA + sounio_exp_f32)
+    p = bf16_cstr_append(buf, p, "kernel void qwen3_gemv_bf16_gate_up_swiglu(\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* wg_base [[buffer(0)]], device const uchar* wu_base [[buffer(1)]],\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* x_base [[buffer(2)]], device uchar* out_base [[buffer(3)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& wg_off [[buffer(4)]], constant ulong& wu_off [[buffer(5)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& x_off [[buffer(6)]], constant ulong& out_off [[buffer(7)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& inter_dim [[buffer(8)]], constant ulong& in_dim [[buffer(9)]],\n")
+    p = bf16_cstr_append(buf, p, "    uint gid [[thread_position_in_grid]], uint tid [[thread_index_in_threadgroup]]) {\n")
+    p = bf16_cstr_append(buf, p, "    threadgroup float4 tg_x4[288];\n")
+    p = bf16_cstr_append(buf, p, "    threadgroup float* tg_x = (threadgroup float*)tg_x4;\n")
+    p = bf16_cstr_append(buf, p, "    ulong n_groups = (inter_dim + 15) / 16; ulong g = (ulong)gid >> 8;\n")
+    p = bf16_cstr_append(buf, p, "    if (g >= n_groups) return;\n")
+    p = bf16_cstr_append(buf, p, "    ulong sg = (ulong)tid >> 5; ulong lane = (ulong)tid & 31ul;\n")
+    p = bf16_cstr_append(buf, p, "    ulong r0 = g * 16ul + sg; ulong r1 = r0 + 8ul;\n")
+    p = bf16_cstr_append(buf, p, "    bool has0 = (r0 < inter_dim); bool has1 = (r1 < inter_dim);\n")
+    p = bf16_cstr_append(buf, p, "    device const float* in_x = (device const float*)(x_base + x_off);\n")
+    p = bf16_cstr_append(buf, p, "    device float* out_y = (device float*)(out_base + out_off);\n")
+    p = bf16_cstr_append(buf, p, "    device const ushort* rg0 = has0 ? ((device const ushort*)(wg_base + wg_off) + r0 * in_dim) : (device const ushort*)wg_base;\n")
+    p = bf16_cstr_append(buf, p, "    device const ushort* ru0 = has0 ? ((device const ushort*)(wu_base + wu_off) + r0 * in_dim) : (device const ushort*)wu_base;\n")
+    p = bf16_cstr_append(buf, p, "    device const ushort* rg1 = has1 ? ((device const ushort*)(wg_base + wg_off) + r1 * in_dim) : (device const ushort*)wg_base;\n")
+    p = bf16_cstr_append(buf, p, "    device const ushort* ru1 = has1 ? ((device const ushort*)(wu_base + wu_off) + r1 * in_dim) : (device const ushort*)wu_base;\n")
+    p = bf16_cstr_append(buf, p, "    float g00=0.0f,g01=0.0f,g02=0.0f,g03=0.0f; float u00=0.0f,u01=0.0f,u02=0.0f,u03=0.0f;\n")
+    p = bf16_cstr_append(buf, p, "    float g10=0.0f,g11=0.0f,g12=0.0f,g13=0.0f; float u10=0.0f,u11=0.0f,u12=0.0f,u13=0.0f;\n")
+    p = bf16_cstr_append(buf, p, "    for (ulong k_base = 0; k_base < in_dim; k_base = k_base + 1024ul) {\n")
+    p = bf16_cstr_append(buf, p, "        ulong chunk_k = min(1024ul, in_dim - k_base);\n")
+    p = bf16_cstr_append(buf, p, "        for (ulong k = (ulong)tid; k < chunk_k; k = k + 256ul) { tg_x[k + ((k >> 5) << 2)] = in_x[k_base + k]; }\n")
+    p = bf16_cstr_append(buf, p, "        threadgroup_barrier(mem_flags::mem_threadgroup);\n")
+    p = bf16_cstr_append(buf, p, "        device const ushort* cg0 = rg0 + k_base; device const ushort* cu0 = ru0 + k_base;\n")
+    p = bf16_cstr_append(buf, p, "        device const ushort* cg1 = rg1 + k_base; device const ushort* cu1 = ru1 + k_base;\n")
+    p = bf16_cstr_append(buf, p, "        bool alg0 = has0 && ((((ulong)cg0) & 7ul) == 0); bool alu0 = has0 && ((((ulong)cu0) & 7ul) == 0);\n")
+    p = bf16_cstr_append(buf, p, "        bool alg1 = has1 && ((((ulong)cg1) & 7ul) == 0); bool alu1 = has1 && ((((ulong)cu1) & 7ul) == 0);\n")
+    p = bf16_cstr_append(buf, p, "        for (ulong k = (ulong)lane * 4ul; k + 3ul < chunk_k; k = k + 128ul) {\n")
+    p = bf16_cstr_append(buf, p, "            ulong u = k >> 2; float4 x4 = tg_x4[u + (u >> 3)];\n")
+    p = bf16_cstr_append(buf, p, "            if (has0) {\n")
+    p = bf16_cstr_append(buf, p, "                float4 wg = qwen3_load_bf16_4(cg0, k, alg0); float4 wu = qwen3_load_bf16_4(cu0, k, alu0);\n")
+    p = bf16_cstr_append(buf, p, "                g00 = fma(wg.x, x4.x, g00); g01 = fma(wg.y, x4.y, g01); g02 = fma(wg.z, x4.z, g02); g03 = fma(wg.w, x4.w, g03);\n")
+    p = bf16_cstr_append(buf, p, "                u00 = fma(wu.x, x4.x, u00); u01 = fma(wu.y, x4.y, u01); u02 = fma(wu.z, x4.z, u02); u03 = fma(wu.w, x4.w, u03);\n")
+    p = bf16_cstr_append(buf, p, "            }\n")
+    p = bf16_cstr_append(buf, p, "            if (has1) {\n")
+    p = bf16_cstr_append(buf, p, "                float4 wg = qwen3_load_bf16_4(cg1, k, alg1); float4 wu = qwen3_load_bf16_4(cu1, k, alu1);\n")
+    p = bf16_cstr_append(buf, p, "                g10 = fma(wg.x, x4.x, g10); g11 = fma(wg.y, x4.y, g11); g12 = fma(wg.z, x4.z, g12); g13 = fma(wg.w, x4.w, g13);\n")
+    p = bf16_cstr_append(buf, p, "                u10 = fma(wu.x, x4.x, u10); u11 = fma(wu.y, x4.y, u11); u12 = fma(wu.z, x4.z, u12); u13 = fma(wu.w, x4.w, u13);\n")
+    p = bf16_cstr_append(buf, p, "            }\n")
+    p = bf16_cstr_append(buf, p, "        }\n")
+    p = bf16_cstr_append(buf, p, "        for (ulong kt = (chunk_k & ~3ULL) + (ulong)lane; kt < chunk_k; kt = kt + 32ul) {\n")
+    p = bf16_cstr_append(buf, p, "            float xt = tg_x[kt + ((kt >> 5) << 2)];\n")
+    p = bf16_cstr_append(buf, p, "            if (has0) { g00 = fma(as_type<float>(((uint)cg0[kt]) << 16), xt, g00); u00 = fma(as_type<float>(((uint)cu0[kt]) << 16), xt, u00); }\n")
+    p = bf16_cstr_append(buf, p, "            if (has1) { g10 = fma(as_type<float>(((uint)cg1[kt]) << 16), xt, g10); u10 = fma(as_type<float>(((uint)cu1[kt]) << 16), xt, u10); }\n")
+    p = bf16_cstr_append(buf, p, "        }\n")
+    p = bf16_cstr_append(buf, p, "        threadgroup_barrier(mem_flags::mem_threadgroup);\n")
+    p = bf16_cstr_append(buf, p, "    }\n")
+    p = bf16_cstr_append(buf, p, "    if (has0) { float sg0 = sounio_warp_sum_f32((g00 + g01) + (g02 + g03)); float su0 = sounio_warp_sum_f32((u00 + u01) + (u02 + u03)); if (lane == 0) out_y[r0] = precise::divide(sg0, 1.0f + sounio_exp_f32(-sg0)) * su0; }\n")
+    p = bf16_cstr_append(buf, p, "    if (has1) { float sg1 = sounio_warp_sum_f32((g10 + g11) + (g12 + g13)); float su1 = sounio_warp_sum_f32((u10 + u11) + (u12 + u13)); if (lane == 0) out_y[r1] = precise::divide(sg1, 1.0f + sounio_exp_f32(-sg1)) * su1; }\n}\n\n")
+
+    // 23. qwen3_gemm_bf16_tc (Metal simdgroup_float8x8 Tensor Core fast prefill, VENDOR_PREFILL)
+    p = bf16_cstr_append(buf, p, "kernel void qwen3_gemm_bf16_tc(\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* w_base [[buffer(0)]], constant ulong& w_off [[buffer(1)]],\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* x_base [[buffer(2)]], constant ulong& x_off [[buffer(3)]],\n")
+    p = bf16_cstr_append(buf, p, "    device uchar* y_base [[buffer(4)]], constant ulong& y_off [[buffer(5)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& out_dim [[buffer(6)]], constant ulong& in_dim [[buffer(7)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& n_toks [[buffer(8)]], uint gid [[thread_position_in_grid]], uint tid [[thread_index_in_threadgroup]]) {\n")
+    p = bf16_cstr_append(buf, p, "    ulong n_m = (out_dim + 63ul) / 64ul; ulong n_n = (n_toks + 7ul) / 8ul;\n")
+    p = bf16_cstr_append(buf, p, "    ulong bid = (ulong)gid >> 8;\n")
+    p = bf16_cstr_append(buf, p, "    if (n_toks == 0 || bid >= n_m * n_n) return;\n")
+    p = bf16_cstr_append(buf, p, "    ulong g_m = bid % n_m; ulong g_n = bid / n_m;\n")
+    p = bf16_cstr_append(buf, p, "    ulong sg = (ulong)tid >> 5; ulong lane = (ulong)tid & 31ul;\n")
+    p = bf16_cstr_append(buf, p, "    threadgroup float tg_a[512];\n")
+    p = bf16_cstr_append(buf, p, "    threadgroup float tg_b[64];\n")
+    p = bf16_cstr_append(buf, p, "    device const ushort* w_bf16 = (device const ushort*)(w_base + w_off);\n")
+    p = bf16_cstr_append(buf, p, "    device const float* in_x = (device const float*)(x_base + x_off);\n")
+    p = bf16_cstr_append(buf, p, "    device float* out_y = (device float*)(y_base + y_off);\n")
+    p = bf16_cstr_append(buf, p, "    simdgroup_float8x8 matC = simdgroup_float8x8(0.0f);\n")
+    p = bf16_cstr_append(buf, p, "    for (ulong k_base = 0ul; k_base < in_dim; k_base = k_base + 8ul) {\n")
+    p = bf16_cstr_append(buf, p, "        if (tid < 64u) {\n")
+    p = bf16_cstr_append(buf, p, "            ulong kl = (ulong)tid >> 3; ulong nl = (ulong)tid & 7ul;\n")
+    p = bf16_cstr_append(buf, p, "            ulong tok = g_n * 8ul + nl; ulong kk = k_base + kl;\n")
+    p = bf16_cstr_append(buf, p, "            tg_b[tid] = (tok < n_toks && kk < in_dim) ? in_x[tok * in_dim + kk] : 0.0f;\n")
+    p = bf16_cstr_append(buf, p, "        }\n")
+    p = bf16_cstr_append(buf, p, "        for (ulong sub = 0ul; sub < 2ul; ++sub) {\n")
+    p = bf16_cstr_append(buf, p, "            ulong idx = lane + sub * 32ul; ulong rl = idx >> 3; ulong kl = idx & 7ul;\n")
+    p = bf16_cstr_append(buf, p, "            ulong row = g_m * 64ul + sg * 8ul + rl; ulong kk = k_base + kl;\n")
+    p = bf16_cstr_append(buf, p, "            tg_a[sg * 64ul + idx] = (row < out_dim && kk < in_dim) ? as_type<float>(((uint)w_bf16[row * in_dim + kk]) << 16) : 0.0f;\n")
+    p = bf16_cstr_append(buf, p, "        }\n")
+    p = bf16_cstr_append(buf, p, "        threadgroup_barrier(mem_flags::mem_threadgroup);\n")
+    p = bf16_cstr_append(buf, p, "        simdgroup_float8x8 matA; simdgroup_float8x8 matB;\n")
+    p = bf16_cstr_append(buf, p, "        simdgroup_load(matA, tg_a + sg * 64ul, 8);\n")
+    p = bf16_cstr_append(buf, p, "        simdgroup_load(matB, tg_b, 8);\n")
+    p = bf16_cstr_append(buf, p, "        simdgroup_multiply_accumulate(matC, matA, matB, matC);\n")
+    p = bf16_cstr_append(buf, p, "        threadgroup_barrier(mem_flags::mem_threadgroup);\n")
+    p = bf16_cstr_append(buf, p, "    }\n")
+    p = bf16_cstr_append(buf, p, "    simdgroup_store(matC, tg_a + sg * 64ul, 8);\n")
+    p = bf16_cstr_append(buf, p, "    threadgroup_barrier(mem_flags::mem_threadgroup);\n")
+    p = bf16_cstr_append(buf, p, "    for (ulong sub = 0ul; sub < 2ul; ++sub) {\n")
+    p = bf16_cstr_append(buf, p, "        ulong idx = lane + sub * 32ul; ulong rl = idx >> 3; ulong nl = idx & 7ul;\n")
+    p = bf16_cstr_append(buf, p, "        ulong row = g_m * 64ul + sg * 8ul + rl; ulong tok = g_n * 8ul + nl;\n")
+    p = bf16_cstr_append(buf, p, "        if (row < out_dim && tok < n_toks) out_y[tok * out_dim + row] = tg_a[sg * 64ul + idx];\n")
+    p = bf16_cstr_append(buf, p, "    }\n}\n\n")
+    buf
+}
+
+pub fn emit_qwen3_kernels_ptx_cstr() -> i64 with Alloc, Mut {
+    emit_qwen3_ptx_sm80_cstr()
+}
+
+pub fn qwen3_metal_pipelines_compile(s: &MetalSession) -> Qwen3MetalPipelines with Alloc, Mut {
+    let c_src = emit_qwen3_kernels_msl_cstr()
+    if c_src == 0 { return qwen3_metal_pipelines_empty() }
+
+    let p_rmsnorm_bf16 = metal_compile_msl_ptr(s, c_src, "qwen3_rmsnorm_bf16")
+    let p_rmsnorm_f32 = metal_compile_msl_ptr(s, c_src, "qwen3_rmsnorm_f32")
+    let p_rope = metal_compile_msl_ptr(s, c_src, "qwen3_rope_f32")
+    let p_gemv_bf16 = metal_compile_msl_ptr(s, c_src, "qwen3_gemv_bf16")
+    let p_gemv_f32 = metal_compile_msl_ptr(s, c_src, "qwen3_gemv_f32")
+    let p_swiglu = metal_compile_msl_ptr(s, c_src, "qwen3_swiglu_f32")
+    let p_paged_gqa = metal_compile_msl_ptr(s, c_src, "qwen3_paged_gqa_f32")
+    let p_vec_add = metal_compile_msl_ptr(s, c_src, "qwen3_vec_add_f32")
+    let p_kv_scatter = metal_compile_msl_ptr(s, c_src, "qwen3_kv_scatter_f32")
+    let p_argmax_top2 = metal_compile_msl_ptr(s, c_src, "qwen3_argmax_top2_f32")
+    let p_gemm_bf16 = metal_compile_msl_ptr(s, c_src, "qwen3_gemm_bf16")
+    let p_gemm_f32 = metal_compile_msl_ptr(s, c_src, "qwen3_gemm_f32")
+    let p_rope_batch = metal_compile_msl_ptr(s, c_src, "qwen3_rope_batch_f32")
+    let p_kv_scatter_batch = metal_compile_msl_ptr(s, c_src, "qwen3_kv_scatter_batch_f32")
+    let p_paged_gqa_batch = metal_compile_msl_ptr(s, c_src, "qwen3_paged_gqa_batch_f32")
+    let p_argmax_top2_batch = metal_compile_msl_ptr(s, c_src, "qwen3_argmax_top2_batch_f32")
+    let p_qk_norm_rope_kv_bf16 = metal_compile_msl_ptr(s, c_src, "qwen3_qk_norm_rope_kv_scatter_bf16")
+    let p_qk_norm_rope_kv_f32 = metal_compile_msl_ptr(s, c_src, "qwen3_qk_norm_rope_kv_scatter_f32")
+    let p_add_rmsnorm_bf16 = metal_compile_msl_ptr(s, c_src, "qwen3_add_rmsnorm_bf16")
+    let p_add_rmsnorm_f32 = metal_compile_msl_ptr(s, c_src, "qwen3_add_rmsnorm_f32")
+    let p_gemv_bf16_qkv = metal_compile_msl_ptr(s, c_src, "qwen3_gemv_bf16_qkv")
+    let p_gemv_bf16_gate_up_swiglu = metal_compile_msl_ptr(s, c_src, "qwen3_gemv_bf16_gate_up_swiglu")
+    let p_rope_table = metal_compile_msl_ptr(s, c_src, "qwen3_rope_table_f32")
+    let p_rope_batch_table = metal_compile_msl_ptr(s, c_src, "qwen3_rope_batch_table_f32")
+    let p_gemm_bf16_tc = metal_compile_msl_ptr(s, c_src, "qwen3_gemm_bf16_tc")
+
+    heap_free(c_src as *mut u8)
+
+    let all_ok = p_rmsnorm_bf16 > 0 && p_rmsnorm_f32 > 0 && p_rope > 0
+        && p_gemv_bf16 > 0 && p_gemv_f32 > 0 && p_swiglu > 0 && p_paged_gqa > 0
+        && p_vec_add > 0 && p_kv_scatter > 0 && p_argmax_top2 > 0
+        && p_gemm_bf16 > 0 && p_gemm_f32 > 0 && p_rope_batch > 0
+        && p_kv_scatter_batch > 0 && p_paged_gqa_batch > 0 && p_argmax_top2_batch > 0
+        && p_qk_norm_rope_kv_bf16 > 0 && p_qk_norm_rope_kv_f32 > 0
+        && p_add_rmsnorm_bf16 > 0 && p_add_rmsnorm_f32 > 0
+        && p_gemv_bf16_qkv > 0 && p_gemv_bf16_gate_up_swiglu > 0
+        && p_rope_table > 0 && p_rope_batch_table > 0 && p_gemm_bf16_tc > 0
+
+    Qwen3MetalPipelines {
+        rmsnorm_bf16: p_rmsnorm_bf16,
+        rmsnorm_f32: p_rmsnorm_f32,
+        rope: p_rope,
+        gemv_bf16: p_gemv_bf16,
+        gemv_f32: p_gemv_f32,
+        swiglu: p_swiglu,
+        paged_gqa: p_paged_gqa,
+        vec_add: p_vec_add,
+        kv_scatter: p_kv_scatter,
+        argmax_top2: p_argmax_top2,
+        gemm_bf16: p_gemm_bf16,
+        gemm_f32: p_gemm_f32,
+        rope_batch: p_rope_batch,
+        kv_scatter_batch: p_kv_scatter_batch,
+        paged_gqa_batch: p_paged_gqa_batch,
+        argmax_top2_batch: p_argmax_top2_batch,
+        qk_norm_rope_kv_bf16: p_qk_norm_rope_kv_bf16,
+        qk_norm_rope_kv_f32: p_qk_norm_rope_kv_f32,
+        add_rmsnorm_bf16: p_add_rmsnorm_bf16,
+        add_rmsnorm_f32: p_add_rmsnorm_f32,
+        gemv_bf16_qkv: p_gemv_bf16_qkv,
+        gemv_bf16_gate_up_swiglu: p_gemv_bf16_gate_up_swiglu,
+        rope_table: p_rope_table,
+        rope_batch_table: p_rope_batch_table,
+        gemm_bf16_tc: p_gemm_bf16_tc,
+        ok: all_ok,
+    }
+}
+
+pub fn qwen3_metal_encode_rmsnorm(
+    s: &MetalSession,
+    cid: i64,
+    pipe: i64,
+    x_buf: i64,
+    x_byte_off: i64,
+    w_buf: i64,
+    w_byte_off: i64,
+    out_buf: i64,
+    out_byte_off: i64,
+    n_groups: i64,
+    dim: i64,
+    eps_f32_bits: i64
+) -> i64 {
+    if !s.ok || cid <= 0 || pipe <= 0 || n_groups <= 0 || dim <= 0 { return -1 }
+    if metal_cmd_set_buf(s, cid, 0, x_buf, 0) != 0
+        || metal_cmd_set_u64(s, cid, 1, x_byte_off) != 0
+        || metal_cmd_set_buf(s, cid, 2, w_buf, 0) != 0
+        || metal_cmd_set_u64(s, cid, 3, w_byte_off) != 0
+        || metal_cmd_set_buf(s, cid, 4, out_buf, 0) != 0
+        || metal_cmd_set_u64(s, cid, 5, out_byte_off) != 0
+        || metal_cmd_set_u64(s, cid, 6, n_groups) != 0
+        || metal_cmd_set_u64(s, cid, 7, dim) != 0
+        || metal_cmd_set_u64(s, cid, 8, eps_f32_bits) != 0 {
+        return -1
+    }
+    let total_threads = n_groups * 32
+    let group_threads = if total_threads < 128 { 32 } else { 128 }
+    if metal_cmd_dispatch_1d(s, cid, pipe, total_threads, group_threads) != 0 {
+        return -1
+    }
+    0
+}
+
+pub fn qwen3_metal_rmsnorm(
+    s: &MetalSession,
+    pipes: &Qwen3MetalPipelines,
+    x_buf: i64,
+    x_byte_off: i64,
+    w_buf: i64,
+    w_byte_off: i64,
+    w_dtype: i32,
+    out_buf: i64,
+    out_byte_off: i64,
+    n_groups: i64,
+    dim: i64,
+    eps_f32_bits: i64
+) -> i64 {
+    if !pipes.ok || n_groups <= 0 || dim <= 0 { return -1 }
+    let pipe = if w_dtype == 2 { pipes.rmsnorm_bf16 } else { pipes.rmsnorm_f32 }
+    if pipe <= 0 { return -1 }
+    let cid = metal_cmd_begin(s)
+    if cid <= 0 { return -1 }
+    if qwen3_metal_encode_rmsnorm(s, cid, pipe, x_buf, x_byte_off, w_buf, w_byte_off, out_buf, out_byte_off, n_groups, dim, eps_f32_bits) != 0 {
+        let _c = metal_cmd_cancel(s, cid)
+        return -1
+    }
+    metal_cmd_commit_sync(s, cid)
+}
+
+pub fn qwen3_metal_encode_rope(
+    s: &MetalSession,
+    cid: i64,
+    pipe: i64,
+    vec_buf: i64,
+    vec_byte_off: i64,
+    n_heads: i64,
+    head_dim: i64,
+    pos: i64,
+    theta_f32_bits: i64
+) -> i64 {
+    if !s.ok || cid <= 0 || pipe <= 0 || n_heads <= 0 || head_dim <= 0 { return -1 }
+    if metal_cmd_set_buf(s, cid, 0, vec_buf, 0) != 0
+        || metal_cmd_set_u64(s, cid, 1, vec_byte_off) != 0
+        || metal_cmd_set_u64(s, cid, 2, n_heads) != 0
+        || metal_cmd_set_u64(s, cid, 3, head_dim) != 0
+        || metal_cmd_set_u64(s, cid, 4, pos) != 0
+        || metal_cmd_set_u64(s, cid, 5, theta_f32_bits) != 0 {
+        return -1
+    }
+    let hdim = head_dim / 2
+    let total_threads = n_heads * hdim
+    let group_threads = if total_threads < 64 { total_threads } else { 64 }
+    if metal_cmd_dispatch_1d(s, cid, pipe, total_threads, group_threads) != 0 {
+        return -1
+    }
+    0
+}
+
+pub fn qwen3_metal_rope(
+    s: &MetalSession,
+    pipes: &Qwen3MetalPipelines,
+    vec_buf: i64,
+    vec_byte_off: i64,
+    n_heads: i64,
+    head_dim: i64,
+    pos: i64,
+    theta_f32_bits: i64
+) -> i64 {
+    if !pipes.ok || n_heads <= 0 || head_dim <= 0 { return -1 }
+    let pipe = pipes.rope
+    if pipe <= 0 { return -1 }
+    let cid = metal_cmd_begin(s)
+    if cid <= 0 { return -1 }
+    if qwen3_metal_encode_rope(s, cid, pipe, vec_buf, vec_byte_off, n_heads, head_dim, pos, theta_f32_bits) != 0 {
+        let _c = metal_cmd_cancel(s, cid)
+        return -1
+    }
+    metal_cmd_commit_sync(s, cid)
+}
+
+pub fn qwen3_metal_encode_gemv(
+    s: &MetalSession,
+    cid: i64,
+    pipe: i64,
+    w_buf: i64,
+    w_byte_off: i64,
+    x_buf: i64,
+    x_byte_off: i64,
+    y_buf: i64,
+    y_byte_off: i64,
+    out_dim: i64,
+    in_dim: i64
+) -> i64 {
+    if !s.ok || cid <= 0 || pipe <= 0 || out_dim <= 0 || in_dim <= 0 { return -1 }
+    if metal_cmd_set_buf(s, cid, 0, w_buf, 0) != 0
+        || metal_cmd_set_u64(s, cid, 1, w_byte_off) != 0
+        || metal_cmd_set_buf(s, cid, 2, x_buf, 0) != 0
+        || metal_cmd_set_u64(s, cid, 3, x_byte_off) != 0
+        || metal_cmd_set_buf(s, cid, 4, y_buf, 0) != 0
+        || metal_cmd_set_u64(s, cid, 5, y_byte_off) != 0
+        || metal_cmd_set_u64(s, cid, 6, out_dim) != 0
+        || metal_cmd_set_u64(s, cid, 7, in_dim) != 0 {
+        return -1
+    }
+    let n_groups = (out_dim + 31) / 32
+    let total_threads = n_groups * 256
+    if metal_cmd_dispatch_1d(s, cid, pipe, total_threads, 256) != 0 {
+        return -1
+    }
+    0
+}
+
+pub fn qwen3_metal_gemv(
+    s: &MetalSession,
+    pipes: &Qwen3MetalPipelines,
+    w_buf: i64,
+    w_byte_off: i64,
+    w_dtype: i32,
+    x_buf: i64,
+    x_byte_off: i64,
+    y_buf: i64,
+    y_byte_off: i64,
+    out_dim: i64,
+    in_dim: i64
+) -> i64 {
+    if !pipes.ok || out_dim <= 0 || in_dim <= 0 { return -1 }
+    let pipe = if w_dtype == 2 { pipes.gemv_bf16 } else { pipes.gemv_f32 }
+    if pipe <= 0 { return -1 }
+    let cid = metal_cmd_begin(s)
+    if cid <= 0 { return -1 }
+    if qwen3_metal_encode_gemv(s, cid, pipe, w_buf, w_byte_off, x_buf, x_byte_off, y_buf, y_byte_off, out_dim, in_dim) != 0 {
+        let _c = metal_cmd_cancel(s, cid)
+        return -1
+    }
+    metal_cmd_commit_sync(s, cid)
+}
+
+pub fn qwen3_metal_encode_argmax_top2(
+    s: &MetalSession,
+    cid: i64,
+    pipe: i64,
+    logits_buf: i64,
+    logits_byte_off: i64,
+    out_buf: i64,
+    out_byte_off: i64,
+    vocab: i64
+) -> i64 {
+    if !s.ok || cid <= 0 || pipe <= 0 || vocab <= 0 { return -1 }
+    if metal_cmd_set_buf(s, cid, 0, logits_buf, 0) != 0
+        || metal_cmd_set_u64(s, cid, 1, logits_byte_off) != 0
+        || metal_cmd_set_buf(s, cid, 2, out_buf, 0) != 0
+        || metal_cmd_set_u64(s, cid, 3, out_byte_off) != 0
+        || metal_cmd_set_u64(s, cid, 4, vocab) != 0 {
+        return -1
+    }
+    if metal_cmd_dispatch_1d(s, cid, pipe, 32, 32) != 0 {
+        return -1
+    }
+    0
+}
+
+pub fn qwen3_metal_encode_swiglu(
+    s: &MetalSession,
+    cid: i64,
+    pipe: i64,
+    gate_buf: i64,
+    gate_byte_off: i64,
+    up_buf: i64,
+    up_byte_off: i64,
+    out_buf: i64,
+    out_byte_off: i64,
+    inter_dim: i64
+) -> i64 {
+    if !s.ok || cid <= 0 || pipe <= 0 || inter_dim <= 0 { return -1 }
+    if metal_cmd_set_buf(s, cid, 0, gate_buf, 0) != 0
+        || metal_cmd_set_u64(s, cid, 1, gate_byte_off) != 0
+        || metal_cmd_set_buf(s, cid, 2, up_buf, 0) != 0
+        || metal_cmd_set_u64(s, cid, 3, up_byte_off) != 0
+        || metal_cmd_set_buf(s, cid, 4, out_buf, 0) != 0
+        || metal_cmd_set_u64(s, cid, 5, out_byte_off) != 0
+        || metal_cmd_set_u64(s, cid, 6, inter_dim) != 0 {
+        return -1
+    }
+    let group_threads = if inter_dim < 64 { inter_dim } else { 64 }
+    if metal_cmd_dispatch_1d(s, cid, pipe, inter_dim, group_threads) != 0 {
+        return -1
+    }
+    0
+}
+
+pub fn qwen3_metal_swiglu(
+    s: &MetalSession,
+    pipes: &Qwen3MetalPipelines,
+    gate_buf: i64,
+    gate_byte_off: i64,
+    up_buf: i64,
+    up_byte_off: i64,
+    out_buf: i64,
+    out_byte_off: i64,
+    inter_dim: i64
+) -> i64 {
+    if !pipes.ok || inter_dim <= 0 { return -1 }
+    let pipe = pipes.swiglu
+    if pipe <= 0 { return -1 }
+    let cid = metal_cmd_begin(s)
+    if cid <= 0 { return -1 }
+    if qwen3_metal_encode_swiglu(s, cid, pipe, gate_buf, gate_byte_off, up_buf, up_byte_off, out_buf, out_byte_off, inter_dim) != 0 {
+        let _c = metal_cmd_cancel(s, cid)
+        return -1
+    }
+    metal_cmd_commit_sync(s, cid)
+}
+
+pub fn qwen3_metal_encode_paged_gqa(
+    s: &MetalSession,
+    cid: i64,
+    pipe: i64,
+    q_buf: i64,
+    q_byte_off: i64,
+    kv_buf: i64,
+    table_byte_off: i64,
+    k_layer_byte_off: i64,
+    v_layer_byte_off: i64,
+    out_buf: i64,
+    out_byte_off: i64,
+    n_q: i64,
+    n_kv: i64,
+    head_dim: i64,
+    seq_len: i64,
+    block_size: i64
+) -> i64 {
+    if !s.ok || cid <= 0 || pipe <= 0 || n_q <= 0 || n_kv <= 0 || head_dim <= 0 || block_size <= 0 { return -1 }
+    if metal_cmd_set_buf(s, cid, 0, q_buf, 0) != 0
+        || metal_cmd_set_u64(s, cid, 1, q_byte_off) != 0
+        || metal_cmd_set_buf(s, cid, 2, kv_buf, 0) != 0
+        || metal_cmd_set_u64(s, cid, 3, table_byte_off) != 0
+        || metal_cmd_set_u64(s, cid, 4, k_layer_byte_off) != 0
+        || metal_cmd_set_u64(s, cid, 5, v_layer_byte_off) != 0
+        || metal_cmd_set_buf(s, cid, 6, out_buf, 0) != 0
+        || metal_cmd_set_u64(s, cid, 7, out_byte_off) != 0
+        || metal_cmd_set_u64(s, cid, 8, n_q) != 0
+        || metal_cmd_set_u64(s, cid, 9, n_kv) != 0
+        || metal_cmd_set_u64(s, cid, 10, head_dim) != 0
+        || metal_cmd_set_u64(s, cid, 11, seq_len) != 0
+        || metal_cmd_set_u64(s, cid, 12, block_size) != 0 {
+        return -1
+    }
+    let total_threads = n_q * 32
+    let group_threads = if total_threads < 128 { 32 } else { 128 }
+    if metal_cmd_dispatch_1d(s, cid, pipe, total_threads, group_threads) != 0 {
+        return -1
+    }
+    0
+}
+
+pub fn qwen3_metal_paged_gqa(
+    s: &MetalSession,
+    pipes: &Qwen3MetalPipelines,
+    q_buf: i64,
+    q_byte_off: i64,
+    kv_buf: i64,
+    table_byte_off: i64,
+    k_layer_byte_off: i64,
+    v_layer_byte_off: i64,
+    out_buf: i64,
+    out_byte_off: i64,
+    n_q: i64,
+    n_kv: i64,
+    head_dim: i64,
+    seq_len: i64,
+    block_size: i64
+) -> i64 {
+    if !pipes.ok || n_q <= 0 || n_kv <= 0 || head_dim <= 0 || block_size <= 0 { return -1 }
+    let pipe = pipes.paged_gqa
+    if pipe <= 0 { return -1 }
+    let cid = metal_cmd_begin(s)
+    if cid <= 0 { return -1 }
+    if qwen3_metal_encode_paged_gqa(s, cid, pipe, q_buf, q_byte_off, kv_buf, table_byte_off, k_layer_byte_off, v_layer_byte_off, out_buf, out_byte_off, n_q, n_kv, head_dim, seq_len, block_size) != 0 {
+        let _c = metal_cmd_cancel(s, cid)
+        return -1
+    }
+    metal_cmd_commit_sync(s, cid)
+}
+
+pub fn qwen3_metal_encode_vec_add(
+    s: &MetalSession,
+    cid: i64,
+    pipe: i64,
+    a_buf: i64,
+    a_byte_off: i64,
+    b_buf: i64,
+    b_byte_off: i64,
+    len: i64
+) -> i64 {
+    if !s.ok || cid <= 0 || pipe <= 0 || len <= 0 { return -1 }
+    if metal_cmd_set_buf(s, cid, 0, a_buf, 0) != 0
+        || metal_cmd_set_u64(s, cid, 1, a_byte_off) != 0
+        || metal_cmd_set_buf(s, cid, 2, b_buf, 0) != 0
+        || metal_cmd_set_u64(s, cid, 3, b_byte_off) != 0
+        || metal_cmd_set_u64(s, cid, 4, len) != 0 {
+        return -1
+    }
+    let group_threads = if len < 64 { len } else { 64 }
+    if metal_cmd_dispatch_1d(s, cid, pipe, len, group_threads) != 0 {
+        return -1
+    }
+    0
+}
+
+pub fn qwen3_metal_vec_add(
+    s: &MetalSession,
+    pipe: i64,
+    a_buf: i64,
+    a_byte_off: i64,
+    b_buf: i64,
+    b_byte_off: i64,
+    len: i64
+) -> i64 {
+    if !s.ok || pipe <= 0 || len <= 0 { return -1 }
+    let cid = metal_cmd_begin(s)
+    if cid <= 0 { return -1 }
+    if qwen3_metal_encode_vec_add(s, cid, pipe, a_buf, a_byte_off, b_buf, b_byte_off, len) != 0 {
+        let _c = metal_cmd_cancel(s, cid)
+        return -1
+    }
+    metal_cmd_commit_sync(s, cid)
+}
+
+pub fn qwen3_metal_encode_kv_scatter(
+    s: &MetalSession,
+    cid: i64,
+    pipe: i64,
+    k_src_buf: i64,
+    k_src_off: i64,
+    v_src_buf: i64,
+    v_src_off: i64,
+    kv_buf: i64,
+    table_off: i64,
+    k_layer_off: i64,
+    v_layer_off: i64,
+    n_kv_dim: i64,
+    pos: i64,
+    block_size: i64
+) -> i64 {
+    if !s.ok || cid <= 0 || pipe <= 0 || n_kv_dim <= 0 || block_size <= 0 { return -1 }
+    if metal_cmd_set_buf(s, cid, 0, k_src_buf, 0) != 0
+        || metal_cmd_set_u64(s, cid, 1, k_src_off) != 0
+        || metal_cmd_set_buf(s, cid, 2, v_src_buf, 0) != 0
+        || metal_cmd_set_u64(s, cid, 3, v_src_off) != 0
+        || metal_cmd_set_buf(s, cid, 4, kv_buf, 0) != 0
+        || metal_cmd_set_u64(s, cid, 5, table_off) != 0
+        || metal_cmd_set_u64(s, cid, 6, k_layer_off) != 0
+        || metal_cmd_set_u64(s, cid, 7, v_layer_off) != 0
+        || metal_cmd_set_u64(s, cid, 8, n_kv_dim) != 0
+        || metal_cmd_set_u64(s, cid, 9, pos) != 0
+        || metal_cmd_set_u64(s, cid, 10, block_size) != 0 {
+        return -1
+    }
+    let group_threads = if n_kv_dim < 64 { n_kv_dim } else { 64 }
+    if metal_cmd_dispatch_1d(s, cid, pipe, n_kv_dim, group_threads) != 0 {
+        return -1
+    }
+    0
+}
+
+pub fn qwen3_metal_kv_scatter(
+    s: &MetalSession,
+    pipe: i64,
+    k_src_buf: i64,
+    k_src_off: i64,
+    v_src_buf: i64,
+    v_src_off: i64,
+    kv_buf: i64,
+    table_off: i64,
+    k_layer_off: i64,
+    v_layer_off: i64,
+    n_kv_dim: i64,
+    pos: i64,
+    block_size: i64
+) -> i64 {
+    if !s.ok || pipe <= 0 || n_kv_dim <= 0 || block_size <= 0 { return -1 }
+    let cid = metal_cmd_begin(s)
+    if cid <= 0 { return -1 }
+    if qwen3_metal_encode_kv_scatter(s, cid, pipe, k_src_buf, k_src_off, v_src_buf, v_src_off, kv_buf, table_off, k_layer_off, v_layer_off, n_kv_dim, pos, block_size) != 0 {
+        let _c = metal_cmd_cancel(s, cid)
+        return -1
+    }
+    metal_cmd_commit_sync(s, cid)
+}
+
+pub fn qwen3_cuda_rmsnorm(
+    s: &CudaDriverSession,
+    hfn: i64,
+    d_x: i64,
+    d_w: i64,
+    d_out: i64,
+    n_groups: i64,
+    dim: i64,
+    eps_f32_bits: i64
+) -> i64 with Alloc {
+    cuda_launch_6param_1d(s, hfn, n_groups, 1, d_x, d_w, d_out, n_groups, dim, eps_f32_bits)
+}
+
+pub fn qwen3_cuda_rope(
+    s: &CudaDriverSession,
+    hfn: i64,
+    d_v: i64,
+    n_heads: i64,
+    head_dim: i64,
+    pos: i64,
+    theta_f32_bits: i64
+) -> i64 with Alloc {
+    cuda_launch_6param_1d(s, hfn, n_heads, 1, d_v, n_heads, head_dim, pos, theta_f32_bits, 0)
+}
+
+pub fn qwen3_cuda_gemv(
+    s: &CudaDriverSession,
+    hfn: i64,
+    d_w: i64,
+    d_x: i64,
+    d_y: i64,
+    out_dim: i64,
+    in_dim: i64
+) -> i64 with Alloc {
+    cuda_launch_6param_1d(s, hfn, out_dim, 1, d_w, d_x, d_y, out_dim, in_dim, 0)
+}
+
+pub fn qwen3_cuda_swiglu(
+    s: &CudaDriverSession,
+    hfn: i64,
+    d_gate: i64,
+    d_up: i64,
+    d_out: i64,
+    inter_dim: i64
+) -> i64 with Alloc {
+    cuda_launch_6param_1d(s, hfn, inter_dim, 1, d_gate, d_up, d_out, inter_dim, 0, 0)
+}
+
+pub fn qwen3_cuda_paged_gqa(
+    s: &CudaDriverSession,
+    hfn: i64,
+    d_q: i64,
+    d_k: i64,
+    d_v: i64,
+    d_table: i64,
+    d_out: i64,
+    n_q: i64,
+    seq_len: i64,
+    cfg: i64
+) -> i64 with Alloc {
+    cuda_launch_8param_1d(s, hfn, n_q, 1, d_q, d_k, d_v, d_table, d_out, n_q, seq_len, cfg)
+}
+
+pub fn qwen3_metal_encode_gemm(
+    s: &MetalSession,
+    cid: i64,
+    pipe: i64,
+    w_buf: i64,
+    w_byte_off: i64,
+    x_buf: i64,
+    x_byte_off: i64,
+    y_buf: i64,
+    y_byte_off: i64,
+    out_dim: i64,
+    in_dim: i64,
+    n_toks: i64
+) -> i64 {
+    if !s.ok || cid <= 0 || pipe <= 0 || out_dim <= 0 || in_dim <= 0 || n_toks <= 0 || n_toks > 8 { return -1 }
+    if metal_cmd_set_buf(s, cid, 0, w_buf, 0) != 0
+        || metal_cmd_set_u64(s, cid, 1, w_byte_off) != 0
+        || metal_cmd_set_buf(s, cid, 2, x_buf, 0) != 0
+        || metal_cmd_set_u64(s, cid, 3, x_byte_off) != 0
+        || metal_cmd_set_buf(s, cid, 4, y_buf, 0) != 0
+        || metal_cmd_set_u64(s, cid, 5, y_byte_off) != 0
+        || metal_cmd_set_u64(s, cid, 6, out_dim) != 0
+        || metal_cmd_set_u64(s, cid, 7, in_dim) != 0
+        || metal_cmd_set_u64(s, cid, 8, n_toks) != 0 {
+        return -1
+    }
+    let n_groups = (out_dim + 7) / 8
+    let total_threads = n_groups * 256
+    if metal_cmd_dispatch_1d(s, cid, pipe, total_threads, 256) != 0 {
+        return -1
+    }
+    0
+}
+
+pub fn qwen3_metal_encode_gemm_tc(
+    s: &MetalSession,
+    cid: i64,
+    pipe: i64,
+    w_buf: i64,
+    w_byte_off: i64,
+    x_buf: i64,
+    x_byte_off: i64,
+    y_buf: i64,
+    y_byte_off: i64,
+    out_dim: i64,
+    in_dim: i64,
+    n_toks: i64
+) -> i64 {
+    if !s.ok || cid <= 0 || pipe <= 0 || out_dim <= 0 || in_dim <= 0 || n_toks <= 0 { return -1 }
+    if metal_cmd_set_buf(s, cid, 0, w_buf, 0) != 0
+        || metal_cmd_set_u64(s, cid, 1, w_byte_off) != 0
+        || metal_cmd_set_buf(s, cid, 2, x_buf, 0) != 0
+        || metal_cmd_set_u64(s, cid, 3, x_byte_off) != 0
+        || metal_cmd_set_buf(s, cid, 4, y_buf, 0) != 0
+        || metal_cmd_set_u64(s, cid, 5, y_byte_off) != 0
+        || metal_cmd_set_u64(s, cid, 6, out_dim) != 0
+        || metal_cmd_set_u64(s, cid, 7, in_dim) != 0
+        || metal_cmd_set_u64(s, cid, 8, n_toks) != 0 {
+        return -1
+    }
+    let n_m = (out_dim + 63) / 64
+    let n_n = (n_toks + 7) / 8
+    let total_threads = n_m * n_n * 256
+    if metal_cmd_dispatch_1d(s, cid, pipe, total_threads, 256) != 0 {
+        return -1
+    }
+    0
+}
+
+pub fn qwen3_metal_gemm(
+    s: &MetalSession,
+    pipes: &Qwen3MetalPipelines,
+    w_buf: i64,
+    w_byte_off: i64,
+    w_dtype: i32,
+    x_buf: i64,
+    x_byte_off: i64,
+    y_buf: i64,
+    y_byte_off: i64,
+    out_dim: i64,
+    in_dim: i64,
+    n_toks: i64
+) -> i64 {
+    if !pipes.ok || out_dim <= 0 || in_dim <= 0 || n_toks <= 0 || n_toks > 8 { return -1 }
+    let pipe = if w_dtype == 2 { pipes.gemm_bf16 } else { pipes.gemm_f32 }
+    if pipe <= 0 { return -1 }
+    let cid = metal_cmd_begin(s)
+    if cid <= 0 { return -1 }
+    if qwen3_metal_encode_gemm(s, cid, pipe, w_buf, w_byte_off, x_buf, x_byte_off, y_buf, y_byte_off, out_dim, in_dim, n_toks) != 0 {
+        let _c = metal_cmd_cancel(s, cid)
+        return -1
+    }
+    metal_cmd_commit_sync(s, cid)
+}
+
+pub fn qwen3_metal_encode_rope_table(
+    s: &MetalSession,
+    cid: i64,
+    pipe: i64,
+    vec_buf: i64,
+    vec_byte_off: i64,
+    rope_buf: i64,
+    rope_byte_off: i64,
+    n_heads: i64,
+    head_dim: i64
+) -> i64 {
+    if !s.ok || cid <= 0 || pipe <= 0 || rope_buf <= 0 || n_heads <= 0 || head_dim <= 0 { return -1 }
+    if metal_cmd_set_buf(s, cid, 0, vec_buf, 0) != 0
+        || metal_cmd_set_u64(s, cid, 1, vec_byte_off) != 0
+        || metal_cmd_set_buf(s, cid, 2, rope_buf, 0) != 0
+        || metal_cmd_set_u64(s, cid, 3, rope_byte_off) != 0
+        || metal_cmd_set_u64(s, cid, 4, n_heads) != 0
+        || metal_cmd_set_u64(s, cid, 5, head_dim) != 0 {
+        return -1
+    }
+    let hdim = head_dim / 2
+    let total_threads = n_heads * hdim
+    let group_threads = if total_threads < 64 { total_threads } else { 64 }
+    if metal_cmd_dispatch_1d(s, cid, pipe, total_threads, group_threads) != 0 {
+        return -1
+    }
+    0
+}
+
+pub fn qwen3_metal_encode_rope_batch_table(
+    s: &MetalSession,
+    cid: i64,
+    pipe: i64,
+    vec_buf: i64,
+    vec_byte_off: i64,
+    rope_buf: i64,
+    rope_byte_off: i64,
+    n_heads: i64,
+    head_dim: i64,
+    pos_start: i64,
+    n_toks: i64
+) -> i64 {
+    if !s.ok || cid <= 0 || pipe <= 0 || rope_buf <= 0 || n_heads <= 0 || head_dim <= 0 || n_toks <= 0 || pos_start < 0 { return -1 }
+    if metal_cmd_set_buf(s, cid, 0, vec_buf, 0) != 0
+        || metal_cmd_set_u64(s, cid, 1, vec_byte_off) != 0
+        || metal_cmd_set_buf(s, cid, 2, rope_buf, 0) != 0
+        || metal_cmd_set_u64(s, cid, 3, rope_byte_off) != 0
+        || metal_cmd_set_u64(s, cid, 4, n_heads) != 0
+        || metal_cmd_set_u64(s, cid, 5, head_dim) != 0
+        || metal_cmd_set_u64(s, cid, 6, pos_start) != 0
+        || metal_cmd_set_u64(s, cid, 7, n_toks) != 0 {
+        return -1
+    }
+    let hdim = head_dim / 2
+    let total_threads = n_toks * n_heads * hdim
+    let group_threads = if total_threads < 64 { total_threads } else { 64 }
+    if metal_cmd_dispatch_1d(s, cid, pipe, total_threads, group_threads) != 0 {
+        return -1
+    }
+    0
+}
+
+pub fn qwen3_metal_encode_rope_batch(
+    s: &MetalSession,
+    cid: i64,
+    pipe: i64,
+    vec_buf: i64,
+    vec_byte_off: i64,
+    n_heads: i64,
+    head_dim: i64,
+    pos_start: i64,
+    theta_f32_bits: i64,
+    n_toks: i64
+) -> i64 {
+    if !s.ok || cid <= 0 || pipe <= 0 || n_heads <= 0 || head_dim <= 0 || n_toks <= 0 || pos_start < 0 { return -1 }
+    if metal_cmd_set_buf(s, cid, 0, vec_buf, 0) != 0
+        || metal_cmd_set_u64(s, cid, 1, vec_byte_off) != 0
+        || metal_cmd_set_u64(s, cid, 2, n_heads) != 0
+        || metal_cmd_set_u64(s, cid, 3, head_dim) != 0
+        || metal_cmd_set_u64(s, cid, 4, pos_start) != 0
+        || metal_cmd_set_u64(s, cid, 5, theta_f32_bits) != 0
+        || metal_cmd_set_u64(s, cid, 6, n_toks) != 0 {
+        return -1
+    }
+    let hdim = head_dim / 2
+    let total_threads = n_toks * n_heads * hdim
+    let group_threads = if total_threads < 64 { total_threads } else { 64 }
+    if metal_cmd_dispatch_1d(s, cid, pipe, total_threads, group_threads) != 0 {
+        return -1
+    }
+    0
+}
+
+pub fn qwen3_metal_encode_kv_scatter_batch(
+    s: &MetalSession,
+    cid: i64,
+    pipe: i64,
+    k_src_buf: i64,
+    k_src_off: i64,
+    v_src_buf: i64,
+    v_src_off: i64,
+    kv_buf: i64,
+    table_off: i64,
+    k_layer_off: i64,
+    v_layer_off: i64,
+    n_kv_dim: i64,
+    pos_start: i64,
+    n_toks: i64,
+    block_size: i64
+) -> i64 {
+    if !s.ok || cid <= 0 || pipe <= 0 || n_kv_dim <= 0 || n_toks <= 0 || pos_start < 0 || block_size <= 0 { return -1 }
+    let packed = (n_toks << 32) | (pos_start & 4294967295)
+    if metal_cmd_set_buf(s, cid, 0, k_src_buf, 0) != 0
+        || metal_cmd_set_u64(s, cid, 1, k_src_off) != 0
+        || metal_cmd_set_buf(s, cid, 2, v_src_buf, 0) != 0
+        || metal_cmd_set_u64(s, cid, 3, v_src_off) != 0
+        || metal_cmd_set_buf(s, cid, 4, kv_buf, 0) != 0
+        || metal_cmd_set_u64(s, cid, 5, table_off) != 0
+        || metal_cmd_set_u64(s, cid, 6, k_layer_off) != 0
+        || metal_cmd_set_u64(s, cid, 7, v_layer_off) != 0
+        || metal_cmd_set_u64(s, cid, 8, n_kv_dim) != 0
+        || metal_cmd_set_u64(s, cid, 9, packed) != 0
+        || metal_cmd_set_u64(s, cid, 10, block_size) != 0 {
+        return -1
+    }
+    let total_threads = n_toks * n_kv_dim
+    let group_threads = if total_threads < 64 { total_threads } else { 64 }
+    if metal_cmd_dispatch_1d(s, cid, pipe, total_threads, group_threads) != 0 {
+        return -1
+    }
+    0
+}
+
+pub fn qwen3_metal_encode_paged_gqa_batch(
+    s: &MetalSession,
+    cid: i64,
+    pipe: i64,
+    q_buf: i64,
+    q_byte_off: i64,
+    kv_buf: i64,
+    table_byte_off: i64,
+    k_layer_byte_off: i64,
+    v_layer_byte_off: i64,
+    out_buf: i64,
+    out_byte_off: i64,
+    n_q: i64,
+    n_kv: i64,
+    head_dim: i64,
+    pos_start: i64,
+    n_toks: i64,
+    block_size: i64
+) -> i64 {
+    if !s.ok || cid <= 0 || pipe <= 0 || n_q <= 0 || n_kv <= 0 || head_dim <= 0 || n_toks <= 0 || pos_start < 0 || block_size <= 0 { return -1 }
+    let packed = (n_toks << 32) | (pos_start & 4294967295)
+    if metal_cmd_set_buf(s, cid, 0, q_buf, 0) != 0
+        || metal_cmd_set_u64(s, cid, 1, q_byte_off) != 0
+        || metal_cmd_set_buf(s, cid, 2, kv_buf, 0) != 0
+        || metal_cmd_set_u64(s, cid, 3, table_byte_off) != 0
+        || metal_cmd_set_u64(s, cid, 4, k_layer_byte_off) != 0
+        || metal_cmd_set_u64(s, cid, 5, v_layer_byte_off) != 0
+        || metal_cmd_set_buf(s, cid, 6, out_buf, 0) != 0
+        || metal_cmd_set_u64(s, cid, 7, out_byte_off) != 0
+        || metal_cmd_set_u64(s, cid, 8, n_q) != 0
+        || metal_cmd_set_u64(s, cid, 9, n_kv) != 0
+        || metal_cmd_set_u64(s, cid, 10, head_dim) != 0
+        || metal_cmd_set_u64(s, cid, 11, packed) != 0
+        || metal_cmd_set_u64(s, cid, 12, block_size) != 0 {
+        return -1
+    }
+    let total_threads = n_toks * n_q * 32
+    let group_threads = if total_threads < 128 { 32 } else { 128 }
+    if metal_cmd_dispatch_1d(s, cid, pipe, total_threads, group_threads) != 0 {
+        return -1
+    }
+    0
+}
+
+pub fn qwen3_metal_encode_argmax_top2_batch(
+    s: &MetalSession,
+    cid: i64,
+    pipe: i64,
+    logits_buf: i64,
+    logits_byte_off: i64,
+    out_buf: i64,
+    out_byte_off: i64,
+    vocab: i64,
+    n_toks: i64
+) -> i64 {
+    if !s.ok || cid <= 0 || pipe <= 0 || vocab <= 0 || n_toks <= 0 { return -1 }
+    if metal_cmd_set_buf(s, cid, 0, logits_buf, 0) != 0
+        || metal_cmd_set_u64(s, cid, 1, logits_byte_off) != 0
+        || metal_cmd_set_buf(s, cid, 2, out_buf, 0) != 0
+        || metal_cmd_set_u64(s, cid, 3, out_byte_off) != 0
+        || metal_cmd_set_u64(s, cid, 4, vocab) != 0
+        || metal_cmd_set_u64(s, cid, 5, n_toks) != 0 {
+        return -1
+    }
+    if metal_cmd_dispatch_1d(s, cid, pipe, n_toks * 32, 32) != 0 {
+        return -1
+    }
+    0
+}
+
+pub fn qwen3_metal_encode_qk_norm_rope_kv_scatter(
+    s: &MetalSession,
+    cid: i64,
+    pipe: i64,
+    q_buf: i64,
+    k_buf: i64,
+    v_buf: i64,
+    qw_buf: i64,
+    kw_buf: i64,
+    kv_buf: i64,
+    q_off: i64,
+    k_off: i64,
+    v_off: i64,
+    qw_off: i64,
+    kw_off: i64,
+    table_off: i64,
+    k_layer_off: i64,
+    v_layer_off: i64,
+    n_q: i64,
+    n_kv: i64,
+    head_dim: i64,
+    pos: i64,
+    block_size: i64,
+    eps_bits: i64,
+    rope_buf: i64,
+    rope_off: i64
+) -> i64 {
+    if !s.ok || cid <= 0 || pipe <= 0 || q_buf <= 0 || k_buf <= 0 || v_buf <= 0
+        || qw_buf <= 0 || kw_buf <= 0 || kv_buf <= 0 || rope_buf <= 0
+        || n_q <= 0 || n_kv <= 0 || head_dim < 2 || block_size <= 0 || pos < 0 {
+        return -1
+    }
+    if metal_cmd_set_buf(s, cid, 0, q_buf, 0) != 0
+        || metal_cmd_set_buf(s, cid, 1, k_buf, 0) != 0
+        || metal_cmd_set_buf(s, cid, 2, v_buf, 0) != 0
+        || metal_cmd_set_buf(s, cid, 3, qw_buf, 0) != 0
+        || metal_cmd_set_buf(s, cid, 4, kw_buf, 0) != 0
+        || metal_cmd_set_buf(s, cid, 5, kv_buf, 0) != 0
+        || metal_cmd_set_u64(s, cid, 6, q_off) != 0
+        || metal_cmd_set_u64(s, cid, 7, k_off) != 0
+        || metal_cmd_set_u64(s, cid, 8, v_off) != 0
+        || metal_cmd_set_u64(s, cid, 9, qw_off) != 0
+        || metal_cmd_set_u64(s, cid, 10, kw_off) != 0
+        || metal_cmd_set_u64(s, cid, 11, table_off) != 0
+        || metal_cmd_set_u64(s, cid, 12, k_layer_off) != 0
+        || metal_cmd_set_u64(s, cid, 13, v_layer_off) != 0
+        || metal_cmd_set_u64(s, cid, 14, n_q) != 0
+        || metal_cmd_set_u64(s, cid, 15, n_kv) != 0
+        || metal_cmd_set_u64(s, cid, 16, head_dim) != 0
+        || metal_cmd_set_u64(s, cid, 17, pos) != 0
+        || metal_cmd_set_u64(s, cid, 18, block_size) != 0
+        || metal_cmd_set_u64(s, cid, 19, eps_bits) != 0
+        || metal_cmd_set_buf(s, cid, 20, rope_buf, 0) != 0
+        || metal_cmd_set_u64(s, cid, 21, rope_off) != 0 {
+        return -1
+    }
+    let total_threads = (n_q + n_kv) * 32
+    let group_threads = if total_threads < 128 { 32 } else { 128 }
+    if metal_cmd_dispatch_1d(s, cid, pipe, total_threads, group_threads) != 0 {
+        return -1
+    }
+    0
+}
+
+pub fn qwen3_metal_encode_add_rmsnorm(
+    s: &MetalSession,
+    cid: i64,
+    pipe: i64,
+    x_buf: i64,
+    h_buf: i64,
+    w_buf: i64,
+    out_buf: i64,
+    x_off: i64,
+    h_off: i64,
+    w_off: i64,
+    out_off: i64,
+    dim: i64,
+    eps_bits: i64
+) -> i64 {
+    if !s.ok || cid <= 0 || pipe <= 0 || x_buf <= 0 || h_buf <= 0 || w_buf <= 0 || out_buf <= 0 || dim <= 0 {
+        return -1
+    }
+    if metal_cmd_set_buf(s, cid, 0, x_buf, 0) != 0
+        || metal_cmd_set_buf(s, cid, 1, h_buf, 0) != 0
+        || metal_cmd_set_buf(s, cid, 2, w_buf, 0) != 0
+        || metal_cmd_set_buf(s, cid, 3, out_buf, 0) != 0
+        || metal_cmd_set_u64(s, cid, 4, x_off) != 0
+        || metal_cmd_set_u64(s, cid, 5, h_off) != 0
+        || metal_cmd_set_u64(s, cid, 6, w_off) != 0
+        || metal_cmd_set_u64(s, cid, 7, out_off) != 0
+        || metal_cmd_set_u64(s, cid, 8, dim) != 0
+        || metal_cmd_set_u64(s, cid, 9, eps_bits) != 0 {
+        return -1
+    }
+    if metal_cmd_dispatch_1d(s, cid, pipe, 32, 32) != 0 {
+        return -1
+    }
+    0
+}
+
+pub fn qwen3_metal_encode_gemv_bf16_qkv(
+    s: &MetalSession,
+    cid: i64,
+    pipe: i64,
+    wq_buf: i64,
+    wk_buf: i64,
+    wv_buf: i64,
+    x_buf: i64,
+    out_buf: i64,
+    wq_off: i64,
+    wk_off: i64,
+    wv_off: i64,
+    x_off: i64,
+    yq_off: i64,
+    yk_off: i64,
+    yv_off: i64,
+    q_dim: i64,
+    kv_dim: i64,
+    in_dim: i64
+) -> i64 {
+    if !s.ok || cid <= 0 || pipe <= 0 || wq_buf <= 0 || wk_buf <= 0 || wv_buf <= 0
+        || x_buf <= 0 || out_buf <= 0 || q_dim <= 0 || kv_dim <= 0 || in_dim <= 0 {
+        return -1
+    }
+    if metal_cmd_set_buf(s, cid, 0, wq_buf, 0) != 0
+        || metal_cmd_set_buf(s, cid, 1, wk_buf, 0) != 0
+        || metal_cmd_set_buf(s, cid, 2, wv_buf, 0) != 0
+        || metal_cmd_set_buf(s, cid, 3, x_buf, 0) != 0
+        || metal_cmd_set_buf(s, cid, 4, out_buf, 0) != 0
+        || metal_cmd_set_u64(s, cid, 5, wq_off) != 0
+        || metal_cmd_set_u64(s, cid, 6, wk_off) != 0
+        || metal_cmd_set_u64(s, cid, 7, wv_off) != 0
+        || metal_cmd_set_u64(s, cid, 8, x_off) != 0
+        || metal_cmd_set_u64(s, cid, 9, yq_off) != 0
+        || metal_cmd_set_u64(s, cid, 10, yk_off) != 0
+        || metal_cmd_set_u64(s, cid, 11, yv_off) != 0
+        || metal_cmd_set_u64(s, cid, 12, q_dim) != 0
+        || metal_cmd_set_u64(s, cid, 13, kv_dim) != 0
+        || metal_cmd_set_u64(s, cid, 14, in_dim) != 0 {
+        return -1
+    }
+    let total_out = q_dim + 2 * kv_dim
+    let n_groups = (total_out + 31) / 32
+    let total_threads = n_groups * 256
+    if metal_cmd_dispatch_1d(s, cid, pipe, total_threads, 256) != 0 {
+        return -1
+    }
+    0
+}
+
+pub fn qwen3_metal_encode_gemv_bf16_gate_up_swiglu(
+    s: &MetalSession,
+    cid: i64,
+    pipe: i64,
+    wg_buf: i64,
+    wu_buf: i64,
+    x_buf: i64,
+    out_buf: i64,
+    wg_off: i64,
+    wu_off: i64,
+    x_off: i64,
+    out_off: i64,
+    inter_dim: i64,
+    in_dim: i64
+) -> i64 {
+    if !s.ok || cid <= 0 || pipe <= 0 || wg_buf <= 0 || wu_buf <= 0 || x_buf <= 0
+        || out_buf <= 0 || inter_dim <= 0 || in_dim <= 0 {
+        return -1
+    }
+    if metal_cmd_set_buf(s, cid, 0, wg_buf, 0) != 0
+        || metal_cmd_set_buf(s, cid, 1, wu_buf, 0) != 0
+        || metal_cmd_set_buf(s, cid, 2, x_buf, 0) != 0
+        || metal_cmd_set_buf(s, cid, 3, out_buf, 0) != 0
+        || metal_cmd_set_u64(s, cid, 4, wg_off) != 0
+        || metal_cmd_set_u64(s, cid, 5, wu_off) != 0
+        || metal_cmd_set_u64(s, cid, 6, x_off) != 0
+        || metal_cmd_set_u64(s, cid, 7, out_off) != 0
+        || metal_cmd_set_u64(s, cid, 8, inter_dim) != 0
+        || metal_cmd_set_u64(s, cid, 9, in_dim) != 0 {
+        return -1
+    }
+    let n_groups = (inter_dim + 15) / 16
+    let total_threads = n_groups * 256
+    if metal_cmd_dispatch_1d(s, cid, pipe, total_threads, 256) != 0 {
+        return -1
+    }
+    0
+}
