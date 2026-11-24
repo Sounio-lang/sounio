@@ -1230,13 +1230,29 @@ pub fn epsilon_subsumes(provided_eps: f64, provided_mode: i64, required_eps: f64
     if required_eps < 0.0 {
         return true
     }
-    if provided_mode == 2 || provided_mode == 3 {
+    // A confidence (mode 1 or 2) or ⊥ (mode 3) never meets an error bound.
+    if provided_mode == 1 || provided_mode == 2 || provided_mode == 3 {
         return false
     }
     if !epsilon_is_valid(provided_eps) || !epsilon_is_valid(required_eps) {
         return false
     }
     provided_eps <= required_eps
+}
+
+// EPI-006: a confidence requirement (mode 2 floor, mode 1 exact) is checked
+// against the provided value's confidence. A value typed by an annotation `ε >= x` holds it in the
+// epsilon slot (mode 2); a `Knowledge(v, e=c)` holds it in knowledge_conf and
+// states no error bound. Every other requirement reads the epsilon slot.
+pub fn epsilon_provided_view(provided: TypeEntry, provided_eps: f64, required_mode: i64) -> f64 {
+    // Modes 1 (`ε = x`, exact) and 2 (`ε >= x`, floor) are confidences; mode 0
+    // is a variance bound, never a confidence. A mode-0 value meets a
+    // confidence requirement only through a stated knowledge_conf; without one
+    // the view is unspecified (-1) and the requirement refuses.
+    if (required_mode == 2 || required_mode == 1) && provided.knowledge_epsilon_mode == 0 {
+        return provided.knowledge_conf
+    }
+    provided_eps
 }
 
 pub fn epsilon_subsumes_call_boundary(provided_eps: f64, provided_mode: i64, required_eps: f64, required_mode: i64) -> bool {
@@ -1278,7 +1294,7 @@ pub fn knowledge_compatible(ty_a: TypeEntry, ty_b: TypeEntry) -> bool with Mut, 
     } else {
         // Check epsilon subsumption
         epsilon_subsumes(
-            ty_a.knowledge_epsilon,
+            epsilon_provided_view(ty_a, ty_a.knowledge_epsilon, ty_b.knowledge_epsilon_mode),
             ty_a.knowledge_epsilon_mode,
             ty_b.knowledge_epsilon,
             ty_b.knowledge_epsilon_mode
@@ -1699,7 +1715,7 @@ pub fn knowledge_call_boundary_compatible(provided: TypeEntry, required: TypeEnt
     let pmeta = knowledge_meta_from_ty(provided)
     let rmeta = knowledge_meta_from_ty(required)
     if !epsilon_subsumes_call_boundary(
-        knowledge_meta_epsilon(pmeta),
+        epsilon_provided_view(provided, knowledge_meta_epsilon(pmeta), required.knowledge_epsilon_mode),
         provided.knowledge_epsilon_mode,
         knowledge_meta_epsilon(rmeta),
         required.knowledge_epsilon_mode
