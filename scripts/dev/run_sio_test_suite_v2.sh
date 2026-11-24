@@ -42,6 +42,16 @@
 #   bash scripts/dev/run_sio_test_suite_v2.sh --filter-exact BASENAME [--verbose] [--format junit] [--jobs N]
 #   bash scripts/dev/run_sio_test_suite_v2.sh [--filter PATTERN] --list-tests
 #   bash scripts/dev/run_sio_test_suite_v2.sh --test-list FILE [--verbose] [--format junit] [--jobs N]
+#
+# Environment:
+#   SOUNIO_TEST_TARGET=<triple>  cross-compile target forwarded to the compiler,
+#     e.g. aarch64-macos for running the suite on a Mac with a multi-target
+#     Madaros (the raw positional interface ignores --target; the wrapper
+#     switches to the `build` verb and ad-hoc signs Mach-O outputs on Darwin).
+#     Unset keeps the historical default-target behavior.
+#   SOUNIO_TEST_SOUC_BIN=<path>  override the compiler binary (a raw ELF is
+#     routed through scripts/ci/souc-native-wrapper.sh).
+#   SOUNIO_STDLIB_PATH=<dir>     forwarded to the compiler.
 
 set -uo pipefail
 
@@ -52,6 +62,18 @@ else
     ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 fi
 cd "$ROOT_DIR"
+
+# Cross-compile target knob (lie01d harness acceptance). SOUNIO_TEST_TARGET
+# (e.g. aarch64-macos) is forwarded to the compiler wrapper, which switches
+# to the `build` verb (the raw positional interface ignores --target) and
+# ad-hoc signs Mach-O outputs on Darwin. Fail fast on a malformed value: a
+# typo here would silently build for the wrong architecture.
+if [[ -n "${SOUNIO_TEST_TARGET:-}" ]]; then
+  case "$SOUNIO_TEST_TARGET" in
+    *-*) export SOUNIO_TEST_TARGET ;;
+    *) echo "error: SOUNIO_TEST_TARGET must be a target triple (e.g. aarch64-macos), got '$SOUNIO_TEST_TARGET'" >&2; exit 2 ;;
+  esac
+fi
 
 # Harness-local override. SOUNIO_TEST_SOUC_BIN may point at one of two
 # distinct interfaces:
