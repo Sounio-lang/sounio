@@ -13897,8 +13897,9 @@ var LOWER_STRICT_FIELD_WHY: [i64; 4096] = [0; 4096]
 // Set by field_idx_from_name / field_idx_from_name_simple: 0 when the index
 // came from a layout without a vote, else the guess kind (1 vote, 2 hash of an
 // unknown name, 3 hash of a field the named struct lacks). Read by the sites
-// that turn the index into a load or a store; the first-order variance walk
-// also resolves names speculatively, and a guess there moves no data.
+// that turn the index into a load or a store, and by the first-order variance
+// sites, where the index keys the uncertainty bound to a field: a guess there
+// moves no bytes but reads or binds another field's variance (why + 10).
 var LOWER_FIELD_GUESS_WHY: i64 = 0
 
 fn lower_strict_field_note(fn_name: Name, field_name: Name, why: i64) with Mut, Panic, Div {
@@ -13931,13 +13932,20 @@ pub fn lower_strict_field_report() -> i64 with IO, Mut, Div, Panic {
         print(str_from_bytes(fld.buf, fld.len))
         print("` in `")
         print(str_from_bytes(fnm.buf, fnm.len))
-        let why = LOWER_STRICT_FIELD_WHY[i as usize]
+        let why_all = LOWER_STRICT_FIELD_WHY[i as usize]
+        // 10 + why: the guessed slot keys first-order variance metadata, so
+        // the field's uncertainty would be read from or bound to that slot.
+        let why = why_all % 10
+        print("`")
+        if why_all >= 10 {
+            print(" (uncertainty bookkeeping)")
+        }
         if why == 1 {
-            print("` is not read from the receiver's type: the name sits at different indices in different structs and the lowerer would pick one by vote\n")
+            print(" is not read from the receiver's type: the name sits at different indices in different structs and the lowerer would pick one by vote\n")
         } else if why == 2 {
-            print("` is not read from the receiver's type: no struct has this field and the lowerer would hash its first byte\n")
+            print(" is not read from the receiver's type: no struct has this field and the lowerer would hash its first byte\n")
         } else {
-            print("` is not read from the receiver's type: the receiver's struct has no such field and the lowerer would hash its first byte\n")
+            print(" is not read from the receiver's type: the receiver's struct has no such field and the lowerer would hash its first byte\n")
         }
         i = i + 1
     }
@@ -20587,11 +20595,17 @@ impl Lowerer {
         while row < nout {
             let iv = lo.tg_row_install(si, row)
             lo = iv.0
-            // Hop through the struct-valued fields on the way to the leaf.
+            // Hop through the struct-valued fields on the way to the leaf. The
+            // path came from the returned type's layout (tg_out_layout), so
+            // each hop is resolved against the struct it walks, never by vote.
             var cur = dst_reg
+            var cur_ty = ir_name_at(TG_RTYPE[tgi as usize])
             var l: i64 = 0
             while l + 1 < odepth[row as usize] {
-                let hidx = lo.field_idx_from_name_simple(ir_name_at(opath[(row * 3 + l) as usize]))
+                let hname = ir_name_at(opath[(row * 3 + l) as usize])
+                let hidx = lo.field_idx_from_name(cur_ty, hname)
+                cur_ty = lo.field_named_type_for_struct(cur_ty, hname)
+                if LOWER_STRICT_FIELD_ON != 0 && LOWER_FIELD_GUESS_WHY != 0 { lower_strict_field_note(lo.current_fn_name_for_trace(), ir_name_at(opath[(row * 3 + l) as usize]), LOWER_FIELD_GUESS_WHY + 10) }
                 var nxt = lo.lookup_variance_for_field_base(cur, hidx)
                 if nxt < 0 {
                     let fr = lo.fresh_reg()
@@ -20602,7 +20616,8 @@ impl Lowerer {
                 cur = nxt
                 l = l + 1
             }
-            let fidx = lo.field_idx_from_name_simple(ir_name_at(opath[(row * 3 + odepth[row as usize] - 1) as usize]))
+            let fidx = lo.field_idx_from_name(cur_ty, ir_name_at(opath[(row * 3 + odepth[row as usize] - 1) as usize]))
+            if LOWER_STRICT_FIELD_ON != 0 && LOWER_FIELD_GUESS_WHY != 0 { lower_strict_field_note(lo.current_fn_name_for_trace(), ir_name_at(opath[(row * 3 + odepth[row as usize] - 1) as usize]), LOWER_FIELD_GUESS_WHY + 10) }
             lo = lo.bind_variance_for_field(cur, fidx, iv.1)
             lo = lo.fo_field_sens_store(lo.variance_field_key(cur, fidx))
             if ord2 { lo = lo.fo_field_hess_store(lo.variance_field_key(cur, fidx)) }
@@ -25758,6 +25773,7 @@ impl Lowerer {
                     // the outer field, so variance_of(result.water.value)
                     // is the same transfer as variance_of(call().water.value).
                     var leaf_f0: i64 = 0 - 1
+                    LOWER_FIELD_GUESS_WHY = 0
                     if depth == 0 {
                         if sname.len > 0 {
                             leaf_f0 = lo.field_idx_from_struct_literal_name(sname, fname, field_idx)
@@ -25765,13 +25781,18 @@ impl Lowerer {
                             leaf_f0 = lo.field_idx_from_name_simple(fname)
                         }
                     } else if depth == 1 && outer_idx >= 0 && outer_idx < 128 {
-                        let leaf = lo.field_idx_from_name_simple(fname)
+                        // sname is this inner literal's own struct (the caller passes
+                        // its path), so the leaf index is read from that layout.
+                        let leaf = if sname.len > 0 { lo.field_idx_from_struct_literal_name(sname, fname, field_idx) } else { lo.field_idx_from_name_simple(fname) }
                         if leaf >= 0 && leaf < 128 {
                             leaf_f0 = 0 - (2 + outer_idx * 128 + leaf)
                         }
                     }
+                    // The transfer is registered under this slot: a guessed slot
+                    // attaches the leaf's uncertainty to another field.
+                    if LOWER_STRICT_FIELD_ON != 0 && LOWER_FIELD_GUESS_WHY != 0 { lower_strict_field_note(lo.current_fn_name_for_trace(), fname, LOWER_FIELD_GUESS_WHY + 10) }
                     if (*init).kind == ExprKind::ExprStructLit {
-                        let child_outer = if depth == 0 { lo.field_idx_from_name_simple(fname) } else { 0 - 1 }
+                        let child_outer = if depth == 0 { if sname.len > 0 { lo.field_idx_from_struct_literal_name(sname, fname, field_idx) } else { lo.field_idx_from_name_simple(fname) } } else { 0 - 1 }
                         lo = lo.fo_ctor_walk_literal(fn_hash, sub, blk, init, p0, p1, nparams, depth + 1, ir_path_first_name((*init).path), child_outer)
                     } else {
                         lo = lo.fo_ctor_classify_leaf(fn_hash, sub, leaf_f0, blk, init, p0, p1, nparams, 0)
@@ -27907,6 +27928,7 @@ impl Lowerer {
                 return (lo, -1)
             }
             let idx = lo.field_idx_for_base_ref(&(*base).left, (*base).name)
+            if LOWER_STRICT_FIELD_ON != 0 && LOWER_FIELD_GUESS_WHY != 0 { lower_strict_field_note(lo.current_fn_name_for_trace(), (*base).name, LOWER_FIELD_GUESS_WHY + 10) }
             return (lo, lo.lookup_variance_for_field_base(inner.1, idx))
         }
         // #1706: a chain rooted at a CALL carrying an identity FO transfer.
@@ -31538,6 +31560,7 @@ impl Lowerer {
             if fbase.1 >= 0 {
                 var lo_f = fbase.0
                 let idx = lo_f.field_idx_for_base_ref(&(*e).left, (*e).name)
+                if LOWER_STRICT_FIELD_ON != 0 && LOWER_FIELD_GUESS_WHY != 0 { lower_strict_field_note(lo_f.current_fn_name_for_trace(), (*e).name, LOWER_FIELD_GUESS_WHY + 10) }
                 let live = lo_f.fo_live_var_from_field_key(fbase.1, idx)
                 if live.1 >= 0 {
                     return live
@@ -34973,6 +34996,12 @@ impl Lowerer {
     fn expr_direct_struct_name(self, e: &Expr) -> Name with Mut, Panic, Div, Alloc {
         if (*e).kind == ExprKind::ExprIdent {
             return self.lookup_local_struct_type((*e).name)
+        }
+        // `(B { .. }, n)`: a struct literal names its own type. Without this
+        // arm the slot stayed untyped and `t.0.x` voted across every struct
+        // with an `x` -- B { y, x } read index 0 or the hash, printing 0.
+        if (*e).kind == ExprKind::ExprStructLit {
+            return ir_path_first_name((*e).path)
         }
         let fid = self.expr_method_fn_id(e)
         if fid >= 0 {
@@ -40244,10 +40273,48 @@ impl Lowerer {
                         lo = lo.bind_local_tuple_struct(s.name, t0_layout, 0)
                     }
                 }
+                // A tuple literal names the struct of EVERY slot directly. The
+                // arm above answers slot 0 only, so `let t = (n, B { .. })` left
+                // `t.1.x` untyped: the vote across structs with an `x` picked
+                // the wrong index and the read returned 0 (strict E311). A local
+                // records two struct slots; a third stays untyped and strict
+                // refuses it rather than guess.
+                if (*t0_expr).kind == ExprKind::ExprTupleLit {
+                    lo = lo.bind_tuple_literal_struct_slots(s.name, &(*t0_expr))
+                }
             }
             _ => {}
         }
         (lo, reg)
+    }
+
+    fn bind_tuple_literal_struct_slots(self, name: Name, e: &Expr) -> Lowerer with Mut, Alloc, Panic, Div {
+        var lo = self
+        var bound: i64 = 0
+        var k: i64 = 0
+        var cur = &(*e).args
+        while bound < 2 {
+            match *cur {
+                Some(lst) => {
+                    let sn = lo.expr_direct_struct_name(&(*lst).head)
+                    if sn.len > 0 {
+                        let li = lower_struct_layout_index_of(&(*lo.struct_layouts), sn)
+                        if li >= 0 {
+                            if bound == 0 {
+                                lo = lo.bind_local_tuple_struct(name, li, k)
+                            } else {
+                                lo = lo.bind_local_tuple_struct2(name, li, k)
+                            }
+                            bound = bound + 1
+                        }
+                    }
+                    k = k + 1
+                    cur = &(*lst).tail
+                }
+                _ => break
+            }
+        }
+        lo
     }
 
     fn lower_let_stmt(self, s: Stmt, is_mut: bool) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
@@ -43573,6 +43640,7 @@ impl Lowerer {
             var lo = fbase.0
             if fbase.1 >= 0 {
                 let idx = lo.field_idx_for_base_ref(&(*e).left, (*e).name)
+                if LOWER_STRICT_FIELD_ON != 0 && LOWER_FIELD_GUESS_WHY != 0 { lower_strict_field_note(lo.current_fn_name_for_trace(), (*e).name, LOWER_FIELD_GUESS_WHY + 10) }
                 let key = lo.variance_field_key(fbase.1, idx)
                 let slot = lo.fo_field_sens_slot(key)
                 if slot >= 0 {
