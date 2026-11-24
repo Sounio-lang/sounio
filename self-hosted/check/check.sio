@@ -10020,7 +10020,63 @@ fn checker_record_hyper_expr_inplace(c: *mut Checker, span: Span, algebra_tag: i
     (*c).hyper_exprs = add_result.0
 }
 
+// One warning per call site, however many times the checker walks the body.
+// A single `madaros build` checks the same function body three times with
+// three separate Checker instances: compiler_visibility_preflight
+// (compiler/main.sio), the verdict pass inside
+// bridge_lower_single_module_box_scoped (compiler/module_frontend.sio), and
+// check_program_epistemic_into (check/mod.sio). Each walk reached
+// checker_check_hessian_metric_expr_inplace, so one hessian_of call site
+// printed W047 three times (9 blocks for the 3 sites in
+// tests/run-pass/epistemic_hessian_of.sio). The per-instance w046_* span
+// table cannot dedup across those instances, so the emitted set lives in
+// process globals, keyed by (code, fn-name hash, start, end): distinct
+// call sites have distinct spans and still warn; a replay of the same site
+// does not. Span.file_id cannot be part of the key: each walk re-loads and
+// re-parses the source, so the same site arrives with a different file_id
+// (a file_id-keyed table measured 6 W047 for 3 sites, not 3). The current
+// function name is stable across the walks and keeps two same-offset sites
+// in different functions apart. Synthetic spans (start == end == 0) carry
+// no site identity and always print. Overflow past 512 distinct sites
+// means later ones may repeat; that is a capacity limit, stated, not a
+// silent cap.
+var CHECKER_WARN_EMITTED_COUNT: i64 = 0
+var CHECKER_WARN_EMITTED_CODE: [i64; 512] = [0; 512]
+var CHECKER_WARN_EMITTED_FN: [i64; 512] = [0; 512]
+var CHECKER_WARN_EMITTED_START: [i64; 512] = [0; 512]
+var CHECKER_WARN_EMITTED_END: [i64; 512] = [0; 512]
+
+fn checker_warning_already_emitted(c: *mut Checker, code: i64, span: Span) -> bool with Mut {
+    if span.start <= 0 && span.end <= 0 { return false }
+    var fn_hash: i64 = 0
+    var fi: i64 = 0
+    while fi < (*c).current_fn_name.len && fi < 384 {
+        fn_hash = fn_hash * 31 + (*c).current_fn_name.buf[fi as usize] as i64
+        fi = fi + 1
+    }
+    var i: i64 = 0
+    while i < CHECKER_WARN_EMITTED_COUNT && i < 512 {
+        if CHECKER_WARN_EMITTED_CODE[i as usize] == code
+            && CHECKER_WARN_EMITTED_FN[i as usize] == fn_hash
+            && CHECKER_WARN_EMITTED_START[i as usize] == span.start
+            && CHECKER_WARN_EMITTED_END[i as usize] == span.end {
+            return true
+        }
+        i = i + 1
+    }
+    if CHECKER_WARN_EMITTED_COUNT < 512 {
+        let n = CHECKER_WARN_EMITTED_COUNT
+        CHECKER_WARN_EMITTED_CODE[n as usize] = code
+        CHECKER_WARN_EMITTED_FN[n as usize] = fn_hash
+        CHECKER_WARN_EMITTED_START[n as usize] = span.start
+        CHECKER_WARN_EMITTED_END[n as usize] = span.end
+        CHECKER_WARN_EMITTED_COUNT = n + 1
+    }
+    false
+}
+
 fn checker_report_warning_at_inplace(c: *mut Checker, span: Span, code: i64, msg_a: i64, msg_b: i64, msg_c: i64) with Mut, IO, Panic, Div {
+    if checker_warning_already_emitted(c, code, span) { return }
     (*c).warning_count = (*c).warning_count + 1
     print("warning[W")
     if code < 100 { print("0") }
@@ -21704,6 +21760,7 @@ impl Checker {
 }
 
 fn checker_report_warning_at_mut(c: *mut Checker, span: Span, code: i64, msg_a: i64, msg_b: i64, msg_c: i64) with Mut, IO, Panic, Div {
+    if checker_warning_already_emitted(c, code, span) { return }
     (*c).warning_count = (*c).warning_count + 1
     print("warning[W")
     if code < 100 { print("0") }
