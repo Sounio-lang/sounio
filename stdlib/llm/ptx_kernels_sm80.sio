@@ -515,6 +515,60 @@ fn ptx_cr_emit_sounio_exp(buf: i64, pos: i64) -> i64 with Mut {
     p
 }
 
+fn ptx_cr_emit_sounio_exp_inline(buf: i64, pos: i64, in_reg: string, out_reg: string, done_lbl: string) -> i64 with Mut {
+    var p = pos
+    p = bf16_cstr_append(buf, p, "    setp.nan.ftz.f32 %p8, ")
+    p = bf16_cstr_append(buf, p, in_reg)
+    p = bf16_cstr_append(buf, p, ", ")
+    p = bf16_cstr_append(buf, p, in_reg)
+    p = bf16_cstr_append(buf, p, "; @%p8 mov.f32 ")
+    p = bf16_cstr_append(buf, p, out_reg)
+    p = bf16_cstr_append(buf, p, ", ")
+    p = bf16_cstr_append(buf, p, in_reg)
+    p = bf16_cstr_append(buf, p, "; @%p8 bra ")
+    p = bf16_cstr_append(buf, p, done_lbl)
+    p = bf16_cstr_append(buf, p, ";\n")
+    p = bf16_cstr_append(buf, p, "    setp.le.ftz.f32 %p8, ")
+    p = bf16_cstr_append(buf, p, in_reg)
+    p = bf16_cstr_append(buf, p, ", 0fC2AEAC50; @%p8 mov.f32 ")
+    p = bf16_cstr_append(buf, p, out_reg)
+    p = bf16_cstr_append(buf, p, ", 0f00000000; @%p8 bra ")
+    p = bf16_cstr_append(buf, p, done_lbl)
+    p = bf16_cstr_append(buf, p, ";\n")
+    p = bf16_cstr_append(buf, p, "    setp.ge.ftz.f32 %p8, ")
+    p = bf16_cstr_append(buf, p, in_reg)
+    p = bf16_cstr_append(buf, p, ", 0f42B17218; @%p8 mov.f32 ")
+    p = bf16_cstr_append(buf, p, out_reg)
+    p = bf16_cstr_append(buf, p, ", 0f7F800000; @%p8 bra ")
+    p = bf16_cstr_append(buf, p, done_lbl)
+    p = bf16_cstr_append(buf, p, ";\n")
+    p = bf16_cstr_append(buf, p, "    fma.rn.ftz.f32 %fe0, ")
+    p = bf16_cstr_append(buf, p, in_reg)
+    p = bf16_cstr_append(buf, p, ", 0f3FB8AA3B, 0f4B400000;\n")
+    p = bf16_cstr_append(buf, p, "    mov.b32 %r12, %fe0; sub.u32 %r13, %r12, 0x4b400000; mov.b32 %rs1, %r13;\n")
+    p = bf16_cstr_append(buf, p, "    sub.rn.ftz.f32 %fe1, %fe0, 0f4B400000;\n")
+    p = bf16_cstr_append(buf, p, "    fma.rn.ftz.f32 %fe2, %fe1, 0fBF317200, ")
+    p = bf16_cstr_append(buf, p, in_reg)
+    p = bf16_cstr_append(buf, p, ";\n")
+    p = bf16_cstr_append(buf, p, "    fma.rn.ftz.f32 %fe2, %fe1, 0fB5BFBE8E, %fe2;\n")
+    p = bf16_cstr_append(buf, p, "    fma.rn.ftz.f32 %fe3, 0f3AB6DA02, %fe2, 0f3C091D98;\n")
+    p = bf16_cstr_append(buf, p, "    fma.rn.ftz.f32 %fe3, %fe3, %fe2, 0f3D2AAA2F;\n")
+    p = bf16_cstr_append(buf, p, "    fma.rn.ftz.f32 %fe3, %fe3, %fe2, 0f3E2AAA48;\n")
+    p = bf16_cstr_append(buf, p, "    fma.rn.ftz.f32 %fe3, %fe3, %fe2, 0f3F000000;\n")
+    p = bf16_cstr_append(buf, p, "    fma.rn.ftz.f32 %fe3, %fe3, %fe2, 0f3F800000;\n")
+    p = bf16_cstr_append(buf, p, "    fma.rn.ftz.f32 %fe3, %fe3, %fe2, 0f3F800000;\n")
+    p = bf16_cstr_append(buf, p, "    shr.s32 %rs2, %rs1, 1; sub.s32 %rs3, %rs1, %rs2;\n")
+    p = bf16_cstr_append(buf, p, "    add.s32 %rs2, %rs2, 127; mov.b32 %r13, %rs2; shl.b32 %r13, %r13, 23; mov.b32 %fe4, %r13;\n")
+    p = bf16_cstr_append(buf, p, "    add.s32 %rs3, %rs3, 127; mov.b32 %r14, %rs3; shl.b32 %r14, %r14, 23; mov.b32 %fe5, %r14;\n")
+    p = bf16_cstr_append(buf, p, "    mul.rn.ftz.f32 %fe6, %fe3, %fe4;\n")
+    p = bf16_cstr_append(buf, p, "    mul.rn.ftz.f32 ")
+    p = bf16_cstr_append(buf, p, out_reg)
+    p = bf16_cstr_append(buf, p, ", %fe6, %fe5;\n")
+    p = bf16_cstr_append(buf, p, done_lbl)
+    p = bf16_cstr_append(buf, p, ":\n")
+    p
+}
+
 fn ptx_cr_emit_embed_and_vec(buf: i64, pos: i64) -> i64 with Mut {
     var p = pos
     p = bf16_cstr_append(buf, p, ".visible .entry cuda_embed_lookup(\n")
@@ -611,32 +665,56 @@ fn ptx_cr_emit_rmsnorm(buf: i64, pos: i64) -> i64 with Mut {
 
 fn ptx_cr_emit_add_accum_rmsnorm(buf: i64, pos: i64) -> i64 with Mut {
     var p = pos
-    // Single-warp core for cuda_add_rmsnorm and cuda_add_accum_rmsnorm; grid_x=1, block_x=32.
+    // Multi-warp (block_x=256) with SMEM x cache (dim<=4096) and exact Warp-0 stride-32 reduction.
     p = bf16_cstr_append(buf, p, ".visible .entry cuda_add_accum_rmsnorm(\n")
     p = bf16_cstr_append(buf, p, "    .param .u64 p_x, .param .u64 p_h, .param .u64 p_w, .param .u64 p_out,\n")
     p = bf16_cstr_append(buf, p, "    .param .u64 p_conf, .param .u64 p_dim, .param .u64 p_eps, .param .u64 p_wl,\n")
     p = bf16_cstr_append(buf, p, "    .param .u64 p_flags, .param .u64 p_bf16\n) {\n")
-    p = bf16_cstr_append(buf, p, "    .reg .pred %p<10>; .reg .b32 %r<20>; .reg .b64 %rd<24>; .reg .f32 %f<20>;\n")
+    p = bf16_cstr_append(buf, p, "    .shared .align 4 .b8 s_x[16384]; .shared .align 4 .b8 s_inv[4];\n")
+    p = bf16_cstr_append(buf, p, "    .reg .pred %p<11>; .reg .b32 %r<22>; .reg .b64 %rd<26>; .reg .f32 %f<24>;\n")
     p = bf16_cstr_append(buf, p, "    ld.param.u64 %rd1, [p_x]; ld.param.u64 %rd2, [p_h];\n")
     p = bf16_cstr_append(buf, p, "    ld.param.u64 %rd3, [p_w]; ld.param.u64 %rd4, [p_out];\n")
     p = bf16_cstr_append(buf, p, "    ld.param.u64 %rd5, [p_conf]; ld.param.u64 %rd6, [p_dim];\n")
     p = bf16_cstr_append(buf, p, "    ld.param.u64 %rd7, [p_eps]; ld.param.u64 %rd8, [p_wl];\n")
     p = bf16_cstr_append(buf, p, "    ld.param.u64 %rd9, [p_flags]; ld.param.u64 %rd10, [p_bf16];\n")
     p = bf16_cstr_append(buf, p, "    setp.eq.u64 %p1, %rd6, 0; @%p1 bra L_AA_EXIT;\n")
-    p = bf16_cstr_append(buf, p, "    mov.u32 %r1, %tid.x; setp.ge.u32 %p1, %r1, 32; @%p1 bra L_AA_EXIT;\n")
-    p = bf16_cstr_append(buf, p, "    cvt.u64.u32 %rd12, %r1; mov.f32 %f1, 0f00000000; mov.u64 %rd13, %rd12;\n")
-    p = bf16_cstr_append(buf, p, "L_AA_L1:\n    setp.ge.u64 %p2, %rd13, %rd6; @%p2 bra L_AA_WRED;\n")
+    p = bf16_cstr_append(buf, p, "    mov.u32 %r1, %tid.x; mov.u32 %r2, %ntid.x; mov.u32 %r16, s_x;\n")
+    p = bf16_cstr_append(buf, p, "    cvt.u64.u32 %rd12, %r1; cvt.u64.u32 %rd23, %r2;\n")
+    p = bf16_cstr_append(buf, p, "    setp.le.u64 %p10, %rd6, 4096;\n")
+    // Phase 0: parallel residual add across all threads; cache in s_x if dim <= 4096
+    p = bf16_cstr_append(buf, p, "    mov.u64 %rd13, %rd12;\n")
+    p = bf16_cstr_append(buf, p, "L_AA_P0:\n    setp.ge.u64 %p2, %rd13, %rd6; @%p2 bra L_AA_P0_D;\n")
     p = bf16_cstr_append(buf, p, "    shl.b64 %rd14, %rd13, 2; add.u64 %rd15, %rd1, %rd14; add.u64 %rd16, %rd2, %rd14;\n")
-    p = bf16_cstr_append(buf, p, "    ld.global.f32 %f2, [%rd15]; ld.global.f32 %f3, [%rd16];\n")
+    p = bf16_cstr_append(buf, p, "    ld.global.f32 %f2, [%rd15]; ld.global.nc.f32 %f3, [%rd16];\n")
     p = bf16_cstr_append(buf, p, "    add.rn.ftz.f32 %f4, %f2, %f3; st.global.f32 [%rd15], %f4;\n")
-    p = bf16_cstr_append(buf, p, "    fma.rn.ftz.f32 %f1, %f4, %f4, %f1; add.u64 %rd13, %rd13, 32; bra L_AA_L1;\nL_AA_WRED:\n")
+    p = bf16_cstr_append(buf, p, "    @%p10 cvt.u32.u64 %r15, %rd14; @%p10 add.u32 %r15, %r16, %r15; @%p10 st.shared.f32 [%r15], %f4;\n")
+    p = bf16_cstr_append(buf, p, "    add.u64 %rd13, %rd13, %rd23; bra L_AA_P0;\n")
+    p = bf16_cstr_append(buf, p, "L_AA_P0_D:\n    bar.sync 0;\n")
+    // Phase 1: exact Warp-0 stride-32 sum-of-squares reduction + conformal update
+    p = bf16_cstr_append(buf, p, "    setp.ge.u32 %p1, %r1, 32; @%p1 bra L_AA_P1_D;\n")
+    p = bf16_cstr_append(buf, p, "    mov.f32 %f1, 0f00000000; mov.u64 %rd13, %rd12;\n")
+    p = bf16_cstr_append(buf, p, "    @!%p10 bra L_AA_L1_G;\n")
+    p = bf16_cstr_append(buf, p, "L_AA_L1_S:\n    add.u64 %rd17, %rd13, 96; setp.ge.u64 %p2, %rd17, %rd6; @%p2 bra L_AA_L1_ST;\n")
+    p = bf16_cstr_append(buf, p, "    cvt.u32.u64 %r15, %rd13; shl.b32 %r15, %r15, 2; add.u32 %r15, %r16, %r15;\n")
+    p = bf16_cstr_append(buf, p, "    ld.shared.f32 %f2, [%r15]; ld.shared.f32 %f3, [%r15+128];\n")
+    p = bf16_cstr_append(buf, p, "    ld.shared.f32 %f4, [%r15+256]; ld.shared.f32 %f6, [%r15+384];\n")
+    p = bf16_cstr_append(buf, p, "    fma.rn.ftz.f32 %f1, %f2, %f2, %f1; fma.rn.ftz.f32 %f1, %f3, %f3, %f1;\n")
+    p = bf16_cstr_append(buf, p, "    fma.rn.ftz.f32 %f1, %f4, %f4, %f1; fma.rn.ftz.f32 %f1, %f6, %f6, %f1;\n")
+    p = bf16_cstr_append(buf, p, "    add.u64 %rd13, %rd13, 128; bra L_AA_L1_S;\n")
+    p = bf16_cstr_append(buf, p, "L_AA_L1_ST:\n    setp.ge.u64 %p2, %rd13, %rd6; @%p2 bra L_AA_WRED;\n")
+    p = bf16_cstr_append(buf, p, "    cvt.u32.u64 %r15, %rd13; shl.b32 %r15, %r15, 2; add.u32 %r15, %r16, %r15; ld.shared.f32 %f2, [%r15];\n")
+    p = bf16_cstr_append(buf, p, "    fma.rn.ftz.f32 %f1, %f2, %f2, %f1; add.u64 %rd13, %rd13, 32; bra L_AA_L1_ST;\n")
+    p = bf16_cstr_append(buf, p, "L_AA_L1_G:\n    setp.ge.u64 %p2, %rd13, %rd6; @%p2 bra L_AA_WRED;\n")
+    p = bf16_cstr_append(buf, p, "    shl.b64 %rd14, %rd13, 2; add.u64 %rd15, %rd1, %rd14; ld.global.f32 %f2, [%rd15];\n")
+    p = bf16_cstr_append(buf, p, "    fma.rn.ftz.f32 %f1, %f2, %f2, %f1; add.u64 %rd13, %rd13, 32; bra L_AA_L1_G;\nL_AA_WRED:\n")
     p = ptx_cr_warp_sum_f32(buf, p, "%f1", "%r10", "%r11", "%f10")
     p = bf16_cstr_append(buf, p, "    cvt.rn.f32.u64 %f7, %rd6; div.rn.ftz.f32 %f8, %f1, %f7;\n")
     p = bf16_cstr_append(buf, p, "    cvt.u32.u64 %r4, %rd7; mov.b32 %f9, %r4; add.rn.ftz.f32 %f8, %f8, %f9;\n")
     p = bf16_cstr_append(buf, p, "    sqrt.rn.ftz.f32 %f8, %f8; div.rn.ftz.f32 %f11, 0f3F800000, %f8;\n")
-    p = bf16_cstr_append(buf, p, "    setp.eq.u32 %p4, %r1, 0; @!%p4 bra L_AA_LOOP2;\n")
-    p = bf16_cstr_append(buf, p, "    and.b64 %rd18, %rd9, 2; setp.ne.u64 %p5, %rd18, 0; @!%p5 bra L_AA_LOOP2;\n")
-    p = bf16_cstr_append(buf, p, "    setp.ne.u64 %p6, %rd5, 0; @!%p6 bra L_AA_LOOP2;\n")
+    p = bf16_cstr_append(buf, p, "    setp.eq.u32 %p4, %r1, 0; @!%p4 bra L_AA_P1_D;\n")
+    p = bf16_cstr_append(buf, p, "    st.shared.f32 [s_inv], %f11;\n")
+    p = bf16_cstr_append(buf, p, "    and.b64 %rd18, %rd9, 2; setp.ne.u64 %p5, %rd18, 0; @!%p5 bra L_AA_P1_D;\n")
+    p = bf16_cstr_append(buf, p, "    setp.ne.u64 %p6, %rd5, 0; @!%p6 bra L_AA_P1_D;\n")
     p = bf16_cstr_append(buf, p, "    and.b64 %rd19, %rd9, 1; setp.ne.u64 %p7, %rd19, 0;\n")
     p = bf16_cstr_append(buf, p, "    @%p7 ld.global.f32 %f12, [%rd5+16]; @!%p7 ld.global.f32 %f12, [%rd5];\n")
     p = bf16_cstr_append(buf, p, "    cvt.u32.u64 %r5, %rd8; mov.b32 %f13, %r5; sqrt.rn.ftz.f32 %f14, %f1;\n")
@@ -645,15 +723,19 @@ fn ptx_cr_emit_add_accum_rmsnorm(buf: i64, pos: i64) -> i64 with Mut {
     p = bf16_cstr_append(buf, p, "    setp.ne.u64 %p8, %rd20, 0; setp.ne.u32 %p9, %r6, 0; and.pred %p8, %p8, %p9;\n")
     p = bf16_cstr_append(buf, p, "    @%p8 mul.rn.ftz.f32 %f15, %f15, %f11;\n")
     p = bf16_cstr_append(buf, p, "    st.global.f32 [%rd5], %f15;\n")
-    p = bf16_cstr_append(buf, p, "L_AA_LOOP2:\n    setp.ne.u64 %p5, %rd10, 0; mov.u64 %rd13, %rd12;\n")
+    // Phase 2: parallel scale + store across all threads
+    p = bf16_cstr_append(buf, p, "L_AA_P1_D:\n    bar.sync 0; ld.shared.f32 %f11, [s_inv];\n")
+    p = bf16_cstr_append(buf, p, "    setp.ne.u64 %p5, %rd10, 0; mov.u64 %rd13, %rd12;\n")
     p = bf16_cstr_append(buf, p, "L_AA_L2:\n    setp.ge.u64 %p2, %rd13, %rd6; @%p2 bra L_AA_EXIT;\n")
-    p = bf16_cstr_append(buf, p, "    shl.b64 %rd14, %rd13, 2; add.u64 %rd15, %rd1, %rd14; add.u64 %rd16, %rd4, %rd14;\n")
-    p = bf16_cstr_append(buf, p, "    ld.global.f32 %f16, [%rd15];\n    @%p5 bra L_AA_BF;\n")
-    p = bf16_cstr_append(buf, p, "    add.u64 %rd21, %rd3, %rd14; ld.global.f32 %f17, [%rd21]; bra L_AA_WR;\n")
+    p = bf16_cstr_append(buf, p, "    shl.b64 %rd14, %rd13, 2; add.u64 %rd16, %rd4, %rd14;\n")
+    p = bf16_cstr_append(buf, p, "    @%p10 cvt.u32.u64 %r15, %rd14; @%p10 add.u32 %r15, %r16, %r15; @%p10 ld.shared.f32 %f16, [%r15];\n")
+    p = bf16_cstr_append(buf, p, "    @!%p10 add.u64 %rd15, %rd1, %rd14; @!%p10 ld.global.f32 %f16, [%rd15];\n")
+    p = bf16_cstr_append(buf, p, "    @%p5 bra L_AA_BF;\n")
+    p = bf16_cstr_append(buf, p, "    add.u64 %rd21, %rd3, %rd14; ld.global.nc.f32 %f17, [%rd21]; bra L_AA_WR;\n")
     p = bf16_cstr_append(buf, p, "L_AA_BF:\n    shl.b64 %rd22, %rd13, 1; add.u64 %rd21, %rd3, %rd22;\n")
-    p = bf16_cstr_append(buf, p, "    ld.global.u16 %r7, [%rd21]; cvt.u32.u16 %r8, %r7; shl.b32 %r9, %r8, 16; mov.b32 %f17, %r9;\n")
+    p = bf16_cstr_append(buf, p, "    ld.global.nc.u16 %r7, [%rd21]; cvt.u32.u16 %r8, %r7; shl.b32 %r9, %r8, 16; mov.b32 %f17, %r9;\n")
     p = bf16_cstr_append(buf, p, "L_AA_WR:\n    mul.rn.ftz.f32 %f18, %f16, %f11; mul.rn.ftz.f32 %f19, %f18, %f17; st.global.f32 [%rd16], %f19;\n")
-    p = bf16_cstr_append(buf, p, "    add.u64 %rd13, %rd13, 32; bra L_AA_L2;\n")
+    p = bf16_cstr_append(buf, p, "    add.u64 %rd13, %rd13, %rd23; bra L_AA_L2;\n")
     p = bf16_cstr_append(buf, p, "L_AA_EXIT:\n    ret;\n}\n\n")
     p
 }
@@ -812,6 +894,76 @@ fn ptx_cr_emit_qk_rope_and_gqa(buf: i64, pos: i64) -> i64 with Mut {
     p = bf16_cstr_append(buf, p, "    @%p4 shl.b64 %rd19, %rd18, 2; @%p4 add.u64 %rd19, %rd14, %rd19; @%p4 st.global.f32 [%rd19], 0f00000000;\n")
     p = bf16_cstr_append(buf, p, "    add.u64 %rd17, %rd17, 1; bra L_GQA_ZLOOP;\n")
     p = bf16_cstr_append(buf, p, "L_GQA_EXIT:\n    ret;\n}\n\n")
+
+    // Register-only head_dim == 128 fast path (0 bytes .local, inlined sounio_exp_f32, exact FMA order)
+    p = bf16_cstr_append(buf, p, ".visible .entry cuda_paged_gqa_warp_d128(\n")
+    p = bf16_cstr_append(buf, p, "    .param .u64 p_q, .param .u64 p_kcache, .param .u64 p_vcache, .param .u64 p_out,\n")
+    p = bf16_cstr_append(buf, p, "    .param .u64 p_nq, .param .u64 p_nkv, .param .u64 p_hdim, .param .u64 p_seq\n) {\n")
+    p = bf16_cstr_append(buf, p, "    .reg .pred %p<10>; .reg .b32 %r<16>; .reg .s32 %rs<4>; .reg .b64 %rd<28>; .reg .f32 %f<18>;\n")
+    p = bf16_cstr_append(buf, p, "    .reg .f32 %fq<4>; .reg .f32 %fa<4>; .reg .f32 %fk<4>; .reg .f32 %fe<8>;\n")
+    p = bf16_cstr_append(buf, p, "    ld.param.u64 %rd1, [p_q]; ld.param.u64 %rd2, [p_kcache]; ld.param.u64 %rd3, [p_vcache];\n")
+    p = bf16_cstr_append(buf, p, "    ld.param.u64 %rd4, [p_out]; ld.param.u64 %rd5, [p_nq]; ld.param.u64 %rd6, [p_nkv];\n")
+    p = bf16_cstr_append(buf, p, "    ld.param.u64 %rd7, [p_hdim]; ld.param.u64 %rd8, [p_seq];\n")
+    p = bf16_cstr_append(buf, p, "    mov.u32 %r1, %ctaid.x; cvt.u64.u32 %rd9, %r1;\n")
+    p = bf16_cstr_append(buf, p, "    setp.ge.u64 %p1, %rd9, %rd5; @%p1 bra L_G128_EXIT;\n")
+    p = bf16_cstr_append(buf, p, "    setp.eq.u64 %p2, %rd6, 0; @%p2 bra L_G128_EXIT;\n")
+    p = bf16_cstr_append(buf, p, "    setp.ne.u64 %p2, %rd7, 128; @%p2 bra L_G128_EXIT;\n")
+    p = bf16_cstr_append(buf, p, "    div.u64 %rd10, %rd5, %rd6; div.u64 %rd11, %rd9, %rd10;\n")
+    p = bf16_cstr_append(buf, p, "    cvt.rn.f32.u64 %f1, %rd7; sqrt.rn.ftz.f32 %f1, %f1; div.rn.ftz.f32 %f2, 0f3F800000, %f1;\n")
+    p = bf16_cstr_append(buf, p, "    mov.u32 %r2, %tid.x; and.b32 %r2, %r2, 31; cvt.u64.u32 %rd16, %r2; shl.b64 %rd17, %rd16, 2;\n")
+    p = bf16_cstr_append(buf, p, "    shl.b64 %rd12, %rd9, 9; add.u64 %rd12, %rd12, %rd17;\n")
+    p = bf16_cstr_append(buf, p, "    add.u64 %rd13, %rd1, %rd12; add.u64 %rd14, %rd4, %rd12;\n")
+    p = bf16_cstr_append(buf, p, "    setp.eq.u64 %p3, %rd8, 0; @%p3 bra L_G128_ZERO;\n")
+    p = bf16_cstr_append(buf, p, "    ld.global.nc.f32 %fq0, [%rd13]; ld.global.nc.f32 %fq1, [%rd13+128];\n")
+    p = bf16_cstr_append(buf, p, "    ld.global.nc.f32 %fq2, [%rd13+256]; ld.global.nc.f32 %fq3, [%rd13+384];\n")
+    p = bf16_cstr_append(buf, p, "    shl.b64 %rd21, %rd6, 9; shl.b64 %rd22, %rd11, 9; add.u64 %rd22, %rd22, %rd17;\n")
+    p = bf16_cstr_append(buf, p, "    add.u64 %rd25, %rd2, %rd22; add.u64 %rd26, %rd3, %rd22;\n")
+    // t = 0
+    p = bf16_cstr_append(buf, p, "    ld.global.nc.f32 %fk0, [%rd25]; ld.global.nc.f32 %fk1, [%rd25+128];\n")
+    p = bf16_cstr_append(buf, p, "    ld.global.nc.f32 %fk2, [%rd25+256]; ld.global.nc.f32 %fk3, [%rd25+384];\n")
+    p = bf16_cstr_append(buf, p, "    mov.f32 %f6, 0f00000000;\n")
+    p = bf16_cstr_append(buf, p, "    fma.rn.ftz.f32 %f6, %fq0, %fk0, %f6; fma.rn.ftz.f32 %f6, %fq1, %fk1, %f6;\n")
+    p = bf16_cstr_append(buf, p, "    fma.rn.ftz.f32 %f6, %fq2, %fk2, %f6; fma.rn.ftz.f32 %f6, %fq3, %fk3, %f6;\n")
+    p = ptx_cr_warp_sum_f32(buf, p, "%f6", "%r10", "%r11", "%f10")
+    p = bf16_cstr_append(buf, p, "    mul.rn.ftz.f32 %f4, %f6, %f2; mov.f32 %f5, 0f3F800000;\n")
+    p = bf16_cstr_append(buf, p, "    ld.global.nc.f32 %fa0, [%rd26]; ld.global.nc.f32 %fa1, [%rd26+128];\n")
+    p = bf16_cstr_append(buf, p, "    ld.global.nc.f32 %fa2, [%rd26+256]; ld.global.nc.f32 %fa3, [%rd26+384];\n")
+    p = bf16_cstr_append(buf, p, "    mov.u64 %rd23, 1; setp.ge.u64 %p7, %rd23, %rd8; @%p7 bra L_G128_NORM;\n")
+    // t = 1 .. seq - 1
+    p = bf16_cstr_append(buf, p, "L_G128_T:\n    add.u64 %rd25, %rd25, %rd21; add.u64 %rd26, %rd26, %rd21;\n")
+    p = bf16_cstr_append(buf, p, "    ld.global.nc.f32 %fk0, [%rd25]; ld.global.nc.f32 %fk1, [%rd25+128];\n")
+    p = bf16_cstr_append(buf, p, "    ld.global.nc.f32 %fk2, [%rd25+256]; ld.global.nc.f32 %fk3, [%rd25+384];\n")
+    p = bf16_cstr_append(buf, p, "    mov.f32 %f6, 0f00000000;\n")
+    p = bf16_cstr_append(buf, p, "    fma.rn.ftz.f32 %f6, %fq0, %fk0, %f6; fma.rn.ftz.f32 %f6, %fq1, %fk1, %f6;\n")
+    p = bf16_cstr_append(buf, p, "    fma.rn.ftz.f32 %f6, %fq2, %fk2, %f6; fma.rn.ftz.f32 %f6, %fq3, %fk3, %f6;\n")
+    p = ptx_cr_warp_sum_f32(buf, p, "%f6", "%r10", "%r11", "%f10")
+    p = bf16_cstr_append(buf, p, "    mul.rn.ftz.f32 %f9, %f6, %f2;\n")
+    p = bf16_cstr_append(buf, p, "    ld.global.nc.f32 %fk0, [%rd26]; ld.global.nc.f32 %fk1, [%rd26+128];\n")
+    p = bf16_cstr_append(buf, p, "    ld.global.nc.f32 %fk2, [%rd26+256]; ld.global.nc.f32 %fk3, [%rd26+384];\n")
+    p = bf16_cstr_append(buf, p, "    setp.gt.ftz.f32 %p6, %f9, %f4; @%p6 bra L_G128_NEWMAX;\n")
+    p = bf16_cstr_append(buf, p, "    sub.rn.ftz.f32 %f11, %f9, %f4;\n")
+    p = ptx_cr_emit_sounio_exp_inline(buf, p, "%f11", "%f12", "L_G128_E1")
+    p = bf16_cstr_append(buf, p, "    add.rn.ftz.f32 %f5, %f5, %f12;\n")
+    p = bf16_cstr_append(buf, p, "    fma.rn.ftz.f32 %fa0, %f12, %fk0, %fa0; fma.rn.ftz.f32 %fa1, %f12, %fk1, %fa1;\n")
+    p = bf16_cstr_append(buf, p, "    fma.rn.ftz.f32 %fa2, %f12, %fk2, %fa2; fma.rn.ftz.f32 %fa3, %f12, %fk3, %fa3;\n")
+    p = bf16_cstr_append(buf, p, "    bra L_G128_TNEXT;\n")
+    p = bf16_cstr_append(buf, p, "L_G128_NEWMAX:\n    sub.rn.ftz.f32 %f11, %f4, %f9;\n")
+    p = ptx_cr_emit_sounio_exp_inline(buf, p, "%f11", "%f12", "L_G128_E2")
+    p = bf16_cstr_append(buf, p, "    fma.rn.ftz.f32 %f5, %f5, %f12, 0f3F800000; mov.f32 %f4, %f9;\n")
+    p = bf16_cstr_append(buf, p, "    fma.rn.ftz.f32 %fa0, %fa0, %f12, %fk0; fma.rn.ftz.f32 %fa1, %fa1, %f12, %fk1;\n")
+    p = bf16_cstr_append(buf, p, "    fma.rn.ftz.f32 %fa2, %fa2, %f12, %fk2; fma.rn.ftz.f32 %fa3, %fa3, %f12, %fk3;\n")
+    p = bf16_cstr_append(buf, p, "L_G128_TNEXT:\n    add.u64 %rd23, %rd23, 1; setp.lt.u64 %p7, %rd23, %rd8; @%p7 bra L_G128_T;\n")
+    p = bf16_cstr_append(buf, p, "L_G128_NORM:\n    setp.gt.ftz.f32 %p3, %f5, 0f00000000; @!%p3 bra L_G128_ZERO;\n")
+    p = bf16_cstr_append(buf, p, "    div.rn.ftz.f32 %f15, 0f3F800000, %f5;\n")
+    p = bf16_cstr_append(buf, p, "    mul.rn.ftz.f32 %fa0, %fa0, %f15; st.global.f32 [%rd14], %fa0;\n")
+    p = bf16_cstr_append(buf, p, "    mul.rn.ftz.f32 %fa1, %fa1, %f15; st.global.f32 [%rd14+128], %fa1;\n")
+    p = bf16_cstr_append(buf, p, "    mul.rn.ftz.f32 %fa2, %fa2, %f15; st.global.f32 [%rd14+256], %fa2;\n")
+    p = bf16_cstr_append(buf, p, "    mul.rn.ftz.f32 %fa3, %fa3, %f15; st.global.f32 [%rd14+384], %fa3;\n")
+    p = bf16_cstr_append(buf, p, "    bra L_G128_EXIT;\n")
+    p = bf16_cstr_append(buf, p, "L_G128_ZERO:\n")
+    p = bf16_cstr_append(buf, p, "    st.global.f32 [%rd14], 0f00000000; st.global.f32 [%rd14+128], 0f00000000;\n")
+    p = bf16_cstr_append(buf, p, "    st.global.f32 [%rd14+256], 0f00000000; st.global.f32 [%rd14+384], 0f00000000;\n")
+    p = bf16_cstr_append(buf, p, "L_G128_EXIT:\n    ret;\n}\n\n")
     p
 }
 
@@ -1241,12 +1393,13 @@ fn ptx_cr_emit_q4s_pack_word(buf: i64, pos: i64, dst_reg: string, k_off: string,
     p
 }
 
-fn ptx_cr_emit_q4s_dot_word(buf: i64, pos: i64, w_reg: string, x_byte_off: string) -> i64 with Mut {
+fn ptx_cr_emit_q4s_dot_word(buf: i64, pos: i64, w_reg: string, x_off0: string, x_off1: string) -> i64 with Mut {
     var p = pos
-    p = bf16_cstr_append(buf, p, "    add.u64 %rd17, %rd16, ")
-    p = bf16_cstr_append(buf, p, x_byte_off)
-    p = bf16_cstr_append(buf, p, "; ld.global.v4.f32 {%f4, %f5, %f6, %f7}, [%rd17];\n")
-    p = bf16_cstr_append(buf, p, "    ld.global.v4.f32 {%f8, %f9, %f10, %f11}, [%rd17+16];\n")
+    p = bf16_cstr_append(buf, p, "    ld.global.nc.v4.f32 {%f4, %f5, %f6, %f7}, [%rd16+")
+    p = bf16_cstr_append(buf, p, x_off0)
+    p = bf16_cstr_append(buf, p, "];\n    ld.global.nc.v4.f32 {%f8, %f9, %f10, %f11}, [%rd16+")
+    p = bf16_cstr_append(buf, p, x_off1)
+    p = bf16_cstr_append(buf, p, "];\n")
     var nib: i64 = 0
     while nib < 8 {
         let freg = if nib == 0 { "%f4" } else if nib == 1 { "%f5" } else if nib == 2 { "%f6" } else if nib == 3 { "%f7" }
@@ -1269,6 +1422,65 @@ fn ptx_cr_emit_q4s_dot_word(buf: i64, pos: i64, w_reg: string, x_byte_off: strin
         p = bf16_cstr_append(buf, p, ", %f16;\n")
         nib = nib + 1
     }
+    p
+}
+
+fn ptx_cr_emit_q4s_gemm_word(buf: i64, pos: i64, w_reg: string, x_off: string, done_lbl: string) -> i64 with Mut {
+    var p = pos
+    var nib: i64 = 0
+    while nib < 8 {
+        let fw = if nib == 0 { "%fw0" } else if nib == 1 { "%fw1" } else if nib == 2 { "%fw2" } else if nib == 3 { "%fw3" }
+            else if nib == 4 { "%fw4" } else if nib == 5 { "%fw5" } else if nib == 6 { "%fw6" } else { "%fw7" }
+        let sh = if nib == 0 { "0" } else if nib == 1 { "4" } else if nib == 2 { "8" } else if nib == 3 { "12" }
+            else if nib == 4 { "16" } else if nib == 5 { "20" } else if nib == 6 { "24" } else { "28" }
+        if nib == 0 {
+            p = bf16_cstr_append(buf, p, "    and.b32 %r14, ")
+            p = bf16_cstr_append(buf, p, w_reg)
+            p = bf16_cstr_append(buf, p, ", 15; ")
+        } else {
+            p = bf16_cstr_append(buf, p, "    shr.u32 %r14, ")
+            p = bf16_cstr_append(buf, p, w_reg)
+            p = bf16_cstr_append(buf, p, ", ")
+            p = bf16_cstr_append(buf, p, sh)
+            p = bf16_cstr_append(buf, p, "; and.b32 %r14, %r14, 15; ")
+        }
+        p = bf16_cstr_append(buf, p, "add.s32 %rs1, %r14, -8; cvt.rn.f32.s32 ")
+        p = bf16_cstr_append(buf, p, fw)
+        p = bf16_cstr_append(buf, p, ", %rs1;\n")
+        nib = nib + 1
+    }
+    p = bf16_cstr_append(buf, p, "    add.u64 %rd20, %rd18, ")
+    p = bf16_cstr_append(buf, p, x_off)
+    p = bf16_cstr_append(buf, p, ";\n")
+    var ti: i64 = 0
+    while ti < 8 {
+        if ti > 0 {
+            p = ptx_cr_tok_lbl(buf, p, "    @!%pb", ti)
+            p = bf16_cstr_append(buf, p, " bra ")
+            p = bf16_cstr_append(buf, p, done_lbl)
+            p = bf16_cstr_append(buf, p, ";\n    add.u64 %rd20, %rd20, %rd13;\n")
+        }
+        p = bf16_cstr_append(buf, p, "    ld.global.nc.v4.f32 {%fx0, %fx1, %fx2, %fx3}, [%rd20];\n")
+        p = bf16_cstr_append(buf, p, "    ld.global.nc.v4.f32 {%fx4, %fx5, %fx6, %fx7}, [%rd20+16];\n")
+        var k: i64 = 0
+        while k < 8 {
+            let fw = if k == 0 { "%fw0" } else if k == 1 { "%fw1" } else if k == 2 { "%fw2" } else if k == 3 { "%fw3" }
+                else if k == 4 { "%fw4" } else if k == 5 { "%fw5" } else if k == 6 { "%fw6" } else { "%fw7" }
+            let fx = if k == 0 { "%fx0" } else if k == 1 { "%fx1" } else if k == 2 { "%fx2" } else if k == 3 { "%fx3" }
+                else if k == 4 { "%fx4" } else if k == 5 { "%fx5" } else if k == 6 { "%fx6" } else { "%fx7" }
+            p = ptx_cr_tok_lbl(buf, p, "    fma.rn.ftz.f32 %fb", ti)
+            p = bf16_cstr_append(buf, p, ", ")
+            p = bf16_cstr_append(buf, p, fw)
+            p = bf16_cstr_append(buf, p, ", ")
+            p = bf16_cstr_append(buf, p, fx)
+            p = ptx_cr_tok_lbl(buf, p, ", %fb", ti)
+            p = bf16_cstr_append(buf, p, ";\n")
+            k = k + 1
+        }
+        ti = ti + 1
+    }
+    p = bf16_cstr_append(buf, p, done_lbl)
+    p = bf16_cstr_append(buf, p, ":\n")
     p
 }
 
@@ -1335,17 +1547,17 @@ fn ptx_cr_emit_q4_soa(buf: i64, pos: i64) -> i64 with Mut {
     p = bf16_cstr_append(buf, p, "    and.b64 %rd18, %rd3, 15; setp.eq.u64 %p6, %rd18, 0;\n")
     p = bf16_cstr_append(buf, p, "    mov.f32 %f1, 0f00000000; mov.u64 %rd12, %rd8;\n")
     p = bf16_cstr_append(buf, p, "L_Q4SG_B:\n    setp.ge.u64 %p2, %rd12, %rd9; @%p2 bra L_Q4SG_RED;\n")
-    p = bf16_cstr_append(buf, p, "    shl.b64 %rd13, %rd12, 1; add.u64 %rd13, %rd11, %rd13; ld.global.u16 %hu1, [%rd13];\n")
+    p = bf16_cstr_append(buf, p, "    shl.b64 %rd13, %rd12, 1; add.u64 %rd13, %rd11, %rd13; ld.global.nc.u16 %hu1, [%rd13];\n")
     p = bf16_cstr_append(buf, p, "    mov.b16 %hf1, %hu1; cvt.f32.f16 %f2, %hf1;\n")
     p = bf16_cstr_append(buf, p, "    shl.b64 %rd13, %rd12, 5; add.u64 %rd14, %rd13, 32; setp.le.u64 %p3, %rd14, %rd6; and.pred %p3, %p3, %p6;\n")
     p = bf16_cstr_append(buf, p, "    mov.f32 %f16, 0f00000000;\n")
     p = bf16_cstr_append(buf, p, "    @!%p3 bra L_Q4SG_TAIL;\n")
-    p = bf16_cstr_append(buf, p, "    shl.b64 %rd14, %rd12, 4; add.u64 %rd14, %rd10, %rd14; ld.global.v4.b32 {%r10, %r11, %r12, %r13}, [%rd14];\n")
+    p = bf16_cstr_append(buf, p, "    shl.b64 %rd14, %rd12, 4; add.u64 %rd14, %rd10, %rd14; ld.global.nc.v4.b32 {%r10, %r11, %r12, %r13}, [%rd14];\n")
     p = bf16_cstr_append(buf, p, "    shl.b64 %rd15, %rd13, 2; add.u64 %rd16, %rd3, %rd15;\n")
-    p = ptx_cr_emit_q4s_dot_word(buf, p, "%r10", "0")
-    p = ptx_cr_emit_q4s_dot_word(buf, p, "%r11", "32")
-    p = ptx_cr_emit_q4s_dot_word(buf, p, "%r12", "64")
-    p = ptx_cr_emit_q4s_dot_word(buf, p, "%r13", "96")
+    p = ptx_cr_emit_q4s_dot_word(buf, p, "%r10", "0", "16")
+    p = ptx_cr_emit_q4s_dot_word(buf, p, "%r11", "32", "48")
+    p = ptx_cr_emit_q4s_dot_word(buf, p, "%r12", "64", "80")
+    p = ptx_cr_emit_q4s_dot_word(buf, p, "%r13", "96", "112")
     p = bf16_cstr_append(buf, p, "    fma.rn.ftz.f32 %f1, %f2, %f16, %f1; add.u64 %rd12, %rd12, 32; bra L_Q4SG_B;\n")
     p = bf16_cstr_append(buf, p, "L_Q4SG_TAIL:\n    shl.b64 %rd14, %rd12, 4; add.u64 %rd14, %rd10, %rd14; mov.u64 %rd15, 0;\n")
     p = bf16_cstr_append(buf, p, "L_Q4SG_TL:\n    setp.ge.u64 %p4, %rd15, 32; @%p4 bra L_Q4SG_TD;\n")
@@ -1360,6 +1572,111 @@ fn ptx_cr_emit_q4_soa(buf: i64, pos: i64) -> i64 with Mut {
     p = bf16_cstr_append(buf, p, "    setp.eq.u32 %p4, %r4, 0; @!%p4 bra L_Q4SG_EXIT;\n")
     p = bf16_cstr_append(buf, p, "    shl.b64 %rd18, %rd7, 2; add.u64 %rd19, %rd4, %rd18; st.global.f32 [%rd19], %f1;\n")
     p = bf16_cstr_append(buf, p, "L_Q4SG_EXIT:\n    ret;\n}\n\n")
+
+    // Batched SIMT prefill GEMM on Q4_SoA_32 (1..8 tokens/CTA): exact per-token FMA order of cuda_gemv_q4_soa
+    p = bf16_cstr_append(buf, p, ".visible .entry cuda_gemm_q4_soa_simt(\n")
+    p = bf16_cstr_append(buf, p, "    .param .u64 p_nib, .param .u64 p_scl, .param .u64 p_x, .param .u64 p_y,\n")
+    p = bf16_cstr_append(buf, p, "    .param .u64 p_out, .param .u64 p_in, .param .u64 p_ntoks, .param .u64 p_dmy\n) {\n")
+    p = bf16_cstr_append(buf, p, "    .reg .pred %p<8>; .reg .pred %pb<9>; .reg .u16 %hu<2>; .reg .f16 %hf<2>;\n")
+    p = bf16_cstr_append(buf, p, "    .reg .b32 %r<20>; .reg .s32 %rs<4>; .reg .b64 %rd<26>;\n")
+    p = bf16_cstr_append(buf, p, "    .reg .f32 %f<4>; .reg .f32 %fa<8>; .reg .f32 %fb<8>; .reg .f32 %fw<8>; .reg .f32 %fx<8>;\n")
+    p = bf16_cstr_append(buf, p, "    ld.param.u64 %rd1, [p_nib]; ld.param.u64 %rd2, [p_scl]; ld.param.u64 %rd3, [p_x]; ld.param.u64 %rd4, [p_y];\n")
+    p = bf16_cstr_append(buf, p, "    ld.param.u64 %rd5, [p_out]; ld.param.u64 %rd6, [p_in]; ld.param.u64 %rd7, [p_ntoks];\n")
+    p = bf16_cstr_append(buf, p, "    mov.u32 %r1, %ctaid.x; mov.u32 %r2, %tid.x; shr.u32 %r3, %r2, 5; and.b32 %r4, %r2, 31;\n")
+    p = bf16_cstr_append(buf, p, "    mad.lo.u32 %r5, %r1, 8, %r3; cvt.u64.u32 %rd9, %r5;\n")
+    p = bf16_cstr_append(buf, p, "    setp.ge.u64 %p1, %rd9, %rd5; @%p1 bra L_Q4GM_EXIT;\n")
+    p = bf16_cstr_append(buf, p, "    setp.eq.u64 %p1, %rd7, 0; @%p1 bra L_Q4GM_EXIT;\n")
+    var gi: i64 = 0
+    while gi < 8 {
+        p = ptx_cr_tok_lbl(buf, p, "    mov.f32 %fa", gi)
+        p = bf16_cstr_append(buf, p, ", 0f00000000;\n")
+        gi = gi + 1
+    }
+    p = bf16_cstr_append(buf, p, "    setp.gt.u64 %pb1, %rd7, 1; setp.gt.u64 %pb2, %rd7, 2; setp.gt.u64 %pb3, %rd7, 3;\n")
+    p = bf16_cstr_append(buf, p, "    setp.gt.u64 %pb4, %rd7, 4; setp.gt.u64 %pb5, %rd7, 5; setp.gt.u64 %pb6, %rd7, 6; setp.gt.u64 %pb7, %rd7, 7;\n")
+    p = bf16_cstr_append(buf, p, "    cvt.u64.u32 %rd8, %r4; add.u64 %rd10, %rd6, 31; shr.u64 %rd10, %rd10, 5;\n")
+    p = bf16_cstr_append(buf, p, "    mul.lo.u64 %rd11, %rd9, %rd10; shl.b64 %rd12, %rd11, 4; add.u64 %rd11, %rd1, %rd12;\n")
+    p = bf16_cstr_append(buf, p, "    mul.lo.u64 %rd12, %rd9, %rd10; shl.b64 %rd12, %rd12, 1; add.u64 %rd12, %rd2, %rd12;\n")
+    p = bf16_cstr_append(buf, p, "    shl.b64 %rd13, %rd6, 2; shl.b64 %rd14, %rd5, 2;\n")
+    p = bf16_cstr_append(buf, p, "    and.b64 %rd22, %rd3, 15; setp.eq.u64 %p6, %rd22, 0;\n")
+    p = bf16_cstr_append(buf, p, "    and.b64 %rd23, %rd6, 3; setp.eq.u64 %p5, %rd23, 0; and.pred %p6, %p6, %p5;\n")
+    p = bf16_cstr_append(buf, p, "    mov.u64 %rd15, %rd8;\n")
+    p = bf16_cstr_append(buf, p, "L_Q4GM_B:\n    setp.ge.u64 %p2, %rd15, %rd10; @%p2 bra L_Q4GM_RED;\n")
+    p = bf16_cstr_append(buf, p, "    shl.b64 %rd16, %rd15, 1; add.u64 %rd16, %rd12, %rd16; ld.global.nc.u16 %hu1, [%rd16];\n")
+    p = bf16_cstr_append(buf, p, "    mov.b16 %hf1, %hu1; cvt.f32.f16 %f2, %hf1;\n")
+    gi = 0
+    while gi < 8 {
+        p = ptx_cr_tok_lbl(buf, p, "    mov.f32 %fb", gi)
+        p = bf16_cstr_append(buf, p, ", 0f00000000;\n")
+        gi = gi + 1
+    }
+    p = bf16_cstr_append(buf, p, "    shl.b64 %rd16, %rd15, 5; add.u64 %rd17, %rd16, 32; setp.le.u64 %p3, %rd17, %rd6; and.pred %p3, %p3, %p6;\n")
+    p = bf16_cstr_append(buf, p, "    @!%p3 bra L_Q4GM_TAIL;\n")
+    p = bf16_cstr_append(buf, p, "    shl.b64 %rd17, %rd15, 4; add.u64 %rd17, %rd11, %rd17; ld.global.nc.v4.b32 {%r10, %r11, %r12, %r13}, [%rd17];\n")
+    p = bf16_cstr_append(buf, p, "    shl.b64 %rd18, %rd16, 2; add.u64 %rd18, %rd3, %rd18;\n")
+    p = ptx_cr_emit_q4s_gemm_word(buf, p, "%r10", "0", "L_Q4GM_W0D")
+    p = ptx_cr_emit_q4s_gemm_word(buf, p, "%r11", "32", "L_Q4GM_W1D")
+    p = ptx_cr_emit_q4s_gemm_word(buf, p, "%r12", "64", "L_Q4GM_W2D")
+    p = ptx_cr_emit_q4s_gemm_word(buf, p, "%r13", "96", "L_Q4GM_W3D")
+    p = bf16_cstr_append(buf, p, "    fma.rn.ftz.f32 %fa0, %f2, %fb0, %fa0;\n")
+    gi = 1
+    while gi < 8 {
+        p = ptx_cr_tok_lbl(buf, p, "    @%pb", gi)
+        p = ptx_cr_tok_lbl(buf, p, " fma.rn.ftz.f32 %fa", gi)
+        p = ptx_cr_tok_lbl(buf, p, ", %f2, %fb", gi)
+        p = ptx_cr_tok_lbl(buf, p, ", %fa", gi)
+        p = bf16_cstr_append(buf, p, ";\n")
+        gi = gi + 1
+    }
+    p = bf16_cstr_append(buf, p, "    add.u64 %rd15, %rd15, 32; bra L_Q4GM_B;\n")
+    p = bf16_cstr_append(buf, p, "L_Q4GM_TAIL:\n    shl.b64 %rd17, %rd15, 4; add.u64 %rd17, %rd11, %rd17; mov.u64 %rd19, 0;\n")
+    p = bf16_cstr_append(buf, p, "L_Q4GM_TL:\n    setp.ge.u64 %p4, %rd19, 32; @%p4 bra L_Q4GM_TD;\n")
+    p = bf16_cstr_append(buf, p, "    add.u64 %rd20, %rd16, %rd19; setp.ge.u64 %p5, %rd20, %rd6; @%p5 bra L_Q4GM_TD;\n")
+    p = bf16_cstr_append(buf, p, "    shr.u64 %rd21, %rd19, 1; add.u64 %rd21, %rd17, %rd21; ld.global.nc.u8 %r6, [%rd21];\n")
+    p = bf16_cstr_append(buf, p, "    cvt.u32.u64 %r7, %rd19; and.b32 %r7, %r7, 1; shl.b32 %r7, %r7, 2;\n")
+    p = bf16_cstr_append(buf, p, "    shr.u32 %r8, %r6, %r7; and.b32 %r8, %r8, 15; add.s32 %rs1, %r8, -8; cvt.rn.f32.s32 %fw0, %rs1;\n")
+    p = bf16_cstr_append(buf, p, "    shl.b64 %rd21, %rd20, 2; add.u64 %rd21, %rd3, %rd21;\n")
+    gi = 0
+    while gi < 8 {
+        if gi > 0 {
+            p = ptx_cr_tok_lbl(buf, p, "    @!%pb", gi)
+            p = bf16_cstr_append(buf, p, " bra L_Q4GM_TN;\n    add.u64 %rd21, %rd21, %rd13;\n")
+        }
+        p = bf16_cstr_append(buf, p, "    ld.global.nc.f32 %fx0, [%rd21]; ")
+        p = ptx_cr_tok_lbl(buf, p, "fma.rn.ftz.f32 %fb", gi)
+        p = ptx_cr_tok_lbl(buf, p, ", %fw0, %fx0, %fb", gi)
+        p = bf16_cstr_append(buf, p, ";\n")
+        gi = gi + 1
+    }
+    p = bf16_cstr_append(buf, p, "L_Q4GM_TN:\n    add.u64 %rd19, %rd19, 1; bra L_Q4GM_TL;\n")
+    p = bf16_cstr_append(buf, p, "L_Q4GM_TD:\n    fma.rn.ftz.f32 %fa0, %f2, %fb0, %fa0;\n")
+    gi = 1
+    while gi < 8 {
+        p = ptx_cr_tok_lbl(buf, p, "    @%pb", gi)
+        p = ptx_cr_tok_lbl(buf, p, " fma.rn.ftz.f32 %fa", gi)
+        p = ptx_cr_tok_lbl(buf, p, ", %f2, %fb", gi)
+        p = ptx_cr_tok_lbl(buf, p, ", %fa", gi)
+        p = bf16_cstr_append(buf, p, ";\n")
+        gi = gi + 1
+    }
+    p = bf16_cstr_append(buf, p, "    add.u64 %rd15, %rd15, 32; bra L_Q4GM_B;\n")
+    p = bf16_cstr_append(buf, p, "L_Q4GM_RED:\n    setp.eq.u32 %p7, %r4, 0;\n")
+    p = bf16_cstr_append(buf, p, "    shl.b64 %rd21, %rd9, 2; add.u64 %rd21, %rd4, %rd21;\n")
+    gi = 0
+    while gi < 8 {
+        if gi > 0 {
+            p = ptx_cr_tok_lbl(buf, p, "    @!%pb", gi)
+            p = bf16_cstr_append(buf, p, " bra L_Q4GM_EXIT;\n    add.u64 %rd21, %rd21, %rd14;\n")
+        }
+        let fa_r = if gi == 0 { "%fa0" } else if gi == 1 { "%fa1" } else if gi == 2 { "%fa2" } else if gi == 3 { "%fa3" }
+            else if gi == 4 { "%fa4" } else if gi == 5 { "%fa5" } else if gi == 6 { "%fa6" } else { "%fa7" }
+        p = ptx_cr_warp_sum_f32(buf, p, fa_r, "%r14", "%r15", "%f3")
+        p = bf16_cstr_append(buf, p, "    @%p7 st.global.f32 [%rd21], ")
+        p = bf16_cstr_append(buf, p, fa_r)
+        p = bf16_cstr_append(buf, p, ";\n")
+        gi = gi + 1
+    }
+    p = bf16_cstr_append(buf, p, "L_Q4GM_EXIT:\n    ret;\n}\n\n")
     p
 }
 
@@ -1653,7 +1970,7 @@ fn ptx_cr_emit_gemm_bf16_and_tc(buf: i64, pos: i64, sm_ver: i64) -> i64 with Mut
 }
 
 pub fn emit_qwen3_cuda_runner_ptx_for_sm(sm_ver: i64, driver_ver: i64) -> i64 with Alloc, Mut {
-    let buf = heap_alloc(393216) as i64
+    let buf = heap_alloc(524288) as i64
     var p: i64 = 0
     if sm_ver >= 80 && driver_ver >= 12000 {
         p = bf16_cstr_append(buf, p, ".version 8.0\n.target sm_80\n.address_size 64\n\n")

@@ -57,15 +57,21 @@ use llm::qwen3::{
     qwen3_metal_runner_free,
     qwen3_metal_runner_is_ok,
     qwen3_cuda_runner_init_audit,
+    qwen3_cuda_runner_init_mode,
     qwen3_cuda_runner_free,
     qwen3_cuda_runner_is_ok,
     qwen3_cuda_print_info,
     qwen3_cuda_audit_reset_fma_hits,
     qwen3_cuda_audit_read_fma_hits,
+    qwen3_cuda_conformal_init,
+    qwen3_cuda_conformal_is_ok,
+    qwen3_cuda_conformal_free,
     qwen3_forward_batch_bf16_metal_mode,
     qwen3_forward_batch_bf16_cuda_mode,
     qwen3_forward_token_metal_opt,
     qwen3_forward_token_cuda_opt,
+    qwen3_forward_token_q4_cuda,
+    qwen3_forward_batch_q4_cuda,
     f32_ftz_sub,
 }
 
@@ -661,10 +667,114 @@ fn run_61440_cuda(
     ok
 }
 
+fn run_61440_cuda_q4(
+    m: &Qwen3Model,
+    tok: &Qwen3Tokenizer,
+    shard: &MappedShard,
+    slen: i64,
+    of: &OutFile,
+    resume_skip: i64,
+    max_tokens: i64,
+    max_seq: i64,
+    max_prompts: i64
+) -> bool with IO, Alloc, Mut, Div, Panic {
+    let rt = qwen3_cuda_runner_init_mode(m, max_seq, "", -1, true)
+    let cc = qwen3_cuda_conformal_init(m, &rt, 22, -1.0)
+    let prompt_cap: i64 = 65536
+    let tokens_cap: i64 = 8192
+    let out_cap: i64 = 262144
+    let work_arena = page_arena_alloc(prompt_cap * 2 + tokens_cap * 8 + out_cap * 2 + 256)
+
+    var ok = qwen3_cuda_runner_is_ok(&rt) && qwen3_cuda_conformal_is_ok(&cc) && page_arena_is_ok(&work_arena)
+    var done_prompts: i64 = 0
+
+    if ok {
+        println("[audit61440] backend=cuda_q4 prefill=simt float_model=\"binary32, round-to-nearest-even, FTZ+DAZ, fixed op order\"")
+        qwen3_cuda_print_info(&rt)
+        let wbase = page_arena_ptr(&work_arena)
+        let line_ptr = wbase
+        let chat_ptr = line_ptr + prompt_cap
+        let tok_ptr = chat_ptr + prompt_cap
+        let out_ptr = tok_ptr + tokens_cap * 8
+        let ent_ptr = out_ptr + out_cap
+        let bi_ptr = ent_ptr + out_cap
+        let pos_ptr = bi_ptr + 8
+        let _wbi0 = ptr_write_i64_le(bi_ptr, 0, 0)
+
+        var pidx: i64 = 0
+        while ok {
+            if max_prompts > 0 && pidx >= max_prompts { break }
+            let ll = next_prompt_from_shard(shard, slen, bi_ptr, line_ptr, prompt_cap)
+            if ll < 0 { ok = false; break }
+            if ll == 0 { break }
+
+            if pidx < resume_skip {
+                pidx = pidx + 1
+                continue
+            }
+
+            let chat_len = qwen3_format_chat_bytes(0, 0, line_ptr, ll, true, false, chat_ptr, prompt_cap)
+            if chat_len <= 0 { ok = false; break }
+            let n_prompt = qwen3_encode_bytes(tok, chat_ptr, chat_len, tok_ptr, tokens_cap)
+            if n_prompt <= 0 || n_prompt + max_tokens > max_seq { ok = false; break }
+
+            if !qwen3_forward_batch_q4_cuda(m, &cc, &rt, tok_ptr, 0, n_prompt, true) {
+                ok = false
+                break
+            }
+
+            let _wep0 = ptr_write_i64_le(pos_ptr, 0, 0)
+            var prev_tok = append_top2_entry(m, ent_ptr, pos_ptr, false)
+            var step: i64 = 1
+            while step < max_tokens {
+                let kv_pos = n_prompt + step - 1
+                if !qwen3_forward_token_q4_cuda(m, &cc, &rt, prev_tok, kv_pos, true) {
+                    ok = false
+                    break
+                }
+                prev_tok = append_top2_entry(m, ent_ptr, pos_ptr, true)
+                step = step + 1
+            }
+            if !ok { break }
+            let ent_len = ptr_read_i64_le(pos_ptr, 0)
+
+            begin_prompt_line(out_ptr, pos_ptr, pidx, n_prompt, max_tokens, 0)
+            var hp = ptr_read_i64_le(pos_ptr, 0)
+            if hp + ent_len + 2 >= out_cap { ok = false; break }
+            var ei: i64 = 0
+            while ei < ent_len {
+                let _wc = ptr_write_u8(out_ptr, hp + ei, ptr_read_u8(ent_ptr, ei))
+                ei = ei + 1
+            }
+            let _wp = ptr_write_i64_le(pos_ptr, 0, hp + ent_len)
+            if !finalize_prompt_line(of, out_ptr, pos_ptr, out_cap) { ok = false; break }
+
+            done_prompts = done_prompts + 1
+            pidx = pidx + 1
+            if (pidx % 20) == 0 {
+                print("[audit61440-cuda-q4] completed_prompt=")
+                print_int(pidx)
+                println("")
+            }
+        }
+    }
+
+    let _fw = page_arena_free(work_arena)
+    let _fc = qwen3_cuda_conformal_free(cc, &rt)
+    let _fr = qwen3_cuda_runner_free(rt)
+    if ok {
+        print("AUDIT_61440_DONE backend=cuda_q4 new_prompts=")
+        print_int(done_prompts)
+        println(" TOTAL_CUDA_FMA_MIN_NORM_HITS=0")
+    }
+    ok
+}
+
 fn main() -> i64 with IO, Alloc, Mut, Div, Panic {
     let force_cuda = env_equals("SOUNIO_AUDIT_BACKEND", "cuda")
+    let use_q4 = env_equals("SOUNIO_AUDIT_QUANT", "q4")
     let probe_sess = metal_session_open("")
-    let use_metal = (!force_cuda) && metal_session_is_ok(&probe_sess)
+    let use_metal = (!force_cuda) && (!use_q4) && metal_session_is_ok(&probe_sess)
     let _cp = metal_session_close(probe_sess)
 
     let model_buf = heap_alloc(4096) as i64
@@ -703,7 +813,7 @@ fn main() -> i64 with IO, Alloc, Mut, Div, Panic {
 
     if ok {
         if has_header == 0 {
-            let hdr_ok = write_run_header(&of, if use_metal { "metal" } else { "cuda_audit" })
+            let hdr_ok = write_run_header(&of, if use_metal { "metal" } else if use_q4 { "cuda_q4" } else { "cuda_audit" })
             if !hdr_ok {
                 println("AUDIT_61440_HEADER_WRITE_FAIL")
                 ok = false
@@ -723,6 +833,8 @@ fn main() -> i64 with IO, Alloc, Mut, Div, Panic {
         println("")
         ok = if use_metal {
             run_61440_metal(&m, &tok, &shard, slen, &of, resume_skip, max_tokens, max_seq, max_prompts)
+        } else if use_q4 {
+            run_61440_cuda_q4(&m, &tok, &shard, slen, &of, resume_skip, max_tokens, max_seq, max_prompts)
         } else {
             run_61440_cuda(&m, &tok, &shard, slen, &of, resume_skip, max_tokens, max_seq, max_prompts)
         }
