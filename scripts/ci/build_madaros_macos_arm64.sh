@@ -48,6 +48,17 @@ else
     /usr/bin/clang++ -std=c++23 -O2 -Wall -Wextra -Werror -pthread "$ROOT_DIR/scripts/ci/native_build_profile.cpp" -o "$BUILD_DIR/profile-build"
     "$BUILD_DIR/profile-build" "$BUILD_DIR/profile" "$SEED_BIN" self-hosted/compiler/main.sio "$BUILD_DIR/madaros" --target aarch64-macos >"$BUILD_DIR/build.log" 2>&1
 fi
+# A seed that reports `error:`/`parse error:` lines but still writes an ELF must
+# not slip through: the code at an error site is whatever the seed emitted for a
+# construct it refused. #3679 reddened the macOS self-host job exactly this way
+# (an a64 statement-compiler gap surfaced as spurious `parse error:` lines under
+# the #3707 fatality), so the build fails loudly instead of publishing a
+# miscompiled Madaros.
+if [[ -f "$BUILD_DIR/build.log" ]] && grep -qE '^error|parse error:' "$BUILD_DIR/build.log"; then
+    echo 'ERROR: the aarch64 seed reported errors building Madaros' >&2
+    grep -E '^error|parse error:' "$BUILD_DIR/build.log" | head -20 >&2
+    exit 1
+fi
 test -s "$BUILD_DIR/madaros"
 file "$BUILD_DIR/madaros" | grep -Eq 'Mach-O 64-bit.*arm64'
 chmod +x "$BUILD_DIR/madaros"
