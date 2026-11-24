@@ -48,29 +48,34 @@ check_target() {
  || fail 'compiler binary is not an x86_64 Linux ELF'
 }
 
-# The build cache keys both Madaros stages on madaros_env_fingerprint (the
-# SOUNIO_* settings that change the build, plus HOSTTYPE/OSTYPE); the receipt
-# binds the producer's value so a build-flag change changes BUILD_KEY too.
-build_env_fingerprint() {
+# TOOLCHAIN.txt describes the producer of the compiler bytes, not the runner
+# that writes this receipt: on a build-cache hit those differ. The build writes
+# COMPILER.toolchain beside its output (madaros_toolchain_manifest at build
+# time, or the copy stored with the cache entry on a hit), and the receipt
+# carries it. The fields that feed the output must match this checkout and
+# environment; a compiler produced by another build script or with other
+# SOUNIO_* settings is refused rather than relabelled.
+current_build_facts() {
  local repo=$1 lib="$1/scripts/dev/madaros-cache.sh"
  [[ -f "$lib" ]] || fail 'missing scripts/dev/madaros-cache.sh for the build-environment fingerprint'
  # shellcheck source=/dev/null
- ( unset _SOUNIO_MADAROS_CACHE_LOADED; source "$lib" && madaros_env_fingerprint ) || fail 'cannot compute the build-environment fingerprint'
+ ( unset _SOUNIO_MADAROS_CACHE_LOADED; source "$lib" \
+   && printf 'build_script_sha256=%s\nbuild_env_sha256=%s\n' "$(madaros_build_script_sha)" "$(madaros_env_fingerprint)" ) \
+  || fail 'cannot compute the build-environment fingerprint'
 }
 
 write_toolchain() {
- local repo=$1 output=$2 env_sha
- env_sha=$(build_env_fingerprint "$repo")
- [[ "$env_sha" =~ ^[0-9a-f]{64}$ ]] || fail 'build-environment fingerprint is not a SHA256 digest'
- {
- printf 'host_os=%s\n' "$(uname -s)"
- printf 'host_arch=%s\n' "$(uname -m)"
- printf 'host_kernel=%s\n' "$(uname -r)"
- printf 'glibc=%s\n' "$(getconf GNU_LIBC_VERSION 2>/dev/null || echo unavailable)"
- printf 'bash=%s\n' "$(bash --version | head -n1)"
- printf 'build_script_sha256=%s\n' "$(sha256sum "$repo/scripts/ci/build_modular_madaros.sh" | awk '{print $1}')"
- printf 'build_env_sha256=%s\n' "$env_sha"
- } > "$output/TOOLCHAIN.txt"
+ local repo=$1 output=$2 compiler=$3 manifest="$3.toolchain" expected_keys
+ [[ -f "$manifest" && ! -L "$manifest" ]] || fail 'compiler has no producer toolchain manifest (COMPILER.toolchain)'
+ expected_keys=$'host_os\nhost_arch\nhost_kernel\nglibc\nbash\nbuild_script_sha256\nbuild_env_sha256'
+ [[ "$(cut -d= -f1 "$manifest")" == "$expected_keys" ]] || fail 'producer toolchain manifest has unexpected fields'
+ grep -Eq '^build_script_sha256=[0-9a-f]{64}$' "$manifest" || fail 'producer build-script digest is not a SHA256 digest'
+ grep -Eq '^build_env_sha256=[0-9a-f]{64}$' "$manifest" || fail 'build-environment fingerprint is not a SHA256 digest'
+ grep -Fxq "host_os=$(uname -s)" "$manifest" || fail 'compiler was produced on another operating system'
+ grep -Fxq "host_arch=$(uname -m)" "$manifest" || fail 'compiler was produced on another architecture'
+ current_build_facts "$repo" | cmp -s - <(tail -n 2 "$manifest") \
+  || fail 'compiler was produced by another build script or build environment'
+ cp -- "$manifest" "$output/TOOLCHAIN.txt"
  (cd "$output" && sha256sum TOOLCHAIN.txt > TOOLCHAIN.sha256)
 }
 
@@ -160,7 +165,7 @@ prepare() {
  done < "$output/TRACKED_PATHS.txt"
  printf '%s\n' "$bootstrap" > "$output/BOOTSTRAP_PATH"
  (cd "$repo" && sha256sum -- "$bootstrap") > "$output/BOOTSTRAP.sha256"
- write_toolchain "$repo" "$output"
+ write_toolchain "$repo" "$output" "$compiler"
  cp -- "$compiler" "$output/madaros.elf"
  chmod 755 "$output/madaros.elf"
  (cd "$output" && sha256sum madaros.elf > COMPILER.sha256)
@@ -257,6 +262,12 @@ PY
  compiler="$work/compiler"
  cp "$repo/bin/souc-linux-x86_64" "$compiler"
  chmod 755 "$compiler"
+ # The build writes COMPILER.toolchain; the fixture compiler gets the manifest
+ # the fixture's own cache library would write for it.
+ producer_manifest() {
+  ( unset _SOUNIO_MADAROS_CACHE_LOADED; cd "$repo" && source scripts/dev/madaros-cache.sh && madaros_toolchain_manifest )
+ }
+ producer_manifest > "$compiler.toolchain"
  printf 'untracked source\n' > "$repo/self-hosted/untracked.sio"
  "$script" prepare "$repo" "$compiler" "$artifact" "$sha" > "$work/prepare.log"
  "$script" verify "$repo" "$artifact" "$sha" > "$work/verify.log"
@@ -287,7 +298,9 @@ PY
  # The key a real prepare writes moves with a build-environment flag and with an
  # equal-byte symlink retarget, not only with the hashed bytes.
  base_key=$(cat "$artifact/BUILD_KEY")
- SOUNIO_RECEIPT_SELFTEST_FLAG=1 "$script" prepare "$repo" "$compiler" "$work/artifact-env" "$sha" > "$work/prepare-env.log"
+ cp "$compiler" "$work/compiler-env"
+ SOUNIO_RECEIPT_SELFTEST_FLAG=1 producer_manifest > "$work/compiler-env.toolchain"
+ SOUNIO_RECEIPT_SELFTEST_FLAG=1 "$script" prepare "$repo" "$work/compiler-env" "$work/artifact-env" "$sha" > "$work/prepare-env.log"
  [[ "$(cat "$work/artifact-env/BUILD_KEY")" != "$base_key" ]] || fail 'a build-environment flag left BUILD_KEY unchanged'
  grep -q '^build_env_sha256=' "$work/artifact-env/TOOLCHAIN.txt" || fail 'TOOLCHAIN.txt lacks the build-environment fingerprint'
  ln -sfn twin.sio "$repo/stdlib/alias.sio"
@@ -295,6 +308,30 @@ PY
  ln -sfn mod.sio "$repo/stdlib/alias.sio"
  [[ "$(cat "$work/artifact-link/BUILD_KEY")" != "$base_key" ]] || fail 'an equal-byte symlink retarget left BUILD_KEY unchanged'
  printf 'RECEIPT_BUILD_KEY_ENV_AND_SYMLINK_PASS\n'
+ # A cache hit hands over bytes built elsewhere: TOOLCHAIN.txt must name the
+ # producer's runner, not this one. Before the fix the receipt re-described the
+ # current runner, so this kernel line would have been replaced by uname -r.
+ cp "$compiler" "$work/compiler-old"
+ sed 's/^host_kernel=.*/host_kernel=producer-kernel-fixture/' "$compiler.toolchain" > "$work/compiler-old.toolchain"
+ "$script" prepare "$repo" "$work/compiler-old" "$work/artifact-old" "$sha" > "$work/prepare-old.log"
+ grep -Fxq 'host_kernel=producer-kernel-fixture' "$work/artifact-old/TOOLCHAIN.txt" \
+  || fail 'receipt replaced the producer toolchain with the current runner'
+ "$script" verify "$repo" "$work/artifact-old" "$sha" > "$work/verify-old.log"
+ printf 'RECEIPT_PRODUCER_TOOLCHAIN_CARRIED\n'
+ for control in missing stale-script other-env extra-field; do
+  cp "$compiler" "$work/compiler-$control"
+  case "$control" in
+   missing) ;;
+   stale-script) sed "s/^build_script_sha256=.*/build_script_sha256=$(printf 0%.0s {1..64})/" "$compiler.toolchain" > "$work/compiler-$control.toolchain" ;;
+   other-env) cp "$work/compiler-env.toolchain" "$work/compiler-$control.toolchain" ;;
+   extra-field) { cat "$compiler.toolchain"; printf 'note=x\n'; } > "$work/compiler-$control.toolchain" ;;
+  esac
+  rc=0
+  "$script" prepare "$repo" "$work/compiler-$control" "$work/artifact-producer-$control" "$sha" > "$work/producer-$control.log" 2>&1 || rc=$?
+  [[ "$rc" == 65 ]] || fail "producer toolchain control was accepted: $control ($rc)"
+  grep -q '^STDLIB_DEEP_RECEIPT_FAIL:' "$work/producer-$control.log" || fail "producer control lacked refusal diagnostic: $control"
+  printf 'RECEIPT_PRODUCER_TOOLCHAIN_REJECTED %s\n' "$control"
+ done
  ln -s "$repo/bin" "$work/bin-alias"
  for value in "$repo/bin/receipt" "$repo/stdlib/receipt" "$work/bin-alias/receipt"; do
   rc=0

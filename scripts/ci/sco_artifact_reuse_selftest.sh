@@ -30,7 +30,11 @@ git -C "$repo" init -q
 git -C "$repo" -c user.name='CI Fixture' -c user.email='ci-fixture@example.invalid' add .
 git -C "$repo" -c user.name='CI Fixture' -c user.email='ci-fixture@example.invalid' commit -qm fixture
 sha=$(git -C "$repo" rev-parse HEAD)
-bash "$repo/scripts/ci/stdlib_deep_compiler_receipt.sh" prepare "$repo" "$repo/bin/compiler-fixture" "$work/artifact" "$sha"
+# The build writes the producer manifest beside its output; outside the repo,
+# like the CI build's /tmp output, so it is not itself a source input.
+cp "$repo/bin/compiler-fixture" "$work/compiler-fixture"
+( cd "$repo" && source scripts/dev/madaros-cache.sh && madaros_toolchain_manifest ) > "$work/compiler-fixture.toolchain"
+bash "$repo/scripts/ci/stdlib_deep_compiler_receipt.sh" prepare "$repo" "$work/compiler-fixture" "$work/artifact" "$sha"
 export SCO_FIXTURE_CALLS="$work/calls" SCO_FIXTURE_BUILD="$work/unexpected-build"
 run_case() {
   local name=$1
