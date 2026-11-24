@@ -10682,7 +10682,49 @@ fn lowerer_loop_rgn_finalize_mut(lo: &! Lowerer) with Mut, Panic, Div, IO {
 // BSS slot (lowerer_preseed_external_bss_globals_mut dedups by name); the
 // first module's initializer wins, as for the folded words
 // (ast_global_var_init_count).
+// E309: a module-level initializer that was neither folded into BSS words nor
+// deferred to `main`'s entry would leave its global zero-filled. Refused here,
+// after the module's last parse, because an imported pure fn folds only once
+// its module is registered (scripts/ci/madaros_global_init_identity_gate.sh).
+fn lowerer_refuse_dropped_global_inits_mut(lo: &! Lowerer) with Mut, Panic, Div, Alloc, IO {
+    if ast_global_init_refusal_count() <= 0 { return }
+    var fi: i64 = 0
+    while fi < (*(*lo).module).fn_count {
+        let slot = ir_fn_get(&(*(*lo).module), fi)
+        if slot.compile_strategy == IR_STRATEGY_BSS_GLOBAL && slot.name.len > 0 {
+            if ast_global_init_dropped(slot.name) {
+                print("error[E309]: the initializer of module-level `")
+                lower_print_name(slot.name)
+                print("` can be neither evaluated at compile time nor run before `main`; it would silently start as zero, so the compile is refused\n")
+                lowerer_mark_hard_error(lo)
+            }
+        }
+        fi = fi + 1
+    }
+}
+
+// Fixed-array globals with a closed initializer: run the statements the parser
+// built for them (parser/items.sio items_defer_global_array_init).
+fn lowerer_emit_deferred_global_blocks_mut(lo: &! Lowerer) with Mut, Panic, Div, Alloc, IO {
+    if ast_global_deferred_block_overflowed() {
+        print("error[E309]: more than 4096 module-level array initializers need run-time evaluation; the rest would be left zero, so the compile is refused\n")
+        lowerer_mark_hard_error(lo)
+        return
+    }
+    var k: i64 = 0
+    while k < ast_global_deferred_block_count() {
+        let p = ast_global_deferred_block_ptr(k) as *mut Expr
+        if p != (0 as *mut Expr) {
+            let pair = (*lo).lower_expr_ref(&(*p))
+            (*lo) = pair.0
+        }
+        k = k + 1
+    }
+}
+
 fn lowerer_emit_deferred_global_inits_mut(lo: &! Lowerer) with Mut, Panic, Div, Alloc, IO {
+    lowerer_refuse_dropped_global_inits_mut(lo)
+    lowerer_emit_deferred_global_blocks_mut(lo)
     let total = ast_global_deferred_init_count()
     if ast_global_deferred_init_overflowed() {
         print("error: more than 16384 module-level initializers need run-time evaluation; the rest would be left zero, so the compile is refused (#2355)\n")

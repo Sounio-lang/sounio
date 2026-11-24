@@ -17,8 +17,10 @@
 #   globals    same-named private globals referenced by an initialiser
 #   import     control: another module's importable fn/global still folds; a foreign
 #              fn body is evaluated in ITS module; an imported f64 still lands in BSS
-#   shadow     a module defining `helper` itself must not adopt another's `helper`
-#   ambiguous  a name two other modules define is REPORTED and left unfolded
+#   shadow     a module defining `helper` itself must not adopt another's `helper`;
+#              the call initializer cannot run before `main`, so it is refused (E309)
+#   ambiguous  a name two other modules define is REPORTED, and the initializer
+#              is refused (E309) instead of being zero-filled
 # and positive controls: with SOUNIO_DISABLE_GLOBAL_INIT_MODULE_SCOPE=1 (the old
 # bare-name table) the repros must NOT come out right and the ambiguity warning must
 # not appear, so a green run cannot be a program that never collided.
@@ -103,6 +105,26 @@ compile_and_run() {
   fi
 }
 
+# expect_refused <label> <source> <global>...: the compile fails with E309 for
+# each named global (an initializer that could be neither folded in its own
+# module nor run before `main`; it used to leave the global zero-filled).
+expect_refused() {
+  local label="$1" src="$2"
+  shift 2
+  local log="$WORK/$label.log"
+  [[ -f "$src" ]] || fail "$label: missing fixture $src"
+  if env ${REFUSE_ENV:-} "$RAW" --native-compile "$src" -o "$WORK/$label.elf" >"$log" 2>&1; then
+    fail "$label: compiled, but its unevaluable initializer must be refused (E309)"
+  fi
+  local g
+  for g in "$@"; do
+    grep -Fq -- "error[E309]: the initializer of module-level \`$g\`" "$log" || {
+      tail -n 25 "$log" >&2 || true
+      fail "$label: no E309 for $g"
+    }
+  done
+}
+
 # expect_output <label> <expected-file>: exact stdout, no other lines.
 expect_output() {
   local label="$1" expected="$2"
@@ -166,19 +188,18 @@ expect_no_ambiguity import
 echo "$TAG PASS(import): importable fn/global still fold; foreign body evaluated in its module; imported f64 intact"
 
 # --- shadow -------------------------------------------------------------------
-compile_and_run shadow "$FIX/shadow/main.sio"
-expect_output shadow "$FIX/shadow/expected.txt"
-expect_no_ambiguity shadow
-echo "$TAG PASS(shadow): a module's own helper is never replaced by another module's"
+# The module's own `helper` is never replaced by another module's, and a
+# call initializer cannot run before `main` outside its module, so it is refused.
+expect_refused shadow "$FIX/shadow/main.sio" X X2
+echo "$TAG PASS(shadow): a module's own helper is never replaced by another module's; the call initializer is refused (E309)"
 
 # --- ambiguous: reported, not folded -----------------------------------------
-compile_and_run ambiguous "$FIX/ambiguous/main.sio"
-expect_output ambiguous "$FIX/ambiguous/expected.txt"
+expect_refused ambiguous "$FIX/ambiguous/main.sio" SC
 grep -Fq -- "$AMBIG_WARN" "$WORK/ambiguous.log" || {
   tail -n 25 "$WORK/ambiguous.log" >&2 || true
   fail "ambiguous: compile log lacks $AMBIG_WARN"
 }
-echo "$TAG PASS(ambiguous): a name two other modules define is reported and left unfolded"
+echo "$TAG PASS(ambiguous): a name two other modules define is reported, and the initializer is refused (E309), not zero-filled"
 
 # --- positive controls: scoping off => the defects are back -------------------
 # A green gate must be able to go red. With the old bare-name table the fixtures
@@ -187,13 +208,15 @@ compile_and_run control_basic "$FIX/basic/main.sio" "$OFF"
 expect_control_defect control_basic "$FIX/basic/expected.txt" "a=1" "b=20" "g=1"
 compile_and_run control_fold "$FIX/fold/main.sio" "$OFF"
 expect_control_defect control_fold "$FIX/fold/expected.txt" "sb=6" "bb=6" "tb0=2"
-compile_and_run control_globals "$FIX/globals/main.sio" "$OFF"
-expect_control_defect control_globals "$FIX/globals/expected.txt" "ha=6" "hb=0"
-compile_and_run control_import "$FIX/import/main.sio" "$OFF"
-expect_control_defect control_import "$FIX/import/expected.txt" "l=3"
+# With scoping off, HB's initializer resolves nowhere and is neither folded
+# nor deferred: it used to read 0 (hb=0). It is now refused (E309).
+REFUSE_ENV="$OFF" expect_refused control_globals "$FIX/globals/main.sio" HB
+# With scoping off, R and KK are neither folded nor deferred (they used to
+# read 0 next to the l=3 defect); they are now refused (E309).
+REFUSE_ENV="$OFF" expect_refused control_import "$FIX/import/main.sio" R KK
 compile_and_run control_shadow "$FIX/shadow/main.sio" "$OFF"
 expect_control_defect control_shadow "$FIX/shadow/expected.txt" "x_is_foreign=1" "x2_is_foreign=1"
-compile_and_run control_ambiguous "$FIX/ambiguous/main.sio" "$OFF"
+REFUSE_ENV="$OFF" expect_refused control_ambiguous "$FIX/ambiguous/main.sio" SC
 expect_no_ambiguity control_ambiguous
 echo "$TAG PASS(control): scoping disabled reproduces every defect ($(tr '\n' ' ' <"$WORK/control_basic.out"))"
 
