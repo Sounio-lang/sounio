@@ -13176,7 +13176,7 @@ fn checker_check_knowledge_ctor_expr_inplace(c: *mut Checker, e: Expr) -> TypeEn
     let first_arg = expr_list_head(e.args)
     let v_ty = checker_check_opt_expr_inplace(c, first_arg)
     let confidence = checker_enforce_knowledge_confidence_inplace(c, e.args, e.span)
-    var result = ty_knowledge(v_ty, confidence)
+    var result = ty_knowledge_with_confidence(v_ty, confidence)
     // N2 (REQ-2): this ctor wraps a plain value directly -- no independent
     // measurement source is created (that is measure()'s job, above), so the
     // result carries NO uncertainty sources: empty (0), not unknown (-1).
@@ -24161,7 +24161,7 @@ fn check_return_expr_knowledge_subsumes(ontology_items: Option<Box<ItemList> >, 
     let pmeta = knowledge_meta_from_ty(provided)
     let rmeta = knowledge_meta_from_ty(required)
     let eps_ok = epsilon_subsumes_call_boundary(
-        knowledge_meta_epsilon(pmeta),
+        epsilon_provided_view(provided, knowledge_meta_epsilon(pmeta), required.knowledge_epsilon_mode),
         provided.knowledge_epsilon_mode,
         knowledge_meta_epsilon(rmeta),
         required.knowledge_epsilon_mode
@@ -24215,7 +24215,7 @@ fn checker_knowledge_subsumes(c: *mut Checker, provided: TypeEntry, required: Ty
     let rmeta = knowledge_meta_from_ty(required)
 
     let eps_ok = epsilon_subsumes_call_boundary(
-        knowledge_meta_epsilon(pmeta),
+        epsilon_provided_view(provided, knowledge_meta_epsilon(pmeta), required.knowledge_epsilon_mode),
         provided.knowledge_epsilon_mode,
         knowledge_meta_epsilon(rmeta),
         required.knowledge_epsilon_mode
@@ -24264,6 +24264,13 @@ fn checker_knowledge_epsilon_join(c: *mut Checker, a: TypeEntry, b: TypeEntry) -
     } else {
         joined.knowledge_epsilon = 0.0 - 1.0
         joined.knowledge_epsilon_mode = 0
+    }
+    // A stated confidence survives the join only as the weaker of the two:
+    // either branch may be the one that ran.
+    joined.knowledge_conf = if a.knowledge_conf >= 0.0 && b.knowledge_conf >= 0.0 {
+        if a.knowledge_conf < b.knowledge_conf { a.knowledge_conf } else { b.knowledge_conf }
+    } else {
+        0.0 - 1.0
     }
     (true, joined)
 }
@@ -33953,7 +33960,7 @@ impl Checker {
         if minimum > 0 && confidence_milli < minimum {
             c = c.report_error_at(e.span, 215, confidence_milli, minimum, 0)
         }
-        (c, ty_knowledge(v_ty, confidence))
+        (c, ty_knowledge_with_confidence(v_ty, confidence))
     }
 
     fn check_variance_metric_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
@@ -34291,7 +34298,7 @@ impl Checker {
         let pm = knowledge_meta_from_ty(provided_ty)
         let rm = knowledge_meta_from_ty(expected_ty)
         let eps_ok = epsilon_subsumes_call_boundary(
-            knowledge_meta_epsilon(pm),
+            epsilon_provided_view(provided_ty, knowledge_meta_epsilon(pm), expected_ty.knowledge_epsilon_mode),
             provided_ty.knowledge_epsilon_mode,
             knowledge_meta_epsilon(rm),
             expected_ty.knowledge_epsilon_mode
@@ -34403,7 +34410,7 @@ impl Checker {
                 let pm = knowledge_meta_from_ty(got_ty)
                 let rm = knowledge_meta_from_ty(exp_ty)
                 return epsilon_subsumes_call_boundary(
-                    knowledge_meta_epsilon(pm),
+                    epsilon_provided_view(got_ty, knowledge_meta_epsilon(pm), exp_ty.knowledge_epsilon_mode),
                     got_ty.knowledge_epsilon_mode,
                     knowledge_meta_epsilon(rm),
                     exp_ty.knowledge_epsilon_mode

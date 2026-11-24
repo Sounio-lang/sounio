@@ -148,6 +148,16 @@ Normalizing all of them to either a standard deviation or a probability would
 change existing behavior. The catalog records this as a decision, not a new
 normative interpretation.
 
+Decided 2026-11-24, in progress: epsilon splits into `u` (GUM standard
+uncertainty), `conf` (confidence in [0, 1]) and `iv` (certified interval).
+Step 1, in the checker: `TypeEntry.knowledge_conf` holds a stated
+confidence. `Knowledge(v, e=c)` writes c there and leaves the error-bound
+slot unspecified. An annotation `ε < x` or `ε <= x` is an error bound on the
+variance; `ε >= x` is a confidence floor; `ε = x` is an exact confidence. A
+confidence never meets an error bound, and a variance bound never meets a
+confidence requirement. The struct literal `Knowledge { epsilon: .. }`, the
+runtime `.epsilon` and the `⊥` mode follow in later steps.
+
 ### 4.2.3 Construction and payloads
 
 `EPI-007` — **target-contract**. Madaros

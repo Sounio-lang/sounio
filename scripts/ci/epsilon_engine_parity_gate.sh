@@ -16,12 +16,19 @@
 #
 # A compile-fail test answering `check: OK` on either engine is a silent hole.
 # This gate refuses any recurrence and prints every divergent instance by name.
+#
+# Exception: a test listed in epsilon_engine_parity.known may be refused by
+# Madaros and accepted by the lean_single seed (a known seed defect). Only that
+# direction is excused; a Madaros acceptance is never excused.
 set -uo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 SOUC="${SOUC:-./bin/souc}"
 export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
 FROZEN_FILE="scripts/ci/epsilon_engine_parity.frozen"
+KNOWN_FILE="scripts/ci/epsilon_engine_parity.known"
+mapfile -t known < <(grep -vE '^[[:space:]]*(#|$)' "$KNOWN_FILE" 2>/dev/null)
+is_known() { local k; for k in "${known[@]}"; do [[ "$k" == "$1" ]] && return 0; done; return 1; }
 OUT="${GATE_ARTIFACT:-artifacts/gates/epsilon_engine_parity.json}"
 TIMEOUT="${EPS_PARITY_TIMEOUT:-180}"
 
@@ -51,13 +58,16 @@ refuses() { # engine file -> 0 if the engine refuses
   grep -qiE 'error|failed to parse|type error' <<<"$out"
 }
 
-divergent=0; both=0; names=()
+divergent=0; both=0; seed_known=0; names=()
 for t in "${tests[@]}"; do
   m=0; l=0
   refuses madaros     "$t" && m=1
   refuses lean_single "$t" && l=1
   if (( m == 1 && l == 1 )); then
     both=$(( both + 1 ))
+  elif (( m == 1 && l == 0 )) && is_known "$t"; then
+    seed_known=$(( seed_known + 1 ))
+    printf 'EPSILON_PARITY_SEED_KNOWN %s madaros_refuses=1 lean_refuses=0 (listed in %s)\n' "$t" "$KNOWN_FILE"
   else
     divergent=$(( divergent + 1 ))
     names+=("$t")
@@ -95,6 +105,7 @@ cat <<JSON | gate_write_artifact "$OUT"
   "claims": "an epsilon-bounded compile-fail test must be refused by both engines",
   "frozen": ${frozen},
   "measured": ${divergent},
+  "seed_known": ${seed_known},
   "metrics": { "total": ${#tests[@]}, "passed": ${both}, "failed": ${divergent}, "not_run": 0 }
 }
 JSON
