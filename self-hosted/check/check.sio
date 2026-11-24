@@ -14490,17 +14490,53 @@ fn checker_check_join_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
     }
     ty_tuple(elems)
 }
+// The builtin print/println, not a user fn of the same spelling: the same
+// test the generic preflight applies before attributing IO (SIO-27).
+fn checker_print_callee_is_builtin_inplace(c: *mut Checker, callee: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
+    match callee {
+        Some(ce) => {
+            let sig = checker_fn_sigs_find_inplace(c, (*ce).name)
+            sig < 0 || checker_invisible_native_builtin_sig(c, (*ce).name)
+        }
+        None => false
+    }
+}
+
 fn checker_check_call_native_forms_inplace(c: *mut Checker, e: Expr) -> (bool, TypeEntry) with Mut, Panic, Div, Alloc, IO {
-    if call_expr_is_builtin_println(e.left) {
+    if call_expr_is_builtin_print_or_println(e.left) && checker_print_callee_is_builtin_inplace(c, e.left) {
         let first_arg = expr_list_head(e.args)
         let arg_ty = checker_check_opt_expr_inplace(c, first_arg)
-        if checker_type_is_unobserved_like(arg_ty) {
+        // E310: printing a Knowledge value would show its nominal value with
+        // the uncertainty and confidence dropped (Madaros printed `.value`,
+        // lean_single the handle address). The spec fixes no display form, so
+        // the call is refused; name the field to print.
+        if is_knowledge_type(arg_ty) {
+            checker_report_error_at_inplace(c, e.span, 310, 0, 0, 0)
+            return (true, ty_unit())
+        }
+        if checker_type_is_unobserved_like(arg_ty) && call_expr_is_builtin_println(e.left) {
             if !has_effect_id((*c).current_effects, (*c).current_effect_count, 13) {
                 checker_report_unobserved_print_inplace(c, e.span)
             }
             var effects_unobserved: [i64; 8] = [0; 8]
             effects_unobserved[0] = 0
             checker_check_callee_effects_inplace(c, e.span, effects_unobserved, 1)
+            return (true, ty_unit())
+        }
+        // The argument is checked above; a one-argument print/println is
+        // finished here (it needs IO) instead of falling through to the
+        // generic call path, which checked the argument a second time and
+        // reported each of its errors twice.
+        if expr_list_count_opt(e.args) == 1 {
+            let callee_name = match e.left {
+                Some(ce) => (*ce).name,
+                None => empty_name(),
+            }
+            // `main` may print without `with IO`, as on the generic path; the
+            // enclosing fn is read by name (current_sig_id is not set here).
+            if !name_matches_str4((*c).current_sig_name, 109, 97, 105, 110) || (*c).in_closure_body {
+                checker_check_io_builtin_effects_inplace(c, e.span, callee_name)
+            }
             return (true, ty_unit())
         }
     }
@@ -21879,6 +21915,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 301 { print("unit registry capacity exceeded; refusing to discard a unit dimension") }
     else if code == 302 { print("`break` with a value is only allowed inside `loop`") }
     else if code == 308 { print("the `break` values of this `loop` have different types") }
+    else if code == 310 { print("printing a Knowledge value would show its nominal value without its uncertainty and confidence; print a field instead (`k.value`, `k.variance`, `k.confidence`)") }
     else if code == 269 { print("a `where` refinement on Knowledge<T> is not enforced by this compiler yet: the predicate would be silently ignored, so it is refused") }
     else if code == 270 { print("`as string` does not convert a number, bool or char to text: no engine formats the value, so the cast is refused") }
     else if code == 263 { print("qualified call is ambiguous: this qualifier names a module you `use`d, but also collides with an unrelated struct/enum method of the same name, and the compiler cannot yet guarantee which one runs") }
@@ -23500,6 +23537,18 @@ fn call_expr_is_builtin_print_char(opt: Option<Box<Expr> >) -> bool with Mut, Pa
                 return false
             }
             name_matches_str10((*expr).name, 112, 114, 105, 110, 116, 95, 99, 104, 97, 114)
+        }
+        None => false
+    }
+}
+
+fn call_expr_is_builtin_print_or_println(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent {
+                return false
+            }
+            name_matches_str7((*expr).name, 112, 114, 105, 110, 116, 108, 110) || name_matches_str5((*expr).name, 112, 114, 105, 110, 116)
         }
         None => false
     }
