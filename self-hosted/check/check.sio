@@ -14485,8 +14485,20 @@ fn checker_check_join_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
     }
     ty_tuple(elems)
 }
+// The builtin print/println, not a user fn of the same spelling: the same
+// test the generic preflight applies before attributing IO (SIO-27).
+fn checker_print_callee_is_builtin_inplace(c: *mut Checker, callee: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
+    match callee {
+        Some(ce) => {
+            let sig = checker_fn_sigs_find_inplace(c, (*ce).name)
+            sig < 0 || checker_invisible_native_builtin_sig(c, (*ce).name)
+        }
+        None => false
+    }
+}
+
 fn checker_check_call_native_forms_inplace(c: *mut Checker, e: Expr) -> (bool, TypeEntry) with Mut, Panic, Div, Alloc, IO {
-    if call_expr_is_builtin_print_or_println(e.left) {
+    if call_expr_is_builtin_print_or_println(e.left) && checker_print_callee_is_builtin_inplace(c, e.left) {
         let first_arg = expr_list_head(e.args)
         let arg_ty = checker_check_opt_expr_inplace(c, first_arg)
         // E310: printing a Knowledge value would show its nominal value with
@@ -14497,16 +14509,29 @@ fn checker_check_call_native_forms_inplace(c: *mut Checker, e: Expr) -> (bool, T
             checker_report_error_at_inplace(c, e.span, 310, 0, 0, 0)
             return (true, ty_unit())
         }
-        if !call_expr_is_builtin_println(e.left) {
-            return (false, ty_unit())
-        }
-        if checker_type_is_unobserved_like(arg_ty) {
+        if checker_type_is_unobserved_like(arg_ty) && call_expr_is_builtin_println(e.left) {
             if !has_effect_id((*c).current_effects, (*c).current_effect_count, 13) {
                 checker_report_unobserved_print_inplace(c, e.span)
             }
             var effects_unobserved: [i64; 8] = [0; 8]
             effects_unobserved[0] = 0
             checker_check_callee_effects_inplace(c, e.span, effects_unobserved, 1)
+            return (true, ty_unit())
+        }
+        // The argument is checked above; a one-argument print/println is
+        // finished here (it needs IO) instead of falling through to the
+        // generic call path, which checked the argument a second time and
+        // reported each of its errors twice.
+        if expr_list_count_opt(e.args) == 1 {
+            let callee_name = match e.left {
+                Some(ce) => (*ce).name,
+                None => empty_name(),
+            }
+            // `main` may print without `with IO`, as on the generic path; the
+            // enclosing fn is read by name (current_sig_id is not set here).
+            if !name_matches_str4((*c).current_sig_name, 109, 97, 105, 110) || (*c).in_closure_body {
+                checker_check_io_builtin_effects_inplace(c, e.span, callee_name)
+            }
             return (true, ty_unit())
         }
     }
