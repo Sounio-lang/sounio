@@ -1088,6 +1088,19 @@ fn items_expr_is_closed(e: &Expr) -> bool with Mut, Panic, Div {
         || k == ExprKind::ExprBoolFalse || k == ExprKind::ExprCharLit || k == ExprKind::ExprStringLit {
         return true
     }
+    // `None`, and a unit enum variant `Type::Variant`: they name a type, which
+    // resolves the same in every module, not a fn or a global. A path whose
+    // first segment is lower-case names a module and stays open.
+    if k == ExprKind::ExprIdent {
+        return name_eq_lit((*e).name, "None")
+    }
+    if k == ExprKind::ExprPath {
+        if (*e).path.seg_count != 2 { return false }
+        let head = ast_path_prefix_name((*e).path, 0)
+        if head.len <= 0 { return false }
+        let c0 = head.buf[0] as i64
+        return c0 >= 65 && c0 <= 90
+    }
     if k == ExprKind::ExprUnary || k == ExprKind::ExprCast {
         return items_opt_expr_is_closed(&(*e).left)
     }
@@ -1259,13 +1272,146 @@ fn items_global_init_overflows(init: &Expr, ty: &Option<Box<TypeExpr>>) -> bool 
     ITEMS_GINIT_OVF_FOUND != 0
 }
 
-fn items_record_global_init_or_defer(name: Name, init: Box<Expr>, deferrable: bool) with Mut, Panic, Div {
+fn items_ginit_ident(name: Name, span: Span) -> Box<Expr> with Mut, Alloc {
+    var e = mk_expr(ExprKind::ExprIdent, span)
+    e.name = name
+    Box::new(e)
+}
+
+fn items_ginit_int(v: i64, span: Span) -> Box<Expr> with Mut, Alloc {
+    var e = mk_expr(ExprKind::ExprIntLit, span)
+    e.int_val = v
+    Box::new(e)
+}
+
+fn items_ginit_assign(target: Box<Expr>, value: Box<Expr>, span: Span) -> Stmt {
+    Stmt {
+        kind: StmtKind::StmtAssign,
+        span: span,
+        name: empty_name(),
+        ty: None,
+        expr: Some(value),
+        target: Some(target),
+        assign_op: AssignOp::AssignEq,
+    }
+}
+
+fn items_ginit_index(name: Name, idx: Box<Expr>, span: Span) -> Box<Expr> with Mut, Alloc {
+    var e = mk_expr(ExprKind::ExprIndex, span)
+    e.left = Some(items_ginit_ident(name, span))
+    e.right = Some(idx)
+    Box::new(e)
+}
+
+// A fixed-array global holds its elements inline in BSS, so the one-word
+// deferral above cannot store it. A closed element list or repeat is instead
+// turned into the statements that write it, run at `main`'s entry:
+//   [a, b, c]  ->  { NAME[0] = a; NAME[1] = b; NAME[2] = c }
+//   [e; n]     ->  { var i = 0; while i < n { NAME[i] = e; i = i + 1 } }
+// The repeat evaluates `e` once per element, so a struct element is a fresh
+// value each time, as a local `[e; n]` gives. Returns false when the
+// initializer is not one of these shapes.
+fn items_defer_global_array_init(name: Name, init: Box<Expr>) -> bool with Mut, Panic, Div, Alloc {
+    if (*init).kind != ExprKind::ExprArrayLit { return false }
+    if !items_expr_is_closed(&(*init)) { return false }
+    let span = (*init).span
+    let iname = make_name("__sio_global_init_i")
+    var stmts: Option<Box<StmtList>> = None
+    match (*init).left {
+        Some(rv) => {
+            match (*init).right {
+                Some(cnt) => {
+                    let idx = items_ginit_ident(iname, span)
+                    let body_assign = items_ginit_assign(items_ginit_index(name, idx, span), rv, span)
+                    var inc = mk_expr(ExprKind::ExprBinary, span)
+                    inc.bin_op = BinaryOp::OpAdd
+                    inc.left = Some(items_ginit_ident(iname, span))
+                    inc.right = Some(items_ginit_int(1, span))
+                    let step = items_ginit_assign(items_ginit_ident(iname, span), Box::new(inc), span)
+                    let body = Block {
+                        stmts: Some(Box::new(StmtList { head: body_assign, tail: Some(Box::new(StmtList { head: step, tail: None })) })),
+                        span: span,
+                    }
+                    var cond = mk_expr(ExprKind::ExprBinary, span)
+                    cond.bin_op = BinaryOp::OpLt
+                    cond.left = Some(items_ginit_ident(iname, span))
+                    cond.right = Some(cnt)
+                    var wh = mk_expr(ExprKind::ExprWhile, span)
+                    wh.left = Some(Box::new(cond))
+                    wh.block = Some(Box::new(body))
+                    let decl = Stmt {
+                        kind: StmtKind::StmtVar,
+                        span: span,
+                        name: iname,
+                        ty: None,
+                        expr: Some(items_ginit_int(0, span)),
+                        target: None,
+                        assign_op: AssignOp::AssignEq,
+                    }
+                    let loop_stmt = Stmt {
+                        kind: StmtKind::StmtExpr,
+                        span: span,
+                        name: empty_name(),
+                        ty: None,
+                        expr: Some(Box::new(wh)),
+                        target: None,
+                        assign_op: AssignOp::AssignEq,
+                    }
+                    stmts = Some(Box::new(StmtList { head: decl, tail: Some(Box::new(StmtList { head: loop_stmt, tail: None })) }))
+                }
+                None => { return false }
+            }
+        }
+        None => {
+            // Element list, in source order; built back to front.
+            var n: i64 = 0
+            var cur = (*init).args
+            var elems: [i64; 4096] = [0; 4096]
+            while true {
+                match cur {
+                    Some(node) => {
+                        if n >= 4096 { return false }
+                        let ep = &(*node).head as *mut Expr
+                        elems[n as usize] = ep as i64
+                        n = n + 1
+                        cur = (*node).tail
+                    }
+                    None => { break }
+                }
+            }
+            var i = n - 1
+            while i >= 0 {
+                let ep = elems[i as usize] as *mut Expr
+                let st = items_ginit_assign(items_ginit_index(name, items_ginit_int(i, span), span), Box::new(*ep), span)
+                stmts = Some(Box::new(StmtList { head: st, tail: stmts }))
+                i = i - 1
+            }
+        }
+    }
+    var blk = mk_expr(ExprKind::ExprBlock, span)
+    blk.block = Some(Box::new(Block { stmts: stmts, span: span }))
+    ast_record_global_deferred_block(name, Box::new(blk))
+    true
+}
+
+// Returns true when the initializer was neither folded into BSS words, nor
+// recorded as a string, nor deferred to `main`'s entry: the global would start
+// zero-filled whatever its initializer says. The caller records that for E309.
+// Before, `var A: [i64; 3] = [impure(), 20, 30]` silently held 0 0 0.
+fn items_record_global_init_or_defer(name: Name, init: Box<Expr>, deferrable: bool) -> bool with Mut, Panic, Div, Alloc {
+    if (*init).kind == ExprKind::ExprStringLit {
+        items_record_global_int_init(name, &(*init))
+        return false
+    }
     let before = ast_gvi_count_in(name, GLOBAL_VAR_INIT_CUR_MOD)
     items_record_global_int_init(name, &(*init))
-    if deferrable && ast_gvi_count_in(name, GLOBAL_VAR_INIT_CUR_MOD) == before
-        && items_expr_is_closed(&(*init)) {
+    if ast_gvi_count_in(name, GLOBAL_VAR_INIT_CUR_MOD) != before { return false }
+    if deferrable && items_expr_is_closed(&(*init)) {
         ast_record_global_deferred_init(name, init)
+        return false
     }
+    if !deferrable && items_defer_global_array_init(name, init) { return false }
+    true
 }
 
 fn items_reverse_item_list_loop(
@@ -1823,7 +1969,7 @@ impl Parser {
         let let_ovf = items_global_init_overflows(&(*init_let_box), &global_ty)
         let let_ovf_start = ITEMS_GINIT_OVF_START
         let let_ovf_end = ITEMS_GINIT_OVF_END
-        items_record_global_init_or_defer(name, init_let_box, items_global_init_deferrable(&global_ty))
+        let let_dropped = items_record_global_init_or_defer(name, init_let_box, items_global_init_deferrable(&global_ty))
         ast_record_global_const_name(name)
         if parser_peek(p) == TokenKind::Semi {
             p = p.advance()
@@ -1832,6 +1978,8 @@ impl Parser {
         let span = p.span_from(start)
         if let_ovf {
             ast_record_global_init_overflow(name, span, let_ovf_start, let_ovf_end)
+        } else if let_dropped {
+            ast_record_global_init_drop(name)
         }
         (p, Item {
             kind: ItemKind::ItemFn,
@@ -1884,6 +2032,7 @@ impl Parser {
         var var_ovf = false
         var var_ovf_start: i64 = 0
         var var_ovf_end: i64 = 0
+        var var_dropped = false
         if parser_peek(p) == TokenKind::Eq {
             p = p.advance()
             p = p.parse_expr()
@@ -1891,7 +2040,7 @@ impl Parser {
             var_ovf = items_global_init_overflows(&(*init_var_box), &global_ty)
             var_ovf_start = ITEMS_GINIT_OVF_START
             var_ovf_end = ITEMS_GINIT_OVF_END
-            items_record_global_init_or_defer(name, init_var_box, items_global_init_deferrable(&global_ty))
+            var_dropped = items_record_global_init_or_defer(name, init_var_box, items_global_init_deferrable(&global_ty))
         }
         if parser_peek(p) == TokenKind::Semi {
             p = p.advance()
@@ -1900,6 +2049,8 @@ impl Parser {
         let span = p.span_from(start)
         if var_ovf {
             ast_record_global_init_overflow(name, span, var_ovf_start, var_ovf_end)
+        } else if var_dropped {
+            ast_record_global_init_drop(name)
         }
         (p, Item {
             kind: ItemKind::ItemFn,
