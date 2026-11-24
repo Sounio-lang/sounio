@@ -160,6 +160,12 @@ Environment:
   SOUNIO_STDLIB_PATH=<dir>   forwarded to raw ELF
   SOUNIO_SOUC_BIN=<path>     override raw ELF
   SOUC_NATIVE_BIN=<path>     override raw ELF (alias)
+  SOUNIO_TEST_TARGET=<triple>
+                         e.g. aarch64-macos: compile via the `build` verb
+                         with --target (the raw positional interface
+                         ignores --target); Mach-O outputs on Darwin are
+                         ad-hoc signed so they execute without a prior
+                         codesign step
 USAGE
 }
 
@@ -184,10 +190,22 @@ souc_compile() {
   local out="$2"
   local log
   if [[ "$RAW_MODE" == "modular" ]]; then
-    log="$("$RAW_SOUC" "$src" -o "$out" 2>&1)" || true
+    # SOUNIO_TEST_TARGET (e.g. aarch64-macos): the raw positional interface
+    # ignores --target, so a set target switches to the `build` verb, which
+    # honors it. Unset target keeps the historical positional invocation.
+    if [[ -n "${SOUNIO_TEST_TARGET:-}" ]]; then
+      log="$("$RAW_SOUC" build "$src" --target "$SOUNIO_TEST_TARGET" -o "$out" 2>&1)" || true
+    else
+      log="$("$RAW_SOUC" "$src" -o "$out" 2>&1)" || true
+    fi
     if [[ ! -s "$out" ]]; then
       printf '%s\ntypecheck: failed\n' "$log"
       return 1
+    fi
+    # Ad-hoc sign Mach-O outputs on Darwin so the harness (and `run` below)
+    # can execute them without a prior codesign step.
+    if [[ "$(uname -s)" == "Darwin" ]] && file "$out" 2>/dev/null | grep -q 'Mach-O'; then
+      codesign -s - -f "$out" 2>/dev/null || true
     fi
     printf '%s' "$log"
     return 0
@@ -218,11 +236,15 @@ case "${1:-}" in
       set -e
       exit "$rc"
     fi
-    tmp="$(mktemp /tmp/sounio-check-XXXXXX.elf)"
-    trap 'rm -f "$tmp"' EXIT
+    # Private temp dir per invocation: a fixed mktemp template in shared /tmp
+    # collides under parallel harness jobs (leftover files from killed runs
+    # exhaust mktemp's namespace). Same below in `run`.
+    tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/sounio-check.XXXXXX")"
+    tmp="$tmpdir/out.elf"
+    trap 'rm -rf "$tmpdir"' EXIT
     souc_compile "$1" "$tmp"
     rc=$?
-    rm -f "$tmp"
+    rm -rf "$tmpdir"
     trap - EXIT
     exit "$rc"
     ;;
@@ -234,14 +256,15 @@ case "${1:-}" in
       usage >&2
       exit 2
     fi
-    tmp="$(mktemp /tmp/sounio-run-XXXXXX.elf)"
-    trap 'rm -f "$tmp"' EXIT
+    tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/sounio-run.XXXXXX")"
+    tmp="$tmpdir/out.elf"
+    trap 'rm -rf "$tmpdir"' EXIT
     set +e
     souc_compile "$1" "$tmp"
     rc=$?
     set -e
     if [[ $rc -ne 0 ]]; then
-      rm -f "$tmp"
+      rm -rf "$tmpdir"
       trap - EXIT
       exit "$rc"
     fi
@@ -250,7 +273,7 @@ case "${1:-}" in
     "$tmp"
     rc=$?
     set -e
-    rm -f "$tmp"
+    rm -rf "$tmpdir"
     trap - EXIT
     exit "$rc"
     ;;
