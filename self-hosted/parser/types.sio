@@ -5,7 +5,7 @@
 
 use parser::ast::*
 use lexer::token::*
-use parser::parser::{parser_peek, parser_at_eof, pt_read_kind, parser_peek_ahead, mk_expr, error_expr, dummy_type_expr, parser_take_expr_box}
+use parser::parser::{parser_peek, parser_at_eof, pt_read_kind, pt_read_start, pt_read_end, parser_peek_ahead, mk_expr, error_expr, dummy_type_expr, parser_take_expr_box}
 use parser::exprs::{parse_expr_entry}
 
 fn type_path_structural_count(list: &StringList, remaining: i64) -> i64 with Mut {
@@ -43,6 +43,52 @@ fn report_unknown_knowledge_component(mut_p: Parser, span: Span) -> Parser with 
     print(": unknown Knowledge annotation component\n")
     print("   = note: an identifier here is an epsilon bound and needs a comparison (e.g. eps < 0.05)\n")
     print("   = note: provenance words are Derived, Computed, Measured; validity words are Valid, ValidUntil, ValidWhile\n")
+    p
+}
+
+// Length of the run of Error tokens at p.pos, or -1 when the run is not a
+// sequence of contiguous one-byte tokens. The lexer refuses every unknown
+// byte (E271) except the UTF-8 sequences of `ε` (CE B5, two tokens) and `⊥`
+// (E2 8A A5, three tokens), so a contiguous run of exactly 2 is `ε` and of
+// exactly 3 is `⊥`. Any other length (`ε=ε`, `ε=⊥⊥`, `ε⊥`) is malformed.
+fn parser_error_run_len(p: Parser) -> i64 with Mut, Panic, Div {
+    if p.pending_gt > 0 { return 0 }
+    var idx = p.pos
+    var n: i64 = 0
+    var prev_end: i64 = 0 - 1
+    while idx < p.token_count && pt_read_kind(idx) == TokenKind::Error {
+        let s = pt_read_start(idx)
+        let e = pt_read_end(idx)
+        if e - s != 1 { return 0 - 1 }
+        if prev_end >= 0 && s != prev_end { return 0 - 1 }
+        prev_end = e
+        n = n + 1
+        idx = idx + 1
+    }
+    n
+}
+
+fn parser_skip_error_run(mut_p: Parser) -> Parser with Mut, Panic, Div {
+    var p = mut_p
+    while parser_peek(p) == TokenKind::Error {
+        p = p.advance()
+    }
+    p
+}
+
+fn report_malformed_epsilon_glyph(mut_p: Parser, span: Span) -> Parser with Mut, IO {
+    var p = mut_p
+    p.had_error = true
+    p.error_count = p.error_count + 1
+    print("error[E241]")
+    if span.start > 0 || span.end > 0 {
+        print(" at ")
+        print_int(span.start)
+        print("..")
+        print_int(span.end)
+    }
+    print(": unknown Knowledge annotation component\n")
+    print("   = note: an epsilon bound is `ε <op> number` or `ε=⊥` (U+22A5, written once); an identifier or another glyph here is not a bound\n")
     p
 }
 
@@ -1349,24 +1395,37 @@ impl Parser {
                         eps_val = p.current().int_value as f64
                         p = p.advance()
                     } else if parser_peek(p) == TokenKind::Ident {
+                        // An identifier is not a type-level bound: it used to be
+                        // skipped, leaving the bound at 0.0 without a diagnostic.
+                        p = report_malformed_epsilon_glyph(p, p.current_span())
                         p = p.advance()
                     } else if parser_peek(p) == TokenKind::Error {
-                        // `ε=⊥` (U+22A5, three Error tokens): Knightian ignorance.
-                        // -2 is the bottom marker the checker maps to mode 3. It used
-                        // to stop here and fail the parse, so Madaros had no `⊥`.
-                        while parser_peek(p) == TokenKind::Error {
+                        // `ε=⊥` (U+22A5, exactly three contiguous Error tokens):
+                        // Knightian ignorance. -2 is the bottom marker the checker
+                        // maps to mode 3. Any other run of Error tokens is refused.
+                        if parser_error_run_len(p) == 3 {
                             p = p.advance()
+                            p = p.advance()
+                            p = p.advance()
+                            eps_val = 0.0 - 2.0
+                        } else {
+                            p = report_malformed_epsilon_glyph(p, ident_span)
+                            p = parser_skip_error_run(p)
                         }
-                        eps_val = 0.0 - 2.0
                     }
                     epsilon_opt = Some(Box::new(EpsilonBound { op: cmp_op, value: eps_val }))
                 } else {
                     p = report_unknown_knowledge_component(p, ident_span)
                 }
             } else if ck == TokenKind::Error {
-                p = p.advance()
-                while parser_peek(p) == TokenKind::Error {
+                // Unicode `ε` on the left: exactly two contiguous Error tokens.
+                let lhs_span = p.current_span()
+                if parser_error_run_len(p) == 2 {
                     p = p.advance()
+                    p = p.advance()
+                } else {
+                    p = report_malformed_epsilon_glyph(p, lhs_span)
+                    p = parser_skip_error_run(p)
                 }
                 var cmp_op2 = CompareOp::CmpEq
                 if parser_peek(p) == TokenKind::Lt {
@@ -1393,11 +1452,17 @@ impl Parser {
                     eps_val2 = p.current().int_value as f64
                     p = p.advance()
                 } else if parser_peek(p) == TokenKind::Ident {
+                    p = report_malformed_epsilon_glyph(p, p.current_span())
                     p = p.advance()
-                } else {
-                    if parser_peek(p) == TokenKind::Error { eps_val2 = 0.0 - 2.0 }
-                    while parser_peek(p) == TokenKind::Error {
+                } else if parser_peek(p) == TokenKind::Error {
+                    if parser_error_run_len(p) == 3 {
                         p = p.advance()
+                        p = p.advance()
+                        p = p.advance()
+                        eps_val2 = 0.0 - 2.0
+                    } else {
+                        p = report_malformed_epsilon_glyph(p, p.current_span())
+                        p = parser_skip_error_run(p)
                     }
                 }
                 epsilon_opt = Some(Box::new(EpsilonBound { op: cmp_op2, value: eps_val2 }))
