@@ -9797,6 +9797,78 @@ fn checker_record_knowledge_binary_inplace(c: *mut Checker, span: Span) -> bool 
     add_result.1 >= 0
 }
 
+// Knowledge<f64> (op) exact constant, + - * /. A constant operand is exact:
+// variance 0, confidence 1, no noise source, so first-order GUM keeps the
+// Knowledge side's variance scaled by the constant (knowledge_binary_result
+// already gives a non-Knowledge operand the empty source set and validity
+// always). Only a compile-time constant is exact: a float literal, its
+// negation, or a module-level let/const whose initialiser is a float literal
+// and whose name no other module-level declaration shares
+// (ast_global_is_exact_f64_literal), not shadowed by a local. A runtime f64 is refused with
+// E313: its type says nothing about its uncertainty (spec ch. 04, "a Value
+// does not establish an exact real value"), and promoting it would let a
+// measured number pass as exact. lean_single promotes every f64.
+fn checker_expr_is_exact_f64_const_inplace(c: *mut Checker, e: Expr) -> bool with Mut, Panic, Div, Alloc {
+    if e.kind == ExprKind::ExprFloatLit { return true }
+    if e.kind == ExprKind::ExprUnary && e.un_op == UnaryOp::OpNeg {
+        match e.left {
+            Some(inner) => { return checker_expr_is_exact_f64_const_inplace(c, *inner) }
+            None => { return false }
+        }
+    }
+    if e.kind == ExprKind::ExprIdent && ast_global_is_exact_f64_literal(e.name) {
+        var bi = (*c).env.count - 1
+        while bi >= 0 {
+            let b = type_env_get_binding(&(*c).env, bi)
+            if name_eq(b.name, e.name) { return b.scope_depth == 0 }
+            bi = bi - 1
+        }
+        // Not bound in this module's environment: an imported global, which
+        // the name table above has already proved unique and literal.
+        return true
+    }
+    false
+}
+
+// The lowerer recognises the same constant shapes syntactically
+// (expr_is_exact_f64_const_ref): a span table does not reach the lowerer on
+// the multi-module path, measured as a SIGSEGV with a plain literal.
+// Returns 0 when this is not a mixed Knowledge<f64> / f64 arithmetic node,
+// 1 when the f64 side is an exact constant (admitted), 2 when it was refused.
+fn checker_knowledge_scalar_status_inplace(c: *mut Checker, e: Expr, left_ty: TypeEntry, right_ty: TypeEntry) -> i64 with Mut, Panic, Div, Alloc, IO {
+    if e.bin_op != BinaryOp::OpAdd && e.bin_op != BinaryOp::OpSub
+        && e.bin_op != BinaryOp::OpMul && e.bin_op != BinaryOp::OpDiv {
+        return 0
+    }
+    let lk = is_knowledge_type(left_ty)
+    let rk = is_knowledge_type(right_ty)
+    if lk == rk { return 0 }
+    let k_ty = if lk { left_ty } else { right_ty }
+    let s_ty = if lk { right_ty } else { left_ty }
+    if knowledge_inner(k_ty).kind != TypeKind::TyF64 { return 0 }
+    // A module-level let/const read inside a function is typed unknown, not
+    // f64. Before this rule `x * SCALE` passed the checker (E004 skips unknown
+    // operands) and the handle was multiplied as a scalar: SIGSEGV at run time.
+    // An unknown operand is admitted only as a module-level constant; the
+    // lowerer then refuses it unless the operand lowers as a float.
+    let s_unknown = s_ty.kind == TypeKind::TyUnknown
+    if !s_unknown && (s_ty.kind != TypeKind::TyF64 || s_ty.unit_id >= 0) {
+        return 0
+    }
+    var is_const = false
+    let s_opt = if lk { e.right } else { e.left }
+    match s_opt {
+        Some(sb) => { is_const = checker_expr_is_exact_f64_const_inplace(c, *sb) }
+        None => {}
+    }
+    if !is_const {
+        checker_report_error_at_inplace(c, e.span, 313, 0, 0, 0)
+        print("   = help: state the claim: `Knowledge(s, ...)` or `measure(s, uncertainty: 0.0)` if s is exact\n")
+        return 2
+    }
+    1
+}
+
 // R6 Correlated (id 29): Knowledge binary arith reusing the same ExprIdent
 // requires `with Correlated`. Distinct from E230 anti-garbling (noise symbols).
 // SOUNIO_FORCE_CORRELATED=1 forces every Knowledge arith op (reachability).
@@ -10195,7 +10267,9 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
     if left_ty.kind == TypeKind::TyUnobserved || right_ty.kind == TypeKind::TyUnobserved {
         return checker_check_binary_unobserved_inplace(c, e.span, e.bin_op, left_ty, right_ty)
     }
-    checker_check_binary_operand_compat_inplace(c, e.span, e.bin_op, left_ty, right_ty, knowledge_ident_add)
+    let ksc = checker_knowledge_scalar_status_inplace(c, e, left_ty, right_ty)
+    if ksc == 2 { return ty_error() }
+    checker_check_binary_operand_compat_inplace(c, e.span, e.bin_op, left_ty, right_ty, knowledge_ident_add || ksc == 1)
     if is_knowledge_type(left_ty) || is_knowledge_type(right_ty) {
         checker_store_binary_knowledge_hyper_inplace(c, e.span, e.bin_op, left_ty, right_ty)
         var kk_admit = checker_knowledge_binary_lowerable(e, left_ty, right_ty)
@@ -22109,6 +22183,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 250 { print("call to an `extern \"C\"` function the native backend does not implement") }
     else if code == 242 { print("epistemic channel index is out of range") }
     else if code == 232 { print("the same array local initialises two fields; the value copy is shallow, so they would be one array -- give each field its own literal") }
+    else if code == 313 { print("an f64 operand of Knowledge arithmetic is not a compile-time constant: only a literal, its negation or a module-level let/const is exact; a runtime f64 says nothing about its own uncertainty") }
     else if code == 312 { print("hessian_wrt source is not a measured source that the value depends on: the source must be a Knowledge binding from measure() (or Knowledge(...)) and the value must depend on it") }
     else if code == 306 { print("retract needs `because:` with a non-empty string literal: leaving a contest is explicit and its reason is recorded (ADR-016, decision 4.3)") }
     else if code == 305 { print("the consistency policy of meet must be a positive numeric literal: an E_n limit is a declared modelling choice, not a value computed at run time (ADR-016)") }
