@@ -159,13 +159,16 @@
       "entry_id": "kernel-param-lowering",
       "stage": "lowering",
       "support_class": "gpu-lowering-supported",
-      "summary": "Kernel parameters flow from GpuKernelIr.params/param_count through PTX .param declarations and ld.param loads.",
+      "summary": "Kernel parameters flow from GpuKernelIr.params/param_count through the signature-derived plan (gpu_param_plan) into PTX .param declarations and ld.param loads. Parameter roles come from type and use, never from names.",
       "descriptor_fields": [
         "GpuKernelIr.params[8]",
         "GpuKernelIr.param_count",
         "GpuParam.name",
         "GpuParam.ty",
-        "GpuOp.param_idx"
+        "GpuOp.param_idx",
+        "GpuParamPlan.roles[8]",
+        "GpuParamPlan.extent_idx",
+        "GpuParamPlan.out_idx"
       ],
       "symbol_refs": [
         {
@@ -178,9 +181,17 @@
           ]
         },
         {
+          "path": "self-hosted/gpu/gpu_param_plan.sio",
+          "symbols": [
+            "gpu_param_plan_build",
+            "gpu_param_plan_ptx_type",
+            "gpu_param_plan_refusal_code"
+          ]
+        },
+        {
           "path": "self-hosted/gpu/lower_to_ptx.sio",
           "symbols": [
-            "kernel.param_count",
+            "gpu_emit_kernel_signature",
             "GpuOpcode::GpuLoadParam",
             "name_to_string(param_name)"
           ]
@@ -196,10 +207,58 @@
         "examples/gpu.sio",
         "examples/kernel_vec_add.sio",
         "examples/kernel_matmul.sio",
-        "examples/kernel_epistemic_vec_add.sio"
+        "examples/kernel_epistemic_vec_add.sio",
+        "tests/gpu/param_plan/pos_read_write_pair.sio",
+        "tests/gpu/param_plan/pos_two_inputs.sio",
+        "tests/gpu/param_plan/pos_scalar_middle.sio",
+        "tests/gpu/param_plan/pos_in_place.sio",
+        "tests/gpu/param_plan/pos_extent_later.sio",
+        "tests/gpu/param_plan/gate_param_plan.sh"
       ],
       "notes": [
-        "The lowering lane is evidence-backed through build --backend gpu on the checked public artifact."
+        "The lowering lane is evidence-backed through build --backend gpu on the checked public artifact.",
+        "Parameter roles are derived from GpuParam.ty and from store use; the literal names n/a/b/c are not consulted.",
+        "The extent is the first i64 parameter wherever it sits (saxpy(a: f64, n: i64) is a real corpus kernel); extent_idx records it. A kernel with no slice at all is legal.",
+        "This entry covers parameter *lowering* only. It does not claim a device launch: perform GPU.launch is still lowered to a CPU call (see KL-22) and --backend gpu refuses a kernel body holding a var."
+      ]
+    },
+    {
+      "entry_id": "kernel-param-plan-refusal",
+      "stage": "lowering",
+      "support_class": "gpu-explicit-unsupported",
+      "summary": "Shapes the parameter plan cannot classify fail closed with a stable refusal code instead of emitting from a guessed signature.",
+      "descriptor_fields": [
+        "GpuParamRefusal",
+        "gpu_param_plan_refusal_code",
+        "gpu_param_plan_refusal_reason"
+      ],
+      "symbol_refs": [
+        {
+          "path": "self-hosted/gpu/gpu_param_plan.sio",
+          "symbols": [
+            "GpuParamRefusal",
+            "gpu_param_plan_build",
+            "gpu_param_plan_record_refusal"
+          ]
+        },
+        {
+          "path": "self-hosted/compiler/main.sio",
+          "symbols": [
+            "gpu_param_plan_refused"
+          ]
+        }
+      ],
+      "evidence_paths": [
+        "tests/gpu/param_plan/neg_no_extent.sio",
+        "tests/gpu/param_plan/neg_arity_over_cap.sio",
+        "tests/gpu/param_plan/neg_no_output_slice.sio",
+        "tests/gpu/param_plan/neg_unsupported_type.sio",
+        "tests/gpu/param_plan/neg_multiple_extents.sio"
+      ],
+      "notes": [
+        "Refusal codes: no_extent, arity_over_cap, no_output_slice, unsupported_param_type, multiple_extents.",
+        "arity_over_cap is recorded where the HLIR-to-GPU mapping truncates at 8 slots, which used to drop parameters silently.",
+        "The first refusal of a compile wins, so a later healthy kernel cannot clear an earlier one."
       ]
     },
     {

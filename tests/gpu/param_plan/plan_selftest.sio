@@ -1,0 +1,197 @@
+//@ run-pass
+//@ expect-stdout: PASS: gpu_param_plan selftest
+//
+// Unit selftest for gpu::gpu_param_plan. Builds kernel IR directly, so it needs
+// no GPU and no source parsing. Every supported shape must classify; every
+// unsupported shape must return its own refusal code.
+//
+// The point of the plan is that nothing here depends on a parameter name: the
+// kernels below deliberately use names that are not `n`, `a`, `b`, `c`.
+
+use gpu::kernel_ir::*
+use gpu::gpu_param_plan::*
+
+fn kernel_with(types: [GpuType; 8], n: i64) -> GpuKernelIr with Mut, Panic {
+    var k = gpu_kernel_new()
+    var i: i64 = 0
+    while i < n {
+        var p = gpu_param_new()
+        p.ty = types[i as usize]
+        p.name = ki_ir_name_from_str("p", 1)
+        k.params[i as usize] = p
+        i = i + 1
+    }
+    k.param_count = n
+    return k
+}
+
+fn load_param(k: GpuKernelIr, param_idx: i64, dst: i64) -> GpuKernelIr with Mut, Panic, Div {
+    var op = gpu_op_new()
+    op.opcode = GpuOpcode::GpuLoadParam
+    op.param_idx = param_idx
+    op.dst_reg = dst
+    return gpu_add_op(k, op)
+}
+
+fn store_through(k: GpuKernelIr, addr: i64) -> GpuKernelIr with Mut, Panic, Div {
+    var op = gpu_op_new()
+    op.opcode = GpuOpcode::GpuStoreGlobal
+    op.addr_reg = addr
+    return gpu_add_op(k, op)
+}
+
+fn add_regs(k: GpuKernelIr, dst: i64, lhs: i64, rhs: i64) -> GpuKernelIr with Mut, Panic, Div {
+    var op = gpu_op_new()
+    op.opcode = GpuOpcode::GpuAdd
+    op.dst_reg = dst
+    op.lhs_reg = lhs
+    op.rhs_reg = rhs
+    return gpu_add_op(k, op)
+}
+
+fn types_of(a: GpuType, b: GpuType, c: GpuType, d: GpuType) -> [GpuType; 8] {
+    var t: [GpuType; 8] = [GpuType::GpuU64; 8]
+    t[0] = a
+    t[1] = b
+    t[2] = c
+    t[3] = d
+    return t
+}
+
+// extent, in, out
+fn case_read_write_pair() -> bool with Mut, Panic, Div {
+    var k = kernel_with(types_of(GpuType::GpuI64, GpuType::GpuPtr, GpuType::GpuPtr, GpuType::GpuU64), 3)
+    k = load_param(k, 1, 1)
+    k = load_param(k, 2, 2)
+    k = store_through(k, 2)
+    let pair = gpu_param_plan_build(k)
+    let plan = pair.0
+    if !gpu_param_plan_is_ok(pair.1) { return false }
+    if plan.count != 3 { return false }
+    if plan.extent_idx != 0 { return false }
+    if plan.out_idx != 2 { return false }
+    if plan.roles[1 as usize] != GpuParamRole::GpuRoleSliceIn { return false }
+    if plan.roles[2 as usize] != GpuParamRole::GpuRoleSliceOut { return false }
+    return gpu_param_plan_count_role(plan, GpuParamRole::GpuRoleSliceOut) == 1
+}
+
+// extent, in, in, out — the shape that used to need the literal names a/b/c
+fn case_two_inputs() -> bool with Mut, Panic, Div {
+    var k = kernel_with(types_of(GpuType::GpuI64, GpuType::GpuPtr, GpuType::GpuPtr, GpuType::GpuPtr), 4)
+    k = load_param(k, 1, 1)
+    k = load_param(k, 2, 2)
+    k = load_param(k, 3, 3)
+    k = store_through(k, 3)
+    let pair = gpu_param_plan_build(k)
+    if !gpu_param_plan_is_ok(pair.1) { return false }
+    return gpu_param_plan_count_role(pair.0, GpuParamRole::GpuRoleSliceIn) == 2
+}
+
+// extent, in, scalar f64, out
+fn case_scalar_middle() -> bool with Mut, Panic, Div {
+    var k = kernel_with(types_of(GpuType::GpuI64, GpuType::GpuPtr, GpuType::GpuF64, GpuType::GpuPtr), 4)
+    k = load_param(k, 1, 1)
+    k = load_param(k, 3, 3)
+    k = store_through(k, 3)
+    let pair = gpu_param_plan_build(k)
+    if !gpu_param_plan_is_ok(pair.1) { return false }
+    return gpu_param_plan_count_role(pair.0, GpuParamRole::GpuRoleScalarF64) == 1
+}
+
+// in-place: one slice, read and written
+fn case_in_place() -> bool with Mut, Panic, Div {
+    var k = kernel_with(types_of(GpuType::GpuI64, GpuType::GpuPtr, GpuType::GpuU64, GpuType::GpuU64), 2)
+    k = load_param(k, 1, 1)
+    k = store_through(k, 1)
+    let pair = gpu_param_plan_build(k)
+    if !gpu_param_plan_is_ok(pair.1) { return false }
+    return pair.0.roles[1 as usize] == GpuParamRole::GpuRoleSliceOut
+}
+
+// store address reached through an add, not directly
+fn case_store_via_add() -> bool with Mut, Panic, Div {
+    var k = kernel_with(types_of(GpuType::GpuI64, GpuType::GpuPtr, GpuType::GpuU64, GpuType::GpuU64), 2)
+    k = load_param(k, 1, 1)
+    k = add_regs(k, 5, 1, 4)
+    k = store_through(k, 5)
+    let pair = gpu_param_plan_build(k)
+    if !gpu_param_plan_is_ok(pair.1) { return false }
+    return pair.0.roles[1 as usize] == GpuParamRole::GpuRoleSliceOut
+}
+
+fn case_no_extent() -> bool with Mut, Panic, Div {
+    let k = kernel_with(types_of(GpuType::GpuF64, GpuType::GpuPtr, GpuType::GpuU64, GpuType::GpuU64), 2)
+    let pair = gpu_param_plan_build(k)
+    return gpu_param_plan_refusal_code(pair.1) == "no_extent"
+}
+
+// extent after a scalar: legal, and the index is recorded
+fn case_extent_later() -> bool with Mut, Panic, Div {
+    let k = kernel_with(types_of(GpuType::GpuF64, GpuType::GpuI64, GpuType::GpuU64, GpuType::GpuU64), 2)
+    let pair = gpu_param_plan_build(k)
+    if !gpu_param_plan_is_ok(pair.1) { return false }
+    return pair.0.extent_idx == 1
+}
+
+// scalar-only kernel, no slices at all
+fn case_scalar_only() -> bool with Mut, Panic, Div {
+    let k = kernel_with(types_of(GpuType::GpuI64, GpuType::GpuF64, GpuType::GpuU64, GpuType::GpuU64), 2)
+    let pair = gpu_param_plan_build(k)
+    return gpu_param_plan_is_ok(pair.1)
+}
+
+fn case_arity_over_cap() -> bool with Mut, Panic, Div {
+    var k = gpu_kernel_new()
+    var i: i64 = 0
+    while i < 9 {
+        var p = gpu_param_new()
+        p.ty = GpuType::GpuPtr
+        k.params[0 as usize] = p
+        i = i + 1
+    }
+    k.param_count = 9
+    let pair = gpu_param_plan_build(k)
+    return gpu_param_plan_refusal_code(pair.1) == "arity_over_cap"
+}
+
+fn case_no_output_slice() -> bool with Mut, Panic, Div {
+    var k = kernel_with(types_of(GpuType::GpuI64, GpuType::GpuPtr, GpuType::GpuU64, GpuType::GpuU64), 2)
+    k = load_param(k, 1, 1)
+    let pair = gpu_param_plan_build(k)
+    return gpu_param_plan_refusal_code(pair.1) == "no_output_slice"
+}
+
+fn case_unsupported_type() -> bool with Mut, Panic, Div {
+    let k = kernel_with(types_of(GpuType::GpuI64, GpuType::GpuF32, GpuType::GpuU64, GpuType::GpuU64), 2)
+    let pair = gpu_param_plan_build(k)
+    return gpu_param_plan_refusal_code(pair.1) == "unsupported_param_type"
+}
+
+fn case_multiple_extents() -> bool with Mut, Panic, Div {
+    let k = kernel_with(types_of(GpuType::GpuI64, GpuType::GpuI64, GpuType::GpuU64, GpuType::GpuU64), 2)
+    let pair = gpu_param_plan_build(k)
+    return gpu_param_plan_refusal_code(pair.1) == "multiple_extents"
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    var fails: i64 = 0
+    if !case_read_write_pair() { println("FAIL read_write_pair"); fails = fails + 1 }
+    if !case_two_inputs() { println("FAIL two_inputs"); fails = fails + 1 }
+    if !case_scalar_middle() { println("FAIL scalar_middle"); fails = fails + 1 }
+    if !case_in_place() { println("FAIL in_place"); fails = fails + 1 }
+    if !case_store_via_add() { println("FAIL store_via_add"); fails = fails + 1 }
+    if !case_no_extent() { println("FAIL no_extent"); fails = fails + 1 }
+    if !case_extent_later() { println("FAIL extent_later"); fails = fails + 1 }
+    if !case_scalar_only() { println("FAIL scalar_only"); fails = fails + 1 }
+    if !case_arity_over_cap() { println("FAIL arity_over_cap"); fails = fails + 1 }
+    if !case_no_output_slice() { println("FAIL no_output_slice"); fails = fails + 1 }
+    if !case_unsupported_type() { println("FAIL unsupported_type"); fails = fails + 1 }
+    if !case_multiple_extents() { println("FAIL multiple_extents"); fails = fails + 1 }
+
+    if fails == 0 {
+        println("PASS: gpu_param_plan selftest")
+        0
+    } else {
+        1
+    }
+}

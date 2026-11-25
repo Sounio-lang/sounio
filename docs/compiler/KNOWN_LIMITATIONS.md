@@ -704,6 +704,15 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   solves) finishes in 39 s on one core. Choose the GPU here for bitwise
   cross-checking of the kernel, not for sweep throughput, until the
   memory-fed MC advance kernel lands.
+- **Parameter lowering is no longer part of this limit.** As of the
+  signature-derived parameter plan (`self-hosted/gpu/gpu_param_plan.sio`),
+  kernel parameters are classified from type and use instead of a fixed arity
+  and the literal names `n`/`a`/`b`/`c`, and shapes outside the plan fail
+  closed with a diagnostic code (`no_extent`, `extent_not_first`,
+  `arity_over_cap`, `no_output_slice`, `unsupported_param_type`,
+  `multiple_extents`). Gate: `tests/gpu/param_plan/gate_param_plan.sh`. The
+  body limit above (`var` locals) is unchanged, and so is the CPU lowering of
+  `perform GPU.launch`.
 
 ### KL-17 — #2773: same-named items in different modules
 
