@@ -72,8 +72,10 @@ use llm::qwen3::{
     qwen3_forward_token_cuda_opt,
     qwen3_forward_token_q4_cuda,
     qwen3_forward_batch_q4_cuda,
+    qwen3_forward_token_q4_conformal_cuda,
     f32_ftz_sub,
 }
+use llm::qwen3_quant_eisa::{EisaConeCert}
 
 extern "C" {
     fn dlopen(filename: *mut u8, flags: i32) -> *mut u8
@@ -271,6 +273,38 @@ fn env_equals(var_name: string, val: string) -> bool with Alloc, Mut {
     ptr_read_u8(p, n) == 0
 }
 
+fn env_f64_or(var_name: string, fallback: f64) -> f64 with Alloc, Mut, Div {
+    let p = hal_getenv_ptr(var_name)
+    if p == 0 || ptr_read_u8(p, 0) == 0 { return fallback }
+    var int_part: f64 = 0.0
+    var frac_part: f64 = 0.0
+    var frac_div: f64 = 1.0
+    var seen_dot = false
+    var seen_digit = false
+    var i: i64 = 0
+    while i < 64 {
+        let b = ptr_read_u8(p, i)
+        if b == 0 { break }
+        if b == 46 {
+            seen_dot = true
+        } else if b >= 48 && b <= 57 {
+            seen_digit = true
+            let d = (b - 48) as f64
+            if seen_dot {
+                frac_div = frac_div * 10.0
+                frac_part = frac_part + d / frac_div
+            } else {
+                int_part = int_part * 10.0 + d
+            }
+        } else {
+            return fallback
+        }
+        i = i + 1
+    }
+    if !seen_digit { return fallback }
+    int_part + frac_part
+}
+
 fn join_tok_json(dst: i64, dir_ptr: i64, dlen: i64) with Mut {
     var i: i64 = 0
     while i < dlen {
@@ -426,6 +460,45 @@ fn append_top2_entry(m: &Qwen3Model, out_buf: i64, pos_ptr: i64, with_comma: boo
     p = app_i64(out_buf, p, b2)
     p = app_byte(out_buf, p, 58)
     p = app_i64(out_buf, p, mb)
+    p = app_str(out_buf, p, ":exactness=VERIFIED_EXACT:history=UNCOMPARED")
+    let _wp = ptr_write_i64_le(pos_ptr, 0, p)
+    t1
+}
+
+fn append_conformal_entry(
+    m: &Qwen3Model,
+    cert: &EisaConeCert,
+    esc_flag: i64,
+    out_buf: i64,
+    pos_ptr: i64,
+    with_comma: bool
+) -> i64 with Alloc, Mut, Div {
+    let pk = page_arena_ptr(&m.arena) + m.buf_top2_off
+    let t1 = cert.refined_top1_id
+    let t2 = if esc_flag == 1 { cert.top1_id } else { cert.runner_up_id }
+    let b1 = ptr_read_u32_le(pk, 32)
+    let b2 = ptr_read_u32_le(pk, 40)
+    let mb = ptr_read_u32_le(pk, 44)
+    let cert_flag: i64 = if cert.strict_global_certified { 1 } else { 0 }
+    let fb_tok: i64 = if esc_flag == 1 { cert.refined_top1_id } else { -1 }
+
+    var p = ptr_read_i64_le(pos_ptr, 0)
+    if with_comma { p = app_byte(out_buf, p, 44) }
+    p = app_i64(out_buf, p, t1)
+    p = app_byte(out_buf, p, 58)
+    p = app_i64(out_buf, p, t2)
+    p = app_byte(out_buf, p, 58)
+    p = app_i64(out_buf, p, b1)
+    p = app_byte(out_buf, p, 58)
+    p = app_i64(out_buf, p, b2)
+    p = app_byte(out_buf, p, 58)
+    p = app_i64(out_buf, p, mb)
+    p = app_str(out_buf, p, ":cert=")
+    p = app_i64(out_buf, p, cert_flag)
+    p = app_str(out_buf, p, ":esc=")
+    p = app_i64(out_buf, p, esc_flag)
+    p = app_str(out_buf, p, ":fb=")
+    p = app_i64(out_buf, p, fb_tok)
     p = app_str(out_buf, p, ":exactness=VERIFIED_EXACT:history=UNCOMPARED")
     let _wp = ptr_write_i64_le(pos_ptr, 0, p)
     t1
@@ -770,11 +843,146 @@ fn run_61440_cuda_q4(
     ok
 }
 
+fn run_61440_cuda_q4_conformal(
+    m: &Qwen3Model,
+    tok: &Qwen3Tokenizer,
+    shard: &MappedShard,
+    slen: i64,
+    of: &OutFile,
+    resume_skip: i64,
+    max_tokens: i64,
+    max_seq: i64,
+    max_prompts: i64
+) -> bool with IO, Alloc, Mut, Div, Panic {
+    let q_hat = env_f64_or("SOUNIO_CONFORMAL_Q", 1.85)
+    let rt = qwen3_cuda_runner_init_mode(m, max_seq, "", -1, false)
+    let cc = qwen3_cuda_conformal_init(m, &rt, 17, q_hat)
+    let prompt_cap: i64 = 65536
+    let tokens_cap: i64 = 8192
+    let out_cap: i64 = 262144
+    let work_arena = page_arena_alloc(prompt_cap * 2 + tokens_cap * 8 + out_cap * 2 + 256)
+
+    var ok = qwen3_cuda_runner_is_ok(&rt) && qwen3_cuda_conformal_is_ok(&cc) && page_arena_is_ok(&work_arena)
+    var done_prompts: i64 = 0
+    var total_cert: i64 = 0
+    var total_esc: i64 = 0
+
+    if ok {
+        print("[audit61440] backend=cuda_q4_conformal prefill=simt q_hat=")
+        print_f64(q_hat)
+        println(" float_model=\"binary32, round-to-nearest-even, FTZ+DAZ, fixed op order\"")
+        qwen3_cuda_print_info(&rt)
+        let wbase = page_arena_ptr(&work_arena)
+        let line_ptr = wbase
+        let chat_ptr = line_ptr + prompt_cap
+        let tok_ptr = chat_ptr + prompt_cap
+        let out_ptr = tok_ptr + tokens_cap * 8
+        let ent_ptr = out_ptr + out_cap
+        let bi_ptr = ent_ptr + out_cap
+        let pos_ptr = bi_ptr + 8
+        let esc_ptr = pos_ptr + 8
+        let _wbi0 = ptr_write_i64_le(bi_ptr, 0, 0)
+
+        var pidx: i64 = 0
+        while ok {
+            if max_prompts > 0 && pidx >= max_prompts { break }
+            let ll = next_prompt_from_shard(shard, slen, bi_ptr, line_ptr, prompt_cap)
+            if ll < 0 { ok = false; break }
+            if ll == 0 { break }
+
+            if pidx < resume_skip {
+                pidx = pidx + 1
+                continue
+            }
+
+            let chat_len = qwen3_format_chat_bytes(0, 0, line_ptr, ll, true, false, chat_ptr, prompt_cap)
+            if chat_len <= 0 { ok = false; break }
+            let n_prompt = qwen3_encode_bytes(tok, chat_ptr, chat_len, tok_ptr, tokens_cap)
+            if n_prompt <= 0 || n_prompt + max_tokens > max_seq { ok = false; break }
+
+            if n_prompt > 1 {
+                if !qwen3_forward_batch_q4_cuda(m, &cc, &rt, tok_ptr, 0, n_prompt - 1, false) {
+                    ok = false
+                    break
+                }
+            }
+
+            let _wep0 = ptr_write_i64_le(pos_ptr, 0, 0)
+            let tid_last = ptr_read_i64_le(tok_ptr, (n_prompt - 1) * 8)
+            let _we0 = ptr_write_i64_le(esc_ptr, 0, 0)
+            let cert0 = qwen3_forward_token_q4_conformal_cuda(m, &cc, &rt, tid_last, n_prompt - 1, true, esc_ptr)
+            if cert0.cone_size <= 0 {
+                ok = false
+                break
+            }
+            let esc0 = ptr_read_i64_le(esc_ptr, 0)
+            if cert0.strict_global_certified { total_cert = total_cert + 1 }
+            if esc0 == 1 { total_esc = total_esc + 1 }
+            var prev_tok = append_conformal_entry(m, &cert0, esc0, ent_ptr, pos_ptr, false)
+            var step: i64 = 1
+            while step < max_tokens {
+                let kv_pos = n_prompt + step - 1
+                let _we1 = ptr_write_i64_le(esc_ptr, 0, 0)
+                let cert_s = qwen3_forward_token_q4_conformal_cuda(m, &cc, &rt, prev_tok, kv_pos, true, esc_ptr)
+                if cert_s.cone_size <= 0 {
+                    ok = false
+                    break
+                }
+                let esc_s = ptr_read_i64_le(esc_ptr, 0)
+                if cert_s.strict_global_certified { total_cert = total_cert + 1 }
+                if esc_s == 1 { total_esc = total_esc + 1 }
+                prev_tok = append_conformal_entry(m, &cert_s, esc_s, ent_ptr, pos_ptr, true)
+                step = step + 1
+            }
+            if !ok { break }
+            let ent_len = ptr_read_i64_le(pos_ptr, 0)
+
+            begin_prompt_line(out_ptr, pos_ptr, pidx, n_prompt, max_tokens, 0)
+            var hp = ptr_read_i64_le(pos_ptr, 0)
+            if hp + ent_len + 2 >= out_cap { ok = false; break }
+            var ei: i64 = 0
+            while ei < ent_len {
+                let _wc = ptr_write_u8(out_ptr, hp + ei, ptr_read_u8(ent_ptr, ei))
+                ei = ei + 1
+            }
+            let _wp = ptr_write_i64_le(pos_ptr, 0, hp + ent_len)
+            if !finalize_prompt_line(of, out_ptr, pos_ptr, out_cap) { ok = false; break }
+
+            done_prompts = done_prompts + 1
+            pidx = pidx + 1
+            if (pidx % 20) == 0 {
+                print("[audit61440-cuda-q4-conformal] completed_prompt=")
+                print_int(pidx)
+                print(" cert=")
+                print_int(total_cert)
+                print(" esc=")
+                print_int(total_esc)
+                println("")
+            }
+        }
+    }
+
+    let _fw = page_arena_free(work_arena)
+    let _fc = qwen3_cuda_conformal_free(cc, &rt)
+    let _fr = qwen3_cuda_runner_free(rt)
+    if ok {
+        print("AUDIT_61440_DONE backend=cuda_q4_conformal new_prompts=")
+        print_int(done_prompts)
+        print(" cert=")
+        print_int(total_cert)
+        print(" esc=")
+        print_int(total_esc)
+        println(" TOTAL_CUDA_FMA_MIN_NORM_HITS=0")
+    }
+    ok
+}
+
 fn main() -> i64 with IO, Alloc, Mut, Div, Panic {
     let force_cuda = env_equals("SOUNIO_AUDIT_BACKEND", "cuda")
     let use_q4 = env_equals("SOUNIO_AUDIT_QUANT", "q4")
+    let use_q4_conf = env_equals("SOUNIO_AUDIT_QUANT", "q4_conformal")
     let probe_sess = metal_session_open("")
-    let use_metal = (!force_cuda) && (!use_q4) && metal_session_is_ok(&probe_sess)
+    let use_metal = (!force_cuda) && (!use_q4) && (!use_q4_conf) && metal_session_is_ok(&probe_sess)
     let _cp = metal_session_close(probe_sess)
 
     let model_buf = heap_alloc(4096) as i64
@@ -813,7 +1021,7 @@ fn main() -> i64 with IO, Alloc, Mut, Div, Panic {
 
     if ok {
         if has_header == 0 {
-            let hdr_ok = write_run_header(&of, if use_metal { "metal" } else if use_q4 { "cuda_q4" } else { "cuda_audit" })
+            let hdr_ok = write_run_header(&of, if use_metal { "metal" } else if use_q4_conf { "cuda_q4_conformal" } else if use_q4 { "cuda_q4" } else { "cuda_audit" })
             if !hdr_ok {
                 println("AUDIT_61440_HEADER_WRITE_FAIL")
                 ok = false
@@ -833,6 +1041,8 @@ fn main() -> i64 with IO, Alloc, Mut, Div, Panic {
         println("")
         ok = if use_metal {
             run_61440_metal(&m, &tok, &shard, slen, &of, resume_skip, max_tokens, max_seq, max_prompts)
+        } else if use_q4_conf {
+            run_61440_cuda_q4_conformal(&m, &tok, &shard, slen, &of, resume_skip, max_tokens, max_seq, max_prompts)
         } else if use_q4 {
             run_61440_cuda_q4(&m, &tok, &shard, slen, &of, resume_skip, max_tokens, max_seq, max_prompts)
         } else {

@@ -402,6 +402,9 @@ pub linear struct CudaDriverSession {
     pub fn_mod_get_fn: i64,
     pub fn_mod_get_global: i64,
     pub fn_mem_alloc: i64,
+    pub fn_mem_alloc_managed: i64,
+    pub fn_mem_advise: i64,
+    pub fn_mem_get_info: i64,
     pub fn_mem_free: i64,
     pub fn_memcpy_h2d: i64,
     pub fn_memcpy_d2h: i64,
@@ -429,6 +432,9 @@ fn cuda_session_empty() -> CudaDriverSession {
         fn_mod_get_fn: 0,
         fn_mod_get_global: 0,
         fn_mem_alloc: 0,
+        fn_mem_alloc_managed: 0,
+        fn_mem_advise: 0,
+        fn_mem_get_info: 0,
         fn_mem_free: 0,
         fn_memcpy_h2d: 0,
         fn_memcpy_d2h: 0,
@@ -488,6 +494,9 @@ pub fn cuda_session_open(driver_path: string, ordinal: i64) -> CudaDriverSession
         fn_mod_get_global = hal_dlsym_str(lib, "cuModuleGetGlobal")
     }
     let fn_mem_alloc = hal_dlsym_str(lib, "cuMemAlloc_v2")
+    let fn_mem_alloc_managed = hal_dlsym_str(lib, "cuMemAllocManaged")
+    let fn_mem_advise = hal_dlsym_str(lib, "cuMemAdvise")
+    let fn_mem_get_info = hal_dlsym_str(lib, "cuMemGetInfo_v2")
     let fn_mem_free = hal_dlsym_str(lib, "cuMemFree_v2")
     let fn_memcpy_h2d = hal_dlsym_str(lib, "cuMemcpyHtoD_v2")
     let fn_memcpy_d2h = hal_dlsym_str(lib, "cuMemcpyDtoH_v2")
@@ -574,6 +583,9 @@ pub fn cuda_session_open(driver_path: string, ordinal: i64) -> CudaDriverSession
         fn_mod_get_fn: fn_mod_get_fn,
         fn_mod_get_global: fn_mod_get_global,
         fn_mem_alloc: fn_mem_alloc,
+        fn_mem_alloc_managed: fn_mem_alloc_managed,
+        fn_mem_advise: fn_mem_advise,
+        fn_mem_get_info: fn_mem_get_info,
         fn_mem_free: fn_mem_free,
         fn_memcpy_h2d: fn_memcpy_h2d,
         fn_memcpy_d2h: fn_memcpy_d2h,
@@ -604,6 +616,9 @@ pub fn cuda_session_close(s: CudaDriverSession) -> i64 {
         fn_mod_get_fn: _,
         fn_mod_get_global: _,
         fn_mem_alloc: _,
+        fn_mem_alloc_managed: _,
+        fn_mem_advise: _,
+        fn_mem_get_info: _,
         fn_mem_free: _,
         fn_memcpy_h2d: _,
         fn_memcpy_d2h: _,
@@ -725,6 +740,36 @@ pub fn cuda_module_get_global(s: &CudaDriverSession, hmod: i64, name: string) ->
     dptr
 }
 
+pub fn cuda_mem_free_bytes(s: &CudaDriverSession) -> i64 with Alloc {
+    if !s.ok || s.fn_mem_get_info == 0 { return 0 }
+    let box = heap_alloc(16) as i64
+    let _z0 = ptr_write_i64_le(box, 0, 0)
+    let _z1 = ptr_write_i64_le(box, 8, 0)
+    let f = s.fn_mem_get_info as fn(i64, i64) -> i64
+    let rc = hal_c_i32(f(box, box + 8))
+    let free_b = ptr_read_i64_le(box, 0)
+    heap_free(box as *mut u8)
+    if rc != 0 { return 0 }
+    free_b
+}
+
+pub fn cuda_mem_alloc_managed(s: &CudaDriverSession, bytes: i64) -> i64 with Alloc {
+    if !s.ok || bytes <= 0 || s.fn_mem_alloc_managed == 0 { return 0 }
+    let dptr_box = heap_alloc(8) as i64
+    let _z = ptr_write_i64_le(dptr_box, 0, 0)
+    let f = s.fn_mem_alloc_managed as fn(i64, i64, i32) -> i64
+    let rc = hal_c_i32(f(dptr_box, bytes, 1 as i32))
+    let dptr = ptr_read_i64_le(dptr_box, 0)
+    heap_free(dptr_box as *mut u8)
+    if rc != 0 || dptr == 0 { return 0 }
+    if s.fn_mem_advise != 0 {
+        let adv = s.fn_mem_advise as fn(i64, i64, i32, i32) -> i64
+        let _a1 = adv(dptr, bytes, 3 as i32, -1 as i32)
+        let _a2 = adv(dptr, bytes, 5 as i32, s.dev as i32)
+    }
+    dptr
+}
+
 pub fn cuda_mem_alloc(s: &CudaDriverSession, bytes: i64) -> i64 with Alloc {
     if !s.ok || bytes <= 0 { return 0 }
     let dptr_box = heap_alloc(8) as i64
@@ -733,8 +778,8 @@ pub fn cuda_mem_alloc(s: &CudaDriverSession, bytes: i64) -> i64 with Alloc {
     let rc = hal_c_i32(f(dptr_box, bytes))
     let dptr = ptr_read_i64_le(dptr_box, 0)
     heap_free(dptr_box as *mut u8)
-    if rc != 0 { return 0 }
-    dptr
+    if rc == 0 && dptr != 0 { return dptr }
+    cuda_mem_alloc_managed(s, bytes)
 }
 
 pub fn cuda_mem_free(s: &CudaDriverSession, dptr: i64) -> i64 {

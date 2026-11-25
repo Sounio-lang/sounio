@@ -144,10 +144,11 @@ struct RunHeader {
   std::string raw;
 };
 
-std::string_view backend_family(std::string_view b) {
-  if (b.starts_with("cuda")) return "cuda";
-  if (b.starts_with("metal")) return "metal";
-  return b;
+bool valid_cross_backend_pair(std::string_view a, std::string_view b) {
+  return (a == "metal" && b == "cuda_audit") ||
+         (a == "cuda_audit" && b == "metal") ||
+         (a == "metal_q4" && b == "cuda_q4") ||
+         (a == "cuda_q4" && b == "metal_q4");
 }
 
 std::string_view verdict_label(bool identical, bool same_backend) {
@@ -163,6 +164,10 @@ struct TokenTuple {
   uint32_t b1 = 0;
   uint32_t b2 = 0;
   uint32_t mb = 0;
+  bool has_conformal = false;
+  int64_t cert = -1;
+  int64_t esc = -1;
+  int64_t fb = -1;
   std::string exactness;
   std::string history;
 };
@@ -290,6 +295,11 @@ std::string compute_token_cols_sha256(const std::map<int64_t, PromptRow>& rows) 
       canonical += std::to_string(tok.t1) + ":" + std::to_string(tok.t2) + ":" +
                    std::to_string(tok.b1) + ":" + std::to_string(tok.b2) + ":" +
                    std::to_string(tok.mb);
+      if (tok.has_conformal) {
+        canonical += ":cert=" + std::to_string(tok.cert) +
+                     ":esc=" + std::to_string(tok.esc) +
+                     ":fb=" + std::to_string(tok.fb);
+      }
     }
     canonical.push_back('\n');
     hasher.update(canonical);
@@ -303,6 +313,7 @@ ParsedTsv parse_tsv(const std::string& path, bool allow_legacy_cross_backend_ide
     throw FormatError("unable to open file: " + path);
   }
   std::optional<RunHeader> header;
+  std::optional<bool> file_has_conformal;
   std::map<int64_t, PromptRow> rows;
   std::string raw;
   size_t line_no = 0;
@@ -340,27 +351,63 @@ ParsedTsv parse_tsv(const std::string& path, bool allow_legacy_cross_backend_ide
     row.tuples.reserve(items.size());
     for (std::string_view item : items) {
       const auto flds = split_char(item, ':');
-      if (flds.size() != 7) {
-        throw FormatError(ctx + ": expected 7-field tuple with exactness & history, got '" +
+      if (flds.size() != 7 && flds.size() != 10) {
+        throw FormatError(ctx + ": expected 7-field or 10-field tuple with exactness & history, got '" +
                           std::string(item) + "'");
       }
+      const bool tuple_is_conf = (flds.size() == 10);
+      if (!file_has_conformal.has_value()) {
+        file_has_conformal = tuple_is_conf;
+      } else if (*file_has_conformal != tuple_is_conf) {
+        throw FormatError(ctx + ": inconsistent tuple field count within file");
+      }
+
       TokenTuple tok;
       tok.t1 = parse_exact_int<int64_t>(flds[0], ctx);
       tok.t2 = parse_exact_int<int64_t>(flds[1], ctx);
       tok.b1 = parse_exact_int<uint32_t>(flds[2], ctx);
       tok.b2 = parse_exact_int<uint32_t>(flds[3], ctx);
       tok.mb = parse_exact_int<uint32_t>(flds[4], ctx);
-      if (!flds[5].starts_with("exactness=") || !flds[6].starts_with("history=")) {
-        throw FormatError(ctx + ": missing exactness=/history= fields in tuple '" +
-                          std::string(item) + "'");
+      if (tuple_is_conf) {
+        tok.has_conformal = true;
+        if (!flds[5].starts_with("cert=") || !flds[6].starts_with("esc=") ||
+            !flds[7].starts_with("fb=") || !flds[8].starts_with("exactness=") ||
+            !flds[9].starts_with("history=")) {
+          throw FormatError(ctx + ": missing cert=/esc=/fb=/exactness=/history= fields in tuple '" +
+                            std::string(item) + "'");
+        }
+        tok.cert = parse_exact_int<int64_t>(flds[5].substr(5), ctx);
+        tok.esc = parse_exact_int<int64_t>(flds[6].substr(4), ctx);
+        tok.fb = parse_exact_int<int64_t>(flds[7].substr(3), ctx);
+        if ((tok.cert != 0 && tok.cert != 1) || (tok.esc != 0 && tok.esc != 1) ||
+            (tok.cert + tok.esc != 1)) {
+          throw FormatError(ctx + ": invalid conformal cert/esc flags (" +
+                            std::to_string(tok.cert) + "/" + std::to_string(tok.esc) + ")");
+        }
+        if (tok.esc == 0 && tok.fb != -1) {
+          throw FormatError(ctx + ": non-escalated token must carry fb=-1, got fb=" +
+                            std::to_string(tok.fb));
+        }
+        if (tok.esc == 1 && (tok.fb < 0 || tok.fb != tok.t1)) {
+          throw FormatError(ctx + ": escalated token must satisfy fb == t1 >= 0, got fb=" +
+                            std::to_string(tok.fb) + " t1=" + std::to_string(tok.t1));
+        }
+        tok.exactness = std::string(flds[8].substr(10));
+        tok.history = std::string(flds[9].substr(8));
+      } else {
+        if (!flds[5].starts_with("exactness=") || !flds[6].starts_with("history=")) {
+          throw FormatError(ctx + ": missing exactness=/history= fields in tuple '" +
+                            std::string(item) + "'");
+        }
+        tok.exactness = std::string(flds[5].substr(10));
+        tok.history = std::string(flds[6].substr(8));
       }
-      tok.exactness = std::string(flds[5].substr(10));
-      tok.history = std::string(flds[6].substr(8));
       if (tok.exactness != "VERIFIED_EXACT") {
         throw FormatError(ctx + ": invalid exactness='" + tok.exactness + "' (expected VERIFIED_EXACT)");
       }
       if (allow_legacy_cross_backend_ident) {
-        if (tok.history != "UNCOMPARED" && tok.history != "CROSS_BACKEND_IDENTICAL") {
+        if (tok.history != "UNCOMPARED" && tok.history != "CROSS_BACKEND_IDENTICAL" &&
+            tok.history != "KERNEL_REVISION_IDENTICAL") {
           throw FormatError(ctx + ": unexpected history='" + tok.history + "' during relabel");
         }
       } else {
@@ -389,13 +436,19 @@ ParsedTsv parse_tsv(const std::string& path, bool allow_legacy_cross_backend_ide
 
 struct CompareResult {
   bool identical = false;
+  bool has_conformal = false;
   size_t prompts = 0;
   size_t total_tokens = 0;
+  size_t certified_tokens = 0;
+  size_t escalated_tokens = 0;
   size_t token_mismatches = 0;
   size_t runner_up_mismatches = 0;
   size_t top1_bit_mismatches = 0;
   size_t second_bit_mismatches = 0;
   size_t margin_bit_mismatches = 0;
+  size_t cert_mismatches = 0;
+  size_t esc_mismatches = 0;
+  size_t fb_mismatches = 0;
   size_t provenance_mismatches = 0;
   double max_margin_drift = 0.0;
   bool max_margin_non_finite = false;
@@ -438,9 +491,17 @@ CompareResult run_compare(const std::string& ref_path, const std::string& cand_p
   res.float_model = ref.header.float_model;
   res.ref_backend = ref.header.backend;
   res.cand_backend = cand.header.backend;
-  const std::string_view rf = backend_family(res.ref_backend);
-  const std::string_view cf = backend_family(res.cand_backend);
-  res.same_backend = (!rf.empty() && rf == cf);
+  res.same_backend = (!res.ref_backend.empty() && res.ref_backend == res.cand_backend);
+  if (!res.same_backend) {
+    if (res.ref_backend.empty() || res.cand_backend.empty() ||
+        !valid_cross_backend_pair(res.ref_backend, res.cand_backend)) {
+      throw FormatError("INCOMPATIBLE_NUMERIC_PATH: cannot compare backend=" +
+                        (res.ref_backend.empty() ? std::string("<missing>") : res.ref_backend) +
+                        " against backend=" +
+                        (res.cand_backend.empty() ? std::string("<missing>") : res.cand_backend) +
+                        " (different numeric paths)");
+    }
+  }
 
   struct AnnotatedRow {
     int64_t pidx = 0;
@@ -477,6 +538,14 @@ CompareResult run_compare(const std::string& ref_path, const std::string& cand_p
       ++res.total_tokens;
       const auto& rm = rrow.tuples[step];
       const auto& cc = crow.tuples[step];
+      if (rm.has_conformal != cc.has_conformal) {
+        throw FormatError("TUPLE_SCHEMA_MISMATCH: cannot compare conformal cert/esc tuple against non-conformal tuple");
+      }
+      if (rm.has_conformal) {
+        res.has_conformal = true;
+        if (rm.cert == 1) ++res.certified_tokens;
+        if (rm.esc == 1) ++res.escalated_tokens;
+      }
       if (rm.exactness != cc.exactness || rm.history != cc.history) {
         ++res.provenance_mismatches;
       }
@@ -485,6 +554,9 @@ CompareResult run_compare(const std::string& ref_path, const std::string& cand_p
       const bool d_b1 = (rm.b1 != cc.b1);
       const bool d_b2 = (rm.b2 != cc.b2);
       const bool d_mb = (rm.mb != cc.mb);
+      const bool d_cert = (rm.has_conformal && rm.cert != cc.cert);
+      const bool d_esc = (rm.has_conformal && rm.esc != cc.esc);
+      const bool d_fb = (rm.has_conformal && rm.fb != cc.fb);
       if (d_t1) {
         ++res.token_mismatches;
         if (first_tok_logs.size() < 10) {
@@ -496,6 +568,9 @@ CompareResult run_compare(const std::string& ref_path, const std::string& cand_p
       if (d_t2) ++res.runner_up_mismatches;
       if (d_b1) ++res.top1_bit_mismatches;
       if (d_b2) ++res.second_bit_mismatches;
+      if (d_cert) ++res.cert_mismatches;
+      if (d_esc) ++res.esc_mismatches;
+      if (d_fb) ++res.fb_mismatches;
       if (d_mb) {
         ++res.margin_bit_mismatches;
         const float fm = std::bit_cast<float>(rm.mb);
@@ -511,7 +586,8 @@ CompareResult run_compare(const std::string& ref_path, const std::string& cand_p
         if (bd > res.max_margin_bit_delta) res.max_margin_bit_delta = bd;
       }
 
-      const bool any_step_diff = (d_t1 || d_t2 || d_b1 || d_b2 || d_mb || rm.exactness != cc.exactness);
+      const bool any_step_diff = (d_t1 || d_t2 || d_b1 || d_b2 || d_mb ||
+                                  d_cert || d_esc || d_fb || rm.exactness != cc.exactness);
       if (any_step_diff && res.first_divergent_op.empty()) {
         std::string_view op = "provenance";
         std::string m_val = rm.exactness;
@@ -520,6 +596,18 @@ CompareResult run_compare(const std::string& ref_path, const std::string& cand_p
           op = "argmax_top1";
           m_val = std::to_string(rm.t1);
           c_val = std::to_string(cc.t1);
+        } else if (d_cert) {
+          op = "cert_flag";
+          m_val = std::to_string(rm.cert);
+          c_val = std::to_string(cc.cert);
+        } else if (d_esc) {
+          op = "esc_flag";
+          m_val = std::to_string(rm.esc);
+          c_val = std::to_string(cc.esc);
+        } else if (d_fb) {
+          op = "bf16_fallback_tok";
+          m_val = std::to_string(rm.fb);
+          c_val = std::to_string(cc.fb);
         } else if (d_b1) {
           op = "logit_top1_f32_u32";
           m_val = std::to_string(rm.b1);
@@ -554,7 +642,9 @@ CompareResult run_compare(const std::string& ref_path, const std::string& cand_p
   res.identical = (res.prompts > 0 && res.token_mismatches == 0 &&
                    res.runner_up_mismatches == 0 && res.margin_bit_mismatches == 0 &&
                    res.top1_bit_mismatches == 0 && res.second_bit_mismatches == 0 &&
-                   res.provenance_mismatches == 0 && !res.max_margin_non_finite);
+                   res.cert_mismatches == 0 && res.esc_mismatches == 0 &&
+                   res.fb_mismatches == 0 && res.provenance_mismatches == 0 &&
+                   !res.max_margin_non_finite);
 
   if (!out_path.empty()) {
     std::ofstream out(out_path, std::ios::binary | std::ios::trunc);
@@ -577,8 +667,11 @@ CompareResult run_compare(const std::string& ref_path, const std::string& cand_p
       for (size_t i = 0; i < arow.tuples.size(); ++i) {
         if (i > 0) out << ',';
         const auto& t = arow.tuples[i];
-        out << t.t1 << ':' << t.t2 << ':' << t.b1 << ':' << t.b2 << ':' << t.mb
-            << ":exactness=" << t.exactness << ":history=" << arow.histories[i];
+        out << t.t1 << ':' << t.t2 << ':' << t.b1 << ':' << t.b2 << ':' << t.mb;
+        if (t.has_conformal) {
+          out << ":cert=" << t.cert << ":esc=" << t.esc << ":fb=" << t.fb;
+        }
+        out << ":exactness=" << t.exactness << ":history=" << arow.histories[i];
       }
       out << '\n';
     }
@@ -597,12 +690,19 @@ void print_compare_result(const CompareResult& res) {
             << " float_model=\"" << res.float_model << "\"\n";
   std::cout << std::setprecision(17)
             << "prompts=" << res.prompts
-            << " total_tokens=" << res.total_tokens
-            << " token_mismatches=" << res.token_mismatches
+            << " total_tokens=" << res.total_tokens;
+  if (res.has_conformal) {
+    std::cout << " certified_tokens=" << res.certified_tokens
+              << " escalated_tokens=" << res.escalated_tokens;
+  }
+  std::cout << " token_mismatches=" << res.token_mismatches
             << " runner_up_mismatches=" << res.runner_up_mismatches
             << " top1_bit_mismatches=" << res.top1_bit_mismatches
             << " second_bit_mismatches=" << res.second_bit_mismatches
             << " margin_bit_mismatches=" << res.margin_bit_mismatches
+            << " cert_mismatches=" << res.cert_mismatches
+            << " esc_mismatches=" << res.esc_mismatches
+            << " fb_mismatches=" << res.fb_mismatches
             << " provenance_mismatches=" << res.provenance_mismatches
             << " max_margin_drift=" << (res.max_margin_non_finite ? -1.0 : res.max_margin_drift)
             << " max_margin_bit_delta=" << res.max_margin_bit_delta
@@ -628,8 +728,11 @@ std::pair<std::string, std::string> relabel_to_uncompared(const std::string& in_
       for (size_t i = 0; i < row.tuples.size(); ++i) {
         if (i > 0) out << ',';
         const auto& t = row.tuples[i];
-        out << t.t1 << ':' << t.t2 << ':' << t.b1 << ':' << t.b2 << ':' << t.mb
-            << ":exactness=" << t.exactness << ":history=UNCOMPARED";
+        out << t.t1 << ':' << t.t2 << ':' << t.b1 << ':' << t.b2 << ':' << t.mb;
+        if (t.has_conformal) {
+          out << ":cert=" << t.cert << ":esc=" << t.esc << ":fb=" << t.fb;
+        }
+        out << ":exactness=" << t.exactness << ":history=UNCOMPARED";
       }
       out << '\n';
     }
@@ -679,11 +782,25 @@ int run_selftest() {
         "# run_header binary_sha256=" + std::string(64, 'c') +
         " float_model=\"binary32, round-to-nearest-even, FTZ+DAZ, fixed op order\" "
         "backend=cuda_q4 prefill=simt\n";
+    const std::string hdr_cuda_q4_conf =
+        "# run_header binary_sha256=" + std::string(64, 'd') +
+        " float_model=\"binary32, round-to-nearest-even, FTZ+DAZ, fixed op order\" "
+        "backend=cuda_q4_conformal prefill=simt\n";
     const std::string bad_fm_hdr =
         "# run_header binary_sha256=" + std::string(64, 'a') +
         " float_model=\"binary32, fast-math\" backend=metal prefill=simt\n";
     const std::string uncomp_row =
         "0\t8\t1\t0\t10:11:1065353216:1056964608:1056964608:exactness=VERIFIED_EXACT:history=UNCOMPARED\n";
+    const std::string conf_ok_row =
+        "0\t8\t2\t0\t"
+        "10:11:1065353216:1056964608:1056964608:cert=1:esc=0:fb=-1:exactness=VERIFIED_EXACT:history=UNCOMPARED,"
+        "42:12:1065353216:1056964608:1056964608:cert=0:esc=1:fb=42:exactness=VERIFIED_EXACT:history=UNCOMPARED\n";
+    const std::string conf_diff_cert_row =
+        "0\t8\t2\t0\t"
+        "10:11:1065353216:1056964608:1056964608:cert=0:esc=1:fb=10:exactness=VERIFIED_EXACT:history=UNCOMPARED,"
+        "42:12:1065353216:1056964608:1056964608:cert=0:esc=1:fb=42:exactness=VERIFIED_EXACT:history=UNCOMPARED\n";
+    const std::string conf_bad_flags_row =
+        "0\t8\t1\t0\t10:11:1065353216:1056964608:1056964608:cert=1:esc=1:fb=10:exactness=VERIFIED_EXACT:history=UNCOMPARED\n";
     const std::string illegal_ident_row =
         "0\t8\t1\t0\t10:11:1065353216:1056964608:1056964608:exactness=VERIFIED_EXACT:history=CROSS_BACKEND_IDENTICAL\n";
     const std::string illegal_krev_row =
@@ -707,6 +824,12 @@ int run_selftest() {
     const std::string p_good_cuda = write_f("good_cuda.tsv", hdr_cuda + uncomp_row);
     const std::string p_good_q4_a = write_f("good_q4_a.tsv", hdr_cuda_q4 + uncomp_row);
     const std::string p_good_q4_b = write_f("good_q4_b.tsv", hdr_cuda_q4 + uncomp_row);
+    const std::string p_good_q4_tok_diff = write_f("good_q4_tok_diff.tsv", hdr_cuda_q4 + tok_diff_row);
+    const std::string p_good_q4_margin_diff = write_f("good_q4_margin_diff.tsv", hdr_cuda_q4 + margin_diff_row);
+    const std::string p_conf_a = write_f("conf_a.tsv", hdr_cuda_q4_conf + conf_ok_row);
+    const std::string p_conf_b = write_f("conf_b.tsv", hdr_cuda_q4_conf + conf_ok_row);
+    const std::string p_conf_diff = write_f("conf_diff.tsv", hdr_cuda_q4_conf + conf_diff_cert_row);
+    const std::string p_conf_bad_flags = write_f("conf_bad_flags.tsv", hdr_cuda_q4_conf + conf_bad_flags_row);
     const std::string p_bad_ref_ident = write_f("ref_ident.tsv", hdr + illegal_ident_row);
     const std::string p_bad_krev_ident = write_f("krev_ident.tsv", hdr_cuda_q4 + illegal_krev_row);
     const std::string p_bad_cand_vend = write_f("cand_vend.tsv", hdr + illegal_vend_row);
@@ -724,6 +847,9 @@ int run_selftest() {
     ok &= expect_format_fail("missing_header", p_bad_nohdr, p_good_cuda);
     ok &= expect_format_fail("wrong_float_model", p_bad_fm, p_good_cuda);
     ok &= expect_format_fail("missing_labels", p_bad_nolbl, p_good_cuda);
+    ok &= expect_format_fail("incompatible_numeric_path_cuda_audit_vs_cuda_q4", p_good_cuda, p_good_q4_a);
+    ok &= expect_format_fail("incompatible_numeric_path_metal_vs_cuda_q4", p_good, p_good_q4_a);
+    ok &= expect_format_fail("conformal_invalid_cert_esc_pair", p_conf_bad_flags, p_conf_b);
     if (!ok) {
       cleanup();
       return 1;
@@ -751,10 +877,59 @@ int run_selftest() {
     std::cout << "SELFTEST_POS [same_backend]: verdict=KERNEL_REVISION_IDENTICAL sha="
               << r_krev.ref_token_cols_sha256 << '\n';
 
+    const std::string out_conf_match = (tmp / "out_conf_match.tsv").string();
+    const auto r_conf = run_compare(p_conf_a, p_conf_b, out_conf_match);
+    if (!r_conf.identical || !r_conf.same_backend || !r_conf.has_conformal ||
+        r_conf.certified_tokens != 1 || r_conf.escalated_tokens != 1 ||
+        r_conf.cert_mismatches != 0 || r_conf.esc_mismatches != 0 || r_conf.fb_mismatches != 0 ||
+        verdict_label(r_conf.identical, r_conf.same_backend) != "KERNEL_REVISION_IDENTICAL") {
+      std::cerr << "SELFTEST FAIL: same-backend conformal KERNEL_REVISION_IDENTICAL match failed\n";
+      cleanup();
+      return 1;
+    }
+    std::cout << "SELFTEST_POS [same_backend_conformal]: verdict=KERNEL_REVISION_IDENTICAL sha="
+              << r_conf.ref_token_cols_sha256 << '\n';
+
+    const auto r_krev_tdiv = run_compare(p_good_q4_a, p_good_q4_tok_diff, "");
+    if (r_krev_tdiv.identical || !r_krev_tdiv.same_backend || r_krev_tdiv.token_mismatches != 1 ||
+        r_krev_tdiv.first_divergent_op.find("op:argmax_top1") == std::string::npos ||
+        verdict_label(r_krev_tdiv.identical, r_krev_tdiv.same_backend) != "KERNEL_REVISION_DIVERGENT") {
+      std::cerr << "SELFTEST FAIL: same-backend token divergence diagnostic wrong\n";
+      cleanup();
+      return 1;
+    }
+    std::cout << "SELFTEST_DIV [same_backend_token]: verdict=KERNEL_REVISION_DIVERGENT first_divergent_op="
+              << r_krev_tdiv.first_divergent_op << '\n';
+
+    const auto r_krev_mdiv = run_compare(p_good_q4_a, p_good_q4_margin_diff, "");
+    if (r_krev_mdiv.identical || !r_krev_mdiv.same_backend || r_krev_mdiv.margin_bit_mismatches != 1 ||
+        r_krev_mdiv.first_divergent_op.find("op:margin_f32_u32") == std::string::npos ||
+        verdict_label(r_krev_mdiv.identical, r_krev_mdiv.same_backend) != "KERNEL_REVISION_DIVERGENT") {
+      std::cerr << "SELFTEST FAIL: same-backend margin divergence diagnostic wrong\n";
+      cleanup();
+      return 1;
+    }
+    std::cout << "SELFTEST_DIV [same_backend_margin]: verdict=KERNEL_REVISION_DIVERGENT first_divergent_op="
+              << r_krev_mdiv.first_divergent_op << '\n';
+
+    const auto r_conf_div = run_compare(p_conf_a, p_conf_diff, "");
+    if (r_conf_div.identical || !r_conf_div.same_backend ||
+        r_conf_div.cert_mismatches != 1 || r_conf_div.esc_mismatches != 1 ||
+        r_conf_div.fb_mismatches != 1 ||
+        r_conf_div.first_divergent_op.find("op:cert_flag") == std::string::npos ||
+        verdict_label(r_conf_div.identical, r_conf_div.same_backend) != "KERNEL_REVISION_DIVERGENT") {
+      std::cerr << "SELFTEST FAIL: same-backend conformal cert/esc divergence diagnostic wrong\n";
+      cleanup();
+      return 1;
+    }
+    std::cout << "SELFTEST_DIV [same_backend_cert_esc]: verdict=KERNEL_REVISION_DIVERGENT first_divergent_op="
+              << r_conf_div.first_divergent_op << '\n';
+
     const std::string out_tok_div = (tmp / "out_tok_div.tsv").string();
     const auto r_tdiv = run_compare(p_good, p_tok_diff, out_tok_div);
-    if (r_tdiv.identical || r_tdiv.token_mismatches != 1 ||
-        r_tdiv.first_divergent_op.find("op:argmax_top1") == std::string::npos) {
+    if (r_tdiv.identical || r_tdiv.same_backend || r_tdiv.token_mismatches != 1 ||
+        r_tdiv.first_divergent_op.find("op:argmax_top1") == std::string::npos ||
+        verdict_label(r_tdiv.identical, r_tdiv.same_backend) != "CROSS_BACKEND_DIVERGENT") {
       std::cerr << "SELFTEST FAIL: token divergence diagnostic wrong: "
                 << r_tdiv.first_divergent_op << '\n';
       cleanup();
@@ -764,8 +939,9 @@ int run_selftest() {
               << r_tdiv.first_divergent_op << '\n';
 
     const auto r_mdiv = run_compare(p_good, p_margin_diff, "");
-    if (r_mdiv.identical || r_mdiv.margin_bit_mismatches != 1 ||
-        r_mdiv.first_divergent_op.find("op:margin_f32_u32") == std::string::npos) {
+    if (r_mdiv.identical || r_mdiv.same_backend || r_mdiv.margin_bit_mismatches != 1 ||
+        r_mdiv.first_divergent_op.find("op:margin_f32_u32") == std::string::npos ||
+        verdict_label(r_mdiv.identical, r_mdiv.same_backend) != "CROSS_BACKEND_DIVERGENT") {
       std::cerr << "SELFTEST FAIL: margin divergence diagnostic wrong: "
                 << r_mdiv.first_divergent_op << '\n';
       cleanup();

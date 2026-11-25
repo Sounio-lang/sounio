@@ -68,6 +68,8 @@ use llm::hal::{
     cuda_module_get_fn,
     cuda_module_get_global,
     cuda_mem_alloc,
+    cuda_mem_alloc_managed,
+    cuda_mem_free_bytes,
     cuda_mem_free,
     cuda_memcpy_h2d,
     cuda_memcpy_d2h,
@@ -5764,12 +5766,25 @@ pub fn qwen3_cuda_runner_is_ok(rt: &Qwen3CudaRunner) -> bool {
     rt.ok
 }
 
-fn qwen3_cuda_upload_shard(sess: &CudaDriverSession, sh: &MappedShard, active: bool) -> i64 with Alloc {
+fn qwen3_cuda_upload_shard(sess: &CudaDriverSession, sh: &MappedShard, active: bool) -> i64 with Alloc, Mut {
     if !active { return 0 }
     let slen = mapped_shard_len(sh)
     let sptr = mapped_shard_ptr(sh)
     if slen <= 0 || sptr <= 0 { return 0 }
-    let dptr = cuda_mem_alloc(sess, slen)
+    let env_p = hal_getenv_ptr("SOUNIO_CUDA_MANAGED_SHARDS")
+    let use_managed = env_p != 0 && ptr_read_u8(env_p, 0) == 49 && ptr_read_u8(env_p, 1) == 0
+    var dptr: i64 = 0
+    if use_managed {
+        let free_b = cuda_mem_free_bytes(sess)
+        if free_b - slen >= 5368709120 {
+            dptr = cuda_mem_alloc(sess, slen)
+        } else {
+            dptr = cuda_mem_alloc_managed(sess, slen)
+        }
+    }
+    if dptr == 0 {
+        dptr = cuda_mem_alloc(sess, slen)
+    }
     if dptr == 0 { return 0 }
     if cuda_memcpy_h2d(sess, dptr, sptr, slen) != 0 {
         let _f = cuda_mem_free(sess, dptr)
