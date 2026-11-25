@@ -1,0 +1,297 @@
+// self-hosted::gpu::gpu_param_plan — signature-derived kernel parameter contract
+//
+// WHY THIS EXISTS
+// ---------------
+// Kernel parameter handling used to be recognized from familiar source shapes:
+// a fixed arity of four, positions 0..3, and the literal names `n`, `a`, `b`,
+// `c`. Any kernel that varied the shape fell off the lowering silently, and the
+// caller had no way to tell "unsupported" from "not a kernel".
+//
+// This module turns the parameter list into an explicit plan derived from the
+// kernel IR: the extent parameter, scalar parameters, input slices and the
+// output slice. Emission and (later) the host launch ABI both read the same
+// plan, so parameter order cannot drift between the two sides.
+//
+// WHAT IS DERIVED FROM WHAT
+// -------------------------
+// - role of a *value* parameter: from `GpuParam.ty` (GpuI64 extent, GpuF64
+//   scalar, GpuPtr slice)
+// - input vs output slice: from use. HLIR keeps no mutability on a parameter
+//   (`HlirParam` carries only value_id/name/ty), so `GpuParam.ty` is GpuPtr for
+//   both directions. A slice is an output when a store reaches it through its
+//   loaded register; otherwise it is an input. Names are never consulted.
+//
+// FAIL CLOSED
+// -----------
+// Every unsupported shape returns a `GpuParamRefusal` instead of a zero plan.
+// Callers must check `gpu_param_plan_is_ok` before emitting anything.
+
+module gpu::gpu_param_plan
+
+use gpu::kernel_ir::*
+
+// Role of one kernel parameter. `GpuRoleNone` means "no plan for this slot".
+pub enum GpuParamRole {
+    GpuRoleNone,
+    GpuRoleExtent,
+    GpuRoleScalarF64,
+    GpuRoleSliceIn,
+    GpuRoleSliceOut,
+}
+
+// Why a kernel did not get a plan. `GpuPlanOk` is the only success value.
+pub enum GpuParamRefusal {
+    GpuPlanOk,
+    GpuPlanNoExtent,
+    GpuPlanExtentNotFirst,
+    GpuPlanArityOverCap,
+    GpuPlanNoOutputSlice,
+    GpuPlanUnsupportedType,
+    GpuPlanMultipleExtents,
+}
+
+// The plan itself. `count` is the number of classified parameters; slots at or
+// beyond `count` stay `GpuRoleNone`.
+pub struct GpuParamPlan {
+    pub roles: [GpuParamRole; 8],
+    pub count: i64,
+    pub extent_idx: i64,
+    pub out_idx: i64,
+}
+
+// Hard structural ceiling: `GpuKernelIr.params` is `[GpuParam; 8]`.
+pub fn gpu_param_plan_cap() -> i64 { 8 }
+
+// How far the store-address walk follows registers before giving up. Address
+// chains in the supported family are `param + offset` (two hops); the slack is
+// for the extra hop a typed index cast adds.
+fn gpu_param_plan_walk_depth() -> i64 { 8 }
+
+pub fn gpu_param_plan_new() -> GpuParamPlan {
+    GpuParamPlan {
+        roles: [GpuParamRole::GpuRoleNone; 8],
+        count: 0,
+        extent_idx: -1,
+        out_idx: -1,
+    }
+}
+
+pub fn gpu_param_plan_is_ok(refusal: GpuParamRefusal) -> bool {
+    refusal == GpuParamRefusal::GpuPlanOk
+}
+
+// Stable machine-readable refusal code. These strings are asserted by
+// tests/gpu/param_plan and must not change without updating the fixtures.
+pub fn gpu_param_plan_refusal_code(refusal: GpuParamRefusal) -> string {
+    match refusal {
+        GpuParamRefusal::GpuPlanOk => "ok",
+        GpuParamRefusal::GpuPlanNoExtent => "no_extent",
+        GpuParamRefusal::GpuPlanExtentNotFirst => "extent_not_first",
+        GpuParamRefusal::GpuPlanArityOverCap => "arity_over_cap",
+        GpuParamRefusal::GpuPlanNoOutputSlice => "no_output_slice",
+        GpuParamRefusal::GpuPlanUnsupportedType => "unsupported_param_type",
+        GpuParamRefusal::GpuPlanMultipleExtents => "multiple_extents",
+    }
+}
+
+// Human-readable explanation, used in the refusal diagnostic.
+pub fn gpu_param_plan_refusal_message(refusal: GpuParamRefusal) -> string {
+    match refusal {
+        GpuParamRefusal::GpuPlanOk => "plan is usable",
+        GpuParamRefusal::GpuPlanNoExtent => "kernel has no leading i64 extent parameter",
+        GpuParamRefusal::GpuPlanExtentNotFirst => "the extent parameter is not the first parameter",
+        GpuParamRefusal::GpuPlanArityOverCap => "kernel has more parameters than the 8-slot kernel IR holds",
+        GpuParamRefusal::GpuPlanNoOutputSlice => "kernel never stores through any slice parameter",
+        GpuParamRefusal::GpuPlanUnsupportedType => "kernel has a parameter type the GPU plan does not classify",
+        GpuParamRefusal::GpuPlanMultipleExtents => "kernel has more than one i64 extent parameter",
+    }
+}
+
+// PTX declaration type for a role. This mirrors `gpu_type_to_string` on the IR
+// type so existing golden PTX stays byte-identical: the extent is declared
+// `s64` (it is an i64 count), slices are `u64` pointers, and the only scalar
+// the supported family admits is `f64`.
+pub fn gpu_param_plan_ptx_type(role: GpuParamRole) -> string {
+    match role {
+        GpuParamRole::GpuRoleScalarF64 => "f64",
+        GpuParamRole::GpuRoleExtent => "s64",
+        GpuParamRole::GpuRoleSliceIn => "u64",
+        GpuParamRole::GpuRoleSliceOut => "u64",
+        GpuParamRole::GpuRoleNone => "u64",
+    }
+}
+
+// ABI type for the host launch contract (phase 3). The extent is passed as an
+// unsigned 64-bit element count; it is the same width as the declaration, so a
+// launch built from this table cannot disagree with the entry signature.
+pub fn gpu_param_plan_abi_type(role: GpuParamRole) -> string {
+    match role {
+        GpuParamRole::GpuRoleScalarF64 => "f64",
+        GpuParamRole::GpuRoleExtent => "u64",
+        GpuParamRole::GpuRoleSliceIn => "u64",
+        GpuParamRole::GpuRoleSliceOut => "u64",
+        GpuParamRole::GpuRoleNone => "u64",
+    }
+}
+
+// Register that holds parameter `param_idx`, or -1 when it is never loaded.
+fn gpu_param_plan_param_reg(kernel: GpuKernelIr, param_idx: i64) -> i64 {
+    var i: i64 = 0
+    while i < kernel.op_count {
+        let op = kernel.ops[i as usize]
+        if op.opcode == GpuOpcode::GpuLoadParam && op.param_idx == param_idx {
+            return op.dst_reg
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+// Does `reg` reach a global store as (part of) the address, within `depth` hops?
+//
+// The address chain runs forward: a parameter register is consumed by an add
+// that produces the effective address, and the store consumes that. So the walk
+// follows values forward through ops that consume `reg`, not backwards through
+// its definition.
+fn gpu_param_plan_reg_reaches_store(kernel: GpuKernelIr, reg: i64, depth: i64) -> bool {
+    if reg < 0 || depth <= 0 { return false }
+    var i: i64 = 0
+    while i < kernel.op_count {
+        let op = kernel.ops[i as usize]
+        if op.opcode == GpuOpcode::GpuStoreGlobal || op.opcode == GpuOpcode::GpuStoreGlobalPred {
+            if op.addr_reg == reg { return true }
+        }
+        if op.lhs_reg == reg || op.rhs_reg == reg || op.addr_reg == reg {
+            if op.dst_reg >= 0 && op.dst_reg != reg {
+                if gpu_param_plan_reg_reaches_store(kernel, op.dst_reg, depth - 1) { return true }
+            }
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// Is parameter `param_idx` written through a global store?
+fn gpu_param_plan_is_output_slice(kernel: GpuKernelIr, param_idx: i64) -> bool {
+    let reg = gpu_param_plan_param_reg(kernel, param_idx)
+    if reg < 0 { return false }
+    return gpu_param_plan_reg_reaches_store(kernel, reg, gpu_param_plan_walk_depth())
+}
+
+// Build the plan. Returns `(plan, refusal)`; the plan is only meaningful when
+// the refusal is `GpuPlanOk`.
+pub fn gpu_param_plan_build(kernel: GpuKernelIr) -> (GpuParamPlan, GpuParamRefusal) {
+    var plan = gpu_param_plan_new()
+    if kernel.param_count <= 0 {
+        return (plan, GpuParamRefusal::GpuPlanNoExtent)
+    }
+    if kernel.param_count > gpu_param_plan_cap() {
+        return (plan, GpuParamRefusal::GpuPlanArityOverCap)
+    }
+
+    plan.count = kernel.param_count
+
+    // Pass 1: classify by type. The extent is the first i64 parameter, wherever
+    // it sits: `saxpy(a: f64, n: i64)` is a real kernel in the corpus, so an
+    // ordering rule would refuse shapes the emitter already handles.
+    var extents: i64 = 0
+    var i: i64 = 0
+    while i < kernel.param_count {
+        let ty = kernel.params[i as usize].ty
+        if ty == GpuType::GpuI64 || ty == GpuType::GpuU64 {
+            extents = extents + 1
+            plan.roles[i as usize] = GpuParamRole::GpuRoleExtent
+            if plan.extent_idx < 0 { plan.extent_idx = i }
+        } else if ty == GpuType::GpuF64 {
+            plan.roles[i as usize] = GpuParamRole::GpuRoleScalarF64
+        } else if ty == GpuType::GpuPtr {
+            plan.roles[i as usize] = GpuParamRole::GpuRoleSliceIn
+        } else {
+            return (plan, GpuParamRefusal::GpuPlanUnsupportedType)
+        }
+        i = i + 1
+    }
+
+    if extents == 0 { return (plan, GpuParamRefusal::GpuPlanNoExtent) }
+    if extents > 1 { return (plan, GpuParamRefusal::GpuPlanMultipleExtents) }
+
+    // Pass 2: a slice written through a store is an output slice.
+    var outs: i64 = 0
+    var slices: i64 = 0
+    var j: i64 = 0
+    while j < kernel.param_count {
+        if plan.roles[j as usize] == GpuParamRole::GpuRoleSliceIn {
+            slices = slices + 1
+            if gpu_param_plan_is_output_slice(kernel, j) {
+                plan.roles[j as usize] = GpuParamRole::GpuRoleSliceOut
+                plan.out_idx = j
+                outs = outs + 1
+            }
+        }
+        j = j + 1
+    }
+
+    // A kernel with no slice at all is legal (a scalar-only kernel); only a
+    // kernel that has slices and writes through none of them is refused.
+    if slices > 0 && outs == 0 { return (plan, GpuParamRefusal::GpuPlanNoOutputSlice) }
+    return (plan, GpuParamRefusal::GpuPlanOk)
+}
+
+// Number of parameters with a given role, for arity assertions in tests.
+pub fn gpu_param_plan_count_role(plan: GpuParamPlan, role: GpuParamRole) -> i64 {
+    var n: i64 = 0
+    var i: i64 = 0
+    while i < plan.count {
+        if plan.roles[i as usize] == role { n = n + 1 }
+        i = i + 1
+    }
+    return n
+}
+
+// ─── Refusal reporting ───────────────────────────────────────────────────────
+//
+// The signature emitter runs deep inside a PtxBuf chain, so the refusal is
+// recorded in a module global instead of widening every return type. Same shape
+// as HLIR_GPU_REFUSE_REASON in gpu/hlir_to_gpu.sio. 0 means "ok".
+
+var GPU_PARAM_PLAN_REFUSE_REASON: i64 = 0
+
+pub fn gpu_param_plan_refusal_reason() -> i64 { return GPU_PARAM_PLAN_REFUSE_REASON }
+
+pub fn gpu_param_plan_clear_refusal() with Mut { GPU_PARAM_PLAN_REFUSE_REASON = 0 }
+
+pub fn gpu_param_plan_refusal_tag(refusal: GpuParamRefusal) -> i64 {
+    match refusal {
+        GpuParamRefusal::GpuPlanOk => 0,
+        GpuParamRefusal::GpuPlanNoExtent => 1,
+        GpuParamRefusal::GpuPlanExtentNotFirst => 2,
+        GpuParamRefusal::GpuPlanArityOverCap => 3,
+        GpuParamRefusal::GpuPlanNoOutputSlice => 4,
+        GpuParamRefusal::GpuPlanUnsupportedType => 5,
+        GpuParamRefusal::GpuPlanMultipleExtents => 6,
+    }
+}
+
+pub fn gpu_param_plan_refusal_from_tag(tag: i64) -> GpuParamRefusal {
+    if tag == 1 { GpuParamRefusal::GpuPlanNoExtent }
+    else if tag == 2 { GpuParamRefusal::GpuPlanExtentNotFirst }
+    else if tag == 3 { GpuParamRefusal::GpuPlanArityOverCap }
+    else if tag == 4 { GpuParamRefusal::GpuPlanNoOutputSlice }
+    else if tag == 5 { GpuParamRefusal::GpuPlanUnsupportedType }
+    else if tag == 6 { GpuParamRefusal::GpuPlanMultipleExtents }
+    else { GpuParamRefusal::GpuPlanOk }
+}
+
+// Code for the currently recorded refusal, or "ok".
+pub fn gpu_param_plan_recorded_code() -> string {
+    return gpu_param_plan_refusal_code(gpu_param_plan_refusal_from_tag(GPU_PARAM_PLAN_REFUSE_REASON))
+}
+
+// Record a refusal. The FIRST refusal of a compile wins: a later healthy kernel
+// must not clear the reason an earlier one was refused for.
+pub fn gpu_param_plan_record_refusal(refusal: GpuParamRefusal) with Mut {
+    let tag = gpu_param_plan_refusal_tag(refusal)
+    if tag == 0 { return }
+    if GPU_PARAM_PLAN_REFUSE_REASON != 0 { return }
+    GPU_PARAM_PLAN_REFUSE_REASON = tag
+}

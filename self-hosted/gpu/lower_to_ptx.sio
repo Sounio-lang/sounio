@@ -5,6 +5,7 @@
 
 use gpu::kernel_ir::*
 use gpu::ptx::*
+use gpu::gpu_param_plan::*
 
 // Lower a complete GPU kernel IR to PTX
 pub fn gpu_lower_to_ptx(kernel: GpuKernelIr) -> PtxBuf with IO, Mut, Panic, Div, Alloc {
@@ -159,6 +160,11 @@ fn gpu_emit_kernel_mode_metadata(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf wit
 }
 
 // Emit kernel signature: .visible .entry kernel_name(params...)
+//
+// Parameter types come from the signature-derived plan (gpu_param_plan), not
+// from a fixed arity or from parameter names. A kernel the plan cannot classify
+// still emits from the raw IR so the caller gets a file, and the refusal is
+// recorded in gpu_param_plan for the caller to report.
 fn gpu_emit_kernel_signature(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with Mut, Panic, Div {
     var out = buf
 
@@ -167,13 +173,23 @@ fn gpu_emit_kernel_signature(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with Mu
     out = gpu_push_name(out, kernel.kernel_name)
     out = ptx_push_str(out, "(\n")
 
+    let plan_pair = gpu_param_plan_build(kernel)
+    let plan = plan_pair.0
+    let refusal = plan_pair.1
+    gpu_param_plan_record_refusal(refusal)
+    let plan_ok = gpu_param_plan_is_ok(refusal)
+
     // Emit each parameter
     var i: i64 = 0
     while i < kernel.param_count {
         let param = kernel.params[i as usize]
 
         out = ptx_push_str(out, "    .param .")
-        out = ptx_push_str(out, gpu_type_to_string(param.ty))
+        if plan_ok && plan.roles[i as usize] != GpuParamRole::GpuRoleNone {
+            out = ptx_push_str(out, gpu_param_plan_ptx_type(plan.roles[i as usize]))
+        } else {
+            out = ptx_push_str(out, gpu_type_to_string(param.ty))
+        }
         out = ptx_push_str(out, " ")
         out = gpu_push_name(out, param.name)
 

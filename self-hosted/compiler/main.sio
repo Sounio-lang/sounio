@@ -88,6 +88,7 @@ use hlir::ir::*
 use hlir::builder::*
 use gpu::kernel_ir::*
 use gpu::lower_to_ptx::*
+use gpu::gpu_param_plan::*
 use hlir::lower::*
 use gpu::hlir_to_gpu::*
 use gpu::epistemic_spirv::*
@@ -30054,6 +30055,22 @@ fn gpu_lowering_refused() -> bool with IO, Mut {
     true
 }
 
+// Kernel parameter plans (gpu/gpu_param_plan.sio) are a PTX-side contract: a
+// kernel whose signature the plan cannot classify is refused here rather than
+// emitted from a guessed shape. The reason is recorded by the signature emitter,
+// so this runs after lowering and before any file is written.
+fn gpu_param_plan_refused() -> bool with IO, Mut {
+    let tag = gpu_param_plan_refusal_reason()
+    if tag == 0 { return false }
+    let refusal = gpu_param_plan_refusal_from_tag(tag)
+    print("error: GPU codegen refused: ")
+    print(gpu_param_plan_refusal_message(refusal))
+    print(" [")
+    print(gpu_param_plan_refusal_code(refusal))
+    print("]; no output written (a wrong kernel is worse than none)\n")
+    true
+}
+
 // Float literals are lowered for PTX only (P0.8.1). The other GPU renderers
 // read a pure immediate as an integer addend and would emit a wrong constant.
 fn gpu_float_literal_refused(backend: string) -> bool with IO {
@@ -30104,6 +30121,7 @@ fn run_gpu_compile_pipeline(
     gpu_target: string,
     gpu_binary_format: string
 ) -> i32 with IO, Mut, Div, Panic, Alloc {
+    gpu_param_plan_clear_refusal()
     print("GPU dispatch: input=")
     print(input_path)
     print(" target=")
@@ -30180,6 +30198,9 @@ fn run_gpu_compile_pipeline(
         // PTX
         let ptx_all = hlir_kernels_to_ptx(hlir_module)
         if gpu_lowering_refused() {
+            return 1
+        }
+        if gpu_param_plan_refused() {
             return 1
         }
         if gpu_float_literal_refused("Metal/SPIR-V/K-AXI (--gpu-target all)") {
@@ -30424,6 +30445,9 @@ fn run_gpu_compile_pipeline(
         if gpu_lowering_refused() {
             return 1
         }
+        if gpu_param_plan_refused() {
+            return 1
+        }
         if str_len(output_path) > 0 {
             if !io_write_bytes_to_file(output_path, dgx_ptx.data, dgx_ptx.len) {
                 print("GPU: failed to write DGX sm_121 PTX\n")
@@ -30463,6 +30487,9 @@ fn run_gpu_compile_pipeline(
         hlir_kernels_to_ptx(hlir_module)
     }
     if gpu_lowering_refused() {
+        return 1
+    }
+    if gpu_param_plan_refused() {
         return 1
     }
     gpu_log_ptx_target(ptx, gpu_target)
