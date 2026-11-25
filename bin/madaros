@@ -190,10 +190,13 @@ if [[ "$(uname -s)" == Darwin && -z "$_madaros_explicit_stack" ]]; then
   MADAROS_STACK_KB="$(ulimit -H -s)"
   [[ "$MADAROS_STACK_KB" == unlimited ]] && MADAROS_STACK_KB=65536
 fi
+# Soft-only on purpose: `ulimit -s N` also lowers the HARD limit, and then a
+# later raise inside a child is refused ("Operation not permitted"). The launch
+# report needs to raise it again (see _compile_source_to_artifact).
 if [[ "$MADAROS_STACK_KB" == "0" ]]; then
-  ulimit -s unlimited 2>/dev/null || true
+  ulimit -S -s unlimited 2>/dev/null || true
 else
-  ulimit -s "$MADAROS_STACK_KB" 2>/dev/null || true
+  ulimit -S -s "$MADAROS_STACK_KB" 2>/dev/null || true
 fi
 
 _require_compiler_stack() {
@@ -247,6 +250,7 @@ GPU build options:
   --gpu-target <target>                 raw GPU target (default: cuda-sm80)
   --gpu-binary-format <fmt>             raw GPU format/mode selector
   --gpu-precision <f32|f64>             compatibility alias for GPU mode
+  --gpu-launch-report                   print per-kernel device/cpu launch verdict
 
 Science boundary options:
   --science-boundary off|advisory|strict
@@ -589,6 +593,7 @@ _parse_build_options() {
   BUILD_TARGET="native"
   BUILD_GPU_TARGET="cuda-sm80"
   BUILD_GPU_BINARY_FORMAT=""
+  BUILD_GPU_LAUNCH_REPORT=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       -t|--target)
@@ -630,6 +635,10 @@ _parse_build_options() {
         fi
         BUILD_GPU_BINARY_FORMAT="$2"
         shift 2
+        ;;
+      --gpu-launch-report)
+        BUILD_GPU_LAUNCH_REPORT=1
+        shift
         ;;
       --gpu-precision)
         if [[ $# -lt 2 ]]; then
@@ -673,6 +682,9 @@ _compile_source_to_artifact() {
     if [[ -n "$BUILD_GPU_BINARY_FORMAT" ]]; then
       gpu_args+=(--gpu-binary-format "$BUILD_GPU_BINARY_FORMAT")
     fi
+    if [[ "$BUILD_GPU_LAUNCH_REPORT" == "1" ]]; then
+      gpu_args+=(--gpu-launch-report)
+    fi
     set +e
     ( ulimit -v "$MADAROS_VMEM_LIMIT_KB" 2>/dev/null || true; exec timeout 300 "$RAW_MADAROS" "${gpu_args[@]}" )
     rc=$?
@@ -697,7 +709,22 @@ _compile_source_to_artifact() {
     return 2
   fi
   set +e
-  ( ulimit -v "$MADAROS_VMEM_LIMIT_KB" 2>/dev/null || true; exec timeout "$native_timeout" "$RAW_MADAROS" build "$src" --target "$BUILD_TARGET" -o "$out" )
+  local native_extra=()
+  local stack_kb=0
+  if [[ "$BUILD_GPU_LAUNCH_REPORT" == "1" ]]; then
+    native_extra+=(--gpu-launch-report)
+    # The launch report lowers the module to HLIR, and HlirModule is returned by
+    # value (functions[1024] and friends, ~12MB of frame) on top of a recursive
+    # descent over `main`. Measured: 8MB segfaults, 1GB segfaults on a module
+    # with a loop and arrays, 4GB holds. The vmem limit is 32GB, so it fits.
+    stack_kb=4194304
+  fi
+  ( ulimit -v "$MADAROS_VMEM_LIMIT_KB" 2>/dev/null || true
+    if [[ "$stack_kb" != "0" ]]; then
+      ulimit -H -s unlimited 2>/dev/null || true
+      ulimit -s "$stack_kb" 2>/dev/null || true
+    fi
+    exec timeout "$native_timeout" "$RAW_MADAROS" build "$src" --target "$BUILD_TARGET" -o "$out" "${native_extra[@]}" )
   rc=$?
   set -e
   if [[ $rc -ne 0 ]]; then

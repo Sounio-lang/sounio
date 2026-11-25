@@ -3157,6 +3157,13 @@ fn run_native_v2_compile_mode(args: ArgList, flag_index: i64) with IO, Mut, Pani
     // The boxed compile-to-file route is SRET-safe for both imported and
     // single-module programs. MultiModuleIrResult.module is now Box<IrModule>
     // (no densify at the legacy load API); prefer this file route for large IR.
+    // Device-launch eligibility: one parameter plan per kernel, before codegen.
+    // The native path has no HLIR of its own, so without this pass there is no
+    // plan and no PTX at launch time. Only the report is wired so far.
+    if compiler_mode_has_flag(args, "--gpu-launch-report") {
+        let launch_kernels = gpu_launch_plan_prepare(source_path)
+        if launch_kernels > 0 { gpu_launch_report_print() }
+    }
     let optimize = compiler_mode_has_flag(args, "-O") || compiler_mode_has_flag(args, "--optimize")
     let rc = module_frontend_compile_imported_to_file_for_target(source_path, out_path, optimize, requested_target, explicit_target)
     let _restored_math = checker_swap_darwin_math(previous_math)
@@ -30053,6 +30060,104 @@ fn gpu_lowering_refused() -> bool with IO, Mut {
     }
     print("; no output written (a wrong kernel is worse than none)\n")
     true
+}
+
+// ─── Launch eligibility table ───────────────────────────────────────────────
+//
+// Filled by gpu_launch_plan_prepare() before native codegen: one row per
+// `kernel fn`, saying whether the parameter plan classifies it for a device
+// launch and why not when it does not. The host launch emitter reads the same
+// rows, so the decision and the ABI cannot disagree.
+//
+// The native path has no HLIR of its own, which is why this pass exists at all:
+// without it there is no plan and no PTX at launch time.
+
+fn gpu_launch_table_cap() -> i64 { 64 }
+fn gpu_launch_row_bytes() -> i64 { 128 }
+
+var GPU_LAUNCH_TABLE_N: i64 = 0
+var GPU_LAUNCH_ELIGIBLE: [i64; 64] = [0; 64]
+var GPU_LAUNCH_REFUSAL: [i64; 64] = [0; 64]
+var GPU_LAUNCH_NAME: [i8; 8192] = [0; 8192]
+var GPU_LAUNCH_NAME_LEN: [i64; 64] = [0; 64]
+var GPU_LAUNCH_DESC: [i8; 8192] = [0; 8192]
+var GPU_LAUNCH_DESC_LEN: [i64; 64] = [0; 64]
+
+fn gpu_launch_table_reset() with Mut {
+    GPU_LAUNCH_TABLE_N = 0
+}
+
+fn gpu_launch_table_put(name: Name, plan: GpuParamPlan, refusal: GpuParamRefusal) with Mut, Panic, Div {
+    if GPU_LAUNCH_TABLE_N >= gpu_launch_table_cap() { return }
+    let row = GPU_LAUNCH_TABLE_N
+    let base = row * gpu_launch_row_bytes()
+    var k: i64 = 0
+    while k < name.len && k < gpu_launch_row_bytes() {
+        GPU_LAUNCH_NAME[(base + k) as usize] = name.buf[k as usize]
+        k = k + 1
+    }
+    GPU_LAUNCH_NAME_LEN[row as usize] = k
+    let desc = gpu_param_plan_describe(plan)
+    var d: i64 = 0
+    while d < str_len(desc) && d < gpu_launch_row_bytes() {
+        GPU_LAUNCH_DESC[(base + d) as usize] = str_char_at(desc, d) as i8
+        d = d + 1
+    }
+    GPU_LAUNCH_DESC_LEN[row as usize] = d
+    GPU_LAUNCH_ELIGIBLE[row as usize] = if gpu_param_plan_is_ok(refusal) { 1 } else { 0 }
+    GPU_LAUNCH_REFUSAL[row as usize] = gpu_param_plan_refusal_tag(refusal)
+    GPU_LAUNCH_TABLE_N = row + 1
+}
+
+fn gpu_launch_report_print() with IO, Mut {
+    var i: i64 = 0
+    while i < GPU_LAUNCH_TABLE_N {
+        let base = i * gpu_launch_row_bytes()
+        print("launch: ")
+        var k: i64 = 0
+        while k < GPU_LAUNCH_NAME_LEN[i as usize] {
+            print_char(GPU_LAUNCH_NAME[(base + k) as usize] as i64)
+            k = k + 1
+        }
+        if GPU_LAUNCH_ELIGIBLE[i as usize] != 0 {
+            print(" device")
+        } else {
+            print(" cpu:")
+            print(gpu_param_plan_refusal_code(gpu_param_plan_refusal_from_tag(GPU_LAUNCH_REFUSAL[i as usize])))
+        }
+        print(" [")
+        var d: i64 = 0
+        while d < GPU_LAUNCH_DESC_LEN[i as usize] {
+            print_char(GPU_LAUNCH_DESC[(base + d) as usize] as i64)
+            d = d + 1
+        }
+        print("]\n")
+        i = i + 1
+    }
+}
+
+// Build one plan per kernel of `source_path`. Module-level lowering errors are
+// tolerated: a `main` the GPU path refuses must not hide the kernels.
+fn gpu_launch_plan_prepare(source_path: string) -> i64 with IO, Mut, Panic, Div, Alloc {
+    gpu_launch_table_reset()
+    let prog = load_module_file(source_path)
+    // The epistemic variant is the one the `--backend gpu` path uses; the plain
+    // hlir_lower_module crashes on a module whose `main` holds loops and arrays.
+    var epistemic = ir_empty_epistemic_section()
+    var hlir_module = hlir_lower_module_with_epistemic(prog, &!epistemic)
+    let kcount = hlir_extract_kernel_count(hlir_module)
+    var ki: i64 = 0
+    while ki < kcount {
+        let fidx = hlir_get_kernel_index(hlir_module, ki)
+        if fidx >= 0 {
+            let func = hlir_module.functions[fidx as usize]
+            let gk = hlir_function_to_gpu_kernel(func)
+            let pair = gpu_param_plan_build(&gk)
+            gpu_launch_table_put(hlir_name_to_name(func.name), pair.0, pair.1)
+        }
+        ki = ki + 1
+    }
+    return kcount
 }
 
 // Kernel parameter plans (gpu/gpu_param_plan.sio) are a PTX-side contract: a
