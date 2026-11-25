@@ -43371,18 +43371,51 @@ impl Lowerer {
         if (*e).kind == ExprKind::ExprBinary {
             if (*e).bin_op != BinaryOp::OpAdd && (*e).bin_op != BinaryOp::OpSub
                 && (*e).bin_op != BinaryOp::OpMul && (*e).bin_op != BinaryOp::OpDiv { return false }
-            if self.expr_is_knowledge_scalar_const_ref(e) { return true }
+            // Knowledge (op) exact constant: test the cheap syntactic constant
+            // shape first, so each child is classified at most once (a second
+            // recursive pass per level made deep sums exponential).
+            if self.opt_expr_is_exact_f64_const_ref(&(*e).right) { return self.opt_expr_is_knowledge_operand_ref(&(*e).left) }
+            if self.opt_expr_is_exact_f64_const_ref(&(*e).left) { return self.opt_expr_is_knowledge_operand_ref(&(*e).right) }
             return self.opt_expr_is_knowledge_operand_ref(&(*e).left) && self.opt_expr_is_knowledge_operand_ref(&(*e).right)
         }
         false
     }
 
-    // Knowledge<f64> (op) exact f64 constant: the checker admitted this span
-    // (checker_knowledge_scalar_status_inplace) and recorded it under op_kind 22.
+    // The exact constant shapes checker_expr_is_exact_f64_const_inplace admits:
+    // a float literal, its negation, or a non-local name that
+    // ast_global_is_exact_f64_literal proves unique with a literal initialiser.
+    fn expr_is_exact_f64_const_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        if (*e).kind == ExprKind::ExprFloatLit { return true }
+        if (*e).kind == ExprKind::ExprUnary && (*e).un_op == UnaryOp::OpNeg {
+            match (*e).left {
+                Some(inner) => { return self.expr_is_exact_f64_const_ref(&(*inner)) }
+                None => { return false }
+            }
+        }
+        if (*e).kind == ExprKind::ExprIdent && ast_global_is_exact_f64_literal((*e).name) {
+            return self.lookup_local((*e).name) == IR_INVALID_REG || self.lookup_local_is_global((*e).name)
+        }
+        false
+    }
+
+    fn opt_expr_is_exact_f64_const_ref(self, opt: &Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc {
+        match *opt {
+            Some(b) => self.expr_is_exact_f64_const_ref(&(*b)),
+            None => false,
+        }
+    }
+
+    // Knowledge<f64> (op) exact f64 constant, recognised syntactically on both
+    // sides. Every mixed Knowledge/f64 arithmetic node that reaches the lowerer
+    // was admitted by checker_knowledge_scalar_status_inplace (other shapes are
+    // E004 or E313). A span table recorded by the checker does not reach the
+    // lowerer on the multi-module path, so the arm cannot rely on one.
     fn expr_is_knowledge_scalar_const_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
-        let hid = lowerer_find_hyper_expr_id_for_span_ref(&self, (*e).span)
-        if hid < 0 || hid >= (*self.module).epistemic.hyper_expr_count { return false }
-        (*self.module).epistemic.hyper_exprs[hid as usize].op_kind == 22
+        if (*e).bin_op != BinaryOp::OpAdd && (*e).bin_op != BinaryOp::OpSub
+            && (*e).bin_op != BinaryOp::OpMul && (*e).bin_op != BinaryOp::OpDiv { return false }
+        if self.opt_expr_is_exact_f64_const_ref(&(*e).right) { return self.opt_expr_is_knowledge_operand_ref(&(*e).left) }
+        if self.opt_expr_is_exact_f64_const_ref(&(*e).left) { return self.opt_expr_is_knowledge_operand_ref(&(*e).right) }
+        false
     }
 
     // Wrap an exact f64 register as a Knowledge handle {value, 0, 1} and reuse

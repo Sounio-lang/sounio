@@ -9764,8 +9764,9 @@ fn checker_record_knowledge_binary_inplace(c: *mut Checker, span: Span) -> bool 
 // Knowledge side's variance scaled by the constant (knowledge_binary_result
 // already gives a non-Knowledge operand the empty source set and validity
 // always). Only a compile-time constant is exact: a float literal, its
-// negation, or a module-level let/const not shadowed by a local (E309 makes
-// every module-level initialiser constant). A runtime f64 is refused with
+// negation, or a module-level let/const whose initialiser is a float literal
+// and whose name no other module-level declaration shares
+// (ast_global_is_exact_f64_literal), not shadowed by a local. A runtime f64 is refused with
 // E313: its type says nothing about its uncertainty (spec ch. 04, "a Value
 // does not establish an exact real value"), and promoting it would let a
 // measured number pass as exact. lean_single promotes every f64.
@@ -9777,19 +9778,23 @@ fn checker_expr_is_exact_f64_const_inplace(c: *mut Checker, e: Expr) -> bool wit
             None => { return false }
         }
     }
-    if e.kind == ExprKind::ExprIdent && ast_is_global_const_name(e.name) {
+    if e.kind == ExprKind::ExprIdent && ast_global_is_exact_f64_literal(e.name) {
         var bi = (*c).env.count - 1
         while bi >= 0 {
             let b = type_env_get_binding(&(*c).env, bi)
             if name_eq(b.name, e.name) { return b.scope_depth == 0 }
             bi = bi - 1
         }
+        // Not bound in this module's environment: an imported global, which
+        // the name table above has already proved unique and literal.
+        return true
     }
     false
 }
 
-// The checker records each admitted span under op_kind 22 so the lowerer
-// takes the mixed arm for exactly the spans checked here.
+// The lowerer recognises the same constant shapes syntactically
+// (expr_is_exact_f64_const_ref): a span table does not reach the lowerer on
+// the multi-module path, measured as a SIGSEGV with a plain literal.
 // Returns 0 when this is not a mixed Knowledge<f64> / f64 arithmetic node,
 // 1 when the f64 side is an exact constant (admitted), 2 when it was refused.
 fn checker_knowledge_scalar_status_inplace(c: *mut Checker, e: Expr, left_ty: TypeEntry, right_ty: TypeEntry) -> i64 with Mut, Panic, Div, Alloc, IO {
@@ -9821,20 +9826,6 @@ fn checker_knowledge_scalar_status_inplace(c: *mut Checker, e: Expr, left_ty: Ty
     if !is_const {
         checker_report_error_at_inplace(c, e.span, 313, 0, 0, 0)
         print("   = help: state the claim: `Knowledge(s, ...)` or `measure(s, uncertainty: 0.0)` if s is exact\n")
-        return 2
-    }
-    let info = HyperExprInfo {
-        span_start: e.span.start,
-        span_end: e.span.end,
-        algebra_tag: 0,
-        op_kind: 22,
-        knowledge_wrapped: true,
-    }
-    let tbl = (*c).hyper_exprs
-    let add_result = tbl.add(info)
-    (*c).hyper_exprs = add_result.0
-    if add_result.1 < 0 {
-        checker_report_error_at_inplace(c, e.span, 245, 0, 0, 0)
         return 2
     }
     1
