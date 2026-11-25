@@ -1,0 +1,55 @@
+// Left-censored assay observations (lie corpus X1).
+// Bergstrand & Karlsson (2009), https://doi.org/10.1208/s12248-009-9112-5
+// A below-quantification result is an event X < LLOQ, not a point reading.
+use stats::distributions::{normal_new, normal_logcdf}
+
+// Distinct, opaque types. The measurement API trusts the assay's BLQ flag;
+// it does not claim to authenticate an instrument or its calibration.
+struct Conc { amount: f64 }
+struct Censored<T> { limit: T }
+struct Imputed<T> { estimate: T }
+
+pub fn assay_blq(lloq: f64) -> Censored<Conc> with Panic {
+    assert(lloq > 0.0 && lloq < 1.7976931348623157e308)
+    return Censored { limit: Conc { amount: lloq } }
+}
+
+// The threshold is metadata, never an observed concentration.
+pub fn assay_lloq(obs: Censored<Conc>) -> f64 {
+    return obs.limit.amount
+}
+
+pub fn impute_zero(obs: Censored<Conc>) -> Imputed<Conc> {
+    return Imputed { estimate: Conc { amount: 0.0 } }
+}
+
+pub fn impute_half_lloq(obs: Censored<Conc>) -> Imputed<Conc> {
+    return Imputed { estimate: Conc { amount: 0.5 * assay_lloq(obs) } }
+}
+
+// An explicit imputed-data consumer may inspect the estimate; it is not an
+// observed Knowledge<Conc>. Scalar extraction erases the marker deliberately.
+pub fn imputed_conc_estimate(obs: Imputed<Conc>) -> f64 {
+    return obs.estimate.amount
+}
+
+// M3/Tobit term: log Pr(Y < LLOQ | mean, sigma), additive Gaussian assay
+// noise. This uses the canonical log-tail kernel, not log(rounded CDF).
+pub fn censored_normal_loglik(obs: Censored<Conc>, mean: f64, sigma: f64) -> f64 with Mut, Div, Panic {
+    return normal_logcdf(normal_new(mean, sigma), assay_lloq(obs))
+}
+
+// Quantified assay result, in contrast to BLQ. The assay boundary supplies
+// the value, threshold and declared standard uncertainty; no BLQ observation
+// is accepted here. This is a trusted input API, not a proof of calibration.
+pub fn assay_quantified(value: f64, lloq: f64, sigma: f64) -> Knowledge<Conc> with Panic, Epistemic {
+    assert(lloq > 0.0 && value >= lloq && value < 1.7976931348623157e308)
+    assert(sigma > 0.0 && sigma < 1.3407807929942596e154)
+    let variance = sigma * sigma
+    assert(variance > 0.0)
+    return Knowledge { value: Conc { amount: value }, variance: variance }
+}
+
+pub fn quantified_conc(obs: Knowledge<Conc>) -> f64 with Epistemic {
+    return obs.value.amount
+}

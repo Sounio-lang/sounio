@@ -1,0 +1,48 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: LIEX1_CENSORED_PASS
+// Synthetic one-parameter half-life fit with one detected and one BLQ
+// replicate at t=1, known starting concentration 2 and known assay sigma 1.
+// The detected reading is 1 + sqrt(2/pi), the BLQ threshold is 1.
+// The log-likelihood score in mean is zero at mean=1: detected residual
+// sqrt(2/pi) cancels phi(0)/Phi(0). Strict concavity gives the unique maximum,
+// and mean=2*exp(-ln(2)/half_life) is monotone, so half-life=1 exactly.
+use epistemic::censored::{Conc, assay_quantified, quantified_conc, assay_blq, assay_lloq, impute_zero, impute_half_lloq, imputed_conc_estimate, censored_normal_loglik}
+use math::pure::{exp, abs}
+
+fn observed(c: Knowledge<Conc>) -> Knowledge<Conc> { c }
+
+fn main() -> i32 with IO, Mut, Div, Panic, Epistemic {
+    let obs = assay_blq(1.0)
+    let reading = observed(assay_quantified(1.7978845608028654, 1.0, 1.0))
+    let detected = quantified_conc(reading)
+    if detected != 1.7978845608028654 { return 8 }
+    // Phi(0)=1/2; Phi(-1)=0.15865525393145707.
+    if !(abs(censored_normal_loglik(obs, 1.0, 1.0) + 0.6931471805599453) <= 1.0e-9) { return 1 }
+    if !(abs(censored_normal_loglik(obs, 2.0, 1.0) + 1.841021645009264) <= 1.0e-9) { return 2 }
+    if assay_lloq(obs) != 1.0 { return 3 }
+    if imputed_conc_estimate(impute_zero(obs)) != 0.0 { return 4 }
+    if imputed_conc_estimate(impute_half_lloq(obs)) != 0.5 { return 5 }
+
+    // Grid fit h = 0.5, 0.75, ..., 2.0, including the closed-form maximizer.
+    var best_h = 0.5
+    var best = -1.0e100
+    var i: i64 = 0
+    while i <= 6 {
+        let h = 0.5 + 0.25 * (i as f64)
+        let mean = 2.0 * exp(-0.6931471805599453 / h)
+        let residual = detected - mean
+        let detected_logpdf = -0.5 * residual * residual - 0.9189385332046727
+        let ll = detected_logpdf + censored_normal_loglik(obs, mean, 1.0)
+        if ll > best {
+            best = ll
+            best_h = h
+        }
+        i = i + 1
+    }
+    if best_h != 1.0 { return 6 }
+    // Maximum log likelihood = -1/pi - log(sqrt(2*pi)) - ln(2).
+    if !(abs(best + 1.930395599948409) <= 1.0e-9) { return 7 }
+    println("LIEX1_CENSORED_PASS")
+    return 0
+}
