@@ -1922,6 +1922,69 @@ pub fn ast_record_global_const_name(name: Name) with Mut, Div {
     }
 }
 
+// Exact f64 module constants for Knowledge (op) constant (E313). The table
+// above is keyed by bare name hash across every loaded module and records a
+// name whatever its initialiser, so it cannot prove that an identifier is an
+// exact constant: a `var` of one module can share its name with a `let` of
+// another, and a deferred initialiser runs at main entry. A name counts as
+// exact only when (1) one `let`/`const` declares it with a float literal or
+// its negation as initialiser, and (2) no other module-level declaration of
+// any kind (let, const, var, any module) has the same name hash. An overflow
+// of either table makes every name non-exact (fail closed).
+pub var GLOBAL_EXACT_F64_HASHES: [i64; 4096] = [0; 4096]
+pub var GLOBAL_EXACT_F64_COUNT: i64 = 0
+pub var GLOBAL_ANY_DECL_HASHES: [i64; 8192] = [0; 8192]
+pub var GLOBAL_ANY_DECL_COUNT: i64 = 0
+pub var GLOBAL_EXACT_F64_OVERFLOW: i64 = 0
+
+pub fn ast_expr_is_float_literal_shape(e: &Expr) -> bool with Mut, Panic, Div {
+    if (*e).kind == ExprKind::ExprFloatLit { return true }
+    if (*e).kind == ExprKind::ExprUnary && (*e).un_op == UnaryOp::OpNeg {
+        match (*e).left {
+            Some(inner) => { return (*inner).kind == ExprKind::ExprFloatLit }
+            None => { return false }
+        }
+    }
+    false
+}
+
+pub fn ast_record_global_any_decl(name: Name) with Mut, Div {
+    if GLOBAL_ANY_DECL_COUNT < 8192 {
+        GLOBAL_ANY_DECL_HASHES[GLOBAL_ANY_DECL_COUNT as usize] = ast_name_hash(name)
+        GLOBAL_ANY_DECL_COUNT = GLOBAL_ANY_DECL_COUNT + 1
+    } else {
+        GLOBAL_EXACT_F64_OVERFLOW = 1
+    }
+}
+
+pub fn ast_record_global_exact_f64(name: Name) with Mut, Div {
+    if GLOBAL_EXACT_F64_COUNT < 4096 {
+        GLOBAL_EXACT_F64_HASHES[GLOBAL_EXACT_F64_COUNT as usize] = ast_name_hash(name)
+        GLOBAL_EXACT_F64_COUNT = GLOBAL_EXACT_F64_COUNT + 1
+    } else {
+        GLOBAL_EXACT_F64_OVERFLOW = 1
+    }
+}
+
+pub fn ast_global_is_exact_f64_literal(name: Name) -> bool with Div {
+    if GLOBAL_EXACT_F64_OVERFLOW != 0 { return false }
+    let h = ast_name_hash(name)
+    var exact = false
+    var i: i64 = 0
+    while i < GLOBAL_EXACT_F64_COUNT {
+        if GLOBAL_EXACT_F64_HASHES[i as usize] == h { exact = true }
+        i = i + 1
+    }
+    if !exact { return false }
+    var decls: i64 = 0
+    i = 0
+    while i < GLOBAL_ANY_DECL_COUNT {
+        if GLOBAL_ANY_DECL_HASHES[i as usize] == h { decls = decls + 1 }
+        i = i + 1
+    }
+    decls == 1
+}
+
 pub fn ast_is_global_const_name(name: Name) -> bool with Div {
     let h = ast_name_hash(name)
     var i: i64 = 0
@@ -2286,6 +2349,9 @@ pub fn ast_reset_global_var_inits() with Mut {
     GLOBAL_DEFERRED_INIT_COUNT = 0
     GLOBAL_DEFERRED_INIT_OVERFLOW = 0
     GLOBAL_CONST_NAME_COUNT = 0
+    GLOBAL_EXACT_F64_COUNT = 0
+    GLOBAL_ANY_DECL_COUNT = 0
+    GLOBAL_EXACT_F64_OVERFLOW = 0
     GLOBAL_VAR_INIT_COUNT = 0
     // The dump notes are per parse session too (a printed note is never repeated).
     GVI_DUMP_N = 0
