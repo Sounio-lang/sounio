@@ -4,10 +4,9 @@
   Main metatheory for `f32@Det`:
   1. `det_agree`: every closed well-typed `T@Det` term evaluates to the exact same
      value on any two conforming backends `B1`, `B2`.
-  2. `no_forge_direct`, `no_forge_typing`, `no_forge`: no derivation can give a
-     `vendor` op type `f32@Det`, and replacing every `vendor` subterm with any arbitrary
-     bit-pattern preserves typing and leaves the evaluated result of every `T@Det` term
-     unchanged.
+  2. `no_forge`: changing the vendor implementation alone cannot affect any
+     closed `T@Det` result, even without a conformance hypothesis. The auxiliary
+     syntax-replacement theorems also cover replacement by literal bits.
 -/
 
 import Det.Core
@@ -120,6 +119,24 @@ theorem det_agree {ref : RefSem} {B1 B2 : Backend}
   det_agree_open hB1 hB2 ht rfl EnvAgreeDet.empty
 
 /-! ### Theorem 2: Non-forgeability (`no_forge`) -/
+
+/-- Open-term version: even plain variable bindings may vary, provided all
+    Det variable bindings agree and the contract implementation is fixed. -/
+theorem no_forge_open (B : Backend) (vendor' : Nat → List Bits → Bits)
+    {Γ : TyEnv} {env1 env2 : Env} {e : Term} {b : BaseTy}
+    (ht : HasType Γ e ⟨b, .det⟩) (henv : EnvAgreeDet Γ env1 env2) :
+    eval B env1 e = eval { B with vendor := vendor' } env2 e :=
+  det_agree_open (ref := B.prim) (B1 := B) (B2 := { B with vendor := vendor' })
+    (fun _ _ => rfl) (fun _ _ => rfl) ht rfl henv
+
+/-- Vendor noninterference: replace the entire vendor implementation by any
+    function of the operation tag and evaluated arguments. The contract
+    primitive implementation is held fixed; no IEEE conformance is needed. -/
+theorem no_forge (B : Backend) (vendor' : Nat → List Bits → Bits)
+    {e : Term} {b : BaseTy}
+    (ht : HasType TyEnv.empty e ⟨b, .det⟩) :
+    eval B Env.empty e = eval { B with vendor := vendor' } Env.empty e :=
+  no_forge_open B vendor' ht EnvAgreeDet.empty
 
 private theorem hasType_vendor_plain_aux :
     ∀ {Γ : TyEnv} {e : Term} {T : Ty},
@@ -247,7 +264,7 @@ end
 /-- Theorem 2c (semantic non-forgeability): for any closed `@Det` term (in particular `f32@Det`),
     replacing every `vendor` subterm with any arbitrary bit-pattern preserves both typing
     and the evaluated result — no `vendor` value can ever reach a `@Det` result. -/
-theorem no_forge (B : Backend) (r : Nat → List Term → Bits)
+theorem no_forge_replacement (B : Backend) (r : Nat → List Term → Bits)
     {e : Term} {b : BaseTy}
     (ht : HasType TyEnv.empty e ⟨b, .det⟩) :
     HasType TyEnv.empty (replaceVendor r e) ⟨b, .det⟩ ∧

@@ -9,7 +9,7 @@
   - Subtyping: `T@Det <: T` (reflexive, upward-only); there is no rule `T -> T@Det`.
   - Floats are abstract bit patterns (`Bits := UInt32`). A reference semantics
     `ref : Prim -> List Bits -> Bits` abstracts IEEE-754 arithmetic together with
-    FTZ/DAZ and NaN canonicalization (all NaNs map to a single canonical bit pattern).
+    FTZ/DAZ and NaN canonicalization (every NaN primitive result is 0x7FC00000).
   - A backend `B` supplies `B.prim : Prim -> List Bits -> Bits` and an arbitrary
     non-contract `B.vendor : Nat -> List Bits -> Bits`.
   - Conformance `Conf ref B` is a hypothesis (`∀ p args, B.prim p args = ref p args`),
@@ -245,18 +245,20 @@ theorem foldl_congr {f1 f2 : Bits → Bits → Bits}
     simp only [List.foldl, hf init a]
     exact foldl_congr hf (f2 init a) rest
 
-/-- Deterministic reduction parameterized by `Order`. -/
+/-- Deterministic reduction of the same ordered operands `init :: xs`.
+    Sequential order is a left fold; tree order combines adjacent pairs,
+    carrying an unpaired final operand unchanged to the next level. -/
 def reduceWithOrder (ord : Order) (f : Bits → Bits → Bits) (init : Bits) (xs : List Bits) : Bits :=
   match ord with
   | .seq => xs.foldl f init
-  | .balancedTree => reduceTree f init xs
+  | .balancedTree => reduceTree f init (init :: xs)
 
 theorem reduceWithOrder_congr (ord : Order) {f1 f2 : Bits → Bits → Bits}
     (hf : ∀ a b, f1 a b = f2 a b) (init : Bits) (xs : List Bits) :
     reduceWithOrder ord f1 init xs = reduceWithOrder ord f2 init xs := by
   cases ord with
   | seq => exact foldl_congr hf init xs
-  | balancedTree => exact reduceTree_congr hf init xs
+  | balancedTree => exact reduceTree_congr hf init (init :: xs)
 
 /- Total functional evaluator parameterized by backend `B` and environment `env`. -/
 mutual

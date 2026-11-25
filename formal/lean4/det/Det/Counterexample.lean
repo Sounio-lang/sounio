@@ -60,28 +60,30 @@ mutual
         HasTypeNoImplicitFlowList Γ (e :: es) T
 end
 
-/-- Concrete reference semantics where `compare [a, b]` returns `1` iff `a == b`, else `0`. -/
+/-- A countermodel reference for the abstract calculus, not an IEEE implementation.
+    Only equality comparison on two distinct normal binary32 values is used. -/
 def witnessRef : RefSem
   | .compare, [a, b] => if a == b then 1 else 0
   | _, _ => 0
 
-/-- Conforming backend A whose vendor op returns `0`. -/
+/-- Conforming backend A whose vendor op returns the bits of `1.0`. -/
 def backendA : Backend :=
   { prim := witnessRef
-    vendor := fun _ _ => 0 }
+    vendor := fun _ _ => 0x3F800000 }
 
-/-- Conforming backend B whose vendor op returns `1`. -/
+/-- Conforming backend B whose vendor op returns the bits of `2.0`. -/
 def backendB : Backend :=
   { prim := witnessRef
-    vendor := fun _ _ => 1 }
+    vendor := fun _ _ => 0x40000000 }
 
 theorem conf_backendA : Conf witnessRef backendA := fun _ _ => rfl
 
 theorem conf_backendB : Conf witnessRef backendB := fun _ _ => rfl
 
-/-- Closed witness term: `if (compare (vendor 0 []) 0) then 1 else 2`. -/
+/-- Closed witness: `if (compare (vendor 0 []) 1.0) then 1.0 else 2.0`. -/
 def implicitFlowWitness : Term :=
-  .ite (.prim .compare [.vendor 0 [], .f32Lit 0]) (.f32Lit 1) (.f32Lit 2)
+  .ite (.prim .compare [.vendor 0 [], .f32Lit 0x3F800000])
+    (.f32Lit 0x3F800000) (.f32Lit 0x40000000)
 
 theorem witness_typed_without_implicit_flow :
     HasTypeNoImplicitFlow TyEnv.empty implicitFlowWitness Ty.f32Det := by
@@ -100,13 +102,13 @@ theorem witness_diverges :
     eval backendA Env.empty implicitFlowWitness ≠
     eval backendB Env.empty implicitFlowWitness := by
   intro h
-  have hA : eval backendA Env.empty implicitFlowWitness = Val.f32 1 := rfl
-  have hB : eval backendB Env.empty implicitFlowWitness = Val.f32 2 := rfl
+  have hA : eval backendA Env.empty implicitFlowWitness = Val.f32 0x3F800000 := rfl
+  have hB : eval backendB Env.empty implicitFlowWitness = Val.f32 0x40000000 := rfl
   rw [hA, hB] at h
   cases h
 
 /-- Theorem 3: Without the implicit-flow rule, `det_agree` is false. -/
-theorem implicit_flow_required :
+theorem implicit_flow_needed :
     ∃ (ref : RefSem) (B1 B2 : Backend) (e : Term),
       Conf ref B1 ∧
       Conf ref B2 ∧
@@ -114,6 +116,28 @@ theorem implicit_flow_required :
       eval B1 Env.empty e ≠ eval B2 Env.empty e :=
   ⟨witnessRef, backendA, backendB, implicitFlowWitness,
    conf_backendA, conf_backendB, witness_typed_without_implicit_flow, witness_diverges⟩
+
+/-- The counterexample also works for any actual reference satisfying these
+    two equality comparisons on normal operands. No assumption about its other
+    primitive results (including NaNs) is needed for this witness. -/
+theorem implicit_flow_needed_for_ref (ref : RefSem)
+    (hEq : bitsToBool (ref .compare [0x3F800000, 0x3F800000]) = true)
+    (hNe : bitsToBool (ref .compare [0x40000000, 0x3F800000]) = false) :
+    ∃ (B1 B2 : Backend) (e : Term), Conf ref B1 ∧ Conf ref B2 ∧
+      HasTypeNoImplicitFlow TyEnv.empty e Ty.f32Det ∧
+      eval B1 Env.empty e ≠ eval B2 Env.empty e := by
+  let B1 : Backend := { backendA with prim := ref }
+  let B2 : Backend := { backendB with prim := ref }
+  refine ⟨B1, B2, implicitFlowWitness, fun _ _ => rfl, fun _ _ => rfl,
+    witness_typed_without_implicit_flow, ?_⟩
+  have ha : eval B1 Env.empty implicitFlowWitness = Val.f32 0x3F800000 := by
+    simp only [implicitFlowWitness, eval, evalList, extractF32s, B1, backendA,
+      Prim.retBase, hEq]
+  have hb : eval B2 Env.empty implicitFlowWitness = Val.f32 0x40000000 := by
+    simp only [implicitFlowWitness, eval, evalList, extractF32s, B2, backendB,
+      Prim.retBase, hNe]
+  rw [ha, hb]
+  decide
 
 private theorem hasType_compare_vendor_plain_aux :
     ∀ {Γ : TyEnv} {e : Term} {T : Ty},
