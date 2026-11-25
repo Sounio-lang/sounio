@@ -1,0 +1,1404 @@
+// Synthesized IR runtime for named Knightian uncertainty affine forms (EPI-006 step 3b).
+//
+// Emitted lazily into an IrModule only when a program uses `knight(...)`,
+// Knowledge binary arithmetic, or `.iv`. Works identically on single-module
+// and multi-module lowering paths (each helper is deduplicated by name in
+// the IrModule).
+//
+// Runtime layout:
+//   Knowledge handle (ir_alloc(dst, 0), 64 word slots, zero-initialized):
+//     slot 0: value (f64)
+//     slot 1: variance (f64)
+//     slot 2: confidence (f64)
+//     slot 3: provenance (ptr)
+//     slot 4: knight_af (array handle, or 0 for pure-aleatory / deterministic Knowledge)
+//
+//   KnightAffine array handle (ir_alloc_array(reg, 2592, 324), 324 words):
+//     word 0: c (f64)          constant term
+//     word 1: n (i64)          active term count (0..64)
+//     word 2: rad_extra (f64)  extra outward-rounded symmetric radius (>= 0.0)
+//     word 3: vacuous (i64)    1 iff interval is [-inf, +inf] (e.g. div by 0)
+//     term t (0 <= t < n) at word 4 + t*5:
+//       +0: name_ptr (i64)     pointer to NUL-terminated source name, or 0 if anonymous
+//       +1: anon_id (i64)      0 if named, unique >0 if anonymous remainder symbol
+//       +2: coeff (f64)        affine coefficient
+//       +3: lo (f64)           source lower bound (-1.0 for anonymous)
+//       +4: hi (f64)           source upper bound (+1.0 for anonymous)
+//
+// Arithmetic preserves exact affine dependency algebra over Knightian names
+// (x - x cancels symbolically to 0), detects exact vs rounded binary64 ops via
+// Knuth TwoSum and Dekker TwoProd, pushes rounded endpoints outward using the
+// Rump-Zimmermann-Boldo-Melquiond predecessor/successor algorithm from
+// stdlib/epistemic/sound_enclosure.sio, and allocates a fresh anonymous symbol
+// for each non-linear remainder (Comba-Stolfi / Adje et al.).
+
+module ir::knight_ir
+
+use parser::ast::{BinaryOp, Name}
+use ir::ir::*
+
+// ============================================================================
+// Low-level IrFunction builder helpers (mutating &! IrFunction in place)
+// ============================================================================
+
+fn kb_emit(f: &! IrFunction, instr: IrInstr) with Mut, Panic, Div {
+    let _ = ir_region_push(&! (*f).region, instr)
+    (*f).instr_count = (*f).instr_count + 1
+}
+
+fn kb_reg(f: &! IrFunction) -> i64 with Mut {
+    let r = (*f).reg_count
+    (*f).reg_count = r + 1
+    r
+}
+
+fn kb_freg(f: &! IrFunction) -> i64 with Mut, Panic, Div {
+    let r = kb_reg(f)
+    kb_emit(f, ir_mark_float_reg(r))
+    r
+}
+
+fn kb_lbl(f: &! IrFunction) -> i64 with Mut {
+    let l = (*f).label_count
+    (*f).label_count = l + 1
+    l
+}
+
+fn kb_imm(f: &! IrFunction, v: i64) -> i64 with Mut, Panic, Div {
+    let r = kb_reg(f)
+    kb_emit(f, ir_load_imm(r, v))
+    r
+}
+
+fn kb_fimm(f: &! IrFunction, v: f64) -> i64 with Mut, Panic, Div {
+    let r = kb_reg(f)
+    kb_emit(f, ir_load_float(r, v))
+    kb_emit(f, ir_mark_float_reg(r))
+    r
+}
+
+fn kb_feta(f: &! IrFunction) -> i64 with Mut, Panic, Div {
+    // 2^-1074: exact IEEE 754 binary64 bit pattern 0x0000000000000001.
+    let r = kb_reg(f)
+    kb_emit(f, ir_load_imm(r, 1))
+    kb_emit(f, ir_mark_float_reg(r))
+    r
+}
+
+fn kb_fphi(f: &! IrFunction) -> i64 with Mut, Panic, Div {
+    // u * (1 + 2u) with u = 2^-53 (sound_enclosure.sio se_phi).
+    kb_fimm(f, 1.1102230246251565e-16 * (1.0 + 2.220446049250313e-16))
+}
+
+fn kb_iop(f: &! IrFunction, a: i64, op: BinaryOp, b: i64) -> i64 with Mut, Panic, Div {
+    let r = kb_reg(f)
+    kb_emit(f, ir_binop(r, a, op, b))
+    r
+}
+
+fn kb_fop(f: &! IrFunction, a: i64, op: BinaryOp, b: i64) -> i64 with Mut, Panic, Div {
+    let r = kb_reg(f)
+    kb_emit(f, ir_binop_typed(r, a, op, b, true, true))
+    kb_emit(f, ir_mark_float_reg(r))
+    r
+}
+
+fn kb_fcmp(f: &! IrFunction, a: i64, op: BinaryOp, b: i64) -> i64 with Mut, Panic, Div {
+    let r = kb_reg(f)
+    kb_emit(f, ir_binop_typed(r, a, op, b, true, true))
+    r
+}
+
+fn kb_fneg(f: &! IrFunction, a: i64) -> i64 with Mut, Panic, Div {
+    let z = kb_fimm(f, 0.0)
+    kb_fop(f, z, BinaryOp::OpSub, a)
+}
+
+fn kb_fabs(f: &! IrFunction, a: i64) -> i64 with Mut, Panic, Div {
+    let res = kb_freg(f)
+    kb_emit(f, ir_copy(res, a))
+    kb_emit(f, ir_mark_float_reg(res))
+    let z = kb_fimm(f, 0.0)
+    let is_neg = kb_fcmp(f, a, BinaryOp::OpLt, z)
+    let l_done = kb_lbl(f)
+    kb_emit(f, ir_branch_false(is_neg, l_done))
+    let neg_a = kb_fop(f, z, BinaryOp::OpSub, a)
+    kb_emit(f, ir_copy(res, neg_a))
+    kb_emit(f, ir_label(l_done))
+    res
+}
+
+fn kb_fmax(f: &! IrFunction, a: i64, b: i64) -> i64 with Mut, Panic, Div {
+    let res = kb_freg(f)
+    kb_emit(f, ir_copy(res, a))
+    kb_emit(f, ir_mark_float_reg(res))
+    let gt = kb_fcmp(f, b, BinaryOp::OpGt, a)
+    let l_done = kb_lbl(f)
+    kb_emit(f, ir_branch_false(gt, l_done))
+    kb_emit(f, ir_copy(res, b))
+    kb_emit(f, ir_label(l_done))
+    res
+}
+
+fn kb_fget_f(f: &! IrFunction, obj: i64, idx: i64) -> i64 with Mut, Panic, Div {
+    let r = kb_reg(f)
+    var ins = ir_field_get(r, obj, idx, ir_empty_name())
+    ins.imm_flags = IR_FLOAT_REG_MARKER_FLAG
+    kb_emit(f, ins)
+    kb_emit(f, ir_mark_float_reg(r))
+    r
+}
+
+fn kb_fget_i(f: &! IrFunction, obj: i64, idx: i64) -> i64 with Mut, Panic, Div {
+    let r = kb_reg(f)
+    kb_emit(f, ir_field_get(r, obj, idx, ir_empty_name()))
+    r
+}
+
+fn kb_fset(f: &! IrFunction, obj: i64, idx: i64, val: i64) with Mut, Panic, Div {
+    kb_emit(f, ir_field_set(obj, idx, val, ir_empty_name()))
+}
+
+fn kb_iget_i(f: &! IrFunction, arr: i64, idx: i64) -> i64 with Mut, Panic, Div {
+    let r = kb_reg(f)
+    kb_emit(f, ir_index_get(r, arr, idx))
+    r
+}
+
+fn kb_iget_f(f: &! IrFunction, arr: i64, idx: i64) -> i64 with Mut, Panic, Div {
+    let r = kb_reg(f)
+    var ins = ir_index_get(r, arr, idx)
+    ins.imm_flags = IR_FLOAT_REG_MARKER_FLAG
+    kb_emit(f, ins)
+    kb_emit(f, ir_mark_float_reg(r))
+    r
+}
+
+fn kb_iset(f: &! IrFunction, arr: i64, idx: i64, val: i64) with Mut, Panic, Div {
+    kb_emit(f, ir_index_set(arr, idx, val))
+}
+
+fn kb_call0_i(f: &! IrFunction, fid: i64, name: Name) -> i64 with Mut, Panic, Div {
+    let r = kb_reg(f)
+    kb_emit(f, ir_call(r, fid, name, None, 0))
+    r
+}
+
+fn kb_call1_i(f: &! IrFunction, fid: i64, name: Name, a0: i64) -> i64 with Mut, Panic, Div, Alloc {
+    let r = kb_reg(f)
+    let args: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_single(a0)))
+    kb_emit(f, ir_call(r, fid, name, args, 1))
+    r
+}
+
+fn kb_call1_f(f: &! IrFunction, fid: i64, name: Name, a0: i64) -> i64 with Mut, Panic, Div, Alloc {
+    let r = kb_reg(f)
+    let args: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_single(a0)))
+    var ins = ir_call(r, fid, name, args, 1)
+    ins.imm_flags = IR_FLOAT_REG_MARKER_FLAG
+    kb_emit(f, ins)
+    kb_emit(f, ir_mark_float_reg(r))
+    r
+}
+
+fn kb_call2_i(f: &! IrFunction, fid: i64, name: Name, a0: i64, a1: i64) -> i64 with Mut, Panic, Div, Alloc {
+    let r = kb_reg(f)
+    let args: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_cons(a0, Some(Box::new(ir_reg_list_single(a1))))))
+    kb_emit(f, ir_call(r, fid, name, args, 2))
+    r
+}
+
+fn kb_call2_f(f: &! IrFunction, fid: i64, name: Name, a0: i64, a1: i64) -> i64 with Mut, Panic, Div, Alloc {
+    let r = kb_reg(f)
+    let args: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_cons(a0, Some(Box::new(ir_reg_list_single(a1))))))
+    var ins = ir_call(r, fid, name, args, 2)
+    ins.imm_flags = IR_FLOAT_REG_MARKER_FLAG
+    kb_emit(f, ins)
+    kb_emit(f, ir_mark_float_reg(r))
+    r
+}
+
+fn kb_call4_i(f: &! IrFunction, fid: i64, name: Name, a0: i64, a1: i64, a2: i64, a3: i64) -> i64 with Mut, Panic, Div, Alloc {
+    let r = kb_reg(f)
+    let l3: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_single(a3)))
+    let l2: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_cons(a2, l3)))
+    let l1: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_cons(a1, l2)))
+    let args: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_cons(a0, l1)))
+    kb_emit(f, ir_call(r, fid, name, args, 4))
+    r
+}
+
+fn kb_call6_i(f: &! IrFunction, fid: i64, name: Name, a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i64 with Mut, Panic, Div, Alloc {
+    let r = kb_reg(f)
+    let l5: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_single(a5)))
+    let l4: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_cons(a4, l5)))
+    let l3: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_cons(a3, l4)))
+    let l2: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_cons(a2, l3)))
+    let l1: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_cons(a1, l2)))
+    let args: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_cons(a0, l1)))
+    kb_emit(f, ir_call(r, fid, name, args, 6))
+    r
+}
+
+// ============================================================================
+// Module slot lookup / reservation helpers
+// ============================================================================
+
+fn knight_find_or_reserve_fn(m: &! IrModule, name: Name) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < (*m).fn_count {
+        if ir_name_eq(ir_fn_get(&(*m), i as usize).name, name) {
+            return i
+        }
+        i = i + 1
+    }
+    let idx = (*m).fn_count
+    var slot = ir_empty_function()
+    slot.name = name
+    ir_function_alloc_region(&! slot)
+    ir_fn_set(m, idx as usize, slot)
+    (*m).fn_count = idx + 1
+    idx
+}
+
+fn knight_ensure_anon_bss(m: &! IrModule) -> (i64, Name) with Mut, Panic, Div {
+    let nm = make_name("__sounio_knight_anon_ctr")
+    var i: i64 = 0
+    while i < (*m).fn_count {
+        let f = ir_fn_get(&(*m), i as usize)
+        if ir_name_eq(f.name, nm) && f.compile_strategy == IR_STRATEGY_BSS_GLOBAL {
+            return (f.param_count, nm)
+        }
+        i = i + 1
+    }
+    let idx = (*m).fn_count
+    var bss = ir_empty_function()
+    bss.name = nm
+    bss.compile_strategy = IR_STRATEGY_BSS_GLOBAL
+    let off = (*m).bss_total_size
+    bss.param_count = off
+    bss.bss_size = 8
+    bss.hyper_algebra_kind = 8
+    ir_function_alloc_region(&! bss)
+    ir_fn_set(m, idx as usize, bss)
+    (*m).fn_count = idx + 1
+    (*m).bss_total_size = off + 8
+    (off, nm)
+}
+
+fn knight_init_fn(name: Name, nparams: i64, returns_float: i64) -> IrFunction with Mut, Panic, Div {
+    var f = ir_empty_function()
+    f.name = name
+    f.param_count = nparams
+    f.reg_count = nparams
+    f.returns_float = returns_float
+    var p: i64 = 0
+    while p < nparams {
+        f.param_regs[p as usize] = p
+        p = p + 1
+    }
+    ir_function_alloc_region(&! f)
+    f
+}
+
+// ============================================================================
+// Synthesized helper builders
+// ============================================================================
+
+fn knight_build_next_anon(m: &! IrModule, fid: i64) with Mut, Panic, Div {
+    let bss = knight_ensure_anon_bss(m)
+    var f = knight_init_fn(make_name("__sounio_knight_next_anon"), 0, 0)
+    let cur = kb_reg(&! f)
+    kb_emit(&! f, ir_load_global(cur, bss.0, bss.1))
+    let one = kb_imm(&! f, 1)
+    let nxt = kb_iop(&! f, cur, BinaryOp::OpAdd, one)
+    kb_emit(&! f, ir_store_global(nxt, bss.0, bss.1))
+    kb_emit(&! f, ir_return(nxt))
+    ir_fn_set(m, fid as usize, f)
+}
+
+fn knight_build_se_down(m: &! IrModule, fid: i64) with Mut, Panic, Div {
+    var f = knight_init_fn(make_name("__sounio_knight_se_down"), 1, 1)
+    kb_emit(&! f, ir_mark_float_reg(0))
+    let ar = kb_fabs(&! f, 0)
+    let phi = kb_fphi(&! f)
+    let eta = kb_feta(&! f)
+    let scaled = kb_fop(&! f, ar, BinaryOp::OpMul, phi)
+    let push = kb_fop(&! f, scaled, BinaryOp::OpAdd, eta)
+    let out = kb_fop(&! f, 0, BinaryOp::OpSub, push)
+    kb_emit(&! f, ir_return(out))
+    ir_fn_set(m, fid as usize, f)
+}
+
+fn knight_build_se_up(m: &! IrModule, fid: i64) with Mut, Panic, Div {
+    var f = knight_init_fn(make_name("__sounio_knight_se_up"), 1, 1)
+    kb_emit(&! f, ir_mark_float_reg(0))
+    let ar = kb_fabs(&! f, 0)
+    let phi = kb_fphi(&! f)
+    let eta = kb_feta(&! f)
+    let scaled = kb_fop(&! f, ar, BinaryOp::OpMul, phi)
+    let push = kb_fop(&! f, scaled, BinaryOp::OpAdd, eta)
+    let out = kb_fop(&! f, 0, BinaryOp::OpAdd, push)
+    kb_emit(&! f, ir_return(out))
+    ir_fn_set(m, fid as usize, f)
+}
+
+fn knight_build_two_sum_err(m: &! IrModule, fid: i64) with Mut, Panic, Div {
+    // Knuth TwoSum (1969): s = a + b; bb = s - a; err = (a - (s - bb)) + (b - bb).
+    var f = knight_init_fn(make_name("__sounio_knight_two_sum_err"), 2, 1)
+    kb_emit(&! f, ir_mark_float_reg(0))
+    kb_emit(&! f, ir_mark_float_reg(1))
+    let s = kb_fop(&! f, 0, BinaryOp::OpAdd, 1)
+    let bb = kb_fop(&! f, s, BinaryOp::OpSub, 0)
+    let s_minus_bb = kb_fop(&! f, s, BinaryOp::OpSub, bb)
+    let da = kb_fop(&! f, 0, BinaryOp::OpSub, s_minus_bb)
+    let db = kb_fop(&! f, 1, BinaryOp::OpSub, bb)
+    let err = kb_fop(&! f, da, BinaryOp::OpAdd, db)
+    kb_emit(&! f, ir_return(err))
+    ir_fn_set(m, fid as usize, f)
+}
+
+fn knight_build_add_dir(m: &! IrModule, fid: i64, is_up: bool, fid_tse: i64, fid_se: i64) with Mut, Panic, Div, Alloc {
+    let fname = if is_up { make_name("__sounio_knight_add_up") } else { make_name("__sounio_knight_add_down") }
+    let se_name = if is_up { make_name("__sounio_knight_se_up") } else { make_name("__sounio_knight_se_down") }
+    var f = knight_init_fn(fname, 2, 1)
+    kb_emit(&! f, ir_mark_float_reg(0))
+    kb_emit(&! f, ir_mark_float_reg(1))
+    let s = kb_fop(&! f, 0, BinaryOp::OpAdd, 1)
+    let err = kb_call2_f(&! f, fid_tse, make_name("__sounio_knight_two_sum_err"), 0, 1)
+    let z = kb_fimm(&! f, 0.0)
+    let need_push = if is_up {
+        kb_fcmp(&! f, err, BinaryOp::OpGt, z)
+    } else {
+        kb_fcmp(&! f, err, BinaryOp::OpLt, z)
+    }
+    let l_exact = kb_lbl(&! f)
+    kb_emit(&! f, ir_branch_false(need_push, l_exact))
+    let pushed = kb_call1_f(&! f, fid_se, se_name, s)
+    kb_emit(&! f, ir_return(pushed))
+    kb_emit(&! f, ir_label(l_exact))
+    kb_emit(&! f, ir_return(s))
+    ir_fn_set(m, fid as usize, f)
+}
+
+fn knight_build_two_prod_err(m: &! IrModule, fid: i64) with Mut, Panic, Div {
+    // Dekker-Veltkamp TwoProd split (C = 2^27 + 1 = 134217729.0).
+    // Returns exact error err such that a * b = fl(a * b) + err (in normal range).
+    var f = knight_init_fn(make_name("__sounio_knight_two_prod_err"), 2, 1)
+    kb_emit(&! f, ir_mark_float_reg(0))
+    kb_emit(&! f, ir_mark_float_reg(1))
+    let z = kb_fimm(&! f, 0.0)
+    let one = kb_fimm(&! f, 1.0)
+    let mone = kb_fimm(&! f, 0.0 - 1.0)
+    let l_check = kb_lbl(&! f)
+    let l_zero = kb_lbl(&! f)
+    let c0 = kb_fcmp(&! f, 0, BinaryOp::OpEq, z)
+    let l_n1 = kb_lbl(&! f)
+    kb_emit(&! f, ir_branch_false(c0, l_n1))
+    kb_emit(&! f, ir_jump(l_zero))
+    kb_emit(&! f, ir_label(l_n1))
+    let c1 = kb_fcmp(&! f, 1, BinaryOp::OpEq, z)
+    let l_n2 = kb_lbl(&! f)
+    kb_emit(&! f, ir_branch_false(c1, l_n2))
+    kb_emit(&! f, ir_jump(l_zero))
+    kb_emit(&! f, ir_label(l_n2))
+    let c2 = kb_fcmp(&! f, 0, BinaryOp::OpEq, one)
+    let l_n3 = kb_lbl(&! f)
+    kb_emit(&! f, ir_branch_false(c2, l_n3))
+    kb_emit(&! f, ir_jump(l_zero))
+    kb_emit(&! f, ir_label(l_n3))
+    let c3 = kb_fcmp(&! f, 1, BinaryOp::OpEq, one)
+    let l_n4 = kb_lbl(&! f)
+    kb_emit(&! f, ir_branch_false(c3, l_n4))
+    kb_emit(&! f, ir_jump(l_zero))
+    kb_emit(&! f, ir_label(l_n4))
+    let c4 = kb_fcmp(&! f, 0, BinaryOp::OpEq, mone)
+    let l_n5 = kb_lbl(&! f)
+    kb_emit(&! f, ir_branch_false(c4, l_n5))
+    kb_emit(&! f, ir_jump(l_zero))
+    kb_emit(&! f, ir_label(l_n5))
+    let c5 = kb_fcmp(&! f, 1, BinaryOp::OpEq, mone)
+    kb_emit(&! f, ir_branch_false(c5, l_check))
+    kb_emit(&! f, ir_label(l_zero))
+    kb_emit(&! f, ir_return(z))
+
+    kb_emit(&! f, ir_label(l_check))
+    let p = kb_fop(&! f, 0, BinaryOp::OpMul, 1)
+    let split_c = kb_fimm(&! f, 134217729.0)
+    let ca = kb_fop(&! f, split_c, BinaryOp::OpMul, 0)
+    let ca_m_a = kb_fop(&! f, ca, BinaryOp::OpSub, 0)
+    let a_hi = kb_fop(&! f, ca, BinaryOp::OpSub, ca_m_a)
+    let a_lo = kb_fop(&! f, 0, BinaryOp::OpSub, a_hi)
+    let cb = kb_fop(&! f, split_c, BinaryOp::OpMul, 1)
+    let cb_m_b = kb_fop(&! f, cb, BinaryOp::OpSub, 1)
+    let b_hi = kb_fop(&! f, cb, BinaryOp::OpSub, cb_m_b)
+    let b_lo = kb_fop(&! f, 1, BinaryOp::OpSub, b_hi)
+    let t0 = kb_fop(&! f, a_hi, BinaryOp::OpMul, b_hi)
+    let t1 = kb_fop(&! f, t0, BinaryOp::OpSub, p)
+    let t2 = kb_fop(&! f, a_hi, BinaryOp::OpMul, b_lo)
+    let t3 = kb_fop(&! f, t1, BinaryOp::OpAdd, t2)
+    let t4 = kb_fop(&! f, a_lo, BinaryOp::OpMul, b_hi)
+    let t5 = kb_fop(&! f, t3, BinaryOp::OpAdd, t4)
+    let t6 = kb_fop(&! f, a_lo, BinaryOp::OpMul, b_lo)
+    let err = kb_fop(&! f, t5, BinaryOp::OpAdd, t6)
+    kb_emit(&! f, ir_return(err))
+    ir_fn_set(m, fid as usize, f)
+}
+
+fn knight_build_mul_dir(m: &! IrModule, fid: i64, is_up: bool, fid_tpe: i64, fid_se: i64) with Mut, Panic, Div, Alloc {
+    let fname = if is_up { make_name("__sounio_knight_mul_up") } else { make_name("__sounio_knight_mul_down") }
+    let se_name = if is_up { make_name("__sounio_knight_se_up") } else { make_name("__sounio_knight_se_down") }
+    var f = knight_init_fn(fname, 2, 1)
+    kb_emit(&! f, ir_mark_float_reg(0))
+    kb_emit(&! f, ir_mark_float_reg(1))
+    let z = kb_fimm(&! f, 0.0)
+    let l_nz_a = kb_lbl(&! f)
+    let ca0 = kb_fcmp(&! f, 0, BinaryOp::OpEq, z)
+    kb_emit(&! f, ir_branch_false(ca0, l_nz_a))
+    kb_emit(&! f, ir_return(z))
+    kb_emit(&! f, ir_label(l_nz_a))
+    let l_nz_b = kb_lbl(&! f)
+    let cb0 = kb_fcmp(&! f, 1, BinaryOp::OpEq, z)
+    kb_emit(&! f, ir_branch_false(cb0, l_nz_b))
+    kb_emit(&! f, ir_return(z))
+    kb_emit(&! f, ir_label(l_nz_b))
+
+    let p = kb_fop(&! f, 0, BinaryOp::OpMul, 1)
+    let big = kb_fimm(&! f, 1.0e150)
+    let tiny = kb_fimm(&! f, 1.0e-290)
+    let aa = kb_fabs(&! f, 0)
+    let ab = kb_fabs(&! f, 1)
+    let ap = kb_fabs(&! f, p)
+    let l_push = kb_lbl(&! f)
+    let l_ok1 = kb_lbl(&! f)
+    let b1 = kb_fcmp(&! f, aa, BinaryOp::OpGe, big)
+    kb_emit(&! f, ir_branch_false(b1, l_ok1))
+    kb_emit(&! f, ir_jump(l_push))
+    kb_emit(&! f, ir_label(l_ok1))
+    let l_ok2 = kb_lbl(&! f)
+    let b2 = kb_fcmp(&! f, ab, BinaryOp::OpGe, big)
+    kb_emit(&! f, ir_branch_false(b2, l_ok2))
+    kb_emit(&! f, ir_jump(l_push))
+    kb_emit(&! f, ir_label(l_ok2))
+    let l_ok3 = kb_lbl(&! f)
+    let b3 = kb_fcmp(&! f, ap, BinaryOp::OpLt, tiny)
+    kb_emit(&! f, ir_branch_false(b3, l_ok3))
+    kb_emit(&! f, ir_jump(l_push))
+    kb_emit(&! f, ir_label(l_ok3))
+
+    let err = kb_call2_f(&! f, fid_tpe, make_name("__sounio_knight_two_prod_err"), 0, 1)
+    let need = if is_up {
+        kb_fcmp(&! f, err, BinaryOp::OpGt, z)
+    } else {
+        kb_fcmp(&! f, err, BinaryOp::OpLt, z)
+    }
+    let l_exact = kb_lbl(&! f)
+    kb_emit(&! f, ir_branch_false(need, l_exact))
+    kb_emit(&! f, ir_label(l_push))
+    let pushed = kb_call1_f(&! f, fid_se, se_name, p)
+    kb_emit(&! f, ir_return(pushed))
+    kb_emit(&! f, ir_label(l_exact))
+    kb_emit(&! f, ir_return(p))
+    ir_fn_set(m, fid as usize, f)
+}
+
+fn knight_build_div_dir(m: &! IrModule, fid: i64, is_up: bool, fid_tpe: i64, fid_se: i64) with Mut, Panic, Div, Alloc {
+    let fname = if is_up { make_name("__sounio_knight_div_up") } else { make_name("__sounio_knight_div_down") }
+    let se_name = if is_up { make_name("__sounio_knight_se_up") } else { make_name("__sounio_knight_se_down") }
+    var f = knight_init_fn(fname, 2, 1)
+    kb_emit(&! f, ir_mark_float_reg(0))
+    kb_emit(&! f, ir_mark_float_reg(1))
+    let z = kb_fimm(&! f, 0.0)
+    let l_nz = kb_lbl(&! f)
+    let ca0 = kb_fcmp(&! f, 0, BinaryOp::OpEq, z)
+    kb_emit(&! f, ir_branch_false(ca0, l_nz))
+    kb_emit(&! f, ir_return(z))
+    kb_emit(&! f, ir_label(l_nz))
+
+    let q = kb_fop(&! f, 0, BinaryOp::OpDiv, 1)
+    let big = kb_fimm(&! f, 1.0e150)
+    let tiny = kb_fimm(&! f, 1.0e-290)
+    let aq = kb_fabs(&! f, q)
+    let ab = kb_fabs(&! f, 1)
+    let aa = kb_fabs(&! f, 0)
+    let l_push = kb_lbl(&! f)
+    let l_c1 = kb_lbl(&! f)
+    let k1 = kb_fcmp(&! f, aq, BinaryOp::OpGe, big)
+    kb_emit(&! f, ir_branch_false(k1, l_c1))
+    kb_emit(&! f, ir_jump(l_push))
+    kb_emit(&! f, ir_label(l_c1))
+    let l_c2 = kb_lbl(&! f)
+    let k2 = kb_fcmp(&! f, ab, BinaryOp::OpGe, big)
+    kb_emit(&! f, ir_branch_false(k2, l_c2))
+    kb_emit(&! f, ir_jump(l_push))
+    kb_emit(&! f, ir_label(l_c2))
+    let l_c3 = kb_lbl(&! f)
+    let k3 = kb_fcmp(&! f, aa, BinaryOp::OpLt, tiny)
+    kb_emit(&! f, ir_branch_false(k3, l_c3))
+    kb_emit(&! f, ir_jump(l_push))
+    kb_emit(&! f, ir_label(l_c3))
+
+    let qb = kb_fop(&! f, q, BinaryOp::OpMul, 1)
+    let eq_a = kb_fcmp(&! f, qb, BinaryOp::OpEq, 0)
+    kb_emit(&! f, ir_branch_false(eq_a, l_push))
+    let err = kb_call2_f(&! f, fid_tpe, make_name("__sounio_knight_two_prod_err"), q, 1)
+    let err0 = kb_fcmp(&! f, err, BinaryOp::OpEq, z)
+    kb_emit(&! f, ir_branch_false(err0, l_push))
+    kb_emit(&! f, ir_return(q))
+
+    kb_emit(&! f, ir_label(l_push))
+    let pushed = kb_call1_f(&! f, fid_se, se_name, q)
+    kb_emit(&! f, ir_return(pushed))
+    ir_fn_set(m, fid as usize, f)
+}
+
+fn knight_build_af_add_term(
+    m: &! IrModule,
+    fid: i64,
+    fid_str_eq: i64,
+    fid_tse: i64,
+    fid_add_up: i64,
+    fid_mul_up: i64
+) with Mut, Panic, Div, Alloc {
+    // Params: 0=af, 1=name_ptr, 2=anon_id, 3=coeff(f64), 4=lo(f64), 5=hi(f64)
+    var f = knight_init_fn(make_name("__sounio_knight_af_add_term"), 6, 0)
+    kb_emit(&! f, ir_mark_float_reg(3))
+    kb_emit(&! f, ir_mark_float_reg(4))
+    kb_emit(&! f, ir_mark_float_reg(5))
+    let zero_i = kb_imm(&! f, 0)
+    let one_i = kb_imm(&! f, 1)
+    let two_i = kb_imm(&! f, 2)
+    let three_i = kb_imm(&! f, 3)
+    let four_i = kb_imm(&! f, 4)
+    let five_i = kb_imm(&! f, 5)
+    let cap_i = kb_imm(&! f, 64)
+    let zero_f = kb_fimm(&! f, 0.0)
+
+    let l_nz = kb_lbl(&! f)
+    let is_z = kb_fcmp(&! f, 3, BinaryOp::OpEq, zero_f)
+    kb_emit(&! f, ir_branch_false(is_z, l_nz))
+    kb_emit(&! f, ir_return(zero_i))
+    kb_emit(&! f, ir_label(l_nz))
+
+    let n = kb_iget_i(&! f, 0, one_i)
+    let idx = kb_imm(&! f, 0)
+    let l_loop = kb_lbl(&! f)
+    let l_not_found = kb_lbl(&! f)
+    let l_next = kb_lbl(&! f)
+    let l_matched = kb_lbl(&! f)
+
+    kb_emit(&! f, ir_label(l_loop))
+    let cond = kb_iop(&! f, idx, BinaryOp::OpLt, n)
+    kb_emit(&! f, ir_branch_false(cond, l_not_found))
+
+    let t5 = kb_iop(&! f, idx, BinaryOp::OpMul, five_i)
+    let base = kb_iop(&! f, four_i, BinaryOp::OpAdd, t5)
+    let t_name = kb_iget_i(&! f, 0, base)
+    let base1 = kb_iop(&! f, base, BinaryOp::OpAdd, one_i)
+    let t_anon = kb_iget_i(&! f, 0, base1)
+
+    // Match check:
+    // if anon_id == 0: match iff t_anon == 0 && str_eq(t_name, name_ptr) != 0
+    // else:            match iff t_anon == anon_id
+    let l_chk_anon = kb_lbl(&! f)
+    let anon_is_0 = kb_iop(&! f, 2, BinaryOp::OpEq, zero_i)
+    kb_emit(&! f, ir_branch_false(anon_is_0, l_chk_anon))
+    let t_anon_is_0 = kb_iop(&! f, t_anon, BinaryOp::OpEq, zero_i)
+    kb_emit(&! f, ir_branch_false(t_anon_is_0, l_next))
+    let eq_str = kb_call2_i(&! f, fid_str_eq, make_name("str_eq"), t_name, 1)
+    let str_ok = kb_iop(&! f, eq_str, BinaryOp::OpNe, zero_i)
+    kb_emit(&! f, ir_branch_false(str_ok, l_next))
+    kb_emit(&! f, ir_jump(l_matched))
+
+    kb_emit(&! f, ir_label(l_chk_anon))
+    let eq_anon = kb_iop(&! f, t_anon, BinaryOp::OpEq, 2)
+    kb_emit(&! f, ir_branch_false(eq_anon, l_next))
+
+    // Matched term at `base`!
+    kb_emit(&! f, ir_label(l_matched))
+    let base2 = kb_iop(&! f, base, BinaryOp::OpAdd, two_i)
+    let old_c = kb_iget_f(&! f, 0, base2)
+    let new_c = kb_fop(&! f, old_c, BinaryOp::OpAdd, 3)
+    let err_c = kb_call2_f(&! f, fid_tse, make_name("__sounio_knight_two_sum_err"), old_c, 3)
+
+    // Exact symbolic cancellation: new_c == 0.0 && err_c == 0.0 -> remove term.
+    let l_update = kb_lbl(&! f)
+    let nc0 = kb_fcmp(&! f, new_c, BinaryOp::OpEq, zero_f)
+    kb_emit(&! f, ir_branch_false(nc0, l_update))
+    let ec0 = kb_fcmp(&! f, err_c, BinaryOp::OpEq, zero_f)
+    kb_emit(&! f, ir_branch_false(ec0, l_update))
+
+    // Swap last term (n - 1) into slot `idx` and decrement `n`.
+    let last_i = kb_iop(&! f, n, BinaryOp::OpSub, one_i)
+    let l_dec = kb_lbl(&! f)
+    let need_swap = kb_iop(&! f, idx, BinaryOp::OpLt, last_i)
+    kb_emit(&! f, ir_branch_false(need_swap, l_dec))
+    let lt5 = kb_iop(&! f, last_i, BinaryOp::OpMul, five_i)
+    let lbase = kb_iop(&! f, four_i, BinaryOp::OpAdd, lt5)
+    var k: i64 = 0
+    while k < 5 {
+        let ki = kb_imm(&! f, k)
+        let sidx = kb_iop(&! f, lbase, BinaryOp::OpAdd, ki)
+        let didx = kb_iop(&! f, base, BinaryOp::OpAdd, ki)
+        let v = kb_iget_i(&! f, 0, sidx)
+        kb_iset(&! f, 0, didx, v)
+        k = k + 1
+    }
+    kb_emit(&! f, ir_label(l_dec))
+    kb_iset(&! f, 0, one_i, last_i)
+    kb_emit(&! f, ir_return(zero_i))
+
+    // Update coefficient in place; absorb any TwoSum residual outward into rad_extra.
+    kb_emit(&! f, ir_label(l_update))
+    kb_iset(&! f, 0, base2, new_c)
+    let l_ret_u = kb_lbl(&! f)
+    let ec_nz = kb_fcmp(&! f, err_c, BinaryOp::OpNe, zero_f)
+    kb_emit(&! f, ir_branch_false(ec_nz, l_ret_u))
+    let abs_ec = kb_fabs(&! f, err_c)
+    let abs_lo = kb_fabs(&! f, 4)
+    let abs_hi = kb_fabs(&! f, 5)
+    let max_b = kb_fmax(&! f, abs_lo, abs_hi)
+    let bump = kb_call2_f(&! f, fid_mul_up, make_name("__sounio_knight_mul_up"), abs_ec, max_b)
+    let old_rad = kb_iget_f(&! f, 0, two_i)
+    let new_rad = kb_call2_f(&! f, fid_add_up, make_name("__sounio_knight_add_up"), old_rad, bump)
+    kb_iset(&! f, 0, two_i, new_rad)
+    kb_emit(&! f, ir_label(l_ret_u))
+    kb_emit(&! f, ir_return(zero_i))
+
+    kb_emit(&! f, ir_label(l_next))
+    let next_idx = kb_iop(&! f, idx, BinaryOp::OpAdd, one_i)
+    kb_emit(&! f, ir_copy(idx, next_idx))
+    kb_emit(&! f, ir_jump(l_loop))
+
+    // Not found -> append if n < 64, else collapse outward into rad_extra + center.
+    kb_emit(&! f, ir_label(l_not_found))
+    let l_overflow = kb_lbl(&! f)
+    let has_room = kb_iop(&! f, n, BinaryOp::OpLt, cap_i)
+    kb_emit(&! f, ir_branch_false(has_room, l_overflow))
+
+    let nt5 = kb_iop(&! f, n, BinaryOp::OpMul, five_i)
+    let nbase = kb_iop(&! f, four_i, BinaryOp::OpAdd, nt5)
+    let nb1 = kb_iop(&! f, nbase, BinaryOp::OpAdd, one_i)
+    let nb2 = kb_iop(&! f, nbase, BinaryOp::OpAdd, two_i)
+    let nb3 = kb_iop(&! f, nbase, BinaryOp::OpAdd, three_i)
+    let nb4 = kb_iop(&! f, nbase, BinaryOp::OpAdd, four_i)
+    kb_iset(&! f, 0, nbase, 1)
+    kb_iset(&! f, 0, nb1, 2)
+    kb_iset(&! f, 0, nb2, 3)
+    kb_iset(&! f, 0, nb3, 4)
+    kb_iset(&! f, 0, nb4, 5)
+    let n_inc = kb_iop(&! f, n, BinaryOp::OpAdd, one_i)
+    kb_iset(&! f, 0, one_i, n_inc)
+    kb_emit(&! f, ir_return(zero_i))
+
+    // Overflow (>64 terms): sound outward collapse into af[2] (rad_extra).
+    kb_emit(&! f, ir_label(l_overflow))
+    let abs_c = kb_fabs(&! f, 3)
+    let abs_lo2 = kb_fabs(&! f, 4)
+    let abs_hi2 = kb_fabs(&! f, 5)
+    let max_b2 = kb_fmax(&! f, abs_lo2, abs_hi2)
+    let ov_rad = kb_call2_f(&! f, fid_mul_up, make_name("__sounio_knight_mul_up"), abs_c, max_b2)
+    let old_rad2 = kb_iget_f(&! f, 0, two_i)
+    let new_rad2 = kb_call2_f(&! f, fid_add_up, make_name("__sounio_knight_add_up"), old_rad2, ov_rad)
+    kb_iset(&! f, 0, two_i, new_rad2)
+    kb_emit(&! f, ir_return(zero_i))
+    ir_fn_set(m, fid as usize, f)
+}
+
+fn knight_build_new(m: &! IrModule, fid: i64) with Mut, Panic, Div {
+    // Params: 0=name_ptr, 1=lo(f64), 2=hi(f64) -> Knowledge handle
+    var f = knight_init_fn(make_name("__sounio_knight_new"), 3, 0)
+    kb_emit(&! f, ir_mark_float_reg(1))
+    kb_emit(&! f, ir_mark_float_reg(2))
+    let half = kb_fimm(&! f, 0.5)
+    let sum = kb_fop(&! f, 1, BinaryOp::OpAdd, 2)
+    let mid = kb_fop(&! f, half, BinaryOp::OpMul, sum)
+    let zero_f = kb_fimm(&! f, 0.0)
+    let one_f = kb_fimm(&! f, 1.0)
+    let zero_i = kb_imm(&! f, 0)
+    let one_i = kb_imm(&! f, 1)
+    let two_i = kb_imm(&! f, 2)
+    let three_i = kb_imm(&! f, 3)
+    let four_i = kb_imm(&! f, 4)
+    let five_i = kb_imm(&! f, 5)
+    let six_i = kb_imm(&! f, 6)
+    let seven_i = kb_imm(&! f, 7)
+    let eight_i = kb_imm(&! f, 8)
+
+    let kn = kb_reg(&! f)
+    kb_emit(&! f, ir_alloc(kn, 0))
+    kb_fset(&! f, kn, 0, mid)
+    kb_fset(&! f, kn, 1, zero_f)
+    kb_fset(&! f, kn, 2, zero_f)
+
+    let af = kb_reg(&! f)
+    kb_emit(&! f, ir_alloc_array(af, 2592, 324))
+    kb_iset(&! f, af, zero_i, zero_f)
+    kb_iset(&! f, af, one_i, one_i)
+    kb_iset(&! f, af, two_i, zero_f)
+    kb_iset(&! f, af, three_i, zero_i)
+    kb_iset(&! f, af, four_i, 0)       // name_ptr
+    kb_iset(&! f, af, five_i, zero_i)  // anon_id = 0 (named)
+    kb_iset(&! f, af, six_i, one_f)    // coeff = 1.0
+    kb_iset(&! f, af, seven_i, 1)      // lo
+    kb_iset(&! f, af, eight_i, 2)      // hi
+
+    kb_fset(&! f, kn, 4, af)
+    kb_emit(&! f, ir_return(kn))
+    ir_fn_set(m, fid as usize, f)
+}
+
+fn knight_build_iv(
+    m: &! IrModule,
+    fid: i64,
+    fid_add_down: i64,
+    fid_add_up: i64,
+    fid_mul_down: i64,
+    fid_mul_up: i64
+) with Mut, Panic, Div, Alloc {
+    // Param: 0=kn (Knowledge handle) -> Tuple (f64, f64) handle (slot 0 = lo, slot 1 = hi)
+    var f = knight_init_fn(make_name("__sounio_knight_iv"), 1, 1027)
+    let zero_i = kb_imm(&! f, 0)
+    let one_i = kb_imm(&! f, 1)
+    let two_i = kb_imm(&! f, 2)
+    let three_i = kb_imm(&! f, 3)
+    let four_i = kb_imm(&! f, 4)
+    let five_i = kb_imm(&! f, 5)
+    let zero_f = kb_fimm(&! f, 0.0)
+
+    let tup = kb_reg(&! f)
+    kb_emit(&! f, ir_alloc(tup, 0))
+    let af = kb_fget_i(&! f, 0, 4)
+    let l_has_af = kb_lbl(&! f)
+    let is_null = kb_iop(&! f, af, BinaryOp::OpEq, zero_i)
+    kb_emit(&! f, ir_branch_false(is_null, l_has_af))
+    let v = kb_fget_f(&! f, 0, 0)
+    kb_fset(&! f, tup, 0, v)
+    kb_fset(&! f, tup, 1, v)
+    kb_emit(&! f, ir_return(tup))
+
+    kb_emit(&! f, ir_label(l_has_af))
+    let vac = kb_iget_i(&! f, af, three_i)
+    let l_fin = kb_lbl(&! f)
+    let is_vac = kb_iop(&! f, vac, BinaryOp::OpNe, zero_i)
+    kb_emit(&! f, ir_branch_false(is_vac, l_fin))
+    let big = kb_fimm(&! f, 1.0e308)
+    let ten = kb_fimm(&! f, 10.0)
+    let inf = kb_fop(&! f, big, BinaryOp::OpMul, ten)
+    let minf = kb_fneg(&! f, inf)
+    kb_fset(&! f, tup, 0, minf)
+    kb_fset(&! f, tup, 1, inf)
+    kb_emit(&! f, ir_return(tup))
+
+    kb_emit(&! f, ir_label(l_fin))
+    let c0 = kb_iget_f(&! f, af, zero_i)
+    let lo_acc = kb_freg(&! f)
+    let hi_acc = kb_freg(&! f)
+    kb_emit(&! f, ir_copy(lo_acc, c0))
+    kb_emit(&! f, ir_mark_float_reg(lo_acc))
+    kb_emit(&! f, ir_copy(hi_acc, c0))
+    kb_emit(&! f, ir_mark_float_reg(hi_acc))
+    let n = kb_iget_i(&! f, af, one_i)
+    let idx = kb_imm(&! f, 0)
+    let l_loop = kb_lbl(&! f)
+    let l_done = kb_lbl(&! f)
+    kb_emit(&! f, ir_label(l_loop))
+    let cond = kb_iop(&! f, idx, BinaryOp::OpLt, n)
+    kb_emit(&! f, ir_branch_false(cond, l_done))
+
+    let t5 = kb_iop(&! f, idx, BinaryOp::OpMul, five_i)
+    let base = kb_iop(&! f, four_i, BinaryOp::OpAdd, t5)
+    let b2 = kb_iop(&! f, base, BinaryOp::OpAdd, two_i)
+    let b3 = kb_iop(&! f, base, BinaryOp::OpAdd, three_i)
+    let b4 = kb_iop(&! f, base, BinaryOp::OpAdd, four_i)
+    let coeff = kb_iget_f(&! f, af, b2)
+    let t_lo = kb_iget_f(&! f, af, b3)
+    let t_hi = kb_iget_f(&! f, af, b4)
+
+    let l_neg = kb_lbl(&! f)
+    let l_step = kb_lbl(&! f)
+    let is_pos = kb_fcmp(&! f, coeff, BinaryOp::OpGt, zero_f)
+    kb_emit(&! f, ir_branch_false(is_pos, l_neg))
+    let p_lo = kb_call2_f(&! f, fid_mul_down, make_name("__sounio_knight_mul_down"), coeff, t_lo)
+    let p_hi = kb_call2_f(&! f, fid_mul_up, make_name("__sounio_knight_mul_up"), coeff, t_hi)
+    let n_lo = kb_call2_f(&! f, fid_add_down, make_name("__sounio_knight_add_down"), lo_acc, p_lo)
+    let n_hi = kb_call2_f(&! f, fid_add_up, make_name("__sounio_knight_add_up"), hi_acc, p_hi)
+    kb_emit(&! f, ir_copy(lo_acc, n_lo))
+    kb_emit(&! f, ir_copy(hi_acc, n_hi))
+    kb_emit(&! f, ir_jump(l_step))
+
+    kb_emit(&! f, ir_label(l_neg))
+    let is_neg = kb_fcmp(&! f, coeff, BinaryOp::OpLt, zero_f)
+    kb_emit(&! f, ir_branch_false(is_neg, l_step))
+    let np_lo = kb_call2_f(&! f, fid_mul_down, make_name("__sounio_knight_mul_down"), coeff, t_hi)
+    let np_hi = kb_call2_f(&! f, fid_mul_up, make_name("__sounio_knight_mul_up"), coeff, t_lo)
+    let nn_lo = kb_call2_f(&! f, fid_add_down, make_name("__sounio_knight_add_down"), lo_acc, np_lo)
+    let nn_hi = kb_call2_f(&! f, fid_add_up, make_name("__sounio_knight_add_up"), hi_acc, np_hi)
+    kb_emit(&! f, ir_copy(lo_acc, nn_lo))
+    kb_emit(&! f, ir_copy(hi_acc, nn_hi))
+
+    kb_emit(&! f, ir_label(l_step))
+    let idx1 = kb_iop(&! f, idx, BinaryOp::OpAdd, one_i)
+    kb_emit(&! f, ir_copy(idx, idx1))
+    kb_emit(&! f, ir_jump(l_loop))
+
+    kb_emit(&! f, ir_label(l_done))
+    let rad = kb_iget_f(&! f, af, two_i)
+    let l_ret = kb_lbl(&! f)
+    let has_rad = kb_fcmp(&! f, rad, BinaryOp::OpGt, zero_f)
+    kb_emit(&! f, ir_branch_false(has_rad, l_ret))
+    let mrad = kb_fneg(&! f, rad)
+    let r_lo = kb_call2_f(&! f, fid_add_down, make_name("__sounio_knight_add_down"), lo_acc, mrad)
+    let r_hi = kb_call2_f(&! f, fid_add_up, make_name("__sounio_knight_add_up"), hi_acc, rad)
+    kb_emit(&! f, ir_copy(lo_acc, r_lo))
+    kb_emit(&! f, ir_copy(hi_acc, r_hi))
+
+    kb_emit(&! f, ir_label(l_ret))
+    kb_fset(&! f, tup, 0, lo_acc)
+    kb_fset(&! f, tup, 1, hi_acc)
+    kb_emit(&! f, ir_return(tup))
+    ir_fn_set(m, fid as usize, f)
+}
+
+fn knight_build_binop(
+    m: &! IrModule,
+    fid: i64,
+    fid_next_anon: i64,
+    fid_tse: i64,
+    fid_tpe: i64,
+    fid_add_down: i64,
+    fid_add_up: i64,
+    fid_mul_down: i64,
+    fid_mul_up: i64,
+    fid_div_down: i64,
+    fid_div_up: i64,
+    fid_add_term: i64,
+    fid_iv: i64
+) with Mut, Panic, Div, Alloc {
+    // Params: 0=op_code (0=Add,1=Sub,2=Mul,3=Div), 1=lhs_kn, 2=rhs_kn, 3=dst_kn -> i64
+    var f = knight_init_fn(make_name("__sounio_knight_binop"), 4, 0)
+    let zero_i = kb_imm(&! f, 0)
+    let one_i = kb_imm(&! f, 1)
+    let two_i = kb_imm(&! f, 2)
+    let three_i = kb_imm(&! f, 3)
+    let four_i = kb_imm(&! f, 4)
+    let five_i = kb_imm(&! f, 5)
+    let zero_f = kb_fimm(&! f, 0.0)
+    let one_f = kb_fimm(&! f, 1.0)
+    let mone_f = kb_fimm(&! f, 0.0 - 1.0)
+    let half_f = kb_fimm(&! f, 0.5)
+
+    // Fast path: if neither operand carries a Knightian affine form, leave dst.slot4 = 0.
+    let af_a = kb_fget_i(&! f, 1, 4)
+    let af_b = kb_fget_i(&! f, 2, 4)
+    let l_active = kb_lbl(&! f)
+    let a0 = kb_iop(&! f, af_a, BinaryOp::OpEq, zero_i)
+    kb_emit(&! f, ir_branch_false(a0, l_active))
+    let b0 = kb_iop(&! f, af_b, BinaryOp::OpEq, zero_i)
+    kb_emit(&! f, ir_branch_false(b0, l_active))
+    kb_fset(&! f, 3, 4, zero_i)
+    kb_emit(&! f, ir_return(zero_i))
+
+    kb_emit(&! f, ir_label(l_active))
+    let res = kb_reg(&! f)
+    kb_emit(&! f, ir_alloc_array(res, 2592, 324))
+    kb_iset(&! f, res, zero_i, zero_f)
+    kb_iset(&! f, res, one_i, zero_i)
+    kb_iset(&! f, res, two_i, zero_f)
+    kb_iset(&! f, res, three_i, zero_i)
+
+    // Check vacuous propagation.
+    let l_set_vac = kb_lbl(&! f)
+    let l_chk_vb = kb_lbl(&! f)
+    let a_nz = kb_iop(&! f, af_a, BinaryOp::OpNe, zero_i)
+    kb_emit(&! f, ir_branch_false(a_nz, l_chk_vb))
+    let va = kb_iget_i(&! f, af_a, three_i)
+    let va_nz = kb_iop(&! f, va, BinaryOp::OpNe, zero_i)
+    kb_emit(&! f, ir_branch_false(va_nz, l_chk_vb))
+    kb_emit(&! f, ir_jump(l_set_vac))
+
+    kb_emit(&! f, ir_label(l_chk_vb))
+    let l_not_vac = kb_lbl(&! f)
+    let b_nz = kb_iop(&! f, af_b, BinaryOp::OpNe, zero_i)
+    kb_emit(&! f, ir_branch_false(b_nz, l_not_vac))
+    let vb = kb_iget_i(&! f, af_b, three_i)
+    let vb_nz = kb_iop(&! f, vb, BinaryOp::OpNe, zero_i)
+    kb_emit(&! f, ir_branch_false(vb_nz, l_not_vac))
+
+    kb_emit(&! f, ir_label(l_set_vac))
+    kb_iset(&! f, res, three_i, one_i)
+    kb_fset(&! f, 3, 4, res)
+    kb_emit(&! f, ir_return(zero_i))
+
+    kb_emit(&! f, ir_label(l_not_vac))
+    // Extract c_a, rad_a, c_b, rad_b
+    let c_a = kb_freg(&! f)
+    let rad_a = kb_freg(&! f)
+    kb_emit(&! f, ir_copy(rad_a, zero_f))
+    kb_emit(&! f, ir_mark_float_reg(rad_a))
+    let l_ca_null = kb_lbl(&! f)
+    let l_ca_done = kb_lbl(&! f)
+    kb_emit(&! f, ir_branch_false(a_nz, l_ca_null))
+    let ca_v = kb_iget_f(&! f, af_a, zero_i)
+    let ra_v = kb_iget_f(&! f, af_a, two_i)
+    kb_emit(&! f, ir_copy(c_a, ca_v))
+    kb_emit(&! f, ir_copy(rad_a, ra_v))
+    kb_emit(&! f, ir_jump(l_ca_done))
+    kb_emit(&! f, ir_label(l_ca_null))
+    let lv = kb_fget_f(&! f, 1, 0)
+    kb_emit(&! f, ir_copy(c_a, lv))
+    kb_emit(&! f, ir_label(l_ca_done))
+
+    let c_b = kb_freg(&! f)
+    let rad_b = kb_freg(&! f)
+    kb_emit(&! f, ir_copy(rad_b, zero_f))
+    kb_emit(&! f, ir_mark_float_reg(rad_b))
+    let l_cb_null = kb_lbl(&! f)
+    let l_cb_done = kb_lbl(&! f)
+    kb_emit(&! f, ir_branch_false(b_nz, l_cb_null))
+    let cb_v = kb_iget_f(&! f, af_b, zero_i)
+    let rb_v = kb_iget_f(&! f, af_b, two_i)
+    kb_emit(&! f, ir_copy(c_b, cb_v))
+    kb_emit(&! f, ir_copy(rad_b, rb_v))
+    kb_emit(&! f, ir_jump(l_cb_done))
+    kb_emit(&! f, ir_label(l_cb_null))
+    let rv = kb_fget_f(&! f, 2, 0)
+    kb_emit(&! f, ir_copy(c_b, rv))
+    kb_emit(&! f, ir_label(l_cb_done))
+
+    // Dispatch on op_code: 0=Add, 1=Sub, 2=Mul, 3=Div
+    let l_mul = kb_lbl(&! f)
+    let l_div = kb_lbl(&! f)
+    let is_lin = kb_iop(&! f, 0, BinaryOp::OpLt, two_i)
+    kb_emit(&! f, ir_branch_false(is_lin, l_mul))
+
+    // ------------------------------------------------------------------------
+    // Linear ops: Add (0) / Sub (1) — exact affine dependency algebra
+    // ------------------------------------------------------------------------
+    let is_sub = kb_iop(&! f, 0, BinaryOp::OpEq, one_i)
+    let sb = kb_freg(&! f)
+    kb_emit(&! f, ir_copy(sb, c_b))
+    kb_emit(&! f, ir_mark_float_reg(sb))
+    let l_sb_done = kb_lbl(&! f)
+    kb_emit(&! f, ir_branch_false(is_sub, l_sb_done))
+    let ncb = kb_fneg(&! f, c_b)
+    kb_emit(&! f, ir_copy(sb, ncb))
+    kb_emit(&! f, ir_label(l_sb_done))
+
+    let c_sum = kb_fop(&! f, c_a, BinaryOp::OpAdd, sb)
+    let c_err_raw = kb_call2_f(&! f, fid_tse, make_name("__sounio_knight_two_sum_err"), c_a, sb)
+    let c_err = kb_fabs(&! f, c_err_raw)
+    let r_ab = kb_call2_f(&! f, fid_add_up, make_name("__sounio_knight_add_up"), rad_a, rad_b)
+    let r_tot = kb_call2_f(&! f, fid_add_up, make_name("__sounio_knight_add_up"), r_ab, c_err)
+    kb_iset(&! f, res, zero_i, c_sum)
+    kb_iset(&! f, res, two_i, r_tot)
+
+    // Copy terms from af_a
+    let l_lin_b = kb_lbl(&! f)
+    kb_emit(&! f, ir_branch_false(a_nz, l_lin_b))
+    let na = kb_iget_i(&! f, af_a, one_i)
+    let ia = kb_imm(&! f, 0)
+    let l_la = kb_lbl(&! f)
+    kb_emit(&! f, ir_label(l_la))
+    let ca_cond = kb_iop(&! f, ia, BinaryOp::OpLt, na)
+    kb_emit(&! f, ir_branch_false(ca_cond, l_lin_b))
+    let ta5 = kb_iop(&! f, ia, BinaryOp::OpMul, five_i)
+    let ba = kb_iop(&! f, four_i, BinaryOp::OpAdd, ta5)
+    let ba1 = kb_iop(&! f, ba, BinaryOp::OpAdd, one_i)
+    let ba2 = kb_iop(&! f, ba, BinaryOp::OpAdd, two_i)
+    let ba3 = kb_iop(&! f, ba, BinaryOp::OpAdd, three_i)
+    let ba4 = kb_iop(&! f, ba, BinaryOp::OpAdd, four_i)
+    let anm = kb_iget_i(&! f, af_a, ba)
+    let aan = kb_iget_i(&! f, af_a, ba1)
+    let acf = kb_iget_f(&! f, af_a, ba2)
+    let alo = kb_iget_f(&! f, af_a, ba3)
+    let ahi = kb_iget_f(&! f, af_a, ba4)
+    let _ = kb_call6_i(&! f, fid_add_term, make_name("__sounio_knight_af_add_term"), res, anm, aan, acf, alo, ahi)
+    let ia1 = kb_iop(&! f, ia, BinaryOp::OpAdd, one_i)
+    kb_emit(&! f, ir_copy(ia, ia1))
+    kb_emit(&! f, ir_jump(l_la))
+
+    // Add (or subtract) terms from af_b
+    kb_emit(&! f, ir_label(l_lin_b))
+    let l_lin_done = kb_lbl(&! f)
+    kb_emit(&! f, ir_branch_false(b_nz, l_lin_done))
+    let nb = kb_iget_i(&! f, af_b, one_i)
+    let ib = kb_imm(&! f, 0)
+    let l_lb = kb_lbl(&! f)
+    kb_emit(&! f, ir_label(l_lb))
+    let cb_cond = kb_iop(&! f, ib, BinaryOp::OpLt, nb)
+    kb_emit(&! f, ir_branch_false(cb_cond, l_lin_done))
+    let tb5 = kb_iop(&! f, ib, BinaryOp::OpMul, five_i)
+    let bb = kb_iop(&! f, four_i, BinaryOp::OpAdd, tb5)
+    let bb1 = kb_iop(&! f, bb, BinaryOp::OpAdd, one_i)
+    let bb2 = kb_iop(&! f, bb, BinaryOp::OpAdd, two_i)
+    let bb3 = kb_iop(&! f, bb, BinaryOp::OpAdd, three_i)
+    let bb4 = kb_iop(&! f, bb, BinaryOp::OpAdd, four_i)
+    let bnm = kb_iget_i(&! f, af_b, bb)
+    let ban = kb_iget_i(&! f, af_b, bb1)
+    let bcf_raw = kb_iget_f(&! f, af_b, bb2)
+    let blo = kb_iget_f(&! f, af_b, bb3)
+    let bhi = kb_iget_f(&! f, af_b, bb4)
+    let bcf = kb_freg(&! f)
+    kb_emit(&! f, ir_copy(bcf, bcf_raw))
+    kb_emit(&! f, ir_mark_float_reg(bcf))
+    let l_bcf_ok = kb_lbl(&! f)
+    kb_emit(&! f, ir_branch_false(is_sub, l_bcf_ok))
+    let nbcf = kb_fneg(&! f, bcf_raw)
+    kb_emit(&! f, ir_copy(bcf, nbcf))
+    kb_emit(&! f, ir_label(l_bcf_ok))
+    let _ = kb_call6_i(&! f, fid_add_term, make_name("__sounio_knight_af_add_term"), res, bnm, ban, bcf, blo, bhi)
+    let ib1 = kb_iop(&! f, ib, BinaryOp::OpAdd, one_i)
+    kb_emit(&! f, ir_copy(ib, ib1))
+    kb_emit(&! f, ir_jump(l_lb))
+
+    kb_emit(&! f, ir_label(l_lin_done))
+    kb_fset(&! f, 3, 4, res)
+    kb_emit(&! f, ir_return(zero_i))
+
+    // ------------------------------------------------------------------------
+    // Non-linear Mul (2): Comba-Stolfi / Adje et al. with fresh anonymous symbol
+    // ------------------------------------------------------------------------
+    kb_emit(&! f, ir_label(l_mul))
+    let is_mul = kb_iop(&! f, 0, BinaryOp::OpEq, two_i)
+    kb_emit(&! f, ir_branch_false(is_mul, l_div))
+
+    let iva = kb_call1_i(&! f, fid_iv, make_name("__sounio_knight_iv"), 1)
+    let loa = kb_fget_f(&! f, iva, 0)
+    let hia = kb_fget_f(&! f, iva, 1)
+    let suma = kb_fop(&! f, loa, BinaryOp::OpAdd, hia)
+    let mua = kb_fop(&! f, half_f, BinaryOp::OpMul, suma)
+    let m_mua = kb_fneg(&! f, mua)
+    let m_loa = kb_fneg(&! f, loa)
+    let ra1 = kb_call2_f(&! f, fid_add_up, make_name("__sounio_knight_add_up"), hia, m_mua)
+    let ra2 = kb_call2_f(&! f, fid_add_up, make_name("__sounio_knight_add_up"), mua, m_loa)
+    let R_a = kb_fmax(&! f, ra1, ra2)
+
+    let ivb = kb_call1_i(&! f, fid_iv, make_name("__sounio_knight_iv"), 2)
+    let lob = kb_fget_f(&! f, ivb, 0)
+    let hib = kb_fget_f(&! f, ivb, 1)
+    let sumb = kb_fop(&! f, lob, BinaryOp::OpAdd, hib)
+    let mub = kb_fop(&! f, half_f, BinaryOp::OpMul, sumb)
+    let m_mub = kb_fneg(&! f, mub)
+    let m_lob = kb_fneg(&! f, lob)
+    let rb1 = kb_call2_f(&! f, fid_add_up, make_name("__sounio_knight_add_up"), hib, m_mub)
+    let rb2 = kb_call2_f(&! f, fid_add_up, make_name("__sounio_knight_add_up"), mub, m_lob)
+    let R_b = kb_fmax(&! f, rb1, rb2)
+
+    // c_res = mub * c_a + mua * c_b - mua * mub
+    let p1 = kb_fop(&! f, mub, BinaryOp::OpMul, c_a)
+    let e1_r = kb_call2_f(&! f, fid_tpe, make_name("__sounio_knight_two_prod_err"), mub, c_a)
+    let e1 = kb_fabs(&! f, e1_r)
+    let p2 = kb_fop(&! f, mua, BinaryOp::OpMul, c_b)
+    let e2_r = kb_call2_f(&! f, fid_tpe, make_name("__sounio_knight_two_prod_err"), mua, c_b)
+    let e2 = kb_fabs(&! f, e2_r)
+    let p3 = kb_fop(&! f, mua, BinaryOp::OpMul, mub)
+    let e3_r = kb_call2_f(&! f, fid_tpe, make_name("__sounio_knight_two_prod_err"), mua, mub)
+    let e3 = kb_fabs(&! f, e3_r)
+    let s12 = kb_fop(&! f, p1, BinaryOp::OpAdd, p2)
+    let e12_r = kb_call2_f(&! f, fid_tse, make_name("__sounio_knight_two_sum_err"), p1, p2)
+    let e12 = kb_fabs(&! f, e12_r)
+    let mp3 = kb_fneg(&! f, p3)
+    let c_mul = kb_fop(&! f, s12, BinaryOp::OpAdd, mp3)
+    let e123_r = kb_call2_f(&! f, fid_tse, make_name("__sounio_knight_two_sum_err"), s12, mp3)
+    let e123 = kb_fabs(&! f, e123_r)
+    kb_iset(&! f, res, zero_i, c_mul)
+
+    let nl_rad = kb_freg(&! f)
+    let r_ab_nl = kb_call2_f(&! f, fid_mul_up, make_name("__sounio_knight_mul_up"), R_a, R_b)
+    let e_a = kb_call2_f(&! f, fid_add_up, make_name("__sounio_knight_add_up"), e1, e2)
+    let e_b = kb_call2_f(&! f, fid_add_up, make_name("__sounio_knight_add_up"), e3, e12)
+    let e_c = kb_call2_f(&! f, fid_add_up, make_name("__sounio_knight_add_up"), e_a, e_b)
+    let e_d = kb_call2_f(&! f, fid_add_up, make_name("__sounio_knight_add_up"), e_c, e123)
+    let amub = kb_fabs(&! f, mub)
+    let amua = kb_fabs(&! f, mua)
+    let er_ra = kb_call2_f(&! f, fid_mul_up, make_name("__sounio_knight_mul_up"), amub, rad_a)
+    let er_rb = kb_call2_f(&! f, fid_mul_up, make_name("__sounio_knight_mul_up"), amua, rad_b)
+    let er_r = kb_call2_f(&! f, fid_add_up, make_name("__sounio_knight_add_up"), er_ra, er_rb)
+    let nl0 = kb_call2_f(&! f, fid_add_up, make_name("__sounio_knight_add_up"), r_ab_nl, e_d)
+    let nl1 = kb_call2_f(&! f, fid_add_up, make_name("__sounio_knight_add_up"), nl0, er_r)
+    kb_emit(&! f, ir_copy(nl_rad, nl1))
+    kb_emit(&! f, ir_mark_float_reg(nl_rad))
+
+    // Scale terms of af_a by mub
+    let l_mul_b = kb_lbl(&! f)
+    kb_emit(&! f, ir_branch_false(a_nz, l_mul_b))
+    let mna = kb_iget_i(&! f, af_a, one_i)
+    let mia = kb_imm(&! f, 0)
+    let l_mla = kb_lbl(&! f)
+    kb_emit(&! f, ir_label(l_mla))
+    let mca = kb_iop(&! f, mia, BinaryOp::OpLt, mna)
+    kb_emit(&! f, ir_branch_false(mca, l_mul_b))
+    let mta5 = kb_iop(&! f, mia, BinaryOp::OpMul, five_i)
+    let mba = kb_iop(&! f, four_i, BinaryOp::OpAdd, mta5)
+    let mba1 = kb_iop(&! f, mba, BinaryOp::OpAdd, one_i)
+    let mba2 = kb_iop(&! f, mba, BinaryOp::OpAdd, two_i)
+    let mba3 = kb_iop(&! f, mba, BinaryOp::OpAdd, three_i)
+    let mba4 = kb_iop(&! f, mba, BinaryOp::OpAdd, four_i)
+    let manm = kb_iget_i(&! f, af_a, mba)
+    let maan = kb_iget_i(&! f, af_a, mba1)
+    let macf = kb_iget_f(&! f, af_a, mba2)
+    let malo = kb_iget_f(&! f, af_a, mba3)
+    let mahi = kb_iget_f(&! f, af_a, mba4)
+    let mscf = kb_fop(&! f, mub, BinaryOp::OpMul, macf)
+    let mse_r = kb_call2_f(&! f, fid_tpe, make_name("__sounio_knight_two_prod_err"), mub, macf)
+    let mse = kb_fabs(&! f, mse_r)
+    let amalo = kb_fabs(&! f, malo)
+    let amahi = kb_fabs(&! f, mahi)
+    let mabnd = kb_fmax(&! f, amalo, amahi)
+    let mbump = kb_call2_f(&! f, fid_mul_up, make_name("__sounio_knight_mul_up"), mse, mabnd)
+    let nl_a_new = kb_call2_f(&! f, fid_add_up, make_name("__sounio_knight_add_up"), nl_rad, mbump)
+    kb_emit(&! f, ir_copy(nl_rad, nl_a_new))
+    let _ = kb_call6_i(&! f, fid_add_term, make_name("__sounio_knight_af_add_term"), res, manm, maan, mscf, malo, mahi)
+    let mia1 = kb_iop(&! f, mia, BinaryOp::OpAdd, one_i)
+    kb_emit(&! f, ir_copy(mia, mia1))
+    kb_emit(&! f, ir_jump(l_mla))
+
+    // Scale terms of af_b by mua
+    kb_emit(&! f, ir_label(l_mul_b))
+    let l_mul_rem = kb_lbl(&! f)
+    kb_emit(&! f, ir_branch_false(b_nz, l_mul_rem))
+    let mnb = kb_iget_i(&! f, af_b, one_i)
+    let mib = kb_imm(&! f, 0)
+    let l_mlb = kb_lbl(&! f)
+    kb_emit(&! f, ir_label(l_mlb))
+    let mcb = kb_iop(&! f, mib, BinaryOp::OpLt, mnb)
+    kb_emit(&! f, ir_branch_false(mcb, l_mul_rem))
+    let mtb5 = kb_iop(&! f, mib, BinaryOp::OpMul, five_i)
+    let mbb = kb_iop(&! f, four_i, BinaryOp::OpAdd, mtb5)
+    let mbb1 = kb_iop(&! f, mbb, BinaryOp::OpAdd, one_i)
+    let mbb2 = kb_iop(&! f, mbb, BinaryOp::OpAdd, two_i)
+    let mbb3 = kb_iop(&! f, mbb, BinaryOp::OpAdd, three_i)
+    let mbb4 = kb_iop(&! f, mbb, BinaryOp::OpAdd, four_i)
+    let mbnm = kb_iget_i(&! f, af_b, mbb)
+    let mban = kb_iget_i(&! f, af_b, mbb1)
+    let mbcf = kb_iget_f(&! f, af_b, mbb2)
+    let mblo = kb_iget_f(&! f, af_b, mbb3)
+    let mbhi = kb_iget_f(&! f, af_b, mbb4)
+    let mbscf = kb_fop(&! f, mua, BinaryOp::OpMul, mbcf)
+    let mbse_r = kb_call2_f(&! f, fid_tpe, make_name("__sounio_knight_two_prod_err"), mua, mbcf)
+    let mbse = kb_fabs(&! f, mbse_r)
+    let amblo = kb_fabs(&! f, mblo)
+    let ambhi = kb_fabs(&! f, mbhi)
+    let mbbnd = kb_fmax(&! f, amblo, ambhi)
+    let mbbump = kb_call2_f(&! f, fid_mul_up, make_name("__sounio_knight_mul_up"), mbse, mbbnd)
+    let nl_b_new = kb_call2_f(&! f, fid_add_up, make_name("__sounio_knight_add_up"), nl_rad, mbbump)
+    kb_emit(&! f, ir_copy(nl_rad, nl_b_new))
+    let _ = kb_call6_i(&! f, fid_add_term, make_name("__sounio_knight_af_add_term"), res, mbnm, mban, mbscf, mblo, mbhi)
+    let mib1 = kb_iop(&! f, mib, BinaryOp::OpAdd, one_i)
+    kb_emit(&! f, ir_copy(mib, mib1))
+    kb_emit(&! f, ir_jump(l_mlb))
+
+    // Add fresh anonymous symbol for non-linear remainder if nl_rad > 0
+    kb_emit(&! f, ir_label(l_mul_rem))
+    let l_mul_done = kb_lbl(&! f)
+    let has_nl = kb_fcmp(&! f, nl_rad, BinaryOp::OpGt, zero_f)
+    kb_emit(&! f, ir_branch_false(has_nl, l_mul_done))
+    let fresh_id = kb_call0_i(&! f, fid_next_anon, make_name("__sounio_knight_next_anon"))
+    let _ = kb_call6_i(&! f, fid_add_term, make_name("__sounio_knight_af_add_term"), res, zero_i, fresh_id, nl_rad, mone_f, one_f)
+    kb_emit(&! f, ir_label(l_mul_done))
+    kb_fset(&! f, 3, 4, res)
+    kb_emit(&! f, ir_return(zero_i))
+
+    // ------------------------------------------------------------------------
+    // Non-linear Div (3): certified monotone affine reciprocal + Mul
+    // ------------------------------------------------------------------------
+    kb_emit(&! f, ir_label(l_div))
+    let div_ivb = kb_call1_i(&! f, fid_iv, make_name("__sounio_knight_iv"), 2)
+    let d_lo = kb_fget_f(&! f, div_ivb, 0)
+    let d_hi = kb_fget_f(&! f, div_ivb, 1)
+
+    // If divisor interval encloses 0 -> vacuous [-inf, +inf].
+    let l_div_ok = kb_lbl(&! f)
+    let le0 = kb_fcmp(&! f, d_lo, BinaryOp::OpLe, zero_f)
+    kb_emit(&! f, ir_branch_false(le0, l_div_ok))
+    let ge0 = kb_fcmp(&! f, d_hi, BinaryOp::OpGe, zero_f)
+    kb_emit(&! f, ir_branch_false(ge0, l_div_ok))
+    kb_iset(&! f, res, three_i, one_i)
+    kb_fset(&! f, 3, 4, res)
+    kb_emit(&! f, ir_return(zero_i))
+
+    kb_emit(&! f, ir_label(l_div_ok))
+    // Determine positive range [u, v] with 0 < u <= v (neg_b = 1 if d_hi < 0).
+    let neg_b = kb_fcmp(&! f, d_hi, BinaryOp::OpLt, zero_f)
+    let u = kb_freg(&! f)
+    let v = kb_freg(&! f)
+    kb_emit(&! f, ir_copy(u, d_lo))
+    kb_emit(&! f, ir_mark_float_reg(u))
+    kb_emit(&! f, ir_copy(v, d_hi))
+    kb_emit(&! f, ir_mark_float_reg(v))
+    let l_uv_ok = kb_lbl(&! f)
+    kb_emit(&! f, ir_branch_false(neg_b, l_uv_ok))
+    let ndh = kb_fneg(&! f, d_hi)
+    let ndl = kb_fneg(&! f, d_lo)
+    kb_emit(&! f, ir_copy(u, ndh))
+    kb_emit(&! f, ir_copy(v, ndl))
+    kb_emit(&! f, ir_label(l_uv_ok))
+
+    // Min-range affine reciprocal of y in [u, v]:
+    //   a_pos = div_down(1, mul_up(v, v)) <= 1/v^2
+    //   g(y) = 1/y + a_pos * y is monotone decreasing on [u, v]
+    //   g_lo = add_down(div_down(1, v), mul_down(a_pos, v))
+    //   g_hi = add_up(div_up(1, u), mul_up(a_pos, u))
+    //   zeta = 0.5 * (g_lo + g_hi)
+    //   delta = max(add_up(g_hi, -zeta), add_up(zeta, -g_lo))
+    //   1/b in (-a_pos) * b + (neg_b ? -zeta : zeta) + [-delta, +delta]
+    let v2_up = kb_call2_f(&! f, fid_mul_up, make_name("__sounio_knight_mul_up"), v, v)
+    let a_pos = kb_call2_f(&! f, fid_div_down, make_name("__sounio_knight_div_down"), one_f, v2_up)
+    let slope = kb_fneg(&! f, a_pos)
+    let inv_v_lo = kb_call2_f(&! f, fid_div_down, make_name("__sounio_knight_div_down"), one_f, v)
+    let ap_v_lo = kb_call2_f(&! f, fid_mul_down, make_name("__sounio_knight_mul_down"), a_pos, v)
+    let g_lo = kb_call2_f(&! f, fid_add_down, make_name("__sounio_knight_add_down"), inv_v_lo, ap_v_lo)
+    let inv_u_hi = kb_call2_f(&! f, fid_div_up, make_name("__sounio_knight_div_up"), one_f, u)
+    let ap_u_hi = kb_call2_f(&! f, fid_mul_up, make_name("__sounio_knight_mul_up"), a_pos, u)
+    let g_hi = kb_call2_f(&! f, fid_add_up, make_name("__sounio_knight_add_up"), inv_u_hi, ap_u_hi)
+    let g_sum = kb_fop(&! f, g_lo, BinaryOp::OpAdd, g_hi)
+    let zeta = kb_fop(&! f, half_f, BinaryOp::OpMul, g_sum)
+    let m_zeta = kb_fneg(&! f, zeta)
+    let m_glo = kb_fneg(&! f, g_lo)
+    let d1 = kb_call2_f(&! f, fid_add_up, make_name("__sounio_knight_add_up"), g_hi, m_zeta)
+    let d2 = kb_call2_f(&! f, fid_add_up, make_name("__sounio_knight_add_up"), zeta, m_glo)
+    let delta = kb_freg(&! f)
+    let d_init = kb_fmax(&! f, d1, d2)
+    kb_emit(&! f, ir_copy(delta, d_init))
+    kb_emit(&! f, ir_mark_float_reg(delta))
+
+    let s_zeta = kb_freg(&! f)
+    kb_emit(&! f, ir_copy(s_zeta, zeta))
+    kb_emit(&! f, ir_mark_float_reg(s_zeta))
+    let l_sz_ok = kb_lbl(&! f)
+    kb_emit(&! f, ir_branch_false(neg_b, l_sz_ok))
+    kb_emit(&! f, ir_copy(s_zeta, m_zeta))
+    kb_emit(&! f, ir_label(l_sz_ok))
+
+    // Build inv_af = slope * b + s_zeta + delta * eps_fresh
+    let sc_cb = kb_fop(&! f, slope, BinaryOp::OpMul, c_b)
+    let e_scb_r = kb_call2_f(&! f, fid_tpe, make_name("__sounio_knight_two_prod_err"), slope, c_b)
+    let e_scb = kb_fabs(&! f, e_scb_r)
+    let inv_c = kb_fop(&! f, sc_cb, BinaryOp::OpAdd, s_zeta)
+    let e_ic_r = kb_call2_f(&! f, fid_tse, make_name("__sounio_knight_two_sum_err"), sc_cb, s_zeta)
+    let e_ic = kb_fabs(&! f, e_ic_r)
+    let e_rb = kb_call2_f(&! f, fid_mul_up, make_name("__sounio_knight_mul_up"), a_pos, rad_b)
+    let de1 = kb_call2_f(&! f, fid_add_up, make_name("__sounio_knight_add_up"), delta, e_scb)
+    let de2 = kb_call2_f(&! f, fid_add_up, make_name("__sounio_knight_add_up"), de1, e_ic)
+    let de3 = kb_call2_f(&! f, fid_add_up, make_name("__sounio_knight_add_up"), de2, e_rb)
+    kb_emit(&! f, ir_copy(delta, de3))
+    kb_iset(&! f, res, zero_i, inv_c)
+
+    let l_div_rem = kb_lbl(&! f)
+    kb_emit(&! f, ir_branch_false(b_nz, l_div_rem))
+    let dnb = kb_iget_i(&! f, af_b, one_i)
+    let dib = kb_imm(&! f, 0)
+    let l_dlb = kb_lbl(&! f)
+    kb_emit(&! f, ir_label(l_dlb))
+    let dcb = kb_iop(&! f, dib, BinaryOp::OpLt, dnb)
+    kb_emit(&! f, ir_branch_false(dcb, l_div_rem))
+    let dtb5 = kb_iop(&! f, dib, BinaryOp::OpMul, five_i)
+    let dbb = kb_iop(&! f, four_i, BinaryOp::OpAdd, dtb5)
+    let dbb1 = kb_iop(&! f, dbb, BinaryOp::OpAdd, one_i)
+    let dbb2 = kb_iop(&! f, dbb, BinaryOp::OpAdd, two_i)
+    let dbb3 = kb_iop(&! f, dbb, BinaryOp::OpAdd, three_i)
+    let dbb4 = kb_iop(&! f, dbb, BinaryOp::OpAdd, four_i)
+    let dbnm = kb_iget_i(&! f, af_b, dbb)
+    let dban = kb_iget_i(&! f, af_b, dbb1)
+    let dbcf = kb_iget_f(&! f, af_b, dbb2)
+    let dblo = kb_iget_f(&! f, af_b, dbb3)
+    let dbhi = kb_iget_f(&! f, af_b, dbb4)
+    let dscf = kb_fop(&! f, slope, BinaryOp::OpMul, dbcf)
+    let dse_r = kb_call2_f(&! f, fid_tpe, make_name("__sounio_knight_two_prod_err"), slope, dbcf)
+    let dse = kb_fabs(&! f, dse_r)
+    let adblo = kb_fabs(&! f, dblo)
+    let adbhi = kb_fabs(&! f, dbhi)
+    let dbnd = kb_fmax(&! f, adblo, adbhi)
+    let dbump = kb_call2_f(&! f, fid_mul_up, make_name("__sounio_knight_mul_up"), dse, dbnd)
+    let d_new = kb_call2_f(&! f, fid_add_up, make_name("__sounio_knight_add_up"), delta, dbump)
+    kb_emit(&! f, ir_copy(delta, d_new))
+    let _ = kb_call6_i(&! f, fid_add_term, make_name("__sounio_knight_af_add_term"), res, dbnm, dban, dscf, dblo, dbhi)
+    let dib1 = kb_iop(&! f, dib, BinaryOp::OpAdd, one_i)
+    kb_emit(&! f, ir_copy(dib, dib1))
+    kb_emit(&! f, ir_jump(l_dlb))
+
+    kb_emit(&! f, ir_label(l_div_rem))
+    let l_div_mul = kb_lbl(&! f)
+    let has_d = kb_fcmp(&! f, delta, BinaryOp::OpGt, zero_f)
+    kb_emit(&! f, ir_branch_false(has_d, l_div_mul))
+    let div_fresh = kb_call0_i(&! f, fid_next_anon, make_name("__sounio_knight_next_anon"))
+    let _ = kb_call6_i(&! f, fid_add_term, make_name("__sounio_knight_af_add_term"), res, zero_i, div_fresh, delta, mone_f, one_f)
+
+    kb_emit(&! f, ir_label(l_div_mul))
+    let inv_kn = kb_reg(&! f)
+    kb_emit(&! f, ir_alloc(inv_kn, 0))
+    let rhs_v = kb_fget_f(&! f, 2, 0)
+    let inv_v = kb_fop(&! f, one_f, BinaryOp::OpDiv, rhs_v)
+    kb_fset(&! f, inv_kn, 0, inv_v)
+    kb_fset(&! f, inv_kn, 1, zero_f)
+    kb_fset(&! f, inv_kn, 2, zero_f)
+    kb_fset(&! f, inv_kn, 4, res)
+    // Multiply a * inv_b into dst_kn (3)
+    let _ = kb_call4_i(&! f, fid, make_name("__sounio_knight_binop"), two_i, 1, inv_kn, 3)
+    kb_emit(&! f, ir_return(zero_i))
+    ir_fn_set(m, fid as usize, f)
+}
+
+// ============================================================================
+// Public entry point: ensure all Knightian runtime helpers exist in `m`
+// ============================================================================
+
+pub struct KnightRuntimeIds {
+    pub fid_new: i64,
+    pub fid_binop: i64,
+    pub fid_iv: i64,
+}
+
+pub fn ir_ensure_knight_runtime(m: &! IrModule) -> KnightRuntimeIds with Mut, Panic, Div, Alloc {
+    let fid_new = knight_find_or_reserve_fn(m, make_name("__sounio_knight_new"))
+    let fid_binop = knight_find_or_reserve_fn(m, make_name("__sounio_knight_binop"))
+    let fid_iv = knight_find_or_reserve_fn(m, make_name("__sounio_knight_iv"))
+    if ir_fn_get(&(*m), fid_new as usize).instr_count > 0 {
+        return KnightRuntimeIds { fid_new: fid_new, fid_binop: fid_binop, fid_iv: fid_iv }
+    }
+    let fid_str_eq = knight_find_or_reserve_fn(m, make_name("str_eq"))
+    let fid_next_anon = knight_find_or_reserve_fn(m, make_name("__sounio_knight_next_anon"))
+    let fid_se_down = knight_find_or_reserve_fn(m, make_name("__sounio_knight_se_down"))
+    let fid_se_up = knight_find_or_reserve_fn(m, make_name("__sounio_knight_se_up"))
+    let fid_tse = knight_find_or_reserve_fn(m, make_name("__sounio_knight_two_sum_err"))
+    let fid_add_down = knight_find_or_reserve_fn(m, make_name("__sounio_knight_add_down"))
+    let fid_add_up = knight_find_or_reserve_fn(m, make_name("__sounio_knight_add_up"))
+    let fid_tpe = knight_find_or_reserve_fn(m, make_name("__sounio_knight_two_prod_err"))
+    let fid_mul_down = knight_find_or_reserve_fn(m, make_name("__sounio_knight_mul_down"))
+    let fid_mul_up = knight_find_or_reserve_fn(m, make_name("__sounio_knight_mul_up"))
+    let fid_div_down = knight_find_or_reserve_fn(m, make_name("__sounio_knight_div_down"))
+    let fid_div_up = knight_find_or_reserve_fn(m, make_name("__sounio_knight_div_up"))
+    let fid_add_term = knight_find_or_reserve_fn(m, make_name("__sounio_knight_af_add_term"))
+
+    knight_build_next_anon(m, fid_next_anon)
+    knight_build_se_down(m, fid_se_down)
+    knight_build_se_up(m, fid_se_up)
+    knight_build_two_sum_err(m, fid_tse)
+    knight_build_add_dir(m, fid_add_down, false, fid_tse, fid_se_down)
+    knight_build_add_dir(m, fid_add_up, true, fid_tse, fid_se_up)
+    knight_build_two_prod_err(m, fid_tpe)
+    knight_build_mul_dir(m, fid_mul_down, false, fid_tpe, fid_se_down)
+    knight_build_mul_dir(m, fid_mul_up, true, fid_tpe, fid_se_up)
+    knight_build_div_dir(m, fid_div_down, false, fid_tpe, fid_se_down)
+    knight_build_div_dir(m, fid_div_up, true, fid_tpe, fid_se_up)
+    knight_build_af_add_term(m, fid_add_term, fid_str_eq, fid_tse, fid_add_up, fid_mul_up)
+    knight_build_new(m, fid_new)
+    knight_build_iv(m, fid_iv, fid_add_down, fid_add_up, fid_mul_down, fid_mul_up)
+    knight_build_binop(
+        m,
+        fid_binop,
+        fid_next_anon,
+        fid_tse,
+        fid_tpe,
+        fid_add_down,
+        fid_add_up,
+        fid_mul_down,
+        fid_mul_up,
+        fid_div_down,
+        fid_div_up,
+        fid_add_term,
+        fid_iv
+    )
+    KnightRuntimeIds { fid_new: fid_new, fid_binop: fid_binop, fid_iv: fid_iv }
+}
