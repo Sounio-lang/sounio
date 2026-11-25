@@ -410,6 +410,7 @@ pub linear struct CudaDriverSession {
     pub fn_dev_get_name: i64,
     pub fn_driver_get_ver: i64,
     pub fn_dev_get_attr: i64,
+    pub fn_memcpy: i64,
     pub sm_major: i64,
     pub sm_minor: i64,
     pub launch_scratch: i64,
@@ -436,6 +437,7 @@ fn cuda_session_empty() -> CudaDriverSession {
         fn_dev_get_name: 0,
         fn_driver_get_ver: 0,
         fn_dev_get_attr: 0,
+        fn_memcpy: 0,
         sm_major: 0,
         sm_minor: 0,
         launch_scratch: 0,
@@ -494,6 +496,9 @@ pub fn cuda_session_open(driver_path: string, ordinal: i64) -> CudaDriverSession
     let fn_dev_get_name = hal_dlsym_str(lib, "cuDeviceGetName")
     let fn_driver_get_ver = hal_dlsym_str(lib, "cuDriverGetVersion")
     let fn_dev_get_attr = hal_dlsym_str(lib, "cuDeviceGetAttribute")
+    let main_h = dlopen(0 as *mut u8, 1) as i64
+    let fn_memcpy = if main_h != 0 { hal_dlsym_str(main_h, "memcpy") } else { 0 }
+    if main_h != 0 { let _cm = dlclose(main_h as *mut u8) }
 
     if fn_init == 0 || fn_dev_get == 0 || fn_ctx_create == 0 || fn_ctx_destroy == 0
         || fn_mod_load_data == 0 || fn_mod_unload == 0 || fn_mod_get_fn == 0
@@ -577,6 +582,7 @@ pub fn cuda_session_open(driver_path: string, ordinal: i64) -> CudaDriverSession
         fn_dev_get_name: fn_dev_get_name,
         fn_driver_get_ver: fn_driver_get_ver,
         fn_dev_get_attr: fn_dev_get_attr,
+        fn_memcpy: fn_memcpy,
         sm_major: sm_major,
         sm_minor: sm_minor,
         launch_scratch: lscratch,
@@ -606,6 +612,7 @@ pub fn cuda_session_close(s: CudaDriverSession) -> i64 {
         fn_dev_get_name: _,
         fn_driver_get_ver: _,
         fn_dev_get_attr: _,
+        fn_memcpy: _,
         sm_major: _,
         sm_minor: _,
         launch_scratch,
@@ -736,18 +743,40 @@ pub fn cuda_mem_free(s: &CudaDriverSession, dptr: i64) -> i64 {
     hal_c_i32(f(dptr))
 }
 
-pub fn cuda_memcpy_h2d(s: &CudaDriverSession, dst_dev: i64, src_host: i64, bytes: i64) -> i64 {
+pub fn cuda_memcpy_h2d(s: &CudaDriverSession, dst_dev: i64, src_host: i64, bytes: i64) -> i64 with Alloc {
     if !s.ok || dst_dev == 0 || src_host == 0 || bytes <= 0 { return -1 }
     let f = s.fn_memcpy_h2d as fn(i64, i64, i64) -> i64
-    let chunk_cap: i64 = 16777216
+    let chunk_cap: i64 = 4194304
+    let bounce_cap = if bytes < chunk_cap { bytes } else { chunk_cap }
+    let bounce = heap_alloc(bounce_cap)
+    let bounce_i = bounce as i64
+    if bounce_i == 0 { return -1 }
     var off: i64 = 0
     while off < bytes {
         let rem = bytes - off
         let n = if rem > chunk_cap { chunk_cap } else { rem }
-        let rc = hal_c_i32(f(dst_dev + off, src_host + off, n))
-        if rc != 0 { return rc }
+        if s.fn_memcpy != 0 {
+            let mc = s.fn_memcpy as fn(i64, i64, i64) -> i64
+            let _mc = mc(bounce_i, src_host + off, n)
+        } else {
+            var bi: i64 = 0
+            while bi + 8 <= n {
+                let _w8 = ptr_write_i64_le(bounce_i, bi, ptr_read_i64_le(src_host + off, bi))
+                bi = bi + 8
+            }
+            while bi < n {
+                let _w1 = ptr_write_u8(bounce_i, bi, ptr_read_u8(src_host + off, bi))
+                bi = bi + 1
+            }
+        }
+        let rc = hal_c_i32(f(dst_dev + off, bounce_i, n))
+        if rc != 0 {
+            heap_free(bounce)
+            return rc
+        }
         off = off + n
     }
+    heap_free(bounce)
     0
 }
 
