@@ -43371,9 +43371,77 @@ impl Lowerer {
         if (*e).kind == ExprKind::ExprBinary {
             if (*e).bin_op != BinaryOp::OpAdd && (*e).bin_op != BinaryOp::OpSub
                 && (*e).bin_op != BinaryOp::OpMul && (*e).bin_op != BinaryOp::OpDiv { return false }
+            // Knowledge (op) exact constant: test the cheap syntactic constant
+            // shape first, so each child is classified at most once (a second
+            // recursive pass per level made deep sums exponential).
+            if self.opt_expr_is_exact_f64_const_ref(&(*e).right) { return self.opt_expr_is_knowledge_operand_ref(&(*e).left) }
+            if self.opt_expr_is_exact_f64_const_ref(&(*e).left) { return self.opt_expr_is_knowledge_operand_ref(&(*e).right) }
             return self.opt_expr_is_knowledge_operand_ref(&(*e).left) && self.opt_expr_is_knowledge_operand_ref(&(*e).right)
         }
         false
+    }
+
+    // The exact constant shapes checker_expr_is_exact_f64_const_inplace admits:
+    // a float literal, its negation, or a non-local name that
+    // ast_global_is_exact_f64_literal proves unique with a literal initialiser.
+    fn expr_is_exact_f64_const_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        if (*e).kind == ExprKind::ExprFloatLit { return true }
+        if (*e).kind == ExprKind::ExprUnary && (*e).un_op == UnaryOp::OpNeg {
+            match (*e).left {
+                Some(inner) => { return self.expr_is_exact_f64_const_ref(&(*inner)) }
+                None => { return false }
+            }
+        }
+        if (*e).kind == ExprKind::ExprIdent && ast_global_is_exact_f64_literal((*e).name) {
+            return self.lookup_local((*e).name) == IR_INVALID_REG || self.lookup_local_is_global((*e).name)
+        }
+        false
+    }
+
+    fn opt_expr_is_exact_f64_const_ref(self, opt: &Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc {
+        match *opt {
+            Some(b) => self.expr_is_exact_f64_const_ref(&(*b)),
+            None => false,
+        }
+    }
+
+    // Knowledge<f64> (op) exact f64 constant, recognised syntactically on both
+    // sides. Every mixed Knowledge/f64 arithmetic node that reaches the lowerer
+    // was admitted by checker_knowledge_scalar_status_inplace (other shapes are
+    // E004 or E313). A span table recorded by the checker does not reach the
+    // lowerer on the multi-module path, so the arm cannot rely on one.
+    fn expr_is_knowledge_scalar_const_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        if (*e).bin_op != BinaryOp::OpAdd && (*e).bin_op != BinaryOp::OpSub
+            && (*e).bin_op != BinaryOp::OpMul && (*e).bin_op != BinaryOp::OpDiv { return false }
+        if self.opt_expr_is_exact_f64_const_ref(&(*e).right) { return self.opt_expr_is_knowledge_operand_ref(&(*e).left) }
+        if self.opt_expr_is_exact_f64_const_ref(&(*e).left) { return self.opt_expr_is_knowledge_operand_ref(&(*e).right) }
+        false
+    }
+
+    // Wrap an exact f64 register as a Knowledge handle {value, 0, 1} and reuse
+    // the Knowledge (x) Knowledge GUM arm: with variance 0 and confidence 1 on
+    // the constant side it reduces to c^2 va (*), va (+ -), va / c^2 (k / c),
+    // c^2 vb / b^4 (c / k), and min(conf, 1) = conf.
+    fn lower_knowledge_scalar_arith(self, op: BinaryOp, lhs: i64, rhs: i64, k_on_left: bool, dst: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let scalar = if k_on_left { rhs } else { lhs }
+        let hp = lo.fresh_reg()
+        lo = hp.0
+        let zp = lo.fresh_reg()
+        lo = zp.0
+        lo = lo.emit(ir_load_float(zp.1, 0.0))
+        let op1 = lo.fresh_reg()
+        lo = op1.0
+        lo = lo.emit(ir_load_float(op1.1, 1.0))
+        lo = lo.emit(ir_mark_float_reg(scalar))
+        lo = lo.emit(ir_alloc(hp.1, 0))
+        lo = lo.emit(ir_field_set(hp.1, 0, scalar, make_name("value")))
+        lo = lo.emit(ir_field_set(hp.1, 1, zp.1, make_name("variance")))
+        lo = lo.emit(ir_field_set(hp.1, 2, op1.1, make_name("confidence")))
+        if k_on_left {
+            return lo.lower_knowledge_binary_arith(op, lhs, hp.1, dst)
+        }
+        lo.lower_knowledge_binary_arith(op, hp.1, rhs, dst)
     }
 
     // Knowledge operand tree whose leaves are all bound names (no call), so it
@@ -47154,6 +47222,24 @@ impl Lowerer {
                 }
                 return (lo_k7, dst)
             }
+        }
+        if (e.bin_op == BinaryOp::OpAdd || e.bin_op == BinaryOp::OpSub || e.bin_op == BinaryOp::OpMul || e.bin_op == BinaryOp::OpDiv)
+            && lo3.expr_is_knowledge_scalar_const_ref(e) {
+            let k_left = lo3.opt_expr_is_knowledge_operand_ref(&e.left)
+            if !k_left && !lo3.opt_expr_is_knowledge_operand_ref(&e.right) {
+                print("error: Madaros cannot classify the Knowledge operand of a Knowledge (x) constant expression; bind it to a typed local first, e.g. `let a: Knowledge<f64> = ...` (fail-closed)\n")
+                var lo_ks_refuse = lo3
+                lowerer_mark_hard_error(&! lo_ks_refuse)
+                return (lo_ks_refuse, dst)
+            }
+            let scalar_is_float = if k_left { rhs_expr_is_float } else { lhs_expr_is_float }
+            if !scalar_is_float {
+                print("error: the constant operand of a Knowledge (x) constant expression does not lower as f64 (a module-level constant is typed unknown inside a function); write the literal or annotate it `: f64` (fail-closed)\n")
+                var lo_kf_refuse = lo3
+                lowerer_mark_hard_error(&! lo_kf_refuse)
+                return (lo_kf_refuse, dst)
+            }
+            return lo3.lower_knowledge_scalar_arith(e.bin_op, lhs, rhs, k_left, dst)
         }
         if e.bin_op == BinaryOp::OpAdd || e.bin_op == BinaryOp::OpSub || e.bin_op == BinaryOp::OpMul || e.bin_op == BinaryOp::OpDiv {
             let hid = lowerer_find_hyper_expr_id_for_span_ref(&lo3, e.span)
