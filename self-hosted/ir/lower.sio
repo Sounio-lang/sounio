@@ -7695,7 +7695,7 @@ fn lowerer_register_struct_fields_mut(
                         name_id: ir_intern_name((*list).head.name),
                         index: field_idx,
                         // println i64-segfault fix: see note in lowerer_register_struct_fields_direct_mut.
-                        is_float: if lower_type_expr_is_f64(&(*list).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 2 } else if lower_type_expr_is_integer(&(*list).head.ty) { 3 } else if lower_type_expr_is_bool(&(*list).head.ty) { 3 } else if lower_type_expr_is_pointer_like(&(*list).head.ty) { 4 } else { 0 },
+                        is_float: if lower_type_expr_is_f64(&(*list).head.ty) || lower_type_expr_is_censored_f64(&(*list).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 2 } else if lower_type_expr_is_integer(&(*list).head.ty) { 3 } else if lower_type_expr_is_bool(&(*list).head.ty) { 3 } else if lower_type_expr_is_pointer_like(&(*list).head.ty) { 4 } else { 0 },
                         elem_type_name_id: ir_intern_name(lower_type_expr_elem_or_box_inner_name(&(*list).head.ty)),
                         word_scalar_array_len: word_len,
                         named_type_name_id: ir_intern_name(lower_type_expr_named_type_name(&(*list).head.ty)),
@@ -8858,7 +8858,7 @@ fn ir_fast_summary_register_struct_fields_owned(
                     name_id: ir_intern_name((*list).head.name),
                     index: idx,
                     // println i64-segfault fix: see note in lowerer_register_struct_fields_direct_mut.
-                    is_float: if lower_type_expr_is_f64(&(*list).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 2 } else if lower_type_expr_is_integer(&(*list).head.ty) { 3 } else if lower_type_expr_is_bool(&(*list).head.ty) { 3 } else if lower_type_expr_is_pointer_like(&(*list).head.ty) { 4 } else { 0 },
+                    is_float: if lower_type_expr_is_f64(&(*list).head.ty) || lower_type_expr_is_censored_f64(&(*list).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 2 } else if lower_type_expr_is_integer(&(*list).head.ty) { 3 } else if lower_type_expr_is_bool(&(*list).head.ty) { 3 } else if lower_type_expr_is_pointer_like(&(*list).head.ty) { 4 } else { 0 },
                     elem_type_name_id: ir_intern_name(lower_type_expr_elem_or_box_inner_name(&(*list).head.ty)),
                     word_scalar_array_len: word_len,
                     named_type_name_id: ir_intern_name(lower_type_expr_named_type_name(&(*list).head.ty)),
@@ -10026,7 +10026,7 @@ fn lowerer_lower_fn_params_mut(
                     if lower_type_expr_is_f128(&(*list).head.ty) {
                         lowerer_mark_local_wide_bits_mut(lo, (*list).head.name, 128)
                     }
-                } else if lower_type_expr_is_f64(&(*list).head.ty) {
+                } else if lower_type_expr_is_f64(&(*list).head.ty) || lower_type_expr_is_censored_f64(&(*list).head.ty) {
                     lowerer_mark_local_scalar_kind_mut(lo, (*list).head.name, 2)
                 } else if lower_type_expr_fn_returns_f64(&(*list).head.ty) {
                     lowerer_mark_local_fn_ptr_ret_float_mut(lo, (*list).head.name)
@@ -11819,6 +11819,23 @@ fn lower_cast_type_is_i64(ct: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, D
             if seg.head_buf[1] as i64 != 54 { return false }    // '6'
             if seg.head_buf[2] as i64 != 52 { return false }    // '4'
             true
+        }
+        None => false,
+    }
+}
+
+
+// Lie corpus X1: a Censored<f64> value is its f64 quantification limit at
+// runtime, so a Censored<f64> parameter/local must be marked float exactly
+// like an f64 one, or the caller and callee disagree on the register kind.
+fn lower_type_expr_is_censored_f64(te: &TypeExpr) -> bool with Mut, Panic, Div {
+    if (*te).kind != TypeExprKind::TypeCensored { return false }
+    match (*te).type_args {
+        Some(args) => {
+            match (*args).tail {
+                Some(_) => false,
+                None => lower_type_expr_is_f64(&(*args).head),
+            }
         }
         None => false,
     }
@@ -14514,6 +14531,7 @@ fn lower_binary_op_is_compare(op: BinaryOp) -> bool {
 // (tests/stdlib/data/test_bigframe_ops_stdlib.sio).
 fn lower_name_is_f64_raw_builtin(n: Name) -> bool with Mut, Panic, Div {
     ir_name_eq(n, make_name("read_f64")) || ir_name_eq(n, make_name("bits_to_f64"))
+        || ir_name_is_censored(n) || ir_name_is_censored_bound(n)
 }
 
 // The call names the builtin, not a user function: nothing resolves, or what
@@ -35848,7 +35866,7 @@ impl Lowerer {
                             // that would strlen the bool value 1 as a pointer (SIGSEGV).
                             // Marker 3 is consumed only by field_is_int_* (println
                             // dispatch), so this is inert for float/array/store paths.
-                            is_float: if lower_type_expr_is_f64(&(*list).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 2 } else if lower_type_expr_is_integer(&(*list).head.ty) { 3 } else if lower_type_expr_is_bool(&(*list).head.ty) { 3 } else if lower_type_expr_is_pointer_like(&(*list).head.ty) { 4 } else { 0 },
+                            is_float: if lower_type_expr_is_f64(&(*list).head.ty) || lower_type_expr_is_censored_f64(&(*list).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 2 } else if lower_type_expr_is_integer(&(*list).head.ty) { 3 } else if lower_type_expr_is_bool(&(*list).head.ty) { 3 } else if lower_type_expr_is_pointer_like(&(*list).head.ty) { 4 } else { 0 },
                             elem_type_name_id: ir_intern_name(lower_type_expr_elem_or_box_inner_name(&(*list).head.ty)),
                             word_scalar_array_len: word_len,
                             named_type_name_id: ir_intern_name(lower_type_expr_named_type_name(&(*list).head.ty)),
@@ -36596,7 +36614,7 @@ impl Lowerer {
                         lo = lo.report_error_at(10759)
                     }
 
-                    if lower_type_expr_is_f64(&(*list).head.ty) {
+                    if lower_type_expr_is_f64(&(*list).head.ty) || lower_type_expr_is_censored_f64(&(*list).head.ty) {
                         let instr_count = (*current_func).instr_count
                         if instr_count < IR_MAX_INSTRS {
                             // Pointer form: the surrounding code holds
@@ -45910,6 +45928,10 @@ impl Lowerer {
             || ir_name_is_transition_step_count(callee_name)
             || ir_name_is_lift_knowledge(callee_name)
             || ir_name_is_measure(callee_name)
+            || ir_name_is_residual_knowledge(callee_name)
+            || ir_name_is_type_b(callee_name)
+            || ir_name_is_censored(callee_name)
+            || ir_name_is_censored_bound(callee_name)
             || (self.name_is_sign(callee_name) && count_expr_list_ref(&e.args) == 2)
             || ir_name_is_knowledge_ctor(callee_name)
             || self.name_is_variance_of(callee_name)
@@ -46025,6 +46047,29 @@ impl Lowerer {
         }
         if ir_name_is_measure(callee_name) {
             return self.lower_measure_call_ref(e.span, &e.args)
+        }
+        if ir_name_is_residual_knowledge(callee_name) {
+            // Type A is a checker-level provenance on the same runtime
+            // construction as measure() (X2).
+            return self.lower_measure_call_ref(e.span, &e.args)
+        }
+        if ir_name_is_type_b(callee_name) {
+            // Explicit Type B choice: identity at runtime (X2).
+            match *(&e.args) {
+                Some(list) => {
+                    return self.lower_expr_ref(&(*list).head)
+                }
+                _ => return (self, 0 - 1)
+            }
+        }
+        if ir_name_is_censored(callee_name) || ir_name_is_censored_bound(callee_name) {
+            // A Censored runtime value is its quantification limit (X1).
+            match *(&e.args) {
+                Some(list) => {
+                    return self.lower_expr_ref(&(*list).head)
+                }
+                _ => return (self, 0 - 1)
+            }
         }
         if ir_name_is_knowledge_ctor(callee_name) {
             return self.lower_knowledge_ctor_call_ref(e.span, &e.args)

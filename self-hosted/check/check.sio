@@ -2030,6 +2030,28 @@ fn checker_lower_named_type_with_args_mut(c: *mut Checker, path: AstPath, type_a
             }
         }
     }
+    // Lie corpus X1: `Censored<T>` arrives here as a name + type_args, the
+    // same way the ZD family does. It lowers to the distinct TyCensored,
+    // never to a Knowledge or a bare named type.
+    if name_matches_str8(name, 67, 101, 110, 115, 111, 114, 101, 100) {
+        match type_args {
+            Some(args) => {
+                match (*args).tail {
+                    Some(_) => {
+                        checker_report_error_at_inplace(c, span, 72, 0, 0, 0)
+                        return ty_error()
+                    }
+                    None => {}
+                }
+                let inner_ty = checker_lower_type_expr_mut(c, (*args).head)
+                return ty_censored(inner_ty)
+            }
+            None => {
+                checker_report_error_at_inplace(c, span, 72, 0, 0, 0)
+                return ty_error()
+            }
+        }
+    }
     // KL-13b: `f64<m/s>` / `f64<mol/cm3>` — UnitExpr in the single type argument.
     if name_is_f64(name) {
         match type_args {
@@ -3163,6 +3185,10 @@ fn checker_lower_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry with 
         TypeExprKind::TypeAdmissible => {
             let inner_ty = checker_lower_single_wrapper_arg_mut(c, te.type_args)
             if inner_ty.kind == TypeKind::TyError { ty_error() } else { ty_admissible(inner_ty, -1) }
+        }
+        TypeExprKind::TypeCensored => {
+            let inner_ty = checker_lower_single_wrapper_arg_mut(c, te.type_args)
+            if inner_ty.kind == TypeKind::TyError { ty_error() } else { ty_censored(inner_ty) }
         }
         TypeExprKind::TypeDeferred => {
             let inner_ty = checker_lower_single_wrapper_arg_mut(c, te.type_args)
@@ -5684,6 +5710,10 @@ fn checker_collect_runtime_builtins_inplace(c: *mut Checker) with Mut, Panic, Di
     checker_bind_import_unknown_inplace(c, make_name("sensitivity_of"))
     checker_bind_import_unknown_inplace(c, make_name("uncertainty_of"))
     checker_bind_import_unknown_inplace(c, make_name("hessian_of"))
+    checker_bind_import_unknown_inplace(c, make_name("residual_knowledge"))
+    checker_bind_import_unknown_inplace(c, make_name("type_b"))
+    checker_bind_import_unknown_inplace(c, make_name("censored"))
+    checker_bind_import_unknown_inplace(c, make_name("censored_bound"))
     checker_bind_import_unknown_inplace(c, make_name("hessian_wrt"))
     checker_bind_import_unknown_inplace(c, make_name("chain_to_knowledge_into"))
     // syscall6: raw syscall builtin emitted by native codegen (no .sio
@@ -12615,6 +12645,10 @@ fn call_expr_should_bridge_by_value(e: Expr) -> bool with Mut, Panic, Div, Alloc
     if call_expr_is_builtin_rollback_transition(e.left) { return true }
     if call_expr_is_builtin_lift_knowledge(e.left) { return true }
     if call_expr_is_builtin_measure(e.left) { return true }
+    if call_expr_is_builtin_residual_knowledge(e.left) { return true }
+    if call_expr_is_builtin_type_b(e.left) { return true }
+    if call_expr_is_builtin_censored(e.left) { return true }
+    if call_expr_is_builtin_censored_bound(e.left) { return true }
     // sign(a, b) is the knowledge contest. sign(x) is math/pure's unary f64.
     if call_expr_is_builtin_sign(e.left) && expr_list_handle_count(expr_list_handle(e.args)) == 2 { return true }
     if call_expr_is_builtin_variance_of(e.left) { return true }
@@ -12865,6 +12899,22 @@ fn checker_check_call_args_inplace(c: *mut Checker, args: ExprListHandle, params
 // calls this helper, so the loop frame no longer keeps its temporaries live
 // across the nested call -- it can release them before recursing.
 fn checker_check_call_arg_post_inplace(c: *mut Checker, call_span: Span, arg_expr: Expr, arg_ty: TypeEntry, param_ty: TypeEntry, has_param_info: bool, primitive_exact: bool, implicit_borrow: bool) with Mut, Panic, Div, Alloc, IO {
+    // Lie corpus X1/X2 boundary (E313): name the epistemic cause before
+    // the generic mismatch machinery reports its own code for the same
+    // call. A Censored is not a Knowledge in either direction, and a
+    // Type A (residual-estimated) Knowledge does not satisfy a Type B
+    // or unspecified Knowledge requirement.
+    if has_param_info {
+        let a313 = call_ref_inner_or_self(arg_ty)
+        let p313 = call_ref_inner_or_self(param_ty)
+        let cross_censored = (is_censored_type(a313) && is_knowledge_type(p313))
+            || (is_knowledge_type(a313) && is_censored_type(p313))
+        let type_a_cross = is_knowledge_type(a313) && is_knowledge_type(p313)
+            && a313.knowledge_u_prov == 2 && p313.knowledge_u_prov != 2
+        if cross_censored || type_a_cross {
+            checker_report_error_at_inplace(c, call_span, 313, 0, 0, 0)
+        }
+    }
     if has_param_info && !primitive_exact {
         if !checker_call_arg_types_compatible_inplace(c, arg_expr, arg_ty, param_ty) {
             checker_report_mismatch_inplace(c, call_span, 9, param_ty, arg_ty)
@@ -12962,6 +13012,7 @@ fn checker_check_measure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
     // Preserve the payload-type correspondence constructor: an instrument
     // starts with an unknown bound, refined only by independent literal data.
     var result = ty_knowledge(v_ty, 0.0 - 1.0)
+    result.knowledge_u_prov = 1
     let literal_variance = checker_measure_literal_variance(e.args)
     if literal_variance >= 0.0 {
         result.knowledge_epsilon = literal_variance
@@ -12998,6 +13049,62 @@ fn checker_check_measure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
     // requirement.
     result.knowledge_provenance_kind = PROVENANCE_KIND_MEASURED
     result
+}
+
+// residual_knowledge(v, sigma) -> Knowledge<T> with Type A provenance on
+// u: the standard uncertainty was estimated from residual scatter (the
+// curve_fit absolute_sigma=False shape), not declared. Same runtime
+// construction as measure(); only the u provenance differs.
+fn checker_check_residual_knowledge_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let first_arg = expr_list_head(e.args)
+    let v_ty = checker_check_opt_expr_inplace(c, first_arg)
+    checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+    var result = ty_knowledge(v_ty, 0.0 - 1.0)
+    result.knowledge_u_prov = 2
+    result.knowledge_provenance_kind = PROVENANCE_KIND_COMPUTED
+    result
+}
+
+// type_b(k) -> Knowledge<T>: the caller explicitly takes declared
+// (Type B) responsibility for k's standard uncertainty. This is the
+// only way a Type A value may satisfy a Type B requirement, and it is
+// a choice made at the call, not a coercion the compiler invents.
+fn checker_check_type_b_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let first_arg = expr_list_head(e.args)
+    let k_ty = checker_check_opt_expr_inplace(c, first_arg)
+    checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+    if !is_error_or_unknown(k_ty) && !is_knowledge_type(k_ty) {
+        checker_report_error_at_inplace(c, e.span, 313, 0, 0, 0)
+        return ty_error()
+    }
+    var result = k_ty
+    result.knowledge_u_prov = 1
+    result
+}
+
+// censored(lloq) -> Censored<T>: a below-quantification observation.
+// It carries the quantification limit as an upper bound and no measured
+// value; the result type is TyCensored, never Knowledge (X1).
+fn checker_check_censored_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let first_arg = expr_list_head(e.args)
+    let v_ty = checker_check_opt_expr_inplace(c, first_arg)
+    checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+    ty_censored(v_ty)
+}
+
+// censored_bound(c) -> T: the quantification limit of a Censored.
+fn checker_check_censored_bound_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let first_arg = expr_list_head(e.args)
+    let c_ty = checker_check_opt_expr_inplace(c, first_arg)
+    checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+    if !is_error_or_unknown(c_ty) && !is_censored_type(c_ty) {
+        checker_report_error_at_inplace(c, e.span, 313, 0, 0, 0)
+        return ty_error()
+    }
+    match c_ty.inner {
+        Some(inner_box) => *inner_box,
+        None => ty_error()
+    }
 }
 
 // seq_new() -> Seq<_>. Element type comes from the binding annotation
@@ -13182,6 +13289,7 @@ fn checker_check_knowledge_ctor_expr_inplace(c: *mut Checker, e: Expr) -> TypeEn
     let v_ty = checker_check_opt_expr_inplace(c, first_arg)
     let confidence = checker_enforce_knowledge_confidence_inplace(c, e.args, e.span)
     var result = ty_knowledge_with_confidence(v_ty, confidence)
+    result.knowledge_u_prov = 1
     // N2 (REQ-2): this ctor wraps a plain value directly -- no independent
     // measurement source is created (that is measure()'s job, above), so the
     // result carries NO uncertainty sources: empty (0), not unknown (-1).
@@ -14829,6 +14937,18 @@ fn checker_check_call_metric_forms_inplace(c: *mut Checker, e: Expr) -> (bool, T
     // by-value bridge below (which SRET-smashes on the 164KB Checker return).
     if call_expr_is_builtin_measure(e.left) {
         return (true, checker_check_measure_expr_inplace(c, e))
+    }
+    if call_expr_is_builtin_residual_knowledge(e.left) {
+        return (true, checker_check_residual_knowledge_expr_inplace(c, e))
+    }
+    if call_expr_is_builtin_type_b(e.left) {
+        return (true, checker_check_type_b_expr_inplace(c, e))
+    }
+    if call_expr_is_builtin_censored(e.left) {
+        return (true, checker_check_censored_expr_inplace(c, e))
+    }
+    if call_expr_is_builtin_censored_bound(e.left) {
+        return (true, checker_check_censored_bound_expr_inplace(c, e))
     }
     let merge_kind = call_expr_merge_kind(e.left)
     if merge_kind >= 0 {
@@ -19258,6 +19378,14 @@ fn print_type_name(ty: TypeEntry) with IO, Mut, Panic, Div, Alloc {
             }
             print(">")
         }
+        TypeKind::TyCensored => {
+            print("Censored<")
+            match ty.inner {
+                Some(inner) => print_type_name(*inner)
+                None => print("?")
+            }
+            print(">")
+        }
         TypeKind::TyAleatoric => {
             print("Aleatoric<")
             match ty.inner {
@@ -21927,6 +22055,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 242 { print("epistemic channel index is out of range") }
     else if code == 232 { print("the same array local initialises two fields; the value copy is shallow, so they would be one array -- give each field its own literal") }
     else if code == 312 { print("hessian_wrt source is not a measured source that the value depends on: the source must be a Knowledge binding from measure() (or Knowledge(...)) and the value must depend on it") }
+    else if code == 313 { print("epistemic boundary refusal (lie corpus X1/X2): a Censored observation is not a Knowledge measurement, and Type A (residual-estimated) uncertainty does not satisfy a Type B (declared) requirement") }
     else if code == 306 { print("retract needs `because:` with a non-empty string literal: leaving a contest is explicit and its reason is recorded (ADR-016, decision 4.3)") }
     else if code == 305 { print("the consistency policy of meet must be a positive numeric literal: an E_n limit is a declared modelling choice, not a value computed at run time (ADR-016)") }
     else if code == 243 { print("the correlation coefficient must be a compile-time literal; a runtime value silently becomes 0.0, which asserts independence") }
@@ -22965,6 +23094,58 @@ fn call_expr_is_builtin_rollback_transition(opt: Option<Box<Expr> >) -> bool wit
                 return false
             }
             name_matches_str19((*expr).name, 114, 111, 108, 108, 98, 97, 99, 107, 95, 116, 114, 97, 110, 115, 105, 116, 105, 111, 110)
+        }
+        None => false
+    }
+}
+
+fn call_expr_is_builtin_residual_knowledge(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent {
+                return false
+            }
+            // "residual_knowledge" (18 bytes)
+            name_matches_str18((*expr).name, 114, 101, 115, 105, 100, 117, 97, 108, 95, 107, 110, 111, 119, 108, 101, 100, 103, 101)
+        }
+        None => false
+    }
+}
+
+fn call_expr_is_builtin_type_b(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent {
+                return false
+            }
+            // "type_b" (6 bytes)
+            name_matches_str6((*expr).name, 116, 121, 112, 101, 95, 98)
+        }
+        None => false
+    }
+}
+
+fn call_expr_is_builtin_censored(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent {
+                return false
+            }
+            // "censored" (8 bytes)
+            name_matches_str8((*expr).name, 99, 101, 110, 115, 111, 114, 101, 100)
+        }
+        None => false
+    }
+}
+
+fn call_expr_is_builtin_censored_bound(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent {
+                return false
+            }
+            // "censored_bound" (14 bytes)
+            name_matches_str14((*expr).name, 99, 101, 110, 115, 111, 114, 101, 100, 95, 98, 111, 117, 110, 100)
         }
         None => false
     }
@@ -24178,6 +24359,11 @@ fn check_return_expr_knowledge_subsumes(ontology_items: Option<Box<ItemList> >, 
     if !val_ok {
         return false
     }
+    // X2: Type A u (residual-estimated) never satisfies a Type B or
+    // unspecified requirement (u provenance does not subsume that way).
+    if provided.knowledge_u_prov == 2 && required.knowledge_u_prov != 2 {
+        return false
+    }
     provenance_subsumes(knowledge_meta_provenance(pmeta), knowledge_meta_provenance(rmeta))
 }
 
@@ -24234,6 +24420,11 @@ fn checker_knowledge_subsumes(c: *mut Checker, provided: TypeEntry, required: Ty
         return false
     }
 
+    // X2: Type A u (residual-estimated) never satisfies a Type B or
+    // unspecified requirement (u provenance does not subsume that way).
+    if provided.knowledge_u_prov == 2 && required.knowledge_u_prov != 2 {
+        return false
+    }
     provenance_subsumes(knowledge_meta_provenance(pmeta), knowledge_meta_provenance(rmeta))
 }
 
@@ -26048,6 +26239,7 @@ impl Checker {
             TypeExprKind::TypeDPBudget => c.lower_dp_budget_type(te.type_args, te.span)
             TypeExprKind::TypeCausalEffect => c.lower_causal_effect_annotation(te.type_args, te.span)
             TypeExprKind::TypeAleatoric => c.lower_aleatoric_annotation(te.type_args, te.span)
+            TypeExprKind::TypeCensored => c.lower_censored_annotation(te.type_args, te.span)
             TypeExprKind::TypePotentialOutcome => c.lower_potential_outcome_type(te.type_args, te.span)
             TypeExprKind::TypeProof => c.lower_proof_annotation(te.type_args, te.span)
             TypeExprKind::TypeLemma => c.lower_lemma_annotation(te.type_args, te.span)
@@ -26109,6 +26301,17 @@ impl Checker {
                     let c = elem_pair.0
                     let elem_ty = elem_pair.1
                     return (c, ty_hyper(algebra_tag, elem_ty))
+                }
+
+                // Lie corpus X1: `Censored<T>` — by-value twin of the
+                // *mut named-type arm. Distinct TyCensored, never a
+                // Knowledge or a bare named type.
+                if name_matches_str8(name, 67, 101, 110, 115, 111, 114, 101, 100) {
+                    let inner_result = self.lower_type_expr_list(*args)
+                    let c = inner_result.0
+                    let inner_args = inner_result.1
+                    let inner_ty = inner_args.head
+                    return (c, ty_censored(inner_ty))
                 }
 
                 // Unobserved<T> — observer type-state wrapper
@@ -27113,6 +27316,15 @@ impl Checker {
             pair
         } else {
             (pair.0, ty_aleatoric(pair.1, -1.0))
+        }
+    }
+
+    fn lower_censored_annotation(self, opt: Option<Box<TypeExprList> >, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let pair = self.lower_single_wrapper_arg(opt, span)
+        if pair.1.kind == TypeKind::TyError {
+            pair
+        } else {
+            (pair.0, ty_censored(pair.1))
         }
     }
 
@@ -33938,6 +34150,7 @@ impl Checker {
         // (checker_check_measure_expr_inplace) -- without this, authoritative
         // four-axis subsumption rejects `let a: Knowledge[f64, Measured] = measure(...)`.
         var result = ty_knowledge(v_ty, 0.0 - 1.0)
+        result.knowledge_u_prov = 1
         let literal_variance = checker_measure_literal_variance(e.args)
         if literal_variance >= 0.0 {
             result.knowledge_epsilon = literal_variance
@@ -33965,7 +34178,8 @@ impl Checker {
         if minimum > 0 && confidence_milli < minimum {
             c = c.report_error_at(e.span, 215, confidence_milli, minimum, 0)
         }
-        (c, ty_knowledge_with_confidence(v_ty, confidence))
+        let kc_result = ty_knowledge_with_confidence(v_ty, confidence)
+        (c, kc_result)
     }
 
     fn check_variance_metric_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
