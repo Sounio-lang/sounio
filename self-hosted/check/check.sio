@@ -11011,6 +11011,118 @@ fn checker_check_if_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut
     }
 }
 
+// Loop pre-widen. A loop body is checked once, but it runs 0+ times. A use of a
+// binding inside the body may therefore see the value the PREVIOUS iteration
+// assigned, not the pre-loop value. checker_merge_ns_reassigned_inplace widens
+// a reassigned Knowledge binding to Unknown only AFTER the body, which leaves
+// every in-body use before the reassignment reading the pre-loop set. Before
+// call summaries became precise that hole was hidden: calls returned Unknown
+// anyway. Measured on #3748 at 33f953e3e1: with
+// `acc = fwd(a)` before the loop and `let cur = fwd(a); cur - acc; acc = cur`
+// inside, the checker judged `cur - acc` over {a} and {a} as the same exact
+// identity and accepted, and the program printed Var 2.0 instead of 0. So every
+// Knowledge binding the body (re)assigns, and every tracked field of a struct
+// binding it assigns through, is widened to Unknown BEFORE the body is checked.
+fn checker_loop_prewiden_name(c: *mut Checker, nm: Name) with Mut, Panic, Div, Alloc, IO {
+    if !type_env_has_binding(&(*c).env, nm) { return }
+    let cur_ty = type_env_lookup(&(*c).env, nm)
+    if cur_ty.kind == TypeKind::TyKnowledge {
+        var forced = cur_ty
+        forced.noise_set_id = 0 - 1
+        type_env_bind_mut(&!(*c).env, nm, forced, true)
+        checker_ns_trace_emit("loop_prewiden", forced.noise_set_id)
+    } else if cur_ty.kind == TypeKind::TyNamed {
+        ns_field_widen_var_entries(c, nm)
+    }
+}
+
+fn checker_loop_prewiden_target(c: *mut Checker, t: &Expr, depth: i64) with Mut, Panic, Div, Alloc, IO {
+    if depth > 96 { return }
+    if (*t).kind == ExprKind::ExprIdent {
+        checker_loop_prewiden_name(c, (*t).name)
+        return
+    }
+    match (*t).left {
+        Some(x) => { checker_loop_prewiden_target(c, &(*x), depth + 1) }
+        None => {}
+    }
+}
+
+fn checker_loop_prewiden_expr(c: *mut Checker, e: &Expr, depth: i64) with Mut, Panic, Div, Alloc, IO {
+    if depth > 96 { return }
+    match (*e).left {
+        Some(x) => { checker_loop_prewiden_expr(c, &(*x), depth + 1) }
+        None => {}
+    }
+    match (*e).right {
+        Some(x) => { checker_loop_prewiden_expr(c, &(*x), depth + 1) }
+        None => {}
+    }
+    match (*e).else_expr {
+        Some(x) => { checker_loop_prewiden_expr(c, &(*x), depth + 1) }
+        None => {}
+    }
+    match (*e).block {
+        Some(b) => { checker_loop_prewiden_stmts(c, &(*b).stmts, depth + 1) }
+        None => {}
+    }
+    var args = &(*e).args
+    while true {
+        match *args {
+            Some(a) => {
+                checker_loop_prewiden_expr(c, &(*a).head, depth + 1)
+                args = &(*a).tail
+            }
+            None => break
+        }
+    }
+    var arms = &(*e).arms
+    while true {
+        match *arms {
+            Some(al) => {
+                match (*al).head.guard {
+                    Some(g) => { checker_loop_prewiden_expr(c, &(*g), depth + 1) }
+                    None => {}
+                }
+                checker_loop_prewiden_expr(c, &(*al).head.body, depth + 1)
+                arms = &(*al).tail
+            }
+            None => break
+        }
+    }
+}
+
+fn checker_loop_prewiden_stmts(c: *mut Checker, opt: &Option<Box<StmtList> >, depth: i64) with Mut, Panic, Div, Alloc, IO {
+    if depth > 96 { return }
+    var cur = opt
+    while true {
+        match *cur {
+            Some(sl) => {
+                if (*sl).head.kind == StmtKind::StmtAssign {
+                    match (*sl).head.target {
+                        Some(t) => { checker_loop_prewiden_target(c, &(*t), depth + 1) }
+                        None => {}
+                    }
+                }
+                match (*sl).head.expr {
+                    Some(x) => { checker_loop_prewiden_expr(c, &(*x), depth + 1) }
+                    None => {}
+                }
+                cur = &(*sl).tail
+            }
+            None => break
+        }
+    }
+}
+
+fn checker_loop_prewiden_block(c: *mut Checker, blk: &Option<Box<Block> >) with Mut, Panic, Div, Alloc, IO {
+    if checker_ns_sabotage_join() { return }
+    match *blk {
+        Some(b) => { checker_loop_prewiden_stmts(c, &(*b).stmts, 0) }
+        None => {}
+    }
+}
+
 // *mut ExprWhile handler — FULL transcription of check_while_expr (16436), not a bridge:
 // the condition and the loop body block are both checked via the *mut spine so a nested
 // enum path-expr anywhere in the condition or body reaches checker_check_path_expr_inplace
@@ -11020,6 +11132,8 @@ fn checker_check_if_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut
 // release_exclusive_borrows before the body — is faithful to the by-value original.
 // While is SIMPLER than if: it has NO refine_cond_env narrowing, so none is added here.
 fn checker_check_while_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    // The condition is re-evaluated each iteration, so it is widened too.
+    checker_loop_prewiden_block(c, &e.block)
     // Condition (via the *mut spine). Must be bool.
     let cond_ty = checker_check_opt_expr_inplace(c, e.left)
     if !is_error_or_unknown(cond_ty) && !is_bool_type(cond_ty) {
@@ -11062,6 +11176,7 @@ fn checker_check_while_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
 // Keep the original depth guard, borrow release, body check and unit result.
 // Unlike the existing inplace while handler, this does not add NS widening.
 fn checker_check_loop_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    checker_loop_prewiden_block(c, &e.block)
     if (*c).loop_depth >= MAX_LOOP_DEPTH {
         checker_report_error_at_inplace(c, e.span, 62, (*c).loop_depth, MAX_LOOP_DEPTH, 0)
         return ty_error()
@@ -11083,6 +11198,7 @@ fn checker_check_loop_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
 // limit on for-in; body type discarded).
 fn checker_check_for_in_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let _iter_ty = checker_check_opt_expr_inplace(c, e.left)
+    checker_loop_prewiden_block(c, &e.block)
     type_env_push_scope_mut(&!(*c).env)
     borrow_push_scope_mut(&!(*c).borrows)
     checker_push_const_scope_inplace(c)
