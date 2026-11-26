@@ -1,1 +1,8 @@
-CI Decision now requires a gen2 fixed-point receipt for the compiler source at the head. The source is identified by the git tree hash of `self-hosted/`, and the receipt is `docs/evidence/gen2-fixpoint/<tree>.receipt`, recording the Slurm job, node, gen1/gen2/gen3 sha256 (gen2 must equal gen3), MaxRSS and wall time. Checked by `scripts/ci/gen2_receipt_gate.sh` in Fast Checks, with nine controls (`--selftest`). The first receipt covers main's current tree (job 28684, #3741).
+CI Decision now requires a gen2 fixed-point receipt for the compiler state at the head. A state is identified by its gen2 inputs key: sha256 over the git object ids of every input listed in `scripts/ci/gen2_receipt_inputs.txt`, plus that file's parameters. The list is fail-closed: compiler, stdlib, bootstrap ELFs, the fixed-point gate, the build script and their helpers. The receipt is `docs/evidence/gen2-fixpoint/<key>.receipt` and records:
+- the full commit, which the gate fetches if absent and refuses if it cannot;
+- the Slurm job and node;
+- `gate_rc=0` and `ir_parity=pass`;
+- full sha256 of gen1, gen2 and gen3, with gen2 required to equal gen3;
+- MaxRSS and wall time.
+
+Checked by `scripts/ci/gen2_receipt_gate.sh` in Fast Checks, with sixteen controls (`--selftest`). The receipt is a signed-off attestation checked for consistency, not a re-execution.
