@@ -1,15 +1,15 @@
 // AST-level generic-fn specializer (monomorphizer).
 //
-// Runs AFTER parsing, BEFORE type checking. The parser currently discards a
-// fn's `<T, U>` type-param header (parse_type_param_header consumes the
-// tokens without storing them on FnDef — FnDef has no type_params field).
-// So "is this fn generic" is recovered structurally: any single-segment,
-// single-UPPERCASE-letter TypeNamed in a fn's params/return type that is not
-// a locally declared struct/enum name is treated as a free type variable
-// (a conservative variant of check.sio's
+// Runs AFTER parsing, BEFORE type checking. The parser keeps a fn's
+// `<T: Tr, ...>` header on FnDef.type_params; the declared parameters are this
+// pass's type variables, in declaration order. A name a fn uses without
+// declaring it (a parameter of an enclosing `impl S<T>`) is still recovered
+// structurally: a single-segment, single-UPPERCASE-letter TypeNamed in the
+// signature that is not a locally declared struct/enum name (a conservative
+// variant of check.sio's
 // type_is_unresolved_type_param_in_tables/collect_fn_generic_names_*).
-// The pass is only hooked into the single-module (no imports) pipeline
-// lanes, so imported type names can never be misread as type variables.
+// In the multi-module lane the driver passes the merged item list (WP-A3
+// below), so imported struct/enum names are known there too.
 //
 // Algorithm:
 //   1. Collect generic function/method and struct templates.
@@ -903,10 +903,12 @@ fn spec_collect_known_names(items: Option<Box<ItemList>>, acc: SpecKnownNames) -
 // Free-type-variable detection
 // ============================================================
 
-// A candidate type parameter must be a single UPPERCASE letter (T, U, F, K,
-// V, ...). The single-letter restriction keeps stdlib named types (Option,
-// Box, ...) from being misread as free type variables; generic fns with
-// multi-character param names simply stay on the baseline checker path.
+// The structural rule, for a type variable a fn uses without declaring it (a
+// parameter of an enclosing `impl S<T>`): a single UPPERCASE letter (T, U, F,
+// K, V, ...) that is not a known struct/enum name. The single-letter
+// restriction keeps stdlib named types (Option, Box, ...) from being misread.
+// Declared parameters, of any length, come from FnDef.type_params instead
+// (spec_collect_free_vars_from_fndef).
 fn spec_type_is_free_var(te: TypeExpr, known: SpecKnownNames) -> bool with Mut, Panic, Div {
     if te.kind != TypeExprKind::TypeNamed { return false }
     if te.path.seg_count != 1 { return false }
@@ -974,8 +976,25 @@ fn spec_collect_free_vars_from_params(opt: Option<Box<ParamList>>, known: SpecKn
     }
 }
 
+// The fn's type parameters, in order: first the ones it declares, in the order
+// of its `<...>` header (turbofish arguments and trait bounds are positional
+// over that header, never over first use in the signature); then any name the
+// structural rule above finds in its signature that it does not declare, which
+// is a parameter of an enclosing `impl S<T>`.
 fn spec_collect_free_vars_from_fndef(fd: FnDef, known: SpecKnownNames) -> SpecNameBuf with Mut, Panic, Div {
-    var buf = spec_collect_free_vars_from_params(fd.params, known, SpecNameBuf { names: [empty_name(); 4], count: 0 })
+    var buf = SpecNameBuf { names: [empty_name(); 4], count: 0 }
+    var cur = fd.type_params
+    var done = false
+    while !done {
+        match cur {
+            None => { done = true }
+            Some(node) => {
+                buf = spec_name_buf_push(buf, (*node).head.name)
+                cur = (*node).tail
+            }
+        }
+    }
+    buf = spec_collect_free_vars_from_params(fd.params, known, buf)
     match fd.return_type {
         Some(rt) => buf = spec_collect_free_vars_from_type(*rt, known, buf)
         None => {}
