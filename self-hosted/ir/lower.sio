@@ -4,6 +4,7 @@ module ir::lower
 
 use parser::ast::*
 use ir::ir::*
+use ir::knight_ir::{KnightRuntimeIds, ir_ensure_knight_runtime}
 use ir::numeric_payload::{ir_wide_compile_pool_reset, ir_wide_compile_pool_intern_low}
 use check::specializer::{spec_dce_filter_with_global_marks, spec_dce_global_marks_ready, spec_item_module_lookup, spec_item_module_populated, spec_item_module_overflowed}
 use io::trace::*
@@ -188,7 +189,7 @@ struct LowerLocalStack {
 var MERGE_X: [i64; 8] = [-1; 8]
 var MERGE_V: [i64; 64] = [-1; 64]
 var MERGE_RHS: [i64; 8] = [-1; 8]
-var MERGE_NAME: [Name; 8] = [ir_empty_name(); 8]
+var MERGE_NAME: [Name; 8]
 
 // ADR-016 contests of measured values (lower_contest_let_ref): a `let` bound to
 // contest(x1, ..., xn) or to retract(c, x, because: "...") records the sources,
@@ -197,7 +198,7 @@ var MERGE_NAME: [Name; 8] = [ir_empty_name(); 8]
 // contest read those sources. Keyed by function, so a name in another function
 // never matches.
 var CONTEST_N: i64 = 0
-var CONTEST_NAME: [Name; 64] = [ir_empty_name(); 64]
+var CONTEST_NAME: [Name; 64]
 var CONTEST_FN: [i64; 64] = [-1; 64]
 var CONTEST_LIST: [i64; 64] = [0; 64]
 var CONTEST_MASK: [i64; 64] = [0; 64]
@@ -413,9 +414,9 @@ var FO_STEP_BASE_SLOT: i64 = 0 - 1
 var FO_STEP_NF: i64 = 0
 var FO_STEP_NIDX: i64 = 0 - 1
 var FO_STEP_FIDX: [i64; 4] = [-1; 4]
-var FO_STEP_FNAME: [Name; 4] = [ir_empty_name(); 4]
-var FO_STEP_NNAME: Name = ir_empty_name()
-var FO_STEP_FN: Name = ir_empty_name()
+var FO_STEP_FNAME: [Name; 4]
+var FO_STEP_NNAME: Name
+var FO_STEP_FN: Name
 var FO_STEP_ZERO: i64 = 0
 var FO_STEP_ZVAL: i64 = 0
 var FO_STEP_ZS: [i64; 64] = [-1; 64]
@@ -475,7 +476,7 @@ var TG_MODULE: [i64; 768] = [0 - 1; 768]
 var TG_COUNT: i64 = 0
 let TG_MAX: i64 = 512
 var TG_ID: [i64; 768] = [0; 768]
-var TG_NAME: [Name; 768] = [ir_empty_name(); 768]
+var TG_NAME: [Name; 768]
 var TG_NF: [i64; 768] = [0; 768]
 // Bit p set: declared (non-self) parameter p carries a tangent (f64 or
 // Knowledge). Bit p of TG_KMASK: that parameter is a Knowledge.
@@ -935,7 +936,7 @@ fn tg_name_is_query(n: Name) -> bool with Mut, Panic, Div {
     ir_name_eq_lit(n, "variance_of") || ir_name_eq_lit(n, "covariance_of")
         || fo_merge_kind(n) >= 0
         || ir_name_eq_lit(n, "uncertainty_of") || ir_name_eq_lit(n, "sensitivity_of")
-        || ir_name_eq_lit(n, "hessian_of") || ir_name_eq_lit(n, "second_order_mean")
+        || ir_name_eq_lit(n, "hessian_of") || ir_name_eq_lit(n, "hessian_wrt") || ir_name_eq_lit(n, "second_order_mean")
         || ir_name_eq_lit(n, "correlate") || ir_name_eq_lit(n, "std_of")
         || ir_name_eq_lit(n, "confidence_of")
 }
@@ -1167,11 +1168,11 @@ fn tg_stmts_nonstraight(opt: &Option<Box<StmtList>>, depth: i64) -> bool with Mu
 
 // Collect the names called by the body into `out` (up to 32), for the
 // transitive may-draw question.
-var TG_CALLEES: [Name; 33] = [ir_empty_name(); 33]
+var TG_CALLEES: [Name; 33]
 var TG_NCALLEES: i64 = 0
 // Methods called (by short name, a method call or `Type::f`), and whether the
 // body calls something that is not a name (a field, a call result).
-var TG_MCALLEES: [Name; 33] = [ir_empty_name(); 33]
+var TG_MCALLEES: [Name; 33]
 var TG_NMCALLEES: i64 = 0
 var TG_OPAQUE_CALL: i64 = 0
 
@@ -1649,7 +1650,7 @@ var FO_LOOP_SCOPE: [i64; 64] = [0; 64]
 // local whose residual was never written adds no residual channel.
 var FO_RESID_NZ: [i64; 128] = [0; 128]
 var FO_LATE_DONE: [i64; 64] = [0; 64]
-var TG_DROP_NAME: Name = ir_empty_name()
+var TG_DROP_NAME: Name
 var TG_TAINT_N: i64 = 0
 var TG_TAINT: [i64; 128] = [0; 128]
 var TG_TAINT_CALLEE: [i64; 128] = [0; 128]
@@ -2837,7 +2838,7 @@ fn fo_array_base_tracked(base: i64) -> bool with Mut, Panic, Div {
 // variance. Without this, variance_of(r.cl0) keys the reference's own
 // register and reads 0 while variance_of(p.cl0) is live.
 var FO_REF_ALIAS_COUNT: i64 = 0
-var FO_REF_ALIAS_NAME: [Name; 64] = [ir_empty_name(); 64]
+var FO_REF_ALIAS_NAME: [Name; 64]
 var FO_REF_ALIAS_BASE: [i64; 64] = [0 - 1; 64]
 
 fn fo_ref_alias_reset() with Mut {
@@ -2900,7 +2901,7 @@ var FO_LOGN_ACTIVE: i64 = 0
 var FO_LOGN_U: i64 = 0 - 1
 var FO_LOGN_V: i64 = 0 - 1
 var FO_LOGN_COUNT: i64 = 0
-var FO_LOGN_NAME: [Name; 64] = [ir_empty_name(); 64]
+var FO_LOGN_NAME: [Name; 64]
 var FO_LOGN_LU: [i64; 64] = [0 - 1; 64]
 var FO_LOGN_LV: [i64; 64] = [0 - 1; 64]
 
@@ -3191,8 +3192,62 @@ fn lower_raw_ptr_field_pointee(type_name: Name, field_name: Name) -> Name with M
     ir_empty_name()
 }
 
+// Referent of a field declared `&S` or `&!S`, for TYPING only. With `t: &!Tbl`
+// in `struct Lw`, `(*(*lo).t).count` had no owner type: the field's named type
+// is empty for a reference type expression, so `count` fell through to the
+// first struct that has a field of that name. A program that also declared an
+// unrelated `struct X { pad: i64, count: i64 }` stored 3 at X's offset of
+// `count` (8) instead of Tbl's (0) and printed 0, with exit 0 (measured
+// 2026-11-23, tests/run-pass/lean_single_deep_chain_stores.sio).
+// Kept apart from LOWER_RAW_FIELD_*: that table also decides the raw-pointer
+// deref code path (expr_is_raw_mut_deref_ref), and a reference field must keep
+// the code path it has; only its type was missing.
+var LOWER_REF_FIELD_COUNT: i64 = 0
+var LOWER_REF_FIELD_TYPE: [i64; 4096] = [0; 4096]
+var LOWER_REF_FIELD_NAME: [i64; 4096] = [0; 4096]
+var LOWER_REF_FIELD_PTE: [i64; 4096] = [0; 4096]
+
+fn lower_ref_field_note(type_name: Name, field_name: Name, ty: &TypeExpr) with Mut, Panic, Div {
+    if (*ty).kind != TypeExprKind::TypeReference && (*ty).kind != TypeExprKind::TypeRefMut { return }
+    let pte = lower_opt_type_named_name(&(*ty).inner)
+    if pte.len <= 0 { return }
+    let tid = ir_intern_name(type_name)
+    let fid = ir_intern_name(field_name)
+    let pid = ir_intern_name(pte)
+    var i: i64 = 0
+    while i < LOWER_REF_FIELD_COUNT {
+        if LOWER_REF_FIELD_TYPE[i as usize] == tid && LOWER_REF_FIELD_NAME[i as usize] == fid {
+            if LOWER_REF_FIELD_PTE[i as usize] != pid { LOWER_REF_FIELD_PTE[i as usize] = 0 - 1 }
+            return
+        }
+        i = i + 1
+    }
+    if LOWER_REF_FIELD_COUNT >= 4096 { return }
+    LOWER_REF_FIELD_TYPE[LOWER_REF_FIELD_COUNT as usize] = tid
+    LOWER_REF_FIELD_NAME[LOWER_REF_FIELD_COUNT as usize] = fid
+    LOWER_REF_FIELD_PTE[LOWER_REF_FIELD_COUNT as usize] = pid
+    LOWER_REF_FIELD_COUNT = LOWER_REF_FIELD_COUNT + 1
+}
+
+fn lower_ref_field_referent(type_name: Name, field_name: Name) -> Name with Mut, Panic, Div {
+    if type_name.len <= 0 { return ir_empty_name() }
+    let tid = ir_intern_name(type_name)
+    let fid = ir_intern_name(field_name)
+    var i: i64 = 0
+    while i < LOWER_REF_FIELD_COUNT {
+        if LOWER_REF_FIELD_TYPE[i as usize] == tid && LOWER_REF_FIELD_NAME[i as usize] == fid {
+            let pid = LOWER_REF_FIELD_PTE[i as usize]
+            if pid <= 0 { return ir_empty_name() }
+            return ir_name_at(pid)
+        }
+        i = i + 1
+    }
+    ir_empty_name()
+}
+
 fn lower_kn_field_note(type_name: Name, field_name: Name, ty: &TypeExpr) with Mut, Panic, Div {
     lower_raw_ptr_field_note(type_name, field_name, ty)
+    lower_ref_field_note(type_name, field_name, ty)
     // SIO-557: every struct declaration walk funnels through here, so one
     // hook records raw-ptr byte fields for all of them.
     lower_byteptr_field_note(type_name, field_name, ty)
@@ -10628,7 +10683,58 @@ fn lowerer_loop_rgn_finalize_mut(lo: &! Lowerer) with Mut, Panic, Div, IO {
 // BSS slot (lowerer_preseed_external_bss_globals_mut dedups by name); the
 // first module's initializer wins, as for the folded words
 // (ast_global_var_init_count).
+// E309: a module-level initializer that was neither folded into BSS words nor
+// deferred to `main`'s entry would leave its global zero-filled. Refused here,
+// after the module's last parse, because an imported pure fn folds only once
+// its module is registered (scripts/ci/madaros_global_init_identity_gate.sh).
+fn lowerer_refuse_dropped_global_inits_mut(lo: &! Lowerer) with Mut, Panic, Div, Alloc, IO {
+    if ast_global_init_drop_overflowed() {
+        print("error[E309]: the initializer of a module-level global can be neither evaluated at compile time nor run before `main`: more than 4096 such initializers, so some would not even be named; the compile is refused\n")
+        lowerer_mark_hard_error(lo)
+        return
+    }
+    var fi: i64 = 0
+    while fi < (*(*lo).module).fn_count {
+        let slot = ir_fn_get(&(*(*lo).module), fi)
+        if slot.compile_strategy == IR_STRATEGY_BSS_GLOBAL && slot.name.len > 0 {
+            if ast_global_init_dropped(slot.name) {
+                print("error[E309]: the initializer of a module-level global can be neither evaluated at compile time nor run before `main`: `")
+                lower_print_name(slot.name)
+                print("` would silently start as zero, so the compile is refused\n")
+                lowerer_mark_hard_error(lo)
+            } else if ast_global_deferred_block_ambiguous(slot.name) {
+                print("error[E309]: the initializer of a module-level global can be neither evaluated at compile time nor run before `main`: `")
+                lower_print_name(slot.name)
+                print("` has a closed array initializer in two modules, and one would overwrite the other at `main`'s entry\n")
+                lowerer_mark_hard_error(lo)
+            }
+        }
+        fi = fi + 1
+    }
+}
+
+// Fixed-array globals with a closed initializer: run the statements the parser
+// built for them (parser/items.sio items_defer_global_array_init).
+fn lowerer_emit_deferred_global_blocks_mut(lo: &! Lowerer) with Mut, Panic, Div, Alloc, IO {
+    if ast_global_deferred_block_overflowed() {
+        print("error[E309]: the initializer of a module-level global can be neither evaluated at compile time nor run before `main`: more than 4096 array initializers need run-time evaluation, and the rest would be left zero\n")
+        lowerer_mark_hard_error(lo)
+        return
+    }
+    var k: i64 = 0
+    while k < ast_global_deferred_block_count() {
+        let p = ast_global_deferred_block_ptr(k) as *mut Expr
+        if p != (0 as *mut Expr) {
+            let pair = (*lo).lower_expr_ref(&(*p))
+            (*lo) = pair.0
+        }
+        k = k + 1
+    }
+}
+
 fn lowerer_emit_deferred_global_inits_mut(lo: &! Lowerer) with Mut, Panic, Div, Alloc, IO {
+    lowerer_refuse_dropped_global_inits_mut(lo)
+    lowerer_emit_deferred_global_blocks_mut(lo)
     let total = ast_global_deferred_init_count()
     if ast_global_deferred_init_overflowed() {
         print("error: more than 16384 module-level initializers need run-time evaluation; the rest would be left zero, so the compile is refused (#2355)\n")
@@ -13769,6 +13875,82 @@ pub fn lower_untyped_field_trace_init() with IO, Mut, Div, Panic {
     } else {
         LOWER_UNTYPED_TRACE_ON = 0
     }
+    LOWER_STRICT_FIELD_COUNT = 0
+    if read_env("SOUNIO_STRICT_FIELD") == "1" {
+        LOWER_STRICT_FIELD_ON = 1
+    } else {
+        LOWER_STRICT_FIELD_ON = 0
+    }
+}
+
+// SOUNIO_STRICT_FIELD=1: a field index the lowerer GUESSES instead of reading
+// from the receiver's type refuses the compile (E311), listed after lowering.
+// The guesses are: (1) an untyped name that sits at different indices in
+// different layouts, resolved by majority vote; (2) a name in no layout,
+// resolved by the first-byte hash; (3) a known struct without that field,
+// also hashed. Each picks a word with no warning when it is wrong (#3722,
+// shape 21 of claude/research/2026-11-23-madaros-field-name-guessing.md).
+var LOWER_STRICT_FIELD_ON: i64 = 0
+var LOWER_STRICT_FIELD_COUNT: i64 = 0
+var LOWER_STRICT_FIELD_FN: [i64; 4096] = [0; 4096]
+var LOWER_STRICT_FIELD_NAME: [i64; 4096] = [0; 4096]
+var LOWER_STRICT_FIELD_WHY: [i64; 4096] = [0; 4096]
+// Set by field_idx_from_name / field_idx_from_name_simple: 0 when the index
+// came from a layout without a vote, else the guess kind (1 vote, 2 hash of an
+// unknown name, 3 hash of a field the named struct lacks). Read by the sites
+// that turn the index into a load or a store, and by the first-order variance
+// sites, where the index keys the uncertainty bound to a field: a guess there
+// moves no bytes but reads or binds another field's variance (why + 10).
+var LOWER_FIELD_GUESS_WHY: i64 = 0
+
+fn lower_strict_field_note(fn_name: Name, field_name: Name, why: i64) with Mut, Panic, Div {
+    if LOWER_STRICT_FIELD_ON == 0 { return }
+    let f = ir_intern_name(fn_name)
+    let n = ir_intern_name(field_name)
+    var i: i64 = 0
+    while i < LOWER_STRICT_FIELD_COUNT {
+        if LOWER_STRICT_FIELD_FN[i as usize] == f && LOWER_STRICT_FIELD_NAME[i as usize] == n
+            && LOWER_STRICT_FIELD_WHY[i as usize] == why {
+            return
+        }
+        i = i + 1
+    }
+    if LOWER_STRICT_FIELD_COUNT >= 4096 { return }
+    LOWER_STRICT_FIELD_FN[LOWER_STRICT_FIELD_COUNT as usize] = f
+    LOWER_STRICT_FIELD_NAME[LOWER_STRICT_FIELD_COUNT as usize] = n
+    LOWER_STRICT_FIELD_WHY[LOWER_STRICT_FIELD_COUNT as usize] = why
+    LOWER_STRICT_FIELD_COUNT = LOWER_STRICT_FIELD_COUNT + 1
+}
+
+// Prints one E311 line per distinct guess and returns how many there were.
+pub fn lower_strict_field_report() -> i64 with IO, Mut, Div, Panic {
+    if LOWER_STRICT_FIELD_ON == 0 { return 0 }
+    var i: i64 = 0
+    while i < LOWER_STRICT_FIELD_COUNT {
+        let fnm = ir_name_at(LOWER_STRICT_FIELD_FN[i as usize])
+        let fld = ir_name_at(LOWER_STRICT_FIELD_NAME[i as usize])
+        print("error[E311]: the index of field `")
+        print(str_from_bytes(fld.buf, fld.len))
+        print("` in `")
+        print(str_from_bytes(fnm.buf, fnm.len))
+        let why_all = LOWER_STRICT_FIELD_WHY[i as usize]
+        // 10 + why: the guessed slot keys first-order variance metadata, so
+        // the field's uncertainty would be read from or bound to that slot.
+        let why = why_all % 10
+        print("`")
+        if why_all >= 10 {
+            print(" (uncertainty bookkeeping)")
+        }
+        if why == 1 {
+            print(" is not read from the receiver's type: the name sits at different indices in different structs and the lowerer would pick one by vote\n")
+        } else if why == 2 {
+            print(" is not read from the receiver's type: no struct has this field and the lowerer would hash its first byte\n")
+        } else {
+            print(" is not read from the receiver's type: the receiver's struct has no such field and the lowerer would hash its first byte\n")
+        }
+        i = i + 1
+    }
+    LOWER_STRICT_FIELD_COUNT
 }
 
 fn lower_field_name_is_ambiguous(table: &StructLayoutTable, field_name: Name) -> bool with Mut, Panic, Div {
@@ -16820,11 +17002,325 @@ fn tg_hof_call_relower_safe(callee: Name, e: &Expr) -> bool with Mut, Panic, Div
     true
 }
 
+// A call to a known inline helper is re-lowered by the variance walk, which
+// evaluates it a second time. That is only meaning-preserving if the helper
+// leaves no trace the caller can see and reads nothing a sibling argument can
+// change. `with Mut` does not say so: it admits a write to a global.
+// `lcoh(rand_gaussian(..), r, rand_gaussian(..), ..)` drew from the generator
+// twice per argument, so the same program printed a different Monte Carlo mean
+// under Madaros than under lean_single.
+//
+// A helper is stateless here when, walking its body in lexical scope order:
+//   - every assignment's target is rooted in a name bound in an enclosing scope
+//     of the helper itself: a by-value parameter, a `let` or a `var`. A `&`/`&!`
+//     parameter or `self` writes through to the caller, so it does not count;
+//     neither does a deref store or any other target shape;
+//   - reads are not restricted (see the ExprIdent case in fo_sl_expr for the
+//     one ordering this leaves open);
+//   - every call (in an operand, an argument, a struct-literal field, an
+//     assignment target or a match arm) is a pure math builtin or, again, a
+//     stateless known helper; a method call, a call through a non-name, a
+//     closure, an effect handler or `perform` answers "not stateless".
+// A call back into a helper whose check is in progress adds nothing: the bodies
+// on the cycle decide. Anything else, including the depth (8) or visit (64)
+// budget running out, answers "not stateless": the argument is then lowered
+// once and the call carries no inlined variance, the walk's old fallback.
+var FO_SL_LOC: [Name; 64]
+var FO_SL_NLOC: i64 = 0
+var FO_SL_BAD: i64 = 0
+var FO_SL_BUDGET: i64 = 0
+var FO_SL_CALLEES: [Name; 33]
+var FO_SL_NCALLEES: i64 = 0
+var FO_SL_STACK: [Name; 9]
+
+fn fo_sl_is_local(n: Name) -> bool with Mut, Panic, Div {
+    var i: i64 = FO_SL_NLOC - 1
+    while i >= 0 {
+        if ir_name_eq(FO_SL_LOC[i as usize], n) { return true }
+        i = i - 1
+    }
+    false
+}
+
+fn fo_sl_add_local(n: Name) with Mut, Panic, Div {
+    if FO_SL_NLOC >= 64 {
+        FO_SL_BAD = 1
+        return
+    }
+    FO_SL_LOC[FO_SL_NLOC as usize] = n
+    FO_SL_NLOC = FO_SL_NLOC + 1
+}
+
+fn fo_sl_note_callee(n: Name) with Mut, Panic, Div {
+    if FO_SL_NCALLEES >= 32 {
+        FO_SL_BAD = 1
+        return
+    }
+    FO_SL_CALLEES[FO_SL_NCALLEES as usize] = n
+    FO_SL_NCALLEES = FO_SL_NCALLEES + 1
+}
+
+// The name an assignment target finally writes through: `x`, `x[i]`, `x.f`,
+// `x[i].f`. A deref store or any other shape has no such name (empty).
+fn fo_sl_target_root(e: &Expr, depth: i64) -> Name with Mut, Panic, Div {
+    if depth > 32 { return ir_empty_name() }
+    if (*e).kind == ExprKind::ExprIdent { return (*e).name }
+    if (*e).kind == ExprKind::ExprIndex || (*e).kind == ExprKind::ExprFieldAccess {
+        match (*e).left {
+            Some(l) => { return fo_sl_target_root(&(*l), depth + 1) }
+            None => { return ir_empty_name() }
+        }
+    }
+    ir_empty_name()
+}
+
+fn fo_sl_opt(opt: &Option<Box<Expr>>, depth: i64) with Mut, Panic, Div {
+    match *opt {
+        Some(x) => { fo_sl_expr(&(*x), depth + 1) }
+        None => {}
+    }
+}
+
+// Every sub-expression a value or a call can hide in. The index expressions
+// of an assignment target are walked as reads; its root is checked by the
+// caller.
+fn fo_sl_expr(e: &Expr, depth: i64) with Mut, Panic, Div {
+    if depth > 96 {
+        FO_SL_BAD = 1
+        return
+    }
+    let k = (*e).kind
+    if k == ExprKind::ExprClosure || k == ExprKind::ExprHandle || k == ExprKind::ExprMethodCall {
+        FO_SL_BAD = 1
+        return
+    }
+    // A read of a module-level `var` is allowed: the re-lowered copy feeds the
+    // variance channels, not the value or any state, and refusing it removed
+    // the inlined variance of every helper that reads a parameter kept in a
+    // `var` global (6 of the 550 variance tests, e.g. knowledge_vanthoff_pressure).
+    // A sibling argument that writes that global does not leak into the
+    // variance in the shape tests/run-pass/global_read_sibling_mutator_order.sio
+    // pins: with the reader first, value and variance both use the global as it
+    // was (2 and 1, not 2 and 100); with the writer first, both use the new
+    // value. Other shapes are not measured.
+    if k == ExprKind::ExprIdent { return }
+    if k == ExprKind::ExprCall {
+        match (*e).left {
+            Some(c) => {
+                if (*c).kind == ExprKind::ExprIdent {
+                    fo_sl_note_callee((*c).name)
+                } else {
+                    FO_SL_BAD = 1
+                }
+            }
+            None => { FO_SL_BAD = 1 }
+        }
+    } else {
+        fo_sl_opt(&(*e).left, depth)
+    }
+    fo_sl_opt(&(*e).right, depth)
+    fo_sl_opt(&(*e).else_expr, depth)
+    match (*e).block {
+        Some(b) => { fo_sl_stmts(&(*b).stmts, depth + 1) }
+        None => {}
+    }
+    match (*e).handler_block {
+        Some(_b) => { FO_SL_BAD = 1 }
+        None => {}
+    }
+    var args = &(*e).args
+    while true {
+        match *args {
+            Some(a) => {
+                fo_sl_expr(&(*a).head, depth + 1)
+                args = &(*a).tail
+            }
+            None => break
+        }
+    }
+    var fl = &(*e).fields
+    while true {
+        match *fl {
+            Some(f) => {
+                fo_sl_expr(&(*f).head.value, depth + 1)
+                fl = &(*f).tail
+            }
+            None => break
+        }
+    }
+    var arms = &(*e).arms
+    while true {
+        match *arms {
+            Some(al) => {
+                // A pattern may bind names; they are not recorded, so a read of
+                // one fails closed as a non-local read.
+                fo_sl_opt(&(*al).head.guard, depth)
+                fo_sl_expr(&(*al).head.body, depth + 1)
+                arms = &(*al).tail
+            }
+            None => break
+        }
+    }
+}
+
+// One lexical scope: bindings made here are visible to later statements of
+// this block and its sub-blocks, and dropped when the block ends.
+fn fo_sl_stmts(opt: &Option<Box<StmtList>>, depth: i64) with Mut, Panic, Div {
+    if depth > 96 {
+        FO_SL_BAD = 1
+        return
+    }
+    let mark = FO_SL_NLOC
+    var cur = opt
+    while true {
+        match *cur {
+            Some(sl) => {
+                let k = (*sl).head.kind
+                // The initialiser is read before the new name exists.
+                match (*sl).head.expr {
+                    Some(x) => { fo_sl_expr(&(*x), depth + 1) }
+                    None => {}
+                }
+                if k == StmtKind::StmtLet || k == StmtKind::StmtVar {
+                    fo_sl_add_local((*sl).head.name)
+                }
+                if k == StmtKind::StmtAssign {
+                    match (*sl).head.target {
+                        Some(t) => {
+                            let root = fo_sl_target_root(&(*t), 0)
+                            if root.len <= 0 || !fo_sl_is_local(root) { FO_SL_BAD = 1 }
+                            // index expressions in the target are reads (and may call)
+                            if (*t).kind == ExprKind::ExprIndex || (*t).kind == ExprKind::ExprFieldAccess {
+                                fo_sl_opt(&(*t).left, depth)
+                                fo_sl_opt(&(*t).right, depth)
+                            }
+                        }
+                        None => { FO_SL_BAD = 1 }
+                    }
+                }
+                cur = &(*sl).tail
+            }
+            None => break
+        }
+    }
+    FO_SL_NLOC = mark
+}
+
+fn fo_sl_empty_def() -> FnDef {
+    FnDef {
+        name: ir_empty_name(), params: None, return_type: None, effects: None,
+        body: Block { stmts: None, span: Span { file_id: 0, start: 0, end: 0 } },
+        span: Span { file_id: 0, start: 0, end: 0 }, is_kernel: false, is_extern: false,
+    }
+}
+
+// `given`: fd0 is the definition to test (a bound function of a specialised
+// clone); otherwise n is looked up among the known inline helpers.
+// `fn_params_callable`: a call to one of the definition's own parameters (a
+// higher-order helper calling the function it was handed) is not a callee
+// here; the caller checks the functions bound to those parameters.
+fn fo_known_helper_stateless_at(n: Name, depth: i64, given: bool, fd0: FnDef, fn_params_callable: bool) -> bool with Mut, Panic, Div, Alloc {
+    if !given && lower_name_is_pure_math_builtin(n) { return true }
+    if depth > 8 { return false }
+    var k: i64 = 0
+    while k < depth {
+        if ir_name_eq(FO_SL_STACK[k as usize], n) { return true }
+        k = k + 1
+    }
+    if FO_SL_BUDGET <= 0 { return false }
+    FO_SL_BUDGET = FO_SL_BUDGET - 1
+    var fd = fd0
+    if !given {
+        let id = ir_intern_name(n)
+        var found = false
+        var cur = FO_INLINE_HEAD
+        while !found {
+            match cur {
+                Some(node) => {
+                    if (*node).id == id {
+                        fd = (*node).def
+                        found = true
+                    } else {
+                        cur = (*node).next
+                    }
+                }
+                None => break
+            }
+        }
+        if !found { return false }
+    }
+    FO_SL_STACK[depth as usize] = n
+    FO_SL_NLOC = 0
+    FO_SL_BAD = 0
+    FO_SL_NCALLEES = 0
+    var pnames: [Name; 16] = [ir_empty_name(); 16]
+    var np: i64 = 0
+    var pc = &fd.params
+    while true {
+        match *pc {
+            Some(pl) => {
+                if np < 16 {
+                    pnames[np as usize] = (*pl).head.name
+                    np = np + 1
+                }
+                // `self` and `&`/`&!`/raw-pointer parameters reach the caller's storage.
+                if !(*pl).head.is_self && !lower_type_expr_is_ref_like(&(*pl).head.ty) && (*pl).head.ty.kind != TypeExprKind::TypeRawPtr {
+                    fo_sl_add_local((*pl).head.name)
+                }
+                pc = &(*pl).tail
+            }
+            None => break
+        }
+    }
+    fo_sl_stmts(&fd.body.stmts, 0)
+    if FO_SL_BAD != 0 { return false }
+    let nn = FO_SL_NCALLEES
+    var callees: [Name; 33] = [ir_empty_name(); 33]
+    var j: i64 = 0
+    while j < nn {
+        callees[j as usize] = FO_SL_CALLEES[j as usize]
+        j = j + 1
+    }
+    j = 0
+    while j < nn {
+        var skip = false
+        if fn_params_callable {
+            var q: i64 = 0
+            while q < np {
+                if ir_name_eq(pnames[q as usize], callees[j as usize]) { skip = true }
+                q = q + 1
+            }
+        }
+        if !skip {
+            if !fo_known_helper_stateless_at(callees[j as usize], depth + 1, false, fo_sl_empty_def(), false) { return false }
+        }
+        j = j + 1
+    }
+    true
+}
+
+fn fo_known_helper_stateless(n: Name) -> bool with Mut, Panic, Div, Alloc {
+    FO_SL_BUDGET = 64
+    fo_known_helper_stateless_at(n, 0, false, fo_sl_empty_def(), false)
+}
+
+// The same test for a definition in hand: the bound function of a specialised
+// clone, or a higher-order helper (whose own function parameters are checked
+// by the caller through what they are bound to).
+fn fo_def_stateless(fd: FnDef, fn_params_callable: bool) -> bool with Mut, Panic, Div, Alloc {
+    FO_SL_BUDGET = 64
+    fo_known_helper_stateless_at(fd.name, 0, true, fd, fn_params_callable)
+}
+
 fn lower_expr_relower_safe_ref(e: &Expr) -> bool with Mut, Panic, Div, Alloc {
     if (*e).kind == ExprKind::ExprCall {
         match (*e).left {
             Some(callee) => {
-                if (*callee).kind == ExprKind::ExprIdent && (lower_name_is_pure_math_builtin((*callee).name) || fo_inline_known((*callee).name)) {
+                if (*callee).kind == ExprKind::ExprIdent && lower_name_is_pure_math_builtin((*callee).name) {
+                    return lower_expr_list_relower_safe(&(*e).args)
+                }
+                if (*callee).kind == ExprKind::ExprIdent && fo_inline_known((*callee).name) {
+                    if !fo_known_helper_stateless((*callee).name) { return false }
                     return lower_expr_list_relower_safe(&(*e).args)
                 }
                 if (*callee).kind == ExprKind::ExprIdent && tg_bound_fn((*callee).name).len > 0 {
@@ -16832,11 +17328,28 @@ fn lower_expr_relower_safe_ref(e: &Expr) -> bool with Mut, Panic, Div, Alloc {
                     let bent = tg_fn_ident_entry((*callee).name)
                     if bent >= 0 && TG_HASFN[bent as usize] != 1 && TG_RET[bent as usize] == 0 && !tg_may_draw(bent, 0) {
                         let bfd = tg_def_at(bent)
-                        if !tg_effects_have_io(&bfd.effects) { return lower_expr_list_relower_safe(&(*e).args) }
+                        // No IO and no draw is not enough: a bound function may write a global.
+                        if !tg_effects_have_io(&bfd.effects) && fo_def_stateless(bfd, false) { return lower_expr_list_relower_safe(&(*e).args) }
                     }
                     return false
                 }
                 if (*callee).kind == ExprKind::ExprIdent && tg_hof_call_relower_safe((*callee).name, e) {
+                    // The higher-order helper itself, and every function handed to it.
+                    let t = tg_find(ir_intern_name((*callee).name))
+                    if t < 0 || !fo_def_stateless(tg_def_at(t), true) { return false }
+                    var hac = &(*e).args
+                    while true {
+                        match *hac {
+                            Some(hal) => {
+                                if (*hal).head.kind == ExprKind::ExprIdent {
+                                    let ent = tg_fn_ident_entry((*hal).head.name)
+                                    if ent >= 0 && !fo_def_stateless(tg_def_at(ent), false) { return false }
+                                }
+                                hac = &(*hal).tail
+                            }
+                            None => break
+                        }
+                    }
                     return lower_expr_list_relower_safe(&(*e).args)
                 }
             }
@@ -17203,6 +17716,18 @@ fn so_name_is_hessian_of_ident(e: &Expr) -> bool with Mut, Panic, Div {
         && n.buf[4] == 105 as i8 && n.buf[5] == 97 as i8
         && n.buf[6] == 110 as i8 && n.buf[7] == 95 as i8
         && n.buf[8] == 111 as i8 && n.buf[9] == 102 as i8 { return true }
+    // `hessian_wrt` reads the same Hessian by source identity, so it must
+    // switch the second-order walk on too. Without this the builtin compiles
+    // and runs, so_enabled stays false, every slot stays -1, and the query
+    // evaluates to exactly zero with no diagnostic.
+    // "hessian_wrt" = 11 chars
+    if n.len == 11
+        && n.buf[0] == 104 as i8 && n.buf[1] == 101 as i8
+        && n.buf[2] == 115 as i8 && n.buf[3] == 115 as i8
+        && n.buf[4] == 105 as i8 && n.buf[5] == 97 as i8
+        && n.buf[6] == 110 as i8 && n.buf[7] == 95 as i8
+        && n.buf[8] == 119 as i8 && n.buf[9] == 114 as i8
+        && n.buf[10] == 116 as i8 { return true }
     // `second_order_mean` reads the same Hessian, so it must switch the
     // second-order walk on too. Without this line the builtin still compiles
     // and still runs -- so_enabled stays false, every so_expr_hess slot stays
@@ -18039,6 +18564,7 @@ impl Lowerer {
 
     fn emit_named_field(self, base_reg: i64, field_name: Name, value_reg: i64) -> Lowerer with Mut, Panic, Div, IO {
         let field_idx = self.field_idx_from_name_simple(field_name)
+        if LOWER_STRICT_FIELD_ON != 0 && LOWER_FIELD_GUESS_WHY != 0 { lower_strict_field_note(self.current_fn_name_for_trace(), field_name, LOWER_FIELD_GUESS_WHY) }
         self.emit(ir_field_set(base_reg, field_idx, value_reg, field_name))
     }
 
@@ -19006,6 +19532,8 @@ impl Lowerer {
             r = self.lower_sensitivity_of_call_ref(&e.args)
         } else if kind == 4 {
             r = self.lower_hessian_of_call_ref(&e.args)
+        } else if kind == 6 {
+            r = self.lower_hessian_wrt_call_ref(&e.args)
         } else {
             r = self.lower_second_order_mean_call_ref(&e.args)
         }
@@ -19027,6 +19555,7 @@ impl Lowerer {
             if kind == 2 { print("uncertainty_of") }
             if kind == 3 { print("sensitivity_of") }
             if kind == 4 { print("hessian_of") }
+            if kind == 6 { print("hessian_wrt") }
             if kind == 5 { print("second_order_mean") }
             print(" in `")
             print(str_from_bytes((*lo.current_func).name.buf, (*lo.current_func).name.len))
@@ -20082,11 +20611,17 @@ impl Lowerer {
         while row < nout {
             let iv = lo.tg_row_install(si, row)
             lo = iv.0
-            // Hop through the struct-valued fields on the way to the leaf.
+            // Hop through the struct-valued fields on the way to the leaf. The
+            // path came from the returned type's layout (tg_out_layout), so
+            // each hop is resolved against the struct it walks, never by vote.
             var cur = dst_reg
+            var cur_ty = ir_name_at(TG_RTYPE[tgi as usize])
             var l: i64 = 0
             while l + 1 < odepth[row as usize] {
-                let hidx = lo.field_idx_from_name_simple(ir_name_at(opath[(row * 3 + l) as usize]))
+                let hname = ir_name_at(opath[(row * 3 + l) as usize])
+                let hidx = lo.field_idx_from_name(cur_ty, hname)
+                cur_ty = lo.field_named_type_for_struct(cur_ty, hname)
+                if LOWER_STRICT_FIELD_ON != 0 && LOWER_FIELD_GUESS_WHY != 0 { lower_strict_field_note(lo.current_fn_name_for_trace(), ir_name_at(opath[(row * 3 + l) as usize]), LOWER_FIELD_GUESS_WHY + 10) }
                 var nxt = lo.lookup_variance_for_field_base(cur, hidx)
                 if nxt < 0 {
                     let fr = lo.fresh_reg()
@@ -20097,7 +20632,8 @@ impl Lowerer {
                 cur = nxt
                 l = l + 1
             }
-            let fidx = lo.field_idx_from_name_simple(ir_name_at(opath[(row * 3 + odepth[row as usize] - 1) as usize]))
+            let fidx = lo.field_idx_from_name(cur_ty, ir_name_at(opath[(row * 3 + odepth[row as usize] - 1) as usize]))
+            if LOWER_STRICT_FIELD_ON != 0 && LOWER_FIELD_GUESS_WHY != 0 { lower_strict_field_note(lo.current_fn_name_for_trace(), ir_name_at(opath[(row * 3 + odepth[row as usize] - 1) as usize]), LOWER_FIELD_GUESS_WHY + 10) }
             lo = lo.bind_variance_for_field(cur, fidx, iv.1)
             lo = lo.fo_field_sens_store(lo.variance_field_key(cur, fidx))
             if ord2 { lo = lo.fo_field_hess_store(lo.variance_field_key(cur, fidx)) }
@@ -23533,6 +24069,17 @@ impl Lowerer {
         && n.buf[8] == 111 as i8 && n.buf[9] == 102 as i8
     }
 
+    // "hessian_wrt" = h e s s i a n _ w r t (11 bytes)
+    fn name_is_hessian_wrt(self, n: Name) -> bool with Div {
+        n.len == 11
+        && n.buf[0] == 104 as i8 && n.buf[1] == 101 as i8
+        && n.buf[2] == 115 as i8 && n.buf[3] == 115 as i8
+        && n.buf[4] == 105 as i8 && n.buf[5] == 97 as i8
+        && n.buf[6] == 110 as i8 && n.buf[7] == 95 as i8
+        && n.buf[8] == 119 as i8 && n.buf[9] == 114 as i8
+        && n.buf[10] == 116 as i8
+    }
+
     // second_order_mean(expr) -> E2[f] = f(mu) + (1/2) * sum_k H_kk * sigma2_k
     // correlate(a, b, rho) -- record Cov between the channels a and b carry.
     fn name_is_correlate(self, n: Name) -> bool with Div {
@@ -25253,6 +25800,7 @@ impl Lowerer {
                     // the outer field, so variance_of(result.water.value)
                     // is the same transfer as variance_of(call().water.value).
                     var leaf_f0: i64 = 0 - 1
+                    LOWER_FIELD_GUESS_WHY = 0
                     if depth == 0 {
                         if sname.len > 0 {
                             leaf_f0 = lo.field_idx_from_struct_literal_name(sname, fname, field_idx)
@@ -25260,13 +25808,18 @@ impl Lowerer {
                             leaf_f0 = lo.field_idx_from_name_simple(fname)
                         }
                     } else if depth == 1 && outer_idx >= 0 && outer_idx < 128 {
-                        let leaf = lo.field_idx_from_name_simple(fname)
+                        // sname is this inner literal's own struct (the caller passes
+                        // its path), so the leaf index is read from that layout.
+                        let leaf = if sname.len > 0 { lo.field_idx_from_struct_literal_name(sname, fname, field_idx) } else { lo.field_idx_from_name_simple(fname) }
                         if leaf >= 0 && leaf < 128 {
                             leaf_f0 = 0 - (2 + outer_idx * 128 + leaf)
                         }
                     }
+                    // The transfer is registered under this slot: a guessed slot
+                    // attaches the leaf's uncertainty to another field.
+                    if LOWER_STRICT_FIELD_ON != 0 && LOWER_FIELD_GUESS_WHY != 0 { lower_strict_field_note(lo.current_fn_name_for_trace(), fname, LOWER_FIELD_GUESS_WHY + 10) }
                     if (*init).kind == ExprKind::ExprStructLit {
-                        let child_outer = if depth == 0 { lo.field_idx_from_name_simple(fname) } else { 0 - 1 }
+                        let child_outer = if depth == 0 { if sname.len > 0 { lo.field_idx_from_struct_literal_name(sname, fname, field_idx) } else { lo.field_idx_from_name_simple(fname) } } else { 0 - 1 }
                         lo = lo.fo_ctor_walk_literal(fn_hash, sub, blk, init, p0, p1, nparams, depth + 1, ir_path_first_name((*init).path), child_outer)
                     } else {
                         lo = lo.fo_ctor_classify_leaf(fn_hash, sub, leaf_f0, blk, init, p0, p1, nparams, 0)
@@ -27401,7 +27954,11 @@ impl Lowerer {
             if inner.1 < 0 {
                 return (lo, -1)
             }
-            let idx = lo.field_idx_from_name_simple((*base).name)
+            // A Box local (`let next = pair.1`) has no struct type of its own; the
+            // load site reads its inner layout, and so must the variance key.
+            let vbx = match (*base).left { Some(vbl) => { if (*vbl).kind == ExprKind::ExprIdent { lower_lookup_box_inner_layout(lo.locals, lo.scope_depth, (*vbl).name) } else { 0 - 1 } } _ => 0 - 1 }
+            let idx = if vbx >= 0 && vbx < (*lo.struct_layouts).count { lo.field_idx_from_name((*lo.struct_layouts).entries[vbx as usize].type_name, (*base).name) } else { lo.field_idx_for_base_ref(&(*base).left, (*base).name) }
+            if LOWER_STRICT_FIELD_ON != 0 && LOWER_FIELD_GUESS_WHY != 0 { lower_strict_field_note(lo.current_fn_name_for_trace(), (*base).name, LOWER_FIELD_GUESS_WHY + 10) }
             return (lo, lo.lookup_variance_for_field_base(inner.1, idx))
         }
         // #1706: a chain rooted at a CALL carrying an identity FO transfer.
@@ -31032,7 +31589,11 @@ impl Lowerer {
             let fbase = self.variance_field_chain_base(e)
             if fbase.1 >= 0 {
                 var lo_f = fbase.0
-                let idx = lo_f.field_idx_from_name_simple((*e).name)
+                // A Box local (`let next = pair.1`) has no struct type of its own; the
+                // load site reads its inner layout, and so must the variance key.
+                let vbx = match (*e).left { Some(vbl) => { if (*vbl).kind == ExprKind::ExprIdent { lower_lookup_box_inner_layout(lo_f.locals, lo_f.scope_depth, (*vbl).name) } else { 0 - 1 } } _ => 0 - 1 }
+                let idx = if vbx >= 0 && vbx < (*lo_f.struct_layouts).count { lo_f.field_idx_from_name((*lo_f.struct_layouts).entries[vbx as usize].type_name, (*e).name) } else { lo_f.field_idx_for_base_ref(&(*e).left, (*e).name) }
+                if LOWER_STRICT_FIELD_ON != 0 && LOWER_FIELD_GUESS_WHY != 0 { lower_strict_field_note(lo_f.current_fn_name_for_trace(), (*e).name, LOWER_FIELD_GUESS_WHY + 10) }
                 let live = lo_f.fo_live_var_from_field_key(fbase.1, idx)
                 if live.1 >= 0 {
                     return live
@@ -31550,6 +32111,14 @@ impl Lowerer {
 
     fn expr_call_return_knowledge_value_float_ref(self, expr: &Expr) -> i64 with Mut, Panic, Div, Alloc {
         if (*expr).kind == ExprKind::ExprCall {
+            match (*expr).left {
+                Some(callee_k) => {
+                    if (*callee_k).kind == ExprKind::ExprIdent && ir_name_eq_lit((*callee_k).name, "knight") {
+                        return 1
+                    }
+                }
+                None => {}
+            }
             let fn_id = self.expr_call_callee_fn_id_ref(expr)
             if fn_id >= 0 && fn_id < self.module.fn_count {
                 return ir_fn_get(&(*self.module), fn_id as usize).return_kn_value_float
@@ -31991,6 +32560,7 @@ impl Lowerer {
 
     // Phase 3.2: Proper struct field index lookup via layout table
     fn field_idx_from_name(self, struct_name: Name, field_name: Name) -> i64 with Mut, Panic, Div {
+        LOWER_FIELD_GUESS_WHY = 0
         // Search layout table for the struct
         var si: i64 = 0
         while si < (*self.struct_layouts).count {
@@ -32006,6 +32576,7 @@ impl Lowerer {
                 // Named layout is present but this field is not on it. Do not
                 // consult other structs: a majority of `.end` is Span.end = 2,
                 // which is also Expr.int_val. Hash only.
+                LOWER_FIELD_GUESS_WHY = 3
                 if field_name.len <= 0 {
                     return 0
                 }
@@ -32018,6 +32589,13 @@ impl Lowerer {
         let consensual = lower_field_idx_untyped(&(*self.struct_layouts), field_name)
         if LOWER_UNTYPED_TRACE_ON != 0 {
             lower_untyped_field_trace_note(&(*self.struct_layouts), self.current_fn_name_for_trace(), field_name, consensual)
+        }
+        if LOWER_STRICT_FIELD_ON != 0 {
+            if lower_field_name_is_ambiguous(&(*self.struct_layouts), field_name) {
+                LOWER_FIELD_GUESS_WHY = 1
+            } else if consensual < 0 {
+                LOWER_FIELD_GUESS_WHY = 2
+            }
         }
         if consensual >= 0 {
             return consensual
@@ -32032,6 +32610,7 @@ impl Lowerer {
     // Phase 3.2: Lookup struct field index without needing struct name
     // Used when we don't know the struct type at the call site
     fn field_idx_from_name_simple(self, n: Name) -> i64 with Mut, Panic, Div {
+        LOWER_FIELD_GUESS_WHY = 0
         // Try numeric field access first (.0, .1, .2, ..., .15, ...). Tuple-let
         // desugaring turns `let (_, ..., v10) = f()` into a temporary tuple plus
         // `let v10 = __tup.10` (#1502), so a tuple slot name can be more than one
@@ -32060,6 +32639,13 @@ impl Lowerer {
         if LOWER_UNTYPED_TRACE_ON != 0 {
             lower_untyped_field_trace_note(&(*self.struct_layouts), self.current_fn_name_for_trace(), n, consensual)
         }
+        if LOWER_STRICT_FIELD_ON != 0 {
+            if lower_field_name_is_ambiguous(&(*self.struct_layouts), n) {
+                LOWER_FIELD_GUESS_WHY = 1
+            } else if consensual < 0 {
+                LOWER_FIELD_GUESS_WHY = 2
+            }
+        }
         if consensual >= 0 {
             return consensual
         }
@@ -32072,6 +32658,7 @@ impl Lowerer {
     }
 
     fn field_idx_from_struct_literal_name(self, struct_name: Name, field_name: Name, default_idx: i64) -> i64 with Mut, Panic, Div {
+        LOWER_FIELD_GUESS_WHY = 0
         if struct_name.len <= 0 {
             return self.field_idx_from_name_simple(field_name)
         }
@@ -32539,6 +33126,13 @@ impl Lowerer {
     }
 
     fn field_is_float_for_base_ref(self, base_opt: &Option<Box<Expr>>, field_name: Name) -> bool with Mut, Panic, Div, Alloc {
+        let tidx = lower_name_tuple_index(field_name)
+        if tidx >= 0 {
+            let tmask = self.opt_base_tuple_float_mask_ref(base_opt) & 4294967295
+            if tmask != 0 && (tmask >> (tidx as i32)) % 2 == 1 {
+                return true
+            }
+        }
         if ir_name_eq_lit(field_name, "value") {
             let kn = self.field_base_kn_value_float_ref(base_opt)
             if kn == 0 { return false }
@@ -32558,6 +33152,7 @@ impl Lowerer {
     }
 
     fn field_idx_for_base_ref(self, base_opt: &Option<Box<Expr>>, field_name: Name) -> i64 with Mut, Panic, Div, Alloc {
+        LOWER_FIELD_GUESS_WHY = 0
         match *base_opt {
             Some(base_expr) => {
                 let type_name = self.expr_receiver_struct_type_ref(&(*base_expr))
@@ -33036,6 +33631,9 @@ impl Lowerer {
                                 // `(*(*c).structs)` -- a field declared `*mut S`.
                                 let raw_inner = lower_raw_ptr_field_pointee(owner_type, (*operand).name)
                                 if raw_inner.len > 0 { return raw_inner }
+                                // `(*(*lo).t)` -- a field declared `&!S` or `&S`.
+                                let ref_inner = lower_ref_field_referent(owner_type, (*operand).name)
+                                if ref_inner.len > 0 { return ref_inner }
                             }
                             None => {}
                         }
@@ -33538,6 +34136,9 @@ impl Lowerer {
     fn opt_base_tuple_float_mask_ref(self, base_opt: &Option<Box<Expr>>) -> i64 with Mut, Panic, Div, Alloc {
         match *base_opt {
             Some(base_expr) => {
+                if (*base_expr).kind == ExprKind::ExprFieldAccess && ir_name_eq_lit((*base_expr).name, "iv") {
+                    return 3
+                }
                 if (*base_expr).kind == ExprKind::ExprIdent {
                     return self.lookup_local_tuple_float_mask((*base_expr).name)
                 }
@@ -33982,7 +34583,7 @@ impl Lowerer {
                         || self.name_is_uncertainty_of(callee_name)
                         || self.name_is_sensitivity_of(callee_name)
                         || self.name_is_second_order_mean(callee_name)
-                        || self.name_is_hessian_of(callee_name) {
+                        || self.name_is_hessian_of(callee_name) || self.name_is_hessian_wrt(callee_name) {
                         return true
                     }
                     if (*callee_expr).kind == ExprKind::ExprIdent {
@@ -34446,6 +35047,12 @@ impl Lowerer {
     fn expr_direct_struct_name(self, e: &Expr) -> Name with Mut, Panic, Div, Alloc {
         if (*e).kind == ExprKind::ExprIdent {
             return self.lookup_local_struct_type((*e).name)
+        }
+        // `(B { .. }, n)`: a struct literal names its own type. Without this
+        // arm the slot stayed untyped and `t.0.x` voted across every struct
+        // with an `x` -- B { y, x } read index 0 or the hash, printing 0.
+        if (*e).kind == ExprKind::ExprStructLit {
+            return ir_path_first_name((*e).path)
         }
         let fid = self.expr_method_fn_id(e)
         if fid >= 0 {
@@ -39216,6 +39823,9 @@ impl Lowerer {
                             lo = lo.bind_local_struct_type(s.name, make_name("Knowledge"), false)
                             lowerer_bind_kn_value_float_mut(&! lo, s.name, 1)
                         }
+                        if (*rhs).kind == ExprKind::ExprFieldAccess && ir_name_eq_lit((*rhs).name, "iv") {
+                            lo = lo.bind_local_tuple_float_mask(s.name, 3)
+                        }
                     }
                     None => {}
                 }
@@ -39365,6 +39975,11 @@ impl Lowerer {
                         }
                         None => false,
                     }
+                    // knight("name", lo, hi) -> Knowledge<f64>
+                    if ir_name_eq_lit(callee_struct_name, "knight") {
+                        lo = lo.bind_local_struct_type(s.name, make_name("Knowledge"), false)
+                        lowerer_bind_kn_value_float_mut(&! lo, s.name, 1)
+                    }
                     // measure(...) → Knowledge (return-name lookup often misses builtins)
                     if ir_name_is_measure(callee_struct_name) {
                         lo = lo.bind_local_struct_type(s.name, make_name("Knowledge"), false)
@@ -39393,6 +40008,13 @@ impl Lowerer {
                         }
                     }
                     if name_eq_lit(callee_struct_name, "seq_len") {
+                        lo = lo.bind_local_struct_type(s.name, make_name("Knowledge"), false)
+                    }
+                    // The builtin `Knowledge(v, e=c)` constructor returns a Knowledge but
+                    // has no fn id, so the return-name lookup missed it and `k.epsilon`
+                    // was resolved by name: a struct with its own `epsilon` field at
+                    // another index won the vote and the read took that slot.
+                    if name_eq_lit(callee_struct_name, "Knowledge") {
                         lo = lo.bind_local_struct_type(s.name, make_name("Knowledge"), false)
                     }
                     // `let pair = f()` where f returns a tuple carrying a named
@@ -39717,10 +40339,48 @@ impl Lowerer {
                         lo = lo.bind_local_tuple_struct(s.name, t0_layout, 0)
                     }
                 }
+                // A tuple literal names the struct of EVERY slot directly. The
+                // arm above answers slot 0 only, so `let t = (n, B { .. })` left
+                // `t.1.x` untyped: the vote across structs with an `x` picked
+                // the wrong index and the read returned 0 (strict E311). A local
+                // records two struct slots; a third stays untyped and strict
+                // refuses it rather than guess.
+                if (*t0_expr).kind == ExprKind::ExprTupleLit {
+                    lo = lo.bind_tuple_literal_struct_slots(s.name, &(*t0_expr))
+                }
             }
             _ => {}
         }
         (lo, reg)
+    }
+
+    fn bind_tuple_literal_struct_slots(self, name: Name, e: &Expr) -> Lowerer with Mut, Alloc, Panic, Div {
+        var lo = self
+        var bound: i64 = 0
+        var k: i64 = 0
+        var cur = &(*e).args
+        while bound < 2 {
+            match *cur {
+                Some(lst) => {
+                    let sn = lo.expr_direct_struct_name(&(*lst).head)
+                    if sn.len > 0 {
+                        let li = lower_struct_layout_index_of(&(*lo.struct_layouts), sn)
+                        if li >= 0 {
+                            if bound == 0 {
+                                lo = lo.bind_local_tuple_struct(name, li, k)
+                            } else {
+                                lo = lo.bind_local_tuple_struct2(name, li, k)
+                            }
+                            bound = bound + 1
+                        }
+                    }
+                    k = k + 1
+                    cur = &(*lst).tail
+                }
+                _ => break
+            }
+        }
+        lo
     }
 
     fn lower_let_stmt(self, s: Stmt, is_mut: bool) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
@@ -39831,6 +40491,7 @@ impl Lowerer {
                         match base_opt {
                             Some(base_expr) => {
                                 let fidx = lo_cmp.field_idx_for_base_ref(&(*target_f128).left, (*target_f128).name)
+                                if LOWER_STRICT_FIELD_ON != 0 && LOWER_FIELD_GUESS_WHY != 0 { lower_strict_field_note(lo_cmp.current_fn_name_for_trace(), (*target_f128).name, LOWER_FIELD_GUESS_WHY) }
                                 let pair_base = lo_cmp.lower_expr_ref(&(*base_expr))
                                 var lo_f = pair_base.0
                                 let base_reg = pair_base.1
@@ -40137,6 +40798,7 @@ impl Lowerer {
                                     false
                                 }
                                 let fidx = lo.field_idx_for_base_ref(&(*target_expr).left, (*target_expr).name)
+                                if LOWER_STRICT_FIELD_ON != 0 && LOWER_FIELD_GUESS_WHY != 0 { lower_strict_field_note(lo.current_fn_name_for_trace(), (*target_expr).name, LOWER_FIELD_GUESS_WHY) }
                                 let field_word = if raw_mut_deref {
                                     lo.raw_payload_word_offset(&(*target_expr).left, (*target_expr).name, fidx)
                                 } else {
@@ -41416,6 +42078,7 @@ impl Lowerer {
                     } else {
                         field_idx
                     }
+                    if LOWER_STRICT_FIELD_ON != 0 && LOWER_FIELD_GUESS_WHY != 0 && (*list).head.name.len > 0 { lower_strict_field_note(lo.current_fn_name_for_trace(), (*list).head.name, LOWER_FIELD_GUESS_WHY) }
                     // V0-E.5.5: an f128 field initializer must produce an F128Bits
                     // handle — a bare `1.0` here is binary128, never f64 bits.
                     let field_is_f128 = struct_name.len > 0
@@ -42040,6 +42703,7 @@ impl Lowerer {
                             return lo.refuse_struct_pattern("unknown field")
                         }
                         let fidx = lo.field_idx_from_name(struct_name, fname)
+                        if LOWER_STRICT_FIELD_ON != 0 && LOWER_FIELD_GUESS_WHY != 0 { lower_strict_field_note(lo.current_fn_name_for_trace(), fname, LOWER_FIELD_GUESS_WHY) }
                         let is_float = lo.field_is_float_for_struct(struct_name, fname)
                         let pair_d = lo.fresh_reg()
                         lo = pair_d.0
@@ -42723,7 +43387,7 @@ impl Lowerer {
             match (*e).left {
                 Some(callee) => {
                     if (*callee).kind == ExprKind::ExprIdent {
-                        if name_eq_lit((*callee).name, "measure") || name_eq_lit((*callee).name, "Knowledge") { return true }
+                        if name_eq_lit((*callee).name, "measure") || name_eq_lit((*callee).name, "Knowledge") || name_eq_lit((*callee).name, "knight") { return true }
                     }
                 }
                 None => {}
@@ -42734,9 +43398,77 @@ impl Lowerer {
         if (*e).kind == ExprKind::ExprBinary {
             if (*e).bin_op != BinaryOp::OpAdd && (*e).bin_op != BinaryOp::OpSub
                 && (*e).bin_op != BinaryOp::OpMul && (*e).bin_op != BinaryOp::OpDiv { return false }
+            // Knowledge (op) exact constant: test the cheap syntactic constant
+            // shape first, so each child is classified at most once (a second
+            // recursive pass per level made deep sums exponential).
+            if self.opt_expr_is_exact_f64_const_ref(&(*e).right) { return self.opt_expr_is_knowledge_operand_ref(&(*e).left) }
+            if self.opt_expr_is_exact_f64_const_ref(&(*e).left) { return self.opt_expr_is_knowledge_operand_ref(&(*e).right) }
             return self.opt_expr_is_knowledge_operand_ref(&(*e).left) && self.opt_expr_is_knowledge_operand_ref(&(*e).right)
         }
         false
+    }
+
+    // The exact constant shapes checker_expr_is_exact_f64_const_inplace admits:
+    // a float literal, its negation, or a non-local name that
+    // ast_global_is_exact_f64_literal proves unique with a literal initialiser.
+    fn expr_is_exact_f64_const_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        if (*e).kind == ExprKind::ExprFloatLit { return true }
+        if (*e).kind == ExprKind::ExprUnary && (*e).un_op == UnaryOp::OpNeg {
+            match (*e).left {
+                Some(inner) => { return self.expr_is_exact_f64_const_ref(&(*inner)) }
+                None => { return false }
+            }
+        }
+        if (*e).kind == ExprKind::ExprIdent && ast_global_is_exact_f64_literal((*e).name) {
+            return self.lookup_local((*e).name) == IR_INVALID_REG || self.lookup_local_is_global((*e).name)
+        }
+        false
+    }
+
+    fn opt_expr_is_exact_f64_const_ref(self, opt: &Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc {
+        match *opt {
+            Some(b) => self.expr_is_exact_f64_const_ref(&(*b)),
+            None => false,
+        }
+    }
+
+    // Knowledge<f64> (op) exact f64 constant, recognised syntactically on both
+    // sides. Every mixed Knowledge/f64 arithmetic node that reaches the lowerer
+    // was admitted by checker_knowledge_scalar_status_inplace (other shapes are
+    // E004 or E313). A span table recorded by the checker does not reach the
+    // lowerer on the multi-module path, so the arm cannot rely on one.
+    fn expr_is_knowledge_scalar_const_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        if (*e).bin_op != BinaryOp::OpAdd && (*e).bin_op != BinaryOp::OpSub
+            && (*e).bin_op != BinaryOp::OpMul && (*e).bin_op != BinaryOp::OpDiv { return false }
+        if self.opt_expr_is_exact_f64_const_ref(&(*e).right) { return self.opt_expr_is_knowledge_operand_ref(&(*e).left) }
+        if self.opt_expr_is_exact_f64_const_ref(&(*e).left) { return self.opt_expr_is_knowledge_operand_ref(&(*e).right) }
+        false
+    }
+
+    // Wrap an exact f64 register as a Knowledge handle {value, 0, 1} and reuse
+    // the Knowledge (x) Knowledge GUM arm: with variance 0 and confidence 1 on
+    // the constant side it reduces to c^2 va (*), va (+ -), va / c^2 (k / c),
+    // c^2 vb / b^4 (c / k), and min(conf, 1) = conf.
+    fn lower_knowledge_scalar_arith(self, op: BinaryOp, lhs: i64, rhs: i64, k_on_left: bool, dst: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let scalar = if k_on_left { rhs } else { lhs }
+        let hp = lo.fresh_reg()
+        lo = hp.0
+        let zp = lo.fresh_reg()
+        lo = zp.0
+        lo = lo.emit(ir_load_float(zp.1, 0.0))
+        let op1 = lo.fresh_reg()
+        lo = op1.0
+        lo = lo.emit(ir_load_float(op1.1, 1.0))
+        lo = lo.emit(ir_mark_float_reg(scalar))
+        lo = lo.emit(ir_alloc(hp.1, 0))
+        lo = lo.emit(ir_field_set(hp.1, 0, scalar, make_name("value")))
+        lo = lo.emit(ir_field_set(hp.1, 1, zp.1, make_name("variance")))
+        lo = lo.emit(ir_field_set(hp.1, 2, op1.1, make_name("confidence")))
+        if k_on_left {
+            return lo.lower_knowledge_binary_arith(op, lhs, hp.1, dst)
+        }
+        lo.lower_knowledge_binary_arith(op, hp.1, rhs, dst)
     }
 
     // Knowledge operand tree whose leaves are all bound names (no call), so it
@@ -42862,6 +43594,26 @@ impl Lowerer {
         lo = lo.emit(ir_field_set(dst, 0, rv.1, make_name("value")))
         lo = lo.emit(ir_field_set(dst, 1, var_reg, make_name("variance")))
         lo = lo.emit(ir_field_set(dst, 2, cm, make_name("confidence")))
+        // EPI-006 step 3b: propagate certified Knightian affine form (slot 63).
+        // Fast-paths in 3 instructions when neither operand carries Knightian uncertainty.
+        let rids_kn = ir_ensure_knight_runtime(&! (*lo.module))
+        let op_code_kn: i64 = if op == BinaryOp::OpAdd { 0 } else if op == BinaryOp::OpSub { 1 } else if op == BinaryOp::OpMul { 2 } else { 3 }
+        let opc_p = lo.fresh_reg()
+        lo = opc_p.0
+        lo = lo.emit(ir_load_imm(opc_p.1, op_code_kn))
+        let kret_p = lo.fresh_reg()
+        lo = kret_p.0
+        let kargs: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_cons(
+            opc_p.1,
+            Some(Box::new(ir_reg_list_cons(
+                lhs,
+                Some(Box::new(ir_reg_list_cons(
+                    rhs,
+                    Some(Box::new(ir_reg_list_single(dst))),
+                ))),
+            ))),
+        )))
+        lo = lo.emit(ir_call(kret_p.1, rids_kn.fid_binop, make_name("__sounio_knight_binop"), kargs, 4))
         lo = lo.bind_variance_for_base_reg(dst, var_reg)
         lo.pending_variance_reg = var_reg
         lo = lo.fo_seed_from_variance(var_reg, 0 - 1)
@@ -42947,6 +43699,112 @@ impl Lowerer {
         }
 
         (lo11, dst_reg)
+    }
+
+    // EPI-006 step 3b: knight("name", lo, hi) -> Knowledge<f64> carrying a
+    // named Knightian affine source in slot 63, midpoint in slot 0, variance 0.
+    fn lower_knight_call_ref(self, _span: Span, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if FO_FN_OBSERVES { FO_CONTAINER_KNOWLEDGE_SEEN = true }
+        fo_require_uncertainty_tracking()
+        var lo = self
+        var name_reg: i64 = 0 - 1
+        var lo_reg: i64 = 0 - 1
+        var hi_reg: i64 = 0 - 1
+        match *args {
+            Some(l0) => {
+                let p0 = lo.lower_expr_ref(&(*l0).head)
+                lo = p0.0
+                name_reg = p0.1
+                match (*l0).tail {
+                    Some(l1) => {
+                        let a1_is_f = lo.expr_result_is_float_ref(&(*l1).head)
+                        let p1 = lo.lower_expr_ref(&(*l1).head)
+                        lo = p1.0
+                        lo_reg = p1.1
+                        if !a1_is_f {
+                            let z1p = lo.fresh_reg()
+                            lo = z1p.0
+                            lo = lo.emit(ir_load_float(z1p.1, 0.0))
+                            lo = lo.emit(ir_mark_float_reg(z1p.1))
+                            let c1p = lo.fresh_reg()
+                            lo = c1p.0
+                            lo = lo.emit(ir_binop_typed(c1p.1, lo_reg, BinaryOp::OpAdd, z1p.1, false, true))
+                            lo = lo.emit(ir_mark_float_reg(c1p.1))
+                            lo_reg = c1p.1
+                        } else {
+                            lo = lo.emit(ir_mark_float_reg(lo_reg))
+                        }
+                        match (*l1).tail {
+                            Some(l2) => {
+                                let a2_is_f = lo.expr_result_is_float_ref(&(*l2).head)
+                                let p2 = lo.lower_expr_ref(&(*l2).head)
+                                lo = p2.0
+                                hi_reg = p2.1
+                                if !a2_is_f {
+                                    let z2p = lo.fresh_reg()
+                                    lo = z2p.0
+                                    lo = lo.emit(ir_load_float(z2p.1, 0.0))
+                                    lo = lo.emit(ir_mark_float_reg(z2p.1))
+                                    let c2p = lo.fresh_reg()
+                                    lo = c2p.0
+                                    lo = lo.emit(ir_binop_typed(c2p.1, hi_reg, BinaryOp::OpAdd, z2p.1, false, true))
+                                    lo = lo.emit(ir_mark_float_reg(c2p.1))
+                                    hi_reg = c2p.1
+                                } else {
+                                    lo = lo.emit(ir_mark_float_reg(hi_reg))
+                                }
+                            }
+                            None => {}
+                        }
+                    }
+                    None => {}
+                }
+            }
+            None => {}
+        }
+        if name_reg < 0 {
+            let dp = lo.emit_unit()
+            return dp
+        }
+        if lo_reg < 0 {
+            let lp = lo.fresh_reg()
+            lo = lp.0
+            lo = lo.emit(ir_load_float(lp.1, 0.0))
+            lo = lo.emit(ir_mark_float_reg(lp.1))
+            lo_reg = lp.1
+        }
+        if hi_reg < 0 {
+            let hp = lo.fresh_reg()
+            lo = hp.0
+            lo = lo.emit(ir_load_float(hp.1, 0.0))
+            lo = lo.emit(ir_mark_float_reg(hp.1))
+            hi_reg = hp.1
+        }
+        let rids = ir_ensure_knight_runtime(&! (*lo.module))
+        let dst_p = lo.fresh_reg()
+        lo = dst_p.0
+        let dst_reg = dst_p.1
+        let kargs: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_cons(
+            name_reg,
+            Some(Box::new(ir_reg_list_cons(
+                lo_reg,
+                Some(Box::new(ir_reg_list_single(hi_reg))),
+            ))),
+        )))
+        lo = lo.emit(ir_call(dst_reg, rids.fid_new, make_name("__sounio_knight_new"), kargs, 3))
+        let vp = lo.fresh_reg()
+        lo = vp.0
+        lo = lo.emit(ir_load_float(vp.1, 0.0))
+        lo = lo.emit(ir_mark_float_reg(vp.1))
+        lo = lo.bind_variance_for_base_reg(dst_reg, vp.1)
+        lo.pending_variance_reg = vp.1
+        lo = lo.fo_seed_from_variance(vp.1, 0 - 1)
+        var mk: i64 = 0
+        while mk < FO_MAX_CH {
+            lo.fo_pending_sens[mk as usize] = lo.fo_expr_sens[mk as usize]
+            mk = mk + 1
+        }
+        (lo, dst_reg)
     }
 
     // Knowledge(v, e=<confidence>, prov=<provenance>) -> Knowledge<f64> struct construction.
@@ -43041,7 +43899,11 @@ impl Lowerer {
             let fbase = inl.0.variance_field_chain_base(e)
             var lo = fbase.0
             if fbase.1 >= 0 {
-                let idx = lo.field_idx_from_name_simple((*e).name)
+                // A Box local (`let next = pair.1`) has no struct type of its own; the
+                // load site reads its inner layout, and so must the variance key.
+                let vbx = match (*e).left { Some(vbl) => { if (*vbl).kind == ExprKind::ExprIdent { lower_lookup_box_inner_layout(lo.locals, lo.scope_depth, (*vbl).name) } else { 0 - 1 } } _ => 0 - 1 }
+                let idx = if vbx >= 0 && vbx < (*lo.struct_layouts).count { lo.field_idx_from_name((*lo.struct_layouts).entries[vbx as usize].type_name, (*e).name) } else { lo.field_idx_for_base_ref(&(*e).left, (*e).name) }
+                if LOWER_STRICT_FIELD_ON != 0 && LOWER_FIELD_GUESS_WHY != 0 { lower_strict_field_note(lo.current_fn_name_for_trace(), (*e).name, LOWER_FIELD_GUESS_WHY + 10) }
                 let key = lo.variance_field_key(fbase.1, idx)
                 let slot = lo.fo_field_sens_slot(key)
                 if slot >= 0 {
@@ -43907,6 +44769,97 @@ impl Lowerer {
                 var lo_z = z.0
                 lo_z = lo_z.emit(ir_mark_float_reg(z.1))
                 (lo_z, z.1)
+            }
+        }
+    }
+
+    // hessian_wrt(z, x, y): read the same upper-triangle slot hessian_of
+    // reads, but addressed by source identity, not by position. x and y are
+    // the measured sources themselves (Knowledge bindings); each resolves
+    // at compile time to the channel its own variance register was seeded
+    // with (fo_seed_from_variance keys channels by that register), so a dead
+    // measure() removed by DCE, or reordered code, cannot renumber the
+    // answer the way it renumbers hessian_of(z, j, k).
+    //
+    // Refused with E312 when a source does not resolve to exactly one
+    // channel (not a measured source, or an expression carrying several),
+    // or when z does not depend on that channel: in this algebra a zero
+    // Hessian is the claim "no second-order dependence", and handing it
+    // back for a source the value never heard of would dress a wrong
+    // answer as a right one.
+    fn lower_hessian_wrt_call_ref(self, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        fo_require_uncertainty_tracking()
+        match *args {
+            Some(list) => {
+                // Walk z FIRST and snapshot its Hessian table and sensitivity
+                // row: resolving the sources below walks them, and those
+                // walks rewrite the same tables, so reading the table after
+                // them would read the sources' (empty) Hessian, not z's.
+                let saved_loops = FO_INLINE_ALLOW_LOOPS
+                FO_INLINE_ALLOW_LOOPS = 1
+                TG_QUERY_DEPTH = TG_QUERY_DEPTH + 1
+                let pair_v = self.lower_expr_variance_ref(&(*list).head)
+                TG_QUERY_DEPTH = TG_QUERY_DEPTH - 1
+                FO_INLINE_ALLOW_LOOPS = saved_loops
+                var lo = pair_v.0
+                var hess_snap: [i64; 2080] = [-1; 2080]
+                var hi2: i64 = 0
+                while hi2 < 2080 {
+                    hess_snap[hi2 as usize] = (*lo.so_hess).h[hi2 as usize]
+                    hi2 = hi2 + 1
+                }
+                let sens_snap = lo.fo_snapshot_expr_sens()
+                // Resolve the sources: each walk leaves fo_expr_sens holding
+                // that source's own sensitivity row, whose one live channel
+                // is the source's channel.
+                var cx: i64 = 0 - 1
+                var cy: i64 = 0 - 1
+                match (*list).tail {
+                    Some(rest) => {
+                        let px = lo.lower_expr_variance_ref(&(*rest).head)
+                        lo = px.0
+                        cx = lo.fo_primary_channel()
+                        match (*rest).tail {
+                            Some(rest2) => {
+                                let py = lo.lower_expr_variance_ref(&(*rest2).head)
+                                lo = py.0
+                                cy = lo.fo_primary_channel()
+                            }
+                            _ => {}
+                        }
+                    }
+                    _ => {}
+                }
+                let depends_x = cx >= 0 && cx < FO_MAX_CH && sens_snap[cx as usize] >= 0
+                let depends_y = cy >= 0 && cy < FO_MAX_CH && sens_snap[cy as usize] >= 0
+                if !depends_x || !depends_y {
+                    print("error[E312]: hessian_wrt source is not a measured source that the value depends on\n")
+                    print("   = note: hessian_wrt(z, x, y) indexes by the measured sources themselves; a source with no channel, several channels, or no dependence from z is refused instead of reading a Hessian slot by position\n")
+                    lo = lo.report_error_at(44309)
+                    let zr = lo.emit_f64_const(0.0)
+                    var lo_z = zr.0
+                    lo_z = lo_z.emit(ir_mark_float_reg(zr.1))
+                    return (lo_z, zr.1)
+                }
+                let idx = lo.so_hess_idx(cx, cy)
+                let slot = hess_snap[idx as usize]
+                if slot >= 0 {
+                    let cp = lo.fresh_reg()
+                    lo = cp.0
+                    lo = lo.emit(ir_copy(cp.1, slot))
+                    lo = lo.emit(ir_mark_float_reg(cp.1))
+                    return (lo, cp.1)
+                }
+                let zr = lo.emit_f64_const(0.0)
+                var lo_z = zr.0
+                lo_z = lo_z.emit(ir_mark_float_reg(zr.1))
+                (lo_z, zr.1)
+            }
+            _ => {
+                let zr = self.emit_f64_const(0.0)
+                var lo_z = zr.0
+                lo_z = lo_z.emit(ir_mark_float_reg(zr.1))
+                (lo_z, zr.1)
             }
         }
     }
@@ -45178,13 +46131,14 @@ impl Lowerer {
             || ir_name_is_transition_step_count(callee_name)
             || ir_name_is_lift_knowledge(callee_name)
             || ir_name_is_measure(callee_name)
+            || ir_name_eq_lit(callee_name, "knight")
             || (self.name_is_sign(callee_name) && count_expr_list_ref(&e.args) == 2)
             || ir_name_is_knowledge_ctor(callee_name)
             || self.name_is_variance_of(callee_name)
             || self.name_is_covariance_of(callee_name)
             || self.name_is_uncertainty_of(callee_name)
             || self.name_is_sensitivity_of(callee_name)
-            || self.name_is_hessian_of(callee_name)
+            || self.name_is_hessian_of(callee_name) || self.name_is_hessian_wrt(callee_name)
             || self.name_is_correlate(callee_name)
             || fo_merge_kind(callee_name) >= 0
             || self.name_is_second_order_mean(callee_name)
@@ -45294,6 +46248,9 @@ impl Lowerer {
         if ir_name_is_measure(callee_name) {
             return self.lower_measure_call_ref(e.span, &e.args)
         }
+        if ir_name_eq_lit(callee_name, "knight") {
+            return self.lower_knight_call_ref(e.span, &e.args)
+        }
         if ir_name_is_knowledge_ctor(callee_name) {
             return self.lower_knowledge_ctor_call_ref(e.span, &e.args)
         }
@@ -45319,6 +46276,9 @@ impl Lowerer {
         }
         if self.name_is_hessian_of(callee_name) {
             return self.tg_checked_query(4, e)
+        }
+        if self.name_is_hessian_wrt(callee_name) {
+            return self.tg_checked_query(6, e)
         }
         if self.name_is_correlate(callee_name) {
             return self.lower_correlate_call_ref(&e.args)
@@ -46409,6 +47369,23 @@ impl Lowerer {
                 lo_k6 = lo_k6.emit(ir_field_set(dst, 0, result_value_reg, make_name("value")))
                 lo_k6 = lo_k6.emit(ir_field_set(dst, 1, result_variance_reg, make_name("variance")))
                 var lo_k7 = lo_k6.emit(ir_field_set(dst, 2, conf_reg, make_name("confidence")))
+                let rids_ss = ir_ensure_knight_runtime(&! (*lo_k7.module))
+                let opc_ss = lo_k7.fresh_reg()
+                lo_k7 = opc_ss.0
+                lo_k7 = lo_k7.emit(ir_load_imm(opc_ss.1, 0))
+                let kret_ss = lo_k7.fresh_reg()
+                lo_k7 = kret_ss.0
+                let kargs_ss: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_cons(
+                    opc_ss.1,
+                    Some(Box::new(ir_reg_list_cons(
+                        lhs,
+                        Some(Box::new(ir_reg_list_cons(
+                            lhs,
+                            Some(Box::new(ir_reg_list_single(dst))),
+                        ))),
+                    ))),
+                )))
+                lo_k7 = lo_k7.emit(ir_call(kret_ss.1, rids_ss.fid_binop, make_name("__sounio_knight_binop"), kargs_ss, 4))
                 lo_k7 = lo_k7.bind_variance_for_base_reg(dst, result_variance_reg)
                 lo_k7.pending_variance_reg = result_variance_reg
                 lo_k7 = lo_k7.fo_seed_from_variance(result_variance_reg, 0 - 1)
@@ -46419,6 +47396,24 @@ impl Lowerer {
                 }
                 return (lo_k7, dst)
             }
+        }
+        if (e.bin_op == BinaryOp::OpAdd || e.bin_op == BinaryOp::OpSub || e.bin_op == BinaryOp::OpMul || e.bin_op == BinaryOp::OpDiv)
+            && lo3.expr_is_knowledge_scalar_const_ref(e) {
+            let k_left = lo3.opt_expr_is_knowledge_operand_ref(&e.left)
+            if !k_left && !lo3.opt_expr_is_knowledge_operand_ref(&e.right) {
+                print("error: Madaros cannot classify the Knowledge operand of a Knowledge (x) constant expression; bind it to a typed local first, e.g. `let a: Knowledge<f64> = ...` (fail-closed)\n")
+                var lo_ks_refuse = lo3
+                lowerer_mark_hard_error(&! lo_ks_refuse)
+                return (lo_ks_refuse, dst)
+            }
+            let scalar_is_float = if k_left { rhs_expr_is_float } else { lhs_expr_is_float }
+            if !scalar_is_float {
+                print("error: the constant operand of a Knowledge (x) constant expression does not lower as f64 (a module-level constant is typed unknown inside a function); write the literal or annotate it `: f64` (fail-closed)\n")
+                var lo_kf_refuse = lo3
+                lowerer_mark_hard_error(&! lo_kf_refuse)
+                return (lo_kf_refuse, dst)
+            }
+            return lo3.lower_knowledge_scalar_arith(e.bin_op, lhs, rhs, k_left, dst)
         }
         if e.bin_op == BinaryOp::OpAdd || e.bin_op == BinaryOp::OpSub || e.bin_op == BinaryOp::OpMul || e.bin_op == BinaryOp::OpDiv {
             let hid = lowerer_find_hyper_expr_id_for_span_ref(&lo3, e.span)
@@ -47258,6 +48253,7 @@ impl Lowerer {
     // word 0 and resolve it as a GC handle — heap_alloc leaves that word 0.
     fn prepare_raw_mut_field_index(self, field_expr: &Expr, elem_idx: i64) -> RawMutIndexAddr with Mut, Panic, Div, Alloc, IO {
         let fidx = self.field_idx_for_base_ref(&(*field_expr).left, (*field_expr).name)
+        if LOWER_STRICT_FIELD_ON != 0 && LOWER_FIELD_GUESS_WHY != 0 { lower_strict_field_note(self.current_fn_name_for_trace(), (*field_expr).name, LOWER_FIELD_GUESS_WHY) }
         let word_off = self.raw_payload_word_offset(&(*field_expr).left, (*field_expr).name, fidx)
         let packed_byte = self.raw_payload_field_is_byte(&(*field_expr).left, (*field_expr).name)
         let ptr_pair = match (*field_expr).left {
@@ -47337,6 +48333,14 @@ impl Lowerer {
         // version changed nothing measurable.
         var lo1 = lo1_pre
         var base = base_pre
+        if ir_name_eq_lit(e.name, "iv") && (lo1.opt_expr_is_knowledge_operand_ref(&e.left) || lo1.field_base_kn_value_float_ref(&e.left) >= 0) {
+            let rids_iv = ir_ensure_knight_runtime(&! (*lo1.module))
+            let iv_dst_p = lo1.fresh_reg()
+            lo1 = iv_dst_p.0
+            let iv_args: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_single(base)))
+            lo1 = lo1.emit(ir_call(iv_dst_p.1, rids_iv.fid_iv, make_name("__sounio_knight_iv"), iv_args, 1))
+            return (lo1, iv_dst_p.1)
+        }
         if ir_name_eq_lit(e.name, "value") {
             let kn_marker = lo1.field_base_kn_value_float_ref(&e.left)
             if kn_marker == 2 || kn_marker == -2 {
@@ -47450,6 +48454,7 @@ impl Lowerer {
         } else {
             lo1.field_idx_for_base_ref(&e.left, e.name)
         }
+        if LOWER_STRICT_FIELD_ON != 0 && LOWER_FIELD_GUESS_WHY != 0 { lower_strict_field_note(lo1.current_fn_name_for_trace(), e.name, LOWER_FIELD_GUESS_WHY) }
         // Tuple desugar: let __tup = f(); let a = __tup.0 — float-element base
         // means .0/.1 are f64 even without a struct layout entry.
         var field_is_float = lo1.field_is_float_for_base_ref(&e.left, e.name) || lo1.field_is_float_by_name_simple(e.name)
@@ -50478,10 +51483,16 @@ impl Lowerer {
             print_int(dst)
             print("\n")
         }
-        lo = lo.emit(ir_alloc(dst, lo.aggregate_storage_bytes(count_struct_fields_ref(&e.fields))))
-        lo = lo.ensure_struct_literal_layout_ref(ir_path_first_name(e.path), &e.fields)
-        lo = lo.lower_struct_fields_ref(dst, ir_path_first_name(e.path), &e.fields, 0)
-        if ir_name_eq_lit(ir_path_first_name(e.path), "Knowledge") {
+        let lit_struct_name = ir_path_first_name(e.path)
+        let lit_alloc_tag = if ir_name_eq_lit(lit_struct_name, "Knowledge") {
+            0
+        } else {
+            lo.aggregate_storage_bytes(count_struct_fields_ref(&e.fields))
+        }
+        lo = lo.emit(ir_alloc(dst, lit_alloc_tag))
+        lo = lo.ensure_struct_literal_layout_ref(lit_struct_name, &e.fields)
+        lo = lo.lower_struct_fields_ref(dst, lit_struct_name, &e.fields, 0)
+        if ir_name_eq_lit(lit_struct_name, "Knowledge") {
             lo = lo.lower_knowledge_literal_variance(dst, &e.fields)
         }
         (lo, dst)

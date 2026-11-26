@@ -41,7 +41,7 @@
 
 use check::check::{checker_ns_sabotage, checker_ns_trace_emit}
 use check::compat::{is_bool_type, is_error_or_unknown, types_compatible}
-use check::noise_sets::{ns_empty, ns_union, ns_union_opaque, ns_union_sub}
+use check::noise_sets::{ns_empty, ns_union, ns_union_opaque, ns_union_sub, ns_unknown}
 use check::types::{ty_ate, ty_bigO, ty_contest, ty_counterfactual, ty_diff_private, ty_differentiable, ty_distribution, ty_dp_budget, ty_elbo, ty_entropic, ty_error, ty_f64, ty_fair_prediction, ty_gradient, ty_intervention, ty_jacobian, ty_kl_bounded, ty_knowledge, ty_lemma, ty_matrix_shaped, ty_mutual_info, ty_policy, ty_proof, ty_robust, ty_sample, ty_sde, ty_validated}
 use parser::ast::{ast_string_lit_payload, name_eq}
 pub fn check_knowledge_type(checker: Checker, info: KnowledgeTypeInfo) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
@@ -89,10 +89,14 @@ pub fn check_knowledge_type(checker: Checker, info: KnowledgeTypeInfo) -> (Check
     // Validate epsilon bound if present
     var eps_val: f64 = -1.0
     var eps_mode: i64 = 0
+    var knight_set: i64 = ns_empty()
     match info.epsilon {
         Some(eb) => {
             let bound = *eb
-            if bound.value < 0.0 {
+            if bound.value == 0.0 - 2.0 && bound.op == CompareOp::CmpEq {
+                // `ε=⊥`: Knightian ignorance — carried in knight_set_id (unknown/non-empty), no numeric bound.
+                knight_set = ns_unknown()
+            } else if bound.value < 0.0 {
                 c = c.report_error_at(Span { file_id: 0, start: 0, end: 0 }, 22, 0, 0, 0)
             } else if bound.value > 1.0 {
                 c = c.report_error_at(Span { file_id: 0, start: 0, end: 0 }, 22, 0, 0, 0)
@@ -111,6 +115,7 @@ pub fn check_knowledge_type(checker: Checker, info: KnowledgeTypeInfo) -> (Check
     // only consumer. Lane: SOUNIO-KNOWLEDGE-BOUNDARY-PROVENANCE.
     var ty = ty_knowledge(inner_ty, eps_val)
     ty.knowledge_epsilon_mode = eps_mode
+    ty.knight_set_id = knight_set
     let prov = meta.provenance
     ty.knowledge_provenance_kind = prov.kind
     let val_cond = meta.validity
@@ -132,10 +137,13 @@ pub fn check_intervention_type(checker: Checker, info: KnowledgeTypeInfo) -> (Ch
 
     var eps_val: f64 = -1.0
     var eps_mode: i64 = 0
+    var knight_set: i64 = ns_empty()
     match info.epsilon {
         Some(eb) => {
             let bound = *eb
-            if bound.value < 0.0 {
+            if bound.value == 0.0 - 2.0 && bound.op == CompareOp::CmpEq {
+                knight_set = ns_unknown()
+            } else if bound.value < 0.0 {
                 c = c.report_error_at(Span { file_id: 0, start: 0, end: 0 }, 22, 0, 0, 0)
             } else if bound.value > 1.0 {
                 c = c.report_error_at(Span { file_id: 0, start: 0, end: 0 }, 22, 0, 0, 0)
@@ -149,6 +157,7 @@ pub fn check_intervention_type(checker: Checker, info: KnowledgeTypeInfo) -> (Ch
 
     var ty = ty_intervention(inner_ty, eps_val)
     ty.knowledge_epsilon_mode = eps_mode
+    ty.knight_set_id = knight_set
     (c, ty)
 }
 
@@ -159,10 +168,13 @@ pub fn check_counterfactual_type(checker: Checker, info: KnowledgeTypeInfo) -> (
 
     var eps_val: f64 = -1.0
     var eps_mode: i64 = 0
+    var knight_set: i64 = ns_empty()
     match info.epsilon {
         Some(eb) => {
             let bound = *eb
-            if bound.value < 0.0 {
+            if bound.value == 0.0 - 2.0 && bound.op == CompareOp::CmpEq {
+                knight_set = ns_unknown()
+            } else if bound.value < 0.0 {
                 c = c.report_error_at(Span { file_id: 0, start: 0, end: 0 }, 22, 0, 0, 0)
             } else if bound.value > 1.0 {
                 c = c.report_error_at(Span { file_id: 0, start: 0, end: 0 }, 22, 0, 0, 0)
@@ -176,6 +188,7 @@ pub fn check_counterfactual_type(checker: Checker, info: KnowledgeTypeInfo) -> (
 
     var ty = ty_counterfactual(inner_ty, eps_val)
     ty.knowledge_epsilon_mode = eps_mode
+    ty.knight_set_id = knight_set
     (c, ty)
 }
 
@@ -186,10 +199,13 @@ pub fn check_validated_type(checker: Checker, info: KnowledgeTypeInfo) -> (Check
 
     var eps_val: f64 = -1.0
     var eps_mode: i64 = 0
+    var knight_set: i64 = ns_empty()
     match info.epsilon {
         Some(eb) => {
             let bound = *eb
-            if bound.value < 0.0 {
+            if bound.value == 0.0 - 2.0 && bound.op == CompareOp::CmpEq {
+                knight_set = ns_unknown()
+            } else if bound.value < 0.0 {
                 c = c.report_error_at(Span { file_id: 0, start: 0, end: 0 }, 22, 0, 0, 0)
             } else if bound.value > 1.0 {
                 c = c.report_error_at(Span { file_id: 0, start: 0, end: 0 }, 22, 0, 0, 0)
@@ -203,6 +219,7 @@ pub fn check_validated_type(checker: Checker, info: KnowledgeTypeInfo) -> (Check
 
     var ty = ty_validated(inner_ty, eps_val)
     ty.knowledge_epsilon_mode = eps_mode
+    ty.knight_set_id = knight_set
     (c, ty)
 }
 
@@ -1204,25 +1221,26 @@ pub fn epsilon_mode_from_compare_op(op: CompareOp) -> i64 {
     0
 }
 
-// Directional epsilon subsumption. This deliberately mirrors lean_single
-// ty_eq: the required annotation chooses the direction, while a confidence
-// value cannot flow into an error-bound requirement.
-pub fn epsilon_subsumes(provided_eps: f64, provided_mode: i64, required_eps: f64, required_mode: i64) -> bool {
+// Directional epsilon subsumption with Knightian source-set discipline.
+// Precise requirements (ε < x, ε >= x, ε = x) accept only an empty Knightian
+// set (provided_ks == 0). `ε=⊥` (required_ks != 0) and unannotated Knowledge<T>
+// accept any set. Precise -> ⊥ is allowed; ⊥ -> precise is refused.
+pub fn epsilon_subsumes(provided_eps: f64, provided_mode: i64, provided_ks: i64, required_eps: f64, required_mode: i64, required_ks: i64) -> bool {
     if provided_eps > 1.0 || required_eps > 1.0 {
         return false
     }
-    if required_mode == 3 {
-        if provided_mode == 3 { return true }
-        return provided_mode == 0 && provided_eps < 0.0
+    if required_ks != 0 {
+        return true
     }
     if required_mode == 2 {
-        if provided_mode == 3 || !epsilon_is_valid(provided_eps) || !epsilon_is_valid(required_eps) {
+        if provided_ks != 0 || !epsilon_is_valid(provided_eps) || !epsilon_is_valid(required_eps) {
             return false
         }
         return provided_eps >= required_eps
     }
     if required_mode == 1 {
-        if provided_mode == 3 || !epsilon_is_valid(provided_eps) || !epsilon_is_valid(required_eps) {
+        // A floor `ε >= x` does not prove `ε = x` (the confidence may be higher).
+        if provided_ks != 0 || provided_mode == 2 || !epsilon_is_valid(provided_eps) || !epsilon_is_valid(required_eps) {
             return false
         }
         return provided_eps == required_eps
@@ -1230,7 +1248,8 @@ pub fn epsilon_subsumes(provided_eps: f64, provided_mode: i64, required_eps: f64
     if required_eps < 0.0 {
         return true
     }
-    if provided_mode == 2 || provided_mode == 3 {
+    // A confidence (mode 1 or 2) or any non-empty Knightian set never meets an error bound.
+    if provided_ks != 0 || provided_mode == 1 || provided_mode == 2 {
         return false
     }
     if !epsilon_is_valid(provided_eps) || !epsilon_is_valid(required_eps) {
@@ -1239,8 +1258,23 @@ pub fn epsilon_subsumes(provided_eps: f64, provided_mode: i64, required_eps: f64
     provided_eps <= required_eps
 }
 
-pub fn epsilon_subsumes_call_boundary(provided_eps: f64, provided_mode: i64, required_eps: f64, required_mode: i64) -> bool {
-    epsilon_subsumes(provided_eps, provided_mode, required_eps, required_mode)
+// EPI-006: a confidence requirement (mode 2 floor, mode 1 exact) is checked
+// against the provided value's confidence. A value typed by an annotation `ε >= x` holds it in the
+// epsilon slot (mode 2); a `Knowledge(v, e=c)` holds it in knowledge_conf and
+// states no error bound. Every other requirement reads the epsilon slot.
+pub fn epsilon_provided_view(provided: TypeEntry, provided_eps: f64, required_mode: i64) -> f64 {
+    // Modes 1 (`ε = x`, exact) and 2 (`ε >= x`, floor) are confidences; mode 0
+    // is a variance bound, never a confidence. A mode-0 value meets a
+    // confidence requirement only through a stated knowledge_conf; without one
+    // the view is unspecified (-1) and the requirement refuses.
+    if (required_mode == 2 || required_mode == 1) && provided.knowledge_epsilon_mode == 0 {
+        return provided.knowledge_conf
+    }
+    provided_eps
+}
+
+pub fn epsilon_subsumes_call_boundary(provided_eps: f64, provided_mode: i64, provided_ks: i64, required_eps: f64, required_mode: i64, required_ks: i64) -> bool {
+    epsilon_subsumes(provided_eps, provided_mode, provided_ks, required_eps, required_mode, required_ks)
 }
 
 // Meet/join follow the annotation polarity: confidence floors order upward,
@@ -1276,12 +1310,14 @@ pub fn knowledge_compatible(ty_a: TypeEntry, ty_b: TypeEntry) -> bool with Mut, 
     if !types_match {
         false
     } else {
-        // Check epsilon subsumption
+        // Check epsilon + Knightian source-set subsumption
         epsilon_subsumes(
-            ty_a.knowledge_epsilon,
+            epsilon_provided_view(ty_a, ty_a.knowledge_epsilon, ty_b.knowledge_epsilon_mode),
             ty_a.knowledge_epsilon_mode,
+            ty_a.knight_set_id,
             ty_b.knowledge_epsilon,
-            ty_b.knowledge_epsilon_mode
+            ty_b.knowledge_epsilon_mode,
+            ty_b.knight_set_id
         )
     }
 }
@@ -1343,7 +1379,7 @@ pub fn types_equal(a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div {
 // Check if knowledge type meets epsilon requirement
 pub fn knowledge_meets_epsilon(ty: TypeEntry, required_epsilon: f64) -> bool {
     if is_knowledge_type(ty) {
-        epsilon_subsumes(ty.knowledge_epsilon, ty.knowledge_epsilon_mode, required_epsilon, 0)
+        epsilon_subsumes(ty.knowledge_epsilon, ty.knowledge_epsilon_mode, ty.knight_set_id, required_epsilon, 0, ns_empty())
     } else {
         false
     }
@@ -1487,7 +1523,7 @@ pub fn epsilon_combine_weighted(eps_a: f64, eps_b: f64, weight_a: f64, weight_b:
 // check::noise_sets, check.sio's Checker.ns_table). N2 dataflow (REQ-3):
 // the result's noise_set_id is the UNION of the two operands' sets, computed
 // here right beside the epsilon propagation it mirrors.
-pub fn knowledge_binary_result(op: BinaryOp, left_ty: TypeEntry, right_ty: TypeEntry, ns_table: *mut NoiseSetTable) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+pub fn knowledge_binary_result(op: BinaryOp, left_ty: TypeEntry, right_ty: TypeEntry, ns_table: *mut NoiseSetTable, knight_ns_table: *mut NoiseSetTable) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     // If neither operand is Knowledge, return error
     let left_is_knowledge = is_knowledge_type(left_ty)
     let right_is_knowledge = is_knowledge_type(right_ty)
@@ -1634,6 +1670,18 @@ pub fn knowledge_binary_result(op: BinaryOp, left_ty: TypeEntry, right_ty: TypeE
                         ns_union_opaque(ns_table, left_ns, right_ns)
                     }
                 }
+                // EPI-006 step 3b: union Knightian source sets in their own
+                // table, kept apart from the aleatory noise set. A result that
+                // depends on any Knightian source states no precise bound or
+                // confidence.
+                let left_ks = if left_is_knowledge { left_ty.knight_set_id } else { ns_empty() }
+                let right_ks = if right_is_knowledge { right_ty.knight_set_id } else { ns_empty() }
+                result.knight_set_id = ns_union(knight_ns_table, left_ks, right_ks)
+                if result.knight_set_id != ns_empty() {
+                    result.knowledge_epsilon = 0.0 - 1.0
+                    result.knowledge_epsilon_mode = 0
+                    result.knowledge_conf = 0.0 - 1.0
+                }
                 checker_ns_trace_emit("union", result.noise_set_id)
                 result
             }
@@ -1699,10 +1747,12 @@ pub fn knowledge_call_boundary_compatible(provided: TypeEntry, required: TypeEnt
     let pmeta = knowledge_meta_from_ty(provided)
     let rmeta = knowledge_meta_from_ty(required)
     if !epsilon_subsumes_call_boundary(
-        knowledge_meta_epsilon(pmeta),
+        epsilon_provided_view(provided, knowledge_meta_epsilon(pmeta), required.knowledge_epsilon_mode),
         provided.knowledge_epsilon_mode,
+        provided.knight_set_id,
         knowledge_meta_epsilon(rmeta),
-        required.knowledge_epsilon_mode
+        required.knowledge_epsilon_mode,
+        required.knight_set_id
     ) {
         return false
     }

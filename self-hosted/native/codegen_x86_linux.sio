@@ -7,7 +7,7 @@
 module native::codegen_x86_linux
 
 use parser::ast::{Name}
-use lexer::span::{srcmap_line, srcmap_col, srcmap_path_len, srcmap_path_byte}
+use lexer::span::{srcmap_line, srcmap_col, srcmap_embed_len, srcmap_embed_byte}
 use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IR_A_SRC_SITE, IR_MAX_FUNCS, IR_MAX_STRINGS, IR_MAX_VREGS, IR_FLOAT_REG_MARKER_FLAG, IR_BOX_ALLOC_FLAG, IR_ALLOC_PACKED_I8, IR_ALLOC_PACKED_U8, IR_ALLOC_LIKE_SOURCE, IR_XOR_TWIST_CAYLEY_DICKSON_SIGN, IR_XOR_CANDIDATE_AUTO, ir_reg_count_is_valid, ir_function_regs_are_valid, ir_xor_convolution_s, ir_name_eq, BSS_BASE_LINUX, IR_STRATEGY_BSS_GLOBAL, BSS_INIT_STRING_MAGIC, ir_bss_packed_header_needed, IR_VALIDATE_FAIL_DST, IR_VALIDATE_FAIL_INSTR, IR_VALIDATE_FAIL_OP, IR_VALIDATE_FAIL_SRC1, IR_VALIDATE_FAIL_SRC2}
 use native::encode::*
 use native::elf::*
@@ -124,8 +124,6 @@ var NC_BIG_ELF: [i8; 234881024] = [0; 234881024]
 fn nc_elf_capacity_bytes() -> i64 { 234881024 }
 // Scratch IR functions for the sret witness. These are module-scope to avoid
 // putting IrFunction-sized temporaries on the Madaros runtime stack.
-var NV2_SRET_MAIN_FN: IrFunction = ir_empty_function()
-var NV2_SRET_MAKE_FN: IrFunction = ir_empty_function()
 
 // ============================================================================
 // Native dispatcher contracts (Sprint 1)
@@ -3032,7 +3030,7 @@ fn nc_emit_located_overflow_stub(nc: &! NativeCompiler, kind: i64, site: i64) ->
     let off = site & 4294967295
     let line = srcmap_line(fid, off)
     let col = srcmap_col(fid, off)
-    let plen = srcmap_path_len(fid)
+    let plen = srcmap_embed_len(fid)
     if line <= 0 || col <= 0 || plen <= 0 { return false }
     let kind_text = nc_overflow_kind_text(kind)
     let prefix = nc_overflow_prefix(kind)
@@ -3043,7 +3041,7 @@ fn nc_emit_located_overflow_stub(nc: &! NativeCompiler, kind: i64, site: i64) ->
     nc_emit_ascii_inline(nc, kind_text)
     nc_emit_ascii_inline(nc, ") at ")
     var pi: i64 = 0
-    while pi < plen { nc_emit_byte(nc, srcmap_path_byte(fid, pi))  pi = pi + 1 }
+    while pi < plen { nc_emit_byte(nc, srcmap_embed_byte(fid, pi))  pi = pi + 1 }
     nc_emit_byte(nc, 58)
     nc_emit_decimal_inline(nc, line)
     nc_emit_byte(nc, 58)
@@ -9274,9 +9272,25 @@ pub(crate) fn emit_builtin_cos(nc: NativeCompiler) -> NativeCompiler with Mut, P
     emit_builtin_trig(nc, true)
 }
 
-// Epilogue shared by print_f64 special-value exits (#2389).
+// print_f64 writes rbx (the RuntimeContext helpers and the digit loops) and,
+// on the |x| >= 2^63 path, r12 and r13. All three are callee-saved under SysV,
+// so they are kept at [rbp-72], [rbp-80], [rbp-88] of the 96-byte frame and
+// put back by the epilogue on every exit. Checked by
+// scripts/ci/print_f64_callee_saved_gate.sh.
+fn emit_print_f64_save_callee_saved(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x48); b = emit_byte(b, 0x89); b = emit_byte(b, 0x5D); b = emit_byte(b, 0xB8)  // mov [rbp-72], rbx
+    b = emit_byte(b, 0x4C); b = emit_byte(b, 0x89); b = emit_byte(b, 0x65); b = emit_byte(b, 0xB0)  // mov [rbp-80], r12
+    b = emit_byte(b, 0x4C); b = emit_byte(b, 0x89); b = emit_byte(b, 0x6D); b = emit_byte(b, 0xA8)  // mov [rbp-88], r13
+    b
+}
+
+// Epilogue shared by every print_f64 exit (#2389, SIO-396).
 fn emit_print_f64_epilogue(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
     var b = buf
+    b = emit_byte(b, 0x48); b = emit_byte(b, 0x8B); b = emit_byte(b, 0x5D); b = emit_byte(b, 0xB8)  // mov rbx, [rbp-72]
+    b = emit_byte(b, 0x4C); b = emit_byte(b, 0x8B); b = emit_byte(b, 0x65); b = emit_byte(b, 0xB0)  // mov r12, [rbp-80]
+    b = emit_byte(b, 0x4C); b = emit_byte(b, 0x8B); b = emit_byte(b, 0x6D); b = emit_byte(b, 0xA8)  // mov r13, [rbp-88]
     b = emit_mov_rsp_rbp(b)
     b = emit_pop_rbp(b)
     b = emit_ret(b)
@@ -9334,6 +9348,319 @@ fn emit_print_f64_write_stack_and_return(c: NativeCompiler, disp8: i8, count: i6
     nc
 }
 
+// SIO-396: exact decimal expansion of a finite f64 with |x| >= 2^63.
+// Position-independent x86-64 blob (no relocations), assembled from self-hosted/native/print_f64_big_core.asm.
+// In: rax = IEEE bits of |x|. Out: rsi = first digit, rdx = length of "<digits>.000000".
+// Lowers rsp by 1536 bytes; the print_f64 epilogue restores it through rbp.
+fn emit_print_f64_big_core(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x81)
+    b = emit_byte(b, 0xec)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x06)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x89)
+    b = emit_byte(b, 0xc1)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0xc1)
+    b = emit_byte(b, 0xe9)
+    b = emit_byte(b, 0x34)
+    b = emit_byte(b, 0x49)
+    b = emit_byte(b, 0xb8)
+    b = emit_byte(b, 0xff)
+    b = emit_byte(b, 0xff)
+    b = emit_byte(b, 0xff)
+    b = emit_byte(b, 0xff)
+    b = emit_byte(b, 0xff)
+    b = emit_byte(b, 0xff)
+    b = emit_byte(b, 0x0f)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x4c)
+    b = emit_byte(b, 0x21)
+    b = emit_byte(b, 0xc0)
+    b = emit_byte(b, 0x49)
+    b = emit_byte(b, 0xb8)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x10)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x4c)
+    b = emit_byte(b, 0x09)
+    b = emit_byte(b, 0xc0)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x81)
+    b = emit_byte(b, 0xe9)
+    b = emit_byte(b, 0x33)
+    b = emit_byte(b, 0x04)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x49)
+    b = emit_byte(b, 0xc7)
+    b = emit_byte(b, 0xc2)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0xca)
+    b = emit_byte(b, 0x9a)
+    b = emit_byte(b, 0x3b)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x31)
+    b = emit_byte(b, 0xd2)
+    b = emit_byte(b, 0x49)
+    b = emit_byte(b, 0xf7)
+    b = emit_byte(b, 0xf2)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x89)
+    b = emit_byte(b, 0x14)
+    b = emit_byte(b, 0x24)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x31)
+    b = emit_byte(b, 0xd2)
+    b = emit_byte(b, 0x49)
+    b = emit_byte(b, 0xf7)
+    b = emit_byte(b, 0xf2)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x89)
+    b = emit_byte(b, 0x54)
+    b = emit_byte(b, 0x24)
+    b = emit_byte(b, 0x08)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x89)
+    b = emit_byte(b, 0x44)
+    b = emit_byte(b, 0x24)
+    b = emit_byte(b, 0x10)
+    b = emit_byte(b, 0x49)
+    b = emit_byte(b, 0xc7)
+    b = emit_byte(b, 0xc1)
+    b = emit_byte(b, 0x03)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x85)
+    b = emit_byte(b, 0xc9)
+    b = emit_byte(b, 0x74)
+    b = emit_byte(b, 0x62)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0xc7)
+    b = emit_byte(b, 0xc3)
+    b = emit_byte(b, 0x1e)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x39)
+    b = emit_byte(b, 0xd9)
+    b = emit_byte(b, 0x73)
+    b = emit_byte(b, 0x03)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x89)
+    b = emit_byte(b, 0xcb)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x29)
+    b = emit_byte(b, 0xd9)
+    b = emit_byte(b, 0x49)
+    b = emit_byte(b, 0xc7)
+    b = emit_byte(b, 0xc0)
+    b = emit_byte(b, 0x01)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x51)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x89)
+    b = emit_byte(b, 0xd9)
+    b = emit_byte(b, 0x49)
+    b = emit_byte(b, 0xd3)
+    b = emit_byte(b, 0xe0)
+    b = emit_byte(b, 0x59)
+    b = emit_byte(b, 0x4d)
+    b = emit_byte(b, 0x31)
+    b = emit_byte(b, 0xdb)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x31)
+    b = emit_byte(b, 0xff)
+    b = emit_byte(b, 0x4c)
+    b = emit_byte(b, 0x39)
+    b = emit_byte(b, 0xcf)
+    b = emit_byte(b, 0x73)
+    b = emit_byte(b, 0x1c)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x8b)
+    b = emit_byte(b, 0x04)
+    b = emit_byte(b, 0xfc)
+    b = emit_byte(b, 0x49)
+    b = emit_byte(b, 0xf7)
+    b = emit_byte(b, 0xe0)
+    b = emit_byte(b, 0x4c)
+    b = emit_byte(b, 0x01)
+    b = emit_byte(b, 0xd8)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x31)
+    b = emit_byte(b, 0xd2)
+    b = emit_byte(b, 0x49)
+    b = emit_byte(b, 0xf7)
+    b = emit_byte(b, 0xf2)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x89)
+    b = emit_byte(b, 0x14)
+    b = emit_byte(b, 0xfc)
+    b = emit_byte(b, 0x49)
+    b = emit_byte(b, 0x89)
+    b = emit_byte(b, 0xc3)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0xff)
+    b = emit_byte(b, 0xc7)
+    b = emit_byte(b, 0xeb)
+    b = emit_byte(b, 0xdf)
+    b = emit_byte(b, 0x4d)
+    b = emit_byte(b, 0x85)
+    b = emit_byte(b, 0xdb)
+    b = emit_byte(b, 0x74)
+    b = emit_byte(b, 0xae)
+    b = emit_byte(b, 0x4c)
+    b = emit_byte(b, 0x89)
+    b = emit_byte(b, 0xd8)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x31)
+    b = emit_byte(b, 0xd2)
+    b = emit_byte(b, 0x49)
+    b = emit_byte(b, 0xf7)
+    b = emit_byte(b, 0xf2)
+    b = emit_byte(b, 0x4a)
+    b = emit_byte(b, 0x89)
+    b = emit_byte(b, 0x14)
+    b = emit_byte(b, 0xcc)
+    b = emit_byte(b, 0x49)
+    b = emit_byte(b, 0xff)
+    b = emit_byte(b, 0xc1)
+    b = emit_byte(b, 0x49)
+    b = emit_byte(b, 0x89)
+    b = emit_byte(b, 0xc3)
+    b = emit_byte(b, 0xeb)
+    b = emit_byte(b, 0xe6)
+    b = emit_byte(b, 0x4c)
+    b = emit_byte(b, 0x8d)
+    b = emit_byte(b, 0xa4)
+    b = emit_byte(b, 0x24)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x02)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x4c)
+    b = emit_byte(b, 0x89)
+    b = emit_byte(b, 0xcf)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0xff)
+    b = emit_byte(b, 0xcf)
+    b = emit_byte(b, 0x78)
+    b = emit_byte(b, 0x32)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x8b)
+    b = emit_byte(b, 0x04)
+    b = emit_byte(b, 0xfc)
+    b = emit_byte(b, 0x4d)
+    b = emit_byte(b, 0x8d)
+    b = emit_byte(b, 0x6c)
+    b = emit_byte(b, 0x24)
+    b = emit_byte(b, 0x08)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0xc7)
+    b = emit_byte(b, 0xc3)
+    b = emit_byte(b, 0x0a)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0xc7)
+    b = emit_byte(b, 0xc1)
+    b = emit_byte(b, 0x09)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x31)
+    b = emit_byte(b, 0xd2)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0xf7)
+    b = emit_byte(b, 0xf3)
+    b = emit_byte(b, 0x80)
+    b = emit_byte(b, 0xc2)
+    b = emit_byte(b, 0x30)
+    b = emit_byte(b, 0x41)
+    b = emit_byte(b, 0x88)
+    b = emit_byte(b, 0x55)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x49)
+    b = emit_byte(b, 0xff)
+    b = emit_byte(b, 0xcd)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0xff)
+    b = emit_byte(b, 0xc9)
+    b = emit_byte(b, 0x75)
+    b = emit_byte(b, 0xeb)
+    b = emit_byte(b, 0x49)
+    b = emit_byte(b, 0x83)
+    b = emit_byte(b, 0xc4)
+    b = emit_byte(b, 0x09)
+    b = emit_byte(b, 0xeb)
+    b = emit_byte(b, 0xc9)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x8d)
+    b = emit_byte(b, 0xb4)
+    b = emit_byte(b, 0x24)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x02)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x80)
+    b = emit_byte(b, 0x3e)
+    b = emit_byte(b, 0x30)
+    b = emit_byte(b, 0x75)
+    b = emit_byte(b, 0x05)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0xff)
+    b = emit_byte(b, 0xc6)
+    b = emit_byte(b, 0xeb)
+    b = emit_byte(b, 0xf6)
+    b = emit_byte(b, 0x41)
+    b = emit_byte(b, 0xc6)
+    b = emit_byte(b, 0x04)
+    b = emit_byte(b, 0x24)
+    b = emit_byte(b, 0x2e)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0xb8)
+    b = emit_byte(b, 0x30)
+    b = emit_byte(b, 0x30)
+    b = emit_byte(b, 0x30)
+    b = emit_byte(b, 0x30)
+    b = emit_byte(b, 0x30)
+    b = emit_byte(b, 0x30)
+    b = emit_byte(b, 0x30)
+    b = emit_byte(b, 0x30)
+    b = emit_byte(b, 0x49)
+    b = emit_byte(b, 0x89)
+    b = emit_byte(b, 0x44)
+    b = emit_byte(b, 0x24)
+    b = emit_byte(b, 0x01)
+    b = emit_byte(b, 0x49)
+    b = emit_byte(b, 0x83)
+    b = emit_byte(b, 0xc4)
+    b = emit_byte(b, 0x07)
+    b = emit_byte(b, 0x4c)
+    b = emit_byte(b, 0x89)
+    b = emit_byte(b, 0xe2)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x29)
+    b = emit_byte(b, 0xf2)
+    b
+}
+
 // Sprint 118: print_f64 builtin — f64 → stdout, fraction rounded (#1573)
 pub(crate) fn emit_builtin_print_f64(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
@@ -9344,7 +9671,8 @@ pub(crate) fn emit_builtin_print_f64(nc: NativeCompiler) -> NativeCompiler with 
 
     c.code = emit_push_rbp(c.code)
     c.code = emit_mov_rbp_rsp(c.code)
-    c.code = emit_sub_rsp_imm32(c.code, 64)
+    c.code = emit_sub_rsp_imm32(c.code, 96)
+    c.code = emit_print_f64_save_callee_saved(c.code)
 
     // rdi = f64 bit pattern
     c.code = emit_mov_reg_reg(c.code, 0, 7)           // mov rax, rdi
@@ -9419,6 +9747,32 @@ pub(crate) fn emit_builtin_print_f64(nc: NativeCompiler) -> NativeCompiler with 
     if jns_pos + 1 < nc_code_capacity_bytes() {
         NC_BIG_CODE[(jns_pos + 1) as usize] = low8(neg_block_len) as i8
     }
+
+    // SIO-396: |x| >= 2^63 does not fit cvttsd2si (it returns 0x8000000000000000 and
+    // the old path printed 9223372036854775808 for 1e19, 1e30, 3e38). Print the exact
+    // decimal expansion of the double instead. rdi = IEEE bits of |x| on both paths.
+    c.code = emit_mov_reg_reg(c.code, 0, 7)           // mov rax, rdi
+    c.code = emit_mov_reg_imm(c.code, 3, 0x43E0000000000000)   // rbx = bits of 2^63
+    var cbg = c.code                                  // cmp rax, rbx
+    cbg = emit_byte(cbg, 0x48)
+    cbg = emit_byte(cbg, 0x39)
+    cbg = emit_byte(cbg, 0xD8)
+    c.code = cbg
+    let jb_small = c.code.len
+    var cbj = c.code                                  // jb rel32 (unsigned: below 2^63)
+    cbj = emit_byte(cbj, 0x0F)
+    cbj = emit_byte(cbj, 0x82)
+    cbj = emit_byte(cbj, 0x00)
+    cbj = emit_byte(cbj, 0x00)
+    cbj = emit_byte(cbj, 0x00)
+    cbj = emit_byte(cbj, 0x00)
+    c.code = cbj
+    c.code = emit_print_f64_big_core(c.code)
+    c = emit_load_runtime_context_field_rdi(c, runtime_context_field_stdout_fd())
+    c = emit_write_syscall_for_target(c, c.target_os_id)
+    c.code = emit_print_f64_epilogue(c.code)
+    let small_target = c.code.len
+    c.code = patch_u32_le(c.code, jb_small + 2, small_target - (jb_small + 6))
 
     // Integer part: cvttsd2si
     c.code = emit_movq_rax_xmm0(c.code)
@@ -9586,10 +9940,8 @@ pub(crate) fn emit_builtin_print_f64(nc: NativeCompiler) -> NativeCompiler with 
     c = emit_load_runtime_context_field_rdi(c, runtime_context_field_stdout_fd())
     c = emit_write_syscall_for_target(c, c.target_os_id)
 
-    // Epilogue
-    c.code = emit_mov_rsp_rbp(c.code)
-    c.code = emit_pop_rbp(c.code)
-    c.code = emit_ret(c.code)
+    // Epilogue (restores the callee-saved registers)
+    c.code = emit_print_f64_epilogue(c.code)
     c
 }
 

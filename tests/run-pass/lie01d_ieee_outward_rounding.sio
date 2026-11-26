@@ -1,0 +1,82 @@
+//@ run-pass
+//@ expect-stdout: LIE01D_IEEE_PASS
+// lie corpus item 1d: outward rounding in epistemic::interval_ieee, and the
+// true entire [-inf, +inf].
+// - Round-to-nearest endpoints exclude the true result on a bad rounding:
+//   every computed endpoint below must be strictly pushed.
+// - "Entire" really is [-inf, +inf] (via se_entire): the old ±1e308
+//   sentinel did not contain 1.5e308 or +inf.
+
+use epistemic::interval_ieee::{interval_new, interval_entire, interval_add,
+    interval_sub, interval_mul, interval_div, interval_sqrt, interval_width,
+    interval_point, interval_subset, div_result, div_exception, dec_interval}
+
+fn main() -> i64 with IO, Mut, Panic {
+    var fails: i64 = 0
+
+    // Addition contains the true sum and is strictly wider than RN.
+    // (Old code: the point 0.30000000000000004, which excludes 0.3.)
+    let s = interval_add(interval_new(0.1, 0.1), interval_new(0.2, 0.2))
+    if !interval_subset(interval_point(0.3), s) { fails = fails + 1 }
+    if !(interval_width(s) > 0.0) { fails = fails + 1 }
+
+    // Multiplication: RN(0.1*0.1) = 0.010000000000000002 excludes 0.01.
+    let m = interval_mul(interval_new(0.1, 0.1), interval_new(0.1, 0.1))
+    if !interval_subset(interval_point(0.01), m) { fails = fails + 1 }
+    if !(interval_width(m) > 0.0) { fails = fails + 1 }
+
+    // Subtraction is widened too (old width exactly 5.0).
+    let d = interval_sub(interval_new(1.0, 3.0), interval_new(2.0, 5.0))
+    if !(interval_width(d) > 5.0) { fails = fails + 1 }
+
+    // Normal division: [2,4]/[1,2] = [1,4] with no exception, widened past
+    // the exact ends (old code: exactly [1,4]).
+    let q = interval_div(interval_new(2.0, 4.0), interval_new(1.0, 2.0))
+    if div_exception(q) != 0 { fails = fails + 1 }
+    if !interval_subset(interval_point(1.0), div_result(q)) { fails = fails + 1 }
+    if !interval_subset(interval_point(4.0), div_result(q)) { fails = fails + 1 }
+    if !(interval_width(div_result(q)) > 3.0) { fails = fails + 1 }
+    if !(interval_width(div_result(q)) < 4.0) { fails = fails + 1 }
+
+    // Zero divisor: empty with exception 1.
+    let z = interval_div(interval_new(1.0, 2.0), interval_new(0.0, 0.0))
+    if div_exception(z) != 1 { fails = fails + 1 }
+    if !(interval_width(div_result(z)) == 0.0) { fails = fails + 1 }
+    if interval_subset(interval_point(5.0), div_result(z)) { fails = fails + 1 }
+    if interval_subset(interval_point(0.5), div_result(z)) { fails = fails + 1 }
+
+    // Half-bounded division: [2,4]/[0,2] reaches +inf (old code: 1e308).
+    let h = interval_div(interval_new(2.0, 4.0), interval_new(0.0, 2.0))
+    if div_exception(h) != 2 { fails = fails + 1 }
+    if !interval_subset(interval_point(1.5e308), div_result(h)) { fails = fails + 1 }
+
+    // Spanning divisor: entire [-inf, +inf] with exception 2.
+    let e = interval_div(interval_new(1.0, 2.0), interval_new(0.0 - 1.0, 1.0))
+    if div_exception(e) != 2 { fails = fails + 1 }
+    let big = 1.0e308
+    let inf = big * 10.0
+    if !interval_subset(interval_point(0.0 - inf), div_result(e)) { fails = fails + 1 }
+    if !interval_subset(interval_point(inf), div_result(e)) { fails = fails + 1 }
+
+    // entire() itself: exactly [-inf, +inf], containing 1.5e308 and +inf.
+    // (Old code: +-1e308, so both containment lines fail there.)
+    let ent = interval_entire()
+    if !interval_subset(interval_point(1.5e308), ent) { fails = fails + 1 }
+    if !interval_subset(interval_point(inf), ent) { fails = fails + 1 }
+    if !interval_subset(interval_point(0.0 - inf), ent) { fails = fails + 1 }
+
+    // sqrt stays rigorous: [4,9] -> [2,3], pushed strictly outward.
+    // (sqrt is correctly rounded per IEEE 754, but RN alone can still
+    // exclude the true root by half an ulp — item 1d.)
+    let r = interval_sqrt(interval_new(4.0, 9.0))
+    if !interval_subset(interval_point(2.0), dec_interval(r)) { fails = fails + 1 }
+    if !interval_subset(interval_point(3.0), dec_interval(r)) { fails = fails + 1 }
+    if !(interval_width(dec_interval(r)) > 1.0) { fails = fails + 1 }
+
+    if fails == 0 {
+        println("LIE01D_IEEE_PASS")
+    } else {
+        println("LIE01D_IEEE_FAIL")
+    }
+    return fails
+}

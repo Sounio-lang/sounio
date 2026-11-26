@@ -1,0 +1,1 @@
+A full-suite known-failure pin that names a diagnostic now has to match the first `^error` line the compiler printed, and must not stop inside a number there. Before, it was searched in the whole failure text, so a new error that came first still read as the known failure while the old diagnostic sat in the 160-character tail, and a pin ending `:61` matched `:614`.

@@ -458,6 +458,11 @@ pub struct Checker {
     pub ns_branch_depth: i64,
     pub ns_reassigned_names: [Name; 64],
     pub ns_reassigned_count: i64,
+    // ---- EPI-006 step 3b: Named Knightian uncertainty sources --------------
+    // Kept apart from the aleatory ns_table / noise_set_id lane.
+    pub knight_ns_table: *mut NoiseSetTable,
+    pub knight_sources: *mut KnightSourceTable,
+    pub last_call_arg_ks: i64,
     // Sticky: set when ns_reassigned_names overflows its 64-slot cap inside a
     // branch context (a 65th distinct reassigned Knowledge var cannot be
     // recorded). At the depth-0 merge this forces EVERY live TyKnowledge
@@ -1491,6 +1496,9 @@ pub fn checker_new() -> Checker with Mut, Panic, Div, Alloc {
         ns_reassigned_names: [empty_name(); 64],
         ns_reassigned_count: 0,
         ns_reassigned_overflow: false,
+        knight_ns_table: ns_table_alloc(),
+        knight_sources: knight_source_table_alloc(),
+        last_call_arg_ks: ns_arg_sentinel(),
         fx: fx_frame_table_alloc(),
         fx_op_params: fx_op_param_table_alloc(),
     }
@@ -1627,6 +1635,9 @@ pub fn checker_init_in_place(raw: *mut Checker) with Mut, Panic, Div, Alloc {
     (*raw).ns_reassigned_names = [empty_name(); 64]
     (*raw).ns_reassigned_count = 0
     (*raw).ns_reassigned_overflow = false
+    (*raw).knight_ns_table = ns_table_alloc()
+    (*raw).knight_sources = knight_source_table_alloc()
+    (*raw).last_call_arg_ks = ns_arg_sentinel()
     (*raw).fx = fx_frame_table_alloc()
     (*raw).fx_op_params = fx_op_param_table_alloc()
 }
@@ -1739,6 +1750,9 @@ fn checker_store_from_value(dst: *mut Checker, src: Checker) with Mut, Panic, Di
     (*dst).ns_reassigned_names = src.ns_reassigned_names
     (*dst).ns_reassigned_count = src.ns_reassigned_count
     (*dst).ns_reassigned_overflow = src.ns_reassigned_overflow
+    (*dst).knight_ns_table = src.knight_ns_table
+    (*dst).knight_sources = src.knight_sources
+    (*dst).last_call_arg_ks = src.last_call_arg_ks
     (*(*dst).fx).perf_ops = (*src.fx).perf_ops
     (*(*dst).fx).perf_owner = (*src.fx).perf_owner
     (*(*dst).fx).perf_count = (*src.fx).perf_count
@@ -2428,10 +2442,14 @@ fn checker_lower_knowledge_type_mut(c: *mut Checker, opt: Option<Box<KnowledgeTy
             }
             var eps_val: f64 = -1.0
             var eps_mode: i64 = 0
+            var knight_set: i64 = ns_empty()
             match info.epsilon {
                 Some(eb) => {
                     let bound = *eb
-                    if bound.value < 0.0 || bound.value > 1.0 {
+                    if bound.value == 0.0 - 2.0 && bound.op == CompareOp::CmpEq {
+                        // `ε=⊥`: Knightian ignorance — carried in knight_set_id, no numeric bound.
+                        knight_set = ns_unknown()
+                    } else if bound.value < 0.0 || bound.value > 1.0 {
                         checker_note_type_error_mut(c)
                     } else {
                         eps_val = bound.value
@@ -2447,6 +2465,7 @@ fn checker_lower_knowledge_type_mut(c: *mut Checker, opt: Option<Box<KnowledgeTy
             // exactly the engine that matters. Lane: SOUNIO-KNOWLEDGE-BOUNDARY-PROVENANCE.
             var ty = ty_knowledge(inner_ty, eps_val)
             ty.knowledge_epsilon_mode = eps_mode
+            ty.knight_set_id = knight_set
             let prov = meta.provenance
             ty.knowledge_provenance_kind = prov.kind
             let val_cond = meta.validity
@@ -4279,14 +4298,29 @@ fn checker_report_undeclared_inplace(c: *mut Checker, span: Span, ident: Name) w
     print("\n")
 }
 
+fn checker_type_requires_precise(ty: TypeEntry) -> bool {
+    is_epistemic_type(ty)
+        && ty.knight_set_id == 0
+        && (ty.knowledge_epsilon_mode == 1
+            || ty.knowledge_epsilon_mode == 2
+            || ty.knowledge_epsilon >= 0.0)
+}
+
+fn checker_is_knightian_into_precise(provided: TypeEntry, required: TypeEntry) -> bool {
+    is_epistemic_type(provided)
+        && provided.knight_set_id != 0
+        && checker_type_requires_precise(required)
+}
+
 fn checker_report_mismatch_inplace(c: *mut Checker, span: Span, code: i64, expected: TypeEntry, got: TypeEntry) with Mut, IO, Panic, Div, Alloc {
+    let emit_code = if checker_is_knightian_into_precise(got, expected) { 314 } else { code }
     (*c).error_count = (*c).error_count + 1
     (*c).had_error = true
     (*c).diag_emitted = true
     print("error[E")
-    if code < 100 { print("0") }
-    if code < 10 { print("0") }
-    print_int(code)
+    if emit_code < 100 { print("0") }
+    if emit_code < 10 { print("0") }
+    print_int(emit_code)
     print("]")
     // WHERE, for the same reason E035 needed it. This reporter carries a Span,
     // but for assignment statements that span is unusable: every E002 in the
@@ -4308,15 +4342,19 @@ fn checker_report_mismatch_inplace(c: *mut Checker, span: Span, code: i64, expec
     if got.kind == TypeKind::TyContest && expected.kind != TypeKind::TyContest {
         print("cannot implicitly coerce contested evidence into this type")
     } else {
-        print_error_message(code)
+        print_error_message(emit_code)
     }
     print("\n   |\n   = expected ")
     print_type_name(expected)
     print("\n   = found ")
     print_type_name(got)
     print("\n")
-    print_error_help(code)
-    print_error_note(code)
+    // The wording lean_single prints, so a compile-fail pattern pins both engines.
+    if checker_is_knightian_into_precise(got, expected) {
+        print("   = note: Knightian uncertainty (ε=⊥) cannot satisfy required confidence or error bound\n")
+    }
+    print_error_help(emit_code)
+    print_error_note(emit_code)
 }
 
 fn checker_report_unobserved_print_inplace(c: *mut Checker, span: Span) with Mut, IO, Panic, Div {
@@ -5684,6 +5722,7 @@ fn checker_collect_runtime_builtins_inplace(c: *mut Checker) with Mut, Panic, Di
     checker_bind_import_unknown_inplace(c, make_name("sensitivity_of"))
     checker_bind_import_unknown_inplace(c, make_name("uncertainty_of"))
     checker_bind_import_unknown_inplace(c, make_name("hessian_of"))
+    checker_bind_import_unknown_inplace(c, make_name("hessian_wrt"))
     checker_bind_import_unknown_inplace(c, make_name("chain_to_knowledge_into"))
     // syscall6: raw syscall builtin emitted by native codegen (no .sio
     // definition). Same E137 preflight hazard as print_f64 above for any
@@ -7459,7 +7498,7 @@ fn checker_check_item_inplace(c: *mut Checker, item: Item) with Mut, Panic, Div,
         match item.fn_def {
             None => {
                 let ovf = ast_global_init_overflow_index(item.name, item.span)
-                if ovf >= 0 {
+                if ovf >= 0 && ast_global_init_refusal_code(ovf) == 300 {
                     let site = Span {
                         file_id: item.span.file_id,
                         start: ast_global_init_overflow_site_start(ovf),
@@ -9143,10 +9182,24 @@ fn checker_loop_break_join_inplace(c: *mut Checker, span: Span, v: Expr, vt: Typ
     }
 }
 
+// The enclosing loop's break state, saved on entry to a loop body. A named
+// struct, not an `(i64, bool, TypeEntry)` tuple: the lean_single seed that
+// builds Madaros sizes a by-value tuple holding a struct wrongly, refuses
+// `saved.2` ("tuple index out of bounds") and emits a wrong load for it.
+pub struct LoopValueSaved {
+    pub takes_value: i64,
+    pub break_seen: bool,
+    pub break_ty: TypeEntry,
+}
+
 // Enter a loop body: takes_value is 1 for `loop`, 0 for `while`/`for`. Returns
 // the enclosing loop's state, which checker_loop_value_leave_inplace restores.
-fn checker_loop_value_enter_inplace(c: *mut Checker, takes_value: i64) -> (i64, bool, TypeEntry) with Mut {
-    let saved = ((*c).loop_takes_value, (*c).loop_break_seen, (*c).loop_break_ty)
+fn checker_loop_value_enter_inplace(c: *mut Checker, takes_value: i64) -> LoopValueSaved with Mut {
+    let saved = LoopValueSaved {
+        takes_value: (*c).loop_takes_value,
+        break_seen: (*c).loop_break_seen,
+        break_ty: (*c).loop_break_ty,
+    }
     (*c).loop_takes_value = takes_value
     (*c).loop_break_seen = false
     (*c).loop_break_ty = ty_unit()
@@ -9155,12 +9208,12 @@ fn checker_loop_value_enter_inplace(c: *mut Checker, takes_value: i64) -> (i64, 
 
 // Leave a loop body: the type its breaks agreed on (`()` when none carried a
 // value), then the enclosing loop's state back.
-fn checker_loop_value_leave_inplace(c: *mut Checker, saved: (i64, bool, TypeEntry)) -> TypeEntry with Mut {
+fn checker_loop_value_leave_inplace(c: *mut Checker, saved: LoopValueSaved) -> TypeEntry with Mut {
     var result = ty_unit()
     if (*c).loop_break_seen { result = (*c).loop_break_ty }
-    (*c).loop_takes_value = saved.0
-    (*c).loop_break_seen = saved.1
-    (*c).loop_break_ty = saved.2
+    (*c).loop_takes_value = saved.takes_value
+    (*c).loop_break_seen = saved.break_seen
+    (*c).loop_break_ty = saved.break_ty
     result
 }
 
@@ -9744,6 +9797,78 @@ fn checker_record_knowledge_binary_inplace(c: *mut Checker, span: Span) -> bool 
     add_result.1 >= 0
 }
 
+// Knowledge<f64> (op) exact constant, + - * /. A constant operand is exact:
+// variance 0, confidence 1, no noise source, so first-order GUM keeps the
+// Knowledge side's variance scaled by the constant (knowledge_binary_result
+// already gives a non-Knowledge operand the empty source set and validity
+// always). Only a compile-time constant is exact: a float literal, its
+// negation, or a module-level let/const whose initialiser is a float literal
+// and whose name no other module-level declaration shares
+// (ast_global_is_exact_f64_literal), not shadowed by a local. A runtime f64 is refused with
+// E313: its type says nothing about its uncertainty (spec ch. 04, "a Value
+// does not establish an exact real value"), and promoting it would let a
+// measured number pass as exact. lean_single promotes every f64.
+fn checker_expr_is_exact_f64_const_inplace(c: *mut Checker, e: Expr) -> bool with Mut, Panic, Div, Alloc {
+    if e.kind == ExprKind::ExprFloatLit { return true }
+    if e.kind == ExprKind::ExprUnary && e.un_op == UnaryOp::OpNeg {
+        match e.left {
+            Some(inner) => { return checker_expr_is_exact_f64_const_inplace(c, *inner) }
+            None => { return false }
+        }
+    }
+    if e.kind == ExprKind::ExprIdent && ast_global_is_exact_f64_literal(e.name) {
+        var bi = (*c).env.count - 1
+        while bi >= 0 {
+            let b = type_env_get_binding(&(*c).env, bi)
+            if name_eq(b.name, e.name) { return b.scope_depth == 0 }
+            bi = bi - 1
+        }
+        // Not bound in this module's environment: an imported global, which
+        // the name table above has already proved unique and literal.
+        return true
+    }
+    false
+}
+
+// The lowerer recognises the same constant shapes syntactically
+// (expr_is_exact_f64_const_ref): a span table does not reach the lowerer on
+// the multi-module path, measured as a SIGSEGV with a plain literal.
+// Returns 0 when this is not a mixed Knowledge<f64> / f64 arithmetic node,
+// 1 when the f64 side is an exact constant (admitted), 2 when it was refused.
+fn checker_knowledge_scalar_status_inplace(c: *mut Checker, e: Expr, left_ty: TypeEntry, right_ty: TypeEntry) -> i64 with Mut, Panic, Div, Alloc, IO {
+    if e.bin_op != BinaryOp::OpAdd && e.bin_op != BinaryOp::OpSub
+        && e.bin_op != BinaryOp::OpMul && e.bin_op != BinaryOp::OpDiv {
+        return 0
+    }
+    let lk = is_knowledge_type(left_ty)
+    let rk = is_knowledge_type(right_ty)
+    if lk == rk { return 0 }
+    let k_ty = if lk { left_ty } else { right_ty }
+    let s_ty = if lk { right_ty } else { left_ty }
+    if knowledge_inner(k_ty).kind != TypeKind::TyF64 { return 0 }
+    // A module-level let/const read inside a function is typed unknown, not
+    // f64. Before this rule `x * SCALE` passed the checker (E004 skips unknown
+    // operands) and the handle was multiplied as a scalar: SIGSEGV at run time.
+    // An unknown operand is admitted only as a module-level constant; the
+    // lowerer then refuses it unless the operand lowers as a float.
+    let s_unknown = s_ty.kind == TypeKind::TyUnknown
+    if !s_unknown && (s_ty.kind != TypeKind::TyF64 || s_ty.unit_id >= 0) {
+        return 0
+    }
+    var is_const = false
+    let s_opt = if lk { e.right } else { e.left }
+    match s_opt {
+        Some(sb) => { is_const = checker_expr_is_exact_f64_const_inplace(c, *sb) }
+        None => {}
+    }
+    if !is_const {
+        checker_report_error_at_inplace(c, e.span, 313, 0, 0, 0)
+        print("   = help: state the claim: `Knowledge(s, ...)` or `measure(s, uncertainty: 0.0)` if s is exact\n")
+        return 2
+    }
+    1
+}
+
 // R6 Correlated (id 29): Knowledge binary arith reusing the same ExprIdent
 // requires `with Correlated`. Distinct from E230 anti-garbling (noise symbols).
 // SOUNIO_FORCE_CORRELATED=1 forces every Knowledge arith op (reachability).
@@ -9792,6 +9917,14 @@ fn checker_check_correlated_on_binary_inplace(c: *mut Checker, e: Expr, left_ty:
     }
     var has_effect = false
     if need {
+        // Pure-Knightian operands (no aleatory measurement sources, non-empty
+        // Knightian set) do not invoke GUM independence: their affine dependency
+        // algebra handles shared slots like `x - x` symbolically.
+        if !force && is_knowledge_type(left_ty) && is_knowledge_type(right_ty)
+            && left_ty.noise_set_id == ns_empty() && right_ty.noise_set_id == ns_empty()
+            && (left_ty.knight_set_id != ns_empty() || right_ty.knight_set_id != ns_empty()) {
+            return false
+        }
         let corr_id: i64 = 29
         has_effect = has_effect_id((*c).current_effects, (*c).current_effect_count, corr_id)
         if !has_effect {
@@ -9948,14 +10081,14 @@ fn checker_check_binary_knowledge_refusals_inplace(c: *mut Checker, span: Span, 
 fn checker_finish_binary_knowledge_result_inplace(c: *mut Checker, span: Span, op: BinaryOp, left_ty: TypeEntry, right_ty: TypeEntry, correlated_same_slot_add: bool) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let left_inner = if is_knowledge_type(left_ty) { knowledge_inner(left_ty) } else { left_ty }
     let right_inner = if is_knowledge_type(right_ty) { knowledge_inner(right_ty) } else { right_ty }
-    var knowledge_result = knowledge_binary_result(op, left_ty, right_ty, (*c).ns_table)
+    var knowledge_result = knowledge_binary_result(op, left_ty, right_ty, (*c).ns_table, (*c).knight_ns_table)
     if knowledge_result.kind == TypeKind::TyError {
         checker_report_error_at_inplace(c, span, 36, 0, 0, 0)
     }
     // W4: the union above may have exhausted the interning table. That
     // saturates to unknown, which is sound but turns every later E230 into
     // an unexplained refusal -- so say it out loud, once per overflow event.
-    if ns_table_overflow_take((*c).ns_table) {
+    if ns_table_overflow_take((*c).ns_table) || ns_table_overflow_take((*c).knight_ns_table) {
         checker_report_error_at_inplace(c, span, 179, 0, 0, 0)
     }
     // N3: anti-garbling gate. An independence-assuming op over operands whose
@@ -10134,7 +10267,9 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
     if left_ty.kind == TypeKind::TyUnobserved || right_ty.kind == TypeKind::TyUnobserved {
         return checker_check_binary_unobserved_inplace(c, e.span, e.bin_op, left_ty, right_ty)
     }
-    checker_check_binary_operand_compat_inplace(c, e.span, e.bin_op, left_ty, right_ty, knowledge_ident_add)
+    let ksc = checker_knowledge_scalar_status_inplace(c, e, left_ty, right_ty)
+    if ksc == 2 { return ty_error() }
+    checker_check_binary_operand_compat_inplace(c, e.span, e.bin_op, left_ty, right_ty, knowledge_ident_add || ksc == 1)
     if is_knowledge_type(left_ty) || is_knowledge_type(right_ty) {
         checker_store_binary_knowledge_hyper_inplace(c, e.span, e.bin_op, left_ty, right_ty)
         var kk_admit = checker_knowledge_binary_lowerable(e, left_ty, right_ty)
@@ -10441,6 +10576,12 @@ fn checker_check_if_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut
             if then_ty.kind == TypeKind::TyKnowledge && else_ty.kind == TypeKind::TyKnowledge {
                 if !checker_ns_sabotage_join() {
                     joined.noise_set_id = ns_union((*c).ns_table, then_ty.noise_set_id, else_ty.noise_set_id)
+                }
+                joined.knight_set_id = ns_union((*c).knight_ns_table, then_ty.knight_set_id, else_ty.knight_set_id)
+                if joined.knight_set_id != ns_empty() {
+                    joined.knowledge_epsilon = 0.0 - 1.0
+                    joined.knowledge_epsilon_mode = 0
+                    joined.knowledge_conf = 0.0 - 1.0
                 }
                 checker_ns_trace_emit("if_join", joined.noise_set_id)
             }
@@ -11030,6 +11171,13 @@ fn checker_check_field_access_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
             // defect (reproduced on both the unpatched and patched Madaros); `.confidence`
             // reads the correct value and is what the darwin_pbpk sources use.
             ty_f64()
+        } else if name_eq_lit(e.name, "iv") {
+            // Certified Knightian interval enclosure `(lo, hi): (f64, f64)` (EPI-006 step 3b).
+            // Ungated like `.variance`/`.confidence`: reads the uncertainty channel itself.
+            ty_tuple(TypeEntryList {
+                head: ty_f64(),
+                tail: Some(Box::new(TypeEntryList { head: ty_f64(), tail: None })),
+            })
         } else {
             checker_report_no_field_inplace(c, e.span, e.name, base_ty)
             ty_error()
@@ -11313,6 +11461,12 @@ fn checker_check_match_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                         if !checker_ns_sabotage_join() {
                             result_ty.noise_set_id = ns_union((*c).ns_table, result_ty.noise_set_id, arm_ty.noise_set_id)
                         }
+                        result_ty.knight_set_id = ns_union((*c).knight_ns_table, result_ty.knight_set_id, arm_ty.knight_set_id)
+                        if result_ty.knight_set_id != ns_empty() {
+                            result_ty.knowledge_epsilon = 0.0 - 1.0
+                            result_ty.knowledge_epsilon_mode = 0
+                            result_ty.knowledge_conf = 0.0 - 1.0
+                        }
                     }
                 }
                 cursor = (*list).tail
@@ -11539,9 +11693,14 @@ fn knowledge_struct_lit_apply_fields(base: TypeEntry, fields: Option<Box<StructF
                         // the strongest possible validity.
                         parse_error = true
                     }
-                } else if name_eq_lit(fname, "epsilon") {
-                    if fval.kind == ExprKind::ExprFloatLit {
-                        result.knowledge_epsilon = fval.float_val
+                } else if name_eq_lit(fname, "epsilon") || name_eq_lit(fname, "confidence") {
+                    // EPI-006 step 2: the literal field lowers to slot 2, the
+                    // confidence (ir_register_knowledge_layout), so the checker reads
+                    // it as a stated confidence too. It used to become a mode-0 error
+                    // bound, and `epsilon: 0.01` met `epsilon < 0.05` on values whose
+                    // GUM variance was 4.04. A value outside [0, 1] states none.
+                    if fval.kind == ExprKind::ExprFloatLit && fval.float_val >= 0.0 && fval.float_val <= 1.0 {
+                        result.knowledge_conf = fval.float_val
                     }
                 }
                 // `provenance:` is intentionally NOT read here -- see the long comment at
@@ -11806,8 +11965,10 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
             var k_struct_result = ty_knowledge(value_ty, 0.0 - 1.0)
             if is_knowledge_type(value_ty) {
                 k_struct_result.noise_set_id = value_ty.noise_set_id
+                k_struct_result.knight_set_id = value_ty.knight_set_id
             } else {
                 k_struct_result.noise_set_id = ns_empty()
+                k_struct_result.knight_set_id = ns_empty()
             }
             // Parse validity/epsilon fields if present in struct literal (shared with
             // the by-value twin, check_knowledge_struct_lit, via this pure helper).
@@ -12595,6 +12756,7 @@ fn call_expr_should_bridge_by_value(e: Expr) -> bool with Mut, Panic, Div, Alloc
     if call_expr_is_builtin_rollback_transition(e.left) { return true }
     if call_expr_is_builtin_lift_knowledge(e.left) { return true }
     if call_expr_is_builtin_measure(e.left) { return true }
+    if call_expr_is_builtin_knight(e.left) { return true }
     // sign(a, b) is the knowledge contest. sign(x) is math/pure's unary f64.
     if call_expr_is_builtin_sign(e.left) && expr_list_handle_count(expr_list_handle(e.args)) == 2 { return true }
     if call_expr_is_builtin_variance_of(e.left) { return true }
@@ -12604,6 +12766,7 @@ fn call_expr_should_bridge_by_value(e: Expr) -> bool with Mut, Panic, Div, Alloc
     if call_expr_is_builtin_uncertainty_of(e.left) { return true }
     if call_expr_is_builtin_sensitivity_of(e.left) { return true }
     if call_expr_is_builtin_hessian_of(e.left) { return true }
+    if call_expr_is_builtin_hessian_wrt(e.left) { return true }
     if call_expr_is_builtin_second_order_mean(e.left) { return true }
     if call_expr_is_builtin_correlate(e.left) { return true }
     if call_expr_contest_witness_kind(e.left) >= 0 { return true }
@@ -12768,6 +12931,7 @@ fn checker_check_call_args_inplace(c: *mut Checker, args: ExprListHandle, params
         // Knowledge arg wins" (that was fail-open; see the fn comment above).
         if idx == ns_watch_idx && arg_ty.kind == TypeKind::TyKnowledge {
             (*c).last_call_arg_ns = arg_ty.noise_set_id
+            (*c).last_call_arg_ks = arg_ty.knight_set_id
         }
         if suppress_arg_consume && (*c).suppress_linear_consume_depth > 0 {
             (*c).suppress_linear_consume_depth = (*c).suppress_linear_consume_depth - 1
@@ -12979,6 +13143,110 @@ fn checker_check_measure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
     result
 }
 
+// Compile-time numeric literal evaluation for knight("name", lo, hi) bounds.
+// Supports float literals, int literals, unary negation (`-1.0`, `-1`), and
+// binary subtraction (`0.0 - 1.0`, `0 - 1`).
+fn checker_knight_const_f64(opt: Option<Box<Expr> >) -> (bool, f64) with Mut, Panic, Div {
+    match opt {
+        None => (false, 0.0)
+        Some(e) => {
+            if (*e).kind == ExprKind::ExprFloatLit {
+                return (true, (*e).float_val)
+            }
+            if (*e).kind == ExprKind::ExprIntLit {
+                return (true, (*e).int_val as f64)
+            }
+            if (*e).kind == ExprKind::ExprUnary && (*e).un_op == UnaryOp::OpNeg {
+                let inner = checker_knight_const_f64((*e).left)
+                if inner.0 { return (true, 0.0 - inner.1) }
+                return (false, 0.0)
+            }
+            if (*e).kind == ExprKind::ExprBinary && (*e).bin_op == BinaryOp::OpSub {
+                let l = checker_knight_const_f64((*e).left)
+                let r = checker_knight_const_f64((*e).right)
+                if l.0 && r.0 { return (true, l.1 - r.1) }
+                return (false, 0.0)
+            }
+            (false, 0.0)
+        }
+    }
+}
+
+fn checker_check_knight_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    // knight("name", lo, hi) -> Knowledge<f64> carrying a named Knightian source.
+    let argc = expr_list_handle_count(expr_list_handle(e.args))
+    let first_arg = expr_list_head(e.args)
+    let second_arg = expr_list_second(e.args)
+    let third_arg = expr_list_third(e.args)
+    let _name_ty = checker_check_opt_expr_inplace(c, first_arg)
+    let lo_ty = checker_check_opt_expr_inplace(c, second_arg)
+    let hi_ty = checker_check_opt_expr_inplace(c, third_arg)
+    if argc != 3 {
+        checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        return ty_error()
+    }
+    if !is_error_or_unknown(lo_ty) && !is_numeric_type(lo_ty) {
+        checker_report_mismatch_inplace(c, e.span, 9, ty_f64(), lo_ty)
+    }
+    if !is_error_or_unknown(hi_ty) && !is_numeric_type(hi_ty) {
+        checker_report_mismatch_inplace(c, e.span, 9, ty_f64(), hi_ty)
+    }
+    var has_name = false
+    var src_name = empty_name()
+    match first_arg {
+        Some(a0) => {
+            if (*a0).kind == ExprKind::ExprStringLit {
+                src_name = ast_string_lit_payload((*a0).name)
+                if src_name.len > 0 { has_name = true }
+            }
+        }
+        None => {}
+    }
+    var result = ty_knowledge(ty_f64(), 0.0 - 1.0)
+    result.noise_set_id = ns_empty()
+    if !has_name {
+        checker_report_error_at_inplace(c, e.span, 314, 0, 0, 0)
+        print("   = note: knight() requires a non-empty string literal source name\n")
+        result.knight_set_id = ns_unknown()
+        return result
+    }
+    let lo_c = checker_knight_const_f64(second_arg)
+    let hi_c = checker_knight_const_f64(third_arg)
+    let both_known = lo_c.0 && hi_c.0
+    if !both_known {
+        checker_report_error_at_inplace(c, e.span, 314, 0, 0, 0)
+        print("   = note: knight() requires finite compile-time constant bounds\n")
+        result.knight_set_id = ns_unknown()
+        return result
+    }
+    if !((lo_c.1 - lo_c.1) == 0.0) || !((hi_c.1 - hi_c.1) == 0.0) {
+        checker_report_error_at_inplace(c, e.span, 314, 0, 0, 0)
+        print("   = note: knight() bounds must be finite\n")
+        result.knight_set_id = ns_unknown()
+        return result
+    }
+    if lo_c.1 > hi_c.1 {
+        checker_report_error_at_inplace(c, e.span, 314, 0, 0, 0)
+        print("   = note: knight() lower bound exceeds upper bound\n")
+        result.knight_set_id = ns_unknown()
+        return result
+    }
+    let reg = knight_source_register((*c).knight_sources, src_name, lo_c.1, hi_c.1, true)
+    let src_id = reg.0
+    let status = reg.1
+    if status == 1 {
+        checker_report_error_at_inplace(c, e.span, 314, 0, 0, 0)
+        print("   = note: Knightian source declared with conflicting bounds\n")
+    } else if status == 2 {
+        checker_report_error_at_inplace(c, e.span, 178, 0, 0, 0)
+    }
+    result.knight_set_id = if src_id >= 0 { ns_singleton((*c).knight_ns_table, src_id) } else { ns_unknown() }
+    if ns_table_overflow_take((*c).knight_ns_table) {
+        checker_report_error_at_inplace(c, e.span, 179, 0, 0, 0)
+    }
+    result
+}
+
 // seq_new() -> Seq<_>. Element type comes from the binding annotation
 // (`var s: Seq<T> = seq_new()`): return ty_unknown so types_compatible accepts
 // any Seq annotation (compat treats bare/unknown Seq as wildcard).
@@ -13160,7 +13428,7 @@ fn checker_check_knowledge_ctor_expr_inplace(c: *mut Checker, e: Expr) -> TypeEn
     let first_arg = expr_list_head(e.args)
     let v_ty = checker_check_opt_expr_inplace(c, first_arg)
     let confidence = checker_enforce_knowledge_confidence_inplace(c, e.args, e.span)
-    var result = ty_knowledge(v_ty, confidence)
+    var result = ty_knowledge_with_confidence(v_ty, confidence)
     // N2 (REQ-2): this ctor wraps a plain value directly -- no independent
     // measurement source is created (that is measure()'s job, above), so the
     // result carries NO uncertainty sources: empty (0), not unknown (-1).
@@ -13315,6 +13583,8 @@ fn epistemic_index_literal(opt: Option<Box<Expr> >) -> (bool, i64) with Mut, Pan
 }
 
 fn checker_check_hessian_metric_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    // Deprecated positional form: warn at every call site (W047).
+    checker_report_warning_at_inplace(c, e.span, 47, 0, 0, 0)
     // hessian_of(expr, j, k) -> f64. THREE arguments, and j,k inside 0..64.
     //
     // It used to require only the first. hessian_of(x*x) then type-checked,
@@ -13349,6 +13619,42 @@ fn checker_check_hessian_metric_expr_inplace(c: *mut Checker, e: Expr) -> TypeEn
                 if lit_idx2_7937.1 < 0 || lit_idx2_7937.1 >= 64 {
                     checker_report_error_at_inplace(c, e.span, 242, lit_idx2_7937.1, 64, 0)
                 }
+            }
+        }
+    }
+    checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+    ty_f64()
+}
+
+// hessian_wrt(z, x, y) -> f64. THREE arguments. x and y are the measured
+// sources themselves (Knowledge bindings), resolved by the lowerer to their
+// channels by source identity. A non-Knowledge source argument is refused
+// here with E312; a Knowledge source that z does not depend on (or that
+// carries no single channel) is refused by the lowerer with the same code,
+// where the channels actually live.
+fn checker_check_hessian_wrt_metric_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let first_arg = expr_list_head(e.args)
+    let second_arg = expr_list_second(e.args)
+    let third_arg = expr_list_third(e.args)
+    match first_arg {
+        None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        Some(_) => {}
+    }
+    match second_arg {
+        None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        Some(xarg) => {
+            let xty = checker_check_opt_expr_inplace(c, Some(xarg))
+            if !is_error_or_unknown(xty) && !is_knowledge_type(xty) {
+                checker_report_error_at_inplace(c, e.span, 312, 0, 0, 0)
+            }
+        }
+    }
+    match third_arg {
+        None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        Some(yarg) => {
+            let yty = checker_check_opt_expr_inplace(c, Some(yarg))
+            if !is_error_or_unknown(yty) && !is_knowledge_type(yty) {
+                checker_report_error_at_inplace(c, e.span, 312, 0, 0, 0)
             }
         }
     }
@@ -13875,6 +14181,11 @@ fn conf_measure_milli(args: Option<Box<ExprList> >) -> i64 with Mut, Panic, Div,
         // floored at 1 so that a provably worthless measurement (u = v) is
         // refused by E214 instead of being read as unknown and accepted.
         if conf < 1 { conf = 1 }
+    } else if vs >= 0 && us > vs {
+        // u > |v|, including v = 0 with u > 0: worth no more than u = |v|.
+        // This used to keep the 990 default, so a reading whose uncertainty
+        // exceeded its value cleared a gate that u = |v| failed.
+        conf = 1
     }
     conf
 }
@@ -14001,7 +14312,9 @@ fn checker_check_call_direct_sig_inplace(c: *mut Checker, e: Expr, direct_sig_id
     // proven-projection verdict (fail-closed: not-a-projection -> -1,
     // "watch nothing").
     let outer_arg_ns_d = (*c).last_call_arg_ns
+    let outer_arg_ks_d = (*c).last_call_arg_ks
     (*c).last_call_arg_ns = ns_arg_sentinel()
+    (*c).last_call_arg_ks = ns_arg_sentinel()
     let ns_proj_d = ns_proj_table_get((*c).ns_proj, direct_sig_id)
     let ns_watch_d = if ns_proj_d.0 { ns_proj_d.1 } else { 0 - 1 }
     checker_check_call_args_inplace(
@@ -14017,10 +14330,12 @@ fn checker_check_call_direct_sig_inplace(c: *mut Checker, e: Expr, direct_sig_id
     checker_release_call_arg_borrows_inplace(c, e.args, effective_params)
     if refused_unimplemented {
         (*c).last_call_arg_ns = outer_arg_ns_d
+        (*c).last_call_arg_ks = outer_arg_ks_d
         return ty_error()
     }
     let ns_result = checker_propagate_call_result_ns_inplace(c, effective_return_type, ns_proj_d.0)
     (*c).last_call_arg_ns = outer_arg_ns_d
+    (*c).last_call_arg_ks = outer_arg_ks_d
     ns_result
 }
 
@@ -14471,17 +14786,53 @@ fn checker_check_join_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
     }
     ty_tuple(elems)
 }
+// The builtin print/println, not a user fn of the same spelling: the same
+// test the generic preflight applies before attributing IO (SIO-27).
+fn checker_print_callee_is_builtin_inplace(c: *mut Checker, callee: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
+    match callee {
+        Some(ce) => {
+            let sig = checker_fn_sigs_find_inplace(c, (*ce).name)
+            sig < 0 || checker_invisible_native_builtin_sig(c, (*ce).name)
+        }
+        None => false
+    }
+}
+
 fn checker_check_call_native_forms_inplace(c: *mut Checker, e: Expr) -> (bool, TypeEntry) with Mut, Panic, Div, Alloc, IO {
-    if call_expr_is_builtin_println(e.left) {
+    if call_expr_is_builtin_print_or_println(e.left) && checker_print_callee_is_builtin_inplace(c, e.left) {
         let first_arg = expr_list_head(e.args)
         let arg_ty = checker_check_opt_expr_inplace(c, first_arg)
-        if checker_type_is_unobserved_like(arg_ty) {
+        // E310: printing a Knowledge value would show its nominal value with
+        // the uncertainty and confidence dropped (Madaros printed `.value`,
+        // lean_single the handle address). The spec fixes no display form, so
+        // the call is refused; name the field to print.
+        if is_knowledge_type(arg_ty) {
+            checker_report_error_at_inplace(c, e.span, 310, 0, 0, 0)
+            return (true, ty_unit())
+        }
+        if checker_type_is_unobserved_like(arg_ty) && call_expr_is_builtin_println(e.left) {
             if !has_effect_id((*c).current_effects, (*c).current_effect_count, 13) {
                 checker_report_unobserved_print_inplace(c, e.span)
             }
             var effects_unobserved: [i64; 8] = [0; 8]
             effects_unobserved[0] = 0
             checker_check_callee_effects_inplace(c, e.span, effects_unobserved, 1)
+            return (true, ty_unit())
+        }
+        // The argument is checked above; a one-argument print/println is
+        // finished here (it needs IO) instead of falling through to the
+        // generic call path, which checked the argument a second time and
+        // reported each of its errors twice.
+        if expr_list_count_opt(e.args) == 1 {
+            let callee_name = match e.left {
+                Some(ce) => (*ce).name,
+                None => empty_name(),
+            }
+            // `main` may print without `with IO`, as on the generic path; the
+            // enclosing fn is read by name (current_sig_id is not set here).
+            if !name_matches_str4((*c).current_sig_name, 109, 97, 105, 110) || (*c).in_closure_body {
+                checker_check_io_builtin_effects_inplace(c, e.span, callee_name)
+            }
             return (true, ty_unit())
         }
     }
@@ -14730,6 +15081,9 @@ fn checker_check_call_metric_forms_inplace(c: *mut Checker, e: Expr) -> (bool, T
     if call_expr_is_builtin_measure(e.left) {
         return (true, checker_check_measure_expr_inplace(c, e))
     }
+    if call_expr_is_builtin_knight(e.left) {
+        return (true, checker_check_knight_expr_inplace(c, e))
+    }
     let merge_kind = call_expr_merge_kind(e.left)
     if merge_kind >= 0 {
         return (true, checker_check_merge_expr_inplace(c, e, merge_kind))
@@ -14781,6 +15135,9 @@ fn checker_check_call_metric_forms_inplace(c: *mut Checker, e: Expr) -> (bool, T
     }
     if call_expr_is_builtin_hessian_of(e.left) {
         return (true, checker_check_hessian_metric_expr_inplace(c, e))
+    }
+    if call_expr_is_builtin_hessian_wrt(e.left) {
+        return (true, checker_check_hessian_wrt_metric_expr_inplace(c, e))
     }
     // E2 is a mean, not a spread: it type-checks as the variance-family
     // metric -- one expression argument, f64 result, same as variance_of.
@@ -15250,6 +15607,15 @@ fn checker_propagate_call_result_ns_inplace(c: *mut Checker, ret_ty: TypeEntry, 
             // projection fn whose projected-parameter argument was not
             // Knowledge-typed (sentinel never overwritten) -- top either way.
             carried.noise_set_id = 0 - 1
+        }
+        // EPI-006 step 3b: preserve Knightian source identity across proven
+        // identity-projection calls. If the declared return type already
+        // demands ε=⊥ (knight_set_id != 0), keep a concrete non-empty source
+        // set from the argument when available, or keep the declared ⊥.
+        if is_projection && (*c).last_call_arg_ks != ns_arg_sentinel() {
+            if (*c).last_call_arg_ks != ns_empty() || carried.knight_set_id == ns_empty() {
+                carried.knight_set_id = (*c).last_call_arg_ks
+            }
         }
         checker_ns_trace_emit("call", carried.noise_set_id)
     }
@@ -15855,6 +16221,8 @@ fn checker_check_call_arg_knowledge_boundary_inplace(c: *mut Checker, arg_ty: Ty
             checker_report_error_at_inplace(c, call_span, 244, 0, 0, 0)
         } else if !validity_subsumes(knowledge_meta_validity(pmeta2), knowledge_meta_validity(rmeta2)) {
             checker_report_error_at_inplace(c, call_span, 265, 0, 0, 0)
+        } else if checker_is_knightian_into_precise(provided_ty, expected_ty) {
+            // Already reported with E314 by checker_report_mismatch_inplace.
         } else {
             checker_report_error_at_inplace(c, call_span, 36, 0, 0, 0) // E036: epsilon bound violation
         }
@@ -16832,6 +17200,7 @@ fn checker_check_let_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
             // Carry the inferred RHS's noise_set_id through the ascription.
             if ann_ty.kind == TypeKind::TyKnowledge && init_ty.kind == TypeKind::TyKnowledge {
                 bind_ty.noise_set_id = init_ty.noise_set_id
+                bind_ty.knight_set_id = if init_ty.knight_set_id != ns_empty() { init_ty.knight_set_id } else { ann_ty.knight_set_id }
             }
         }
     }
@@ -16941,6 +17310,7 @@ fn checker_check_var_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
             // inferred RHS rather than resetting it to the annotation's -1.
             if ann_ty.kind == TypeKind::TyKnowledge && init_ty.kind == TypeKind::TyKnowledge {
                 bind_ty.noise_set_id = init_ty.noise_set_id
+                bind_ty.knight_set_id = if init_ty.knight_set_id != ns_empty() { init_ty.knight_set_id } else { ann_ty.knight_set_id }
             }
         }
     }
@@ -17246,6 +17616,7 @@ fn checker_check_assign_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with
                     if (*c).ns_branch_depth > 0 {
                         var forced = target_ty
                         forced.noise_set_id = 0 - 1
+                        forced.knight_set_id = ns_union((*c).knight_ns_table, target_ty.knight_set_id, val_ty.knight_set_id)
                         type_env_bind_mut(&!(*c).env, (*target).name, forced, true)
                         if (*c).ns_reassigned_count < 64 {
                             (*c).ns_reassigned_names[(*c).ns_reassigned_count as usize] = (*target).name
@@ -17261,6 +17632,7 @@ fn checker_check_assign_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with
                     } else {
                         var rebound = target_ty
                         rebound.noise_set_id = ns_union((*c).ns_table, target_ty.noise_set_id, val_ty.noise_set_id)
+                        rebound.knight_set_id = ns_union((*c).knight_ns_table, target_ty.knight_set_id, val_ty.knight_set_id)
                         type_env_bind_mut(&!(*c).env, (*target).name, rebound, true)
                         checker_ns_trace_emit("reassign_join", rebound.noise_set_id)
                     }
@@ -18558,6 +18930,8 @@ fn print_type_name(ty: TypeEntry) with IO, Mut, Panic, Div, Alloc {
                 // (no float printing in Poseidon VM)
                 print(", eps=")
                 print_milli_ratio(ty.knowledge_epsilon)
+            } else if ty.knight_set_id != 0 {
+                print(", ε=⊥")
             }
             print(">")
         }
@@ -21823,6 +22197,8 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 250 { print("call to an `extern \"C\"` function the native backend does not implement") }
     else if code == 242 { print("epistemic channel index is out of range") }
     else if code == 232 { print("the same array local initialises two fields; the value copy is shallow, so they would be one array -- give each field its own literal") }
+    else if code == 313 { print("an f64 operand of Knowledge arithmetic is not a compile-time constant: only a literal, its negation or a module-level let/const is exact; a runtime f64 says nothing about its own uncertainty") }
+    else if code == 312 { print("hessian_wrt source is not a measured source that the value depends on: the source must be a Knowledge binding from measure() (or Knowledge(...)) and the value must depend on it") }
     else if code == 306 { print("retract needs `because:` with a non-empty string literal: leaving a contest is explicit and its reason is recorded (ADR-016, decision 4.3)") }
     else if code == 305 { print("the consistency policy of meet must be a positive numeric literal: an E_n limit is a declared modelling choice, not a value computed at run time (ADR-016)") }
     else if code == 243 { print("the correlation coefficient must be a compile-time literal; a runtime value silently becomes 0.0, which asserts independence") }
@@ -21860,6 +22236,8 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 301 { print("unit registry capacity exceeded; refusing to discard a unit dimension") }
     else if code == 302 { print("`break` with a value is only allowed inside `loop`") }
     else if code == 308 { print("the `break` values of this `loop` have different types") }
+    else if code == 310 { print("printing a Knowledge value would show its nominal value without its uncertainty and confidence; print a field instead (`k.value`, `k.variance`, `k.confidence`)") }
+    else if code == 314 { print("Knightian uncertainty (ε=⊥) cannot satisfy required confidence or error bound, or a named Knightian source has conflicting bounds") }
     else if code == 269 { print("a `where` refinement on Knowledge<T> is not enforced by this compiler yet: the predicate would be silently ignored, so it is refused") }
     else if code == 270 { print("`as string` does not convert a number, bool or char to text: no engine formats the value, so the cast is refused") }
     else if code == 263 { print("qualified call is ambiguous: this qualifier names a module you `use`d, but also collides with an unrelated struct/enum method of the same name, and the compiler cannot yet guarantee which one runs") }
@@ -22616,6 +22994,10 @@ fn print_warning_message(code: i64) with IO, Mut, Panic, Div {
         print("boolean equality on uncertain value: exact == ignores uncertainty\n")
         print("   = help: use ep_eq_prob + ep_decide (epistemic::uncertain_eq) or claim exactness")
     }
+    else if code == 47 {
+        print("hessian_of(z, j, k) is deprecated: positional channel indices are silently renumbered when a dead measure() is removed or code is reordered\n")
+        print("   = help: use hessian_wrt(z, x, y), which indexes second derivatives by the measured sources themselves\n")
+    }
     else if code == 46 {
         print("refinement predicate could not be represented and is NOT being checked\n")
         print("   = note: this checker represents `<var> <cmp> <literal>` and conjunctions of those\n")
@@ -22873,6 +23255,18 @@ fn call_expr_is_builtin_measure(opt: Option<Box<Expr> >) -> bool with Mut, Panic
     }
 }
 
+fn call_expr_is_builtin_knight(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent {
+                return false
+            }
+            name_eq_lit((*expr).name, "knight")
+        }
+        None => false
+    }
+}
+
 fn call_expr_is_builtin_seq_new(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(expr) => {
@@ -23018,6 +23412,19 @@ fn call_expr_is_builtin_hessian_of(opt: Option<Box<Expr> >) -> bool with Mut, Pa
                 return false
             }
             name_matches_str10((*expr).name, 104, 101, 115, 115, 105, 97, 110, 95, 111, 102)
+        }
+        None => false
+    }
+}
+
+fn call_expr_is_builtin_hessian_wrt(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent {
+                return false
+            }
+            // "hessian_wrt" (11 bytes)
+            name_matches_str11((*expr).name, 104, 101, 115, 115, 105, 97, 110, 95, 119, 114, 116)
         }
         None => false
     }
@@ -23481,6 +23888,18 @@ fn call_expr_is_builtin_print_char(opt: Option<Box<Expr> >) -> bool with Mut, Pa
                 return false
             }
             name_matches_str10((*expr).name, 112, 114, 105, 110, 116, 95, 99, 104, 97, 114)
+        }
+        None => false
+    }
+}
+
+fn call_expr_is_builtin_print_or_println(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent {
+                return false
+            }
+            name_matches_str7((*expr).name, 112, 114, 105, 110, 116, 108, 110) || name_matches_str5((*expr).name, 112, 114, 105, 110, 116)
         }
         None => false
     }
@@ -24032,10 +24451,12 @@ fn check_return_expr_knowledge_subsumes(ontology_items: Option<Box<ItemList> >, 
     let pmeta = knowledge_meta_from_ty(provided)
     let rmeta = knowledge_meta_from_ty(required)
     let eps_ok = epsilon_subsumes_call_boundary(
-        knowledge_meta_epsilon(pmeta),
+        epsilon_provided_view(provided, knowledge_meta_epsilon(pmeta), required.knowledge_epsilon_mode),
         provided.knowledge_epsilon_mode,
+        provided.knight_set_id,
         knowledge_meta_epsilon(rmeta),
-        required.knowledge_epsilon_mode
+        required.knowledge_epsilon_mode,
+        required.knight_set_id
     )
     if !eps_ok {
         return false
@@ -24086,10 +24507,12 @@ fn checker_knowledge_subsumes(c: *mut Checker, provided: TypeEntry, required: Ty
     let rmeta = knowledge_meta_from_ty(required)
 
     let eps_ok = epsilon_subsumes_call_boundary(
-        knowledge_meta_epsilon(pmeta),
+        epsilon_provided_view(provided, knowledge_meta_epsilon(pmeta), required.knowledge_epsilon_mode),
         provided.knowledge_epsilon_mode,
+        provided.knight_set_id,
         knowledge_meta_epsilon(rmeta),
-        required.knowledge_epsilon_mode
+        required.knowledge_epsilon_mode,
+        required.knight_set_id
     )
     if !eps_ok {
         return false
@@ -24117,13 +24540,22 @@ fn checker_knowledge_epsilon_join(c: *mut Checker, a: TypeEntry, b: TypeEntry) -
     var bn = b
     an.knowledge_epsilon = 0.0 - 1.0
     an.knowledge_epsilon_mode = 0
+    an.knight_set_id = ns_empty()
     bn.knowledge_epsilon = 0.0 - 1.0
     bn.knowledge_epsilon_mode = 0
+    bn.knight_set_id = ns_empty()
     if !checker_knowledge_subsumes(c, an, bn) || !checker_knowledge_subsumes(c, bn, an) {
         return (false, a)
     }
     var joined = a
-    if a.knowledge_epsilon_mode == b.knowledge_epsilon_mode && a.knowledge_epsilon >= 0.0 && b.knowledge_epsilon >= 0.0 && a.knowledge_epsilon_mode != 3 {
+    joined.knight_set_id = ns_union((*c).knight_ns_table, a.knight_set_id, b.knight_set_id)
+    if joined.knight_set_id != ns_empty() {
+        joined.knowledge_epsilon = 0.0 - 1.0
+        joined.knowledge_epsilon_mode = 0
+        joined.knowledge_conf = 0.0 - 1.0
+        return (true, joined)
+    }
+    if a.knowledge_epsilon_mode == b.knowledge_epsilon_mode && a.knowledge_epsilon >= 0.0 && b.knowledge_epsilon >= 0.0 {
         if a.knowledge_epsilon_mode == 0 {
             joined.knowledge_epsilon = if a.knowledge_epsilon > b.knowledge_epsilon { a.knowledge_epsilon } else { b.knowledge_epsilon }
         } else if a.knowledge_epsilon_mode == 2 {
@@ -24135,6 +24567,13 @@ fn checker_knowledge_epsilon_join(c: *mut Checker, a: TypeEntry, b: TypeEntry) -
     } else {
         joined.knowledge_epsilon = 0.0 - 1.0
         joined.knowledge_epsilon_mode = 0
+    }
+    // A stated confidence survives the join only as the weaker of the two:
+    // either branch may be the one that ran.
+    joined.knowledge_conf = if a.knowledge_conf >= 0.0 && b.knowledge_conf >= 0.0 {
+        if a.knowledge_conf < b.knowledge_conf { a.knowledge_conf } else { b.knowledge_conf }
+    } else {
+        0.0 - 1.0
     }
     (true, joined)
 }
@@ -30018,6 +30457,7 @@ impl Checker {
                 // inferred RHS rather than resetting it to the annotation's -1.
                 if ann_ty.kind == TypeKind::TyKnowledge && init_ty.kind == TypeKind::TyKnowledge {
                     bind_ty.noise_set_id = init_ty.noise_set_id
+                    bind_ty.knight_set_id = if init_ty.knight_set_id != ns_empty() { init_ty.knight_set_id } else { ann_ty.knight_set_id }
                 }
             }
         }
@@ -30089,6 +30529,7 @@ impl Checker {
                 // inferred RHS rather than resetting it to the annotation's -1.
                 if ann_ty.kind == TypeKind::TyKnowledge && init_ty.kind == TypeKind::TyKnowledge {
                     bind_ty.noise_set_id = init_ty.noise_set_id
+                    bind_ty.knight_set_id = if init_ty.knight_set_id != ns_empty() { init_ty.knight_set_id } else { ann_ty.knight_set_id }
                 }
             }
         }
@@ -30383,6 +30824,13 @@ impl Checker {
             ExprKind::ExprForIn => c.check_for_in_expr(e)
             ExprKind::ExprDsepProof => (c, ty_dsep_proof())
             ExprKind::ExprError => (c, ty_error())
+            // perform/resume are checked by checker_check_perform_expr_inplace
+            // and checker_check_resume_expr_inplace (dispatch group B). This
+            // by-value spine has no port of them; without these arms the match
+            // was not exhaustive, the seed refused it ("match must be
+            // exhaustive") and a by-value perform/resume read an unset result.
+            ExprKind::ExprPerform => (c, ty_unknown())
+            ExprKind::ExprResume => (c, ty_unknown())
         }
         (result.0.exit_expr_depth(), result.1)
     }
@@ -30562,13 +31010,13 @@ impl Checker {
             if kk_both && kk_arith && !kk_hyper && !correlated_same_slot_add && !checker_is_knowledge_ident_add(e, left_ty, right_ty) && !checker_knowledge_binary_lowerable(e, left_ty, right_ty) {
                 c = c.report_error_at(e.span, 245, 0, 0, 0)
             }
-            var knowledge_result = knowledge_binary_result(e.bin_op, left_ty, right_ty, c.ns_table)
+            var knowledge_result = knowledge_binary_result(e.bin_op, left_ty, right_ty, c.ns_table, c.knight_ns_table)
             if knowledge_result.kind == TypeKind::TyError {
                 c = c.report_error_at(e.span, 36, 0, 0, 0)
             }
             // W4: mirror of the in-place spine -- interning-table exhaustion is
             // reported (E179), never silently degraded to "unknown".
-            if ns_table_overflow_take(c.ns_table) {
+            if ns_table_overflow_take(c.ns_table) || ns_table_overflow_take(c.knight_ns_table) {
                 c = c.report_error_at(e.span, 179, 0, 0, 0)
             }
             // N3: anti-garbling gate (value path). Mirrors the in-place path so
@@ -31046,6 +31494,11 @@ impl Checker {
             } else if name_matches_str10(e.name, 99, 111, 110, 102, 105, 100, 101, 110, 99, 101) {
                 // "confidence" — IR field 2.
                 (c, ty_f64())
+            } else if name_eq_lit(e.name, "iv") {
+                (c, ty_tuple(TypeEntryList {
+                    head: ty_f64(),
+                    tail: Some(Box::new(TypeEntryList { head: ty_f64(), tail: None })),
+                }))
             } else {
                 c = c.report_no_field(e.span, e.name, base_ty)
                 (c, ty_error())
@@ -31713,6 +32166,9 @@ impl Checker {
         }
         if call_expr_is_builtin_measure(e.left) {
             return self.check_measure_expr(e)
+        }
+        if call_expr_is_builtin_knight(e.left) {
+            return self.check_knight_expr(e)
         }
         if call_expr_is_builtin_sign(e.left) && expr_list_handle_count(expr_list_handle(e.args)) == 2 {
             return self.check_sign_expr(e)
@@ -33798,6 +34254,66 @@ impl Checker {
         (c, result)
     }
 
+    fn check_knight_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        var c = self
+        let argc = expr_list_handle_count(expr_list_handle(e.args))
+        let first_arg = expr_list_head(e.args)
+        let second_arg = expr_list_second(e.args)
+        let third_arg = expr_list_third(e.args)
+        let p0 = c.check_opt_expr(first_arg)
+        c = p0.0
+        let p1 = c.check_opt_expr(second_arg)
+        c = p1.0
+        let p2 = c.check_opt_expr(third_arg)
+        c = p2.0
+        if argc != 3 {
+            c = c.report_error_at(e.span, 10, 0, 0, 0)
+            return (c, ty_error())
+        }
+        var has_name = false
+        var src_name = empty_name()
+        match first_arg {
+            Some(a0) => {
+                if (*a0).kind == ExprKind::ExprStringLit {
+                    src_name = ast_string_lit_payload((*a0).name)
+                    if src_name.len > 0 { has_name = true }
+                }
+            }
+            None => {}
+        }
+        var result = ty_knowledge(ty_f64(), 0.0 - 1.0)
+        result.noise_set_id = ns_empty()
+        if !has_name {
+            c = c.report_error_at(e.span, 314, 0, 0, 0)
+            result.knight_set_id = ns_unknown()
+            return (c, result)
+        }
+        let lo_c = checker_knight_const_f64(second_arg)
+        let hi_c = checker_knight_const_f64(third_arg)
+        let both_known = lo_c.0 && hi_c.0
+        if !both_known {
+            c = c.report_error_at(e.span, 314, 0, 0, 0)
+            result.knight_set_id = ns_unknown()
+            return (c, result)
+        }
+        if !((lo_c.1 - lo_c.1) == 0.0) || !((hi_c.1 - hi_c.1) == 0.0) || lo_c.1 > hi_c.1 {
+            c = c.report_error_at(e.span, 314, 0, 0, 0)
+            result.knight_set_id = ns_unknown()
+            return (c, result)
+        }
+        let reg = knight_source_register(c.knight_sources, src_name, lo_c.1, hi_c.1, true)
+        if reg.1 == 1 {
+            c = c.report_error_at(e.span, 314, 0, 0, 0)
+        } else if reg.1 == 2 {
+            c = c.report_error_at(e.span, 178, 0, 0, 0)
+        }
+        result.knight_set_id = if reg.0 >= 0 { ns_singleton(c.knight_ns_table, reg.0) } else { ns_unknown() }
+        if ns_table_overflow_take(c.knight_ns_table) {
+            c = c.report_error_at(e.span, 179, 0, 0, 0)
+        }
+        (c, result)
+    }
+
     fn check_knowledge_ctor_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         // Knowledge(v, e=<confidence>, prov=<provenance>) -> Knowledge<T>; by-value twin of
         // checker_check_knowledge_ctor_expr_inplace.
@@ -33817,7 +34333,7 @@ impl Checker {
         if minimum > 0 && confidence_milli < minimum {
             c = c.report_error_at(e.span, 215, confidence_milli, minimum, 0)
         }
-        (c, ty_knowledge(v_ty, confidence))
+        (c, ty_knowledge_with_confidence(v_ty, confidence))
     }
 
     fn check_variance_metric_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
@@ -34155,10 +34671,12 @@ impl Checker {
         let pm = knowledge_meta_from_ty(provided_ty)
         let rm = knowledge_meta_from_ty(expected_ty)
         let eps_ok = epsilon_subsumes_call_boundary(
-            knowledge_meta_epsilon(pm),
+            epsilon_provided_view(provided_ty, knowledge_meta_epsilon(pm), expected_ty.knowledge_epsilon_mode),
             provided_ty.knowledge_epsilon_mode,
+            provided_ty.knight_set_id,
             knowledge_meta_epsilon(rm),
-            expected_ty.knowledge_epsilon_mode
+            expected_ty.knowledge_epsilon_mode,
+            expected_ty.knight_set_id
         )
         let val_ok = validity_subsumes(knowledge_meta_validity(pm), knowledge_meta_validity(rm))
         let prov_ok = provenance_subsumes(knowledge_meta_provenance(pm), knowledge_meta_provenance(rm))
@@ -34175,6 +34693,8 @@ impl Checker {
             self.report_error_at(call_span, 244, 0, 0, 0)
         } else if !val_ok {
             self.report_error_at(call_span, 265, 0, 0, 0)
+        } else if checker_is_knightian_into_precise(provided_ty, expected_ty) {
+            self.report_error_at(call_span, 314, 0, 0, 0)
         } else {
             self.report_error_at(call_span, 36, 0, 0, 0)
         }
@@ -34267,10 +34787,12 @@ impl Checker {
                 let pm = knowledge_meta_from_ty(got_ty)
                 let rm = knowledge_meta_from_ty(exp_ty)
                 return epsilon_subsumes_call_boundary(
-                    knowledge_meta_epsilon(pm),
+                    epsilon_provided_view(got_ty, knowledge_meta_epsilon(pm), exp_ty.knowledge_epsilon_mode),
                     got_ty.knowledge_epsilon_mode,
+                    got_ty.knight_set_id,
                     knowledge_meta_epsilon(rm),
-                    exp_ty.knowledge_epsilon_mode
+                    exp_ty.knowledge_epsilon_mode,
+                    exp_ty.knight_set_id
                 ) && validity_subsumes(knowledge_meta_validity(pm), knowledge_meta_validity(rm))
                   && provenance_subsumes(knowledge_meta_provenance(pm), knowledge_meta_provenance(rm))
             }
@@ -34697,14 +35219,16 @@ impl Checker {
         type_env_bind_mut(&!c.env, e.name, ty_i64(), false)
         c.loop_depth = c.loop_depth + 1
         c.borrows = c.borrows.release_exclusive_borrows()
-        let lv_saved = (c.loop_takes_value, c.loop_break_seen, c.loop_break_ty)
+        let lv_saved_takes = c.loop_takes_value
+        let lv_saved_seen = c.loop_break_seen
+        let lv_saved_ty = c.loop_break_ty
         c.loop_takes_value = 0
         c.loop_break_seen = false
         let body_pair = c.check_opt_block(e.block)
         c = body_pair.0
-        c.loop_takes_value = lv_saved.0
-        c.loop_break_seen = lv_saved.1
-        c.loop_break_ty = lv_saved.2
+        c.loop_takes_value = lv_saved_takes
+        c.loop_break_seen = lv_saved_seen
+        c.loop_break_ty = lv_saved_ty
         c.loop_depth = c.loop_depth - 1
         c = c.pop_const_scope()
         c.borrows = c.borrows.pop_scope()
@@ -34731,14 +35255,16 @@ impl Checker {
         // Without this, the second iteration would fail because the first
         // iteration's exclusive borrows are still active.
         c.borrows = c.borrows.release_exclusive_borrows()
-        let lv_saved = (c.loop_takes_value, c.loop_break_seen, c.loop_break_ty)
+        let lv_saved_takes = c.loop_takes_value
+        let lv_saved_seen = c.loop_break_seen
+        let lv_saved_ty = c.loop_break_ty
         c.loop_takes_value = 0
         c.loop_break_seen = false
         let body_pair = c.check_opt_block(e.block)
         c = body_pair.0
-        c.loop_takes_value = lv_saved.0
-        c.loop_break_seen = lv_saved.1
-        c.loop_break_ty = lv_saved.2
+        c.loop_takes_value = lv_saved_takes
+        c.loop_break_seen = lv_saved_seen
+        c.loop_break_ty = lv_saved_ty
         c.loop_depth = c.loop_depth - 1
         (c, ty_unit())
     }
@@ -34754,16 +35280,18 @@ impl Checker {
         c.loop_depth = c.loop_depth + 1
         // Release exclusive borrows before checking loop body (same as while loops)
         c.borrows = c.borrows.release_exclusive_borrows()
-        let lv_saved = (c.loop_takes_value, c.loop_break_seen, c.loop_break_ty)
+        let lv_saved_takes = c.loop_takes_value
+        let lv_saved_seen = c.loop_break_seen
+        let lv_saved_ty = c.loop_break_ty
         c.loop_takes_value = 1
         c.loop_break_seen = false
         let pair = c.check_opt_block(e.block)
         c = pair.0
         var loop_ty = ty_unit()
         if c.loop_break_seen { loop_ty = c.loop_break_ty }
-        c.loop_takes_value = lv_saved.0
-        c.loop_break_seen = lv_saved.1
-        c.loop_break_ty = lv_saved.2
+        c.loop_takes_value = lv_saved_takes
+        c.loop_break_seen = lv_saved_seen
+        c.loop_break_ty = lv_saved_ty
         c.loop_depth = c.loop_depth - 1
         (c, loop_ty)
     }

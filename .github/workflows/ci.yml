@@ -1009,12 +1009,37 @@ jobs:
       - name: Canonical lean_single fixed point
         if: matrix.shard == 'core-c'
         run: bash scripts/ci/canonical_compiler_gate.sh
+      # The seed refuses a source with more tokens than its buffer holds, instead
+      # of parsing the truncated stream into a parse error at a line with no error.
+      # #3506 hit that at 2,097,152 tokens. The capacity is now 4,194,304.
+      - name: lean_single token capacity refusal
+        if: matrix.shard == 'core-c'
+        run: bash scripts/ci/lean_single_token_capacity_gate.sh
       # lean_single.sio must mean only what its text says: Madaros (block scope,
       # branch typing) accepts it, and the seed no longer reads a stale stack slot
       # on a global assignment. Both failed before the fix that added this step.
       - name: lean_single closed by meaning
         if: matrix.shard == 'core-c'
         run: bash scripts/ci/lean_single_closed_by_meaning_gate.sh
+      # The committed seed must build Madaros (self-hosted/compiler/main.sio)
+      # with no `error:` line. The seed reports type errors in imported modules
+      # and still exits 0 and writes the ELF; on fd59aa3ecb it printed 32 such
+      # errors in check.sio and the code at those sites was wrong. ~45 s.
+      - name: Seed builds Madaros without errors
+        if: matrix.shard == 'core-c'
+        run: bash scripts/ci/seed_builds_madaros_without_errors_gate.sh
+      # One program compiled against the same stdlib in two directories (and
+      # with a trailing slash) gives one ELF: the overflow trap embeds a stdlib
+      # file as stdlib/<rest>, not by its absolute path. ~1 min.
+      - name: Madaros output independent of stdlib location
+        if: matrix.shard == 'core-c'
+        run: bash scripts/ci/madaros_stdlib_location_independent_gate.sh
+      # A type error in an imported module fails the lean_single build: rc != 0,
+      # `typecheck: failed`, no output file. The seed used to print the error,
+      # exit 0 and write an ELF that printed garbage. ~1 s.
+      - name: lean_single import errors are fatal
+        if: matrix.shard == 'core-c'
+        run: bash scripts/ci/lean_single_import_error_fatal_gate.sh
       # The committed Madaros prebuilt must compile lean_single.sio to a compiler
       # that rebuilds the committed seed byte for byte. The prebuilt shipped until
       # 2026-11-22 (built from 0ed977cec) failed this: it miscompiled write_file on
@@ -1453,9 +1478,10 @@ jobs:
           set -euo pipefail
           mkdir -p "$LOWERER_GATE_DIR"
           bash scripts/ci/stdlib_deep_compiler_receipt.sh verify "$GITHUB_WORKSPACE" "$RUNNER_TEMP/stdlib-deep-compiler" "$GITHUB_SHA" | tee "$LOWERER_GATE_DIR/compiler-receipt.log"
-          sha256sum "$MADAROS_RAW_BIN" self-hosted/ir/lower.sio scripts/ci/lowerer_fresh_reg_parity_probe.cpp | tee "$LOWERER_GATE_DIR/compiler-inputs.sha256"
+          sha256sum "$MADAROS_RAW_BIN" self-hosted/ir/lower.sio scripts/ci/lowerer_fresh_reg_parity_probe.cpp scripts/ci/print_f64_callee_saved_probe.cpp | tee "$LOWERER_GATE_DIR/compiler-inputs.sha256"
           g++ --version | tee "$LOWERER_GATE_DIR/cxx-version.log"
           bash scripts/ci/lowerer_fresh_reg_parity_gate.sh "$LOWERER_GATE_DIR/parity" | tee "$LOWERER_GATE_DIR/parity.log"
+          bash scripts/ci/print_f64_callee_saved_gate.sh "$LOWERER_GATE_DIR/print-f64-abi" | tee "$LOWERER_GATE_DIR/print-f64-abi.log"
           ./bin/souc check tests/run-pass/scalar_global_reference.sio > "$LOWERER_GATE_DIR/scalar-check.log" 2>&1
           ./bin/souc compile tests/run-pass/scalar_global_reference.sio -o "$LOWERER_GATE_DIR/scalar-reference" > "$LOWERER_GATE_DIR/scalar-build.log" 2>&1
           chmod +x "$LOWERER_GATE_DIR/scalar-reference"
@@ -1730,6 +1756,14 @@ jobs:
         env:
           MADAROS_RAW_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
         run: bash scripts/ci/madaros_global_init_identity_gate.sh
+      # SOUNIO_STRICT_FIELD=1 refuses a guessed field index (E311): a typed
+      # tuple-slot read compiles clean, an untyped third slot is refused
+      # standalone and through an import, and both compile without the switch.
+      # Reuses the ELF built above.
+      - name: Strict field mode refuses guessed field indices (E311), opt-in only
+        env:
+          MADAROS_RAW_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+        run: bash scripts/ci/madaros_strict_field_gate.sh
       # #2661: SOUNIO_DISABLE_GLOBAL_INIT_IMPL_EXCLUSION=1 restores ONLY the
       # recording of impl methods under their bare name in that fold table
       # (the second #2603 delta), independently of the module-scope knob. The

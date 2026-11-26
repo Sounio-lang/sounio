@@ -42,6 +42,16 @@
 #   bash scripts/dev/run_sio_test_suite_v2.sh --filter-exact BASENAME [--verbose] [--format junit] [--jobs N]
 #   bash scripts/dev/run_sio_test_suite_v2.sh [--filter PATTERN] --list-tests
 #   bash scripts/dev/run_sio_test_suite_v2.sh --test-list FILE [--verbose] [--format junit] [--jobs N]
+#
+# Environment:
+#   SOUNIO_TEST_TARGET=<triple>  cross-compile target forwarded to the compiler,
+#     e.g. aarch64-macos for running the suite on a Mac with a multi-target
+#     Madaros (the raw positional interface ignores --target; the wrapper
+#     switches to the `build` verb and ad-hoc signs Mach-O outputs on Darwin).
+#     Unset keeps the historical default-target behavior.
+#   SOUNIO_TEST_SOUC_BIN=<path>  override the compiler binary (a raw ELF is
+#     routed through scripts/ci/souc-native-wrapper.sh).
+#   SOUNIO_STDLIB_PATH=<dir>     forwarded to the compiler.
 
 set -uo pipefail
 
@@ -52,6 +62,18 @@ else
     ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 fi
 cd "$ROOT_DIR"
+
+# Cross-compile target knob (lie01d harness acceptance). SOUNIO_TEST_TARGET
+# (e.g. aarch64-macos) is forwarded to the compiler wrapper, which switches
+# to the `build` verb (the raw positional interface ignores --target) and
+# ad-hoc signs Mach-O outputs on Darwin. Fail fast on a malformed value: a
+# typo here would silently build for the wrong architecture.
+if [[ -n "${SOUNIO_TEST_TARGET:-}" ]]; then
+  case "$SOUNIO_TEST_TARGET" in
+    *-*) export SOUNIO_TEST_TARGET ;;
+    *) echo "error: SOUNIO_TEST_TARGET must be a target triple (e.g. aarch64-macos), got '$SOUNIO_TEST_TARGET'" >&2; exit 2 ;;
+  esac
+fi
 
 # Harness-local override. SOUNIO_TEST_SOUC_BIN may point at one of two
 # distinct interfaces:
@@ -474,6 +496,28 @@ test_matches_filter() {
     esac
 }
 
+# Does a manifest pin (path|reason) cover this failure?
+#   known_failure_reason_matches <reason> <test_output> <first_diag>
+# A reason that starts with "error" pins a diagnostic. It must occur in the
+# first `^error` line the compiler printed, and must not end in the middle of a
+# number there: a pin "at lib.sio:61" does not match "at lib.sio:614". Matching
+# it anywhere in test_output let the 160-character tail of a run failure keep
+# the old diagnostic while a new, earlier error came first, so a regression
+# read as the known failure. Any other reason (a timeout, a program's own
+# output marker) is still looked for in the whole test_output.
+known_failure_reason_matches() {
+    local reason="$1" out="$2" diag="$3"
+    if [[ "$reason" == error* ]]; then
+        local rest="$diag"
+        while [[ "$rest" == *"$reason"* ]]; do
+            rest="${rest#*"$reason"}"
+            [[ "$rest" =~ ^[0-9] ]] || return 0
+        done
+        return 1
+    fi
+    grep -qF -- "$reason" <<<"$out"
+}
+
 # Function to run a single test
 _run_test_case() {
     local file="$1"
@@ -762,6 +806,7 @@ _run_test_case() {
     local output=""
     local exit_code=0
     local test_output=""
+    local first_diag=""
     local start_time end_time
     
     start_time=$(date +%s)
@@ -774,6 +819,13 @@ _run_test_case() {
                 test_output="check timed out after ${timeout_val}s"
             elif [[ $exit_code -ne 0 ]]; then
                 test_output="check exited $exit_code"
+                # Keep the first diagnostic line too (bounded): "check exited 1"
+                # alone let a manifest pin accept ANY rc=1 refusal, not the one
+                # it was audited for.
+                first_diag="$(grep -m1 -E "^error" <<<"$output" || true)"
+                if [[ -n "$first_diag" ]]; then
+                    test_output="$test_output | ${first_diag:0:200}"
+                fi
             fi
         else
             output=$(timeout "$timeout_val" "$SOUC_BIN" run "$file" 2>&1) || exit_code=$?
@@ -791,6 +843,12 @@ _run_test_case() {
                     snippet="$raw"
                 fi
                 test_output="run exited $exit_code"
+                # First diagnostic line (bounded), as for check-only above: the
+                # 160-character tail can end on a later error or a warning.
+                first_diag="$(grep -m1 -E "^error" <<<"$output" || true)"
+                if [[ -n "$first_diag" ]]; then
+                    test_output="$test_output | ${first_diag:0:200}"
+                fi
                 if [[ -n "$snippet" ]]; then
                     test_output="$test_output | $snippet"
                 fi
@@ -922,7 +980,7 @@ _run_test_case() {
     # so unmatched entries fall straight through to the ordinary fail path.
     if $is_known_failure && [[ $exit_code -ne 0 ]]; then
         expected_reason="${KNOWN_FAILURE_REASON_MAP[$rel_file]:-}"
-        if [[ -n "$expected_reason" ]] && ! grep -qF -- "$expected_reason" <<<"$test_output"; then
+        if [[ -n "$expected_reason" ]] && ! known_failure_reason_matches "$expected_reason" "$test_output" "$first_diag"; then
             is_known_failure=false
             test_output="known-failure reason mismatch: expected '$expected_reason', got: $test_output"
         fi
