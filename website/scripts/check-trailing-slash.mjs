@@ -6,12 +6,17 @@
  * vercel.json `routes`, in this order:
  *   1. /docs and /:lang/docs (with or without a slash, one or two slug
  *      segments, no file extension) 308 to /learn/ or /:lang/learn/.
+ *      /es/docs/effects 308 to the English /learn/effects/.
  *   2. /sitemap.xml (optional trailing slash) 308 to /sitemap-index.xml.
  *      The built file stays sitemap-index.xml; robots.txt is unchanged.
- *   3. /showcases/<stub> and /:lang/showcases/<stub> 308 to /science/<stub>/
- *      for the nine former meta-refresh slugs. The hub /showcases/ stays.
- *   4. /llms.txt sets Content-Type and continues, so it is not slash-redirected.
- *   5. The same three routes `@vercel/routing-utils` `convertTrailingSlash(true)`
+ *   3. Legacy stubs (/manifesto, /roadmap, /platform, /blog, /changelog,
+ *      /registry and /registry/<name>, with or without a locale prefix)
+ *      308 straight to their current targets, slashed or not.
+ *   4. /showcases/<stub> and /:lang/showcases/<stub> 308 to /science/<stub>/
+ *      for the nine former meta-refresh slugs. The hub /showcases/ stays,
+ *      and an unknown slug only gains a trailing slash.
+ *   5. /llms.txt sets Content-Type and continues, so it is not slash-redirected.
+ *   6. The same three routes `@vercel/routing-utils` `convertTrailingSlash(true)`
  *      emits: pass `/.well-known`, 308-add a slash on extensionless paths,
  *      308-strip a slash on paths whose last segment has an extension.
  *
