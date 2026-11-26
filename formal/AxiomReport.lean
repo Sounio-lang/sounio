@@ -13,6 +13,7 @@ import TrustSemiring
 import EpistemicSafety
 import EpistemicStat
 import EpistemicJoint
+import SCCore
 
 -- EL+ saturation: complete and sound w.r.t. the derivation calculus `Der`.
 #print axioms Sounio.OntologyELPlus.subBPlusC_iff
@@ -65,3 +66,11 @@ import EpistemicJoint
 #print axioms Epi.Joint.meet_refuses_statistical
 #print axioms Epi.Joint.resolve_identifiable
 #print axioms Epi.Joint.resolve_refuses_both
+
+-- ADR-032 step 1: Sounio Core fragment, theorems (a) and (b).
+#print axioms SCCore.sc_sound
+#print axioms SCCore.require_never_imprecise
+#print axioms SCCore.consistent_never_conflict
+#print axioms SCCore.opaque_refused_at_require
+#print axioms SCCore.consistentB_sound
+#print axioms SCCore.consistent_perm

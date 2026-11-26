@@ -23,6 +23,7 @@ lean_lib Sounio where
              `OntologyRepairEquivalence,
              `OntologyEvolutionRepair,
              `ClaimStatusInterval,
+             `SCCore,
              `OntologyMinimalRepair,
              `OntologyELReasoner,
              `OntologyELClosureVerified,
