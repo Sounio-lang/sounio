@@ -1548,7 +1548,7 @@ fn extern_name_has_ffi_intrinsic(n: Name) -> bool with Mut, Panic, Div {
 // The bodyless FnDef an `extern "C"` declaration has always produced on main.
 // Kept for every name the forwarding rewrite cannot serve.
 fn extern_decl_fn_def(name: Name, params_opt: Option<Box<ParamList>>, ret_ty: Option<Box<TypeExpr>>, span: Span) -> FnDef with Mut, Panic, Alloc {
-    FnDef { name: name, params: params_opt, return_type: ret_ty, effects: None, body: Block { stmts: None, span: span }, span: span, is_kernel: false, is_extern: true }
+    FnDef { name: name, params: params_opt, return_type: ret_ty, effects: None, body: Block { stmts: None, span: span }, span: span, is_kernel: false, is_extern: true, type_params: None }
 }
 
 fn extern_wrapper_fn_def(name: Name, params_opt: Option<Box<ParamList>>, ret_ty: Option<Box<TypeExpr>>, span: Span) -> FnDef with Mut, Panic, Alloc {
@@ -1571,7 +1571,7 @@ fn extern_wrapper_fn_def(name: Name, params_opt: Option<Box<ParamList>>, ret_ty:
         // the branch forked, and the wrapper is an ordinary Sounio fn forwarding
         // to ffi_<name>, not a bodyless extern declaration. Marking it true would
         // restore the very stub this change exists to stop emitting.
-        is_extern: false }
+        is_extern: false, type_params: None }
 }
 
 // The single decision point: forward to ffi_<name> when that intrinsic exists,
@@ -2142,8 +2142,11 @@ impl Parser {
         var p = self.advance()  // skip 'fn'
         let name = p.current_name()
         p = p.expect_ident()
+        var type_params_opt: Option<Box<TypeParamDefList> > = None
         if parser_peek(p) == TokenKind::Lt {
-            p = p.parse_type_param_header()
+            let tph = p.parse_type_param_header()
+            p = tph.0
+            type_params_opt = tph.1
         }
         // Parameters
         p = p.expect(TokenKind::LParen)
@@ -2197,7 +2200,7 @@ impl Parser {
             body: body,
             span: span,
             is_kernel: is_kernel,
-            is_extern: false,
+            is_extern: false, type_params: type_params_opt,
         }
 
         (p, Item {
@@ -2324,17 +2327,23 @@ impl Parser {
             var rev_tparams: Option<Box<TypeParamDefList>> = None
             while parser_peek(p) != TokenKind::Gt && parser_peek(p) != TokenKind::Eof {
                 let tp_span = p.current_span()
+                var st_is_const = false
                 if parser_peek(p) == TokenKind::Const {
+                    st_is_const = true
                     p = p.advance()
                 }
                 let tp_name = p.current_name()
                 p = p.expect_ident()
+                var st_bounds: Option<Box<TypeExprList> > = None
                 if parser_peek(p) == TokenKind::Colon {
                     p = p.advance()
                     let ann_pair = p.parse_type()
                     p = ann_pair.0
+                    if !st_is_const {
+                        st_bounds = Some(Box::new(TypeExprList { head: ann_pair.1, tail: None }))
+                    }
                 }
-                let tpd = TypeParamDef { name: tp_name, span: p.span_from(tp_span) }
+                let tpd = TypeParamDef { name: tp_name, span: p.span_from(tp_span), bounds: st_bounds }
                 rev_tparams = Some(Box::new(TypeParamDefList { head: tpd, tail: rev_tparams }))
                 if parser_peek(p) == TokenKind::Comma {
                     p = p.advance()
@@ -2414,17 +2423,37 @@ impl Parser {
         })
     }
 
-    fn parse_type_param_header(self) -> Parser with Mut, IO, Panic, Div, Alloc {
+    // `<T: A + B, const N: i64, U>`: the type parameters with their trait
+    // bounds. A `const` parameter is a value, not a type: it is consumed and
+    // not listed (as before), so its annotation is never read as a bound.
+    fn parse_type_param_header(self) -> (Parser, Option<Box<TypeParamDefList> >) with Mut, IO, Panic, Div, Alloc {
         var p = self.expect(TokenKind::Lt)
+        var rev: Option<Box<TypeParamDefList> > = None
         while parser_peek(p) != TokenKind::Gt && parser_peek(p) != TokenKind::Eof {
+            let tp_span = p.current_span()
+            var is_const = false
             if parser_peek(p) == TokenKind::Const {
+                is_const = true
                 p = p.advance()
             }
+            let tp_name = p.current_name()
             p = p.expect_ident()
+            var rev_bounds: Option<Box<TypeExprList> > = None
             if parser_peek(p) == TokenKind::Colon {
                 p = p.advance()
-                let ann_pair = p.parse_type()
-                p = ann_pair.0
+                let b1 = p.parse_type()
+                p = b1.0
+                rev_bounds = Some(Box::new(TypeExprList { head: b1.1, tail: rev_bounds }))
+                while parser_peek(p) == TokenKind::Plus {
+                    p = p.advance()
+                    let bn = p.parse_type()
+                    p = bn.0
+                    rev_bounds = Some(Box::new(TypeExprList { head: bn.1, tail: rev_bounds }))
+                }
+            }
+            if !is_const {
+                let tpd = TypeParamDef { name: tp_name, span: p.span_from(tp_span), bounds: reverse_type_expr_list_opt(rev_bounds) }
+                rev = Some(Box::new(TypeParamDefList { head: tpd, tail: rev }))
             }
             if parser_peek(p) == TokenKind::Comma {
                 p = p.advance()
@@ -2432,7 +2461,8 @@ impl Parser {
                 p = p.advance()
             }
         }
-        p.expect(TokenKind::Gt)
+        p = p.expect(TokenKind::Gt)
+        (p, reverse_type_param_def_list_opt(rev))
     }
 
     // ============================================================
@@ -2759,8 +2789,11 @@ impl Parser {
         var p = self.advance()  // skip 'fn'
         let name = p.current_name()
         p = p.expect_ident()
+        var type_params_opt: Option<Box<TypeParamDefList> > = None
         if parser_peek(p) == TokenKind::Lt {
-            p = p.parse_type_param_header()
+            let tph = p.parse_type_param_header()
+            p = tph.0
+            type_params_opt = tph.1
         }
         p = p.expect(TokenKind::LParen)
         let pair = p.parse_param_list()
@@ -2791,7 +2824,7 @@ impl Parser {
             body: body,
             span: span,
             is_kernel: false,
-            is_extern: false,
+            is_extern: false, type_params: type_params_opt,
         }
 
         (p, Item {
@@ -5018,7 +5051,7 @@ impl Parser {
             p = p.advance()
         }
         let span = p.span_from(start)
-        let fn_def = FnDef { name: name, params: params_opt, return_type: ret_ty, effects: None, body: Block { stmts: None, span: span }, span: span, is_kernel: false, is_extern: true }
+        let fn_def = FnDef { name: name, params: params_opt, return_type: ret_ty, effects: None, body: Block { stmts: None, span: span }, span: span, is_kernel: false, is_extern: true, type_params: None }
         (p, Item { kind: ItemKind::ItemFn, span: span, visibility: visibility, name: name, fn_def: Some(Box::new(fn_def)), struct_def: None, enum_def: None, impl_def: None, type_alias_ty: None, policy_def: None, acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None, transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None, alternative_frontier_def: None, models_def: None, validation_def: None, audit_def: None, use_path: empty_path(), use_glob: false, use_items: None, effect_def: None, session_decl: None, trait_def: None, algebra_def: None, study_def: None, ontology_def: None })
     }
 
@@ -5078,6 +5111,23 @@ fn reverse_field_def_list_loop(
             reverse_field_def_list_loop(next, Some(Box::new(rev_node)))
         },
     }
+}
+
+// Reverse a TypeExprList built by prepending (the bounds of a type parameter).
+fn reverse_type_expr_list_opt(list: Option<Box<TypeExprList>>) -> Option<Box<TypeExprList>> with Mut, Alloc {
+    var acc: Option<Box<TypeExprList>> = None
+    var cur = list
+    var done = false
+    while !done {
+        match cur {
+            None => { done = true }
+            Some(node) => {
+                acc = Some(Box::new(TypeExprList { head: (*node).head, tail: acc }))
+                cur = (*node).tail
+            }
+        }
+    }
+    acc
 }
 
 fn reverse_type_param_def_list_opt(list: Option<Box<TypeParamDefList>>) -> Option<Box<TypeParamDefList>> with Mut, Alloc {
