@@ -27,7 +27,7 @@ if [[ ! -x "$compiler" ]]; then compiler="$work/madaros"; bash scripts/ci/build_
 rec "compiler-sha-$(sha256sum "$compiler" | cut -d' ' -f1)"
 export SOUNIO_STDLIB_PATH="$PWD/stdlib" SOUNIO_MADAROS_BIN="$compiler"
 set +e
-for f in tests/llm/llm_raw_memory_contract.sio tests/llm/llm_mmap_contract.sio tests/llm/llm_v2_adversarial_ftz.sio tests/llm/llm_v2_61440_audit.sio; do
+for f in tests/llm/llm_raw_memory_contract.sio tests/llm/llm_mmap_contract.sio tests/llm/llm_granite_argmax_tail_cpu.sio tests/llm/llm_v2_adversarial_ftz.sio tests/llm/llm_v2_61440_audit.sio; do
   name=$(basename "$f" .sio)
   ./bin/souc check "$f" > "$work/check-$name.log" 2>&1
   rc=$?; rec "check-$name-rc-$rc"

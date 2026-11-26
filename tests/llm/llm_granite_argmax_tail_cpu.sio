@@ -1,0 +1,54 @@
+//@ run-pass
+//@ requires: madaros
+use llm::top2::{qwen3_cpu_top2}
+use llm::raw_memory::{ptr_read_i64_le, ptr_read_u32_le, ptr_write_u32_le}
+
+// Three tail entries at 49152..49154. Cases force tail winners and ties
+// within a CUDA lane (stride 256) and across lanes.
+fn build_granite_argmax_tail(p: i64, mode: i64) with Mut {
+    var i: i64 = 0
+    while i < 49155 {
+        let _w = ptr_write_u32_le(p, i * 4, 3212836864)
+        i = i + 1
+    }
+    let _a = ptr_write_u32_le(p, 49152 * 4, 1073741824)
+    let _b = ptr_write_u32_le(p, 49153 * 4, 1073741824)
+    let _c = ptr_write_u32_le(p, 49154 * 4, 1073741824)
+    if mode == 1 {
+        let _d = ptr_write_u32_le(p, 256 * 4, 1073741824)
+        let _e = ptr_write_u32_le(p, 2 * 4, 1073741824)
+    }
+    if mode == 2 {
+        let _d = ptr_write_u32_le(p, 49154 * 4, 1082130432)
+    }
+}
+
+fn check_granite_argmax_tail(out: i64, mode: i64) -> bool {
+    let t1 = if mode == 0 { 49152 } else if mode == 1 { 2 } else { 49154 }
+    let t2 = if mode == 0 { 49153 } else if mode == 1 { 256 } else { 49152 }
+    let b1 = if mode == 2 { 1082130432 } else { 1073741824 }
+    ptr_read_i64_le(out, 0) == t1 && ptr_read_i64_le(out, 8) == t2
+        && ptr_read_u32_le(out, 16) == b1 && ptr_read_u32_le(out, 20) == 1073741824
+}
+
+fn granite_argmax_tail_cpu() -> bool with IO, Alloc, Mut {
+    let buf = heap_alloc(49155 * 4 + 32) as i64
+    let out = buf + 49155 * 4
+    var ok = buf != 0
+    if ok {
+        var mode: i64 = 0
+        while mode < 3 {
+            build_granite_argmax_tail(buf, mode)
+            let rc = qwen3_cpu_top2(buf, out, 49155)
+            if rc != 0 || !check_granite_argmax_tail(out, mode) { ok = false }
+            mode = mode + 1
+        }
+        heap_free(buf as *mut u8)
+    }
+    println(if ok { "GRANITE_ARGMAX_TAIL_CPU_PASS" } else { "GRANITE_ARGMAX_TAIL_CPU_FAIL" })
+    ok
+}
+
+fn main() -> i64 with IO, Alloc, Mut {
+    if granite_argmax_tail_cpu() { 0 } else { 1 }
+}
