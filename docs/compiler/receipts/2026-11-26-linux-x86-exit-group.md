@@ -70,3 +70,29 @@ source. This establishes the thread-group return regression on Linux x86-64.
 cause of the earlier Granite tail timeout, or cross-GPU numerical identity.
 The Granite numerical audit pin is intentionally unchanged; a separate
 watchdog handles its historical compiler's process-exit hang.
+
+## Historical recurrence and CI enforcement
+
+This re-lands the process-termination correction of commit
+`168d9f9585aa3d9fa4e1b13f41ed9fe5716b7bf6` ([#292](https://github.com/Sounio-lang/sounio/pull/292),
+2026-06-14, “use exit_group(231) for program exit, not exit(60)”), adapted
+from the earlier lean_single epilogue to the current native x86-64 Madaros
+backend. Its commit message records the same NVIDIA L4 sm_89 PASS-then-hang
+symptom (timeout 124 before, clean exit 0 after rebuilding). Neither that
+commit nor its patch-identical predecessor `87df161522af1e9f59aef5b95634b6a870b7d985`
+is an ancestor of `origin/main` as checked on 2026-11-26. The local historical
+remote-tracking refs `origin/regen/souc-bin-exit-group` and
+`origin/fix/gpu-exit-group` retain the original and patch-identical version,
+respectively. The historical GPU result is a claim in that commit message,
+not a newly repeated GPU test.
+
+The first PR CI Decision failed in Fast Checks because the new regression
+script was not directly named by a workflow (unnamed gate count 456 → 457).
+The regression is now an executable step in `.github/workflows/ci.yml`'s
+Madaros Witness Gate, immediately following placement of the verified
+current-source compiler at `/tmp/madaros-ci.elf`. The step passes
+`MADAROS_RAW_BIN` to the gate, builds the C++23 pthread DSO with `g++`,
+checks and compiles the Sounio probe with that exact compiler, and enforces
+the same five-second exit-status test. No frozen ratchet baseline is
+relaxed. CI execution on the updated head is tracked separately from the
+observed Slurm results above.
