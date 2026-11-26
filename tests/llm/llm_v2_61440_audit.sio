@@ -667,38 +667,40 @@ fn run_61440_cuda(
     ok
 }
 
-fn arg_eq(p: i64, s: string) -> bool {
-    if p == 0 { return false }
+fn arg_eq(p: string, s: string) -> bool {
+    if str_len(p) != str_len(s) { return false }
     var i: i64 = 0
     while i < str_len(s) {
-        if ptr_read_u8(p, i) != (str_char_at(s, i) & 255) { return false }
+        if str_char_at(p, i) != str_char_at(s, i) { return false }
         i = i + 1
     }
-    ptr_read_u8(p, i) == 0
+    true
 }
 
-fn copy_arg(dst: i64, src: i64) -> i64 with Mut {
+fn copy_arg(dst: i64, src: string) -> i64 with Mut {
+    let n = str_len(src)
+    if n >= 4090 { return -1 }
     var i: i64 = 0
-    while i < 4090 {
-        let b = ptr_read_u8(src, i)
-        let _w = ptr_write_u8(dst, i, b)
-        if b == 0 { return i }
+    while i < n {
+        let _w = ptr_write_u8(dst, i, str_char_at(src, i) & 255)
         i = i + 1
     }
-    -1
+    let _z = ptr_write_u8(dst, i, 0)
+    n
 }
 
-fn decimal_arg(p: i64) -> i64 with Div {
+fn decimal_arg(p: string) -> i64 with Div {
+    let n = str_len(p)
+    if n <= 0 || n > 8 { return -1 }
     var i: i64 = 0
     var v: i64 = 0
-    while i < 9 {
-        let b = ptr_read_u8(p, i)
-        if b == 0 && i > 0 { return v }
+    while i < n {
+        let b = str_char_at(p, i)
         if b < 48 || b > 57 { return -1 }
         v = v * 10 + b - 48
         i = i + 1
     }
-    -1
+    v
 }
 
 // Offline oracle: one line per prompt, unsigned decimal token IDs separated
@@ -768,7 +770,7 @@ fn verify_granite_prompt_ids(tok: &Qwen3Tokenizer, prompts: &MappedShard, slen: 
     ok
 }
 
-pub fn main(argc: i32, argv: i64) -> i64 with IO, Alloc, Mut, Div, Panic {
+pub fn main() -> i64 with IO, Alloc, Mut, Div, Panic {
     let force_cuda = env_equals("SOUNIO_AUDIT_BACKEND", "cuda")
     let probe_sess = metal_session_open("")
     let use_metal = (!force_cuda) && metal_session_is_ok(&probe_sess)
@@ -789,11 +791,12 @@ pub fn main(argc: i32, argv: i64) -> i64 with IO, Alloc, Mut, Div, Panic {
     var granite = false
     let ref_buf = heap_alloc(4096) as i64
     let _rl = cstr_env_or_default(ref_buf, "SOUNIO_GRANITE_PROMPT_IDS", "")
-    var ai: i64 = 1
-    while ai < argc as i64 {
-        if ai + 1 >= argc as i64 { println("AUDIT_BAD_ARG"); return 1 }
-        let key = ptr_read_i64_le(argv, ai * 8)
-        let val = ptr_read_i64_le(argv, (ai + 1) * 8)
+    let argc = arg_count()
+    var ai: i64 = 0
+    while ai < argc {
+        if ai + 1 >= argc { println("AUDIT_BAD_ARG"); return 1 }
+        let key = get_arg(ai)
+        let val = get_arg(ai + 1)
         if arg_eq(key, "--arch") {
             if arg_eq(val, "granite") { granite = true }
             else if arg_eq(val, "qwen3") { granite = false }
