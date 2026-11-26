@@ -12,6 +12,7 @@ cd "$root"
 export SOUNIO_STDLIB_PATH="$root/stdlib" SOUNIO_MADAROS_BIN="$compiler"
 ./bin/souc check tests/native-v2/exit_group_thread_return.sio > "$work/check.log" 2>&1
 "$compiler" build tests/native-v2/exit_group_thread_return.sio -o "$work/probe" > "$work/build.log" 2>&1
+chmod +x "$work/probe"
 sha256sum "$compiler" "$work/probe" "$work/libexit_group_probe.so" > "$work/SHA256SUMS"
 rc=0
 LD_LIBRARY_PATH="$work${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" timeout -k 2s 5s "$work/probe" > "$work/run.log" 2>&1 || rc=$?

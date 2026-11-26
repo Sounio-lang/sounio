@@ -28,6 +28,13 @@ git init -q src
 git -C src fetch -q --depth 1 https://github.com/Sounio-lang/sounio.git "$commit"
 git -C src checkout -q --detach FETCH_HEAD
 [[ $(git -C src rev-parse HEAD) == "$commit" ]]
+# A corrected test harness can be overlaid without changing the compiler source.
+if [[ -n "${3:-}" ]]; then
+  git -C src fetch -q --depth 1 https://github.com/Sounio-lang/sounio.git "$3"
+  [[ $(git -C src rev-parse FETCH_HEAD) == "$3" ]]
+  git -C src checkout -q FETCH_HEAD -- scripts/ci/madaros_exit_group_thread_gate.sh
+  rec "gate-source-$3"
+fi
 rec "source-$commit"
 cd src
 bash scripts/ci/build_modular_madaros.sh "$work/madaros" > "$work/build-madaros.log" 2>&1
