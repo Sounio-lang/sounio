@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
-import { isCalendarDate, lastmodForUrl, resolveLastmod } from '../src/lib/sitemap-lastmod.mjs';
+import { isCalendarDate, lastmodForUrl, repositoryIsShallow, resolveLastmod } from '../src/lib/sitemap-lastmod.mjs';
 
 const websiteRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
 const distSitemap = path.join(websiteRoot, 'dist/sitemap-0.xml');
@@ -31,7 +31,7 @@ export function lastmodDay(value) {
   return null;
 }
 
-export function sitemapLastmodErrors(xml, lookup) {
+export function sitemapLastmodErrors(xml, lookup, { allowMissing = false } = {}) {
   const errors = [];
   const blocks = [...xml.matchAll(/<url>([\s\S]*?)<\/url>/g)].map((match) => match[1]);
   if (blocks.length === 0) errors.push('sitemap has no <url>');
@@ -43,16 +43,37 @@ export function sitemapLastmodErrors(xml, lookup) {
       continue;
     }
     const day = lastmodDay(lastmod);
+    const expected = lookup(loc);
     if (!day) {
+      if (allowMissing && !expected) continue;
       errors.push(`${loc}: lastmod ${JSON.stringify(lastmod)} is not a content or git day`);
       continue;
     }
-    const expected = lookup(loc);
     if (expected !== day) {
       errors.push(`${loc}: lastmod ${day}, source date ${expected ?? 'missing'}`);
     }
   }
   return errors;
+}
+
+/** Distinct calendar days in <lastmod>, and how many URLs share the most common one. */
+export function lastmodConcentration(xml) {
+  const blocks = [...xml.matchAll(/<url>([\s\S]*?)<\/url>/g)].map((match) => match[1]);
+  const counts = new Map();
+  for (const block of blocks) {
+    const raw = block.match(/<lastmod>([^<]*)<\/lastmod>/)?.[1] ?? '';
+    const day = lastmodDay(raw);
+    if (!day) continue;
+    counts.set(day, (counts.get(day) ?? 0) + 1);
+  }
+  let mode = 0;
+  for (const count of counts.values()) if (count > mode) mode = count;
+  return {
+    urls: blocks.length,
+    distinct: counts.size,
+    mode,
+    share: blocks.length === 0 ? 0 : mode / blocks.length,
+  };
 }
 
 selfTest();
@@ -77,6 +98,17 @@ if (process.argv.includes('--self-test')) {
     '<urlset><url><loc>https://www.souniolang.org/</loc><lastmod>2026-08-01</lastmod></url></urlset>',
     () => '2026-08-01',
   ).length, 0);
+  const omitted = '<urlset><url><loc>https://www.souniolang.org/learn/</loc></url></urlset>';
+  assert.equal(sitemapLastmodErrors(omitted, () => null, { allowMissing: true }).length, 0);
+  assert.ok(sitemapLastmodErrors(omitted, () => null).some((error) => error.includes('/learn/')));
+  const sameDay = Array.from({ length: 10 }, () => '<url><loc>https://www.souniolang.org/a/</loc><lastmod>2026-08-01</lastmod></url>').join('');
+  const concentrated = lastmodConcentration(`<urlset>${sameDay}</urlset>`);
+  assert.equal(concentrated.urls, 10);
+  assert.equal(concentrated.distinct, 1);
+  assert.ok(concentrated.share > 0.9);
+  const mixed = lastmodConcentration('<urlset><url><loc>https://www.souniolang.org/a/</loc><lastmod>2026-08-01</lastmod></url><url><loc>https://www.souniolang.org/b/</loc><lastmod>2026-08-02T00:00:00.000Z</lastmod></url></urlset>');
+  assert.equal(mixed.distinct, 2);
+  assert.ok(mixed.share <= 0.9);
   console.log('sitemap lastmod self-test passed');
   process.exit(0);
 }
@@ -87,7 +119,8 @@ if (!xml) {
   process.exit(1);
 }
 
-const errors = sitemapLastmodErrors(xml, lastmodForUrl);
+const shallow = repositoryIsShallow();
+const errors = sitemapLastmodErrors(xml, lastmodForUrl, { allowMissing: shallow });
 if (errors.length > 0) {
   console.error(`sitemap lastmod failed (${errors.length}):`);
   for (const error of errors.slice(0, 30)) console.error(`- ${error}`);
@@ -95,5 +128,11 @@ if (errors.length > 0) {
   process.exit(1);
 }
 
-const count = xml.match(/<lastmod>/g)?.length ?? 0;
-console.log(`sitemap lastmod: ${count} urls, from content or git dates`);
+const concentration = lastmodConcentration(xml);
+console.log(`sitemap lastmod: ${concentration.urls} urls, ${concentration.distinct} distinct values, from content or git dates`);
+// A shallow checkout has already refused to invent a deploy-day lastmod.
+// A full history that still stamps one day on more than 90% of URLs is the production bug.
+if (!shallow && concentration.urls > 0 && concentration.share > 0.9) {
+  console.error(`sitemap lastmod failed: ${concentration.mode} of ${concentration.urls} urls share one lastmod (${concentration.distinct} distinct values)`);
+  process.exit(1);
+}

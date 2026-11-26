@@ -22,6 +22,7 @@ import { EFFECTS_FAQ } from '../src/lib/effect-system-page.mjs';
 import { UNCERTAINTY_EN, UNCERTAINTY_PT } from '../src/lib/uncertainty-page.mjs';
 import { rehypeDemoteH1 } from '../src/lib/rehype-demote-h1.mjs';
 import { isoDateOrNothing, CODE_REPOSITORY, COMPUTER_LANGUAGE_ID, FORMER_LANGUAGE_NAME, FORMER_RELEASE_URL, computerLanguage } from '../src/lib/structured-data.mjs';
+import { lastmodForPathname } from '../src/lib/sitemap-lastmod.mjs';
 
 // seo-locales resolves content from cwd. Astro and `npm --prefix website`
 // already start there. This command is also run from the repo root.
@@ -373,7 +374,6 @@ function uncertaintyAppearanceErrors(route, html, blocks, page) {
   const article = blocks.find((block) => block['@type'] === 'TechArticle');
   if (article?.headline !== page.h1) found.push(`${route}: TechArticle headline`);
   if (article?.description !== page.description) found.push(`${route}: TechArticle description`);
-  if (article?.dateModified !== page.dateModified) found.push(`${route}: TechArticle dateModified`);
   if ('softwareVersion' in (article ?? {})) found.push(`${route}: softwareVersion on TechArticle`);
   if (JSON.stringify(article?.author) !== JSON.stringify(page.author)) {
     found.push(`${route}: TechArticle author ${JSON.stringify(article?.author)}`);
@@ -535,6 +535,16 @@ for await (const file of walk(dist)) {
     }
   }
   const articles = blocks.filter((block) => block['@type'] === 'TechArticle');
+  const expectedModified = lastmodForPathname(route);
+  for (const article of articles) {
+    if (expectedModified) {
+      if (article.dateModified !== expectedModified) {
+        errors.push(`${route}: TechArticle dateModified ${JSON.stringify(article.dateModified ?? null)} is not the sitemap lastmod ${expectedModified}`);
+      }
+    } else if ('dateModified' in article) {
+      errors.push(`${route}: TechArticle dateModified was emitted without a sitemap lastmod`);
+    }
+  }
   const crumbs = blocks.filter((block) => block['@type'] === 'BreadcrumbList');
   if (bare === '/language/' && crumbs.length !== 1) {
     errors.push(`${route}: language page must keep one BreadcrumbList`);
@@ -656,21 +666,6 @@ for await (const file of walk(dist)) {
       if (article.description !== expected.description) errors.push(`${route}: TechArticle description does not match the meta description`);
       if (article.inLanguage !== 'en') errors.push(`${route}: TechArticle inLanguage`);
       if (article.url !== absoluteUrl(bare)) errors.push(`${route}: TechArticle url ${article.url}`);
-      if (isEffectsPage) {
-        if (article.dateModified !== EFFECTS_PAGE.dateModified) {
-          errors.push(`${route}: dateModified is ${JSON.stringify(article.dateModified)}`);
-        }
-      } else if (isUncertaintyPage) {
-        if (article.dateModified !== UNCERTAINTY_EN.dateModified) {
-          errors.push(`${route}: dateModified is ${JSON.stringify(article.dateModified)}`);
-        }
-      } else if (isEffectCheckerPage) {
-        if (article.dateModified !== expected.dateModified) {
-          errors.push(`${route}: dateModified is ${JSON.stringify(article.dateModified)}`);
-        }
-      } else if ('dateModified' in article) {
-        errors.push(`${route}: dateModified was emitted without a calendar date in the source`);
-      }
     }
   if (bare === '/learn/compiler/self-hosted/') {
     if (headings[0] !== SELF_HOSTED_PAGE.h1) {
