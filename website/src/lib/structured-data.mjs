@@ -1,3 +1,5 @@
+import { lastmodForPathname } from './sitemap-lastmod.mjs';
+
 export const CODE_REPOSITORY = 'https://github.com/Sounio-lang/sounio';
 
 /** Former public name of the language. Not a second language. */
@@ -238,7 +240,12 @@ export function buildPageSchemas({
   omitSoftwareApplication,
   datePublished,
   pageTitle,
+  pathname,
 }) {
+  // TechArticle dateModified is the sitemap day for this URL (content date or
+  // last commit). The build clock is not a date. TechArticle gets no
+  // datePublished: those pages have no frontmatter publishedAt or date.
+  const articleModified = pathname ? lastmodForPathname(pathname) ?? undefined : undefined;
   const schemas = [];
   if (bare === '/' && !omitSoftwareApplication) schemas.push(softwareApplication({ description, siteOrigin }));
   if (bare === '/' || bare === '/learn/getting-started/') schemas.push(softwareSourceCode());
@@ -248,7 +255,7 @@ export function buildPageSchemas({
       description,
       url: canonicalUrl,
       inLanguage,
-      dateModified,
+      dateModified: articleModified,
       about,
       author,
       isPartOf,
@@ -265,6 +272,7 @@ export function buildPageSchemas({
         description,
         url: canonicalUrl,
         inLanguage,
+        dateModified: articleModified,
         author,
       }));
     } else if (kind === 'blog') {

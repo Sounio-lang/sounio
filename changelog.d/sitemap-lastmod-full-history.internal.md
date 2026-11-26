@@ -1,0 +1,1 @@
+Website production and PR builds check out full git history, so each sitemap `lastmod` is a content date or that file's last commit instead of the deploy day. A shallow checkout on GitHub Actions fails the build. TechArticle JSON-LD uses that same `dateModified` when the day is known. The compiler and the standard library are unchanged.
