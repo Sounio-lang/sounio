@@ -27,6 +27,8 @@ if [[ ! -x "$compiler" && -x /tmp/granite-runtime-check-29232/madaros ]]; then c
 if [[ ! -x "$compiler" ]]; then compiler="$work/madaros"; bash scripts/ci/build_modular_madaros.sh "$compiler" > "$work/build.log" 2>&1; fi
 rec "compiler-sha-$(sha256sum "$compiler" | cut -d' ' -f1)"
 export SOUNIO_STDLIB_PATH="$PWD/stdlib" SOUNIO_MADAROS_BIN="$compiler"
+art=/orangefs/training/llm-granite-n10/cpu-$SLURM_JOB_ID
+if [[ -w /orangefs/training/llm-granite-n10 ]]; then mkdir -p "$art"; else art=""; fi
 set +e
 for f in tests/llm/llm_raw_memory_contract.sio tests/llm/llm_mmap_contract.sio tests/llm/llm_granite_argmax_tail_cpu.sio tests/llm/llm_v2_adversarial_ftz.sio tests/llm/llm_v2_61440_audit.sio; do
   name=$(basename "$f" .sio)
@@ -45,10 +47,18 @@ for f in tests/llm/llm_raw_memory_contract.sio tests/llm/llm_mmap_contract.sio t
   fi
   chmod +x "$work/$name"
   rec "sha-$name-$(sha256sum "$work/$name" | cut -d' ' -f1)"
+  if [[ -n "$art" ]]; then cp "$work/$name" "$art/$name"; fi
   if [[ "$name" != llm_v2_61440_audit ]]; then
     SOUNIO_AUDIT_BACKEND=cpu SOUNIO_ADV_OUT="$work/cpu.bin" "$work/$name" > "$work/run-$name.log" 2>&1
     rec "run-$name-rc-$?"
     grep -E 'PASS|FAIL|TOTAL_' "$work/run-$name.log" | tail -5 | while IFS= read -r l; do rec "$l"; done
+  else
+    SOUNIO_AUDIT_BACKEND=cuda "$work/$name" --arch granite --prompts 1 > "$work/cli-shape.log" 2>&1
+    rec "registered-shape-refusal-rc-$?"
+    grep -E 'AUDIT_|GRANITE_' "$work/cli-shape.log" | head -4 | while IFS= read -r l; do rec "$l"; done
+    SOUNIO_AUDIT_BACKEND=cuda "$work/$name" --arch unknown > "$work/cli-arch.log" 2>&1
+    rec "unknown-arch-refusal-rc-$?"
+    grep -E 'AUDIT_|GRANITE_' "$work/cli-arch.log" | head -4 | while IFS= read -r l; do rec "$l"; done
   fi
 done
 c++ -std=c++23 -O2 -Wall -Wextra -Werror tools/sounio-llm/granite_prompt_ids.cpp -lpcre2-8 -o "$work/ids" > "$work/build-ids.log" 2>&1
@@ -57,5 +67,11 @@ tail -4 "$work/build-ids.log" | while IFS= read -r l; do rec "$l"; done
 c++ -std=c++23 -O2 -Wall -Wextra -Werror tools/sounio-llm/cmp_61440.cpp -o "$work/cmp" > "$work/build-cmp.log" 2>&1
 rec "build-cmp-rc-$?"
 if [[ -x "$work/cmp" ]]; then "$work/cmp" --selftest > "$work/cmp-selftest.log" 2>&1; rec "cmp-selftest-rc-$?"; rec "cmp-sha-$(sha256sum "$work/cmp" | cut -d' ' -f1)"; fi
+if [[ -n "$art" ]]; then
+  cp "$work/"*.log "$art/" 2>/dev/null || true
+  if [[ -s "$work/cpu.bin" ]]; then cp "$work/cpu.bin" "$art/"; fi
+  (cd "$art" && find . -maxdepth 1 -type f ! -name "SHA256SUMS*" -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.tmp && mv SHA256SUMS.tmp SHA256SUMS)
+  rec "cpu-artifacts-$art"
+fi
 exit 0
 __CA_BUNDLE__
