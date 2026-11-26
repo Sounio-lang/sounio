@@ -40,8 +40,42 @@ expect "$llms_with_site" full false
 
 lean="$(classify_pr formal/lean4/SounioGradedModal.lean)"
 expect "$lean" lean true
+expect "$lean" bootstrap false
+
+# The bootstrap Lean model and the Sporos semantics are Bootstrap Proofs only; the rest of
+# formal/ is Lean Proofs only; the package files and the toolchain select both.
+boot_lean="$(classify_pr formal/Bootstrap/X86Vm.lean formal/Sporos/DagRun.lean formal/Bootstrap/AxiomReport.lean)"
+expect "$boot_lean" bootstrap true
+expect "$boot_lean" lean false
+expect "$boot_lean" full false
+formal_top="$(classify_pr formal/ElfLinker.lean formal/AxiomReport.lean)"
+expect "$formal_top" lean true
+expect "$formal_top" bootstrap false
+for shared in formal/lakefile.lean formal/lean-toolchain scripts/ci/lean_axiom_report.sh; do
+  both="$(classify_pr "$shared")"
+  expect "$both" lean true
+  expect "$both" bootstrap true
+done
 expect "$lean" math true
 expect "$lean" compiler false
+
+# The Sporos C++ interpreter and its differential belong to the Bootstrap Proofs job.
+sporos="$(classify_pr bootstrap/model/sporos_fast.cpp)"
+expect "$sporos" bootstrap true
+expect "$sporos" lean false
+expect "$sporos" full false
+
+# The x86 CPU differential harness belongs to the Bootstrap Proofs job.
+x86diff="$(classify_pr bootstrap/model/x86diff_cpu.cpp bootstrap/model/x86int_diff_gate.sh)"
+expect "$x86diff" bootstrap true
+expect "$x86diff" lean false
+expect "$x86diff" full false
+
+# The bootstrap model gates belong to the Bootstrap Proofs job, not to Lean Proofs.
+boot_gates="$(classify_pr bootstrap/model/tmr_fault_gate.sh bootstrap/model/x86env_diff_gate.sh bootstrap/model/x86dec_fuzz_gate.sh bootstrap/model/x86uni_diff_gate.sh bootstrap/model/x86vm_diff_gate.sh bootstrap/model/aarch64_phys_gate.sh bootstrap/model/sporos_provlen_gate.sh bootstrap/model/sporos_vm_gate.sh bootstrap/model/sporos_vm_proofs.sh bootstrap/model/tmr_burst_straddle_gate.sh bootstrap/model/root_c_seed_gate.sh)"
+expect "$boot_gates" bootstrap true
+expect "$boot_gates" lean false
+expect "$boot_gates" full false
 
 compiler="$(classify_pr self-hosted/compiler/main.sio)"
 expect "$compiler" compiler true
@@ -76,12 +110,13 @@ done
 expect "$unknown" full true
 expect "$unknown" compiler true
 expect "$unknown" lean true
+expect "$unknown" bootstrap true
 
 root_build="$(classify_pr Makefile)"
 expect "$root_build" full true
 
 workflow="$(classify_pr .github/workflows/ci.yml)"
-for key in docs website compiler runtime stdlib tests lean math ontology clinical sio full; do
+for key in docs website compiler runtime stdlib tests lean bootstrap math ontology clinical sio full; do
   expect "$workflow" "$key" true
 done
 
@@ -161,7 +196,7 @@ json_sub() {
   printf '%s' "$out"
 }
 
-good_needs='{"impact":{"outputs":{"compiler":"false","runtime":"false","stdlib":"false","tests":"false","sio":"false","lean":"false","website":"false","full":"false"}},"contracts":{"result":"success"},"fast-checks":{"result":"success"},"native-selfhost-linux-x86_64":{"result":"skipped"},"native-linux-regressions":{"result":"skipped"},"source-bootstrap-selfhost-linux-x86_64":{"result":"skipped"},"source-bootstrap-regressions":{"result":"skipped"},"scientific-reference-controls":{"result":"skipped"},"current-source-madaros":{"result":"skipped"},"sco-current-source":{"result":"skipped"},"madaros-current-source-deref-f64":{"result":"skipped"},"native-selfhost-macos-arm64":{"result":"skipped"},"full-test-suite":{"result":"skipped"},"madaros-witness-gate":{"result":"skipped"},"gate-wave-0":{"result":"skipped"},"sounio-lint":{"result":"skipped"},"lean-proofs":{"result":"skipped"},"website":{"result":"skipped"},"r6-corpus-sweep":{"result":"skipped"},"slow-lane":{"result":"skipped"}}'
+good_needs='{"impact":{"outputs":{"compiler":"false","runtime":"false","stdlib":"false","tests":"false","sio":"false","lean":"false","website":"false","full":"false"}},"contracts":{"result":"success"},"fast-checks":{"result":"success"},"native-selfhost-linux-x86_64":{"result":"skipped"},"native-linux-regressions":{"result":"skipped"},"source-bootstrap-selfhost-linux-x86_64":{"result":"skipped"},"source-bootstrap-regressions":{"result":"skipped"},"scientific-reference-controls":{"result":"skipped"},"current-source-madaros":{"result":"skipped"},"sco-current-source":{"result":"skipped"},"madaros-current-source-deref-f64":{"result":"skipped"},"native-selfhost-macos-arm64":{"result":"skipped"},"full-test-suite":{"result":"skipped"},"madaros-witness-gate":{"result":"skipped"},"madaros-corpus-regression":{"result":"skipped"},"gate-wave-0":{"result":"skipped"},"sounio-lint":{"result":"skipped"},"lean-proofs":{"result":"skipped"},"bootstrap-proofs":{"result":"skipped"},"website":{"result":"skipped"},"r6-corpus-sweep":{"result":"skipped"},"slow-lane":{"result":"skipped"}}'
 # Both nightly signals pinned, like every other check below: a skipped
 # r6-corpus-sweep is only correct off the nightly cadence, and
 # is_nightly() (evaluate_ci_decision.py) treats GITHUB_EVENT_NAME=schedule and
@@ -181,7 +216,22 @@ if NEEDS_JSON="$bad_needs" python3 "$DECISION" >/dev/null 2>&1; then
   exit 1
 fi
 
-compiler_needs='{"impact":{"outputs":{"compiler":"true","runtime":"false","stdlib":"false","tests":"false","sio":"true","lean":"false","website":"false","full":"false"}},"contracts":{"result":"success"},"fast-checks":{"result":"success"},"native-selfhost-linux-x86_64":{"result":"success"},"native-linux-regressions":{"result":"success"},"source-bootstrap-selfhost-linux-x86_64":{"result":"success"},"source-bootstrap-regressions":{"result":"success"},"scientific-reference-controls":{"result":"success"},"current-source-madaros":{"result":"success"},"sco-current-source":{"result":"success"},"madaros-current-source-deref-f64":{"result":"failure"},"native-selfhost-macos-arm64":{"result":"success"},"full-test-suite":{"result":"success"},"madaros-witness-gate":{"result":"success"},"gate-wave-0":{"result":"success"},"sounio-lint":{"result":"success"},"lean-proofs":{"result":"skipped"},"website":{"result":"skipped"},"r6-corpus-sweep":{"result":"skipped"},"slow-lane":{"result":"skipped"}}'
+# Bootstrap Proofs is selected by the bootstrap key alone: it must pass when selected,
+# and a failure of it must fail the decision even when Lean Proofs is not selected.
+boot_sel="$(json_sub "$good_needs" '"lean":"false"' '"lean":"false","bootstrap":"true"')"
+boot_ok="$(json_sub "$boot_sel" '"bootstrap-proofs":{"result":"skipped"}' '"bootstrap-proofs":{"result":"success"}')"
+NEEDS_JSON="$boot_ok" GITHUB_EVENT_NAME=push NIGHTLY_INPUT=false python3 "$DECISION" | grep -Fq CI_DECISION_PASS
+boot_bad="$(json_sub "$boot_sel" '"bootstrap-proofs":{"result":"skipped"}' '"bootstrap-proofs":{"result":"failure"}')"
+if NEEDS_JSON="$boot_bad" GITHUB_EVENT_NAME=push NIGHTLY_INPUT=false python3 "$DECISION" >/dev/null 2>&1; then
+  echo "impact-ci-selftest: decision accepted a failed Bootstrap Proofs job" >&2
+  exit 1
+fi
+if NEEDS_JSON="$boot_sel" GITHUB_EVENT_NAME=push NIGHTLY_INPUT=false python3 "$DECISION" >/dev/null 2>&1; then
+  echo "impact-ci-selftest: decision accepted a selected Bootstrap Proofs job that was skipped" >&2
+  exit 1
+fi
+
+compiler_needs='{"impact":{"outputs":{"compiler":"true","runtime":"false","stdlib":"false","tests":"false","sio":"true","lean":"false","website":"false","full":"false"}},"contracts":{"result":"success"},"fast-checks":{"result":"success"},"native-selfhost-linux-x86_64":{"result":"success"},"native-linux-regressions":{"result":"success"},"source-bootstrap-selfhost-linux-x86_64":{"result":"success"},"source-bootstrap-regressions":{"result":"success"},"scientific-reference-controls":{"result":"success"},"current-source-madaros":{"result":"success"},"sco-current-source":{"result":"success"},"madaros-current-source-deref-f64":{"result":"failure"},"native-selfhost-macos-arm64":{"result":"success"},"full-test-suite":{"result":"success"},"madaros-witness-gate":{"result":"success"},"madaros-corpus-regression":{"result":"success"},"gate-wave-0":{"result":"success"},"sounio-lint":{"result":"success"},"lean-proofs":{"result":"skipped"},"bootstrap-proofs":{"result":"skipped"},"website":{"result":"skipped"},"r6-corpus-sweep":{"result":"skipped"},"slow-lane":{"result":"skipped"}}'
 if NEEDS_JSON="$compiler_needs" python3 "$DECISION" >/dev/null 2>&1; then
   echo "impact-ci-selftest: decision accepted failed current-source Madaros gate" >&2
   exit 1
@@ -210,6 +260,11 @@ done
 witness_failed_needs="$(json_sub "$compiler_green_needs" '"madaros-witness-gate":{"result":"success"}' '"madaros-witness-gate":{"result":"failure"}')"
 if NEEDS_JSON="$witness_failed_needs" python3 "$DECISION" >/dev/null 2>&1; then
   echo "impact-ci-selftest: decision accepted failed selected Madaros witness gate" >&2
+  exit 1
+fi
+corpus_failed_needs="$(json_sub "$compiler_green_needs" '"madaros-corpus-regression":{"result":"success"}' '"madaros-corpus-regression":{"result":"failure"}')"
+if NEEDS_JSON="$corpus_failed_needs" python3 "$DECISION" >/dev/null 2>&1; then
+  echo "impact-ci-selftest: decision accepted failed selected Madaros corpus regression" >&2
   exit 1
 fi
 
@@ -290,7 +345,7 @@ NEEDS_JSON="$slow_skipped" GITHUB_EVENT_NAME=workflow_dispatch NIGHTLY_INPUT=fal
 
 node "$ROOT_DIR/scripts/ci/ci_decision_contract.mjs" "$ROOT_DIR" --selftest
 
-stdlib_needs='{"impact":{"outputs":{"compiler":"false","runtime":"false","stdlib":"true","tests":"false","sio":"true","lean":"false","website":"false","full":"false"}},"contracts":{"result":"success"},"fast-checks":{"result":"success"},"native-selfhost-linux-x86_64":{"result":"skipped"},"native-linux-regressions":{"result":"skipped"},"source-bootstrap-selfhost-linux-x86_64":{"result":"skipped"},"source-bootstrap-regressions":{"result":"skipped"},"scientific-reference-controls":{"result":"skipped"},"current-source-madaros":{"result":"skipped"},"sco-current-source":{"result":"skipped"},"madaros-current-source-deref-f64":{"result":"skipped"},"native-selfhost-macos-arm64":{"result":"skipped"},"full-test-suite":{"result":"skipped"},"madaros-witness-gate":{"result":"success"},"sounio-lint":{"result":"success"},"lean-proofs":{"result":"skipped"},"website":{"result":"skipped"},"r6-corpus-sweep":{"result":"skipped"},"slow-lane":{"result":"skipped"}}'
+stdlib_needs='{"impact":{"outputs":{"compiler":"false","runtime":"false","stdlib":"true","tests":"false","sio":"true","lean":"false","website":"false","full":"false"}},"contracts":{"result":"success"},"fast-checks":{"result":"success"},"native-selfhost-linux-x86_64":{"result":"skipped"},"native-linux-regressions":{"result":"skipped"},"source-bootstrap-selfhost-linux-x86_64":{"result":"skipped"},"source-bootstrap-regressions":{"result":"skipped"},"scientific-reference-controls":{"result":"skipped"},"current-source-madaros":{"result":"skipped"},"sco-current-source":{"result":"skipped"},"madaros-current-source-deref-f64":{"result":"skipped"},"native-selfhost-macos-arm64":{"result":"skipped"},"full-test-suite":{"result":"skipped"},"madaros-witness-gate":{"result":"success"},"madaros-corpus-regression":{"result":"success"},"sounio-lint":{"result":"success"},"lean-proofs":{"result":"skipped"},"bootstrap-proofs":{"result":"skipped"},"website":{"result":"skipped"},"r6-corpus-sweep":{"result":"skipped"},"slow-lane":{"result":"skipped"}}'
 if NEEDS_JSON="$stdlib_needs" python3 "$DECISION" >/dev/null 2>&1; then
   echo "impact-ci-selftest: decision accepted stdlib suite without native compiler/full suite" >&2
   exit 1

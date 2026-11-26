@@ -1,0 +1,1679 @@
+//@ run-pass
+//@ timeout: 180
+//@ expect-stdout-contains: CIRC28_DISTRIBUTION_SPECTRUM_B_PASS
+//
+// Cross-drug DIAGNOSTIC of the circ28 drug layer: where the volume of distribution sits in time
+// (distribution spectrum), what central volume an intravenous two-exponential analysis of the model
+// would report, where an absorbed oral dose sits at the oral peak, and whether a SECOND volume
+// parameter fitted to a second volume observable (the central volume Vc) repairs the oral peak.
+// Nothing is fitted or tuned here and no stdlib file is changed: the eleven fitted records are built
+// by their own modules (midazolam tablet, quetiapine, venlafaxine IR, haloperidol, olanzapine,
+// clozapine, aripiprazole, risperidone, tacrolimus, sirolimus, everolimus) and read.
+//
+// THE PATTERN. With ka fitted to the pooled Tmax the oral peak is too flat in several drugs (midazolam
+// tablet Cmax/AUC 0.233 against 0.359 /h; quetiapine 0.153 against 0.252 /h; venlafaxine IR Cmax,ss 77
+// against 225 ng/mL; sirolimus 26 against 67; everolimus 3.7 against 17.8; tacrolimus 8 against 29
+// ng/mL). Haloperidol errs the other way.
+// COORDINATOR'S HYPOTHESIS. One Kp scalar multiplies every Rodgers-Rowland Kp; for lipophilic bases
+// the well-perfused organs get large Kp, so the volume in equilibrium with blood within minutes is
+// much larger than the central volume of human two-compartment fits; the absorbed dose is diluted at
+// once and Tmax can only be matched by a slow ka. Two volume observables (V_ss, Vc), one parameter.
+//
+// DEFINITIONS (kernel symbols: v_i organ volume, vf_i vascular fraction, Q_i flow, kp_i, ps_i, bp)
+//   reference   plasma for eight drugs; WHOLE BLOOD for tacrolimus, sirolimus, everolimus (their
+//               observables are whole-blood; the record's CD_BP is the single ratio at C_ref, and the
+//               runs here are the single-ratio linear kernel: the modules measured it against the
+//               local-binding kernel at dCmax -0.3 %). Volumes are printed in litres of the reference
+//               fluid: plasma-referred litres divided by 1 (plasma) or by bp (blood).
+//   capacity    C_i = bp v_i vf_i + v_i (1 - vf_i) kp_i  (plasma-referred L): exactly the organ's
+//               term of circ28_vss_plasma; pools bp (v_ven + v_art). Sum = V_ss (ASSERTED).
+//   tau_i       time constant of filling organ i from blood. The organ sub-system for a step C_in in
+//               the inflow of flow Q (Q_h for the liver, the cardiac output for the lung):
+//                 Vv dC/dt = Q (C_in - C) - ps (C/bp - T/kp),   Vt dT/dt = ps (C/bp - T/kp)
+//               is x' = M x + u with M = [[-a, b], [c, -d]], a = (Q + ps/bp)/Vv, b = ps/(kp Vv),
+//               c = ps/(bp Vt), d = ps/(kp Vt). Its eigenvalues are -(a + d +- sqrt((a-d)^2 + 4bc))/2;
+//               their product is ad - bc = Q ps/(kp Vv Vt), so the slow one is
+//                 lambda_s = (ad - bc) / lambda_f,  lambda_f = (a + d + sqrt((a-d)^2 + 4bc))/2,
+//               and tau_i = 1/lambda_s (EXACT slow mode; the fast mode is the vascular wash-in).
+//               Quasi-steady vascular space gives the series form the task states:
+//                 Vt dT/dt = Qeff (C_in - bp T/kp),  Qeff = Q ps/(ps + Q bp)  =>  tau ~ (Vt kp/bp)/Qeff;
+//               the task's C_i,blood/Qeff adds the vascular capacity over Qeff, which is right when
+//               the organ is flow-limited (Qeff ~ Q) and too long when it is permeability-limited
+//               (the vascular space fills at Q, not at Qeff). Both are printed; tau_i is the exact one.
+//               Hepatic and gut-wall metabolism are left out of tau (it is a filling time).
+//               Checked against a simulated single-organ step response (trapezoidal rule, 4000
+//               steps per tau): the time at which the organ content reaches 1 - 1/e of its final
+//               value (S0, two organs: one flow-limited, one permeability-limited).
+//   V_rapid(T)  bp x total blood volume + sum of the TISSUE capacities with tau_i < T (threshold
+//               form, the task's; every blood bed is counted as rapid), T = 5, 15, 30 min. A smooth
+//               form, blood + sum of tissue capacity x (1 - exp(-T/tau_i)), is printed beside it
+//               because the threshold form jumps when an organ's tau crosses T.
+//   IV bolus    1 mg infused over 0.02 h; 0.005 h steps to 0.5 h (sign of every state checked at
+//               every step), 0.05 h to 4 h, then 120 steps to T_end = max(24 h, 10 ln2 V_ss/CL).
+//               Dose/C at 5, 15, 30 min; terminal log-linear fit on [0.6 T_end, T_end] (B, beta);
+//               residual log-linear fit from 0.08 h while the residual exceeds 10 % of the terminal
+//               line (A, alpha; "none" with fewer than 3 points); Vc_peel = Dose/(A + B); alpha share
+//               of AUC = (A/alpha)/AUC_inf.
+//   oral run    record ka, fa, tlag; 0.05 h steps to 12 h, then 60 steps to T_end; AUC_inf with the
+//               IV terminal rate. Steady state (venlafaxine IR 75 mg and clozapine 100 mg, both twice
+//               daily, the regimens their ka was fitted on): superposition of the single-dose curve,
+//               0.1 h steps (0.3 h in the fits), 5 intervals plus the geometric tail.
+//   at Tmax     shares of the dose ABSORBED so far: gut tissue (the absorption site), liver, lung,
+//               other rapid organs (kidney, brain, heart, spleen, pancreas, gut vascular), slow organs
+//               (muscle, adipose, skin, bone, rest), blood pools, eliminated. Sum = 1 (ASSERTED).
+//   what-if F   NOT ADOPTED. kp_i x s_r for the rapid organs (liver, kidney, brain, heart, lung, gut,
+//               spleen, pancreas) and kp_i x s_s for the slow ones with s_s set so that V_ss is
+//               unchanged (clearance and F do not depend on kp in this kernel). s_r is solved so that
+//               Vc_peel equals the observed Vc; ka is refitted to the same Tmax target (not for
+//               haloperidol, whose ka is measured); printed: s_r, s_s, Cmax/AUC or Cmax, IV t1/2.
+//               Where no observed Vc exists (or as a second row) the FAMILY LIMIT s_r = 0.05 is
+//               printed: the smallest central volume this two-scalar family can give, i.e. the most
+//               favourable case for the hypothesis.
+//
+// D. OBSERVED CENTRAL VOLUMES (opened 2026-11-15; AB abstract, FT full text, SEC secondary)
+//   midazolam    IV. Brill 2014 Clin Pharmacokinet 53:931 (PMC4171595, FT via Europe PMC): 12 healthy
+//                men, 76.0 kg, 1 mg IV 150 min after 2 mg oral, three-compartment model with two
+//                equalised peripheral volumes, first samples 5 min after the IV dose; V1 = 44.1 L
+//                (RSE 16.1 %) x (1 + 0.0105 (TBW - 127)) = 20.5 L at 76 kg; Q 1.31 and 0.153 L/min;
+//                oral input: THREE TRANSIT compartments, mean transit time 30.8 min (healthy).
+//                Burstein 1997 J Clin Pharmacol 37:711 (PMID 9378843, AB): 8 healthy, 2 mg IV,
+//                two-compartment: Vc 0.27 (SD 0.14) L/kg, Vp 0.67 (0.11) L/kg, CLd 0.31 (0.29),
+//                CL 0.57 (0.26) L/h/kg; x 73 kg. Pooled k = 2 (u = max(SE_w, SE_b), in Sounio).
+//   haloperidol  NO Vc found. Holley 1983 Clin Pharmacol Ther 33:477 (PMID 6831826, AB): 0.125 mg/kg
+//                IV, distribution half-lives 0.19 (SD 0.07) h and 2 (1) h in 6 men (three-exponential).
+//                Chang 1992 (PMID 1579624, AB): three-compartment, "volume of distribution during the
+//                distribution phase" 1754 L (not a central volume).
+//   quetiapine   NO Vc found (no IV form). Brogren PAGE 2010 poster (page-meeting.org abstract 7053,
+//                FT of the poster): 58 healthy, two-compartment, TRANSIT absorption, mean transit time
+//                1.14 h (IR), CL/F 96.8 L/h, Vss/F 515 L; Vc/F not on the poster. Zhou 2015 (AB,
+//                module dossier): one-compartment V/F 574 L.
+//   venlafaxine  NO Vc found. Wang 2022 Front Pharmacol (PMC9772442, FT via Europe PMC): one-
+//                compartment, V/F 628 L (RSE 5.8 %), ka 0.63 /h fixed; it cites a three-compartment
+//                fit of IV data (Lin 2016 J Pharm Sci 105:3088, values not readable: closed).
+//   olanzapine   oral only. Li 2018 BMJ Open (PMC6104801, FT via Europe PMC): 22 healthy Chinese men
+//                (10 mg, first sample at 1 h) + 234 patients; two-compartment with lag 0.877 h, ka
+//                2.85 /h (x 1.89 for one formulation); Vc/F 2390 L x 0.216 or 0.207 for the two
+//                formulations given to the volunteers = 516 and 495 L (RSE 12.6 % and 13 %), Vp/F
+//                168 L, Q/F 8.41 L/h. Vc = Vc/F x the record's F. No sample before 1 h: the early
+//                volume is not resolved by that design.
+//   clozapine    NO Vc found (Cheng 1988 IV, PMID 3203703, AB: V_ss and t1/2 only; Albitar 2024,
+//                PMID 38836990, AB: two-compartment, volumes not in the abstract).
+//   aripiprazole oral only. Koue 2007 (PMID 17978491, AB): 66 healthy Japanese men, two-compartment,
+//                lag 0.805 h, ka 2.65 /h, V1/F 3.84 L/kg, V2/F 1.54 L/kg, Q/F 0.168 L/h/kg; x 73 kg x F.
+//   risperidone  oral only. Vermeulen 2007 as tabulated by Carrascosa-Arteaga 2025 (PMC12114922, SEC):
+//                407 patients, two-compartment, Vc 137 L, Vp 100 L, Q 3.65 L/h, ka 2.34 /h, lag 0.165 h,
+//                first-pass conversion modelled separately with F = 100 %: taken as Vc (not x F).
+//   tacrolimus   oral only, whole blood. Storset 2014 Br J Clin Pharmacol 78:509 (PMC4243902, FT via
+//                Europe PMC, Table 2 re-read here): kidney recipients, V1/F 125 L (RSE 11 %), V2/F
+//                636 L, Q/F 23.8 L/h, CL/F 16.1 L/h, ka 1.01 /h, lag 0.41 h; x the record's F.
+//   sirolimus    oral only, whole blood. Djebli 2006 (PMID 17048977, AB): 22 kidney recipients, Vc/F
+//                218 L, Vp/F 292 L, Erlang absorption. Wang 2016 (PMID 27117038, AB): 22 healthy
+//                Chinese + 105 recipients, central V/F 676 L, ka 0.24 /h. Pooled k = 2, x F.
+//   everolimus   oral only. Moes 2012 (PMID 22624503, AB): 53 kidney recipients, whole blood, V1/F
+//                148 L, lag, ka 7.36 /h. van Erp 2016 (PMC5069307, FT via Europe PMC): 73 cancer
+//                patients, PLASMA-referred Vc/F 207 L (RSE 5 %), Vp/F 485 L, Q/F 72.1 L/h, four
+//                transit compartments (mean absorption time 0.544 h); / bp to whole blood. Pooled
+//                k = 2 in whole-blood litres, x F.
+//   Second search round (2026-11-15): PubMed titles for population PK of quetiapine (22), clozapine (8),
+//   venlafaxine (13) and haloperidol (18) were listed; none was opened, so no Vc is taken for them
+//   (patient popPK with oral data only would give Vc/F, not a measurement of the initial volume).
+//   Every oral two-compartment model above carries a lag or transit input with a fast ka.
+//   Observed peak rows (the modules' own validation rows, from their reports): midazolam tablet
+//   Cmax/AUC 0.359 /h (sb 0.049) and IV t1/2 2.06 h; quetiapine 0.252 /h (sb 0.031); venlafaxine IR
+//   75 mg b.i.d. Cmax,ss 225 ng/mL; haloperidol Cmax/AUC 0.066 /h (Holley; range 0.029-0.066);
+//   olanzapine 10 mg 16.6 ng/mL (SD 3.8); clozapine 100 mg b.i.d. Cmax,ss 445 (SD 105); aripiprazole
+//   10 mg 50.6 (15.5); tacrolimus 5 mg 28.8; sirolimus 10 mg 67; everolimus 2 mg 17.8 (6.1) ng/mL.
+//
+// PRE-REGISTRATION (written 2026-11-15 BEFORE any run of this file; `souc check` only). DISCLOSURE:
+// before writing it I ran scratch programs that only built the eleven records and printed their 18
+// values and V_ss, timed the existing drug tests, and read the reports; the hand estimates below used
+// the acidic-phospholipid column of the Rodgers-Rowland tissue table and the kernel's flows.
+//  COORDINATOR
+//   C1 V_rapid(15 min) >= 2 x observed Vc for midazolam, quetiapine and venlafaxine.
+//   C2 at the model's oral Tmax more than half of the absorbed dose sits in rapid organs other than
+//      blood (gut tissue + liver + lung + other rapid), for those three.
+//   C3 the what-if raises Cmax/AUC toward the observed value for those three; midazolam tablet into
+//      0.30-0.40 /h.
+//   C4 haloperidol: opposite sign, V_rapid below the observed Vc.
+//  MINE (they contradict C1-C3)
+//   M1 V_rapid(15 min, threshold) / observed Vc: midazolam 0.45-1.15, olanzapine 0.04-0.15,
+//      aripiprazole 0.04-0.15, risperidone 0.12-0.35, tacrolimus 0.2-0.6, sirolimus 0.08-0.35,
+//      everolimus 0.6-1.8. No drug reaches 2. (Quetiapine, venlafaxine, haloperidol, clozapine: no
+//      observed Vc found, so C1 for two of its three drugs and C4 are NOT TESTABLE as stated.)
+//   M2 V_rapid(15 min) / V_ss: midazolam 0.12-0.35, quetiapine 0.15-0.32, venlafaxine 0.09-0.25,
+//      haloperidol 0.02-0.07, olanzapine 0.03-0.09, clozapine 0.03-0.10, aripiprazole 0.03-0.10,
+//      risperidone 0.15-0.32, tacrolimus 0.03-0.08, sirolimus 0.04-0.10, everolimus 0.09-0.20.
+//      Reason: for a base the R&R Kp is large in lung, liver, kidney, but those organs are 5.6 L of
+//      tissue; muscle carries about 60 % of the capacity and fills in 0.5 to 11 h.
+//   M3 share of the absorbed dose in rapid organs other than blood at Tmax: midazolam 0.03-0.12,
+//      quetiapine 0.04-0.15, venlafaxine 0.12-0.32 (all below one half); the largest single share is
+//      "eliminated" for midazolam (0.45-0.75) and quetiapine (0.45-0.80). Gut tissue alone:
+//      tacrolimus above 0.35, sirolimus 0.15-0.50, everolimus 0.08-0.35.
+//   M4 what-if: midazolam s_r between 0.4 and 2.5 and tablet Cmax/AUC 0.19-0.28 /h (below 0.30), IV
+//      t1/2 2.6-4.2 h. Family limit s_r = 0.05: midazolam Cmax/AUC below 0.30; quetiapine below
+//      0.21 (observed 0.252); venlafaxine IR Cmax,ss below 130 ng/mL (observed 225). Reason: the
+//      observed (Cmax/AUC) x Tmax is 0.45 (midazolam) and 0.37 (quetiapine); a one-compartment
+//      first-order input without lag cannot exceed 1/e = 0.368 and a distribution phase lowers it, so
+//      no re-split of volume reaches it; a lag or transit input does.
+//   M5 haloperidol: the model shows no alpha phase faster than 0.5 h (observed 0.19 h).
+//   M6 midazolam IV: Dose/C(5 min) 6-16 L; Vc_peel/V_ss 0.15-0.45.
+//   M7 tau: exact slow mode against the simulated 63 % time within 3 % (ASSERTED); the series form
+//      C_blood/Qeff within 6 % of the exact tau for the flow-limited records and 20-100 % too long
+//      in some organ for tacrolimus and sirolimus (permeability-limited).
+//  ASSERTED (identities and guards only; predictions are printed as HIT / MISS and never asserted):
+//   capacities sum to V_ss (1e-10); S0 tau check (3 %); no negative state after the IV bolus; mass
+//   balance (1e-9); IV dose/AUC equals the closed-form clearance (1 %); oral shares sum to 1 (1e-9);
+//   record guard rows (Kp scalar, hepatic clint, V_ss against the values the modules' own tests
+//   print, 1e-4); baseline Tmax of the record against the module's target (5 %, linear records whose
+//   ka is fitted; printed only for the immunophilins and haloperidol); what-if keeps V_ss (1e-10)
+//   and clearance (1 %).
+//
+// FILES. The eleven drugs do not fit one compiled program in the 5 s budget (the records of the
+// immunophilins take about 2.8 s to build, each run is about 74 microseconds per step): this file
+// (_a) holds midazolam, quetiapine, venlafaxine, haloperidol, olanzapine, clozapine, aripiprazole; the
+// sibling _b holds risperidone, tacrolimus, sirolimus, everolimus. The code is identical; only main
+// differs. Each prints its own marker.
+//
+// AMENDMENTS MADE AFTER THE FIRST RUN (the pre-registration above is unchanged; disclosed):
+//  1 the first run found a peak-detection defect (with a lag the curve is 0 at the start and the
+//    "previous point was the maximum" branch fired at Tmax = 0.1 h for haloperidol and olanzapine):
+//    guarded by cm > 0.
+//  2 the first run MISSED the pre-registered M7 first part for the permeability-limited liver of
+//    tacrolimus (63 % time / exact tau = 0.83, not within 3 %): the organ content is
+//    1 - w exp(-t/tau) - (1 - w) exp(-lf t) with slow-mode weight w < 1, so the 63 % time is not tau.
+//    Kept as a printed MISS; the ASSERTED check is now the late slope of the residual between 2 and
+//    3 tau (1 % tolerance; ratio 1.000000 for both organs).
+//  3 Vc_peel(s_r) is not monotone, so the what-if scans a 6-point log grid first; the flag says
+//    when the observed Vc lies outside the family (1: below every grid value, 2: above).
+//  4 added (Dose - eliminated)/C(t), the body-mass volume, beside Dose/C(t) (Dose/C overstates it by
+//    the eliminated mass), and diagnostic G (one more diagnostic, labelled, see below).
+//  5 speed: fits use early-exit single-dose runs, steady state with 5 intervals (0.3 h steps in the
+//    fits), IV runs with coarser early steps; the reported runs use the full resolution.
+//  6 lean_single: circ28_drug_params_theta gives ps[8] = 0 there when the record has no CD_PSGUT
+//    (Madaros: 20 x gut flow = 1170 L/h) because `th[CD_PSGUT] > 0.0` is true for the unset slot;
+//    worked around here with a 1e-6 threshold; the aripiprazole record of the chained fit differs
+//    by 0.27 % in hepatic clint on lean_single (guard tolerance 1 % for that row only).
+//
+// DIAGNOSTIC G (the one further diagnostic; chosen from the run: at Tmax the absorbed dose sits
+// mostly in "eliminated" and slow organs, not in rapid organs; the quantity that fixes Cmax/AUC at a
+// given Tmax is the SHAPE of the input). The record's own disposition, the first-order input replaced
+// by a chain of 3 equal transit compartments, rate refitted to the same Tmax target. Three is
+// Brill 2014's number for midazolam; for the other drugs it is borrowed.
+//
+// RESULT (run 2026-11-15, Madaros, three engines agree on PASS; full tables in the report
+// peak_shape_report.md): the coordinator's hypothesis is not supported: V_rapid(15 min) is 0.02 to
+// 0.19 of V_ss and 0.09 to 0.80 of the observed Vc; at Tmax 0.10 to 0.13 of the absorbed dose is in
+// rapid organs other than blood (midazolam, quetiapine, venlafaxine); the Vc-matched split moves
+// midazolam Cmax/AUC from 0.233 to 0.262 only (0.359 observed) and could not reach the observed Vc.
+// Diagnostic G: transit input at the same Tmax gives midazolam 0.367 /h (observed 0.359) and
+// quetiapine 0.258 /h (0.252), venlafaxine Cmax,ss 120 (225), tacrolimus 20.9 (28.8), sirolimus 34
+// (67), everolimus 4.5 (17.8) ng/mL.
+//
+//
+// REPAIR AFTER THE TRANSIT REFIT (2026-11-15; the text above is the record of the diagnostic on the PRE-refit models and is unchanged).
+// The refit round (commits ce68f19a5f .. 8b4560f1f0) changed CD_KA of risperidone and tacrolimus to the per-stage rate k of an Erlang
+// chain (ntr 4). Repair, with no stdlib file touched:
+//  1 BASELINE = the pre-refit FIRST-ORDER input, built explicitly: ds_fo_all overwrites CD_KA and CD_TLAG of the copied record with the
+//    pre-refit fits (git 90220737e9): risperidone ka 0.8120 /h (lag 0), tacrolimus ka 4.426075 /h (lag 0; the value the pre-refit record
+//    carried after tac_ka_record: tac_ka_fit() 10 was only the bound). Sirolimus and everolimus: the legacy entry points sir_drug_into
+//    and evr_drug_into still build the first-order record (the refit kept them), read as they are. Diagnostic G never used the
+//    record's ka and is unchanged by construction.
+//  2 REPRODUCED: risperidone, tacrolimus and everolimus print the SAME numbers as the pre-refit run (every row of T1-T5 and every
+//    prediction line, diffed against the pre-refit file and binary), so the baseline Tmax of tacrolimus is again 1.4065 h (target 1.37).
+//  3 RE-BASELINED: sirolimus only, and only in the 6th digit: the legacy fit now lands on ps scalar 0.137655 (before 0.137658) and
+//    hepatic clint 272.342492 (before 272.342087, rel 1.5e-6); the guard values are unchanged (1e-4 tolerance). Rows move by <= 3e-5 of
+//    themselves, e.g. Dose/C(15 min) 25.349962 -> 25.349700 L, Cmax 28.198159 -> 28.198341 ng/mL, M7 worst-organ tau deviation
+//    0.795913 -> 0.795915. No prediction verdict changes (14 evaluated, 13 HIT before and after).
+//  4 CONCLUSION still holds: the coordinator's hypothesis is not supported for risperidone, tacrolimus, sirolimus and everolimus
+//    (V_rapid15/Vc 0.14-0.58 against the predicted >= 2; peak shape, not early volume), and the transit what-if G is as before.
+//
+// COMPILER NOTES. Records are built first in main (the aripiprazole test found that a float computed
+// in main before circ28_drug_new makes Madaros segfault); the 784-element systems are created once
+// in main and passed down; results travel in flat f64 arrays with literal strides.
+
+use darwin_pbpk::circ28::*
+use darwin_pbpk::circ28_kp::*
+use darwin_pbpk::circ28_drug::*
+use darwin_pbpk::circ28_nl::*
+use darwin_pbpk::circ28_drug_midazolam::*
+use darwin_pbpk::circ28_drug_quetiapine::*
+use darwin_pbpk::circ28_drug_venlafaxine::*
+use darwin_pbpk::circ28_drug_haloperidol::*
+use darwin_pbpk::circ28_drug_olanzapine::*
+use darwin_pbpk::circ28_drug_clozapine::*
+use darwin_pbpk::circ28_drug_aripiprazole::*
+use darwin_pbpk::circ28_drug_risperidone::*
+use darwin_pbpk::circ28_drug_tacrolimus::*
+use darwin_pbpk::circ28_drug_sirolimus::*
+use darwin_pbpk::circ28_drug_everolimus::*
+use math::pure::{exp, ln}
+
+fn ds_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn ds_name(k: i32) -> string {
+    if k == 0 { return "midazolam (tablet)" }
+    if k == 1 { return "quetiapine" }
+    if k == 2 { return "venlafaxine (IR)" }
+    if k == 3 { return "haloperidol" }
+    if k == 4 { return "olanzapine" }
+    if k == 5 { return "clozapine" }
+    if k == 6 { return "aripiprazole" }
+    if k == 7 { return "risperidone" }
+    if k == 8 { return "tacrolimus" }
+    if k == 9 { return "sirolimus" }
+    return "everolimus"
+}
+
+fn ds_organ(i: i32) -> string {
+    if i == 1 { return "liver   " }
+    if i == 2 { return "kidney  " }
+    if i == 3 { return "brain   " }
+    if i == 4 { return "heart   " }
+    if i == 5 { return "lung    " }
+    if i == 6 { return "muscle  " }
+    if i == 7 { return "adipose " }
+    if i == 8 { return "gut     " }
+    if i == 9 { return "skin    " }
+    if i == 10 { return "bone    " }
+    if i == 11 { return "spleen  " }
+    if i == 12 { return "pancreas" }
+    return "rest    "
+}
+
+fn ds_is_rapid(i: i32) -> bool {
+    return i == 1 || i == 2 || i == 3 || i == 4 || i == 5 || i == 8 || i == 11 || i == 12
+}
+
+// Flow through organ i (L/h of blood).
+fn ds_q(p: Circ28Params, i: i32) -> f64 with Mut {
+    if i == 1 { return circ28_q_hepatic(p) }
+    if i == 5 { return circ28_cardiac_output(p) }
+    return p.q[i]
+}
+
+// Plasma-referred capacities (L).
+fn ds_cap_t(p: Circ28Params, i: i32) -> f64 { return p.v[i] * (1.0 - p.vf[i]) * p.kp[i] }
+fn ds_cap_v(p: Circ28Params, i: i32) -> f64 { return p.bp * p.v[i] * p.vf[i] }
+
+// Series form of the task: blood-referred capacity over Qeff (h).
+fn ds_tau_series(p: Circ28Params, i: i32) -> f64 with Mut, Div {
+    let q = ds_q(p, i)
+    let qeff = q * p.ps[i] / (p.ps[i] + q * p.bp)
+    return ((ds_cap_t(p, i) + ds_cap_v(p, i)) / p.bp) / qeff
+}
+
+// Exact slow-mode time constant of the two-state organ (h); see the header.
+fn ds_tau_exact(p: Circ28Params, i: i32) -> f64 with Mut, Div {
+    let q = ds_q(p, i)
+    let vv = p.v[i] * p.vf[i]
+    let vt = p.v[i] * (1.0 - p.vf[i])
+    let a = (q + p.ps[i] / p.bp) / vv
+    let b = p.ps[i] / (p.kp[i] * vv)
+    let c = p.ps[i] / (p.bp * vt)
+    let d = p.ps[i] / (p.kp[i] * vt)
+    let disc = cd_sqrt((a - d) * (a - d) + 4.0 * b * c)
+    let lf = 0.5 * (a + d + disc)
+    let ls = (a * d - b * c) / lf
+    return 1.0 / ls
+}
+
+// Simulated step response of organ i alone (inflow concentration 1 from t = 0): the time (h) at
+// which the organ content reaches 1 - 1/e of its final value. Trapezoidal rule, 4000 steps per
+// exact tau, at most 5 tau.
+fn ds_t63(p: Circ28Params, i: i32, late: &![f64; 2]) -> f64 with Mut, Div, Panic {
+    let q = ds_q(p, i)
+    let vv = p.v[i] * p.vf[i]
+    let vt = p.v[i] * (1.0 - p.vf[i])
+    let a = (q + p.ps[i] / p.bp) / vv
+    let b = p.ps[i] / (p.kp[i] * vv)
+    let c = p.ps[i] / (p.bp * vt)
+    let d = p.ps[i] / (p.kp[i] * vt)
+    let u = q / vv
+    let tau = ds_tau_exact(p, i)
+    let h = tau / 4000.0
+    let mfin = vv + vt * p.kp[i] / p.bp
+    let target = mfin * (1.0 - exp(0.0 - 1.0))
+    // (I - h/2 M) x1 = (I + h/2 M) x0 + h u e1
+    let m11 = 1.0 + 0.5 * h * a
+    let m12 = 0.0 - 0.5 * h * b
+    let m21 = 0.0 - 0.5 * h * c
+    let m22 = 1.0 + 0.5 * h * d
+    let det = m11 * m22 - m12 * m21
+    var x1 = 0.0
+    var x2 = 0.0
+    var t = 0.0
+    var mprev = 0.0
+    var t63 = 0.0 - 1.0
+    var rres = 0.0
+    var k: i32 = 0
+    while k < 12000 {
+        let r1 = x1 + 0.5 * h * (b * x2 - a * x1) + h * u
+        let r2 = x2 + 0.5 * h * (c * x1 - d * x2)
+        x1 = (r1 * m22 - m12 * r2) / det
+        x2 = (m11 * r2 - m21 * r1) / det
+        t = t + h
+        let m = vv * x1 + vt * x2
+        if m >= target && t63 < 0.0 {
+            t63 = t - h * (m - target) / (m - mprev)
+        }
+        mprev = m
+        k = k + 1
+        if k == 8000 { rres = mfin - m }
+        if k == 12000 { (*late)[0] = tau / ln(rres / (mfin - m)) }
+    }
+    return t63
+}
+
+// Plasma clearance (L/h) in closed form.
+fn ds_cl_plasma(p: Circ28Params) -> f64 with Mut, Div {
+    return circ28_splanchnic_clearance(p) * p.bp + p.cl_renal + p.cl_plasma
+}
+
+// Oral bioavailability in closed form.
+fn ds_f_oral(p: Circ28Params, fa: f64) -> f64 with Mut, Div {
+    return fa * circ28_gut_availability(p) * (1.0 - circ28_hepatic_extraction(p))
+}
+
+// Two-compartment closed forms from CL, Vc, Q, Vp: o[0] alpha half-life (h), o[1] beta half-life,
+// o[2] alpha share of the bolus AUC.
+fn ds_two_comp(cl: f64, vc: f64, q: f64, vp: f64, o: &![f64; 4]) with Mut, Div {
+    let k10 = cl / vc
+    let k12 = q / vc
+    let k21 = q / vp
+    let s = k10 + k12 + k21
+    let disc = cd_sqrt(s * s - 4.0 * k10 * k21)
+    let al = 0.5 * (s + disc)
+    let be = k10 * k21 / al
+    let ca = (al - k21) / (al - be)
+    let cb = (k21 - be) / (al - be)
+    (*o)[0] = 0.6931471805599453 / al
+    (*o)[1] = 0.6931471805599453 / be
+    (*o)[2] = (ca / al) / (ca / al + cb / be)
+    (*o)[3] = 0.0
+}
+
+// A and B of the spectrum for one parameter set. vdiv turns plasma-referred litres into litres of
+// the reference fluid. Fills r[0] V_ss, r[1..3] V_rapid 5/15/30 min (threshold), r[4..6] smooth,
+// r[7] blood, r[8] largest |series/exact - 1|, r[9] rapid-organ tissue capacity, r[10] slow-organ
+// tissue capacity, r[11] capacity sum - V_ss (relative). Prints the sorted table when prn.
+fn ds_spectrum(p: Circ28Params, vdiv: f64, prn: bool, r: &![f64; 16]) with IO, Mut, Div, Panic {
+    var tau: [f64; 14] = [0.0; 14]
+    var ord: [i32; 14] = [0; 14]
+    var i: i32 = 1
+    var worst = 0.0
+    while i < 14 {
+        tau[i] = ds_tau_exact(p, i)
+        ord[i] = i
+        let dev = ds_abs(ds_tau_series(p, i) / tau[i] - 1.0)
+        if dev > worst { worst = dev }
+        i = i + 1
+    }
+    // selection sort of ord[1..13] by tau
+    i = 1
+    while i < 13 {
+        var m: i32 = i
+        var j: i32 = i + 1
+        while j < 14 {
+            if tau[ord[j]] < tau[ord[m]] { m = j }
+            j = j + 1
+        }
+        let tmp = ord[i]
+        ord[i] = ord[m]
+        ord[m] = tmp
+        i = i + 1
+    }
+    let blood = p.bp * circ28_blood_volume(p)
+    let vss = circ28_vss_plasma(p)
+    var sum = p.bp * (p.v_ven + p.v_art)
+    var cum = blood
+    var vr5 = blood
+    var vr15 = blood
+    var vr30 = blood
+    var vs5 = blood
+    var vs15 = blood
+    var vs30 = blood
+    var capr = 0.0
+    var caps = 0.0
+    if prn {
+        println("    organ      Kp       tau exact (min)  series (min)  tissue capacity (L)  cumulative with blood (L)  share of V_ss")
+        print("    blood (all beds)                                 "); print(blood / vdiv); print("            "); print(blood / vdiv); print("   "); println(blood / vss)
+    }
+    i = 1
+    while i < 14 {
+        let o = ord[i]
+        let ct = ds_cap_t(p, o)
+        sum = sum + ct + ds_cap_v(p, o)
+        cum = cum + ct
+        if ds_is_rapid(o) { capr = capr + ct } else { caps = caps + ct }
+        if tau[o] < 5.0 / 60.0 { vr5 = vr5 + ct }
+        if tau[o] < 0.25 { vr15 = vr15 + ct }
+        if tau[o] < 0.5 { vr30 = vr30 + ct }
+        vs5 = vs5 + ct * (1.0 - exp(0.0 - (5.0 / 60.0) / tau[o]))
+        vs15 = vs15 + ct * (1.0 - exp(0.0 - 0.25 / tau[o]))
+        vs30 = vs30 + ct * (1.0 - exp(0.0 - 0.5 / tau[o]))
+        if prn {
+            print("    "); print(ds_organ(o)); print("  "); print(p.kp[o]); print("  "); print(60.0 * tau[o]); print("  "); print(60.0 * ds_tau_series(p, o))
+            print("  "); print(ct / vdiv); print("  "); print(cum / vdiv); print("  "); println(cum / vss)
+        }
+        i = i + 1
+    }
+    (*r)[0] = vss / vdiv
+    (*r)[1] = vr5 / vdiv
+    (*r)[2] = vr15 / vdiv
+    (*r)[3] = vr30 / vdiv
+    (*r)[4] = vs5 / vdiv
+    (*r)[5] = vs15 / vdiv
+    (*r)[6] = vs30 / vdiv
+    (*r)[7] = blood / vdiv
+    (*r)[8] = worst
+    (*r)[9] = capr
+    (*r)[10] = caps
+    (*r)[11] = ds_abs(sum - vss) / vss
+}
+
+// Linear interpolation of the recorded curve at time t.
+fn ds_at(ts: &[f64; 400], cs: &[f64; 400], n: i32, t: f64) -> f64 with Mut, Div {
+    var i: i32 = 1
+    while i <= n {
+        if (*ts)[i] >= t {
+            let t0 = (*ts)[i - 1]
+            let w = (t - t0) / ((*ts)[i] - t0)
+            return (*cs)[i - 1] + w * ((*cs)[i] - (*cs)[i - 1])
+        }
+        i = i + 1
+    }
+    return (*cs)[n]
+}
+
+// IV bolus of 1 mg (0.02 h infusion). cdiv: bp for a plasma reference, 1 for whole blood.
+//  o[0..2] C at 5, 15, 30 min (mg/L)   o[3..5] Dose/C (L)        o[6] terminal half-life (h)
+//  o[7] alpha half-life (h; 0 = none)  o[8] A   o[9] B (mg/L)    o[10] Vc_peel (L)
+//  o[11] alpha share of AUC            o[12] AUC_inf (mg h/L)    o[13] CL = dose/AUC_inf (L/h)
+//  o[14] smallest state value in the first 0.5 h (mg/L)          o[15] mass-balance error
+//  o[16] residual points used          o[17] terminal rate (1/h) o[18] T_end (h)
+fn ds_iv(p: Circ28Params, cdiv: f64, t_end: f64, nfin: i32, sys: &!Circ28Sys, o: &![f64; 24]) with Mut, Div, Panic {
+    var ts: [f64; 400] = [0.0; 400]
+    var cs: [f64; 400] = [0.0; 400]
+    var es: [f64; 400] = [0.0; 400]
+    var s = circ28_state_zero()
+    var el = circ28_elim_zero()
+    var n: i32 = 0
+    var t = 0.0
+    var input = 0.0
+    var xmin = 0.0
+    var ph: i32 = 0
+    while ph < 3 {
+        var dt = 0.005
+        if nfin < 100 { dt = 0.01 }
+        var tstop = 0.5
+        if ph == 1 {
+            dt = 0.05
+            if nfin < 100 { dt = 0.1 }
+            tstop = 4.0
+        }
+        if ph == 2 {
+            dt = (t_end - 4.0) / (nfin as f64)
+            tstop = t_end
+        }
+        circ28_prepare(p, dt, sys)
+        while t + 0.5 * dt < tstop {
+            let mass = circ28_iv_mass(1.0, 0.02, t, t + dt)
+            input = input + mass
+            circ28_step(&!s, p, sys, mass / dt, 0.0, &!el)
+            t = t + dt
+            n = n + 1
+            ts[n] = t
+            cs[n] = s.x[0] / cdiv
+            es[n] = el.hepatic + el.formed + el.renal + el.plasma + el.gut
+            if ph == 0 {
+                var k: i32 = 0
+                while k < 28 {
+                    if s.x[k] < xmin { xmin = s.x[k] }
+                    k = k + 1
+                }
+            }
+        }
+        ph = ph + 1
+    }
+    let c5 = ds_at(&ts, &cs, n, 5.0 / 60.0)
+    let c15 = ds_at(&ts, &cs, n, 0.25)
+    let c30 = ds_at(&ts, &cs, n, 0.5)
+    let e5 = ds_at(&ts, &es, n, 5.0 / 60.0)
+    let e15 = ds_at(&ts, &es, n, 0.25)
+    let e30 = ds_at(&ts, &es, n, 0.5)
+    // terminal fit on [0.6 T_end, T_end]
+    var sw = 0.0
+    var st = 0.0
+    var sy = 0.0
+    var stt = 0.0
+    var sty = 0.0
+    var i: i32 = 1
+    while i <= n {
+        if ts[i] >= 0.6 * t_end && cs[i] > 0.0 {
+            let y = ln(cs[i])
+            sw = sw + 1.0
+            st = st + ts[i]
+            sy = sy + y
+            stt = stt + ts[i] * ts[i]
+            sty = sty + ts[i] * y
+        }
+        i = i + 1
+    }
+    let den = sw * stt - st * st
+    let slope = (sw * sty - st * sy) / den
+    let lz = 0.0 - slope
+    let bb = exp((sy - slope * st) / sw)
+    // residual fit
+    sw = 0.0
+    st = 0.0
+    sy = 0.0
+    stt = 0.0
+    sty = 0.0
+    var go = true
+    i = 1
+    while i <= n {
+        if go && ts[i] >= 0.08 {
+            let line = bb * exp(0.0 - lz * ts[i])
+            let res = cs[i] - line
+            if res > 0.1 * line {
+                let y = ln(res)
+                sw = sw + 1.0
+                st = st + ts[i]
+                sy = sy + y
+                stt = stt + ts[i] * ts[i]
+                sty = sty + ts[i] * y
+            } else {
+                go = false
+            }
+        }
+        i = i + 1
+    }
+    var al = 0.0
+    var aa = 0.0
+    if sw >= 3.0 {
+        let den2 = sw * stt - st * st
+        let sl2 = (sw * sty - st * sy) / den2
+        al = 0.0 - sl2
+        aa = exp((sy - sl2 * st) / sw)
+    }
+    let auc = el.auc_ven / cdiv + cs[n] / lz
+    let elim = el.hepatic + el.formed + el.renal + el.plasma + el.gut
+    let rem = circ28_total_mass(&s, p)
+    (*o)[0] = c5
+    (*o)[1] = c15
+    (*o)[2] = c30
+    (*o)[3] = 1.0 / c5
+    (*o)[4] = 1.0 / c15
+    (*o)[5] = 1.0 / c30
+    (*o)[6] = 0.6931471805599453 / lz
+    (*o)[7] = 0.0
+    (*o)[11] = 0.0
+    if al > 0.0 {
+        (*o)[7] = 0.6931471805599453 / al
+        (*o)[11] = (aa / al) / auc
+    }
+    (*o)[8] = aa
+    (*o)[9] = bb
+    (*o)[10] = 1.0 / (aa + bb)
+    (*o)[12] = auc
+    (*o)[13] = 1.0 / auc
+    (*o)[14] = xmin
+    (*o)[15] = ds_abs(input - elim - rem) / input
+    (*o)[16] = sw
+    (*o)[17] = lz
+    (*o)[18] = t_end
+    (*o)[19] = (1.0 - e5) / c5
+    (*o)[20] = (1.0 - e15) / c15
+    (*o)[21] = (1.0 - e30) / c30
+}
+
+// Mass (mg) entering the gut tissue in [t0, t1]. ntr = 0: the record's first-order input with lag
+// (circ28_oral_mass). ntr > 0 (diagnostic G): a chain of ntr equal transit compartments with rate
+// ka (delivered into the gut after the lag): cumulative fraction G(t) = 1 - exp(-ka s) sum_{j<ntr}
+// (ka s)^j / j!, s = t - tlag.
+fn ds_in_mass(ntr: i32, ka: f64, fa: f64, dose: f64, tlag: f64, t0: f64, t1: f64) -> f64 with Mut, Div, Panic {
+    if ntr <= 0 { return circ28_oral_mass(ka, fa, dose, tlag, t0, t1) }
+    var g0 = 0.0
+    var g1 = 0.0
+    var s = t0 - tlag
+    if s > 0.0 {
+        var term = 1.0
+        var sum = 1.0
+        var j: i32 = 1
+        while j < ntr {
+            term = term * ka * s / (j as f64)
+            sum = sum + term
+            j = j + 1
+        }
+        g0 = 1.0 - exp(0.0 - ka * s) * sum
+    }
+    s = t1 - tlag
+    if s > 0.0 {
+        var term = 1.0
+        var sum = 1.0
+        var j: i32 = 1
+        while j < ntr {
+            term = term * ka * s / (j as f64)
+            sum = sum + term
+            j = j + 1
+        }
+        g1 = 1.0 - exp(0.0 - ka * s) * sum
+    }
+    return fa * dose * (g1 - g0)
+}
+
+// Oral dose. tau_ss = 0: single dose (0.05 h to 12 h, 60 steps to t_end). tau_ss > 0: superposition
+// to steady state (0.1 h steps, 5 intervals, geometric tail with lz).
+//  o[0] Cmax single (mg/L)  o[1] Tmax single (h)  o[2] AUC_inf (mg h/L)  o[3] Cmax/AUC (1/h)
+//  o[4] Cmax,ss             o[5] Tmax,ss          o[6] mass absorbed at the single-dose grid peak
+//  shares of o[6] at that peak: o[7] gut tissue  o[8] liver  o[9] lung  o[10] other rapid
+//  o[11] slow organs  o[12] blood pools  o[13] eliminated  o[14] their sum  o[15] o[6]/(fa dose)
+//  o[16] mass-balance error  o[17] muscle  o[18] adipose
+//  o[19] the Tmax the ka fit looks at (single dose or steady state)
+fn ds_oral(p: Circ28Params, cdiv: f64, dose: f64, ka: f64, fa: f64, tlag: f64, tau_ss: f64, lz: f64, t_end: f64, fast: i32, ntr: i32, sys: &!Circ28Sys, o: &![f64; 24]) with Mut, Div, Panic {
+    var css: [f64; 128] = [0.0; 128]
+    var snap: [f64; 28] = [0.0; 28]
+    var s = circ28_state_zero()
+    var el = circ28_elim_zero()
+    var t = 0.0
+    var input = 0.0
+    var cm = 0.0
+    var tm = 0.0
+    var c_prev = 0.0
+    var c_pp = 0.0
+    var cmax = 0.0
+    var tmax = 0.0
+    var snap_in = 0.0
+    var snap_el = 0.0
+    var c_last = 0.0
+    var nph: i32 = 2
+    var dt1 = 0.05
+    var t1 = 12.0
+    var ntau: i32 = 0
+    if tau_ss > 0.0 {
+        nph = 1
+        dt1 = 0.1
+        if fast == 1 { dt1 = 0.3 }
+        t1 = 5.0 * tau_ss
+        ntau = (tau_ss / dt1 + 0.5) as i32
+    }
+    var ph: i32 = 0
+    var nstep: i32 = 0
+    var rising = true
+    while ph < nph {
+        var dt = dt1
+        var tstop = t1
+        if ph == 1 {
+            dt = (t_end - t1) / 60.0
+            tstop = t_end
+        }
+        circ28_prepare(p, dt, sys)
+        while t + 0.5 * dt < tstop && !(fast == 1 && ntau == 0 && !rising) {
+            let mass = ds_in_mass(ntr, ka, fa, dose, tlag, t, t + dt)
+            input = input + mass
+            circ28_step(&!s, p, sys, 0.0, mass / dt, &!el)
+            t = t + dt
+            nstep = nstep + 1
+            let c = s.x[0] / cdiv
+            if ph == 0 {
+                if c > cm {
+                    cm = c
+                    tm = t
+                    var k: i32 = 0
+                    while k < 28 {
+                        snap[k] = s.x[k]
+                        k = k + 1
+                    }
+                    snap_in = input
+                    snap_el = el.hepatic + el.formed + el.renal + el.plasma + el.gut
+                } else {
+                    if rising && cm > 0.0 && nstep >= 3 {
+                        // the previous point was the grid maximum: parabola through the last three
+                        rising = false
+                        let dd = c_pp - 2.0 * c_prev + c
+                        cmax = c_prev
+                        tmax = t - dt
+                        if dd < 0.0 {
+                            let off = 0.5 * (c_pp - c) / dd
+                            tmax = t - dt + off * dt
+                            cmax = c_prev - 0.25 * (c_pp - c) * off
+                        }
+                    }
+                }
+                if ntau > 0 {
+                    var j: i32 = (nstep - 1) % ntau
+                    css[j + 1] = css[j + 1] + c
+                    if nstep > 4 * ntau {
+                        // geometric tail from the last interval
+                        let g = exp(0.0 - lz * tau_ss)
+                        css[j + 1] = css[j + 1] + c * g / (1.0 - g)
+                    }
+                }
+            }
+            c_pp = c_prev
+            c_prev = c
+            c_last = c
+        }
+        ph = ph + 1
+    }
+    if rising {
+        cmax = cm
+        tmax = tm
+    }
+    if fast == 1 && ntau == 0 {
+        (*o)[0] = cmax
+        (*o)[1] = tmax
+        (*o)[19] = tmax
+        return
+    }
+    let auc = el.auc_ven / cdiv + c_last / lz
+    (*o)[0] = cmax
+    (*o)[1] = tmax
+    (*o)[2] = auc
+    (*o)[3] = cmax / auc
+    (*o)[4] = 0.0
+    (*o)[5] = 0.0
+    if ntau > 0 {
+        // css[1..ntau] is the steady-state curve at t = dt .. tau; css[0] is the value at t = 0 = css[ntau]
+        css[0] = css[ntau]
+        var jm: i32 = 1
+        var cmx = 0.0
+        var j: i32 = 1
+        while j <= ntau {
+            if css[j] > cmx {
+                cmx = css[j]
+                jm = j
+            }
+            j = j + 1
+        }
+        var cs_ss = cmx
+        var ts_ss = (jm as f64) * dt1
+        if jm < ntau {
+            let dd = css[jm - 1] - 2.0 * css[jm] + css[jm + 1]
+            if dd < 0.0 {
+                let off = 0.5 * (css[jm - 1] - css[jm + 1]) / dd
+                ts_ss = ts_ss + off * dt1
+                cs_ss = css[jm] - 0.25 * (css[jm - 1] - css[jm + 1]) * off
+            }
+        }
+        (*o)[4] = cs_ss
+        (*o)[5] = ts_ss
+    }
+    // shares at the single-dose grid peak
+    var m_gut = 0.0
+    var m_liv = 0.0
+    var m_lun = 0.0
+    var m_rap = 0.0
+    var m_slo = 0.0
+    var m_mus = 0.0
+    var m_adi = 0.0
+    var i: i32 = 1
+    while i < 14 {
+        let mv = p.v[i] * p.vf[i] * snap[circ28_iv(i)]
+        let mt = p.v[i] * (1.0 - p.vf[i]) * snap[circ28_it(i)]
+        if i == 8 {
+            m_gut = mt
+            m_rap = m_rap + mv
+        } else if i == 1 {
+            m_liv = mv + mt
+        } else if i == 5 {
+            m_lun = mv + mt
+        } else if ds_is_rapid(i) {
+            m_rap = m_rap + mv + mt
+        } else {
+            m_slo = m_slo + mv + mt
+            if i == 6 { m_mus = mv + mt }
+            if i == 7 { m_adi = mv + mt }
+        }
+        i = i + 1
+    }
+    let m_blo = p.v_ven * snap[0] + p.v_art * snap[1]
+    (*o)[6] = snap_in
+    (*o)[7] = m_gut / snap_in
+    (*o)[8] = m_liv / snap_in
+    (*o)[9] = m_lun / snap_in
+    (*o)[10] = m_rap / snap_in
+    (*o)[11] = m_slo / snap_in
+    (*o)[12] = m_blo / snap_in
+    (*o)[13] = snap_el / snap_in
+    (*o)[14] = (m_gut + m_liv + m_lun + m_rap + m_slo + m_blo + snap_el) / snap_in
+    (*o)[15] = snap_in / (fa * dose)
+    let elim = el.hepatic + el.formed + el.renal + el.plasma + el.gut
+    (*o)[16] = ds_abs(input - elim - circ28_total_mass(&s, p)) / input
+    (*o)[17] = m_mus / snap_in
+    (*o)[18] = m_adi / snap_in
+    (*o)[19] = tmax
+    if ntau > 0 { (*o)[19] = (*o)[5] }
+}
+
+// The what-if parameter set: kp x sr for the rapid organs, the slow organs rescaled to keep V_ss.
+// Returns the slow scalar in ss[0] (negative when sr is beyond what V_ss allows).
+fn ds_split(p: Circ28Params, sr: f64, ss: &![f64; 1]) -> Circ28Params with Mut, Div {
+    var q = p
+    var capr = 0.0
+    var caps = 0.0
+    var i: i32 = 1
+    while i < 14 {
+        if ds_is_rapid(i) { capr = capr + ds_cap_t(p, i) } else { caps = caps + ds_cap_t(p, i) }
+        i = i + 1
+    }
+    let s2 = (capr + caps - sr * capr) / caps
+    i = 1
+    while i < 14 {
+        if ds_is_rapid(i) { q.kp[i] = p.kp[i] * sr } else { q.kp[i] = p.kp[i] * s2 }
+        i = i + 1
+    }
+    (*ss)[0] = s2
+    return q
+}
+
+// ka with Tmax(ka) = tobs (Illinois on ln ka over [0.02, 60] /h). o receives the run at the root.
+// Returns ka; 60 when the target is below the Tmax floor, 0.02 when above the ceiling.
+fn ds_fit_ka(p: Circ28Params, cdiv: f64, dose: f64, fa: f64, tlag: f64, tau_ss: f64, lz: f64, t_end: f64, tobs: f64, ntr: i32, sys: &!Circ28Sys, o: &![f64; 24]) -> f64 with Mut, Div, Panic {
+    var xa = ln(0.02)
+    var xb = ln(60.0)
+    ds_oral(p, cdiv, dose, exp(xb), fa, tlag, tau_ss, lz, t_end, 1, ntr, sys, o)
+    var fb = (*o)[19] - tobs
+    if fb > 0.0 { return exp(xb) }
+    ds_oral(p, cdiv, dose, exp(xa), fa, tlag, tau_ss, lz, t_end, 1, ntr, sys, o)
+    var fa_ = (*o)[19] - tobs
+    if fa_ < 0.0 { return exp(xa) }
+    var x = 0.5 * (xa + xb)
+    var it: i32 = 0
+    var side: i32 = 0
+    while it < 40 {
+        x = (xa * fb - xb * fa_) / (fb - fa_)
+        ds_oral(p, cdiv, dose, exp(x), fa, tlag, tau_ss, lz, t_end, 1, ntr, sys, o)
+        let fx = (*o)[19] - tobs
+        if ds_abs(fx) < 2.0e-3 { return exp(x) }
+        if fx > 0.0 {
+            xa = x
+            fa_ = fx
+            if side == 1 { fb = 0.5 * fb }
+            side = 1
+        } else {
+            xb = x
+            fb = fx
+            if side == 2 { fa_ = 0.5 * fa_ }
+            side = 2
+        }
+        if xb - xa < 1.0e-7 { return exp(x) }
+        it = it + 1
+    }
+    return exp(x)
+}
+
+// sr with Vc_peel(sr) = vc_obs (vc in litres of the reference fluid). Vc_peel(sr) is NOT monotone
+// (small sr: slow organs, scaled up to keep V_ss, carry the early volume; large sr: the rapid organs
+// do), so a 6-point log grid over [0.02, 0.98 sr_max] is scanned first, the sign change nearest
+// sr = 1 is taken and refined by Illinois on ln sr (fast IV runs, 60 final steps). When there is no
+// sign change the grid point with the smallest |Vc_peel - vc_obs| is returned with flag 1 (every
+// grid value above the target: target below the family) or 2 (every value below it). o receives the
+// IV run at the returned value (fast); the caller repeats it at full resolution.
+fn ds_fit_sr(p: Circ28Params, cdiv: f64, t_end: f64, vc_obs: f64, sys: &!Circ28Sys, o: &![f64; 24], flag: &![f64; 1]) -> f64 with Mut, Div, Panic {
+    var ss: [f64; 1] = [0.0; 1]
+    var g: [f64; 6] = [0.0; 6]
+    var xg: [f64; 6] = [0.0; 6]
+    var capr = 0.0
+    var caps = 0.0
+    var i: i32 = 1
+    while i < 14 {
+        if ds_is_rapid(i) { capr = capr + ds_cap_t(p, i) } else { caps = caps + ds_cap_t(p, i) }
+        i = i + 1
+    }
+    let x0 = ln(0.02)
+    let x1 = ln(0.98 * (capr + caps) / capr)
+    (*flag)[0] = 0.0
+    var best: i32 = 0
+    var bestabs = 1.0e30
+    var allpos = true
+    var allneg = true
+    i = 0
+    while i < 6 {
+        xg[i] = x0 + (x1 - x0) * (i as f64) / 5.0
+        let pq = ds_split(p, exp(xg[i]), &!ss)
+        ds_iv(pq, cdiv, t_end, 60, sys, o)
+        g[i] = (*o)[10] - vc_obs
+        if g[i] > 0.0 { allneg = false } else { allpos = false }
+        if ds_abs(g[i]) < bestabs {
+            bestabs = ds_abs(g[i])
+            best = i
+        }
+        i = i + 1
+    }
+    if allpos || allneg {
+        if allpos { (*flag)[0] = 1.0 } else { (*flag)[0] = 2.0 }
+        let pq = ds_split(p, exp(xg[best]), &!ss)
+        ds_iv(pq, cdiv, t_end, 60, sys, o)
+        return exp(xg[best])
+    }
+    var jb: i32 = -1
+    var dmin = 1.0e30
+    i = 0
+    while i < 5 {
+        if g[i] * g[i + 1] <= 0.0 {
+            var mid = 0.5 * (xg[i] + xg[i + 1])
+            if mid < 0.0 { mid = 0.0 - mid }
+            if mid < dmin {
+                dmin = mid
+                jb = i
+            }
+        }
+        i = i + 1
+    }
+    var xa = xg[jb]
+    var xb = xg[jb + 1]
+    var fa_ = g[jb]
+    var fb = g[jb + 1]
+    var x = 0.5 * (xa + xb)
+    var it: i32 = 0
+    var side: i32 = 0
+    while it < 8 {
+        x = (xa * fb - xb * fa_) / (fb - fa_)
+        let px = ds_split(p, exp(x), &!ss)
+        ds_iv(px, cdiv, t_end, 60, sys, o)
+        let fx = (*o)[10] - vc_obs
+        if ds_abs(fx) < 1.0e-3 * vc_obs { return exp(x) }
+        if fx * fa_ > 0.0 {
+            xa = x
+            fa_ = fx
+            if side == 1 { fb = 0.5 * fb }
+            side = 1
+        } else {
+            xb = x
+            fb = fx
+            if side == 2 { fa_ = 0.5 * fa_ }
+            side = 2
+        }
+        it = it + 1
+    }
+    return exp(x)
+}
+
+// Pool of two values with standard errors: o[0] mean, o[1] u = max(SE_w, SE_b), o[2] SE_w, o[3] SE_b.
+fn ds_pool2(m1: f64, s1: f64, m2: f64, s2: f64, o: &![f64; 4]) with Mut, Div {
+    let mean = 0.5 * (m1 + m2)
+    let sew = 0.5 * cd_sqrt(s1 * s1 + s2 * s2)
+    let seb = 0.5 * ds_abs(m1 - m2)
+    (*o)[0] = mean
+    (*o)[1] = sew
+    if seb > sew { (*o)[1] = seb }
+    (*o)[2] = sew
+    (*o)[3] = seb
+}
+
+// Per-drug constants. c[0] 1 = whole-blood reference  c[1] oral dose (mg)  c[2] dosing interval of
+// the steady-state observable (h; 0 = single dose)  c[3] Tmax target (h; 0 = none)  c[4] 1 = ka is
+// fitted to that Tmax  c[5] peak metric: 0 Cmax/AUC (1/h), 1 Cmax (ng/mL), 2 Cmax,ss (ng/mL)
+// c[6] observed value  c[7] its SD (0 = none)  c[8] observed Vc/F or Vc (L of the reference fluid)
+// c[9] its u  c[10] 1 = c[8] is Vc/F (multiply by the record's F), 0 = Vc  c[11] observed alpha
+// half-life (h; 0 none)  c[12] observed IV terminal half-life (h; 0 none)  c[13] guard: Kp scalar
+// c[14] guard: hepatic clint  c[15] guard: V_ss plasma (L)  c[16] the module's reported peak value
+// c[17] 1 = Tmax guard asserted
+// c[18] 1 = RE-BASELINED drug: the first-order ka is refitted here to the Tmax target on the current record (see REPAIR AFTER THE TRANSIT REFIT)
+fn ds_cfg(k: i32, bp: f64, c: &![f64; 24]) with Mut, Div, Panic {
+    var pl: [f64; 4] = [0.0; 4]
+    var tc: [f64; 4] = [0.0; 4]
+    var i: i32 = 0
+    while i < 24 {
+        (*c)[i] = 0.0
+        i = i + 1
+    }
+    if k == 0 {
+        (*c)[1] = 7.5
+        (*c)[3] = mdz_obs_tmax(1)
+        (*c)[4] = 1.0
+        (*c)[6] = 0.359
+        (*c)[7] = 0.049
+        // Brill 2014: V1 at 76 kg, SE from the RSE of V1(127 kg); Burstein 1997: 0.27 (0.14) L/kg, n 8, x 73 kg
+        let v_brill = 44.1 * (1.0 + 0.0105 * (76.0 - 127.0))
+        ds_pool2(v_brill, 0.161 * v_brill, 0.27 * 73.0, 0.14 / cd_sqrt(8.0) * 73.0, &!pl)
+        (*c)[8] = pl[0]
+        (*c)[9] = pl[1]
+        ds_two_comp(0.57, 0.27, 0.31, 0.67, &!tc)
+        (*c)[11] = tc[0]
+        (*c)[12] = 2.06
+        (*c)[13] = 0.838959
+        (*c)[14] = 950.686981
+        (*c)[15] = 67.145455
+        (*c)[16] = 0.233
+        (*c)[17] = 1.0
+    }
+    if k == 1 {
+        (*c)[1] = 25.0
+        (*c)[3] = qtp_obs_tmax()
+        (*c)[4] = 1.0
+        (*c)[6] = 0.252
+        (*c)[7] = 0.031
+        // re-baselined after the transit refit (the record was refitted to the transit-input run): pre-refit guards were Kp scalar 0.116453, clint 243.749164, V_ss 116.272851
+        (*c)[13] = 0.104617
+        (*c)[14] = 161.632599
+        (*c)[15] = 104.834359
+        (*c)[18] = 1.0
+        (*c)[16] = 0.153
+        (*c)[17] = 1.0
+    }
+    if k == 2 {
+        (*c)[1] = 75.0
+        (*c)[2] = 12.0
+        (*c)[3] = ven_obs_tmax_ir()
+        (*c)[4] = 1.0
+        (*c)[5] = 2.0
+        (*c)[6] = 225.0
+        (*c)[13] = 1.235003
+        (*c)[14] = 23.111956
+        (*c)[15] = 321.2
+        (*c)[16] = 76.8
+        (*c)[17] = 1.0
+    }
+    if k == 3 {
+        (*c)[1] = 1.0
+        (*c)[6] = 0.066
+        (*c)[11] = 0.19
+        (*c)[13] = 4.931273
+        (*c)[14] = 1265.423565
+        (*c)[15] = 1299.4
+        (*c)[16] = 0.107
+    }
+    if k == 4 {
+        (*c)[1] = 10.0
+        (*c)[3] = olz_obs_tmax()
+        (*c)[4] = 1.0
+        (*c)[5] = 1.0
+        (*c)[6] = 16.6
+        (*c)[7] = 3.8
+        // Li 2018: Vc/F 2390 L x 0.216 and x 0.207 (the two formulations of the healthy cohort)
+        ds_pool2(2390.0 * 0.216, 2390.0 * 0.216 * cd_sqrt(0.126 * 0.126 + 0.131 * 0.131), 2390.0 * 0.207, 2390.0 * 0.207 * cd_sqrt(0.126 * 0.126 + 0.128 * 0.128), &!pl)
+        (*c)[8] = pl[0]
+        (*c)[9] = pl[1]
+        (*c)[10] = 1.0
+        ds_two_comp(25.4 * 0.61, pl[0], 8.41, 168.0, &!tc)
+        (*c)[11] = tc[0]
+        (*c)[13] = 7.460072
+        (*c)[14] = 138.83738
+        (*c)[15] = 524.431088
+        (*c)[16] = 13.2
+        (*c)[17] = 1.0
+    }
+    if k == 5 {
+        (*c)[1] = 100.0
+        (*c)[2] = 12.0
+        (*c)[3] = clz_obs_tmax_ss()
+        (*c)[4] = 1.0
+        (*c)[5] = 2.0
+        (*c)[6] = 445.0
+        (*c)[7] = 105.0
+        // re-baselined after the transit refit (fits that depend on the oral run moved by 2.4e-5 / 2.5 %): pre-refit guards were Kp scalar 1.726813, clint 355.51324, V_ss 442.101106
+        (*c)[13] = 1.726771
+        (*c)[14] = 364.504549
+        (*c)[15] = 442.090465
+        (*c)[16] = 359.3
+        (*c)[17] = 1.0
+    }
+    if k == 6 {
+        (*c)[1] = 10.0
+        (*c)[3] = ari_obs(7, 0)
+        (*c)[4] = 1.0
+        (*c)[5] = 1.0
+        (*c)[6] = 50.6
+        (*c)[7] = 15.5
+        (*c)[8] = 3.84 * 73.0
+        (*c)[10] = 1.0
+        ds_two_comp(0.0645, 3.84, 0.168, 1.54, &!tc)
+        (*c)[11] = tc[0]
+        (*c)[13] = 0.208227
+        (*c)[14] = 211.669629
+        (*c)[15] = 357.7
+        (*c)[16] = 0.0
+        (*c)[17] = 1.0
+    }
+    if k == 7 {
+        (*c)[1] = 1.0
+        (*c)[3] = rsp_obs_r_tmax()
+        (*c)[4] = 1.0
+        (*c)[8] = 137.0
+        (*c)[9] = 0.0
+        (*c)[13] = 1.587376
+        (*c)[14] = 53.346774
+        (*c)[15] = 109.5
+        (*c)[17] = 1.0
+    }
+    if k == 8 {
+        (*c)[0] = 1.0
+        (*c)[1] = 5.0
+        (*c)[3] = tac_obs_tmax()
+        (*c)[4] = 1.0
+        (*c)[5] = 1.0
+        (*c)[6] = 28.8
+        (*c)[8] = 125.0
+        (*c)[9] = 0.11 * 125.0
+        (*c)[10] = 1.0
+        ds_two_comp(16.1, 125.0, 23.8, 636.0, &!tc)
+        (*c)[11] = tc[0]
+        (*c)[13] = 102.203107
+        (*c)[14] = 29862.727189
+        (*c)[15] = 6261.095853
+        (*c)[16] = 8.13
+    }
+    if k == 9 {
+        (*c)[0] = 1.0
+        (*c)[1] = 10.0
+        (*c)[3] = sir_obs_tmax()
+        (*c)[4] = 1.0
+        (*c)[5] = 1.0
+        (*c)[6] = 67.0
+        ds_pool2(218.0, 0.0, 676.0, 0.0, &!pl)
+        (*c)[8] = pl[0]
+        (*c)[9] = pl[1]
+        (*c)[10] = 1.0
+        (*c)[13] = 0.46827
+        (*c)[14] = 272.342087
+        (*c)[15] = 2086.521174
+        (*c)[16] = 26.1
+    }
+    if k == 10 {
+        (*c)[0] = 1.0
+        (*c)[1] = 2.0
+        (*c)[3] = evr_obs_tmax()
+        (*c)[4] = 1.0
+        (*c)[5] = 1.0
+        (*c)[6] = 17.8
+        (*c)[7] = 6.1
+        // Moes 2012: 148 L whole blood; van Erp 2016: 207 L plasma-referred (RSE 5 %) / bp
+        ds_pool2(148.0, 0.0, 207.0 / bp, 0.05 * 207.0 / bp, &!pl)
+        (*c)[8] = pl[0]
+        (*c)[9] = pl[1]
+        (*c)[10] = 1.0
+        (*c)[13] = 0.038057
+        (*c)[14] = 3.308921
+        (*c)[15] = 442.07456
+        (*c)[16] = 3.69
+    }
+}
+
+fn ds_rel(tag: string, got: f64, want: f64, tol: f64) -> i32 with IO, Mut, Div, Panic {
+    let r = ds_abs(got - want) / ds_abs(want)
+    if !(r <= tol) {
+        print("  [FAIL] "); print(tag); print(": got "); print(got); print(" want "); print(want); print(" rel "); println(r)
+        return 1
+    }
+    return 0
+}
+
+fn ds_below(tag: string, got: f64, lim: f64) -> i32 with IO, Mut, Div, Panic {
+    if !(got <= lim) {
+        print("  [FAIL] "); print(tag); print(": "); print(got); print(" above "); println(lim)
+        return 1
+    }
+    return 0
+}
+
+// One prediction row: HIT when lo <= v <= hi. Returns 1 for a hit.
+fn ds_pred(tag: string, v: f64, lo: f64, hi: f64) -> i32 with IO, Mut, Div, Panic {
+    print("  "); print(tag); print(": "); print(v); print("  predicted ["); print(lo); print(", "); print(hi); print("]  ")
+    if v >= lo && v <= hi {
+        println("HIT")
+        return 1
+    }
+    println("MISS")
+    return 0
+}
+
+// The peak metric of a run in the unit of c[5].
+fn ds_peak(kind: f64, o: &[f64; 24]) -> f64 {
+    if kind < 0.5 { return (*o)[3] }
+    if kind < 1.5 { return 1000.0 * (*o)[0] }
+    return 1000.0 * (*o)[4]
+}
+
+// Everything for drug k. res[64 k + j]:
+//  0 V_ss  1 V_rapid 15 (threshold)  2 V_rapid 15 (smooth)  3 Dose/C(5 min)  4 Dose/C(15)  5 Vc_peel
+//  6 alpha t1/2  7 alpha AUC share  8 IV t1/2  9 observed Vc (0 none)  10 u  11 ratio V_rapid15/Vc
+//  12 ratio Vc_peel/Vc  13 model Tmax  14 baseline peak metric  15 observed peak  16..22 shares
+//  (gut tissue, liver, lung, other rapid, slow, blood, eliminated)  23 rapid other than blood
+//  24 what-if s_r  25 s_s  26 what-if peak  27 what-if IV t1/2  28 what-if ka  29 flag
+//  30 limit peak  31 limit IV t1/2  32 limit ka  33 limit Vc_peel  34 V_rapid5  35 V_rapid30
+//  36 record ka  37 F  38 worst series/exact deviation  39 Dose/C(30)  40 Tmax target
+//  41 what-if Tmax  42 limit Tmax  43 limit s_s  44 muscle share  45 adipose share  46 absorbed
+//  fraction at Tmax  47 baseline Cmax/AUC  48 what-if Cmax/AUC  49 limit Cmax/AUC
+fn ds_drug(k: i32, thall: &[f64; 198], sys: &!Circ28Sys, res: &![f64; 704]) -> i32 with IO, Mut, Div, Panic {
+    var fails: i32 = 0
+    var th: [f64; 18] = [0.0; 18]
+    var i: i32 = 0
+    while i < 18 {
+        th[i] = (*thall)[18 * k + i]
+        i = i + 1
+    }
+    var t2 = th
+    var p = circ28_drug_params_theta(t2)
+    // lean_single workaround (defect of circ28_drug_params_theta there: its `var psg = p.ps[8]` gives 0 when the record has no CD_PSGUT, while Madaros gives 20 x the gut flow): rewrite the default.
+    var ps8 = p.ps[6] / p.q[6] * p.q[8]
+    if th[CD_PSGUT] > 1.0e-6 { ps8 = th[CD_PSGUT] }
+    p.ps[8] = ps8
+    var c: [f64; 24] = [0.0; 24]
+    ds_cfg(k, p.bp, &!c)
+    var cdiv = p.bp
+    var vdiv = 1.0
+    if c[0] > 0.5 {
+        cdiv = 1.0
+        vdiv = p.bp
+    }
+    print("  theta:")
+    var ti: i32 = 0
+    while ti < 18 {
+        print(" "); print(th[ti])
+        ti = ti + 1
+    }
+    println("")
+    var ka = th[CD_KA]
+    let fa = th[CD_FA]
+    let tlag = th[CD_TLAG]
+    let b: i32 = 64 * k
+    print("== "); print(k); print(" "); print(ds_name(k))
+    if c[0] > 0.5 { println("   [volumes and concentrations: WHOLE BLOOD]") } else { println("   [volumes and concentrations: plasma]") }
+    // guards on the record
+    fails = fails + ds_rel("guard Kp scalar", th[CD_KPSC], c[13], 1.0e-4)
+    var tolc = 1.0e-4
+    if k == 6 { tolc = 1.0e-2 }
+    fails = fails + ds_rel("guard hepatic clint", th[CD_CLINT], c[14], tolc)
+    fails = fails + ds_rel("guard V_ss plasma", circ28_vss_plasma(p), c[15], 1.0e-4)
+    let cl = ds_cl_plasma(p)
+    let f_oral = ds_f_oral(p, fa)
+    print("  record: Kp scalar "); print(th[CD_KPSC]); print("  ps scalar "); print(th[CD_PSSC]); print("  bp "); print(p.bp); print("  fu "); print(p.fu)
+    print("  ka "); print(ka); print(" /h  tlag "); print(tlag); print("  fa "); print(fa); print("  F "); print(f_oral); print("  CL "); print(cl / vdiv); println(" L/h")
+    // A, B
+    var sp: [f64; 16] = [0.0; 16]
+    println("  A distribution spectrum (organs sorted by tau)")
+    ds_spectrum(p, vdiv, true, &!sp)
+    fails = fails + ds_below("capacities sum to V_ss", sp[11], 1.0e-10)
+    print("  B V_rapid threshold 5/15/30 min (L): "); print(sp[1]); print(" / "); print(sp[2]); print(" / "); print(sp[3])
+    print("   smooth: "); print(sp[4]); print(" / "); print(sp[5]); print(" / "); print(sp[6]); print("   V_ss "); print(sp[0]); print("   V_rapid15/V_ss "); println(sp[2] / sp[0])
+    print("    rapid-organ tissue capacity / V_ss "); print(sp[9] / (sp[0] * vdiv)); print("   slow-organ "); print(sp[10] / (sp[0] * vdiv)); print("   largest |series/exact - 1| of tau "); println(sp[8])
+    // C
+    var t_end = 10.0 * 0.6931471805599453 * (sp[0] * vdiv) / cl
+    if t_end < 24.0 { t_end = 24.0 }
+    var iv: [f64; 24] = [0.0; 24]
+    ds_iv(p, cdiv, t_end, 120, sys, &!iv)
+    print("  C IV bolus 1 mg: Dose/C at 5/15/30 min (L) "); print(iv[3]); print(" / "); print(iv[4]); print(" / "); print(iv[5])
+    print("   Vc_peel "); print(iv[10]); print(" L  alpha t1/2 "); print(iv[7]); print(" h ("); print(iv[16]); print(" pts)  alpha share of AUC "); print(iv[11])
+    print("  terminal t1/2 "); print(iv[6]); print(" h  T_end "); println(t_end)
+    print("  C2 body mass / C (Dose - eliminated)/C at 5/15/30 min (L): "); print(iv[19]); print(" / "); print(iv[20]); print(" / "); println(iv[21])
+    fails = fails + ds_below("IV: no negative state (mg/L)", 0.0 - iv[14], 1.0e-12)
+    fails = fails + ds_below("IV mass balance", iv[15], 1.0e-9)
+    fails = fails + ds_rel("IV dose/AUC = closed-form CL", iv[13], cl / vdiv, 1.0e-2)
+    // D
+    var vc = c[8]
+    var uvc = c[9]
+    if c[10] > 0.5 {
+        vc = vc * f_oral
+        uvc = uvc * f_oral
+    }
+    if vc > 0.0 {
+        print("  D observed Vc "); print(vc); print(" L (u "); print(uvc); print(")")
+        if c[10] > 0.5 { print("  = Vc/F "); print(c[8]); print(" x F "); print(f_oral) }
+        print("   V_rapid15/Vc "); print(sp[2] / vc); print("   Dose/C(15 min)/Vc "); print(iv[4] / vc); print("   Vc_peel/Vc "); println(iv[10] / vc)
+    } else {
+        println("  D observed Vc: none found")
+    }
+    if c[11] > 0.0 { print("    observed alpha half-life (h) "); print(c[11]); print("   model "); println(iv[7]) }
+    if c[18] > 0.5 {
+        var pre: [f64; 24] = [0.0; 24]
+        let ka_old = ka
+        ka = ds_fit_ka(p, cdiv, c[1], fa, tlag, c[2], iv[17], t_end, c[3], 0, sys, &!pre)
+        print("  re-baselined: first-order ka refitted to the Tmax target "); print(c[3]); print(" h on the current record: "); print(ka); print(" /h (the pre-refit record had "); print(ka_old); println(" /h)")
+    }
+    // E
+    var po: [f64; 24] = [0.0; 24]
+    ds_oral(p, cdiv, c[1], ka, fa, tlag, c[2], iv[17], t_end, 0, 0, sys, &!po)
+    let peak0 = ds_peak(c[5], &po)
+    print("  E oral "); print(c[1]); print(" mg: Tmax "); print(po[19]); print(" h (target "); print(c[3]); print(")  single-dose Cmax (ng/mL) "); print(1000.0 * po[0])
+    print("  Cmax/AUC "); print(po[3]); print(" /h  peak metric "); print(peak0); print("  observed "); print(c[6]); print("  module report "); println(c[16])
+    print("    at the single-dose peak ("); print(po[1]); print(" h, "); print(po[15]); println(" of fa x dose absorbed), shares of the absorbed dose:")
+    print("    gut tissue "); print(po[7]); print("  liver "); print(po[8]); print("  lung "); print(po[9]); print("  other rapid "); print(po[10])
+    print("  slow "); print(po[11]); print(" (muscle "); print(po[17]); print(", adipose "); print(po[18]); print(")  blood pools "); print(po[12]); print("  eliminated "); println(po[13])
+    fails = fails + ds_rel("oral shares sum to 1", po[14], 1.0, 1.0e-9)
+    fails = fails + ds_below("oral mass balance", po[16], 1.0e-9)
+    fails = fails + ds_rel("oral AUC = F dose / CL", po[2], f_oral / fa * fa * c[1] / (cl / vdiv), 1.0e-2)
+    if c[17] > 0.5 { fails = fails + ds_rel("baseline Tmax = the module's target", po[19], c[3], 5.0e-2) }
+    // F
+    var sr = 1.0
+    var s2: [f64; 1] = [1.0; 1]
+    var flag: [f64; 1] = [0.0; 1]
+    var ivw: [f64; 24] = [0.0; 24]
+    var pow: [f64; 24] = [0.0; 24]
+    var kaw = ka
+    var spw: [f64; 16] = [0.0; 16]
+    (*res)[b + 24] = 0.0
+    if vc > 0.0 {
+        sr = ds_fit_sr(p, cdiv, t_end, vc, sys, &!ivw, &!flag)
+        let pw = ds_split(p, sr, &!s2)
+        ds_iv(pw, cdiv, t_end, 120, sys, &!ivw)
+        ds_spectrum(pw, vdiv, false, &!spw)
+        fails = fails + ds_rel("what-if keeps V_ss", spw[0], sp[0], 1.0e-10)
+        fails = fails + ds_rel("what-if keeps CL", ivw[13], iv[13], 1.0e-2)
+        if c[4] > 0.5 {
+            kaw = ds_fit_ka(pw, cdiv, c[1], fa, tlag, c[2], ivw[17], t_end, c[3], 0, sys, &!pow)
+        }
+        ds_oral(pw, cdiv, c[1], kaw, fa, tlag, c[2], ivw[17], t_end, 0, 0, sys, &!pow)
+        print("  F WHAT-IF (not adopted) Vc_peel = observed Vc: s_r "); print(sr); print("  s_s "); print(s2[0]); print("  flag "); print(flag[0])
+        print("  Vc_peel "); print(ivw[10]); print("  ka "); print(kaw); print("  Tmax "); print(pow[19]); print("  peak metric "); print(ds_peak(c[5], &pow))
+        print("  Cmax/AUC "); print(pow[3]); print("  IV t1/2 "); print(ivw[6]); print("  V_rapid15 "); println(spw[2])
+        (*res)[b + 24] = sr
+        (*res)[b + 25] = s2[0]
+        (*res)[b + 26] = ds_peak(c[5], &pow)
+        (*res)[b + 27] = ivw[6]
+        (*res)[b + 28] = kaw
+        (*res)[b + 29] = flag[0]
+        (*res)[b + 41] = pow[19]
+        (*res)[b + 48] = pow[3]
+    }
+    // family limit
+    var ivl: [f64; 24] = [0.0; 24]
+    var pol: [f64; 24] = [0.0; 24]
+    var s3: [f64; 1] = [1.0; 1]
+    var kal = ka
+    let plim = ds_split(p, 0.05, &!s3)
+    ds_iv(plim, cdiv, t_end, 120, sys, &!ivl)
+    if c[4] > 0.5 {
+        kal = ds_fit_ka(plim, cdiv, c[1], fa, tlag, c[2], ivl[17], t_end, c[3], 0, sys, &!pol)
+    }
+    ds_oral(plim, cdiv, c[1], kal, fa, tlag, c[2], ivl[17], t_end, 0, 0, sys, &!pol)
+    print("  F FAMILY LIMIT (not adopted) s_r 0.05: s_s "); print(s3[0]); print("  Vc_peel "); print(ivl[10]); print("  Dose/C(15 min) "); print(ivl[4])
+    print("  ka "); print(kal); print("  Tmax "); print(pol[19]); print("  peak metric "); print(ds_peak(c[5], &pol)); print("  Cmax/AUC "); print(pol[3]); print("  IV t1/2 "); println(ivl[6])
+    fails = fails + ds_rel("limit keeps CL", ivl[13], iv[13], 1.0e-2)
+    // G transit-input diagnostic (the ONE further diagnostic; not adopted): the record's own
+    // disposition, the input replaced by a chain of 3 equal transit compartments (Brill 2014 used 3
+    // for midazolam; for the other drugs 3 is borrowed and labelled as such), rate refitted to the
+    // same Tmax target.
+    (*res)[b + 50] = 0.0
+    if k == 0 || k == 1 || k == 2 || k >= 8 {
+        var pog: [f64; 24] = [0.0; 24]
+        let kag = ds_fit_ka(p, cdiv, c[1], fa, tlag, c[2], iv[17], t_end, c[3], 3, sys, &!pog)
+        ds_oral(p, cdiv, c[1], kag, fa, tlag, c[2], iv[17], t_end, 0, 3, sys, &!pog)
+        print("  G TRANSIT INPUT x3 (diagnostic, not adopted): k_tr "); print(kag); print(" /h  Tmax "); print(pog[19]); print("  peak metric "); print(ds_peak(c[5], &pog))
+        print("  Cmax/AUC "); print(pog[3]); print("  observed "); println(c[6])
+        (*res)[b + 50] = 1.0
+        (*res)[b + 51] = kag
+        (*res)[b + 52] = ds_peak(c[5], &pog)
+        (*res)[b + 53] = pog[3]
+        (*res)[b + 54] = pog[19]
+    }
+    (*res)[b + 55] = sp[2] / sp[0]
+    (*res)[b + 56] = iv[10] / sp[0]
+    (*res)[b + 57] = 1.0e9
+    if iv[7] > 0.0 { (*res)[b + 57] = iv[7] }
+    (*res)[b + 58] = iv[19]
+    (*res)[b + 59] = iv[20]
+    (*res)[b + 60] = iv[21]
+    (*res)[b + 63] = 1.0
+    (*res)[b + 0] = sp[0]
+    (*res)[b + 1] = sp[2]
+    (*res)[b + 2] = sp[5]
+    (*res)[b + 3] = iv[3]
+    (*res)[b + 4] = iv[4]
+    (*res)[b + 5] = iv[10]
+    (*res)[b + 6] = iv[7]
+    (*res)[b + 7] = iv[11]
+    (*res)[b + 8] = iv[6]
+    (*res)[b + 9] = vc
+    (*res)[b + 10] = uvc
+    (*res)[b + 11] = 0.0
+    (*res)[b + 12] = 0.0
+    if vc > 0.0 {
+        (*res)[b + 11] = sp[2] / vc
+        (*res)[b + 12] = iv[10] / vc
+    }
+    (*res)[b + 13] = po[19]
+    (*res)[b + 14] = peak0
+    (*res)[b + 15] = c[6]
+    (*res)[b + 16] = po[7]
+    (*res)[b + 17] = po[8]
+    (*res)[b + 18] = po[9]
+    (*res)[b + 19] = po[10]
+    (*res)[b + 20] = po[11]
+    (*res)[b + 21] = po[12]
+    (*res)[b + 22] = po[13]
+    (*res)[b + 23] = po[7] + po[8] + po[9] + po[10]
+    (*res)[b + 30] = ds_peak(c[5], &pol)
+    (*res)[b + 31] = ivl[6]
+    (*res)[b + 32] = kal
+    (*res)[b + 33] = ivl[10]
+    (*res)[b + 34] = sp[1]
+    (*res)[b + 35] = sp[3]
+    (*res)[b + 36] = ka
+    (*res)[b + 37] = f_oral
+    (*res)[b + 38] = sp[8]
+    (*res)[b + 39] = iv[5]
+    (*res)[b + 40] = c[3]
+    (*res)[b + 42] = pol[19]
+    (*res)[b + 43] = s3[0]
+    (*res)[b + 44] = po[17]
+    (*res)[b + 45] = po[18]
+    (*res)[b + 46] = po[15]
+    (*res)[b + 47] = po[3]
+    (*res)[b + 49] = pol[3]
+    return fails
+}
+
+// S0: the tau formula against a simulated single-organ step response.
+fn ds_s0(thall: &[f64; 198], k: i32, organ: i32, label: string) -> i32 with IO, Mut, Div, Panic {
+    var fails: i32 = 0
+    var th: [f64; 18] = [0.0; 18]
+    var i: i32 = 0
+    while i < 18 {
+        th[i] = (*thall)[18 * k + i]
+        i = i + 1
+    }
+    var t2 = th
+    let p = circ28_drug_params_theta(t2)
+    println("S0 tau: exact slow mode against the simulated step response (63 % time), the late slope and the series form")
+    var lt: [f64; 2] = [0.0; 2]
+    let te = ds_tau_exact(p, organ)
+    let ts = ds_t63(p, organ, &!lt)
+    print("  "); print(label); print(": exact "); print(60.0 * te); print(" min  simulated 63 % time "); print(60.0 * ts); print(" min  series "); print(60.0 * ds_tau_series(p, organ)); print(" min  sim/exact "); println(ts / te)
+    print("  late-slope tau (residual between 2 and 3 tau) "); print(60.0 * lt[0]); print(" min  ratio to exact "); println(lt[0] / te)
+    var _hit: i32 = ds_pred("M7 first part (pre-registered: 63 % time within 3 % of exact)", ts / te, 0.97, 1.03)
+    fails = fails + ds_rel("S0 late slope", lt[0], te, 1.0e-2)
+    return fails
+}
+
+fn ds_copy(d: &Circ28Drug, k: i32, thall: &![f64; 198]) with Mut, Div, Panic, Epistemic {
+    var i: i32 = 0
+    while i < 18 {
+        (*thall)[18 * k + i] = circ28_drug_value(d, i)
+        i = i + 1
+    }
+}
+
+// REPAIR AFTER THE TRANSIT REFIT (2026-11-15): the pre-refit (rounds 1-4) oral input of drug k, a FIRST-ORDER input with its
+// ka (/h) and lag (h), written over the CD_KA and CD_TLAG slots of the copied record. The refit round turned CD_KA into the per-stage
+// rate of an Erlang chain for most drugs; the diagnostics below were registered on the first-order records, so the baseline is built
+// here explicitly. Values are the stored fits of the pre-refit modules (git 90220737e9). Drugs not in this file are skipped by the caller.
+fn ds_fo(thall: &![f64; 198], k: i32, ka: f64, tlag: f64) with Mut {
+    (*thall)[18 * k + CD_KA] = ka
+    (*thall)[18 * k + CD_TLAG] = tlag
+}
+
+fn ds_fo_all(thall: &![f64; 198], klo: i32, khi: i32) with Mut {
+    if klo <= 0 && 0 < khi { ds_fo(thall, 0, 0.827927, 0.0) }
+    if klo <= 1 && 1 < khi { ds_fo(thall, 1, 0.467594, 0.0) }
+    if klo <= 2 && 2 < khi { ds_fo(thall, 2, 0.259729, 0.0) }
+    if klo <= 4 && 4 < khi { ds_fo(thall, 4, 0.220538, 0.5) }
+    if klo <= 5 && 5 < khi { ds_fo(thall, 5, 0.295110, 0.0) }
+    if klo <= 6 && 6 < khi { ds_fo(thall, 6, 0.284844, 0.0) }
+    if klo <= 7 && 7 < khi { ds_fo(thall, 7, 0.8120, 0.0) }
+    if klo <= 8 && 8 < khi { ds_fo(thall, 8, 4.426075, 0.0) }
+}
+
+fn ds_summary(res: &[f64; 704], klo: i32, khi: i32) -> i32 with IO, Mut, Div, Panic {
+    println("T1 drug | V_ss | V_rapid 5 / 15 / 30 min (threshold) | 15 min smooth | Dose/C(5) | Dose/C(15) | (Dose-eliminated)/C(5) | (15) | Vc_peel | observed Vc (u) | V_rapid15/Vc | Vc_peel/Vc   [L of the reference fluid]")
+    var k: i32 = klo
+    while k < khi {
+        let b: i32 = 64 * k
+        print("  "); print(ds_name(k)); print(" | "); print((*res)[b]); print(" | "); print((*res)[b + 34]); print(" / "); print((*res)[b + 1]); print(" / "); print((*res)[b + 35])
+        print(" | "); print((*res)[b + 2]); print(" | "); print((*res)[b + 3]); print(" | "); print((*res)[b + 4]); print(" | "); print((*res)[b + 58]); print(" | "); print((*res)[b + 59]); print(" | "); print((*res)[b + 5])
+        print(" | "); print((*res)[b + 9]); print(" ("); print((*res)[b + 10]); print(") | "); print((*res)[b + 11]); print(" | "); println((*res)[b + 12])
+        k = k + 1
+    }
+    println("T2 drug | IV alpha t1/2 (h) | alpha share of AUC | IV terminal t1/2 (h) | V_rapid15/V_ss | Vc_peel/V_ss")
+    k = klo
+    while k < khi {
+        let b: i32 = 64 * k
+        print("  "); print(ds_name(k)); print(" | "); print((*res)[b + 6]); print(" | "); print((*res)[b + 7]); print(" | "); print((*res)[b + 8]); print(" | "); print((*res)[b + 55]); print(" | "); println((*res)[b + 56])
+        k = k + 1
+    }
+    println("T3 drug | Tmax model (target) | absorbed by Tmax | gut tissue | liver | lung | other rapid | slow | blood pools | eliminated | rapid other than blood")
+    k = klo
+    while k < khi {
+        let b: i32 = 64 * k
+        print("  "); print(ds_name(k)); print(" | "); print((*res)[b + 13]); print(" ("); print((*res)[b + 40]); print(") | "); print((*res)[b + 46]); print(" | "); print((*res)[b + 16]); print(" | "); print((*res)[b + 17]); print(" | "); print((*res)[b + 18])
+        print(" | "); print((*res)[b + 19]); print(" | "); print((*res)[b + 20]); print(" | "); print((*res)[b + 21]); print(" | "); print((*res)[b + 22]); print(" | "); println((*res)[b + 23])
+        k = k + 1
+    }
+    println("T4 drug | peak metric: baseline | observed | what-if Vc-matched (s_r, s_s, ka, flag) | family limit s_r 0.05 (s_s, ka) | IV t1/2 baseline / what-if / limit | Cmax/AUC baseline / what-if / limit")
+    k = klo
+    while k < khi {
+        let b: i32 = 64 * k
+        print("  "); print(ds_name(k)); print(" | "); print((*res)[b + 14]); print(" | "); print((*res)[b + 15]); print(" | "); print((*res)[b + 26]); print(" ("); print((*res)[b + 24]); print(", "); print((*res)[b + 25]); print(", "); print((*res)[b + 28]); print(", "); print((*res)[b + 29])
+        print(") | "); print((*res)[b + 30]); print(" ("); print((*res)[b + 43]); print(", "); print((*res)[b + 32]); print(") | "); print((*res)[b + 8]); print(" / "); print((*res)[b + 27]); print(" / "); print((*res)[b + 31])
+        print(" | "); print((*res)[b + 47]); print(" / "); print((*res)[b + 48]); print(" / "); println((*res)[b + 49])
+        k = k + 1
+    }
+    println("T5 drug | transit-input diagnostic G: k_tr | Tmax | peak metric | Cmax/AUC | (baseline peak metric, observed)")
+    k = klo
+    while k < khi {
+        let b: i32 = 64 * k
+        if (*res)[b + 50] > 0.5 {
+            print("  "); print(ds_name(k)); print(" | "); print((*res)[b + 51]); print(" | "); print((*res)[b + 54]); print(" | "); print((*res)[b + 52]); print(" | "); print((*res)[b + 53]); print(" | ("); print((*res)[b + 14]); print(", "); print((*res)[b + 15]); println(")")
+        }
+        k = k + 1
+    }
+    return 0
+}
+
+// One pre-registered prediction row for drug k (skipped when the drug is not in this file).
+fn ds_pk(res: &[f64; 704], k: i32, j: i32, tag: string, lo: f64, hi: f64, acc: &![i32; 2]) with IO, Mut, Div, Panic {
+    if (*res)[64 * k + 63] < 0.5 { return }
+    let h = ds_pred(tag, (*res)[64 * k + j], lo, hi)
+    (*acc)[0] = (*acc)[0] + h
+    (*acc)[1] = (*acc)[1] + 1
+}
+
+// Predictions against the run: HIT / MISS, printed, never asserted. acc[0] hits, acc[1] evaluated.
+fn ds_predictions(res: &[f64; 704], acc: &![i32; 2]) with IO, Mut, Div, Panic {
+    println("P predictions (pre-registered in the header), HIT or MISS")
+    println(" coordinator")
+    ds_pk(res, 0, 11, "C1 midazolam V_rapid15/Vc >= 2", 2.0, 1.0e9, acc)
+    println("  C1 quetiapine, venlafaxine and C4 haloperidol: NOT TESTABLE as stated (no observed Vc found)")
+    ds_pk(res, 0, 23, "C2 midazolam rapid organs other than blood > 0.5", 0.5, 1.0, acc)
+    ds_pk(res, 1, 23, "C2 quetiapine", 0.5, 1.0, acc)
+    ds_pk(res, 2, 23, "C2 venlafaxine", 0.5, 1.0, acc)
+    ds_pk(res, 0, 26, "C3 midazolam what-if Cmax/AUC in 0.30-0.40", 0.30, 0.40, acc)
+    ds_pk(res, 1, 30, "C3 quetiapine family limit Cmax/AUC reaches 0.20 or more (toward 0.252)", 0.20, 1.0e9, acc)
+    ds_pk(res, 2, 30, "C3 venlafaxine family limit Cmax,ss reaches 150 or more (toward 225)", 150.0, 1.0e9, acc)
+    println(" mine")
+    ds_pk(res, 0, 11, "M1 midazolam V_rapid15/Vc", 0.45, 1.15, acc)
+    ds_pk(res, 4, 11, "M1 olanzapine", 0.04, 0.15, acc)
+    ds_pk(res, 6, 11, "M1 aripiprazole", 0.04, 0.15, acc)
+    ds_pk(res, 7, 11, "M1 risperidone", 0.12, 0.35, acc)
+    ds_pk(res, 8, 11, "M1 tacrolimus", 0.2, 0.6, acc)
+    ds_pk(res, 9, 11, "M1 sirolimus", 0.08, 0.35, acc)
+    ds_pk(res, 10, 11, "M1 everolimus", 0.6, 1.8, acc)
+    ds_pk(res, 0, 55, "M2 midazolam V_rapid15/V_ss", 0.12, 0.35, acc)
+    ds_pk(res, 1, 55, "M2 quetiapine", 0.15, 0.32, acc)
+    ds_pk(res, 2, 55, "M2 venlafaxine", 0.09, 0.25, acc)
+    ds_pk(res, 3, 55, "M2 haloperidol", 0.02, 0.07, acc)
+    ds_pk(res, 4, 55, "M2 olanzapine", 0.03, 0.09, acc)
+    ds_pk(res, 5, 55, "M2 clozapine", 0.03, 0.10, acc)
+    ds_pk(res, 6, 55, "M2 aripiprazole", 0.03, 0.10, acc)
+    ds_pk(res, 7, 55, "M2 risperidone", 0.15, 0.32, acc)
+    ds_pk(res, 8, 55, "M2 tacrolimus", 0.03, 0.08, acc)
+    ds_pk(res, 9, 55, "M2 sirolimus", 0.04, 0.10, acc)
+    ds_pk(res, 10, 55, "M2 everolimus", 0.09, 0.20, acc)
+    ds_pk(res, 0, 23, "M3 midazolam rapid organs other than blood", 0.03, 0.12, acc)
+    ds_pk(res, 1, 23, "M3 quetiapine", 0.04, 0.15, acc)
+    ds_pk(res, 2, 23, "M3 venlafaxine", 0.12, 0.32, acc)
+    ds_pk(res, 0, 22, "M3 midazolam eliminated", 0.45, 0.75, acc)
+    ds_pk(res, 1, 22, "M3 quetiapine eliminated", 0.45, 0.80, acc)
+    ds_pk(res, 8, 16, "M3 tacrolimus gut tissue > 0.35", 0.35, 1.0, acc)
+    ds_pk(res, 9, 16, "M3 sirolimus gut tissue", 0.15, 0.50, acc)
+    ds_pk(res, 10, 16, "M3 everolimus gut tissue", 0.08, 0.35, acc)
+    ds_pk(res, 0, 24, "M4 midazolam s_r", 0.4, 2.5, acc)
+    ds_pk(res, 0, 26, "M4 midazolam what-if Cmax/AUC", 0.19, 0.28, acc)
+    ds_pk(res, 0, 27, "M4 midazolam what-if IV t1/2", 2.6, 4.2, acc)
+    ds_pk(res, 0, 30, "M4 midazolam family limit Cmax/AUC < 0.30", 0.0, 0.30, acc)
+    ds_pk(res, 1, 30, "M4 quetiapine family limit Cmax/AUC < 0.21", 0.0, 0.21, acc)
+    ds_pk(res, 2, 30, "M4 venlafaxine family limit Cmax,ss < 130", 0.0, 130.0, acc)
+    ds_pk(res, 3, 57, "M5 haloperidol alpha t1/2 (h; none = 1e9) > 0.5", 0.5, 2.0e9, acc)
+    ds_pk(res, 0, 3, "M6 midazolam Dose/C(5 min) (L)", 6.0, 16.0, acc)
+    ds_pk(res, 0, 56, "M6 midazolam Vc_peel/V_ss", 0.15, 0.45, acc)
+    var w8 = 0.0
+    var any = 0
+    var k: i32 = 0
+    while k < 8 {
+        if (*res)[64 * k + 63] > 0.5 {
+            any = 1
+            if (*res)[64 * k + 38] > w8 { w8 = (*res)[64 * k + 38] }
+        }
+        k = k + 1
+    }
+    if any == 1 {
+        let h = ds_pred("M7 series/exact tau, worst organ of the flow-limited records in this file", w8, 0.0, 0.06)
+        (*acc)[0] = (*acc)[0] + h
+        (*acc)[1] = (*acc)[1] + 1
+    }
+    ds_pk(res, 8, 38, "M7 tacrolimus worst organ", 0.20, 1.00, acc)
+    ds_pk(res, 9, 38, "M7 sirolimus worst organ", 0.20, 1.00, acc)
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic, Epistemic {
+    // records first (see COMPILER NOTES), then every float
+    var d7m = circ28_drug_new()
+    var d7 = circ28_drug_new()
+    var d8 = circ28_drug_new()
+    var d9 = circ28_drug_new()
+    var d10 = circ28_drug_new()
+    var sysn = nl28_sys_zero()
+    var sys = circ28_sys_zero()
+    var thall: [f64; 198] = [0.0; 198]
+    var res: [f64; 704] = [0.0; 704]
+    var fails: i32 = 0
+
+    rsp_measured_m(&!d7m)
+    rsp_fit_record_m(&!d7m)
+    rsp_measured_r(&!d7)
+    rsp_fit_record_r(&!d7)
+    rsp_ka_record(&!d7)
+    ds_copy(&d7, 7, &!thall)
+    tac_drug_into(&!d8, &!sysn)
+    ds_copy(&d8, 8, &!thall)
+    sir_drug_into(&!d9, &!sysn)
+    ds_copy(&d9, 9, &!thall)
+    let fit = evr_drug_into(&!d10, 1.0, &!sysn)
+    let thk1 = circ28_drug_theta(&d10)
+    let pk1 = circ28_drug_params_theta(thk1)
+    let ka1 = mtor_ka_solve(pk1, mtor_hct(), evr_bmax(), evr_kd(), 2.0, thk1[CD_FA], evr_obs_tmax(), 0.05, 10.0, &!sysn)
+    evr_ka_set(&!d10, ka1, &!sysn)
+    ds_copy(&d10, 10, &!thall)
+
+    ds_fo_all(&!thall, 7, 11)
+    fails = fails + ds_s0(&thall, 8, 1, "tacrolimus liver (permeability-limited)")
+    var k: i32 = 7
+    while k < 11 {
+        fails = fails + ds_drug(k, &thall, &!sys, &!res)
+        k = k + 1
+    }
+    fails = fails + ds_summary(&res, 7, 11)
+    var acc: [i32; 2] = [0; 2]
+    ds_predictions(&res, &!acc)
+    print("P total: "); print(acc[0]); print(" HIT of "); print(acc[1]); println(" evaluated predictions in this file")
+    if fails == 0 {
+        println("CIRC28_DISTRIBUTION_SPECTRUM_B_PASS")
+        return 0
+    }
+    print("CIRC28_DISTRIBUTION_SPECTRUM_B_FAIL "); println(fails)
+    return 1
+}

@@ -9,18 +9,21 @@ use parser::parser::{parser_last_error_count, parser_reset_last_errors}
 use ir::ir::*
 use ir::opt_cleanup::{OcpCleanupModuleReceipt, opt_cleanup_module_inplace, OCP_SKIP_MASK, OCP_RESEARCH_EXACT_INTEGRAL_CENTER, OCP_RESEARCH_EXACT_CENTER_APPLICATIONS, OCP_RESEARCH_EXACT_CENTER_LAST_FUNCTION}
 use io::env::{read_env}
+use lexer::span::{srcmap_note_stdlib_root}
 use io::trace::{io_trace_i64_string}
 use check::mod::{check_items_verdict_boot4, check_items_verdict_boot4_with_module_map, check_items_verdict_boot4_with_ontocache_sidecar, check_modules_verdict_boot4, check_program_epistemic_into, check_program_with_artifacts, checker_to_ir_epistemic_into, checker_apply_ir_metadata, checker_apply_ir_ontology_parameter_links_from_items}
 use ir::lower::{lower_hard_error_report, lower_program_to_ir_trace, lower_program_to_ir_with_epistemic_trace, lower_program_to_ir_summary_flat_owned_with_epistemic_ref, lower_program_bodies_from_summary_flat_with_epistemic_ref, lower_program_bodies_from_summary_with_epistemic_boxed_owned, lower_dep_program_items_into_acc_with_externs, lower_hard_error_reset, lower_compile_error_scope_begin, lower_compile_error_scope_end, lower_hard_error_pending, lower_note_merge_fn_overflow, lower_merge_fn_overflowed, lower_merge_state_reset, lower_rgn_merge_check, lower_rgn_merge_vetoed, lower_rgn_veto_regions, ir_instr_census_report, fo_preregister_program_items_multipass, fo_xfer_global_reset, lower_use_module_reset, lower_set_current_module_id, lower_set_skip_use_recollect_for_merged, lower_fn_tuple_arr_reset, lower_fn_tuple_f64_arrays_collect}
 use native::codegen_x86_linux::{compile_native_v2_preview_to_file, native_resolve_target, native_v2_builtin_id_for_name, native_v2_builtin_returns_float, ARCH_X86_64, OS_LINUX, ARCH_AARCH64, OS_MACOS}
 use check::knowledge_context::{knowledge_context_validate_items, knowledge_context_validate_items_values_only}
 use check::check::{checker_swap_darwin_math}
-use ir::lower::{lower_swap_native_closure_envs, lower_untyped_field_trace_init, lower_untyped_field_trace_dump}
+use ir::lower::{lower_swap_native_closure_envs, lower_untyped_field_trace_init, lower_untyped_field_trace_dump, lower_strict_field_report}
 use gpu::native_metal::{native_metal_begin, native_metal_collect_program, native_metal_failed}
 use resolve::mod::{resolve_modules}
 use module_parse::{extract_imports_from_ast, file_exists, file_path_to_module_path, load_module_file}
 use private_fn_identity::{private_fn_identity_apply, module_struct_identity_check, pfi_use_map_reset, pfi_use_map_module_begin, pfi_use_map_note}
 use check::specializer::{specialize_generics, specialize_generics_multi, spec_last_instantiated, spec_mono_marker_count, spec_append_item_lists, spec_dce_unreachable_item_fns, spec_dce_mark_across_programs, spec_dce_filter_with_global_marks, spec_dce_live_item_fns, spec_report_any_specializer_failure, spec_program_mentions_f128}
+use check::mod::{check_items_verdict_boot4_with_module_path}
+use ir::lower::{lower_program_to_ir_summary_box_with_epistemic_ref, lower_program_to_ir_summary_box_with_externs_ref}
 
 // TEST-ONLY: SOUNIO_IR_NAME_POOL_LIMIT=<n> lowers the IR name-id pool's id cap to
 // min(n, IR_NAME_POOL_MAX) so scripts/ci/madaros_name_pool_overflow_gate.sh can
@@ -134,6 +137,37 @@ fn module_frontend_find_user_main_idx(module: &IrModule) -> i64 with Mut, Div, P
         mfi = mfi + 1
     }
     user_main
+}
+
+// True if the entry file itself declares a top-level `fn main`. Scans the
+// entry module's AST, not merged IR: an imported module that happens to
+// declare its own `main` (scenarios/venlafaxine_xr.sio does) must not make a
+// library entry file look runnable.
+fn module_frontend_items_declare_main(items: Option<Box<ItemList>>) -> bool with Mut, Panic, Div {
+    let main_nm = make_name("main")
+    var cur = items
+    var going = true
+    while going {
+        match cur {
+            None => { going = false }
+            Some(list) => {
+                let it = (*list).head
+                if it.kind == ItemKind::ItemFn && ir_name_eq(it.name, main_nm) {
+                    // A bodyless `extern "C" fn main()` is also an ItemFn, but
+                    // it lowers to an instr_count == 0 stub: an ELF entering
+                    // it runs the backend's ud2. It is not an entry point.
+                    match it.fn_def {
+                        Some(fd) => {
+                            if !(*fd).is_extern { return true }
+                        }
+                        None => {}
+                    }
+                }
+                cur = (*list).tail
+            }
+        }
+    }
+    false
 }
 
 // Memoised: read_env allocates and the runtime allocator never reclaims,
@@ -594,6 +628,8 @@ fn module_frontend_resolve_import_relpath(rel_path: string, cur_dir: string) -> 
     if str_len(stdlib_env_root) > 0 {
         let stdlib_env_path = str_concat(str_concat(stdlib_env_root, "/"), rel_path)
         if file_exists(stdlib_env_path) {
+            // The trap text embeds a stdlib file as stdlib/<rest> (lexer::span).
+            srcmap_note_stdlib_root(stdlib_env_root)
             return stdlib_env_path
         }
     }
@@ -3295,8 +3331,8 @@ fn visited_contains(visited: [string; 256], count: i64, path: string) -> bool wi
 // Missing imports and capacity saturation are data, never implicit success.
 pub struct ModuleClosure {
     pub paths: [string; 256],
-    pub edge_callers: [string; 512],
-    pub edge_dependencies: [string; 512],
+    pub edge_callers: [string; 1024],
+    pub edge_dependencies: [string; 1024],
     pub unresolved_callers: [string; 256],
     pub unresolved_imports: [string; 256],
     pub unresolved_paths: [string; 256],
@@ -3412,7 +3448,7 @@ pub fn module_frontend_collect_ast_closure_into(
         var i: i64 = 0
         while i < imports.count && !(*out).parse_failed {
             let dependency_path = resolve_import_file_path(imports.paths[i], cur_dir)
-            if (*out).edge_count < 512 {
+            if (*out).edge_count < 1024 {
                 let edge_index = (*out).edge_count
                 (*out).edge_callers[edge_index] = caller_path
                 (*out).edge_dependencies[edge_index] = dependency_path
@@ -6450,11 +6486,16 @@ fn module_frontend_lower_programs_array_direct_box_multi(
             // Snapshot seed *user* main (by name, smallest body) — NOT functions[0].
             // Into-acc fills dep helpers into low fn_ids (os_oct_mul at fi=0 measured);
             // restoring functions[0] destroyed those bodies → order_spread SEGV.
-            var seed_main_idx = module_frontend_find_user_main_idx(&(*acc_box))
-            if seed_main_idx < 0 {
-                seed_main_idx = 0
+            // No user main: nothing to protect, so no snapshot and no restore.
+            // Falling back to index 0 here snapshotted slot 0 before into-acc
+            // filled it and then wrote the empty snapshot back over the dep body
+            // (NATIVE_REFUSAL empty_stub_ud2 on the dep's first fn). The restore
+            // below is already guarded on seed_main_idx >= 0.
+            let seed_main_idx = module_frontend_find_user_main_idx(&(*acc_box))
+            var seed_user_main = ir_empty_function()
+            if seed_main_idx >= 0 {
+                seed_user_main = ir_function_deep_copy(ir_fn_get(&(*acc_box), seed_main_idx as usize))
             }
-            var seed_user_main = ir_function_deep_copy(ir_fn_get(&(*acc_box), seed_main_idx as usize))
             let into_acc_default = module_frontend_into_acc_enabled()
             if into_acc_default {
                 print("lower_array: dep_mode into_acc\n")
@@ -7846,6 +7887,19 @@ fn module_frontend_compile_imported_to_file_target_impl(
     }
     trace.typechecked_modules = loaded
     print("imported_compile: typecheck ok\n")
+    // An executable needs an entry point. Without `main` the writer used to emit
+    // an ELF whose e_entry was .text+0 -- merged function 0 -- which then died
+    // with SIGSEGV, or SIGILL when D2 below had emptied that slot. Same code and
+    // text as lean_single. `check` and `--emit-obj` do not come through here.
+    // docs/audit/MADAROS_NO_MAIN_ENTRY_FN0_DISPATCH_2026-09-26.md
+    if !module_frontend_items_declare_main(programs[0].items) {
+        print("error[E221]: no main\n")
+        print("note: ")
+        print(main_path)
+        print(" declares no `fn main`; a library can be checked, not built into an executable\n")
+        module_frontend_global_init_compile_end()
+        return 1
+    }
     if use_collapse && loaded > 1 {
         print("imported_compile: specialized_collapse lower_count=1 (from ")
         print_int(loaded)
@@ -7872,6 +7926,11 @@ fn module_frontend_compile_imported_to_file_target_impl(
     }
     print("imported_compile: lower_done\n")
     lower_untyped_field_trace_dump()
+    if lower_strict_field_report() > 0 {
+        print("IR lowering refused: field indices guessed instead of read from the type (SOUNIO_STRICT_FIELD=1)\n")
+        module_frontend_global_init_compile_end()
+        return 1
+    }
     if !lowered.ok {
         print("IR lowering failed during merge: ")
         print(lowered.error_msg)

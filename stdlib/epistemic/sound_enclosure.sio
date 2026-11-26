@@ -1,0 +1,257 @@
+// stdlib/epistemic/sound_enclosure.sio
+//
+// Lie corpus, item 1: a heuristic error bound must not authorize a decision.
+//
+// Origin (real defect, 2026-11-19): the Phase 7C PBPK gate returned
+// SAFE_AUTHORIZE from an AUC error estimate (diff_rk4 * 16/15 + diff_rk4) that
+// was a heuristic majorant, not a bound. Nothing in the types told the two
+// apart: both were f64. The fix was done by hand by an agent reading the code.
+// This module makes the distinction a type, so the compiler refuses it.
+//
+// Two kinds of error radius:
+//   SoundEnclosure - an interval [lo, hi] that contains the exact real value.
+//                    Opaque. Built only from exact points and from the
+//                    operations below, each of which rounds outward.
+//   HeuristicErr   - any estimate. Anyone may build one. It can suggest a
+//                    refinement; it can never produce a SafeAuthorization.
+//
+// Outward rounding without changing the FPU mode: after each round-to-nearest
+// operation, the result r is pushed to a value <= pred(r) or >= succ(r) by
+//   r -/+ (|r| * phi + eta),   phi = u (1 + 2u),  u = 2^-53,  eta = 2^-1074,
+// computed in round-to-nearest. This is the predecessor/successor algorithm of
+// Rump, Zimmermann, Boldo and Melquiond, "Computing predecessor and successor
+// in rounding to nearest", BIT Numer. Math. 49 (2009) 419-431: the result is
+// pred(r) or pred(pred(r)) (resp. succ), never on the wrong side of r.
+// Because RN(op) is within one ulp of the exact result and the push moves at
+// least one ulp outward, the interval contains the exact result.
+//
+// Scope, stated plainly:
+//   - add, sub, mul, div (IEEE correctly rounded), plus exact abs/max/hull.
+//     Transcendental functions are not here: libm exp/log are not correctly
+//     rounded, so wrapping them would be a lie. Exponentials are built from
+//     the four operations with an explicit Taylor tail (see the PBPK gate).
+//   - NaN panics. Infinite bounds are allowed (they are valid, uninformative).
+//
+// KNOWN HOLE (needs the compiler, not a library): se_point(x) trusts that x is
+// an exact input (a literal, a datum, a constant). Nothing stops a caller from
+// computing a heuristic f64 and passing it to se_point, laundering it into an
+// "exact" point. Closing this needs value provenance in the type system
+// (literal / input vs computed f64). It is corpus item 1b.
+
+struct SoundEnclosure {
+    lo: f64,
+    hi: f64,
+}
+
+struct HeuristicErr {
+    center: f64,
+    radius: f64,
+}
+
+struct SafeAuthorization {
+    lo: f64,
+    hi: f64,
+    window_lo: f64,
+    window_hi: f64,
+}
+
+pub const SE_DECIDED_ABOVE: i64 = 1
+pub const SE_DECIDED_BELOW: i64 = 2
+pub const SE_ABSTAIN_BAND: i64 = 3
+pub const SE_REFINE: i64 = 4
+pub const HE_HEURISTIC_ONLY: i64 = 5
+
+fn se_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn se_is_nan(x: f64) -> bool {
+    return x != x
+}
+
+// u (1 + 2u) with u = 2^-53
+fn se_phi() -> f64 {
+    return 1.1102230246251565e-16 * (1.0 + 2.220446049250313e-16)
+}
+
+// 2^-1074, the smallest positive subnormal
+fn se_eta() -> f64 {
+    return 4.9406564584124654e-324
+}
+
+// Outward push of one round-to-nearest result. Public so sibling interval
+// modules reuse the same push instead of copying it (lie corpus item 1d).
+// Rump–Zimmermann–Boldo–Melquiond 2009: the result is pred(r) or
+// pred(pred(r)) (resp. succ), never on the wrong side of r.
+pub fn se_down(r: f64) -> f64 with Panic {
+    assert(!se_is_nan(r))
+    return r - (se_abs(r) * se_phi() + se_eta())
+}
+
+pub fn se_up(r: f64) -> f64 with Panic {
+    assert(!se_is_nan(r))
+    return r + (se_abs(r) * se_phi() + se_eta())
+}
+
+fn se_min4(a: f64, b: f64, c: f64, d: f64) -> f64 with Mut {
+    var m = a
+    if b < m { m = b }
+    if c < m { m = c }
+    if d < m { m = d }
+    return m
+}
+
+fn se_max4(a: f64, b: f64, c: f64, d: f64) -> f64 with Mut {
+    var m = a
+    if b > m { m = b }
+    if c > m { m = c }
+    if d > m { m = d }
+    return m
+}
+
+// ---------------------------------------------------------------------------
+// Construction
+// ---------------------------------------------------------------------------
+
+// An exact input. See KNOWN HOLE above.
+pub fn se_point(x: f64) -> SoundEnclosure with Panic {
+    assert(!se_is_nan(x))
+    return SoundEnclosure { lo: x, hi: x }
+}
+
+// ---------------------------------------------------------------------------
+// Outward-rounded arithmetic
+// ---------------------------------------------------------------------------
+
+pub fn se_add(a: SoundEnclosure, b: SoundEnclosure) -> SoundEnclosure with Panic {
+    return SoundEnclosure { lo: se_down(a.lo + b.lo), hi: se_up(a.hi + b.hi) }
+}
+
+pub fn se_sub(a: SoundEnclosure, b: SoundEnclosure) -> SoundEnclosure with Panic {
+    return SoundEnclosure { lo: se_down(a.lo - b.hi), hi: se_up(a.hi - b.lo) }
+}
+
+pub fn se_mul(a: SoundEnclosure, b: SoundEnclosure) -> SoundEnclosure with Mut, Panic {
+    let p1 = a.lo * b.lo
+    let p2 = a.lo * b.hi
+    let p3 = a.hi * b.lo
+    let p4 = a.hi * b.hi
+    return SoundEnclosure {
+        lo: se_down(se_min4(p1, p2, p3, p4)),
+        hi: se_up(se_max4(p1, p2, p3, p4)),
+    }
+}
+
+// Division. IEEE 754 division is correctly rounded (unlike libm exp/log), so
+// RN(a/b) is within half an ulp of the exact quotient and the same outward
+// push applies. Panics when the divisor encloses zero.
+pub fn se_div(a: SoundEnclosure, b: SoundEnclosure) -> SoundEnclosure with Mut, Div, Panic {
+    assert(b.lo > 0.0 || b.hi < 0.0)
+    let q1 = a.lo / b.lo
+    let q2 = a.lo / b.hi
+    let q3 = a.hi / b.lo
+    let q4 = a.hi / b.hi
+    return SoundEnclosure {
+        lo: se_down(se_min4(q1, q2, q3, q4)),
+        hi: se_up(se_max4(q1, q2, q3, q4)),
+    }
+}
+
+// The following are exact (no rounding happens), so no push is needed.
+
+// { |x| : x in a }
+pub fn se_absval(a: SoundEnclosure) -> SoundEnclosure {
+    if a.lo >= 0.0 { return SoundEnclosure { lo: a.lo, hi: a.hi } }
+    if a.hi <= 0.0 { return SoundEnclosure { lo: 0.0 - a.hi, hi: 0.0 - a.lo } }
+    var m = 0.0 - a.lo
+    if a.hi > m { m = a.hi }
+    return SoundEnclosure { lo: 0.0, hi: m }
+}
+
+// Encloses max(x, y) for x in a, y in b.
+pub fn se_max(a: SoundEnclosure, b: SoundEnclosure) -> SoundEnclosure with Mut {
+    var lo = a.lo
+    if b.lo > lo { lo = b.lo }
+    var hi = a.hi
+    if b.hi > hi { hi = b.hi }
+    return SoundEnclosure { lo: lo, hi: hi }
+}
+
+// Union hull: contains every value either argument contains.
+pub fn se_hull(a: SoundEnclosure, b: SoundEnclosure) -> SoundEnclosure with Mut {
+    var lo = a.lo
+    if b.lo < lo { lo = b.lo }
+    var hi = a.hi
+    if b.hi > hi { hi = b.hi }
+    return SoundEnclosure { lo: lo, hi: hi }
+}
+
+// [-inf, +inf]: valid and uninformative. What a computation returns when its
+// preconditions fail, so that it can never authorize.
+pub fn se_entire() -> SoundEnclosure {
+    let big = 1.0e308
+    let inf = big * 10.0
+    return SoundEnclosure { lo: 0.0 - inf, hi: inf }
+}
+
+// Read-only views for reporting. They return plain f64: whatever is computed
+// from them is no longer sound, by construction of this module.
+pub fn se_lo(a: SoundEnclosure) -> f64 { return a.lo }
+pub fn se_hi(a: SoundEnclosure) -> f64 { return a.hi }
+
+// ---------------------------------------------------------------------------
+// Decisions (Discharge Trichotomy, formal/lean4/SounioDischargeTrichotomy.lean)
+// ---------------------------------------------------------------------------
+
+// Threshold c, epistemic half-width ep, aleatory half-width al.
+// DECIDED_* only when the whole enclosure, widened by ep + al with outward
+// rounding, lies on one side of c (theorems above_sound / below_sound).
+pub fn se_decide(v: SoundEnclosure, ep: f64, al: f64, c: f64) -> i64 with Panic {
+    assert(ep >= 0.0)
+    assert(al >= 0.0)
+    let lower = se_down(se_down(v.lo - ep) - al)
+    let upper = se_up(se_up(v.hi + ep) + al)
+    if c < lower { return SE_DECIDED_ABOVE }
+    if upper < c { return SE_DECIDED_BELOW }
+    return SE_ABSTAIN_BAND
+}
+
+pub fn se_fits_window(v: SoundEnclosure, ep: f64, al: f64, window_lo: f64, window_hi: f64) -> bool with Panic {
+    assert(ep >= 0.0)
+    assert(al >= 0.0)
+    let lower = se_down(se_down(v.lo - ep) - al)
+    let upper = se_up(se_up(v.hi + ep) + al)
+    return window_lo <= lower && upper <= window_hi
+}
+
+// The only way to obtain a SafeAuthorization. Panics if the window does not
+// contain the widened enclosure: call se_fits_window first.
+pub fn se_authorize_window(v: SoundEnclosure, ep: f64, al: f64, window_lo: f64, window_hi: f64) -> SafeAuthorization with Panic {
+    assert(se_fits_window(v, ep, al, window_lo, window_hi))
+    return SafeAuthorization { lo: v.lo, hi: v.hi, window_lo: window_lo, window_hi: window_hi }
+}
+
+pub fn sa_window_lo(a: SafeAuthorization) -> f64 { return a.window_lo }
+pub fn sa_window_hi(a: SafeAuthorization) -> f64 { return a.window_hi }
+
+// ---------------------------------------------------------------------------
+// Heuristic estimates
+// ---------------------------------------------------------------------------
+
+pub fn he_new(center: f64, radius: f64) -> HeuristicErr with Panic {
+    assert(radius >= 0.0)
+    return HeuristicErr { center: center, radius: radius }
+}
+
+// A heuristic can say "looks decided, refine to confirm" or "inside the band".
+// It never returns SE_DECIDED_*.
+pub fn he_decide(h: HeuristicErr, ep: f64, al: f64, c: f64) -> i64 with Panic {
+    assert(ep >= 0.0)
+    assert(al >= 0.0)
+    let lower = h.center - h.radius - ep - al
+    let upper = h.center + h.radius + ep + al
+    if c < lower { return SE_REFINE }
+    if upper < c { return SE_REFINE }
+    return HE_HEURISTIC_ONLY
+}

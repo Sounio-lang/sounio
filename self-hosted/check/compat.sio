@@ -13,6 +13,9 @@
 // stays above types_compatible with no forward reference); returns 0 for any other
 // type. Used so Invariant arithmetic/comparison resolves on the inner T and so the
 // inner T is not erased from compatibility.
+use check::epistemic::{knowledge_meta_from_ty, knowledge_meta_provenance, knowledge_meta_validity, provenance_subsumes, validity_subsumes}
+use check::types::{is_seq_type, ty_bool, ty_error, ty_f128, ty_f256, ty_f64, ty_ref, ty_ref_mut, ty_string, ty_unit, wide_float_format_identity_compatible}
+use parser::ast::{name_eq}
 fn compat_invariant_name_prefix(n: Name) -> bool with Panic, Div {
     if n.len < 10 { return false }
     if (n.buf[0] as i64) != 73 { return false }    // I
@@ -86,23 +89,50 @@ pub fn int_widths_compatible(a: TypeEntry, b: TypeEntry) -> bool with Panic, Div
 // Keep call/return compatibility aligned with lean_single's Knowledge ty_eq.
 // The required annotation chooses confidence-floor, exact, or error-bound
 // ordering; the provided mode only blocks confidence values from silently
-// flowing into an error-bound requirement.
+// flowing into an error-bound requirement. Knightian dependence lives in
+// `knight_set_id` (0 = empty, != 0 = depends on ≥1 Knightian source / ⊥):
+// precise requirements accept only an empty Knightian set; `ε=⊥` and
+// unannotated `Knowledge<T>` accept any set.
 fn compat_epsilon_subsumes(a: TypeEntry, b: TypeEntry) -> bool {
-    if a.knowledge_epsilon > 1.0 || b.knowledge_epsilon > 1.0 {
+    // Only the required value is range-checked here: a mode-0 value meeting a
+    // confidence requirement is judged by its stated confidence, not by its
+    // variance, the same order as epsilon_provided_view.
+    if b.knowledge_epsilon > 1.0 {
         return false
     }
-    if b.knowledge_epsilon_mode == 3 {
-        if a.knowledge_epsilon_mode == 3 { return true }
-        return a.knowledge_epsilon_mode == 0 && a.knowledge_epsilon < 0.0
+    // `ε=⊥` target accepts any Knowledge value (precise -> ⊥ and ⊥ -> ⊥).
+    if b.knight_set_id != 0 {
+        return true
     }
     if b.knowledge_epsilon_mode == 2 {
-        if a.knowledge_epsilon_mode == 3 || a.knowledge_epsilon < 0.0 || b.knowledge_epsilon < 0.0 {
+        // EPI-006: a `Knowledge(v, e=c)` states its confidence in knowledge_conf
+        // (see epsilon_provided_view); an `ε >= x` annotation, in the epsilon slot.
+        // A mode-0 epsilon is a variance bound, never a confidence; modes 1
+        // (exact) and 2 (floor) are confidences.
+        if a.knight_set_id != 0 {
+            return false
+        }
+        if a.knowledge_epsilon_mode == 0 {
+            if a.knowledge_conf < 0.0 || b.knowledge_epsilon < 0.0 { return false }
+            return a.knowledge_conf >= b.knowledge_epsilon
+        }
+        if a.knowledge_epsilon < 0.0 || a.knowledge_epsilon > 1.0 || b.knowledge_epsilon < 0.0 {
             return false
         }
         return a.knowledge_epsilon >= b.knowledge_epsilon
     }
     if b.knowledge_epsilon_mode == 1 {
-        if a.knowledge_epsilon_mode == 3 || a.knowledge_epsilon < 0.0 || b.knowledge_epsilon < 0.0 {
+        // `ε = x` is an exact confidence (EPI-006): a mode-0 value meets it
+        // only through a stated knowledge_conf.
+        if a.knight_set_id != 0 {
+            return false
+        }
+        if a.knowledge_epsilon_mode == 0 {
+            if a.knowledge_conf < 0.0 || b.knowledge_epsilon < 0.0 { return false }
+            return a.knowledge_conf == b.knowledge_epsilon
+        }
+        // A floor `ε >= x` does not prove `ε = x` (the confidence may be higher).
+        if a.knowledge_epsilon_mode == 2 || a.knowledge_epsilon < 0.0 || a.knowledge_epsilon > 1.0 || b.knowledge_epsilon < 0.0 {
             return false
         }
         return a.knowledge_epsilon == b.knowledge_epsilon
@@ -110,7 +140,8 @@ fn compat_epsilon_subsumes(a: TypeEntry, b: TypeEntry) -> bool {
     if b.knowledge_epsilon < 0.0 {
         return true
     }
-    if a.knowledge_epsilon_mode == 2 || a.knowledge_epsilon_mode == 3 || a.knowledge_epsilon < 0.0 {
+    // A confidence (mode 1 or 2) or any non-empty Knightian set never meets an error bound.
+    if a.knight_set_id != 0 || a.knowledge_epsilon_mode != 0 || a.knowledge_epsilon < 0.0 || a.knowledge_epsilon > 1.0 {
         return false
     }
     a.knowledge_epsilon <= b.knowledge_epsilon
@@ -1084,6 +1115,22 @@ pub fn compat_numeric_ignoring_units(a: TypeEntry, b: TypeEntry) -> bool with Mu
 }
 
 
+// Operands of a binary operator that are BOTH Knowledge<T> need the same
+// PAYLOAD type, nothing more. Epsilon, validity and provenance are not an
+// identity the operands must share: they are the inputs knowledge_binary_result
+// combines (validity intersected, provenance reset to Derived, epsilon bound
+// recomputed). Requiring them to subsume each other made `w / Knowledge(70.0,
+// e=1.0, ...)` an E004 against `w: Knowledge<f64>` -- the left operand with an
+// unspecified bound could not "satisfy" the right operand's eps=1000/1000 --
+// although the operands are exactly the pair the operator is defined on.
+// A payload mismatch (Knowledge<f64> vs Knowledge<i64>) is still refused.
+pub fn compat_knowledge_operands(a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
+    if a.kind == TypeKind::TyKnowledge && b.kind == TypeKind::TyKnowledge {
+        return types_compatible_inner(a.inner, b.inner)
+    }
+    false
+}
+
 pub fn binary_result_type(op: BinaryOp, left: TypeEntry, right: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc {
     // If either side is error/unknown/never, propagate
     if is_error_or_unknown(left) {
@@ -1335,6 +1382,10 @@ pub fn binary_result_type(op: BinaryOp, left: TypeEntry, right: TypeEntry) -> Ty
                 ty_error()
             }
         }
+        // i32 fused-guard variants (IR only; never produced by the parser).
+        BinaryOp::OpAddI32 => { if is_integer_type(left) && is_integer_type(right) { left } else { ty_error() } }
+        BinaryOp::OpSubI32 => { if is_integer_type(left) && is_integer_type(right) { left } else { ty_error() } }
+        BinaryOp::OpMulI32 => { if is_integer_type(left) && is_integer_type(right) { left } else { ty_error() } }
 
         // Concat: arrays or strings
         BinaryOp::OpConcat => {

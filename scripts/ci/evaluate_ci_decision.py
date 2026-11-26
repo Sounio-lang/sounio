@@ -63,11 +63,17 @@ def main() -> int:
         "madaros-witness-gate": any(
             truthy(impact.get(key)) for key in ("compiler", "runtime", "stdlib", "tests", "full")
         ),
+        # Same selection as the job's own `if:`: every tests/run-pass program
+        # under this pull request's Madaros, against tests/madaros_corpus_baseline.txt.
+        "madaros-corpus-regression": any(
+            truthy(impact.get(key)) for key in ("compiler", "runtime", "stdlib", "tests", "full")
+        ),
         "gate-wave-0": any(
             truthy(impact.get(key)) for key in ("compiler", "runtime", "stdlib", "tests", "full")
         ),
         "sounio-lint": any(truthy(impact.get(key)) for key in ("compiler", "stdlib", "tests", "sio", "full")),
         "lean-proofs": truthy(impact.get("lean")) or truthy(impact.get("full")),
+        "bootstrap-proofs": truthy(impact.get("bootstrap")) or truthy(impact.get("full")),
         "website": truthy(impact.get("website")) or truthy(impact.get("full")),
         # #2392 follow-up. R6 is selected by the EVENT, not by impact
         # classification: it is nightly-only, so `skipped` is the correct

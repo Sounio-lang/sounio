@@ -6,9 +6,17 @@
  * vercel.json `routes`, in this order:
  *   1. /docs and /:lang/docs (with or without a slash, one or two slug
  *      segments, no file extension) 308 to /learn/ or /:lang/learn/.
+ *      /es/docs/effects 308 to the English /learn/effects/.
  *   2. /sitemap.xml (optional trailing slash) 308 to /sitemap-index.xml.
  *      The built file stays sitemap-index.xml; robots.txt is unchanged.
- *   3. The same three routes `@vercel/routing-utils` `convertTrailingSlash(true)`
+ *   3. Legacy stubs (/manifesto, /roadmap, /platform, /blog, /changelog,
+ *      /registry and /registry/<name>, with or without a locale prefix)
+ *      308 straight to their current targets, slashed or not.
+ *   4. /showcases/<stub> and /:lang/showcases/<stub> 308 to /science/<stub>/
+ *      for the nine former meta-refresh slugs. The hub /showcases/ stays,
+ *      and an unknown slug only gains a trailing slash.
+ *   5. /llms.txt sets Content-Type and continues, so it is not slash-redirected.
+ *   6. The same three routes `@vercel/routing-utils` `convertTrailingSlash(true)`
  *      emits: pass `/.well-known`, 308-add a slash on extensionless paths,
  *      308-strip a slash on paths whose last segment has an extension.
  *
@@ -45,6 +53,20 @@ const ACCEPTANCE = [
   ['/zh-hk/docs/', 308, '/zh-hk/learn/'],
   ['/ja/docs/', 308, '/ja/learn/'],
   ['/es/docs/', 308, '/es/learn/'],
+  ['/es/docs/effects', 308, '/learn/effects/'],
+  ['/es/docs/effects/', 308, '/learn/effects/'],
+  ['/showcases/climate', 308, '/science/climate/'],
+  ['/showcases/climate/', 308, '/science/climate/'],
+  ['/showcases/scientific-computing', 308, '/science/scientific-computing/'],
+  ['/pt/showcases/gpu', 308, '/pt/science/gpu/'],
+  ['/pt/showcases/gpu/', 308, '/pt/science/gpu/'],
+  ['/zh-hk/showcases/neuroimaging/', 308, '/zh-hk/science/neuroimaging/'],
+  ['/el/showcases/causal/', 308, '/el/science/causal/'],
+  ['/ja/showcases/graphics/', 308, '/ja/science/graphics/'],
+  ['/es/showcases/pharma/', 308, '/es/science/pharma/'],
+  ['/zh/showcases/genomics/', 308, '/zh/science/genomics/'],
+  ['/showcases/', null, null],
+  ['/showcases/not-a-stub', 308, '/showcases/not-a-stub/'],
   ['/docs/compiler/effect-system', 308, '/learn/compiler/effect-system/'],
   ['/docs/compiler/effect-system/', 308, '/learn/compiler/effect-system/'],
   ['/about/', null, null],
@@ -237,6 +259,10 @@ async function scanDist() {
     const posix = rel.split(path.sep).join('/');
     if (/(^|\/)docs(\/|\.html$)/.test(posix)) {
       errors.push(`meta-refresh docs page still built: ${posix}`);
+      continue;
+    }
+    if (/^(?:[^/]+\/)?showcases\/[^/]+\/index\.html$/.test(posix)) {
+      errors.push(`showcase meta-refresh page still built: ${posix}`);
       continue;
     }
     const pagePath = fileToPage(rel);

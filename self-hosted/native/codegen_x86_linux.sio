@@ -7,7 +7,7 @@
 module native::codegen_x86_linux
 
 use parser::ast::{Name}
-use lexer::span::{srcmap_line, srcmap_col, srcmap_path_len, srcmap_path_byte}
+use lexer::span::{srcmap_line, srcmap_col, srcmap_embed_len, srcmap_embed_byte}
 use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IR_A_SRC_SITE, IR_MAX_FUNCS, IR_MAX_STRINGS, IR_MAX_VREGS, IR_FLOAT_REG_MARKER_FLAG, IR_BOX_ALLOC_FLAG, IR_ALLOC_PACKED_I8, IR_ALLOC_PACKED_U8, IR_ALLOC_LIKE_SOURCE, IR_XOR_TWIST_CAYLEY_DICKSON_SIGN, IR_XOR_CANDIDATE_AUTO, ir_reg_count_is_valid, ir_function_regs_are_valid, ir_xor_convolution_s, ir_name_eq, BSS_BASE_LINUX, IR_STRATEGY_BSS_GLOBAL, BSS_INIT_STRING_MAGIC, ir_bss_packed_header_needed, IR_VALIDATE_FAIL_DST, IR_VALIDATE_FAIL_INSTR, IR_VALIDATE_FAIL_OP, IR_VALIDATE_FAIL_SRC1, IR_VALIDATE_FAIL_SRC2}
 use native::encode::*
 use native::elf::*
@@ -39,6 +39,9 @@ use ir::opt_strategy::{ir_opt_apply_strategy}
 // with the 18 native:: module imports already present here (~2000+ symbols).
 use io::trace::{io_trace_append_byte, io_trace_append_string, io_trace_append_json_string, io_trace_bool_string, io_trace_i64_string, io_write_bytes_to_file}
 use io::env::{read_env}
+use ir::ir::{ir_arena_arg_at, ir_arena_load, ir_arena_name, ir_arena_report_violation, ir_arena_store, ir_binop, ir_call, ir_float_bits_capacity, ir_float_bits_get, ir_fn_get, ir_function_name_at, ir_instr_new, ir_intern_name, ir_load_imm, ir_name_at, ir_name_from_bytes, ir_reg_list_single, ir_region_slot_r, ir_region_slot_w, ir_return}
+use native::lower_ir::{emit_evex_pd_rr_full}
+use parser::ast::{empty_name, make_name, name_eq, name_eq_lit}
 // Note: native::avx512 EVEX emitters are available in native/avx512.sio.
 // They will be wired into the lowering pass in Horizon 3.2 (vector IR ops).
 
@@ -121,8 +124,6 @@ var NC_BIG_ELF: [i8; 234881024] = [0; 234881024]
 fn nc_elf_capacity_bytes() -> i64 { 234881024 }
 // Scratch IR functions for the sret witness. These are module-scope to avoid
 // putting IrFunction-sized temporaries on the Madaros runtime stack.
-var NV2_SRET_MAIN_FN: IrFunction = ir_empty_function()
-var NV2_SRET_MAKE_FN: IrFunction = ir_empty_function()
 
 // ============================================================================
 // Native dispatcher contracts (Sprint 1)
@@ -2973,12 +2974,16 @@ fn nc_overflow_kind_text(kind: i64) -> string {
     else if kind == 9 { "i64 /" }
     else if kind == 10 { "i64 %" }
     else if kind == 11 { "u64 /" }
-    else { "u64 %" }
+    else if kind == 12 { "u64 %" }
+    else if kind == 13 { "i32 +" }
+    else if kind == 14 { "i32 -" }
+    else { "i32 *" }
 }
 
-// Kinds 0-8 are overflows; 9-12 are a zero divisor (ADR-031 R2).
+// Kinds 0-8 are overflows; 9-12 are a zero divisor (ADR-031 R2); 13-15 are
+// the i32 range guard of OpAddI32/OpSubI32/OpMulI32 (i32 + - *).
 fn nc_overflow_prefix(kind: i64) -> string {
-    if kind >= 9 { "sounio: division by zero (" } else { "sounio: integer overflow (" }
+    if kind >= 9 && kind <= 12 { "sounio: division by zero (" } else { "sounio: integer overflow (" }
 }
 
 // The message for one kind, interned once per compile in the flat rodata.
@@ -3025,7 +3030,7 @@ fn nc_emit_located_overflow_stub(nc: &! NativeCompiler, kind: i64, site: i64) ->
     let off = site & 4294967295
     let line = srcmap_line(fid, off)
     let col = srcmap_col(fid, off)
-    let plen = srcmap_path_len(fid)
+    let plen = srcmap_embed_len(fid)
     if line <= 0 || col <= 0 || plen <= 0 { return false }
     let kind_text = nc_overflow_kind_text(kind)
     let prefix = nc_overflow_prefix(kind)
@@ -3036,7 +3041,7 @@ fn nc_emit_located_overflow_stub(nc: &! NativeCompiler, kind: i64, site: i64) ->
     nc_emit_ascii_inline(nc, kind_text)
     nc_emit_ascii_inline(nc, ") at ")
     var pi: i64 = 0
-    while pi < plen { nc_emit_byte(nc, srcmap_path_byte(fid, pi))  pi = pi + 1 }
+    while pi < plen { nc_emit_byte(nc, srcmap_embed_byte(fid, pi))  pi = pi + 1 }
     nc_emit_byte(nc, 58)
     nc_emit_decimal_inline(nc, line)
     nc_emit_byte(nc, 58)
@@ -3093,6 +3098,24 @@ fn nc_emit_overflow_stubs(nc: &! NativeCompiler) with Mut, Panic, Div {
         i = i + 1
     }
     NC_OVF_PATCH_N = 0
+}
+
+// i32 range guard (ADR-031 R1) after a 64-bit add/sub/imul whose result is in
+// rax: the result must equal its own sign-extended low half. A fused form of the
+// shl 32 / sar 32 / compare / branch window the lowerer used to emit (about 30
+// machine instructions per site on the stack-slot emitter); five here.
+//   movsxd rcx, eax   48 63 C8
+//   cmp    rcx, rax   48 39 C1
+//   jne    trap       0F 85 rel32
+// rcx is scratch. `site` is the source location, re-armed because the guard
+// before it consumed it.
+fn nc_emit_i32_range_guard(nc: &! NativeCompiler, kind: i64, site: i64) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x63); nc_emit_byte(nc, 0xc8)
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x39); nc_emit_byte(nc, 0xc1)
+    let jne_pos = (*nc).code.len
+    nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x85); nc_emit_u32_le(nc, 0)
+    NC_CUR_SRC_SITE = site
+    nc_record_overflow_site(nc, jne_pos + 2, kind)
 }
 
 // JC rel32 (0F 82): taken when CF is set.
@@ -6530,11 +6553,17 @@ fn rgn_emit_zero_range(nc: &! NativeCompiler, lo: i64, hi: i64, c: i64, round_up
     let fits = rgn_emit_jcc(nc, 0x86)
     rgn_emit_mov(nc, 1, 2)
     rgn_patch(nc, fits)
+    // An empty range (a loop iteration that allocated nothing) skips the
+    // string instruction: `rep stosq` with rcx = 0 still pays its microcode
+    // start-up, and __rgn_reset runs at every loop iteration end.
+    rgn_emit_alu(nc, 0x85, 1, 1)
+    let empty = rgn_emit_jcc(nc, 0x84)
     rgn_emit_mov(nc, 7, lo)
     rgn_emit_alu(nc, 0x31, 0, 0)
     nc_emit_byte(nc, 0xf3)  // rep stosq
     nc_emit_byte(nc, 0x48)
     nc_emit_byte(nc, 0xab)
+    rgn_patch(nc, empty)
 }
 
 // Set both bumps back to the start of the region at `tok`.
@@ -9100,272 +9129,134 @@ pub(crate) fn emit_builtin_log(nc: NativeCompiler) -> NativeCompiler with Mut, P
     c
 }
 
-// Sprint 121: sin builtin — range reduction + degree-7 minimax polynomial
-// Algorithm: sin(x) ≈ x(1 - x²(1/6 - x²(1/120 - x²/5040)))
-// Range reduction: n = round(x/(2π)), r = x - n*2π
-// Stack layout: [rbp-8]=r, [rbp-16]=r², [rbp-24]=scratch
-pub(crate) fn emit_builtin_sin(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
-
-    // .rodata constants
-    c.rodata = data_section_add_f64(c.rodata, 0x401921FB54442D18)   // 2π
-    let two_pi_off = c.rodata.last_offset
-    c.rodata = data_section_add_f64(c.rodata, 0x3FC45F306DC9C883)   // 1/(2π)
-    let inv_two_pi_off = c.rodata.last_offset
-    c.rodata = data_section_add_f64(c.rodata, 0x3FF0000000000000)   // 1.0
-    let one_off = c.rodata.last_offset
-    c.rodata = data_section_add_f64(c.rodata, 0x3FC5555555555555)   // 1/6
-    let c3_off = c.rodata.last_offset
-    c.rodata = data_section_add_f64(c.rodata, 0x3F81111111111111)   // 1/120
-    let c5_off = c.rodata.last_offset
-    c.rodata = data_section_add_f64(c.rodata, 0x3F2A01A01A01A01A)   // 1/5040
-    let c7_off = c.rodata.last_offset
-    // Terms through x^13. The series previously stopped at x^7, which is accurate
-    // near zero and badly wrong at the ends of the reduced range: after reduction
-    // r lies in [-pi, pi], and at r = pi the x^7 truncation error is 7.5e-2. That
-    // is what made cos(3.0) return -1.1375 — outside [-1, 1] — and sin(3.0) return
-    // 0.091071 against a truth of 0.141120 (#1551).
-    //
-    // Worst-case truncation error at r = pi, by order: x^7 7.5e-2, x^9 6.9e-3,
-    // x^11 4.5e-4, x^13 2.1e-5. Three more terms buy three and a half decimal
-    // digits across the whole reduced range and cost three multiply-adds.
-    c.rodata = data_section_add_f64(c.rodata, 0x3EC71DE3A556C734)   // 1/362880   (9!)
-    let c9_off = c.rodata.last_offset
-    c.rodata = data_section_add_f64(c.rodata, 0x3E5AE64567F544E4)   // 1/39916800 (11!)
-    let c11_off = c.rodata.last_offset
-    c.rodata = data_section_add_f64(c.rodata, 0x3DE6124613A86D09)   // 1/6227020800 (13!)
-    let c13_off = c.rodata.last_offset
-
-    c.code = emit_push_rbp(c.code)
-    c.code = emit_mov_rbp_rsp(c.code)
-    c.code = emit_sub_rsp_imm32(c.code, 48)
-
-    // rdi = f64 bit pattern of x
-    c.code = emit_mov_reg_reg(c.code, 0, 7)           // mov rax, rdi
-    c.code = emit_movq_xmm0_rax(c.code)               // xmm0 = x
-
-    // Step 1: Range reduction — n = round(x/(2π)), r = x - n*2π
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // [rbp-24] = x (save)
-    let sin_inv2pi = c.code.len
-    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, sin_inv2pi + 4, inv_two_pi_off)
-    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = x/(2π)
-    c.code = emit_cvtsd2si_rax_xmm0(c.code)           // rax = round(x/(2π))
-    c.code = emit_cvtsi2sd_xmm0_rax(c.code)           // xmm0 = n (as f64)
-    let sin_2pi = c.code.len
-    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, sin_2pi + 4, two_pi_off)
-    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = n*2π
-    // r = x - n*2π
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -32)   // [rbp-32] = n*2π
-    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -24)   // xmm0 = x
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -32)   // xmm1 = n*2π
-    c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = r = x - n*2π
-
-    // Store r and compute r²
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -8)    // [rbp-8] = r
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // [rbp-24] = r (copy for mul)
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)   // xmm1 = r
-    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = r²
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -16)   // [rbp-16] = r²
-
-    // Step 2: Horner —
-    //   sin(x) = r(1 - r²(1/6 - r²(1/120 - r²(1/5040 - r²(1/9!
-    //                - r²(1/11! - r²/13!))))))
-    // Innermost: s = 1/13!
-    let sin_c13 = c.code.len
-    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, sin_c13 + 4, c13_off)
-    // s = 1/11! - r² * s
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
-    c.code = emit_mulsd_xmm0_xmm1(c.code)
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
-    let sin_c11 = c.code.len
-    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, sin_c11 + 4, c11_off)
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)
-    c.code = emit_subsd_xmm0_xmm1(c.code)
-    // s = 1/9! - r² * s
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
-    c.code = emit_mulsd_xmm0_xmm1(c.code)
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
-    let sin_c9 = c.code.len
-    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, sin_c9 + 4, c9_off)
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)
-    c.code = emit_subsd_xmm0_xmm1(c.code)
-    // s = 1/5040 - r² * s
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
-    c.code = emit_mulsd_xmm0_xmm1(c.code)
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
-    let sin_c7 = c.code.len
-    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, sin_c7 + 4, c7_off)
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)
-    c.code = emit_subsd_xmm0_xmm1(c.code)
-    // s = 1/120 - r² * s
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
-    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = r²/5040
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
-    let sin_c5 = c.code.len
-    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, sin_c5 + 4, c5_off)
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)   // xmm1 = r²/5040
-    c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = 1/120 - r²/5040
-    // s = 1/6 - r² * s
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
-    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = r²*(1/120 - r²/5040)
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
-    let sin_c3 = c.code.len
-    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, sin_c3 + 4, c3_off)
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)   // xmm1 = r²*(...)
-    c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = 1/6 - r²*(...)
-    // s = 1 - r² * s
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
-    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = r²*(1/6 - ...)
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
-    let sin_one = c.code.len
-    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, sin_one + 4, one_off)
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)   // xmm1 = r²*(...)
-    c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = 1 - r²*(...)
-    // result = r * s
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -8)    // xmm1 = r
-    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = sin(x)
-
-    // Return as bit pattern in rax
-    c.code = emit_movq_rax_xmm0(c.code)
-    c.code = emit_add_rsp_imm32(c.code, 48)
-    c.code = emit_pop_rbp(c.code)
-    c.code = emit_ret(c.code)
-    c
+// sin / cos builtins (ids 18, 19), to double precision.
+//
+// WHY. These were Taylor series through r^13 / r^12 on the reduced range
+// [-pi, pi], with the reduction done against a single-double 2 pi. Their error
+// at |r| near pi was 2e-5 (sin) and 1e-4 (cos): measured cos(3.0) =
+// -0.98993963 against -0.98999250, so every structure factor
+// sum_j q_j cos(k . r_j) of an Ewald sum (stdlib/molecular/ewald.sio), every
+// rotation and every Fourier term built on the builtin carried a 1e-4 error
+// that no test of identities could see.
+//
+// NOW. Cody-Waite reduction r = (x - n 2pi_hi) - n 2pi_lo, n = round(x / 2pi),
+// with 2pi_hi = (float)(2 pi) (24 bits, so n 2pi_hi is exact for |n| < 2^29)
+// and 2pi_lo the long-double remainder; then the Taylor series through r^27
+// (sin) / r^28 (cos), whose truncation error at |r| = pi is 3e-17 / 3e-18,
+// Horner in r^2 with signed coefficients (-1)^j / k! rounded from long double.
+// Coefficients and split: self-hosted/native/oracles/trig_coeffs.cpp.
+// Measured against glibc in tests/run-pass/builtin_trig_double_precision.sio.
+fn trig_coeff_bits(is_cos: bool, j: i64) -> i64 {
+    // j = 0 is the innermost (highest-order) coefficient.
+    if is_cos {
+        if j == 0 { return 0x39D0A18A2635085D }   //  1/28!
+        if j == 1 { return 0xBA688E85FC6A4E5A }   // -1/26!
+        if j == 2 { return 0x3AFF2CF01972F578 }   //  1/24!
+        if j == 3 { return 0xBB90CE396DB7F853 }   // -1/22!
+        if j == 4 { return 0x3C1E542BA4020225 }   //  1/20!
+        if j == 5 { return 0xBCA6827863B97D97 }   // -1/18!
+        if j == 6 { return 0x3D2AE7F3E733B81F }   //  1/16!
+        if j == 7 { return 0xBDA93974A8C07C9D }   // -1/14!
+        if j == 8 { return 0x3E21EED8EFF8D898 }   //  1/12!
+        if j == 9 { return 0xBE927E4FB7789F5C }   // -1/10!
+        if j == 10 { return 0x3EFA01A01A01A01A }  //  1/8!
+        if j == 11 { return 0xBF56C16C16C16C17 }  // -1/6!
+        if j == 12 { return 0x3FA5555555555555 }  //  1/4!
+        if j == 13 { return 0xBFE0000000000000 }  // -1/2!
+        return 0x3FF0000000000000                 //  1
+    }
+    if j == 0 { return 0xBA1D1AB1C2DCCEA3 }       // -1/27!
+    if j == 1 { return 0x3AB3F3CCDD165FA9 }       //  1/25!
+    if j == 2 { return 0xBB4761B41316381A }       // -1/23!
+    if j == 3 { return 0x3BD71B8EF6DCF572 }       //  1/21!
+    if j == 4 { return 0xBC62F49B46814157 }       // -1/19!
+    if j == 5 { return 0x3CE952C77030AD4A }       //  1/17!
+    if j == 6 { return 0xBD6AE7F3E733B81F }       // -1/15!
+    if j == 7 { return 0x3DE6124613A86D09 }       //  1/13!
+    if j == 8 { return 0xBE5AE64567F544E4 }       // -1/11!
+    if j == 9 { return 0x3EC71DE3A556C734 }       //  1/9!
+    if j == 10 { return 0xBF2A01A01A01A01A }      // -1/7!
+    if j == 11 { return 0x3F81111111111111 }      //  1/5!
+    if j == 12 { return 0xBFC5555555555555 }      // -1/3!
+    if j == 13 { return 0x3FF0000000000000 }      //  1
+    0x3FF0000000000000
 }
 
-// Sprint 121: cos builtin — range reduction + degree-6 minimax polynomial
-// Algorithm: cos(x) ≈ 1 - x²(1/2 - x²(1/24 - x²/720))
-// Same range reduction as sin, same stack layout
-pub(crate) fn emit_builtin_cos(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
+// Stack layout: [rbp-8] = r, [rbp-16] = r^2, [rbp-24] = x, [rbp-32] = n.
+fn emit_builtin_trig(nc: NativeCompiler, is_cos: bool) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
-
-    // .rodata constants
-    c.rodata = data_section_add_f64(c.rodata, 0x401921FB54442D18)   // 2π
-    let cos_two_pi_off = c.rodata.last_offset
-    c.rodata = data_section_add_f64(c.rodata, 0x3FC45F306DC9C883)   // 1/(2π)
-    let cos_inv_two_pi_off = c.rodata.last_offset
-    c.rodata = data_section_add_f64(c.rodata, 0x3FF0000000000000)   // 1.0
-    let cos_one_off = c.rodata.last_offset
-    c.rodata = data_section_add_f64(c.rodata, 0x3FE0000000000000)   // 1/2
-    let cos_c2_off = c.rodata.last_offset
-    c.rodata = data_section_add_f64(c.rodata, 0x3FA5555555555555)   // 1/24
-    let cos_c4_off = c.rodata.last_offset
-    c.rodata = data_section_add_f64(c.rodata, 0x3F56C16C16C16C17)   // 1/720
-    let cos_c6_off = c.rodata.last_offset
-    // Terms through x^12, for the same reason as sin: the series stopped at x^6,
-    // whose truncation error at the end of the reduced range (r = pi) is 2.1e-1.
-    // That is what made cos(3.0) return -1.1375 — outside [-1, 1] (#1551).
-    // By order at r = pi: x^6 2.1e-1, x^8 2.4e-2, x^10 1.8e-3, x^12 1.0e-4.
-    c.rodata = data_section_add_f64(c.rodata, 0x3EFA01A01A01A01A)   // 1/40320      (8!)
-    let cos_c8_off = c.rodata.last_offset
-    c.rodata = data_section_add_f64(c.rodata, 0x3E927E4FB7789F5C)   // 1/3628800    (10!)
-    let cos_c10_off = c.rodata.last_offset
-    c.rodata = data_section_add_f64(c.rodata, 0x3E21EED8EFF8D898)   // 1/479001600  (12!)
-    let cos_c12_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3FC45F306DC9C883)   // 1/(2 pi)
+    let inv_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x401921FB60000000)   // 2 pi hi (24 bits)
+    let hi_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0xBE8777A5CF72C000)   // 2 pi - hi
+    let lo_off = c.rodata.last_offset
+    // 15 coefficients for cos (r^28 .. r^0), 14 for sin (r^27 .. r^1, times r).
+    let ncoef: i64 = if is_cos { 15 } else { 14 }
+    var offs: [i64; 16] = [0; 16]
+    var j: i64 = 0
+    while j < ncoef {
+        c.rodata = data_section_add_f64(c.rodata, trig_coeff_bits(is_cos, j))
+        offs[j as usize] = c.rodata.last_offset
+        j = j + 1
+    }
 
     c.code = emit_push_rbp(c.code)
     c.code = emit_mov_rbp_rsp(c.code)
     c.code = emit_sub_rsp_imm32(c.code, 48)
-
-    // rdi = f64 bit pattern of x
-    c.code = emit_mov_reg_reg(c.code, 0, 7)           // mov rax, rdi
+    c.code = emit_mov_reg_reg(c.code, 0, 7)           // mov rax, rdi (bits of x)
     c.code = emit_movq_xmm0_rax(c.code)               // xmm0 = x
-
-    // Step 1: Range reduction (same as sin)
     c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // [rbp-24] = x
-    let cos_inv2pi = c.code.len
+    // n = round(x / 2 pi)
+    let p_inv = c.code.len
     c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, cos_inv2pi + 4, cos_inv_two_pi_off)
-    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = x/(2π)
-    c.code = emit_cvtsd2si_rax_xmm0(c.code)           // rax = round(x/(2π))
-    c.code = emit_cvtsi2sd_xmm0_rax(c.code)           // xmm0 = n
-    let cos_2pi = c.code.len
+    c.relocs = add_rip_reloc(c.relocs, p_inv + 4, inv_off)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    c.code = emit_cvtsd2si_rax_xmm0(c.code)           // round to nearest (MXCSR)
+    c.code = emit_cvtsi2sd_xmm0_rax(c.code)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -32)   // [rbp-32] = n
+    // r = x - n hi  (exact)
+    let p_hi = c.code.len
     c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, cos_2pi + 4, cos_two_pi_off)
-    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = n*2π
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -32)   // [rbp-32] = n*2π
-    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -24)   // xmm0 = x
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -32)   // xmm1 = n*2π
-    c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = r
-
-    // Compute r²
+    c.relocs = add_rip_reloc(c.relocs, p_hi + 4, hi_off)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = n hi
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -16)   // scratch
+    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -24)   // x
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)
+    c.code = emit_subsd_xmm0_xmm1(c.code)             // x - n hi
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -8)
+    // r = r - n lo
+    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -32)   // n
+    let p_lo = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, p_lo + 4, lo_off)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)             // n lo
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -16)
+    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -8)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)
+    c.code = emit_subsd_xmm0_xmm1(c.code)             // r
     c.code = emit_movsd_rbp_disp8_xmm0(c.code, -8)    // [rbp-8] = r
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // copy for mul
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)   // xmm1 = r
-    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = r²
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -16)   // [rbp-16] = r²
-
-    // Step 2: Horner —
-    //   cos(x) = 1 - r²(1/2 - r²(1/24 - r²(1/720 - r²(1/8! - r²(1/10! - r²/12!)))))
-    // Innermost: s = 1/12!
-    let cos_c12 = c.code.len
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -8)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)             // r^2
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -16)   // [rbp-16] = r^2
+    // Horner in r^2: s = c0; s = s r^2 + c_j
+    let p_c0 = c.code.len
     c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, cos_c12 + 4, cos_c12_off)
-    // s = 1/10! - r² * s
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
-    c.code = emit_mulsd_xmm0_xmm1(c.code)
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
-    let cos_c10 = c.code.len
-    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, cos_c10 + 4, cos_c10_off)
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)
-    c.code = emit_subsd_xmm0_xmm1(c.code)
-    // s = 1/8! - r² * s
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
-    c.code = emit_mulsd_xmm0_xmm1(c.code)
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
-    let cos_c8 = c.code.len
-    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, cos_c8 + 4, cos_c8_off)
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)
-    c.code = emit_subsd_xmm0_xmm1(c.code)
-    // s = 1/720 - r² * s
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
-    c.code = emit_mulsd_xmm0_xmm1(c.code)
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
-    let cos_c6 = c.code.len
-    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, cos_c6 + 4, cos_c6_off)
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)
-    c.code = emit_subsd_xmm0_xmm1(c.code)
-    // s = 1/24 - r² * s
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
-    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = r²/720
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
-    let cos_c4 = c.code.len
-    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, cos_c4 + 4, cos_c4_off)
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)
-    c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = 1/24 - r²/720
-    // s = 1/2 - r² * s
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
-    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = r²*(1/24 - r²/720)
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
-    let cos_c2 = c.code.len
-    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, cos_c2 + 4, cos_c2_off)
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)
-    c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = 1/2 - r²*(...)
-    // result = 1 - r² * s
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
-    c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = r²*(1/2 - ...)
-    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
-    let cos_one = c.code.len
-    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, cos_one + 4, cos_one_off)
-    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)
-    c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = cos(x)
-
-    // Return as bit pattern in rax
+    c.relocs = add_rip_reloc(c.relocs, p_c0 + 4, offs[0])
+    var k: i64 = 1
+    while k < ncoef {
+        c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)
+        c.code = emit_mulsd_xmm0_xmm1(c.code)
+        let p_ck = c.code.len
+        c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+        c.relocs = add_rip_reloc(c.relocs, p_ck + 4, offs[k as usize])
+        c.code = emit_addsd_xmm0_xmm1(c.code)
+        k = k + 1
+    }
+    if !is_cos {
+        c.code = emit_movsd_xmm1_rbp_disp8(c.code, -8)
+        c.code = emit_mulsd_xmm0_xmm1(c.code)         // sin = r * s
+    }
     c.code = emit_movq_rax_xmm0(c.code)
     c.code = emit_add_rsp_imm32(c.code, 48)
     c.code = emit_pop_rbp(c.code)
@@ -9373,9 +9264,33 @@ pub(crate) fn emit_builtin_cos(nc: NativeCompiler) -> NativeCompiler with Mut, P
     c
 }
 
-// Epilogue shared by print_f64 special-value exits (#2389).
+pub(crate) fn emit_builtin_sin(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
+    emit_builtin_trig(nc, false)
+}
+
+pub(crate) fn emit_builtin_cos(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
+    emit_builtin_trig(nc, true)
+}
+
+// print_f64 writes rbx (the RuntimeContext helpers and the digit loops) and,
+// on the |x| >= 2^63 path, r12 and r13. All three are callee-saved under SysV,
+// so they are kept at [rbp-72], [rbp-80], [rbp-88] of the 96-byte frame and
+// put back by the epilogue on every exit. Checked by
+// scripts/ci/print_f64_callee_saved_gate.sh.
+fn emit_print_f64_save_callee_saved(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x48); b = emit_byte(b, 0x89); b = emit_byte(b, 0x5D); b = emit_byte(b, 0xB8)  // mov [rbp-72], rbx
+    b = emit_byte(b, 0x4C); b = emit_byte(b, 0x89); b = emit_byte(b, 0x65); b = emit_byte(b, 0xB0)  // mov [rbp-80], r12
+    b = emit_byte(b, 0x4C); b = emit_byte(b, 0x89); b = emit_byte(b, 0x6D); b = emit_byte(b, 0xA8)  // mov [rbp-88], r13
+    b
+}
+
+// Epilogue shared by every print_f64 exit (#2389, SIO-396).
 fn emit_print_f64_epilogue(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
     var b = buf
+    b = emit_byte(b, 0x48); b = emit_byte(b, 0x8B); b = emit_byte(b, 0x5D); b = emit_byte(b, 0xB8)  // mov rbx, [rbp-72]
+    b = emit_byte(b, 0x4C); b = emit_byte(b, 0x8B); b = emit_byte(b, 0x65); b = emit_byte(b, 0xB0)  // mov r12, [rbp-80]
+    b = emit_byte(b, 0x4C); b = emit_byte(b, 0x8B); b = emit_byte(b, 0x6D); b = emit_byte(b, 0xA8)  // mov r13, [rbp-88]
     b = emit_mov_rsp_rbp(b)
     b = emit_pop_rbp(b)
     b = emit_ret(b)
@@ -9433,6 +9348,319 @@ fn emit_print_f64_write_stack_and_return(c: NativeCompiler, disp8: i8, count: i6
     nc
 }
 
+// SIO-396: exact decimal expansion of a finite f64 with |x| >= 2^63.
+// Position-independent x86-64 blob (no relocations), assembled from self-hosted/native/print_f64_big_core.asm.
+// In: rax = IEEE bits of |x|. Out: rsi = first digit, rdx = length of "<digits>.000000".
+// Lowers rsp by 1536 bytes; the print_f64 epilogue restores it through rbp.
+fn emit_print_f64_big_core(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x81)
+    b = emit_byte(b, 0xec)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x06)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x89)
+    b = emit_byte(b, 0xc1)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0xc1)
+    b = emit_byte(b, 0xe9)
+    b = emit_byte(b, 0x34)
+    b = emit_byte(b, 0x49)
+    b = emit_byte(b, 0xb8)
+    b = emit_byte(b, 0xff)
+    b = emit_byte(b, 0xff)
+    b = emit_byte(b, 0xff)
+    b = emit_byte(b, 0xff)
+    b = emit_byte(b, 0xff)
+    b = emit_byte(b, 0xff)
+    b = emit_byte(b, 0x0f)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x4c)
+    b = emit_byte(b, 0x21)
+    b = emit_byte(b, 0xc0)
+    b = emit_byte(b, 0x49)
+    b = emit_byte(b, 0xb8)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x10)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x4c)
+    b = emit_byte(b, 0x09)
+    b = emit_byte(b, 0xc0)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x81)
+    b = emit_byte(b, 0xe9)
+    b = emit_byte(b, 0x33)
+    b = emit_byte(b, 0x04)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x49)
+    b = emit_byte(b, 0xc7)
+    b = emit_byte(b, 0xc2)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0xca)
+    b = emit_byte(b, 0x9a)
+    b = emit_byte(b, 0x3b)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x31)
+    b = emit_byte(b, 0xd2)
+    b = emit_byte(b, 0x49)
+    b = emit_byte(b, 0xf7)
+    b = emit_byte(b, 0xf2)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x89)
+    b = emit_byte(b, 0x14)
+    b = emit_byte(b, 0x24)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x31)
+    b = emit_byte(b, 0xd2)
+    b = emit_byte(b, 0x49)
+    b = emit_byte(b, 0xf7)
+    b = emit_byte(b, 0xf2)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x89)
+    b = emit_byte(b, 0x54)
+    b = emit_byte(b, 0x24)
+    b = emit_byte(b, 0x08)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x89)
+    b = emit_byte(b, 0x44)
+    b = emit_byte(b, 0x24)
+    b = emit_byte(b, 0x10)
+    b = emit_byte(b, 0x49)
+    b = emit_byte(b, 0xc7)
+    b = emit_byte(b, 0xc1)
+    b = emit_byte(b, 0x03)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x85)
+    b = emit_byte(b, 0xc9)
+    b = emit_byte(b, 0x74)
+    b = emit_byte(b, 0x62)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0xc7)
+    b = emit_byte(b, 0xc3)
+    b = emit_byte(b, 0x1e)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x39)
+    b = emit_byte(b, 0xd9)
+    b = emit_byte(b, 0x73)
+    b = emit_byte(b, 0x03)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x89)
+    b = emit_byte(b, 0xcb)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x29)
+    b = emit_byte(b, 0xd9)
+    b = emit_byte(b, 0x49)
+    b = emit_byte(b, 0xc7)
+    b = emit_byte(b, 0xc0)
+    b = emit_byte(b, 0x01)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x51)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x89)
+    b = emit_byte(b, 0xd9)
+    b = emit_byte(b, 0x49)
+    b = emit_byte(b, 0xd3)
+    b = emit_byte(b, 0xe0)
+    b = emit_byte(b, 0x59)
+    b = emit_byte(b, 0x4d)
+    b = emit_byte(b, 0x31)
+    b = emit_byte(b, 0xdb)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x31)
+    b = emit_byte(b, 0xff)
+    b = emit_byte(b, 0x4c)
+    b = emit_byte(b, 0x39)
+    b = emit_byte(b, 0xcf)
+    b = emit_byte(b, 0x73)
+    b = emit_byte(b, 0x1c)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x8b)
+    b = emit_byte(b, 0x04)
+    b = emit_byte(b, 0xfc)
+    b = emit_byte(b, 0x49)
+    b = emit_byte(b, 0xf7)
+    b = emit_byte(b, 0xe0)
+    b = emit_byte(b, 0x4c)
+    b = emit_byte(b, 0x01)
+    b = emit_byte(b, 0xd8)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x31)
+    b = emit_byte(b, 0xd2)
+    b = emit_byte(b, 0x49)
+    b = emit_byte(b, 0xf7)
+    b = emit_byte(b, 0xf2)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x89)
+    b = emit_byte(b, 0x14)
+    b = emit_byte(b, 0xfc)
+    b = emit_byte(b, 0x49)
+    b = emit_byte(b, 0x89)
+    b = emit_byte(b, 0xc3)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0xff)
+    b = emit_byte(b, 0xc7)
+    b = emit_byte(b, 0xeb)
+    b = emit_byte(b, 0xdf)
+    b = emit_byte(b, 0x4d)
+    b = emit_byte(b, 0x85)
+    b = emit_byte(b, 0xdb)
+    b = emit_byte(b, 0x74)
+    b = emit_byte(b, 0xae)
+    b = emit_byte(b, 0x4c)
+    b = emit_byte(b, 0x89)
+    b = emit_byte(b, 0xd8)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x31)
+    b = emit_byte(b, 0xd2)
+    b = emit_byte(b, 0x49)
+    b = emit_byte(b, 0xf7)
+    b = emit_byte(b, 0xf2)
+    b = emit_byte(b, 0x4a)
+    b = emit_byte(b, 0x89)
+    b = emit_byte(b, 0x14)
+    b = emit_byte(b, 0xcc)
+    b = emit_byte(b, 0x49)
+    b = emit_byte(b, 0xff)
+    b = emit_byte(b, 0xc1)
+    b = emit_byte(b, 0x49)
+    b = emit_byte(b, 0x89)
+    b = emit_byte(b, 0xc3)
+    b = emit_byte(b, 0xeb)
+    b = emit_byte(b, 0xe6)
+    b = emit_byte(b, 0x4c)
+    b = emit_byte(b, 0x8d)
+    b = emit_byte(b, 0xa4)
+    b = emit_byte(b, 0x24)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x02)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x4c)
+    b = emit_byte(b, 0x89)
+    b = emit_byte(b, 0xcf)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0xff)
+    b = emit_byte(b, 0xcf)
+    b = emit_byte(b, 0x78)
+    b = emit_byte(b, 0x32)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x8b)
+    b = emit_byte(b, 0x04)
+    b = emit_byte(b, 0xfc)
+    b = emit_byte(b, 0x4d)
+    b = emit_byte(b, 0x8d)
+    b = emit_byte(b, 0x6c)
+    b = emit_byte(b, 0x24)
+    b = emit_byte(b, 0x08)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0xc7)
+    b = emit_byte(b, 0xc3)
+    b = emit_byte(b, 0x0a)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0xc7)
+    b = emit_byte(b, 0xc1)
+    b = emit_byte(b, 0x09)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x31)
+    b = emit_byte(b, 0xd2)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0xf7)
+    b = emit_byte(b, 0xf3)
+    b = emit_byte(b, 0x80)
+    b = emit_byte(b, 0xc2)
+    b = emit_byte(b, 0x30)
+    b = emit_byte(b, 0x41)
+    b = emit_byte(b, 0x88)
+    b = emit_byte(b, 0x55)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x49)
+    b = emit_byte(b, 0xff)
+    b = emit_byte(b, 0xcd)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0xff)
+    b = emit_byte(b, 0xc9)
+    b = emit_byte(b, 0x75)
+    b = emit_byte(b, 0xeb)
+    b = emit_byte(b, 0x49)
+    b = emit_byte(b, 0x83)
+    b = emit_byte(b, 0xc4)
+    b = emit_byte(b, 0x09)
+    b = emit_byte(b, 0xeb)
+    b = emit_byte(b, 0xc9)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x8d)
+    b = emit_byte(b, 0xb4)
+    b = emit_byte(b, 0x24)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x02)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0x80)
+    b = emit_byte(b, 0x3e)
+    b = emit_byte(b, 0x30)
+    b = emit_byte(b, 0x75)
+    b = emit_byte(b, 0x05)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0xff)
+    b = emit_byte(b, 0xc6)
+    b = emit_byte(b, 0xeb)
+    b = emit_byte(b, 0xf6)
+    b = emit_byte(b, 0x41)
+    b = emit_byte(b, 0xc6)
+    b = emit_byte(b, 0x04)
+    b = emit_byte(b, 0x24)
+    b = emit_byte(b, 0x2e)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0xb8)
+    b = emit_byte(b, 0x30)
+    b = emit_byte(b, 0x30)
+    b = emit_byte(b, 0x30)
+    b = emit_byte(b, 0x30)
+    b = emit_byte(b, 0x30)
+    b = emit_byte(b, 0x30)
+    b = emit_byte(b, 0x30)
+    b = emit_byte(b, 0x30)
+    b = emit_byte(b, 0x49)
+    b = emit_byte(b, 0x89)
+    b = emit_byte(b, 0x44)
+    b = emit_byte(b, 0x24)
+    b = emit_byte(b, 0x01)
+    b = emit_byte(b, 0x49)
+    b = emit_byte(b, 0x83)
+    b = emit_byte(b, 0xc4)
+    b = emit_byte(b, 0x07)
+    b = emit_byte(b, 0x4c)
+    b = emit_byte(b, 0x89)
+    b = emit_byte(b, 0xe2)
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x29)
+    b = emit_byte(b, 0xf2)
+    b
+}
+
 // Sprint 118: print_f64 builtin — f64 → stdout, fraction rounded (#1573)
 pub(crate) fn emit_builtin_print_f64(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
@@ -9443,7 +9671,8 @@ pub(crate) fn emit_builtin_print_f64(nc: NativeCompiler) -> NativeCompiler with 
 
     c.code = emit_push_rbp(c.code)
     c.code = emit_mov_rbp_rsp(c.code)
-    c.code = emit_sub_rsp_imm32(c.code, 64)
+    c.code = emit_sub_rsp_imm32(c.code, 96)
+    c.code = emit_print_f64_save_callee_saved(c.code)
 
     // rdi = f64 bit pattern
     c.code = emit_mov_reg_reg(c.code, 0, 7)           // mov rax, rdi
@@ -9518,6 +9747,32 @@ pub(crate) fn emit_builtin_print_f64(nc: NativeCompiler) -> NativeCompiler with 
     if jns_pos + 1 < nc_code_capacity_bytes() {
         NC_BIG_CODE[(jns_pos + 1) as usize] = low8(neg_block_len) as i8
     }
+
+    // SIO-396: |x| >= 2^63 does not fit cvttsd2si (it returns 0x8000000000000000 and
+    // the old path printed 9223372036854775808 for 1e19, 1e30, 3e38). Print the exact
+    // decimal expansion of the double instead. rdi = IEEE bits of |x| on both paths.
+    c.code = emit_mov_reg_reg(c.code, 0, 7)           // mov rax, rdi
+    c.code = emit_mov_reg_imm(c.code, 3, 0x43E0000000000000)   // rbx = bits of 2^63
+    var cbg = c.code                                  // cmp rax, rbx
+    cbg = emit_byte(cbg, 0x48)
+    cbg = emit_byte(cbg, 0x39)
+    cbg = emit_byte(cbg, 0xD8)
+    c.code = cbg
+    let jb_small = c.code.len
+    var cbj = c.code                                  // jb rel32 (unsigned: below 2^63)
+    cbj = emit_byte(cbj, 0x0F)
+    cbj = emit_byte(cbj, 0x82)
+    cbj = emit_byte(cbj, 0x00)
+    cbj = emit_byte(cbj, 0x00)
+    cbj = emit_byte(cbj, 0x00)
+    cbj = emit_byte(cbj, 0x00)
+    c.code = cbj
+    c.code = emit_print_f64_big_core(c.code)
+    c = emit_load_runtime_context_field_rdi(c, runtime_context_field_stdout_fd())
+    c = emit_write_syscall_for_target(c, c.target_os_id)
+    c.code = emit_print_f64_epilogue(c.code)
+    let small_target = c.code.len
+    c.code = patch_u32_le(c.code, jb_small + 2, small_target - (jb_small + 6))
 
     // Integer part: cvttsd2si
     c.code = emit_movq_rax_xmm0(c.code)
@@ -9685,10 +9940,8 @@ pub(crate) fn emit_builtin_print_f64(nc: NativeCompiler) -> NativeCompiler with 
     c = emit_load_runtime_context_field_rdi(c, runtime_context_field_stdout_fd())
     c = emit_write_syscall_for_target(c, c.target_os_id)
 
-    // Epilogue
-    c.code = emit_mov_rsp_rbp(c.code)
-    c.code = emit_pop_rbp(c.code)
-    c.code = emit_ret(c.code)
+    // Epilogue (restores the callee-saved registers)
+    c.code = emit_print_f64_epilogue(c.code)
     c
 }
 
@@ -12298,6 +12551,49 @@ fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64
         nc_emit_pop_rbx(nc)
         nc_emit_mul_rbx(nc)
         nc_emit_carry_guard(nc, 6)
+        nc_core_store_rax_to_temp(nc, dst)
+        nc_core_mark_int_reg(nc, dst)
+        return true
+    }
+    // i32 add/sub/mul (ADR-031 R1): the 64-bit operation with its overflow
+    // guard (a wider right operand that wraps 64 bits is out of i32 range too, so
+    // it reports as the i32 kind and shares the range guard stub), then the i32
+    // range guard, fused. The same checks the lowerer used to spell out as IR.
+    if op == BinaryOp::OpAddI32 {
+        let site = NC_CUR_SRC_SITE
+        nc_core_load_temp_to_rax(nc, lhs)
+        nc_emit_push_rax(nc)
+        nc_core_load_temp_to_rax(nc, rhs)
+        nc_emit_pop_rbx(nc)
+        nc_emit_add_rax_rbx(nc)
+        nc_emit_overflow_guard(nc, 13)
+        nc_emit_i32_range_guard(nc, 13, site)
+        nc_core_store_rax_to_temp(nc, dst)
+        nc_core_mark_int_reg(nc, dst)
+        return true
+    }
+    if op == BinaryOp::OpSubI32 {
+        let site = NC_CUR_SRC_SITE
+        nc_core_load_temp_to_rax(nc, rhs)
+        nc_emit_push_rax(nc)
+        nc_core_load_temp_to_rax(nc, lhs)
+        nc_emit_pop_rbx(nc)
+        nc_emit_sub_rax_rbx(nc)
+        nc_emit_overflow_guard(nc, 14)
+        nc_emit_i32_range_guard(nc, 14, site)
+        nc_core_store_rax_to_temp(nc, dst)
+        nc_core_mark_int_reg(nc, dst)
+        return true
+    }
+    if op == BinaryOp::OpMulI32 {
+        let site = NC_CUR_SRC_SITE
+        nc_core_load_temp_to_rax(nc, lhs)
+        nc_emit_push_rax(nc)
+        nc_core_load_temp_to_rax(nc, rhs)
+        nc_emit_pop_rbx(nc)
+        nc_emit_imul_rax_rbx(nc)
+        nc_emit_overflow_guard(nc, 15)
+        nc_emit_i32_range_guard(nc, 15, site)
         nc_core_store_rax_to_temp(nc, dst)
         nc_core_mark_int_reg(nc, dst)
         return true
@@ -16820,6 +17116,9 @@ fn a64_preview_binop_name(op: BinaryOp) -> string {
     if op == BinaryOp::OpUAdd { return "uadd" }
     if op == BinaryOp::OpUSub { return "usub" }
     if op == BinaryOp::OpUMul { return "umul" }
+    if op == BinaryOp::OpAddI32 { return "addi32" }
+    if op == BinaryOp::OpSubI32 { return "subi32" }
+    if op == BinaryOp::OpMulI32 { return "muli32" }
     if op == BinaryOp::OpDiv { return "div" }
     if op == BinaryOp::OpRem { return "rem" }
     if op == BinaryOp::OpEq { return "eq" }
@@ -17045,18 +17344,18 @@ fn a64_preview_emit_machine_instr(c: A64PreviewCompiler, instr: MachineInstr) ->
         out.code = a64_preview_emit_load_slot(out.code, A64_X10, instr.src1.value)
         if instr.bin_op == BinaryOp::OpAdd {
             out.code = a64_emit_add(out.code, A64_X9, A64_X9, A64_X10)
-        } else if instr.bin_op == BinaryOp::OpUAdd {
+        } else if instr.bin_op == BinaryOp::OpUAdd || instr.bin_op == BinaryOp::OpAddI32 {
             // SIO-588: unsigned add is the same instruction (no trap exists
             // in this preview backend); the U-variant only suppresses the
             // x86 overflow guard, which has no aarch64 counterpart.
             out.code = a64_emit_add(out.code, A64_X9, A64_X9, A64_X10)
         } else if instr.bin_op == BinaryOp::OpSub {
             out.code = a64_emit_sub(out.code, A64_X9, A64_X9, A64_X10)
-        } else if instr.bin_op == BinaryOp::OpUSub {
+        } else if instr.bin_op == BinaryOp::OpUSub || instr.bin_op == BinaryOp::OpSubI32 {
             out.code = a64_emit_sub(out.code, A64_X9, A64_X9, A64_X10)
         } else if instr.bin_op == BinaryOp::OpMul {
             out.code = a64_emit_mul(out.code, A64_X9, A64_X9, A64_X10)
-        } else if instr.bin_op == BinaryOp::OpUMul {
+        } else if instr.bin_op == BinaryOp::OpUMul || instr.bin_op == BinaryOp::OpMulI32 {
             out.code = a64_emit_mul(out.code, A64_X9, A64_X9, A64_X10)
         } else if instr.bin_op == BinaryOp::OpDiv {
             out.code = a64_emit_sdiv(out.code, A64_X9, A64_X9, A64_X10)
@@ -18058,9 +18357,15 @@ pub fn compile_native_v2_preview_to_file(module: &IrModule, target_spec: NativeT
     }
     let text_file_offset = 4096
     let main_idx = find_main_index(module)
-    if main_idx >= 0 {
-        emit_entry_trampoline_with_global_inits_into(&! nc, module, main_idx)
+    // No main, no trampoline: entry_offset would keep its compiler_new() value
+    // of 0 and the ELF would start executing inside merged function 0. The
+    // frontend refuses this with E221 first; this is the writer's own refusal
+    // for any route that reaches it without that check. Distinct rc.
+    if main_idx < 0 {
+        print("error[E221]: no main -- refusing to write an executable with no entry point\n")
+        return 24
     }
+    emit_entry_trampoline_with_global_inits_into(&! nc, module, main_idx)
     let patched_rodata_file_offset = align_page(text_file_offset + nc.code.len)
     let patched_eff_rodata_len = if nc.flat_rodata_len > 0 { nc.flat_rodata_len } else { nc.rodata.len }
     let patched_data_file_offset = align_page(patched_rodata_file_offset + patched_eff_rodata_len)

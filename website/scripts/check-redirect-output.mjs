@@ -114,6 +114,11 @@ async function run() {
     const webPath = normalizeWebPathFromFile(rel);
     if (!webPath) continue;
 
+    if (/^\/(?:(?:pt|el|zh-hk|zh|ja|es)\/)?showcases\/[^/]+$/.test(webPath)) {
+      errors.push(`showcase meta-refresh stub must not be built: ${webPath}`);
+      continue;
+    }
+
     const expected = mapLegacyPathToTarget(webPath);
     if (!expected) continue;
 

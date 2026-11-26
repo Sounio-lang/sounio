@@ -798,3 +798,13 @@ lean_lib «SounioNumericBuffer» where
 -- Exact rational sign check for the selected RODAS4 time coefficient.
 @[default_target]
 lean_lib «SounioRodas4TimeConsistency» where
+
+@[default_target]
+lean_lib «SounioDischargeTrichotomy» where
+
+-- Deterministic floating-point core calculus (f32@Det): cross-backend
+-- bit-identity (det_agree), non-forgeability (no_forge), and necessity of
+-- the implicit-flow rule. Mathlib-free, no `sorry`, no custom axioms.
+@[default_target]
+lean_lib «Det» where
+  srcDir := "det"

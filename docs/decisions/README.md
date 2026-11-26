@@ -75,6 +75,7 @@ Grounded in: commit, artifact, or empirical result
 | 028 | Rulings from the 2026-11-09 decision session (all of `PENDING.md`, plus D-35) | accepted | 2026-11-09 |
 | 029 | The committed seed is the provenance root of the bootstrap (D-10) | accepted | 2026-11-04 |
 | 030 | The Madaros generation chain (gen2 to gen7) and what each layer shows | proposed | 2026-11-10 |
+| 031 | Integer overflow and division by zero fail; one text form for `f64`; the seed changes only in its own PR | accepted (implementation pending) | 2026-11-13 |
 
 Reserved by open pull requests (not yet on `main`):
 
@@ -83,7 +84,7 @@ Reserved by open pull requests (not yet on `main`):
 | 017 | Single authority for IR memory effects (`ir::effects`) | #2686 (renumbered from a colliding 013) |
 | 019 | Certified intervals | #3101 |
 
-The next free number is **030**.
+The next free number is **032**.
 
 ## Files
 
@@ -115,6 +116,7 @@ The next free number is **030**.
 - [ADR-028](./adr-028-rulings-2026-11-09.md)
 - [ADR-029](./adr-029-bootstrap-provenance-root.md)
 - [ADR-030](./adr-030-madaros-generation-chain.md)
+- [ADR-031](./adr-031-integer-overflow-division-and-f64-text.md)
 - [Claim-oracle inventory schema](./claim_oracle_inventory.schema.md)
 
 ## Related Docs

@@ -412,3 +412,90 @@ pub fn ns_cov_nonneg(table: *mut NoiseSetTable, a: i64, b: i64) -> bool with Mut
     }
     !opposed
 }
+
+// ============================================================
+// Named Knightian uncertainty source table (EPI-006 step 3b)
+// ============================================================
+//
+// Each named Knightian source introduced by `knight("name", lo, hi)` is
+// registered here by exact name bytes. Re-introducing the same name with
+// identical bounds returns the SAME source id (same unknown); re-introducing
+// the same name with different bounds is a compile-time conflict (E314).
+// The Knightian source sets themselves reuse NoiseSetTable (a separate table
+// instance on Checker, kept apart from the aleatory noise-symbol table).
+
+pub fn knight_source_cap() -> i64 { 256 }
+
+pub struct KnightSourceTable {
+    pub name_buf: [i8; 98304],   // 256 * 384 bytes
+    pub name_len: [i64; 256],
+    pub lo: [f64; 256],
+    pub hi: [f64; 256],
+    pub bounds_known: [i64; 256],
+    pub count: i64,
+    pub overflow: i64,
+}
+
+// 98304 + 256*8*4 + 8 + 8 = 106512 bytes.
+pub fn knight_source_table_bytes() -> i64 { 106512 }
+
+pub fn knight_source_table_alloc() -> *mut KnightSourceTable with Alloc {
+    heap_alloc(106512) as *mut KnightSourceTable
+}
+
+fn knight_source_slot_matches(tbl: *mut KnightSourceTable, slot: i64, name: Name) -> bool with Mut, Panic, Div {
+    if (*tbl).name_len[slot as usize] != name.len { return false }
+    let base = slot * 384
+    var i: i64 = 0
+    while i < name.len && i < 384 {
+        if (*tbl).name_buf[(base + i) as usize] != name.buf[i as usize] { return false }
+        i = i + 1
+    }
+    true
+}
+
+// Register (or look up) a named Knightian source.
+// Returns (src_id, status):
+//   status == 0: ok (new or identical bounds for existing name)
+//   status == 1: invalid/non-constant/non-finite/reversed bounds, or conflicting
+//                bounds for an already-declared name (E314)
+//   status == 2: capacity exceeded (>256 distinct named sources; E178)
+pub fn knight_source_register(tbl: *mut KnightSourceTable, name: Name, lo: f64, hi: f64, known: bool) -> (i64, i64) with Mut, Panic, Div {
+    // Fail closed: never admit unknown, non-finite, or reversed bounds into the table.
+    if !known {
+        return (0 - 1, 1)
+    }
+    if !((lo - lo) == 0.0) || !((hi - hi) == 0.0) || lo > hi {
+        return (0 - 1, 1)
+    }
+    var i: i64 = 0
+    while i < (*tbl).count {
+        if knight_source_slot_matches(tbl, i, name) {
+            if (*tbl).bounds_known[i as usize] == 0 {
+                return (i, 1)
+            }
+            if (*tbl).lo[i as usize] != lo || (*tbl).hi[i as usize] != hi {
+                return (i, 1)
+            }
+            return (i, 0)
+        }
+        i = i + 1
+    }
+    if (*tbl).count >= knight_source_cap() {
+        (*tbl).overflow = 1
+        return (0 - 1, 2)
+    }
+    let slot = (*tbl).count
+    let base = slot * 384
+    var j: i64 = 0
+    while j < name.len && j < 384 {
+        (*tbl).name_buf[(base + j) as usize] = name.buf[j as usize]
+        j = j + 1
+    }
+    (*tbl).name_len[slot as usize] = name.len
+    (*tbl).lo[slot as usize] = lo
+    (*tbl).hi[slot as usize] = hi
+    (*tbl).bounds_known[slot as usize] = 1
+    (*tbl).count = slot + 1
+    (slot, 0)
+}

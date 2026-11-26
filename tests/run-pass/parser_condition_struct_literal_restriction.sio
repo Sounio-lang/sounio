@@ -1,0 +1,150 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: flat-if 1
+//@ expect-stdout: nested-match 1
+//@ expect-stdout: nested-if 1
+//@ expect-stdout: while 3
+//@ expect-stdout: nested-while 3
+//@ expect-stdout: struct-name 1
+//@ expect-stdout: call-arg 1
+//@ expect-stdout: paren 1
+//@ expect-stdout: array 1
+//@ expect-stdout: arm-body 1
+//@ expect-stdout: CONDITION_STRUCT_LIT_PASS
+//@ description: in an if/while/match/for condition a bare `Name {` closes the condition, also after a nested if/match inside it; struct literals stay legal inside parentheses, call arguments, brackets and match arms
+// Before the fix Parser.no_struct_lit was reset to false (not restored) by any
+// if/match/while nested in an enclosing condition, so in
+// `if (match jq { 0 => 1.0, _ => 2.0 }) * cf > 0.01 * vf {` the `vf {` was read as
+// a struct literal and the module was refused ("module failed to parse"). And
+// the ban reached into parentheses and call arguments, so
+// `if nx(V { x: 3.0 }) > 1.0 {` did not parse.
+
+struct V { x: f64 }
+
+// A struct whose name is also a local below: `b {` and `vf {` in a condition
+// are still the variable followed by the body.
+struct b { k: i64 }
+struct vf { v: f64 }
+
+fn nx(v: V) -> f64 { return v.x }
+
+fn first_x(a: [V; 2]) -> f64 { return a[0].x }
+
+fn flat_if(cf: f64, vf: f64) -> i64 {
+    var r: i64 = 0
+    if cf > 0.01 * vf {
+        r = 1
+    }
+    return r
+}
+
+fn nested_match(jq: i64, cf: f64, vf: f64) -> i64 {
+    var r: i64 = 0
+    if (match jq { 0 => 1.0, _ => 2.0 }) * cf > 0.01 * vf {
+        r = 1
+    }
+    return r
+}
+
+fn nested_if(a: bool, cf: f64, vf: f64) -> i64 {
+    var r: i64 = 0
+    if (if a { cf } else { 0.0 }) > 0.01 * vf {
+        r = 1
+    }
+    return r
+}
+
+fn while_mul(y: f64, z: f64) -> i64 {
+    var x = 0.0
+    var n: i64 = 0
+    while x < y * z {
+        x = x + 1.0
+        n = n + 1
+    }
+    return n
+}
+
+fn nested_while(k: i64, y: f64, z: f64) -> i64 {
+    var x = 0.0
+    var n: i64 = 0
+    while x * (match k { 0 => 1.0, _ => 2.0 }) < y * z {
+        x = x + 1.0
+        n = n + 1
+    }
+    return n
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    var fails: i64 = 0
+
+    let f1 = flat_if(1.0, 2.0)
+    print("flat-if "); println(f1)
+    if f1 != 1 { fails = fails + 1 }
+
+    let f2 = nested_match(0, 1.0, 2.0)
+    print("nested-match "); println(f2)
+    if f2 != 1 { fails = fails + 1 }
+
+    let f3 = nested_if(true, 1.0, 2.0)
+    print("nested-if "); println(f3)
+    if f3 != 1 { fails = fails + 1 }
+
+    let f4 = while_mul(1.5, 2.0)
+    print("while "); println(f4)
+    if f4 != 3 { fails = fails + 1 }
+
+    let f5 = nested_while(0, 1.5, 2.0)
+    print("nested-while "); println(f5)
+    if f5 != 3 { fails = fails + 1 }
+
+    // `b` is both a struct and a local: the condition reads the local.
+    let a: i64 = 5
+    let b: i64 = 2
+    var f6: i64 = 0
+    if a > b {
+        f6 = 1
+    }
+    print("struct-name "); println(f6)
+    if f6 != 1 { fails = fails + 1 }
+    let unused_b = b { k: 1 }
+    let unused_vf = vf { v: 1.0 }
+    if unused_b.k + 1 != 2 { fails = fails + 1 }
+    if unused_vf.v > 1.5 { fails = fails + 1 }
+
+    // Struct literals inside delimiters within a condition stay legal.
+    var f7: i64 = 0
+    if nx(V { x: 3.0 }) > 1.0 {
+        f7 = 1
+    }
+    print("call-arg "); println(f7)
+    if f7 != 1 { fails = fails + 1 }
+
+    var f8: i64 = 0
+    if (V { x: 3.0 }).x > 1.0 {
+        f8 = 1
+    }
+    print("paren "); println(f8)
+    if f8 != 1 { fails = fails + 1 }
+
+    var f9: i64 = 0
+    if first_x([V { x: 2.0 }, V { x: 0.5 }]) > 1.0 {
+        f9 = 1
+    }
+    print("array "); println(f9)
+    if f9 != 1 { fails = fails + 1 }
+
+    var f10: i64 = 0
+    let k: i64 = 0
+    if (match k { 0 => V { x: 5.0 }, _ => V { x: 0.0 } }).x > 1.0 {
+        f10 = 1
+    }
+    print("arm-body "); println(f10)
+    if f10 != 1 { fails = fails + 1 }
+
+    if fails == 0 {
+        println("CONDITION_STRUCT_LIT_PASS")
+        return 0
+    }
+    println("CONDITION_STRUCT_LIT_FAIL")
+    return 1
+}

@@ -1,0 +1,1 @@
+Madaros resolves a field read or written through a struct field declared `&S` or `&!S` (`(*(*o).f).x`) against the referent's layout. It used to look the field up by name in the first struct that had one, so a program that also declared an unrelated struct with a field of the same name at another offset read and wrote the wrong word, with exit 0.

@@ -274,6 +274,13 @@ pub enum BinaryOp {
     OpUAdd,
     OpUSub,
     OpUMul,
+    // i32 add/sub/mul with the 32-bit range guard fused in (ADR-031 R1). The
+    // lowerer chooses them for a dynamic i32 result instead of the 64-bit op
+    // followed by a shl/sar/cmp/branch window (5 IR ops, about 30 machine
+    // instructions per site): x86 emits the 32-bit instruction and `jo`.
+    OpAddI32,
+    OpSubI32,
+    OpMulI32,
 }
 
 // One `on op(params) -> body` clause of a handle with-block (SIO-417).
@@ -1915,6 +1922,69 @@ pub fn ast_record_global_const_name(name: Name) with Mut, Div {
     }
 }
 
+// Exact f64 module constants for Knowledge (op) constant (E313). The table
+// above is keyed by bare name hash across every loaded module and records a
+// name whatever its initialiser, so it cannot prove that an identifier is an
+// exact constant: a `var` of one module can share its name with a `let` of
+// another, and a deferred initialiser runs at main entry. A name counts as
+// exact only when (1) one `let`/`const` declares it with a float literal or
+// its negation as initialiser, and (2) no other module-level declaration of
+// any kind (let, const, var, any module) has the same name hash. An overflow
+// of either table makes every name non-exact (fail closed).
+pub var GLOBAL_EXACT_F64_HASHES: [i64; 4096] = [0; 4096]
+pub var GLOBAL_EXACT_F64_COUNT: i64 = 0
+pub var GLOBAL_ANY_DECL_HASHES: [i64; 8192] = [0; 8192]
+pub var GLOBAL_ANY_DECL_COUNT: i64 = 0
+pub var GLOBAL_EXACT_F64_OVERFLOW: i64 = 0
+
+pub fn ast_expr_is_float_literal_shape(e: &Expr) -> bool with Mut, Panic, Div {
+    if (*e).kind == ExprKind::ExprFloatLit { return true }
+    if (*e).kind == ExprKind::ExprUnary && (*e).un_op == UnaryOp::OpNeg {
+        match (*e).left {
+            Some(inner) => { return (*inner).kind == ExprKind::ExprFloatLit }
+            None => { return false }
+        }
+    }
+    false
+}
+
+pub fn ast_record_global_any_decl(name: Name) with Mut, Div {
+    if GLOBAL_ANY_DECL_COUNT < 8192 {
+        GLOBAL_ANY_DECL_HASHES[GLOBAL_ANY_DECL_COUNT as usize] = ast_name_hash(name)
+        GLOBAL_ANY_DECL_COUNT = GLOBAL_ANY_DECL_COUNT + 1
+    } else {
+        GLOBAL_EXACT_F64_OVERFLOW = 1
+    }
+}
+
+pub fn ast_record_global_exact_f64(name: Name) with Mut, Div {
+    if GLOBAL_EXACT_F64_COUNT < 4096 {
+        GLOBAL_EXACT_F64_HASHES[GLOBAL_EXACT_F64_COUNT as usize] = ast_name_hash(name)
+        GLOBAL_EXACT_F64_COUNT = GLOBAL_EXACT_F64_COUNT + 1
+    } else {
+        GLOBAL_EXACT_F64_OVERFLOW = 1
+    }
+}
+
+pub fn ast_global_is_exact_f64_literal(name: Name) -> bool with Div {
+    if GLOBAL_EXACT_F64_OVERFLOW != 0 { return false }
+    let h = ast_name_hash(name)
+    var exact = false
+    var i: i64 = 0
+    while i < GLOBAL_EXACT_F64_COUNT {
+        if GLOBAL_EXACT_F64_HASHES[i as usize] == h { exact = true }
+        i = i + 1
+    }
+    if !exact { return false }
+    var decls: i64 = 0
+    i = 0
+    while i < GLOBAL_ANY_DECL_COUNT {
+        if GLOBAL_ANY_DECL_HASHES[i as usize] == h { decls = decls + 1 }
+        i = i + 1
+    }
+    decls == 1
+}
+
 pub fn ast_is_global_const_name(name: Name) -> bool with Div {
     let h = ast_name_hash(name)
     var i: i64 = 0
@@ -1997,8 +2067,12 @@ pub var GLOBAL_INIT_OVF_IEND: [i64; 4096] = [0; 4096]
 pub var GLOBAL_INIT_OVF_SSTART: [i64; 4096] = [0; 4096]
 pub var GLOBAL_INIT_OVF_SEND: [i64; 4096] = [0; 4096]
 pub var GLOBAL_INIT_OVF_COUNT: i64 = 0
+// What the entry refuses: 300 (an i64 constant that does not fit) or 309 (an
+// initializer this compiler can neither fold nor evaluate at run time, which
+// used to leave the global zero-filled without a word).
+pub var GLOBAL_INIT_OVF_CODE: [i64; 4096] = [0; 4096]
 
-pub fn ast_record_global_init_overflow(name: Name, item_span: Span, site_start: i64, site_end: i64) with Mut, Div {
+pub fn ast_record_global_init_refusal(name: Name, item_span: Span, site_start: i64, site_end: i64, code: i64) with Mut, Div {
     let h = ast_name_hash(name)
     var k: i64 = 0
     while k < GLOBAL_INIT_OVF_COUNT {
@@ -2006,6 +2080,7 @@ pub fn ast_record_global_init_overflow(name: Name, item_span: Span, site_start: 
             && GLOBAL_INIT_OVF_ISTART[k as usize] == item_span.start && GLOBAL_INIT_OVF_IEND[k as usize] == item_span.end {
             GLOBAL_INIT_OVF_SSTART[k as usize] = site_start
             GLOBAL_INIT_OVF_SEND[k as usize] = site_end
+            GLOBAL_INIT_OVF_CODE[k as usize] = code
             return
         }
         k = k + 1
@@ -2018,7 +2093,92 @@ pub fn ast_record_global_init_overflow(name: Name, item_span: Span, site_start: 
     GLOBAL_INIT_OVF_IEND[n] = item_span.end
     GLOBAL_INIT_OVF_SSTART[n] = site_start
     GLOBAL_INIT_OVF_SEND[n] = site_end
+    GLOBAL_INIT_OVF_CODE[n] = code
     GLOBAL_INIT_OVF_COUNT = GLOBAL_INIT_OVF_COUNT + 1
+}
+
+pub fn ast_record_global_init_overflow(name: Name, item_span: Span, site_start: i64, site_end: i64) with Mut, Div {
+    ast_record_global_init_refusal(name, item_span, site_start, site_end, 300)
+}
+
+pub fn ast_global_init_refusal_code(k: i64) -> i64 with Panic { GLOBAL_INIT_OVF_CODE[k as usize] }
+pub fn ast_global_init_refusal_count() -> i64 { GLOBAL_INIT_OVF_COUNT }
+pub fn ast_global_init_refusal_hash(k: i64) -> i64 with Panic { GLOBAL_INIT_OVF_HASH[k as usize] }
+
+// E309 drop table: one entry per (name, module) whose initializer a parse
+// neither folded nor deferred. Reset with the other init tables at each parse
+// session (ast_reset_global_var_inits), so what lower reads is the last
+// session's state, keyed by the same module serials as the fold and defer
+// tables. A full table latches GLOBAL_DROP_OVERFLOW and lower refuses the
+// compile: an unrecorded drop would otherwise start its global at zero.
+pub var GLOBAL_DROP_HASH: [i64; 4096] = [0; 4096]
+pub var GLOBAL_DROP_MOD: [i64; 4096] = [0; 4096]
+pub var GLOBAL_DROP_COUNT: i64 = 0
+pub var GLOBAL_DROP_OVERFLOW: i64 = 0
+
+pub fn ast_record_global_init_drop(name: Name) with Mut, Div {
+    let h = ast_name_hash(name)
+    var k: i64 = 0
+    while k < GLOBAL_DROP_COUNT {
+        if GLOBAL_DROP_HASH[k as usize] == h && GLOBAL_DROP_MOD[k as usize] == GLOBAL_VAR_INIT_CUR_MOD { return }
+        k = k + 1
+    }
+    if GLOBAL_DROP_COUNT >= 4096 {
+        GLOBAL_DROP_OVERFLOW = 1
+        return
+    }
+    GLOBAL_DROP_HASH[GLOBAL_DROP_COUNT as usize] = h
+    GLOBAL_DROP_MOD[GLOBAL_DROP_COUNT as usize] = GLOBAL_VAR_INIT_CUR_MOD
+    GLOBAL_DROP_COUNT = GLOBAL_DROP_COUNT + 1
+}
+
+pub fn ast_global_init_drop_overflowed() -> bool { GLOBAL_DROP_OVERFLOW != 0 }
+
+// True at lower time when some module dropped the initializer of a global of
+// this name and no parse of that SAME module folded or deferred it since. A
+// same-named global folded in another module does not cancel it.
+pub fn ast_global_init_dropped(name: Name) -> bool with Mut, Panic, Div {
+    let h = ast_name_hash(name)
+    var k: i64 = 0
+    while k < GLOBAL_DROP_COUNT {
+        if GLOBAL_DROP_HASH[k as usize] == h {
+            let m = GLOBAL_DROP_MOD[k as usize]
+            var kept = ast_gvi_count_in(name, m) > 0
+            var d: i64 = 0
+            while !kept && d < GLOBAL_DEFERRED_INIT_COUNT {
+                if GLOBAL_DEFERRED_INIT_HASHES[d as usize] == h && GLOBAL_DEFERRED_INIT_MODS[d as usize] == m { kept = true }
+                d = d + 1
+            }
+            var b: i64 = 0
+            while !kept && b < GLOBAL_DEFERRED_BLOCK_COUNT {
+                if GLOBAL_DEFERRED_BLOCK_HASHES[b as usize] == h && GLOBAL_DEFERRED_BLOCK_MODS[b as usize] == m { kept = true }
+                b = b + 1
+            }
+            if !kept { return true }
+        }
+        k = k + 1
+    }
+    false
+}
+
+// True when closed array initializers for this name were deferred by two
+// different modules. Each block writes the bare name at `main`'s entry, so the
+// last one would overwrite the other's global; lower refuses instead.
+pub fn ast_global_deferred_block_ambiguous(name: Name) -> bool with Mut, Panic, Div {
+    let h = ast_name_hash(name)
+    var first_mod: i64 = 0 - 1
+    var b: i64 = 0
+    while b < GLOBAL_DEFERRED_BLOCK_COUNT {
+        if GLOBAL_DEFERRED_BLOCK_HASHES[b as usize] == h {
+            if first_mod < 0 {
+                first_mod = GLOBAL_DEFERRED_BLOCK_MODS[b as usize]
+            } else if GLOBAL_DEFERRED_BLOCK_MODS[b as usize] != first_mod {
+                return true
+            }
+        }
+        b = b + 1
+    }
+    false
 }
 
 // Index of the recorded overflow for this declaration, or -1.
@@ -2180,11 +2340,18 @@ pub fn ast_global_decl_opt_inner_hash_of(name: Name) -> i64 with Div {
 }
 
 pub fn ast_reset_global_var_inits() with Mut {
+    GLOBAL_DEFERRED_BLOCK_COUNT = 0
+    GLOBAL_DEFERRED_BLOCK_OVERFLOW = 0
+    GLOBAL_DROP_COUNT = 0
+    GLOBAL_DROP_OVERFLOW = 0
     GLOBAL_DECL_TYPE_COUNT = 0
     GLOBAL_DECL_TYPE_OVERFLOW = 0
     GLOBAL_DEFERRED_INIT_COUNT = 0
     GLOBAL_DEFERRED_INIT_OVERFLOW = 0
     GLOBAL_CONST_NAME_COUNT = 0
+    GLOBAL_EXACT_F64_COUNT = 0
+    GLOBAL_ANY_DECL_COUNT = 0
+    GLOBAL_EXACT_F64_OVERFLOW = 0
     GLOBAL_VAR_INIT_COUNT = 0
     // The dump notes are per parse session too (a printed note is never repeated).
     GVI_DUMP_N = 0
@@ -2990,3 +3157,37 @@ pub fn ast_claim_slot_value_end(slot: i64, field_idx: i64) -> i64 {
     }
     CLAIM_FIELD_VALUE_END[(slot * 16 + field_idx) as usize]
 }
+
+// Fixed-array globals whose closed initializer is run at `main`'s entry as the
+// statements that write it (parser/items.sio items_defer_global_array_init).
+// The block is lowered as written, after the one-word deferred stores.
+pub var GLOBAL_DEFERRED_BLOCK_HASHES: [i64; 4096] = [0; 4096]
+pub var GLOBAL_DEFERRED_BLOCK_PTRS: [i64; 4096] = [0; 4096]
+pub var GLOBAL_DEFERRED_BLOCK_MODS: [i64; 4096] = [0; 4096]
+pub var GLOBAL_DEFERRED_BLOCK_COUNT: i64 = 0
+pub var GLOBAL_DEFERRED_BLOCK_OVERFLOW: i64 = 0
+
+pub fn ast_record_global_deferred_block(name: Name, blk: Box<Expr>) with Mut, Div {
+    let p = blk as *mut Expr
+    let h = ast_name_hash(name)
+    var k: i64 = 0
+    while k < GLOBAL_DEFERRED_BLOCK_COUNT {
+        if GLOBAL_DEFERRED_BLOCK_HASHES[k as usize] == h && GLOBAL_DEFERRED_BLOCK_MODS[k as usize] == GLOBAL_VAR_INIT_CUR_MOD {
+            GLOBAL_DEFERRED_BLOCK_PTRS[k as usize] = p as i64
+            return
+        }
+        k = k + 1
+    }
+    if GLOBAL_DEFERRED_BLOCK_COUNT >= 4096 {
+        GLOBAL_DEFERRED_BLOCK_OVERFLOW = 1
+        return
+    }
+    GLOBAL_DEFERRED_BLOCK_HASHES[GLOBAL_DEFERRED_BLOCK_COUNT as usize] = h
+    GLOBAL_DEFERRED_BLOCK_PTRS[GLOBAL_DEFERRED_BLOCK_COUNT as usize] = p as i64
+    GLOBAL_DEFERRED_BLOCK_MODS[GLOBAL_DEFERRED_BLOCK_COUNT as usize] = GLOBAL_VAR_INIT_CUR_MOD
+    GLOBAL_DEFERRED_BLOCK_COUNT = GLOBAL_DEFERRED_BLOCK_COUNT + 1
+}
+
+pub fn ast_global_deferred_block_count() -> i64 { GLOBAL_DEFERRED_BLOCK_COUNT }
+pub fn ast_global_deferred_block_overflowed() -> bool { GLOBAL_DEFERRED_BLOCK_OVERFLOW != 0 }
+pub fn ast_global_deferred_block_ptr(i: i64) -> i64 with Panic { GLOBAL_DEFERRED_BLOCK_PTRS[i as usize] }

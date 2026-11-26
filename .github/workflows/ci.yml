@@ -44,6 +44,7 @@ jobs:
       stdlib: ${{ steps.classify.outputs.stdlib }}
       tests: ${{ steps.classify.outputs.tests }}
       lean: ${{ steps.classify.outputs.lean }}
+      bootstrap: ${{ steps.classify.outputs.bootstrap }}
       math: ${{ steps.classify.outputs.math }}
       ontology: ${{ steps.classify.outputs.ontology }}
       clinical: ${{ steps.classify.outputs.clinical }}
@@ -245,6 +246,9 @@ jobs:
       - name: Workflow script references
         if: matrix.shard == 'core-a'
         run: bash scripts/dev/check_workflow_script_refs.sh
+      - name: Madaros refresh credential selection refuses unconfigured publication
+        if: matrix.shard == 'core-a'
+        run: bash scripts/ci/madaros_refresh_auth_selftest.sh
       # The docs claimed "Cranelift JIT enabled" and named a JIT profile artifact
       # that is tracked nowhere. `souc info` prints `[-] Cranelift JIT` and the
       # binary exports no Cranelift symbol. A doc may not claim a backend the
@@ -273,6 +277,24 @@ jobs:
       - name: PIREUS admission engine compiles and answers
         if: matrix.shard == 'core-a'
         run: bash scripts/ci/pireus_admission_engine_gate.sh
+      # r740 is a second machine for the admitted-lowering pilot. The gate
+      # compiles the engines and checks the launcher argv. It does not submit.
+      - name: PIREUS r740 arch pilot controls
+        if: matrix.shard == 'core-a'
+        run: bash scripts/ci/pireus_r740_arch_pilot_gate.sh
+      # eisa_h.pireus_operator_atlas.v1 classifies kind=2 operators against
+      # the frozen V13 classes (62) and the V1 corpus (3) with the unchanged
+      # V13 canonicalizer. Reproduction, invariance, negatives, receipt v2.
+      - name: PIREUS operator atlas classifies
+        if: matrix.shard == 'core-a'
+        run: bash scripts/ci/pireus_operator_atlas_gate.sh
+      # claude-api-proposer.v1 is a new, declared proposer condition (not the
+      # plan's Inkling pilot). Mock transport only: no network, no API key.
+      # Budget cap, transcript hashes, batch-before-admission, key redaction,
+      # and one mock round through the real Sounio admission + atlas (~40 s).
+      - name: PIREUS Claude proposer condition (mock transport, no network)
+        if: matrix.shard == 'core-a'
+        run: python3 tools/pireus/continuity/claude/test_claude_proposer.py
       - name: Pireus Walsh twist channel spectrum gate
         if: matrix.shard == 'core-a'
         run: bash scripts/ci/pireus_walsh_twist_channel_spectrum_gate.sh
@@ -592,6 +614,17 @@ jobs:
           SOUNIO_STDLIB_PATH: ${{ github.workspace }}/stdlib
           MADAROS_STACK_KB: "524288"
         run: bash scripts/ci/dissertation_frontend_parity_gate.sh
+      # circ28 kernel against its independent Node implementation: 135
+      # quantities from five scenarios, emitted bit-exactly by the Sounio
+      # side, with a negative control that must fail.
+      - name: circ28 kernel Sounio/Node parity
+        if: matrix.shard == 'core-b'
+        env:
+          SOUNIO_GATE_SOUC: ${{ github.workspace }}/bin/souc
+          SOUC_BIN: ${{ github.workspace }}/bin/souc
+          SOUNIO_STDLIB_PATH: ${{ github.workspace }}/stdlib
+          MADAROS_STACK_KB: "524288"
+        run: bash scripts/ci/circ28_parity_gate.sh
       # Venlafaxine per-step mass identity on the Sounio scenario and the Node
       # engine, two-sided (#2718): the PBPK28 parity gate's one-sided
       # conservation check passed a formation step that created ODV mass.
@@ -976,6 +1009,44 @@ jobs:
       - name: Canonical lean_single fixed point
         if: matrix.shard == 'core-c'
         run: bash scripts/ci/canonical_compiler_gate.sh
+      # The seed refuses a source with more tokens than its buffer holds, instead
+      # of parsing the truncated stream into a parse error at a line with no error.
+      # #3506 hit that at 2,097,152 tokens. The capacity is now 4,194,304.
+      - name: lean_single token capacity refusal
+        if: matrix.shard == 'core-c'
+        run: bash scripts/ci/lean_single_token_capacity_gate.sh
+      # lean_single.sio must mean only what its text says: Madaros (block scope,
+      # branch typing) accepts it, and the seed no longer reads a stale stack slot
+      # on a global assignment. Both failed before the fix that added this step.
+      - name: lean_single closed by meaning
+        if: matrix.shard == 'core-c'
+        run: bash scripts/ci/lean_single_closed_by_meaning_gate.sh
+      # The committed seed must build Madaros (self-hosted/compiler/main.sio)
+      # with no `error:` line. The seed reports type errors in imported modules
+      # and still exits 0 and writes the ELF; on fd59aa3ecb it printed 32 such
+      # errors in check.sio and the code at those sites was wrong. ~45 s.
+      - name: Seed builds Madaros without errors
+        if: matrix.shard == 'core-c'
+        run: bash scripts/ci/seed_builds_madaros_without_errors_gate.sh
+      # One program compiled against the same stdlib in two directories (and
+      # with a trailing slash) gives one ELF: the overflow trap embeds a stdlib
+      # file as stdlib/<rest>, not by its absolute path. ~1 min.
+      - name: Madaros output independent of stdlib location
+        if: matrix.shard == 'core-c'
+        run: bash scripts/ci/madaros_stdlib_location_independent_gate.sh
+      # A type error in an imported module fails the lean_single build: rc != 0,
+      # `typecheck: failed`, no output file. The seed used to print the error,
+      # exit 0 and write an ELF that printed garbage. ~1 s.
+      - name: lean_single import errors are fatal
+        if: matrix.shard == 'core-c'
+        run: bash scripts/ci/lean_single_import_error_fatal_gate.sh
+      # The committed Madaros prebuilt must compile lean_single.sio to a compiler
+      # that rebuilds the committed seed byte for byte. The prebuilt shipped until
+      # 2026-11-22 (built from 0ed977cec) failed this: it miscompiled write_file on
+      # a packed [i8; N] global and `0xc3 as i8`, both fixed in source long before.
+      - name: Madaros prebuilt agrees with the seed
+        if: matrix.shard == 'core-c'
+        run: bash scripts/ci/madaros_prebuilt_agrees_with_seed_gate.sh
       # #2363: both explicit-deref nested-store lowering paths must retain the
       # inner- and outer-struct privacy checks. Four private fixtures reject;
       # a public nested-store control must still compile and run.
@@ -1052,6 +1123,17 @@ jobs:
       - name: CD tower seam cross-verification
         if: matrix.shard == 'core-c' && (needs.impact.outputs.math == 'true' || needs.impact.outputs.full == 'true')
         run: bash scripts/ci/cd_tower_seam_gate.sh
+      - name: Cayley-Dickson tower cross-verification
+        if: matrix.shard == 'core-c' && (needs.impact.outputs.math == 'true' || needs.impact.outputs.full == 'true')
+        run: bash scripts/ci/cayley_dickson_tower_gate.sh
+      # cd_zero refuses a level outside [0, 11]; a run-pass fixture cannot
+      # observe a panic, so the refusal probes run here on both engines.
+      - name: Cayley-Dickson level refusals
+        if: matrix.shard == 'core-c' && (needs.impact.outputs.math == 'true' || needs.impact.outputs.full == 'true')
+        run: bash scripts/ci/cayley_dickson_level_refusal_gate.sh
+      - name: Cayley-Dickson level refusals (lean_single)
+        if: matrix.shard == 'core-c' && (needs.impact.outputs.math == 'true' || needs.impact.outputs.full == 'true')
+        run: SOUNIO_SOUC_ENGINE=lean_single bash scripts/ci/cayley_dickson_level_refusal_gate.sh
       - name: Gresnigt G2xS3 cross-verification
         if: matrix.shard == 'core-c' && (needs.impact.outputs.math == 'true' || needs.impact.outputs.full == 'true')
         run: bash scripts/ci/gresnigt_g2s3_gate.sh
@@ -1396,9 +1478,10 @@ jobs:
           set -euo pipefail
           mkdir -p "$LOWERER_GATE_DIR"
           bash scripts/ci/stdlib_deep_compiler_receipt.sh verify "$GITHUB_WORKSPACE" "$RUNNER_TEMP/stdlib-deep-compiler" "$GITHUB_SHA" | tee "$LOWERER_GATE_DIR/compiler-receipt.log"
-          sha256sum "$MADAROS_RAW_BIN" self-hosted/ir/lower.sio scripts/ci/lowerer_fresh_reg_parity_probe.cpp | tee "$LOWERER_GATE_DIR/compiler-inputs.sha256"
+          sha256sum "$MADAROS_RAW_BIN" self-hosted/ir/lower.sio scripts/ci/lowerer_fresh_reg_parity_probe.cpp scripts/ci/print_f64_callee_saved_probe.cpp | tee "$LOWERER_GATE_DIR/compiler-inputs.sha256"
           g++ --version | tee "$LOWERER_GATE_DIR/cxx-version.log"
           bash scripts/ci/lowerer_fresh_reg_parity_gate.sh "$LOWERER_GATE_DIR/parity" | tee "$LOWERER_GATE_DIR/parity.log"
+          bash scripts/ci/print_f64_callee_saved_gate.sh "$LOWERER_GATE_DIR/print-f64-abi" | tee "$LOWERER_GATE_DIR/print-f64-abi.log"
           ./bin/souc check tests/run-pass/scalar_global_reference.sio > "$LOWERER_GATE_DIR/scalar-check.log" 2>&1
           ./bin/souc compile tests/run-pass/scalar_global_reference.sio -o "$LOWERER_GATE_DIR/scalar-reference" > "$LOWERER_GATE_DIR/scalar-build.log" 2>&1
           chmod +x "$LOWERER_GATE_DIR/scalar-reference"
@@ -1627,6 +1710,10 @@ jobs:
         env:
           SOUNIO_MADAROS_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
         run: bash scripts/ci/madaros_method_ref_receiver_gate.sh
+      - name: ADR-016 meet refuses at run time with a diagnostic
+        env:
+          SOUNIO_MADAROS_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+        run: bash scripts/ci/epistemic_meet_refusal_gate.sh
       - name: Seq<f64> element reads classify as float
         env:
           SOUNIO_MADAROS_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
@@ -1669,6 +1756,14 @@ jobs:
         env:
           MADAROS_RAW_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
         run: bash scripts/ci/madaros_global_init_identity_gate.sh
+      # SOUNIO_STRICT_FIELD=1 refuses a guessed field index (E311): a typed
+      # tuple-slot read compiles clean, an untyped third slot is refused
+      # standalone and through an import, and both compile without the switch.
+      # Reuses the ELF built above.
+      - name: Strict field mode refuses guessed field indices (E311), opt-in only
+        env:
+          MADAROS_RAW_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+        run: bash scripts/ci/madaros_strict_field_gate.sh
       # #2661: SOUNIO_DISABLE_GLOBAL_INIT_IMPL_EXCLUSION=1 restores ONLY the
       # recording of impl methods under their bare name in that fold table
       # (the second #2603 delta), independently of the module-scope knob. The
@@ -1693,6 +1788,18 @@ jobs:
         env:
           MADAROS_RAW_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
         run: bash scripts/ci/madaros_builtin_name_shadow_gate.sh
+      # A user or stdlib `fn sqrt` / exp / log / sin / cos / pow is not the
+      # builtin of modules that did not import it. Reuses the ELF built above.
+      - name: Float builtins are not captured by an unimported same-named function
+        env:
+          MADAROS_RAW_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+        run: bash scripts/ci/madaros_builtin_math_shadow_gate.sh
+      # A bare call to a pub fn of a module the caller never imported is
+      # refused (E-NOT-IMPORTED). Reuses the ELF built above.
+      - name: Calls resolve through the caller's own use items
+        env:
+          MADAROS_RAW_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+        run: bash scripts/ci/madaros_import_hygiene_gate.sh
       # Copilot review (PR #2515), comment 4113458034: check_items_verdict_
       # boot4_with_module_map stamped current_module_id per item but left
       # current_module (used by pub(in path)'s ast_path_is_prefix check)
@@ -2017,7 +2124,7 @@ jobs:
         run: bash scripts/ci/madaros_nested_call_stack_gate.sh
       # The run-pass corpus under Madaros is measured by the separate job
       # madaros-corpus-regression (scripts/ci/madaros_corpus_regression_gate.sh),
-      # non-blocking until its baseline is reconciled. It is not run here.
+      # which CI Decision requires. It is not run here.
       - name: Check whether the Madaros cache has entries to save
         id: madaros-cache-has
         if: always() && runner.environment == 'github-hosted' && steps.madaros-cache.outputs.cache-hit != 'true'
@@ -2441,17 +2548,17 @@ jobs:
   # Madaros lanes run only tests a pull request itself changed. This job runs
   # every tests/run-pass program under the Madaros built from this pull
   # request's own source and compares the failure list with
-  # tests/madaros_corpus_baseline.txt. Phase 1 is measurement: the job is
-  # non-blocking and is not in the CI Decision list, so it cannot turn a pull
-  # request red. It becomes required once the baseline is reconciled against
-  # what this job reports.
+  # tests/madaros_corpus_baseline.txt. The baseline is reconciled with what this
+  # job reports (#3681: 2704 programs, 123 listed failures, none new), so the job
+  # is in the CI Decision list: a program that passes under Madaros on main and
+  # fails under this pull request's Madaros turns the pull request red.
+  # Refresh the baseline with SOUNIO_MADAROS_CORPUS_REFRESH=1.
   madaros-corpus-regression:
-    name: Madaros Corpus Regression (measurement, non-blocking)
+    name: Madaros Corpus Regression
     needs: [impact, fast-checks, current-source-madaros]
     if: needs.impact.outputs.compiler == 'true' || needs.impact.outputs.runtime == 'true' || needs.impact.outputs.stdlib == 'true' || needs.impact.outputs.tests == 'true' || needs.impact.outputs.full == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 150
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/current-source-madaros
@@ -2471,6 +2578,7 @@ jobs:
           SOUNIO_IR_FN_INDEX_VERIFY: "1"
         run: |
           set -o pipefail
+          bash scripts/ci/madaros_corpus_timeout_selftest.sh
           bash scripts/ci/madaros_corpus_regression_gate.sh 2>&1 | tee "$RUNNER_TEMP/madaros-corpus.log"
       - name: Summarise
         if: always()
@@ -2517,11 +2625,11 @@ jobs:
       # Measured 2026-11-04: 39 of the 42 such fixtures print their diagnostic
       # and then segfault on a Madaros built from self-hosted/, which every
       # gate reading `rc != 0` as "refused" scored as a passing refusal.
-      # MUST run against the fresh build: the COMMITTED prebuilt (0ff69d86,
-      # built 2026-10-31 from 0ed977ce) still refuses all 42 cleanly with rc 1,
-      # so against it this gate would report the whole baseline as repaired and
-      # fail for the wrong reason. That gap between the shipped prebuilt and
-      # the current source IS the regression this gate pins.
+      # The trigger was check_expr's unannotated `let result = match ...`:
+      # the seed sized `result.0` at 128 slots, so every by-value check_expr
+      # returned a truncated Checker. Annotated 2026-11-22; all 42 refuse with
+      # rc 1 and the baseline is empty. Still run against the fresh build: it
+      # is the source this gate speaks for.
       - name: Epistemic compile-fail fixtures refuse, never crash
         env:
           MADAROS_RAW_BIN: /tmp/madaros-ci.elf
@@ -2862,6 +2970,16 @@ jobs:
         run: |
           mkdir -p "$TMPDIR" "$SOUNIO_MADAROS_CACHE"
           bash scripts/stdlib/deep_science_gate.sh
+      # The demo is outside tests/, so the suite harness never reaches it. This step
+      # runs its parity script and refusal witnesses with this run's compiler.
+      - name: Bedaquiline lung demo parity and refusal gate
+        if: matrix.group == 'integration'
+        env:
+          MADAROS_RAW_BIN: ${{ runner.temp }}/stdlib-deep-compiler/madaros.elf
+          TMPDIR: ${{ runner.temp }}/stdlib-deep-tmp
+          SOUNIO_MADAROS_CACHE: ${{ runner.temp }}/stdlib-deep-cache
+          SOUNIO_BUILD_LOCK: ${{ runner.temp }}/stdlib-deep-build.lock
+        run: bash scripts/ci/demo_aris_bdq_gate.sh
       - name: Upload compact replay receipts
         if: always()
         uses: actions/upload-artifact@v4
@@ -2965,7 +3083,7 @@ jobs:
     needs: [impact, fast-checks]
     if: needs.impact.outputs.lean == 'true' || needs.impact.outputs.full == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 35  # 31.8 min on the #3687 head (2026-11-22) before the bootstrap steps moved to Bootstrap Proofs; 13.8 min of that stays here
     steps:
       - uses: actions/checkout@v4
       - name: Materialize the committed Madaros prebuilt
@@ -3017,18 +3135,6 @@ jobs:
         run: |
           cd formal
           lake build OctonionAlgebra
-      # Bootstrap model (formal/Bootstrap): a minimal x86-64 semantics for the
-      # two seed loaders and short kernel-checked runs of both. SeedData.lean
-      # must match the seed files. The full self-reproduction and cross-check
-      # proofs are too heavy for CI and run on the lab cluster through
-      # bootstrap/model/seed_proofs.sh; the CPU differential is
-      # bootstrap/model/x86diff_gate.sh.
-      - name: Bootstrap x86 model and short seed runs
-        run: |
-          bash bootstrap/model/gen_seed_data.sh /tmp/SeedData.fresh.lean
-          cmp /tmp/SeedData.fresh.lean formal/Bootstrap/SeedData.lean
-          cd formal
-          lake build Bootstrap
       - name: Build all default-target proof modules
         run: |
           cd formal/lean4
@@ -3072,6 +3178,128 @@ jobs:
       # a PR that adds an axiom or a native_decide must regenerate it.
       - name: Axiom inventory is current
         run: bash scripts/dev/gen_axiom_inventory.sh --check
+
+  # The bootstrap chain (formal/Bootstrap, formal/Sporos, bootstrap/model): its own
+  # job so that a bootstrap PR does not also rebuild formal/lean4, and a formal/lean4
+  # PR does not rebuild the bootstrap model. The heavy bootstrap proofs (seeds,
+  # stage 1, sporos_vm) run on the lab cluster through their scripts, not here.
+  bootstrap-proofs:
+    name: Bootstrap Proofs
+    needs: [impact, fast-checks]
+    if: needs.impact.outputs.bootstrap == 'true' || needs.impact.outputs.full == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35  # split out of Lean Proofs on 2026-11-22: these steps took 18.0 of its 31.8 min on the #3687 head
+    steps:
+      - uses: actions/checkout@v4
+      - name: Materialize the committed Madaros prebuilt
+        run: bash scripts/lib/materialize_madaros_prebuilt.sh
+      # Toolchains and build products have different lifetimes. A toolchain-only
+      # key made immutable .lake snapshots rebuild every later proof change.
+      - name: Cache elan toolchains
+        uses: actions/cache@v4
+        with:
+          path: ~/.elan
+          key: lean-elan-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('formal/lean-toolchain', 'formal/lean4/lean-toolchain') }}
+      # Exact source key only: never restore proof objects from another source
+      # tree or toolchain. All lake builds and gates below remain unconditional,
+      # including on a cache hit.
+      - name: Cache exact-source Lean build products
+        uses: actions/cache@v4
+        with:
+          path: |
+            formal/.lake
+          key: bootstrap-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('formal/**', '!formal/**/.lake/**', 'bootstrap/**', 'scripts/ci/*lean*.sh', '.github/workflows/ci.yml') }}
+      - name: Install elan (Lean toolchain manager)
+        run: |
+          if ! command -v elan &>/dev/null; then
+            curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
+              | sh -s -- -y --no-modify-path
+          fi
+          echo "$HOME/.elan/bin" >> $GITHUB_PATH
+      # Bootstrap model (formal/Bootstrap): a minimal x86-64 semantics for the
+      # two seed loaders and short kernel-checked runs of both. SeedData.lean
+      # must match the seed files. The full self-reproduction and cross-check
+      # proofs are too heavy for CI and run on the lab cluster through
+      # bootstrap/model/seed_proofs.sh; the CPU differential is
+      # bootstrap/model/x86diff_gate.sh.
+      - name: Bootstrap x86 model and short seed runs
+        run: |
+          bash bootstrap/model/gen_seed_data.sh /tmp/SeedData.fresh.lean
+          cmp /tmp/SeedData.fresh.lean formal/Bootstrap/SeedData.lean
+          cd formal
+          lake build Bootstrap x86run
+      # The two Sporos interpreters must agree: the Lean reference (`sporos`,
+      # correct by the DAG simulation theorems) and the C++23 one
+      # (`bootstrap/model/sporos_fast.cpp`, trusted only through this check).
+      # Exit status, output and error are compared byte for byte on the
+      # example programs and on 500 random checker-valid programs.
+      - name: Sporos differential (C++ interpreter against the Lean reference)
+        run: bash bootstrap/model/sporos_diff.sh 500
+      # `SporosProvLen`: the Lean reference under `noPhys` is observationally the
+      # machine that tracks provenance only by a 64-bit length, which is what
+      # `sporos_fast.cpp` implements. The examples and 500 random programs must agree,
+      # and two built-in mutations of the C++ provenance tracking must be caught.
+      - name: Sporos provenance-length differential and mutation controls
+        run: sh bootstrap/model/sporos_provlen_gate.sh 500
+      # sporos_vm, the native x86-64 Sporos VM: generator determinism and parity with
+      # the committed binary, its Lean byte check, seed-a rebuilding it from its hex,
+      # the differential against sporos_fast on the examples, the vectors and 2,000
+      # generated programs, and the TMR and mutation controls. Its simulation proofs
+      # (BootstrapSporosVm) are built by sporos_vm_proofs.sh, not here; the step runs
+      # that script's axiom-parser selftest.
+      - name: Bootstrap sporos_vm differential, TMR and mutation controls
+        run: |
+          bash bootstrap/model/sporos_vm_proofs.sh --selftest
+          sh bootstrap/model/sporos_vm_gate.sh 1000
+      # Instruction-level CPU differential for `X86Int` and `X86Dec` (the
+      # stage-1 model): 200,000 random instructions across all 45 decoded forms
+      # executed natively on the runner CPU and compared against `X86Int.step`.
+      - name: Bootstrap X86Int CPU differential
+        run: bash bootstrap/model/x86int_diff_gate.sh 200000 1
+      # Kernel-checked process environment differential (`X86Env`, `syscall`, `initStack`).
+      - name: Bootstrap X86Env Linux syscall differential
+        run: bash bootstrap/model/x86env_diff_gate.sh 2000 1
+      # Hamming-1/2 (`X86Dec.altsAt`) and byte-boundary differential fuzz against CPU.
+      - name: Bootstrap X86Dec Hamming and byte fuzzer
+        run: bash bootstrap/model/x86dec_fuzz_gate.sh 5000 100000 1
+      # Physical 4-site fault injection of the canonical 38-byte machine-code TMR voter.
+      - name: Bootstrap TMR machine-code voter fault injection
+        run: bash bootstrap/model/tmr_fault_gate.sh 20000 1
+      # spr1_check, the independent second stage-1 checker (Root A is
+      # bootstrap/roots/sporos/sporos-stage1.hex): seed-a rebuilds it from its hex,
+      # 2,000 files against the Lean verdict of SporosCheckDiff, the two
+      # negative controls. Fault injection (INJECT=1) runs by hand.
+      - name: Bootstrap spr1_check differential (second stage-1 checker)
+        run: bash bootstrap/model/spr1_check_gate.sh 2000 0
+      # X86Uni (X86Int plus the seeds' narrow forms) against the CPU, 60,000 cases
+      # over every form; the narrow forms at least 1,200 cases each.
+      - name: Bootstrap X86Uni CPU differential
+        run: bash bootstrap/model/x86uni_diff_gate.sh
+      # X86Vm (X86Int plus the forms sporos_vm needs: mul/div, variable shifts,
+      # 16-bit and indexed memory, setcc/cmovcc) against the CPU: 66,000 cases, each
+      # of the 31 new forms at least 1,000; a Hamming-1 fetch sweep; one corrupted
+      # CPU trace that must be rejected.
+      - name: Bootstrap X86Vm CPU differential
+        run: bash bootstrap/model/x86vm_diff_gate.sh
+      # AArch64 physical model and the 44-byte TMR voter. On this x86-64 runner
+      # the gate builds `aarch64-phys-check` and runs its Lean selftest only; the
+      # native AArch64 differential and fault sweeps need ARM64 hardware (run by
+      # hand, or traces from --emit-only checked here with --verify-dir).
+      - name: Bootstrap AArch64 physical model selftest
+        run: bash bootstrap/model/aarch64_phys_gate.sh --selftest
+      # Root C (AArch64 seed-c): seed-a and seed-b assemble seed-c's format A and B
+      # listings to the committed bytes, and the Lean AArch64 model runs it on fixed
+      # vectors, all 256 bytes and 5000 fuzz cases. Native AArch64 runs need Apple Silicon.
+      - name: Bootstrap root C seed gate (Linux half)
+        run: bash bootstrap/model/root_c_seed_gate.sh
+      # Contiguous 64-byte cache-line bursts on the three Decision 50 arenas, and
+      # instruction fetches straddling a guard page, against the CPU (`TMRBurst`).
+      - name: Bootstrap TMR burst and page-straddle gate
+        run: bash bootstrap/model/tmr_burst_straddle_gate.sh 3400 20000 1
+      # The `#print axioms` list for the headline bootstrap theorems built here
+      # (the formal/ package part is in the Lean Proofs job).
+      - name: Axiom report for headline bootstrap theorems
+        run: bash scripts/ci/lean_axiom_report.sh --bootstrap
 
   website:
     name: Website
@@ -3162,11 +3390,13 @@ jobs:
       - native-selfhost-macos-arm64
       - full-test-suite
       - madaros-witness-gate
+      - madaros-corpus-regression
       - scientific-reference-controls
       - stdlib-deep-science
       - gate-wave-0
       - sounio-lint
       - lean-proofs
+      - bootstrap-proofs
       - website
       - r6-corpus-sweep
       - slow-lane

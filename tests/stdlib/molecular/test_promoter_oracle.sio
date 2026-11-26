@@ -1,0 +1,111 @@
+//@ run-pass
+//@ requires: madaros
+//@ timeout: 600
+//@ expect-stdout: MOLECULAR_PROMOTER_ORACLE_OK
+// molecular::promoter against stdlib/molecular/oracles/promoter_oracle.cpp (mode 4,
+// the Halton orientation set), which runs the same quadrature over the same
+// orientations. Every expected number below is that program's output, pasted:
+//   promoter_oracle 250 78.20 3.166 32 6 6 6 4
+// The predictions it tests were written before the library, the oracle and this
+// test (stdlib/molecular/oracles/promoter_predictions.txt): the mirror to 1e-9
+// (C2), and d of this coarse configuration within 0.01 of the converged 0.2947 (C3).
+//
+// Model: sII a = 17.31 A, SPC/E oxygen (78.20 K, 3.166 A), Buch H2 (34.2 K,
+// 2.96 A, 2.01588 amu), 250 K, cutoff 12 A; TraPPE-UA THF (O 55 K / 2.80 A,
+// CH2 46 K / 3.95 A) on a regular ring of radius 1.276 A at every 8b, 32
+// orientations, grid 6 panels x 6 radial x 6 polar x 12 azimuthal nodes.
+
+use math::pure::{sqrt, ln}
+use molecular::host_guest::{hg_build_fd3m, hg_sii_oxygens, hg_sii_cages, hg_replicate, hg_cage_of}
+use molecular::langmuir::{lg_lambda2}
+use molecular::promoter::{pr_ring, pr_halton, pr_orientations, pr_centres, pr_langmuir, PrLangmuir}
+
+fn absd(v: f64) -> f64 { if v < 0.0 { 0.0 - v } else { v } }
+
+// Fails closed: a NaN on either side is a mismatch.
+fn rel_bad(got: f64, want: f64, tol: f64) -> bool with Div {
+    var den = absd(want)
+    if den < 1.0e-300 { den = 1.0 }
+    if got != got || want != want { return true }
+    !(absd(got - want) / den <= tol)
+}
+
+fn rel_ok(tag: string, got: f64, want: f64, tol: f64) -> i64 with IO, Mut, Div {
+    if rel_bad(got, want, tol) {
+        print("MISMATCH "); print(tag); print(" got "); println(got); print("   want "); println(want)
+        return 1
+    }
+    0
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let a = 17.31
+    let t = 250.0
+    let cut = 12.0
+    var bad: i64 = 0
+    if hg_build_fd3m() != 192 { println("group order"); return 1 }
+    var frac: [f64; 12288] = [0.0; 12288]
+    let no = hg_sii_oxygens(&!frac, 0.21796, 0.18198, 0.37081)
+    var host: [f64; 12288] = [0.0; 12288]
+    let nh = hg_replicate(&!host, &frac, no, a, cut)
+    var cen: [f64; 192] = [0.0; 192]
+    let nc = hg_sii_cages(&!cen, a)
+    let small = hg_cage_of(&cen, nc, a, 0.0, 0.0, 0.0)
+    if nc != 24 || small != 0 { println("cages differ from the oracle"); bad = bad + 1 }
+
+    // Halton radical inverse: 7 = 111 (base 2) -> 0.111 = 0.875; 5 = 12 (base 3) -> 0.21 = 7/9
+    bad = bad + rel_ok("halton 7 b2", pr_halton(7, 2), 0.875, 1.0e-15)
+    bad = bad + rel_ok("halton 5 b3", pr_halton(5, 3), 7.0 / 9.0, 1.0e-15)
+
+    var body: [f64; 80] = [0.0; 80]
+    let nb = pr_ring(&!body, 5, 1.276, 55.0, 2.80, 46.0, 3.95)
+    var rot: [f64; 36864] = [0.0; 36864]
+    let nor = pr_orientations(&!rot, 32)
+    // every matrix is a rotation: columns orthonormal, determinant +1
+    var worst = 0.0
+    var m: i64 = 0
+    while m < nor {
+        let o = 9 * m
+        let r0 = rot[o as usize] * rot[o as usize] + rot[(o + 3) as usize] * rot[(o + 3) as usize] + rot[(o + 6) as usize] * rot[(o + 6) as usize]
+        let r01 = rot[o as usize] * rot[(o + 1) as usize] + rot[(o + 3) as usize] * rot[(o + 4) as usize] + rot[(o + 6) as usize] * rot[(o + 7) as usize]
+        let det = rot[o as usize] * (rot[(o + 4) as usize] * rot[(o + 8) as usize] - rot[(o + 5) as usize] * rot[(o + 7) as usize])
+                - rot[(o + 1) as usize] * (rot[(o + 3) as usize] * rot[(o + 8) as usize] - rot[(o + 5) as usize] * rot[(o + 6) as usize])
+                + rot[(o + 2) as usize] * (rot[(o + 3) as usize] * rot[(o + 7) as usize] - rot[(o + 4) as usize] * rot[(o + 6) as usize])
+        if absd(r0 - 1.0) > worst { worst = absd(r0 - 1.0) }
+        if absd(r01) > worst { worst = absd(r01) }
+        if absd(det - 1.0) > worst { worst = absd(det - 1.0) }
+        m = m + 1
+    }
+    if nb != 5 || nor != 32 || !(worst < 1.0e-12) { println("ring or orientation set off"); bad = bad + 1 }
+
+    let rmax = 3.2
+    var pc: [f64; 192] = [0.0; 192]
+    let npc = pr_centres(&!pc, &cen, 16, 8, a, 0.0, 0.0, 0.0, cut + 1.276 + rmax + 0.1)
+    if npc != 20 { print("promoter centres "); print_int(npc); println(" (oracle: 20)"); bad = bad + 1 }
+
+    let eps = sqrt(78.20 * 34.2)
+    let sig = 0.5 * (3.166 + 2.96)
+    let rho = 136.0 / (a * a * a)
+    let rho_mol = 8.0 / (a * a * a)
+    let lam = lg_lambda2(t, 2.01588) / 24.0
+    let r: PrLangmuir = pr_langmuir(&host, nh, &cen, nc, small, a, &pc, npc, &body, nb, &rot, nor,
+                                    eps, sig, 34.2, 2.96, 1.0, lam, cut, rho, rho_mol, t, rmax, 6, 6, 6)
+    bad = bad + rel_ok("C empty", r.c0, 0.028188758114298797, 1.0e-9)
+    bad = bad + rel_ok("C THF", r.c1, 0.037816134986241673, 1.0e-9)
+    let d = ln(r.c1 / r.c0)
+    bad = bad + rel_ok("d", d, 0.29381261300469863, 1.0e-9)
+    bad = bad + rel_ok("dlnC0/de", r.g0e, 0.039296826170664274, 1.0e-9)
+    bad = bad + rel_ok("dlnC0/ds", r.g0s, 0.08964887641986935, 1.0e-9)
+    bad = bad + rel_ok("dlnC1/de", r.g1e, 0.043484654812265849, 1.0e-9)
+    bad = bad + rel_ok("dlnC1/ds", r.g1s, 0.31991426636971787, 1.0e-9)
+    // C3: the coarse configuration is within 0.01 of the converged d = 0.2947
+    if !(absd(d - 0.2947) <= 0.01) { println("d off the converged value"); bad = bad + 1 }
+
+    if bad != 0 {
+        print_int(bad)
+        println(" mismatches")
+        return 1
+    }
+    println("MOLECULAR_PROMOTER_ORACLE_OK")
+    0
+}
