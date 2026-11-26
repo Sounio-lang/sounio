@@ -458,6 +458,11 @@ pub struct Checker {
     pub ns_branch_depth: i64,
     pub ns_reassigned_names: [Name; 64],
     pub ns_reassigned_count: i64,
+    // ---- EPI-006 step 3b: Named Knightian uncertainty sources --------------
+    // Kept apart from the aleatory ns_table / noise_set_id lane.
+    pub knight_ns_table: *mut NoiseSetTable,
+    pub knight_sources: *mut KnightSourceTable,
+    pub last_call_arg_ks: i64,
     // Sticky: set when ns_reassigned_names overflows its 64-slot cap inside a
     // branch context (a 65th distinct reassigned Knowledge var cannot be
     // recorded). At the depth-0 merge this forces EVERY live TyKnowledge
@@ -1491,6 +1496,9 @@ pub fn checker_new() -> Checker with Mut, Panic, Div, Alloc {
         ns_reassigned_names: [empty_name(); 64],
         ns_reassigned_count: 0,
         ns_reassigned_overflow: false,
+        knight_ns_table: ns_table_alloc(),
+        knight_sources: knight_source_table_alloc(),
+        last_call_arg_ks: ns_arg_sentinel(),
         fx: fx_frame_table_alloc(),
         fx_op_params: fx_op_param_table_alloc(),
     }
@@ -1627,6 +1635,9 @@ pub fn checker_init_in_place(raw: *mut Checker) with Mut, Panic, Div, Alloc {
     (*raw).ns_reassigned_names = [empty_name(); 64]
     (*raw).ns_reassigned_count = 0
     (*raw).ns_reassigned_overflow = false
+    (*raw).knight_ns_table = ns_table_alloc()
+    (*raw).knight_sources = knight_source_table_alloc()
+    (*raw).last_call_arg_ks = ns_arg_sentinel()
     (*raw).fx = fx_frame_table_alloc()
     (*raw).fx_op_params = fx_op_param_table_alloc()
 }
@@ -1739,6 +1750,9 @@ fn checker_store_from_value(dst: *mut Checker, src: Checker) with Mut, Panic, Di
     (*dst).ns_reassigned_names = src.ns_reassigned_names
     (*dst).ns_reassigned_count = src.ns_reassigned_count
     (*dst).ns_reassigned_overflow = src.ns_reassigned_overflow
+    (*dst).knight_ns_table = src.knight_ns_table
+    (*dst).knight_sources = src.knight_sources
+    (*dst).last_call_arg_ks = src.last_call_arg_ks
     (*(*dst).fx).perf_ops = (*src.fx).perf_ops
     (*(*dst).fx).perf_owner = (*src.fx).perf_owner
     (*(*dst).fx).perf_count = (*src.fx).perf_count
@@ -2428,12 +2442,13 @@ fn checker_lower_knowledge_type_mut(c: *mut Checker, opt: Option<Box<KnowledgeTy
             }
             var eps_val: f64 = -1.0
             var eps_mode: i64 = 0
+            var knight_set: i64 = ns_empty()
             match info.epsilon {
                 Some(eb) => {
                     let bound = *eb
                     if bound.value == 0.0 - 2.0 && bound.op == CompareOp::CmpEq {
-                        // `ε=⊥`: Knightian ignorance (mode 3), no numeric bound.
-                        eps_mode = 3
+                        // `ε=⊥`: Knightian ignorance — carried in knight_set_id, no numeric bound.
+                        knight_set = ns_unknown()
                     } else if bound.value < 0.0 || bound.value > 1.0 {
                         checker_note_type_error_mut(c)
                     } else {
@@ -2450,6 +2465,7 @@ fn checker_lower_knowledge_type_mut(c: *mut Checker, opt: Option<Box<KnowledgeTy
             // exactly the engine that matters. Lane: SOUNIO-KNOWLEDGE-BOUNDARY-PROVENANCE.
             var ty = ty_knowledge(inner_ty, eps_val)
             ty.knowledge_epsilon_mode = eps_mode
+            ty.knight_set_id = knight_set
             let prov = meta.provenance
             ty.knowledge_provenance_kind = prov.kind
             let val_cond = meta.validity
@@ -4282,14 +4298,29 @@ fn checker_report_undeclared_inplace(c: *mut Checker, span: Span, ident: Name) w
     print("\n")
 }
 
+fn checker_type_requires_precise(ty: TypeEntry) -> bool {
+    is_epistemic_type(ty)
+        && ty.knight_set_id == 0
+        && (ty.knowledge_epsilon_mode == 1
+            || ty.knowledge_epsilon_mode == 2
+            || ty.knowledge_epsilon >= 0.0)
+}
+
+fn checker_is_knightian_into_precise(provided: TypeEntry, required: TypeEntry) -> bool {
+    is_epistemic_type(provided)
+        && provided.knight_set_id != 0
+        && checker_type_requires_precise(required)
+}
+
 fn checker_report_mismatch_inplace(c: *mut Checker, span: Span, code: i64, expected: TypeEntry, got: TypeEntry) with Mut, IO, Panic, Div, Alloc {
+    let emit_code = if checker_is_knightian_into_precise(got, expected) { 314 } else { code }
     (*c).error_count = (*c).error_count + 1
     (*c).had_error = true
     (*c).diag_emitted = true
     print("error[E")
-    if code < 100 { print("0") }
-    if code < 10 { print("0") }
-    print_int(code)
+    if emit_code < 100 { print("0") }
+    if emit_code < 10 { print("0") }
+    print_int(emit_code)
     print("]")
     // WHERE, for the same reason E035 needed it. This reporter carries a Span,
     // but for assignment statements that span is unusable: every E002 in the
@@ -4311,7 +4342,7 @@ fn checker_report_mismatch_inplace(c: *mut Checker, span: Span, code: i64, expec
     if got.kind == TypeKind::TyContest && expected.kind != TypeKind::TyContest {
         print("cannot implicitly coerce contested evidence into this type")
     } else {
-        print_error_message(code)
+        print_error_message(emit_code)
     }
     print("\n   |\n   = expected ")
     print_type_name(expected)
@@ -4319,11 +4350,11 @@ fn checker_report_mismatch_inplace(c: *mut Checker, span: Span, code: i64, expec
     print_type_name(got)
     print("\n")
     // The wording lean_single prints, so a compile-fail pattern pins both engines.
-    if got.kind == TypeKind::TyKnowledge && got.knowledge_epsilon_mode == 3 && expected.kind == TypeKind::TyKnowledge && expected.knowledge_epsilon_mode != 3 && expected.knowledge_epsilon >= 0.0 {
+    if checker_is_knightian_into_precise(got, expected) {
         print("   = note: Knightian uncertainty (ε=⊥) cannot satisfy required confidence or error bound\n")
     }
-    print_error_help(code)
-    print_error_note(code)
+    print_error_help(emit_code)
+    print_error_note(emit_code)
 }
 
 fn checker_report_unobserved_print_inplace(c: *mut Checker, span: Span) with Mut, IO, Panic, Div {
@@ -9886,6 +9917,14 @@ fn checker_check_correlated_on_binary_inplace(c: *mut Checker, e: Expr, left_ty:
     }
     var has_effect = false
     if need {
+        // Pure-Knightian operands (no aleatory measurement sources, non-empty
+        // Knightian set) do not invoke GUM independence: their affine dependency
+        // algebra handles shared slots like `x - x` symbolically.
+        if !force && is_knowledge_type(left_ty) && is_knowledge_type(right_ty)
+            && left_ty.noise_set_id == ns_empty() && right_ty.noise_set_id == ns_empty()
+            && (left_ty.knight_set_id != ns_empty() || right_ty.knight_set_id != ns_empty()) {
+            return false
+        }
         let corr_id: i64 = 29
         has_effect = has_effect_id((*c).current_effects, (*c).current_effect_count, corr_id)
         if !has_effect {
@@ -10042,14 +10081,14 @@ fn checker_check_binary_knowledge_refusals_inplace(c: *mut Checker, span: Span, 
 fn checker_finish_binary_knowledge_result_inplace(c: *mut Checker, span: Span, op: BinaryOp, left_ty: TypeEntry, right_ty: TypeEntry, correlated_same_slot_add: bool) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let left_inner = if is_knowledge_type(left_ty) { knowledge_inner(left_ty) } else { left_ty }
     let right_inner = if is_knowledge_type(right_ty) { knowledge_inner(right_ty) } else { right_ty }
-    var knowledge_result = knowledge_binary_result(op, left_ty, right_ty, (*c).ns_table)
+    var knowledge_result = knowledge_binary_result(op, left_ty, right_ty, (*c).ns_table, (*c).knight_ns_table)
     if knowledge_result.kind == TypeKind::TyError {
         checker_report_error_at_inplace(c, span, 36, 0, 0, 0)
     }
     // W4: the union above may have exhausted the interning table. That
     // saturates to unknown, which is sound but turns every later E230 into
     // an unexplained refusal -- so say it out loud, once per overflow event.
-    if ns_table_overflow_take((*c).ns_table) {
+    if ns_table_overflow_take((*c).ns_table) || ns_table_overflow_take((*c).knight_ns_table) {
         checker_report_error_at_inplace(c, span, 179, 0, 0, 0)
     }
     // N3: anti-garbling gate. An independence-assuming op over operands whose
@@ -10537,6 +10576,12 @@ fn checker_check_if_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut
             if then_ty.kind == TypeKind::TyKnowledge && else_ty.kind == TypeKind::TyKnowledge {
                 if !checker_ns_sabotage_join() {
                     joined.noise_set_id = ns_union((*c).ns_table, then_ty.noise_set_id, else_ty.noise_set_id)
+                }
+                joined.knight_set_id = ns_union((*c).knight_ns_table, then_ty.knight_set_id, else_ty.knight_set_id)
+                if joined.knight_set_id != ns_empty() {
+                    joined.knowledge_epsilon = 0.0 - 1.0
+                    joined.knowledge_epsilon_mode = 0
+                    joined.knowledge_conf = 0.0 - 1.0
                 }
                 checker_ns_trace_emit("if_join", joined.noise_set_id)
             }
@@ -11126,6 +11171,13 @@ fn checker_check_field_access_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
             // defect (reproduced on both the unpatched and patched Madaros); `.confidence`
             // reads the correct value and is what the darwin_pbpk sources use.
             ty_f64()
+        } else if name_eq_lit(e.name, "iv") {
+            // Certified Knightian interval enclosure `(lo, hi): (f64, f64)` (EPI-006 step 3b).
+            // Ungated like `.variance`/`.confidence`: reads the uncertainty channel itself.
+            ty_tuple(TypeEntryList {
+                head: ty_f64(),
+                tail: Some(Box::new(TypeEntryList { head: ty_f64(), tail: None })),
+            })
         } else {
             checker_report_no_field_inplace(c, e.span, e.name, base_ty)
             ty_error()
@@ -11408,6 +11460,12 @@ fn checker_check_match_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                     if result_ty.kind == TypeKind::TyKnowledge && arm_ty.kind == TypeKind::TyKnowledge {
                         if !checker_ns_sabotage_join() {
                             result_ty.noise_set_id = ns_union((*c).ns_table, result_ty.noise_set_id, arm_ty.noise_set_id)
+                        }
+                        result_ty.knight_set_id = ns_union((*c).knight_ns_table, result_ty.knight_set_id, arm_ty.knight_set_id)
+                        if result_ty.knight_set_id != ns_empty() {
+                            result_ty.knowledge_epsilon = 0.0 - 1.0
+                            result_ty.knowledge_epsilon_mode = 0
+                            result_ty.knowledge_conf = 0.0 - 1.0
                         }
                     }
                 }
@@ -11907,8 +11965,10 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
             var k_struct_result = ty_knowledge(value_ty, 0.0 - 1.0)
             if is_knowledge_type(value_ty) {
                 k_struct_result.noise_set_id = value_ty.noise_set_id
+                k_struct_result.knight_set_id = value_ty.knight_set_id
             } else {
                 k_struct_result.noise_set_id = ns_empty()
+                k_struct_result.knight_set_id = ns_empty()
             }
             // Parse validity/epsilon fields if present in struct literal (shared with
             // the by-value twin, check_knowledge_struct_lit, via this pure helper).
@@ -12696,6 +12756,7 @@ fn call_expr_should_bridge_by_value(e: Expr) -> bool with Mut, Panic, Div, Alloc
     if call_expr_is_builtin_rollback_transition(e.left) { return true }
     if call_expr_is_builtin_lift_knowledge(e.left) { return true }
     if call_expr_is_builtin_measure(e.left) { return true }
+    if call_expr_is_builtin_knight(e.left) { return true }
     // sign(a, b) is the knowledge contest. sign(x) is math/pure's unary f64.
     if call_expr_is_builtin_sign(e.left) && expr_list_handle_count(expr_list_handle(e.args)) == 2 { return true }
     if call_expr_is_builtin_variance_of(e.left) { return true }
@@ -12870,6 +12931,7 @@ fn checker_check_call_args_inplace(c: *mut Checker, args: ExprListHandle, params
         // Knowledge arg wins" (that was fail-open; see the fn comment above).
         if idx == ns_watch_idx && arg_ty.kind == TypeKind::TyKnowledge {
             (*c).last_call_arg_ns = arg_ty.noise_set_id
+            (*c).last_call_arg_ks = arg_ty.knight_set_id
         }
         if suppress_arg_consume && (*c).suppress_linear_consume_depth > 0 {
             (*c).suppress_linear_consume_depth = (*c).suppress_linear_consume_depth - 1
@@ -13078,6 +13140,110 @@ fn checker_check_measure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
     // measure(...)` binding shape, since Derived cannot satisfy a trusted Measured
     // requirement.
     result.knowledge_provenance_kind = PROVENANCE_KIND_MEASURED
+    result
+}
+
+// Compile-time numeric literal evaluation for knight("name", lo, hi) bounds.
+// Supports float literals, int literals, unary negation (`-1.0`, `-1`), and
+// binary subtraction (`0.0 - 1.0`, `0 - 1`).
+fn checker_knight_const_f64(opt: Option<Box<Expr> >) -> (bool, f64) with Mut, Panic, Div {
+    match opt {
+        None => (false, 0.0)
+        Some(e) => {
+            if (*e).kind == ExprKind::ExprFloatLit {
+                return (true, (*e).float_val)
+            }
+            if (*e).kind == ExprKind::ExprIntLit {
+                return (true, (*e).int_val as f64)
+            }
+            if (*e).kind == ExprKind::ExprUnary && (*e).un_op == UnaryOp::OpNeg {
+                let inner = checker_knight_const_f64((*e).left)
+                if inner.0 { return (true, 0.0 - inner.1) }
+                return (false, 0.0)
+            }
+            if (*e).kind == ExprKind::ExprBinary && (*e).bin_op == BinaryOp::OpSub {
+                let l = checker_knight_const_f64((*e).left)
+                let r = checker_knight_const_f64((*e).right)
+                if l.0 && r.0 { return (true, l.1 - r.1) }
+                return (false, 0.0)
+            }
+            (false, 0.0)
+        }
+    }
+}
+
+fn checker_check_knight_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    // knight("name", lo, hi) -> Knowledge<f64> carrying a named Knightian source.
+    let argc = expr_list_handle_count(expr_list_handle(e.args))
+    let first_arg = expr_list_head(e.args)
+    let second_arg = expr_list_second(e.args)
+    let third_arg = expr_list_third(e.args)
+    let _name_ty = checker_check_opt_expr_inplace(c, first_arg)
+    let lo_ty = checker_check_opt_expr_inplace(c, second_arg)
+    let hi_ty = checker_check_opt_expr_inplace(c, third_arg)
+    if argc != 3 {
+        checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        return ty_error()
+    }
+    if !is_error_or_unknown(lo_ty) && !is_numeric_type(lo_ty) {
+        checker_report_mismatch_inplace(c, e.span, 9, ty_f64(), lo_ty)
+    }
+    if !is_error_or_unknown(hi_ty) && !is_numeric_type(hi_ty) {
+        checker_report_mismatch_inplace(c, e.span, 9, ty_f64(), hi_ty)
+    }
+    var has_name = false
+    var src_name = empty_name()
+    match first_arg {
+        Some(a0) => {
+            if (*a0).kind == ExprKind::ExprStringLit {
+                src_name = ast_string_lit_payload((*a0).name)
+                if src_name.len > 0 { has_name = true }
+            }
+        }
+        None => {}
+    }
+    var result = ty_knowledge(ty_f64(), 0.0 - 1.0)
+    result.noise_set_id = ns_empty()
+    if !has_name {
+        checker_report_error_at_inplace(c, e.span, 314, 0, 0, 0)
+        print("   = note: knight() requires a non-empty string literal source name\n")
+        result.knight_set_id = ns_unknown()
+        return result
+    }
+    let lo_c = checker_knight_const_f64(second_arg)
+    let hi_c = checker_knight_const_f64(third_arg)
+    let both_known = lo_c.0 && hi_c.0
+    if !both_known {
+        checker_report_error_at_inplace(c, e.span, 314, 0, 0, 0)
+        print("   = note: knight() requires finite compile-time constant bounds\n")
+        result.knight_set_id = ns_unknown()
+        return result
+    }
+    if !((lo_c.1 - lo_c.1) == 0.0) || !((hi_c.1 - hi_c.1) == 0.0) {
+        checker_report_error_at_inplace(c, e.span, 314, 0, 0, 0)
+        print("   = note: knight() bounds must be finite\n")
+        result.knight_set_id = ns_unknown()
+        return result
+    }
+    if lo_c.1 > hi_c.1 {
+        checker_report_error_at_inplace(c, e.span, 314, 0, 0, 0)
+        print("   = note: knight() lower bound exceeds upper bound\n")
+        result.knight_set_id = ns_unknown()
+        return result
+    }
+    let reg = knight_source_register((*c).knight_sources, src_name, lo_c.1, hi_c.1, true)
+    let src_id = reg.0
+    let status = reg.1
+    if status == 1 {
+        checker_report_error_at_inplace(c, e.span, 314, 0, 0, 0)
+        print("   = note: Knightian source declared with conflicting bounds\n")
+    } else if status == 2 {
+        checker_report_error_at_inplace(c, e.span, 178, 0, 0, 0)
+    }
+    result.knight_set_id = if src_id >= 0 { ns_singleton((*c).knight_ns_table, src_id) } else { ns_unknown() }
+    if ns_table_overflow_take((*c).knight_ns_table) {
+        checker_report_error_at_inplace(c, e.span, 179, 0, 0, 0)
+    }
     result
 }
 
@@ -14146,7 +14312,9 @@ fn checker_check_call_direct_sig_inplace(c: *mut Checker, e: Expr, direct_sig_id
     // proven-projection verdict (fail-closed: not-a-projection -> -1,
     // "watch nothing").
     let outer_arg_ns_d = (*c).last_call_arg_ns
+    let outer_arg_ks_d = (*c).last_call_arg_ks
     (*c).last_call_arg_ns = ns_arg_sentinel()
+    (*c).last_call_arg_ks = ns_arg_sentinel()
     let ns_proj_d = ns_proj_table_get((*c).ns_proj, direct_sig_id)
     let ns_watch_d = if ns_proj_d.0 { ns_proj_d.1 } else { 0 - 1 }
     checker_check_call_args_inplace(
@@ -14162,10 +14330,12 @@ fn checker_check_call_direct_sig_inplace(c: *mut Checker, e: Expr, direct_sig_id
     checker_release_call_arg_borrows_inplace(c, e.args, effective_params)
     if refused_unimplemented {
         (*c).last_call_arg_ns = outer_arg_ns_d
+        (*c).last_call_arg_ks = outer_arg_ks_d
         return ty_error()
     }
     let ns_result = checker_propagate_call_result_ns_inplace(c, effective_return_type, ns_proj_d.0)
     (*c).last_call_arg_ns = outer_arg_ns_d
+    (*c).last_call_arg_ks = outer_arg_ks_d
     ns_result
 }
 
@@ -14911,6 +15081,9 @@ fn checker_check_call_metric_forms_inplace(c: *mut Checker, e: Expr) -> (bool, T
     if call_expr_is_builtin_measure(e.left) {
         return (true, checker_check_measure_expr_inplace(c, e))
     }
+    if call_expr_is_builtin_knight(e.left) {
+        return (true, checker_check_knight_expr_inplace(c, e))
+    }
     let merge_kind = call_expr_merge_kind(e.left)
     if merge_kind >= 0 {
         return (true, checker_check_merge_expr_inplace(c, e, merge_kind))
@@ -15434,6 +15607,15 @@ fn checker_propagate_call_result_ns_inplace(c: *mut Checker, ret_ty: TypeEntry, 
             // projection fn whose projected-parameter argument was not
             // Knowledge-typed (sentinel never overwritten) -- top either way.
             carried.noise_set_id = 0 - 1
+        }
+        // EPI-006 step 3b: preserve Knightian source identity across proven
+        // identity-projection calls. If the declared return type already
+        // demands ε=⊥ (knight_set_id != 0), keep a concrete non-empty source
+        // set from the argument when available, or keep the declared ⊥.
+        if is_projection && (*c).last_call_arg_ks != ns_arg_sentinel() {
+            if (*c).last_call_arg_ks != ns_empty() || carried.knight_set_id == ns_empty() {
+                carried.knight_set_id = (*c).last_call_arg_ks
+            }
         }
         checker_ns_trace_emit("call", carried.noise_set_id)
     }
@@ -16039,6 +16221,8 @@ fn checker_check_call_arg_knowledge_boundary_inplace(c: *mut Checker, arg_ty: Ty
             checker_report_error_at_inplace(c, call_span, 244, 0, 0, 0)
         } else if !validity_subsumes(knowledge_meta_validity(pmeta2), knowledge_meta_validity(rmeta2)) {
             checker_report_error_at_inplace(c, call_span, 265, 0, 0, 0)
+        } else if checker_is_knightian_into_precise(provided_ty, expected_ty) {
+            // Already reported with E314 by checker_report_mismatch_inplace.
         } else {
             checker_report_error_at_inplace(c, call_span, 36, 0, 0, 0) // E036: epsilon bound violation
         }
@@ -17016,6 +17200,7 @@ fn checker_check_let_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
             // Carry the inferred RHS's noise_set_id through the ascription.
             if ann_ty.kind == TypeKind::TyKnowledge && init_ty.kind == TypeKind::TyKnowledge {
                 bind_ty.noise_set_id = init_ty.noise_set_id
+                bind_ty.knight_set_id = if init_ty.knight_set_id != ns_empty() { init_ty.knight_set_id } else { ann_ty.knight_set_id }
             }
         }
     }
@@ -17125,6 +17310,7 @@ fn checker_check_var_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
             // inferred RHS rather than resetting it to the annotation's -1.
             if ann_ty.kind == TypeKind::TyKnowledge && init_ty.kind == TypeKind::TyKnowledge {
                 bind_ty.noise_set_id = init_ty.noise_set_id
+                bind_ty.knight_set_id = if init_ty.knight_set_id != ns_empty() { init_ty.knight_set_id } else { ann_ty.knight_set_id }
             }
         }
     }
@@ -17430,6 +17616,7 @@ fn checker_check_assign_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with
                     if (*c).ns_branch_depth > 0 {
                         var forced = target_ty
                         forced.noise_set_id = 0 - 1
+                        forced.knight_set_id = ns_union((*c).knight_ns_table, target_ty.knight_set_id, val_ty.knight_set_id)
                         type_env_bind_mut(&!(*c).env, (*target).name, forced, true)
                         if (*c).ns_reassigned_count < 64 {
                             (*c).ns_reassigned_names[(*c).ns_reassigned_count as usize] = (*target).name
@@ -17445,6 +17632,7 @@ fn checker_check_assign_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with
                     } else {
                         var rebound = target_ty
                         rebound.noise_set_id = ns_union((*c).ns_table, target_ty.noise_set_id, val_ty.noise_set_id)
+                        rebound.knight_set_id = ns_union((*c).knight_ns_table, target_ty.knight_set_id, val_ty.knight_set_id)
                         type_env_bind_mut(&!(*c).env, (*target).name, rebound, true)
                         checker_ns_trace_emit("reassign_join", rebound.noise_set_id)
                     }
@@ -18742,7 +18930,7 @@ fn print_type_name(ty: TypeEntry) with IO, Mut, Panic, Div, Alloc {
                 // (no float printing in Poseidon VM)
                 print(", eps=")
                 print_milli_ratio(ty.knowledge_epsilon)
-            } else if ty.knowledge_epsilon_mode == 3 {
+            } else if ty.knight_set_id != 0 {
                 print(", ε=⊥")
             }
             print(">")
@@ -22049,6 +22237,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 302 { print("`break` with a value is only allowed inside `loop`") }
     else if code == 308 { print("the `break` values of this `loop` have different types") }
     else if code == 310 { print("printing a Knowledge value would show its nominal value without its uncertainty and confidence; print a field instead (`k.value`, `k.variance`, `k.confidence`)") }
+    else if code == 314 { print("Knightian uncertainty (ε=⊥) cannot satisfy required confidence or error bound, or a named Knightian source has conflicting bounds") }
     else if code == 269 { print("a `where` refinement on Knowledge<T> is not enforced by this compiler yet: the predicate would be silently ignored, so it is refused") }
     else if code == 270 { print("`as string` does not convert a number, bool or char to text: no engine formats the value, so the cast is refused") }
     else if code == 263 { print("qualified call is ambiguous: this qualifier names a module you `use`d, but also collides with an unrelated struct/enum method of the same name, and the compiler cannot yet guarantee which one runs") }
@@ -23061,6 +23250,18 @@ fn call_expr_is_builtin_measure(opt: Option<Box<Expr> >) -> bool with Mut, Panic
                 return false
             }
             name_matches_str7((*expr).name, 109, 101, 97, 115, 117, 114, 101)
+        }
+        None => false
+    }
+}
+
+fn call_expr_is_builtin_knight(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent {
+                return false
+            }
+            name_eq_lit((*expr).name, "knight")
         }
         None => false
     }
@@ -24252,8 +24453,10 @@ fn check_return_expr_knowledge_subsumes(ontology_items: Option<Box<ItemList> >, 
     let eps_ok = epsilon_subsumes_call_boundary(
         epsilon_provided_view(provided, knowledge_meta_epsilon(pmeta), required.knowledge_epsilon_mode),
         provided.knowledge_epsilon_mode,
+        provided.knight_set_id,
         knowledge_meta_epsilon(rmeta),
-        required.knowledge_epsilon_mode
+        required.knowledge_epsilon_mode,
+        required.knight_set_id
     )
     if !eps_ok {
         return false
@@ -24306,8 +24509,10 @@ fn checker_knowledge_subsumes(c: *mut Checker, provided: TypeEntry, required: Ty
     let eps_ok = epsilon_subsumes_call_boundary(
         epsilon_provided_view(provided, knowledge_meta_epsilon(pmeta), required.knowledge_epsilon_mode),
         provided.knowledge_epsilon_mode,
+        provided.knight_set_id,
         knowledge_meta_epsilon(rmeta),
-        required.knowledge_epsilon_mode
+        required.knowledge_epsilon_mode,
+        required.knight_set_id
     )
     if !eps_ok {
         return false
@@ -24335,13 +24540,22 @@ fn checker_knowledge_epsilon_join(c: *mut Checker, a: TypeEntry, b: TypeEntry) -
     var bn = b
     an.knowledge_epsilon = 0.0 - 1.0
     an.knowledge_epsilon_mode = 0
+    an.knight_set_id = ns_empty()
     bn.knowledge_epsilon = 0.0 - 1.0
     bn.knowledge_epsilon_mode = 0
+    bn.knight_set_id = ns_empty()
     if !checker_knowledge_subsumes(c, an, bn) || !checker_knowledge_subsumes(c, bn, an) {
         return (false, a)
     }
     var joined = a
-    if a.knowledge_epsilon_mode == b.knowledge_epsilon_mode && a.knowledge_epsilon >= 0.0 && b.knowledge_epsilon >= 0.0 && a.knowledge_epsilon_mode != 3 {
+    joined.knight_set_id = ns_union((*c).knight_ns_table, a.knight_set_id, b.knight_set_id)
+    if joined.knight_set_id != ns_empty() {
+        joined.knowledge_epsilon = 0.0 - 1.0
+        joined.knowledge_epsilon_mode = 0
+        joined.knowledge_conf = 0.0 - 1.0
+        return (true, joined)
+    }
+    if a.knowledge_epsilon_mode == b.knowledge_epsilon_mode && a.knowledge_epsilon >= 0.0 && b.knowledge_epsilon >= 0.0 {
         if a.knowledge_epsilon_mode == 0 {
             joined.knowledge_epsilon = if a.knowledge_epsilon > b.knowledge_epsilon { a.knowledge_epsilon } else { b.knowledge_epsilon }
         } else if a.knowledge_epsilon_mode == 2 {
@@ -30243,6 +30457,7 @@ impl Checker {
                 // inferred RHS rather than resetting it to the annotation's -1.
                 if ann_ty.kind == TypeKind::TyKnowledge && init_ty.kind == TypeKind::TyKnowledge {
                     bind_ty.noise_set_id = init_ty.noise_set_id
+                    bind_ty.knight_set_id = if init_ty.knight_set_id != ns_empty() { init_ty.knight_set_id } else { ann_ty.knight_set_id }
                 }
             }
         }
@@ -30314,6 +30529,7 @@ impl Checker {
                 // inferred RHS rather than resetting it to the annotation's -1.
                 if ann_ty.kind == TypeKind::TyKnowledge && init_ty.kind == TypeKind::TyKnowledge {
                     bind_ty.noise_set_id = init_ty.noise_set_id
+                    bind_ty.knight_set_id = if init_ty.knight_set_id != ns_empty() { init_ty.knight_set_id } else { ann_ty.knight_set_id }
                 }
             }
         }
@@ -30794,13 +31010,13 @@ impl Checker {
             if kk_both && kk_arith && !kk_hyper && !correlated_same_slot_add && !checker_is_knowledge_ident_add(e, left_ty, right_ty) && !checker_knowledge_binary_lowerable(e, left_ty, right_ty) {
                 c = c.report_error_at(e.span, 245, 0, 0, 0)
             }
-            var knowledge_result = knowledge_binary_result(e.bin_op, left_ty, right_ty, c.ns_table)
+            var knowledge_result = knowledge_binary_result(e.bin_op, left_ty, right_ty, c.ns_table, c.knight_ns_table)
             if knowledge_result.kind == TypeKind::TyError {
                 c = c.report_error_at(e.span, 36, 0, 0, 0)
             }
             // W4: mirror of the in-place spine -- interning-table exhaustion is
             // reported (E179), never silently degraded to "unknown".
-            if ns_table_overflow_take(c.ns_table) {
+            if ns_table_overflow_take(c.ns_table) || ns_table_overflow_take(c.knight_ns_table) {
                 c = c.report_error_at(e.span, 179, 0, 0, 0)
             }
             // N3: anti-garbling gate (value path). Mirrors the in-place path so
@@ -31278,6 +31494,11 @@ impl Checker {
             } else if name_matches_str10(e.name, 99, 111, 110, 102, 105, 100, 101, 110, 99, 101) {
                 // "confidence" — IR field 2.
                 (c, ty_f64())
+            } else if name_eq_lit(e.name, "iv") {
+                (c, ty_tuple(TypeEntryList {
+                    head: ty_f64(),
+                    tail: Some(Box::new(TypeEntryList { head: ty_f64(), tail: None })),
+                }))
             } else {
                 c = c.report_no_field(e.span, e.name, base_ty)
                 (c, ty_error())
@@ -31945,6 +32166,9 @@ impl Checker {
         }
         if call_expr_is_builtin_measure(e.left) {
             return self.check_measure_expr(e)
+        }
+        if call_expr_is_builtin_knight(e.left) {
+            return self.check_knight_expr(e)
         }
         if call_expr_is_builtin_sign(e.left) && expr_list_handle_count(expr_list_handle(e.args)) == 2 {
             return self.check_sign_expr(e)
@@ -34030,6 +34254,66 @@ impl Checker {
         (c, result)
     }
 
+    fn check_knight_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        var c = self
+        let argc = expr_list_handle_count(expr_list_handle(e.args))
+        let first_arg = expr_list_head(e.args)
+        let second_arg = expr_list_second(e.args)
+        let third_arg = expr_list_third(e.args)
+        let p0 = c.check_opt_expr(first_arg)
+        c = p0.0
+        let p1 = c.check_opt_expr(second_arg)
+        c = p1.0
+        let p2 = c.check_opt_expr(third_arg)
+        c = p2.0
+        if argc != 3 {
+            c = c.report_error_at(e.span, 10, 0, 0, 0)
+            return (c, ty_error())
+        }
+        var has_name = false
+        var src_name = empty_name()
+        match first_arg {
+            Some(a0) => {
+                if (*a0).kind == ExprKind::ExprStringLit {
+                    src_name = ast_string_lit_payload((*a0).name)
+                    if src_name.len > 0 { has_name = true }
+                }
+            }
+            None => {}
+        }
+        var result = ty_knowledge(ty_f64(), 0.0 - 1.0)
+        result.noise_set_id = ns_empty()
+        if !has_name {
+            c = c.report_error_at(e.span, 314, 0, 0, 0)
+            result.knight_set_id = ns_unknown()
+            return (c, result)
+        }
+        let lo_c = checker_knight_const_f64(second_arg)
+        let hi_c = checker_knight_const_f64(third_arg)
+        let both_known = lo_c.0 && hi_c.0
+        if !both_known {
+            c = c.report_error_at(e.span, 314, 0, 0, 0)
+            result.knight_set_id = ns_unknown()
+            return (c, result)
+        }
+        if !((lo_c.1 - lo_c.1) == 0.0) || !((hi_c.1 - hi_c.1) == 0.0) || lo_c.1 > hi_c.1 {
+            c = c.report_error_at(e.span, 314, 0, 0, 0)
+            result.knight_set_id = ns_unknown()
+            return (c, result)
+        }
+        let reg = knight_source_register(c.knight_sources, src_name, lo_c.1, hi_c.1, true)
+        if reg.1 == 1 {
+            c = c.report_error_at(e.span, 314, 0, 0, 0)
+        } else if reg.1 == 2 {
+            c = c.report_error_at(e.span, 178, 0, 0, 0)
+        }
+        result.knight_set_id = if reg.0 >= 0 { ns_singleton(c.knight_ns_table, reg.0) } else { ns_unknown() }
+        if ns_table_overflow_take(c.knight_ns_table) {
+            c = c.report_error_at(e.span, 179, 0, 0, 0)
+        }
+        (c, result)
+    }
+
     fn check_knowledge_ctor_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         // Knowledge(v, e=<confidence>, prov=<provenance>) -> Knowledge<T>; by-value twin of
         // checker_check_knowledge_ctor_expr_inplace.
@@ -34389,8 +34673,10 @@ impl Checker {
         let eps_ok = epsilon_subsumes_call_boundary(
             epsilon_provided_view(provided_ty, knowledge_meta_epsilon(pm), expected_ty.knowledge_epsilon_mode),
             provided_ty.knowledge_epsilon_mode,
+            provided_ty.knight_set_id,
             knowledge_meta_epsilon(rm),
-            expected_ty.knowledge_epsilon_mode
+            expected_ty.knowledge_epsilon_mode,
+            expected_ty.knight_set_id
         )
         let val_ok = validity_subsumes(knowledge_meta_validity(pm), knowledge_meta_validity(rm))
         let prov_ok = provenance_subsumes(knowledge_meta_provenance(pm), knowledge_meta_provenance(rm))
@@ -34407,6 +34693,8 @@ impl Checker {
             self.report_error_at(call_span, 244, 0, 0, 0)
         } else if !val_ok {
             self.report_error_at(call_span, 265, 0, 0, 0)
+        } else if checker_is_knightian_into_precise(provided_ty, expected_ty) {
+            self.report_error_at(call_span, 314, 0, 0, 0)
         } else {
             self.report_error_at(call_span, 36, 0, 0, 0)
         }
@@ -34501,8 +34789,10 @@ impl Checker {
                 return epsilon_subsumes_call_boundary(
                     epsilon_provided_view(got_ty, knowledge_meta_epsilon(pm), exp_ty.knowledge_epsilon_mode),
                     got_ty.knowledge_epsilon_mode,
+                    got_ty.knight_set_id,
                     knowledge_meta_epsilon(rm),
-                    exp_ty.knowledge_epsilon_mode
+                    exp_ty.knowledge_epsilon_mode,
+                    exp_ty.knight_set_id
                 ) && validity_subsumes(knowledge_meta_validity(pm), knowledge_meta_validity(rm))
                   && provenance_subsumes(knowledge_meta_provenance(pm), knowledge_meta_provenance(rm))
             }
