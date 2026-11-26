@@ -29,6 +29,7 @@ export SOUNIO_MADAROS_BIN="$work/madaros"
 ./bin/souc check stdlib/llm/qwen3.sio > "$work/check-lib.log" 2>&1
 ./bin/souc check tests/llm/llm_v2_adversarial_ftz.sio > "$work/check-test.log" 2>&1
 "$work/madaros" build tests/llm/llm_v2_adversarial_ftz.sio -o "$work/adv" > "$work/build-adv.log" 2>&1
+chmod +x "$work/adv"
 rec adv-built
 SOUNIO_AUDIT_BACKEND=cpu SOUNIO_ADV_OUT="$work/cpu.bin" "$work/adv" > "$work/cpu.log" 2>&1
 grep -q GRANITE_ARGMAX_TAIL_CPU_PASS "$work/cpu.log"

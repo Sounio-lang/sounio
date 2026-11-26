@@ -23,6 +23,7 @@ git -C src fetch -q --depth 1 https://github.com/Sounio-lang/sounio.git "$1"
 git -C src checkout -q --detach FETCH_HEAD
 cd src
 compiler=/tmp/granite-tail-29222/madaros
+if [[ ! -x "$compiler" && -x /tmp/granite-runtime-check-29232/madaros ]]; then compiler=/tmp/granite-runtime-check-29232/madaros; fi
 if [[ ! -x "$compiler" ]]; then compiler="$work/madaros"; bash scripts/ci/build_modular_madaros.sh "$compiler" > "$work/build.log" 2>&1; fi
 rec "compiler-sha-$(sha256sum "$compiler" | cut -d' ' -f1)"
 export SOUNIO_STDLIB_PATH="$PWD/stdlib" SOUNIO_MADAROS_BIN="$compiler"
