@@ -17,7 +17,7 @@ import path from 'node:path';
 import { chdir } from 'node:process';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'parse5';
-import { EFFECTS_PAGE, ENGLISH_SEARCH, SELF_HOSTED_PAGE } from '../src/lib/search-appearance.mjs';
+import { EFFECT_CHECKER_PAGE, EFFECTS_PAGE, ENGLISH_SEARCH, SELF_HOSTED_PAGE } from '../src/lib/search-appearance.mjs';
 import { EFFECTS_FAQ } from '../src/lib/effect-system-page.mjs';
 import { UNCERTAINTY_EN, UNCERTAINTY_PT } from '../src/lib/uncertainty-page.mjs';
 import { rehypeDemoteH1 } from '../src/lib/rehype-demote-h1.mjs';
@@ -560,9 +560,11 @@ for await (const file of walk(dist)) {
         ? SELF_HOSTED_PAGE.h1
         : isEffectsPage
           ? EFFECTS_PAGE.h1
-          : isUncertaintyPage
-            ? UNCERTAINTY_EN.h1
-            : expected.title;
+          : isEffectCheckerPage
+            ? EFFECT_CHECKER_PAGE.h1
+            : isUncertaintyPage
+              ? UNCERTAINTY_EN.h1
+              : expected.title;
       if (article.headline !== headline) errors.push(`${route}: TechArticle headline does not match ${JSON.stringify(headline)}`);
       if (article.description !== expected.description) errors.push(`${route}: TechArticle description does not match the meta description`);
       if (article.inLanguage !== 'en') errors.push(`${route}: TechArticle inLanguage`);
@@ -616,9 +618,39 @@ for await (const file of walk(dist)) {
       errors.push(`${route}: TechArticle about ${JSON.stringify(article?.about)}`);
     }
   }
+  if (bare === '/learn/compiler/effect-system/') {
+    if (headings[0] !== EFFECT_CHECKER_PAGE.h1) {
+      errors.push(`${route}: H1 is ${JSON.stringify(headings[0])}, expected ${JSON.stringify(EFFECT_CHECKER_PAGE.h1)}`);
+    }
+    const callout = `${EFFECT_CHECKER_PAGE.calloutBefore}${EFFECT_CHECKER_PAGE.calloutLink}${EFFECT_CHECKER_PAGE.calloutAfter}`;
+    const h1End = html.search(/<\/h1>/i);
+    const para = h1End < 0 ? null : html.slice(h1End).match(/<p\b[^>]*>([\s\S]*?)<\/p>/i);
+    const lede = para ? decode(para[1].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim()) : '';
+    if (lede !== callout) errors.push(`${route}: first paragraph after H1 is not the effect-guide callout`);
+    if (!html.includes(`href="${EFFECT_CHECKER_PAGE.calloutHref}"`)) {
+      errors.push(`${route}: missing link ${EFFECT_CHECKER_PAGE.calloutHref}`);
+    }
+    const canonicalTag = html.match(/<link\b[^>]*rel="canonical"[^>]*>/i)?.[0] ?? '';
+    if (attr(canonicalTag, 'href') !== 'https://www.souniolang.org/learn/compiler/effect-system/') {
+      errors.push(`${route}: canonical is ${attr(canonicalTag, 'href')}`);
+    }
+    const versionHit = html.match(/v0\.80|v0\.99|v0\.100|v1\.0/);
+    if (versionHit) errors.push(`${route}: compiler version ${versionHit[0]} appears in the HTML`);
+    if (article?.headline === expected.title) {
+      errors.push(`${route}: TechArticle headline repeats the search title`);
+    }
+  }
   if (bare === '/learn/effects/') {
     if (headings[0] !== EFFECTS_PAGE.h1) {
       errors.push(`${route}: H1 is ${JSON.stringify(headings[0])}, expected ${JSON.stringify(EFFECTS_PAGE.h1)}`);
+    }
+    const canonicalTag = html.match(/<link\b[^>]*rel="canonical"[^>]*>/i)?.[0] ?? '';
+    if (attr(canonicalTag, 'href') !== 'https://www.souniolang.org/learn/effects/') {
+      errors.push(`${route}: canonical is ${attr(canonicalTag, 'href')}`);
+    }
+    const robotsTag = html.match(/<meta\b[^>]*name="robots"[^>]*>/i)?.[0] ?? '';
+    if (/noindex/i.test(attr(robotsTag, 'content'))) {
+      errors.push(`${route}: robots meta is noindex`);
     }
     const lede = firstParagraphAfterH1(html);
     if (lede !== EFFECTS_PAGE.lede) errors.push(`${route}: first paragraph after H1 does not match the answer`);
