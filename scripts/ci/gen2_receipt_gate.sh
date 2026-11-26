@@ -84,6 +84,44 @@ inputs_key() {
   } | sha256sum | cut -c1-64
 }
 
+# closure_check <repo> <rev> -> rc 0 iff the inputs list covers what its scripts
+# use. Two checks: (1) every scripts/*.sh path named on a non-comment line of a
+# listed .sh input is itself listed or lies under a listed directory; (2) every
+# program in the IR-parity gate's PROGRAMS array is listed as
+# tests/run-pass/<p>.sio. Each missing input is printed as
+# GEN2_INPUTS_UNCOVERED <path> (named by <file>).
+closure_check() {
+  local repo="$1" rev="$2" list entries=() line f ref ok bad=0 e
+  list="$(git -C "$repo" show "$rev:$INPUTS_REL" 2>/dev/null)" || { echo "GEN2_INPUTS_UNCOVERED $INPUTS_REL (missing)"; return 1; }
+  while IFS= read -r line; do
+    line="${line%%#*}"; line="$(printf '%s' "$line" | sed -e 's/[[:space:]]*$//' -e 's/^[[:space:]]*//')"
+    [[ -z "$line" || "$line" == param\ * ]] && continue
+    entries+=("$line")
+  done <<<"$list"
+  covered() {
+    for e in "${entries[@]}"; do
+      [[ "$1" == "$e" || "$1" == "$e"/* ]] && return 0
+    done
+    return 1
+  }
+  for f in "${entries[@]}"; do
+    [[ "$f" == *.sh ]] || continue
+    while IFS= read -r ref; do
+      [[ -z "$ref" ]] && continue
+      if ! covered "$ref"; then echo "GEN2_INPUTS_UNCOVERED $ref (named by $f)"; bad=1; fi
+    done < <(git -C "$repo" show "$rev:$f" 2>/dev/null | grep -vE '^[[:space:]]*#' | grep -oE 'scripts/[A-Za-z0-9_./-]+\.sh' | sort -u)
+  done
+  local parity="scripts/ci/madaros_gen1_gen2_ir_parity_gate.sh" progs p
+  if covered "$parity"; then
+    progs="$(git -C "$repo" show "$rev:$parity" 2>/dev/null | sed -n 's/^PROGRAMS=(\(.*\))$/\1/p' | head -1)"
+    if [[ -z "$progs" ]]; then echo "GEN2_INPUTS_UNCOVERED PROGRAMS (not found in $parity)"; bad=1; fi
+    for p in $progs; do
+      covered "tests/run-pass/$p.sio" || { echo "GEN2_INPUTS_UNCOVERED tests/run-pass/$p.sio (IR-parity program)"; bad=1; }
+    done
+  fi
+  return $bad
+}
+
 # ensure_commit <repo> <commit>: rc 0 iff the commit object is (now) present.
 ensure_commit() {
   local repo="$1" c="$2"
@@ -213,7 +251,24 @@ selftest() {
   local f3="$t/$RECEIPT_DIR_REL/$key3.receipt"
   write "$f3" "" "inputs_key=$key3"
   expect fail GEN2_RECEIPT_WRONG_COMMIT receipt-names-stale-commit "$key3"
-  require_min_count "$pass" 16 "selftest controls"
+  # Closure: a listed script naming an unlisted helper, and an unlisted
+  # IR-parity program, are each refused; listing them passes.
+  printf 'bash scripts/ci/helper_x.sh\n# scripts/ci/only_in_comment.sh\n' >"$t/scripts/ci/madaros_fixed_point_gate.sh"
+  git -C "$t" "${G[@]}" commit -q -am uses-helper
+  out=$(closure_check "$t" HEAD) && gate_fail "selftest: an unlisted helper passed the closure check"
+  grep -q "GEN2_INPUTS_UNCOVERED scripts/ci/helper_x.sh" <<<"$out" || gate_fail "selftest: closure did not name the helper: $out"
+  grep -q only_in_comment <<<"$out" && gate_fail "selftest: a comment mention was counted"
+  pass=$((pass + 1))
+  printf 'scripts/ci/helper_x.sh\nscripts/ci/madaros_gen1_gen2_ir_parity_gate.sh\n' >>"$t/$INPUTS_REL"
+  echo x >"$t/scripts/ci/helper_x.sh"; printf 'PROGRAMS=(p_one)\n' >"$t/scripts/ci/madaros_gen1_gen2_ir_parity_gate.sh"
+  git -C "$t" add -A; git -C "$t" "${G[@]}" commit -q -m list-helper
+  out=$(closure_check "$t" HEAD) && gate_fail "selftest: an unlisted IR-parity program passed"
+  grep -q "tests/run-pass/p_one.sio" <<<"$out" || gate_fail "selftest: closure did not name the program: $out"
+  pass=$((pass + 1))
+  printf 'tests/run-pass/p_one.sio\n' >>"$t/$INPUTS_REL"; git -C "$t" "${G[@]}" commit -q -am list-prog
+  closure_check "$t" HEAD >/dev/null || gate_fail "selftest: a complete list failed the closure check: $(closure_check "$t" HEAD)"
+  pass=$((pass + 1))
+  require_min_count "$pass" 19 "selftest controls"
   echo "GEN2_RECEIPT_GATE_SELFTEST_PASS controls=$pass"
 }
 
@@ -223,6 +278,11 @@ if [[ "${1:-}" == "--selftest" ]]; then
 fi
 
 cd "$ROOT_DIR" || gate_fail "cannot cd to $ROOT_DIR"
+closure_out="$(closure_check "$ROOT_DIR" HEAD)"; closure_rc=$?
+if [[ $closure_rc -ne 0 ]]; then
+  echo "$closure_out"
+  gate_fail "$INPUTS_REL does not cover inputs that the listed scripts use (above); add them, which gives a new inputs key"
+fi
 KEY="$(inputs_key "$ROOT_DIR" HEAD || true)"
 require_nonempty "$KEY" "inputs key of HEAD ($INPUTS_REL missing at HEAD?)"
 echo "gen2 inputs key at HEAD: $KEY"

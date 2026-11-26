@@ -5,4 +5,4 @@ CI Decision now requires a gen2 fixed-point receipt for the compiler state at th
 - full sha256 of gen1, gen2 and gen3, with gen2 required to equal gen3;
 - MaxRSS and wall time.
 
-Checked by `scripts/ci/gen2_receipt_gate.sh` in Fast Checks, with sixteen controls (`--selftest`). The receipt is a signed-off attestation checked for consistency, not a re-execution.
+Checked by `scripts/ci/gen2_receipt_gate.sh` in Fast Checks, with sixteen controls (`--selftest`). At every run the gate also checks that the input list is closed: every `scripts/*.sh` that a listed script names, and every IR-parity program, must itself be listed. The receipt is a signed-off attestation checked for consistency, not a re-execution.
