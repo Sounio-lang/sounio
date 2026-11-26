@@ -189,6 +189,7 @@ case "$1" in
   else
    [[ "$args" == *" install -y --no-install-recommends g++ libboost-dev libquadmath0 jq "* ]] || exit 83
    echo install >> "$APT_FIXTURE_CALLS"
+   case "$APT_FIXTURE_FAIL" in install-always) exit 74;; install-once) [[ "$n" -ge 2 ]] || exit 74;; esac
   fi
   ;;
  *) exit 84 ;;
@@ -196,21 +197,29 @@ esac
 `);
   fs.writeFileSync(path.join(bin,'dpkg-query'),'#!/usr/bin/env bash\n[[ "${APT_FIXTURE_PRESENT:-}" == 1 ]] && { printf "install ok installed"; exit 0; }\nexit 1\n');
   for(const f of ['sudo','dpkg-query'])fs.chmodSync(path.join(bin,f),0o755);
+  const sources=path.join(temp,'sources'), plain=path.join(temp,'plain-sources');
+  fs.writeFileSync(sources,'deb mirror+file:'+mirrors+' noble main\n');
+  fs.writeFileSync(plain,'deb http://archive.ubuntu.com/ubuntu noble main\n');
   const cases=[
-   {fail:'none',present:'',status:0,calls:'update\ninstall\n'},
-   {fail:'once',present:'',status:0,calls:'update\nupdate\ninstall\n'},
-   {fail:'always',present:'',status:1,calls:'update\nupdate\nupdate\nupdate\n'},
-   {fail:'always',present:'1',status:0,calls:''},
+   {fail:'none',present:'',status:0,calls:'update\ninstall\n',src:sources},
+   {fail:'once',present:'',status:0,calls:'update\nupdate\ninstall\n',src:sources},
+   {fail:'always',present:'',status:1,calls:'update\nupdate\nupdate\nupdate\n',src:sources},
+   {fail:'install-once',present:'',status:0,calls:'update\ninstall\nupdate\ninstall\n',src:sources},
+   {fail:'install-always',present:'',status:1,calls:'update\ninstall\nupdate\ninstall\nupdate\ninstall\nupdate\ninstall\n',src:sources},
+   {fail:'once',present:'',status:0,calls:'update\nupdate\ninstall\n',src:plain},
+   {fail:'always',present:'1',status:0,calls:'',src:sources},
   ];
   for(const c of cases){
-   fs.writeFileSync(mirrors,'');fs.writeFileSync(calls,'');fs.writeFileSync(seen,'');
-   const r=cp.spawnSync('bash',[path.join(root,'scripts/ci/apt_ensure.sh'),'g++','libboost-dev','libquadmath0','jq'],{encoding:'utf8',timeout:20000,env:{...process.env,PATH:bin+path.delimiter+process.env.PATH,APT_ENSURE_FORCE_SUDO:'1',APT_ENSURE_BACKOFF_SECS:'0',APT_ENSURE_MIRROR_FILE:mirrors,APT_FIXTURE_CALLS:calls,APT_FIXTURE_SEEN:seen,APT_FIXTURE_FAIL:c.fail,APT_FIXTURE_PRESENT:c.present}});
+   fs.writeFileSync(mirrors,'ORIGINAL\n');fs.writeFileSync(calls,'');fs.writeFileSync(seen,'');
+   const r=cp.spawnSync('bash',[path.join(root,'scripts/ci/apt_ensure.sh'),'g++','libboost-dev','libquadmath0','jq'],{encoding:'utf8',timeout:20000,env:{...process.env,PATH:bin+path.delimiter+process.env.PATH,APT_ENSURE_FORCE_SUDO:'1',APT_ENSURE_BACKOFF_SECS:'0',APT_ENSURE_MIRROR_FILE:mirrors,APT_ENSURE_SOURCES:c.src,APT_FIXTURE_CALLS:calls,APT_FIXTURE_SEEN:seen,APT_FIXTURE_FAIL:c.fail,APT_FIXTURE_PRESENT:c.present}});
    assert.equal(r.status,c.status,`apt_ensure (${c.fail}, present=${c.present||0}): ${r.stdout}${r.stderr}`);
    assert.equal(fs.readFileSync(calls,'utf8'),c.calls,`apt_ensure (${c.fail}): a failed update must stop before installation`);
    const used=fs.readFileSync(seen,'utf8');
    assert(!/azure/i.test(used),'apt_ensure selected the Azure mirror');
-   if(c.calls)assert(used.startsWith('https://archive.ubuntu.com/ubuntu/\n'),'first attempt must use archive.ubuntu.com');
+   assert.equal(fs.readFileSync(mirrors,'utf8'),'ORIGINAL\n','apt_ensure must restore the mirror file it changed');
+   if(c.src===plain){assert.equal(used,'','without a mirror+file source the mirror file must not be touched');assert(r.stdout.includes('retrying the configured sources unchanged'),'no-rotation mode must be logged');}
+   else if(c.calls)assert(used.startsWith('https://archive.ubuntu.com/ubuntu/\n'),'first attempt must use archive.ubuntu.com');
   }
-  console.log('DEEP_APT_SETUP_FIXTURE_PASS jobs=2 controls=4');
+  console.log('DEEP_APT_SETUP_FIXTURE_PASS jobs=2 controls=7');
  }finally{fs.rmSync(temp,{recursive:true,force:true});}
 }

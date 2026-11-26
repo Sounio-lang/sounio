@@ -35,14 +35,33 @@ mirrors=(
   "https://archive.ubuntu.com/ubuntu/"
 )
 mirror_file="${APT_ENSURE_MIRROR_FILE:-/etc/apt/apt-mirrors.txt}"
+sources_glob="${APT_ENSURE_SOURCES:-/etc/apt/sources.list /etc/apt/sources.list.d/*}"
+
+# Rotation only means something where apt actually reads the mirror file
+# through a `mirror+file:` source, as on the GitHub-hosted image. Elsewhere,
+# self-hosted DARWIN runners included, the configured sources are retried
+# unchanged, and the log says so. The original file is restored on exit, so
+# a shared runner never keeps a mirror this script chose.
+rotate=0
+# shellcheck disable=SC2086
+if [[ -f "$mirror_file" ]] && grep -qsF "mirror+file:$mirror_file" $sources_glob; then
+  rotate=1
+  saved="$(mktemp)"
+  cp "$mirror_file" "$saved"
+  trap 'cat "$saved" | $SUDO tee "$mirror_file" >/dev/null; rm -f "$saved"' EXIT
+else
+  echo "apt_ensure: apt sources do not read $mirror_file via mirror+file; retrying the configured sources unchanged"
+fi
 
 attempt=0
 for m in "${mirrors[@]}"; do
   attempt=$((attempt + 1))
-  if [[ -f "$mirror_file" ]]; then
+  if [[ $rotate -eq 1 ]]; then
     printf '%s\n' "$m" | $SUDO tee "$mirror_file" >/dev/null
+    echo "apt_ensure: attempt $attempt via $m"
+  else
+    echo "apt_ensure: attempt $attempt via the configured sources"
   fi
-  echo "apt_ensure: attempt $attempt via $m"
   if timeout 300 $SUDO apt-get "${opts[@]}" update \
      && timeout 600 $SUDO apt-get "${opts[@]}" install -y --no-install-recommends "${missing[@]}"; then
     echo "apt_ensure: installed ${missing[*]} (attempt $attempt)"
@@ -50,5 +69,5 @@ for m in "${mirrors[@]}"; do
   fi
   sleep $((attempt * ${APT_ENSURE_BACKOFF_SECS:-15}))
 done
-echo "apt_ensure: FAIL: could not install ${missing[*]} from ${#mirrors[@]} mirror attempts" >&2
+echo "apt_ensure: FAIL: could not install ${missing[*]} after ${#mirrors[@]} attempts" >&2
 exit 1
