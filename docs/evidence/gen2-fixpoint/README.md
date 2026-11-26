@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.evidence.gen2-fixpoint.readme
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.evidence.gen2-fixpoint.readme
+-->
+
 # gen2 fixed-point receipts
 
 One file per compiler source. The name is the git tree hash of `self-hosted/`
