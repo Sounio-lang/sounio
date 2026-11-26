@@ -6,7 +6,8 @@
 #    ships g++, jq and libquadmath0); when nothing is missing, apt is not touched.
 # 2. `apt-get update` is tried against a sequence of official Ubuntu mirrors.
 #    A mirror caught mid-sync ("File has unexpected size ... Mirror sync in
-#    progress?", run 45803197304 on 2026-11-26) fails only that attempt.
+#    progress?", run 45803197304 on 2026-11-26) fails only that attempt. The
+#    Azure mirror is not in the list: selecting it failed every setup (#3547).
 # 3. The install is retried the same way. A package that is genuinely missing
 #    from every mirror still fails the step: this script never hides a real
 #    absence, it only removes one mirror as a single point of failure.
@@ -25,15 +26,15 @@ fi
 echo "apt_ensure: missing: ${missing[*]}"
 
 SUDO=""
-[[ "$(id -u)" -eq 0 ]] || SUDO="sudo"
-opts=(-o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=2 -o APT::Update::Error-Mode=any)
+[[ "$(id -u)" -eq 0 && -z "${APT_ENSURE_FORCE_SUDO:-}" ]] || SUDO="sudo"
+opts=(-o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=3 -o APT::Update::Error-Mode=any)
 mirrors=(
   "https://archive.ubuntu.com/ubuntu/"
-  "http://azure.archive.ubuntu.com/ubuntu/"
+  "https://us.archive.ubuntu.com/ubuntu/"
   "http://mirrors.edge.kernel.org/ubuntu/"
   "https://archive.ubuntu.com/ubuntu/"
 )
-mirror_file=/etc/apt/apt-mirrors.txt
+mirror_file="${APT_ENSURE_MIRROR_FILE:-/etc/apt/apt-mirrors.txt}"
 
 attempt=0
 for m in "${mirrors[@]}"; do
@@ -47,7 +48,7 @@ for m in "${mirrors[@]}"; do
     echo "apt_ensure: installed ${missing[*]} (attempt $attempt)"
     exit 0
   fi
-  sleep $((attempt * 15))
+  sleep $((attempt * ${APT_ENSURE_BACKOFF_SECS:-15}))
 done
 echo "apt_ensure: FAIL: could not install ${missing[*]} from ${#mirrors[@]} mirror attempts" >&2
 exit 1

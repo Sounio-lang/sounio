@@ -154,50 +154,63 @@ chmod +x "$target"
 }
 
 if(process.argv[3]==='--selftest'){
- // Run the actual workflow setup with isolated sudo/apt fixtures. The old
- // Azure mirror selection fails before any reference test can start (#3547).
- const setups=[...workflow.matchAll(/      - name: Install independent C\+\+23 reference dependencies\n        run: \|\n((?:          .*\n)+)/g)].map(m=>m[1].replace(/^          /gm,''));
+ // Both scientific jobs install through scripts/ci/apt_ensure.sh. That script is
+ // run here against isolated sudo/apt/dpkg fixtures. The Azure mirror must never
+ // be selected (it failed every setup, #3547). A failed update must never reach
+ // install. A failure on every mirror must propagate. One mid-sync mirror
+ // (run 45803197304, 2026-11-26) must not fail the job.
+ const setups=[...workflow.matchAll(/      - name: Install independent C\+\+23 reference dependencies\n        run: (.*)\n/g)].map(m=>m[1]);
  assert.equal(setups.length,2,'both scientific jobs need dependency setup coverage');
+ for(const s of setups)assert.equal(s,'bash scripts/ci/apt_ensure.sh g++ libboost-dev libquadmath0 jq','scientific dependency setup must go through apt_ensure.sh with the four packages');
+ const script=fs.readFileSync(path.join(root,'scripts/ci/apt_ensure.sh'),'utf8');
+ assert(!/azure/i.test(script.split('\n').filter(l=>!l.trim().startsWith('#')).join('\n')),'the Azure mirror must not be selectable (#3547)');
+ assert.equal((script.match(/timeout [0-9]+ \$SUDO apt-get/g)||[]).length,2,'both package-manager calls must be bounded');
  const temp=fs.mkdtempSync(path.join(os.tmpdir(),'deep-apt-setup-'));
  try{
-  const sudo=path.join(temp,'sudo'), mirrors=path.join(temp,'mirrors'), calls=path.join(temp,'calls');
-  fs.writeFileSync(sudo,String.raw`#!/usr/bin/env bash
+  const bin=path.join(temp,'bin');fs.mkdirSync(bin);
+  const mirrors=path.join(temp,'mirrors'), calls=path.join(temp,'calls'), seen=path.join(temp,'seen');
+  fs.writeFileSync(path.join(bin,'sudo'),String.raw`#!/usr/bin/env bash
 set -euo pipefail
 case "$1" in
  tee)
-  [[ "$#" == 2 && "$2" == /etc/apt/apt-mirrors.txt ]] || exit 80
-  cat > "$APT_FIXTURE_MIRRORS"
+  [[ "$#" == 2 && "$2" == "$APT_ENSURE_MIRROR_FILE" ]] || exit 80
+  cat > "$APT_ENSURE_MIRROR_FILE"; cat "$APT_ENSURE_MIRROR_FILE" >> "$APT_FIXTURE_SEEN"
   ;;
  apt-get)
   shift
-  [[ "$(cat "$APT_FIXTURE_MIRRORS")" == https://archive.ubuntu.com/ubuntu/ ]] || exit 81
   args=" $* "
   for option in Acquire::http::Timeout=30 Acquire::https::Timeout=30 Acquire::Retries=3 APT::Update::Error-Mode=any; do
    [[ "$args" == *" -o $option "* ]] || exit 82
   done
+  n=$(grep -c update "$APT_FIXTURE_CALLS" || true)
   if [[ "$args" == *" update "* ]]; then
    echo update >> "$APT_FIXTURE_CALLS"
-   [[ "$APT_FIXTURE_FAIL" != update ]] || exit 73
+   case "$APT_FIXTURE_FAIL" in always) exit 73;; once) [[ "$n" -ge 1 ]] || exit 73;; esac
   else
    [[ "$args" == *" install -y --no-install-recommends g++ libboost-dev libquadmath0 jq "* ]] || exit 83
    echo install >> "$APT_FIXTURE_CALLS"
-   [[ "$APT_FIXTURE_FAIL" != install ]] || exit 73
   fi
   ;;
  *) exit 84 ;;
 esac
 `);
-  fs.chmodSync(sudo,0o755);
-  for(const [job,setup] of setups.entries()){
-   for(const failure of ['none','update','install']){
-    fs.writeFileSync(mirrors,'http://azure.archive.ubuntu.com/ubuntu\nhttps://archive.ubuntu.com/ubuntu/\n');
-    fs.writeFileSync(calls,'');
-    const r=cp.spawnSync('bash',['-e','-o','pipefail','-c',setup],{encoding:'utf8',timeout:10000,env:{...process.env,PATH:temp+path.delimiter+process.env.PATH,APT_FIXTURE_MIRRORS:mirrors,APT_FIXTURE_CALLS:calls,APT_FIXTURE_FAIL:failure}});
-    assert.equal(r.status,failure==='none'?0:73,`job ${job} dependency setup (${failure}): ${r.stdout}${r.stderr}`);
-    assert.equal(fs.readFileSync(calls,'utf8'),failure==='update'?'update\n':'update\ninstall\n','failed update must stop before installation');
-   }
-   assert.equal((setup.match(/timeout 300 sudo apt-get/g)||[]).length,2,'both package-manager calls must be bounded');
+  fs.writeFileSync(path.join(bin,'dpkg-query'),'#!/usr/bin/env bash\n[[ "${APT_FIXTURE_PRESENT:-}" == 1 ]] && { printf "install ok installed"; exit 0; }\nexit 1\n');
+  for(const f of ['sudo','dpkg-query'])fs.chmodSync(path.join(bin,f),0o755);
+  const cases=[
+   {fail:'none',present:'',status:0,calls:'update\ninstall\n'},
+   {fail:'once',present:'',status:0,calls:'update\nupdate\ninstall\n'},
+   {fail:'always',present:'',status:1,calls:'update\nupdate\nupdate\nupdate\n'},
+   {fail:'always',present:'1',status:0,calls:''},
+  ];
+  for(const c of cases){
+   fs.writeFileSync(mirrors,'');fs.writeFileSync(calls,'');fs.writeFileSync(seen,'');
+   const r=cp.spawnSync('bash',[path.join(root,'scripts/ci/apt_ensure.sh'),'g++','libboost-dev','libquadmath0','jq'],{encoding:'utf8',timeout:20000,env:{...process.env,PATH:bin+path.delimiter+process.env.PATH,APT_ENSURE_FORCE_SUDO:'1',APT_ENSURE_BACKOFF_SECS:'0',APT_ENSURE_MIRROR_FILE:mirrors,APT_FIXTURE_CALLS:calls,APT_FIXTURE_SEEN:seen,APT_FIXTURE_FAIL:c.fail,APT_FIXTURE_PRESENT:c.present}});
+   assert.equal(r.status,c.status,`apt_ensure (${c.fail}, present=${c.present||0}): ${r.stdout}${r.stderr}`);
+   assert.equal(fs.readFileSync(calls,'utf8'),c.calls,`apt_ensure (${c.fail}): a failed update must stop before installation`);
+   const used=fs.readFileSync(seen,'utf8');
+   assert(!/azure/i.test(used),'apt_ensure selected the Azure mirror');
+   if(c.calls)assert(used.startsWith('https://archive.ubuntu.com/ubuntu/\n'),'first attempt must use archive.ubuntu.com');
   }
-  console.log('DEEP_APT_SETUP_FIXTURE_PASS jobs=2 controls=6');
+  console.log('DEEP_APT_SETUP_FIXTURE_PASS jobs=2 controls=4');
  }finally{fs.rmSync(temp,{recursive:true,force:true});}
 }
