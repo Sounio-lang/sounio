@@ -89,6 +89,42 @@ fn module_frontend_global_init_compile_begin() with IO, Mut, Panic, Div {
     // ir_instr_arena_alloc instead.
 }
 
+// Stage clock (SOUNIO_STAGE_NS=1). Every stage line the compile driver already
+// prints is followed by one `stage_ns:` line: monotonic wall ns since the first
+// mark, user+sys CPU us, and peak RSS in KiB, read with clock_gettime(2) and
+// getrusage(2) directly. It is measured inside the compiler, in Sounio, so a
+// gen1-vs-gen2 comparison localises a slowdown to the stage whose emitted code
+// got slower. Off by default: the stage lines alone are unchanged.
+var MF_STAGE_TS: [i64; 2] = [0; 2]
+var MF_STAGE_RU: [i64; 18] = [0; 18]
+var MF_STAGE_T0: i64 = 0
+var MF_STAGE_STATE: i64 = 0 - 1
+
+fn mf_stage_clock_enabled() -> bool with IO, Mut {
+    if MF_STAGE_STATE < 0 {
+        MF_STAGE_STATE = if read_env("SOUNIO_STAGE_NS") == "1" { 1 } else { 0 }
+    }
+    MF_STAGE_STATE == 1
+}
+
+fn mf_stage_mark(line: string) with IO, Mut {
+    print(line)
+    if !mf_stage_clock_enabled() { return }
+    let rc_t = syscall6(228, 1, &! MF_STAGE_TS, 0, 0, 0, 0)
+    let rc_r = syscall6(98, 0, &! MF_STAGE_RU, 0, 0, 0, 0)
+    let now = MF_STAGE_TS[0 as usize] * 1000000000 + MF_STAGE_TS[1 as usize]
+    if MF_STAGE_T0 == 0 { MF_STAGE_T0 = now }
+    let cpu_us = (MF_STAGE_RU[0 as usize] + MF_STAGE_RU[2 as usize]) * 1000000 + MF_STAGE_RU[1 as usize] + MF_STAGE_RU[3 as usize]
+    print("stage_ns: wall_ns=")
+    print_int(now - MF_STAGE_T0)
+    print(" cpu_us=")
+    print_int(cpu_us)
+    print(" maxrss_kib=")
+    print_int(MF_STAGE_RU[4 as usize])
+    if rc_t != 0 || rc_r != 0 { print(" clock_error=1") }
+    print("\n")
+}
+
 fn module_frontend_global_init_compile_end() with Mut {
     OCP_RESEARCH_EXACT_INTEGRAL_CENTER = 0
     GLOBAL_VAR_INIT_SUPPRESS_RESET = 0
@@ -7674,11 +7710,11 @@ fn module_frontend_compile_imported_to_file_target_impl(
     // imported module f64 constants (e.g. stats::densities::DE_LN_SQRT_2PI) remain
     // in GLOBAL_VAR_INIT_* until BSS slots are seeded at lower time.
     module_frontend_global_init_compile_begin()
-    print("imported_compile: begin\n")
+    mf_stage_mark("imported_compile: begin\n")
     var trace = empty_load_multimodule_ir_trace()
-    print("imported_compile: load_begin\n")
+    mf_stage_mark("imported_compile: load_begin\n")
     let main_prog = load_module_file(main_path)
-    print("imported_compile: load_done\n")
+    mf_stage_mark("imported_compile: load_done\n")
     if parser_last_error_count() > 0 {
         print("Parse failed during imported compile\n")
         module_frontend_global_init_compile_end()
@@ -7854,7 +7890,7 @@ fn module_frontend_compile_imported_to_file_target_impl(
     }
 
     trace.last_stage = "typecheck"
-    print("imported_compile: typecheck_begin\n")
+    mf_stage_mark("imported_compile: typecheck_begin\n")
     // WP-A3 + Wave12: when a cross-module generic is instantiated, monomorphize
     // the merged item list (drops E008 CDElementExact__T mono-mismatch) AND
     // lower the monomorphized list as a freestanding single module. Leaving
@@ -7879,7 +7915,7 @@ fn module_frontend_compile_imported_to_file_target_impl(
     } else {
         verdict = check_modules_verdict_boot4(&! programs, loaded)
     }
-    print("imported_compile: typecheck_done\n")
+    mf_stage_mark("imported_compile: typecheck_done\n")
     if verdict != 0 {
         print("Type check failed during imported IR merge\n")
         module_frontend_global_init_compile_end()
@@ -7907,7 +7943,7 @@ fn module_frontend_compile_imported_to_file_target_impl(
     }
 
     trace.last_stage = "lower_merge"
-    print("imported_compile: lower_begin\n")
+    mf_stage_mark("imported_compile: lower_begin\n")
     lower_untyped_field_trace_init()
     var used_specialized: bool = false
     var lowered: ModuleFrontendLowerDirectBoxResult = module_frontend_lower_direct_box_error("uninitialized")
@@ -7924,7 +7960,7 @@ fn module_frontend_compile_imported_to_file_target_impl(
     } else {
         lowered = module_frontend_lower_programs_array_direct_box(&! programs, loaded, &! trace)
     }
-    print("imported_compile: lower_done\n")
+    mf_stage_mark("imported_compile: lower_done\n")
     lower_untyped_field_trace_dump()
     if lower_strict_field_report() > 0 {
         print("IR lowering refused: field indices guessed instead of read from the type (SOUNIO_STRICT_FIELD=1)\n")
@@ -8075,7 +8111,7 @@ fn module_frontend_compile_imported_to_file_target_impl(
     if module_frontend_dump_merged_calls_enabled() {
         ir_module_dump_merge_calls(&(*module_box))
     }
-    print("compile_stage: merged_cleanup_begin\n")
+    mf_stage_mark("compile_stage: merged_cleanup_begin\n")
     if optimize {
         module_frontend_load_ocp_skip_mask()
         let cleanup_receipt = opt_cleanup_module_inplace(&! (*module_box))
@@ -8087,10 +8123,10 @@ fn module_frontend_compile_imported_to_file_target_impl(
     // Finalization and cleanup are complete; codegen receives an immutable
     // module reference after this audit snapshot. Sealed, so that claim is
     // checked rather than asserted -- see the single route above.
-    print("compile_stage: merged_seal_begin\n")
+    mf_stage_mark("compile_stage: merged_seal_begin\n")
     let merged_sealed = ir_module_seal_functions(&(*module_box))
     module_frontend_print_seal_receipt("merged", merged_sealed, fn_count)
-    print("compile_stage: merged_ordered_audit_begin\n")
+    mf_stage_mark("compile_stage: merged_ordered_audit_begin\n")
     module_frontend_print_ordered_path_receipt("merged-final", optimize, &(*module_box))
     parser_reset_last_errors()
     // Last barrier before the ELF is written. The OR into had_error at every
@@ -8115,12 +8151,12 @@ fn module_frontend_compile_imported_to_file_target_impl(
         module_frontend_global_init_compile_end()
         return 1
     }
-    print("compile_stage: merged_float_probe_begin\n")
+    mf_stage_mark("compile_stage: merged_float_probe_begin\n")
     module_frontend_print_float_bits_probe("merged", &(*module_box))
     let target_spec = native_resolve_target(requested_target, "auto", explicit_target)
-    print("compile_stage: merged_native_emit_begin\n")
+    mf_stage_mark("compile_stage: merged_native_emit_begin\n")
     let write_rc = compile_native_v2_preview_to_file(&(*module_box), target_spec, output_path)
-    print("compile_stage: merged_native_emit_end\n")
+    mf_stage_mark("compile_stage: merged_native_emit_end\n")
     if write_rc != 0 {
         print("Error: Failed to write native binary to ")
         print(output_path)
