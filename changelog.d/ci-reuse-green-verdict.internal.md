@@ -5,4 +5,4 @@ A pull request whose earlier head already ran, and passed, every lane its curren
 
 The impact classifier then schedules jobs from the delta since that head. Policy gates read the full classification instead, through the new `policy_*` outputs, and the changelog fragment gate is one of them.
 
-The earlier head is disqualified if the delta deletes a fragment, edits `CHANGELOG.md` by hand, or touches a workflow, a script, stdlib, tests or the compiler. If the API cannot answer, the full classification runs. `impact_ci_selftest.sh` has ten new controls.
+The earlier head is disqualified if the delta deletes a fragment, edits `CHANGELOG.md` by hand, or touches a workflow, a script, stdlib, tests or the compiler. If the API cannot answer, the full classification runs. The earlier run must also have tested the same effective inputs. Its synthetic merge with the base of that moment is rebuilt with `git merge-tree` and compared with the checkout. `impact_ci_selftest.sh` has twelve new controls.

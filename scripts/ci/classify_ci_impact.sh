@@ -86,7 +86,7 @@ else
       done <<<"$full_rows"
       reuse_sha=""
       if [[ -n "$full_rows" ]]; then
-        reuse_sha="$(CI_HEAD_SHA="$HEAD_SHA" CI_REUSE_REQUIRED="$required" bash "$(dirname "${BASH_SOURCE[0]}")/ci_reuse_green_ancestor.sh" || true)"
+        reuse_sha="$(CI_HEAD_SHA="$HEAD_SHA" CI_TESTED_SHA="${CI_TESTED_SHA:-$(git rev-parse HEAD)}" CI_REUSE_REQUIRED="$required" bash "$(dirname "${BASH_SOURCE[0]}")/ci_reuse_green_ancestor.sh" || true)"
       fi
       if [[ -n "$reuse_sha" ]]; then
         mapfile -t reuse_paths < <(git diff --name-only "$reuse_sha" "$HEAD_SHA")

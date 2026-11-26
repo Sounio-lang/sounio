@@ -407,7 +407,7 @@ trap 'rm -rf "$reuse_dir"' EXIT
   git checkout -q pr; git "${G[@]}" merge -q --no-edit main
   h2=$(git rev-parse HEAD)
   main2=$(git rev-parse main)
-  run() { CI_EVENT_NAME=pull_request CI_BASE_SHA="$main2" CI_HEAD_SHA="$1" "$CLASSIFIER" 2>/dev/null; }
+  run() { CI_EVENT_NAME=pull_request CI_BASE_SHA="$main2" CI_HEAD_SHA="$1" CI_TESTED_SHA="$1" "$CLASSIFIER" 2>/dev/null; }
   ALL="docs,website,compiler,runtime,stdlib,tests,lean,bootstrap,math,ontology,clinical,sio,full"
   # 1. H1 green, HEAD = H1 + website: reuse H1, compiler not selected.
   out="$(CI_REUSE_GREEN_SHAS="$h1:$ALL" run "$h2")"
@@ -451,4 +451,40 @@ trap 'rm -rf "$reuse_dir"' EXIT
   out="$(CI_REUSE_GREEN_SHAS="$h2:$ALL" run "$h6")"
   expect "$out" reused_from ""; expect "$out" policy_compiler true
   echo "IMPACT_REUSE_SELFTEST_PASS controls=10"
+)
+
+# Effective tested inputs (review of #3751). R's run tested the synthetic merge of
+# R into the base of that moment. A compiler change B on that base, which main
+# later reverts, is absent from raw R..HEAD but present in what R's run tested.
+reuse_dir2="$(mktemp -d)"
+trap 'rm -rf "$reuse_dir" "$reuse_dir2"' EXIT
+(
+  set -e
+  cd "$reuse_dir2"
+  G=(-c user.name=t -c user.email=t@t)
+  ALL="docs,website,compiler,runtime,stdlib,tests,lean,bootstrap,math,ontology,clinical,sio,full"
+  git init -q -b main .
+  mkdir -p self-hosted website
+  echo a >self-hosted/a.sio; echo w >website/i.html
+  git add -A; git "${G[@]}" commit -q -m base
+  git checkout -q -b pr
+  echo a2 >self-hosted/a.sio; git "${G[@]}" commit -q -am "R: change A"
+  r=$(git rev-parse HEAD)
+  git checkout -q main
+  echo b >self-hosted/b.sio; git add -A; git "${G[@]}" commit -q -m "main: add B"
+  main_b=$(git rev-parse HEAD)
+  git rm -q self-hosted/b.sio; git "${G[@]}" commit -q -m "main: revert B"
+  echo w2 >website/i.html; git "${G[@]}" commit -q -am "main: website"
+  git checkout -q pr; git "${G[@]}" merge -q --no-edit main
+  h=$(git rev-parse HEAD); main_now=$(git rev-parse main)
+  run() { CI_EVENT_NAME=pull_request CI_BASE_SHA="$main_now" CI_HEAD_SHA="$h" CI_TESTED_SHA="$h" "$CLASSIFIER" 2>/dev/null; }
+  # The raw delta R..H is website-only, as the counterexample says.
+  [[ "$(git diff --name-only "$r" "$h")" == "website/i.html" ]] || { echo "impact-ci-selftest: counterexample setup" >&2; exit 1; }
+  # 11. R's run tested merge(R, main_b), which held B: refused.
+  out="$(CI_REUSE_GREEN_SHAS="$r:$ALL@$main_b" run)"
+  expect "$out" reused_from ""; expect "$out" compiler true
+  # 12. R's run tested R on the original base (no B): reused.
+  out="$(CI_REUSE_GREEN_SHAS="$r:$ALL@$(git rev-parse main~3)" run)"
+  expect "$out" reused_from "$r"; expect "$out" compiler false; expect "$out" policy_compiler true
+  echo "IMPACT_REUSE_TESTED_TREE_SELFTEST_PASS controls=2"
 )

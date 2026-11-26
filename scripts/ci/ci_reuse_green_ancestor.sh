@@ -27,8 +27,13 @@
 #      (CI_REUSE_REQUIRED). A green docs-only run, a run on a stacked base that
 #      already held the compiler changes, or a run that itself reused a verdict
 #      does not qualify. Since CI Decision passed on R, every job its
-#      classification selected passed. Those jobs cover HEAD's jobs, and their
-#      inputs are byte-identical between R and HEAD.
+#      classification selected passed. Those jobs cover HEAD's jobs, and by
+#      condition 4 their inputs are byte-identical.
+#   4. Effective inputs. The tree R's run tested, which is its synthetic merge
+#      "Merge R into <base>" (read from its Impact log and recomputed with
+#      git merge-tree), differs from the tree tested now (the checkout,
+#      CI_TESTED_SHA) only in the same reusable paths. A base change that R's
+#      run tested and main later reverted is invisible in R..HEAD.
 # The caller then classifies the impact of HEAD by the R..HEAD delta, for job
 # scheduling only. Policy gates (the changelog fragment gate) keep the full
 # BASE..HEAD classification. Fail-closed: if the API is unavailable, a call
@@ -40,9 +45,12 @@
 #   CI_REUSE_REQUIRED      space-separated impact keys HEAD's full
 #                          classification selects (e.g. "compiler stdlib tests")
 #   CI_PR_NUMBER           this pull request's number (required for the API)
+#   CI_TESTED_SHA          the commit this run tests (default CI_HEAD_SHA; on a
+#                          pull_request run, the checked-out synthetic merge)
 #   GITHUB_REPOSITORY, GH_TOKEN   for the API lookup
 #   CI_REUSE_GREEN_SHAS    selftests only, instead of the API: entries
-#                          "<sha>:<key>,<key>,..." (the keys R's own run selected)
+#                          "<sha>:<key>,<key>,...[@<base>]" (the keys R's own
+#                          run selected; <base>: the base its merge used)
 #   CI_REUSE_DISABLE=1     never reuse
 set -uo pipefail
 
@@ -69,16 +77,22 @@ covers() {
   return 0
 }
 
-# own_run_selection <sha>: prints the impact keys that R's own PR run of ci.yml
-# selected, or fails. Fails when the run is missing, not green, not this PR's,
-# or itself reused an earlier verdict.
+# own_run_selection <sha>: prints "<base> <keys...>": the base sha that R's own
+# PR run of ci.yml merged R into (its synthetic merge, from the checkout line
+# "Merge <R> into <base>" of its Impact log), then the impact keys that run
+# selected. Fails when the run is missing, not green, not this PR's, its base
+# cannot be read, or it itself reused an earlier verdict.
 own_run_selection() {
   local c="$1"
   if [[ -n "${CI_REUSE_GREEN_SHAS+set}" ]]; then
     local e
     for e in $CI_REUSE_GREEN_SHAS; do
       if [[ "${e%%:*}" == "$c" ]]; then
-        printf '%s\n' "${e#*:}" | tr ',' ' '
+        # "<sha>:<keys>" tests the raw head; "<sha>:<keys>@<base>" tests the
+        # synthetic merge of <sha> into <base>.
+        local rest="${e#*:}" mb="$c"
+        [[ "$rest" == *@* ]] && { mb="${rest#*@}"; rest="${rest%@*}"; }
+        printf '%s %s\n' "$mb" "$(tr ',' ' ' <<<"$rest")"
         return 0
       fi
     done
@@ -106,27 +120,59 @@ own_run_selection() {
   done < <(grep -E 'Z (docs|website|compiler|runtime|stdlib|tests|lean|bootstrap|math|ontology|clinical|sio|full|reused_from)=' <<<"$log")
   [[ -z "$reused" ]] || return 1
   [[ -n "$keys" ]] || return 1
-  printf '%s\n' "$keys"
+  local base
+  base="$(grep -oE "HEAD is now at [0-9a-f]+ Merge $c into [0-9a-f]{40}" <<<"$log" | head -1 | grep -oE "[0-9a-f]{40}\$")"
+  [[ "$base" =~ ^[0-9a-f]{40}$ ]] || return 1
+  printf '%s %s\n' "$base" "$keys"
+}
+
+# delta_reusable <a> <b>: rc 0 iff a..b is non-empty and every path in it is
+# reusable, with changelog fragments only added or edited.
+delta_reusable() {
+  local delta st p
+  delta="$(git diff --no-renames --name-status "$1" "$2" 2>/dev/null)" || return 1
+  [[ -n "$delta" ]] || return 1
+  while IFS=$'\t' read -r st p; do
+    [[ -z "$p" ]] && continue
+    reusable_path "$p" || return 1
+    # A changelog fragment may be added or edited in the delta, never deleted.
+    if [[ "$p" == changelog.d/* && "$st" != A && "$st" != M ]]; then return 1; fi
+  done <<<"$delta"
+  return 0
+}
+
+# tested_tree <R> <base>: the tree R's run actually tested. That is R itself
+# when base is R; otherwise the synthetic merge GitHub built ("Merge R into
+# base"), recomputed with git merge-tree. A conflicted or failed merge fails.
+tested_tree() {
+  if [[ "$1" == "$2" ]]; then git rev-parse --verify -q "$1^{tree}"; return; fi
+  git cat-file -e "$2^{commit}" 2>/dev/null || return 1
+  local out
+  out="$(git merge-tree --write-tree "$1" "$2" 2>/dev/null)" || return 1
+  head -1 <<<"$out"
 }
 
 head_full="$(git rev-parse --verify -q "$HEAD_SHA^{commit}")" || exit 0
+# What this run tests: the checkout (the synthetic merge of HEAD into the
+# current base, on a pull_request run). Defaults to HEAD itself.
+tested_now="$(git rev-parse --verify -q "${CI_TESTED_SHA:-$head_full}^{tree}")" || exit 0
 mapfile -t chain < <(git rev-list --first-parent --max-count=13 "$head_full" 2>/dev/null | tail -n +2)
 for c in "${chain[@]}"; do
   [[ -n "$c" ]] || continue
-  delta="$(git diff --no-renames --name-status "$c" "$head_full" 2>/dev/null)" || continue
-  [[ -n "$delta" ]] || continue
-  ok=1
-  while IFS=$'\t' read -r st p; do
-    [[ -z "$p" ]] && continue
-    reusable_path "$p" || { ok=0; break; }
-    # A changelog fragment may be added or edited in the delta, never deleted.
-    if [[ "$p" == changelog.d/* && "$st" != A && "$st" != M ]]; then ok=0; break; fi
-  done <<<"$delta"
-  [[ $ok == 1 ]] || continue
-  # A qualifying candidate whose run was cancelled, or that does not cover HEAD,
-  # does not end the search: an older head can still qualify on its own.
+  # 1. The raw delta (which the caller schedules jobs by) is reusable.
+  delta_reusable "$c" "$head_full" || continue
+  # 2-3. R's own covering run of this PR. A cancelled or non-covering run does
+  # not end the search: an older head can still qualify on its own.
   sel="$(own_run_selection "$c")" || continue
-  if covers "$sel"; then
+  base="${sel%% *}"; keys="${sel#* }"
+  covers "$keys" || continue
+  # 4. Effective inputs. The tree R's run tested (its synthetic merge with the
+  # base of that moment) differs from the tree tested now only in reusable
+  # paths. The raw delta alone is not enough: a base change that R's run
+  # tested and main later reverted is absent from R..HEAD (review of #3751).
+  t_r="$(tested_tree "$c" "$base")" || continue
+  [[ -n "$t_r" ]] || continue
+  if [[ "$t_r" == "$tested_now" ]] || delta_reusable "$t_r" "$tested_now"; then
     echo "$c"
     exit 0
   fi
