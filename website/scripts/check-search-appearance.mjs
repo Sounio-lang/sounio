@@ -172,6 +172,31 @@ function firstParagraphAfterH1(html) {
   return decode(match[1].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim());
 }
 
+// Text of the first paragraph after the first h1, via the HTML parser.
+// A tag-stripping regexp is not used: `<scr<script>ipt>` survives one pass.
+function firstParagraphTextAfterH1(html) {
+  let seenH1 = false;
+  let text = '';
+  function walk(node) {
+    if (text || !node || typeof node !== 'object') return;
+    const name = node.nodeName;
+    if (name === 'h1') seenH1 = true;
+    else if (seenH1 && name === 'p') {
+      const parts = [];
+      collectVisibleText(node, parts);
+      text = parts.join('').replace(/\s+/g, ' ').trim();
+      return;
+    }
+    const children = node.childNodes;
+    if (children) {
+      for (const child of children) walk(child);
+    }
+    if (node.content) walk(node.content);
+  }
+  walk(parse(html));
+  return text;
+}
+
 function attr(tag, name) {
   return tag?.match(new RegExp(`${name}="([^"]*)"`))?.[1] ?? '';
 }
@@ -208,6 +233,10 @@ function selfTest() {
   assert.equal(decode('&lt;h1&gt;'), '<h1>');
   assert.equal(decode('&amp;lt;'), '&lt;');
   assert.equal(decode('&amp;amp;'), '&amp;');
+  assert.equal(
+    firstParagraphTextAfterH1('<h1>Title</h1><p>Start with the <a href="/learn/effects/">Effect System guide</a>. Done.</p>'),
+    'Start with the Effect System guide. Done.',
+  );
 
   const aboutSnippet = `<section><h1>About</h1><p>
         Sounio (formerly Demetrios). Sounio was previously released as Demetrios, the former name of this language.
@@ -623,10 +652,9 @@ for await (const file of walk(dist)) {
       errors.push(`${route}: H1 is ${JSON.stringify(headings[0])}, expected ${JSON.stringify(EFFECT_CHECKER_PAGE.h1)}`);
     }
     const callout = `${EFFECT_CHECKER_PAGE.calloutBefore}${EFFECT_CHECKER_PAGE.calloutLink}${EFFECT_CHECKER_PAGE.calloutAfter}`;
-    const h1End = html.search(/<\/h1>/i);
-    const para = h1End < 0 ? null : html.slice(h1End).match(/<p\b[^>]*>([\s\S]*?)<\/p>/i);
-    const lede = para ? decode(para[1].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim()) : '';
-    if (lede !== callout) errors.push(`${route}: first paragraph after H1 is not the effect-guide callout`);
+    if (firstParagraphTextAfterH1(html) !== callout) {
+      errors.push(`${route}: first paragraph after H1 is not the effect-guide callout`);
+    }
     if (!html.includes(`href="${EFFECT_CHECKER_PAGE.calloutHref}"`)) {
       errors.push(`${route}: missing link ${EFFECT_CHECKER_PAGE.calloutHref}`);
     }
