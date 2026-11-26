@@ -70,7 +70,9 @@ import SCCore
 -- ADR-032 step 1: Sounio Core fragment, theorems (a) and (b).
 #print axioms SCCore.sc_sound
 #print axioms SCCore.require_never_imprecise
+#print axioms SCCore.requireExact_never_imprecise
 #print axioms SCCore.consistent_never_conflict
 #print axioms SCCore.opaque_refused_at_require
+#print axioms SCCore.proj_carries_field_set
 #print axioms SCCore.consistentB_sound
 #print axioms SCCore.consistent_perm
