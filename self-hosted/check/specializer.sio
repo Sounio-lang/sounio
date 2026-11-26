@@ -165,6 +165,13 @@ var SPEC_CAP_OVERFLOW_CODE: i64 = 0
 // Generic methods require an explicit, unambiguous turbofish so the
 // specializer can choose the same-name clone before IR lowering.
 var SPEC_METHOD_TARG_UNSUPPORTED: bool = false
+// `impl Trait for Type` pairs of the compilation unit, as name hashes (flat
+// i64 arrays: the only global state this pass may hold safely), and whether an
+// instantiation broke a trait bound of its template (E315, printed when found).
+var SPEC_TB_TRAIT_H: [i64; 4096] = [0; 4096]
+var SPEC_TB_TYPE_H: [i64; 4096] = [0; 4096]
+var SPEC_TB_COUNT: i64 = 0
+var SPEC_BOUND_UNSATISFIED: bool = false
 // Generic METHOD templates name their impl's target type (SPEC_GF_OWNER_HASH,
 // 0 for a free generic fn). A turbofish-less call `v.push(10)` that matches a
 // template only by name is recorded in SPEC_GF_UNTARGETED_CALL instead of
@@ -296,6 +303,8 @@ fn spec_reset_state() with Mut {
     SPEC_CAP_OVERFLOW = false
     SPEC_CAP_OVERFLOW_CODE = 0
     SPEC_METHOD_TARG_UNSUPPORTED = false
+    SPEC_TB_COUNT = 0
+    SPEC_BOUND_UNSATISFIED = false
 }
 
 // True when this pass poisoned a template whose instantiations cannot survive
@@ -361,7 +370,7 @@ pub fn spec_report_unsupported_method_generic() -> bool with IO {
 // Report every specializer-side refusal. Call this before folding a typecheck
 // verdict so short-circuit `||` on the checker result cannot hide these errors.
 pub fn spec_report_any_specializer_failure() -> bool with IO {
-    spec_report_unsound_poison() || spec_report_cap_overflow() || spec_report_unsupported_method_generic()
+    spec_report_unsound_poison() || spec_report_cap_overflow() || spec_report_unsupported_method_generic() || SPEC_BOUND_UNSATISFIED
 }
 
 // ============================================================
@@ -2000,6 +2009,112 @@ fn spec_make_fn_item(name: Name, fd: FnDef, visibility: Visibility) -> Item with
     }
 }
 
+// ============================================================
+// Trait bounds of generic functions (E315)
+// ============================================================
+
+// Past 4096 pairs a pair is not recorded, and an instantiation that needs it
+// is refused: absence from a truncated table is not evidence of an impl.
+fn spec_tb_note(trait_h: i64, type_h: i64) with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < SPEC_TB_COUNT {
+        if SPEC_TB_TRAIT_H[i as usize] == trait_h && SPEC_TB_TYPE_H[i as usize] == type_h { return }
+        i = i + 1
+    }
+    if SPEC_TB_COUNT >= 4096 { return }
+    SPEC_TB_TRAIT_H[SPEC_TB_COUNT as usize] = trait_h
+    SPEC_TB_TYPE_H[SPEC_TB_COUNT as usize] = type_h
+    SPEC_TB_COUNT = SPEC_TB_COUNT + 1
+}
+
+fn spec_tb_known(trait_h: i64, type_h: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < SPEC_TB_COUNT {
+        if SPEC_TB_TRAIT_H[i as usize] == trait_h && SPEC_TB_TYPE_H[i as usize] == type_h { return true }
+        i = i + 1
+    }
+    false
+}
+
+// Record every `impl Trait for Type` item; the type by its rendered name, the
+// same rendering a turbofish type argument gets.
+fn spec_collect_trait_impls(items: Option<Box<ItemList>>) with Mut, Panic, Div, Alloc {
+    var cur = items
+    var done = false
+    while !done {
+        match cur {
+            None => { done = true }
+            Some(list) => {
+                let it = (*list).head
+                if it.kind == ItemKind::ItemImpl {
+                    match it.impl_def {
+                        Some(id) => {
+                            if (*id).trait_name.len > 0 {
+                                spec_tb_note(ast_name_hash((*id).trait_name), ast_name_hash(spec_render_type_name((*id).target_type)))
+                            }
+                        }
+                        None => {}
+                    }
+                }
+                cur = (*list).tail
+            }
+        }
+    }
+}
+
+// E315: each bound of the template's declared type parameters must have an
+// impl for the type argument bound to it. Type parameters map to arguments
+// through the template's own parameter order (its substitution context).
+fn spec_check_instance_bounds(base_name: Name, gt_idx: i64, targs: Option<Box<TypeExprList>>) -> bool with IO, Mut, Panic, Div, Alloc {
+    var ok = true
+    match spec_generic_table_fd(gt_idx) {
+        None => {}
+        Some(fd_box) => {
+            let ctx = spec_ctx_from_fn_slot(gt_idx)
+            var cur = (*fd_box).type_params
+            var done = false
+            while !done {
+                match cur {
+                    None => { done = true }
+                    Some(node) => {
+                        let idx = spec_ctx_tp_index(ctx, ast_name_hash((*node).head.name))
+                        if idx >= 0 {
+                            let arg = spec_type_args_nth(targs, idx)
+                            let arg_h = ast_name_hash(spec_render_type_name(arg))
+                            var b = (*node).head.bounds
+                            var bdone = false
+                            while !bdone {
+                                match b {
+                                    None => { bdone = true }
+                                    Some(bn) => {
+                                        let tr = spec_path_single_name((*bn).head.path)
+                                        if !spec_tb_known(ast_name_hash(tr), arg_h) {
+                                            print("error[E315]: type argument `")
+                                            print(spec_render_type_string(arg))
+                                            print("` does not implement trait `")
+                                            print(spec_name_to_string(tr))
+                                            print("`, a bound of type parameter `")
+                                            print(spec_name_to_string((*node).head.name))
+                                            print("` of `")
+                                            print(spec_name_to_string(base_name))
+                                            print("`\n")
+                                            SPEC_BOUND_UNSATISFIED = true
+                                            ok = false
+                                        }
+                                        b = (*bn).tail
+                                    }
+                                }
+                            }
+                        }
+                        cur = (*node).tail
+                    }
+                }
+            }
+        }
+    }
+    ok
+}
+
 // Reserve the FULL identity before descending into the body (recursive calls
 // terminate through the reservation). Never use emitted-symbol hashes as cache
 // identity. The original AST remains immutable throughout discovery.
@@ -2014,6 +2129,10 @@ fn spec_ensure_instance(base_name: Name, targs: Option<Box<TypeExprList>>) with 
         return
     }
     if spec_fn_instance_find(gt_idx, key) >= 0 { return }
+    // A broken bound is reported (E315) and not instantiated: the call keeps
+    // its template and turbofish, and no clone body is checked against a type
+    // that lacks the bound.
+    if !spec_check_instance_bounds(base_name, gt_idx, targs) { return }
     // Method dispatch still relies on the receiver's original method name.
     if SPEC_GF_IS_METHOD[gt_idx as usize] && SPEC_GF_INST_COUNT[gt_idx as usize] > 0 {
         SPEC_GF_POISONED[gt_idx as usize] = true
@@ -4062,6 +4181,7 @@ pub fn specialize_generics(items: Option<Box<ItemList>>) -> Option<Box<ItemList>
     spec_collect_generic_structs(items)
     spec_mi_collect(items, known)
     spec_collect_generic_fns(items, known)
+    spec_collect_trait_impls(items)
     spec_collect_generic_methods(items, known)
     if spec_trace_enabled() {
         print("specializer: generic_fns=")
@@ -4131,6 +4251,7 @@ pub fn specialize_generics_multi(items: Option<Box<ItemList>>, programs: &! [Pro
     spec_collect_generic_structs(items)
     spec_mi_collect(items, known)
     spec_collect_generic_fns(items, known)
+    spec_collect_trait_impls(items)
     spec_collect_generic_methods(items, known)
     if spec_trace_enabled() {
         print("specializer: generic_fns=")
