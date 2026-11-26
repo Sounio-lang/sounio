@@ -224,3 +224,12 @@ SHA256:** unavailable because no cross-GPU pair has run. The above hashes
 are actually executed CPU/scoped tokenizer witnesses, not surrogate GPU
 parity. The final N-10 receipt and PR review gate remain pending terminal
 GPU results; branch is pushed and no merge has been performed.
+
+### Final source-only cleanup (13:12 UTC)
+
+Commit `c2fbca468899f25227b6163b565736f3ec794ae3` removes one trailing
+blank line from `top2.sio`; the numerical source is unchanged. Job **29308**
+(`dl380p-dl380p-proxmox`, CPU-only) checked that library via the public
+compiler wrapper: `COMPLETED 0:0`, elapsed `00:00:23`, batch MaxRSS `1022M`.
+`git diff --check 575d1eb57..HEAD` is clean. Both GPU jobs remain pinned to
+`ad4a505c1931d48552397089ca11d7cfaeabd988` for a matched-source comparison.
