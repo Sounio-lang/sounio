@@ -1,0 +1,1 @@
+CI no longer depends on one Ubuntu mirror. `scripts/ci/apt_ensure.sh` skips packages that are already installed, and otherwise retries `apt-get update`/`install` across four official mirror attempts. A mirror caught mid-sync failed #3741's Independent Scientific Reference Controls on 2026-11-26. The four `apt-get update` sites in `ci.yml` now use it.
