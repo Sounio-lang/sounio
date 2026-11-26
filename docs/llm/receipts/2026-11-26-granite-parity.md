@@ -549,3 +549,41 @@ within 5 seconds. Before job 29563 and after job 29564 (D CPU-only) both build
 Madaros from their respective source checkout; after depends on the
 reproduced before failure. **NOT ESTABLISHED:** before/after execution
 results until those jobs finish. No compiler changes on the Granite branch.
+
+### B. Compiler regression terminal results (OBSERVED)
+
+The initial baseline allocation **29563** built Madaros successfully but
+failed its harness with status 126 (generated probe lacked executable bit;
+00:02:00, batch MaxRSS 2209536K). Its dependent 29564 was canceled. This
+was not a reproduced thread hang. The harness was corrected to `chmod +x`
+and rerun with the same unpatched compiler source and identical regression
+source; the corrected harness alone was overlaid at
+`46f3c22e84c42a210c237c344446213e641605d9`.
+
+| Job | Node | Source | State | Wall time | Batch MaxRSS | Program result |
+|---|---|---|---|---|---|---|
+| 29566 | D | `648d25bfdb959fe7407e81fb99b7d0f75bdd3789` | COMPLETED 0:0 | 00:02:17 | 2475884K | readiness marker; timeout 124, expected exit 37 |
+| 29567 | D | `46f3c22e84c42a210c237c344446213e641605d9` | COMPLETED 0:0 | 00:01:48 | 2194760K | readiness marker; exit 37 within 5 seconds, PASS |
+
+Both used source-built Madaros, the same Sounio and C++ probe sources,
+CPU-only jobs tagged `lane:llm-granite`. The before batch succeeded because
+it asserted the expected regression failure. The after batch recorded
+`EXIT_GROUP_THREAD_RETURN_PASS` and `EXIT_GROUP_AFTER_PASS`.
+
+| SHA256 artifact | Before (29566) | After (29567) |
+|---|---|---|
+| Madaros | `82e085c09464e7446d6345a14324802ea68bf8c66a3988d4d3f23bda9da1e1d1` | `7b4a7e53da0e13fc2c0459eb086faaad33343d4268e9d4f335fbdd06f1ff0628` |
+| probe executable | `6919e16b848cad4e4a397db95f30dad4e5fb64fab01021eed5fe27f050f56f3d` | `46992b58b4f926f19b527d711b845ac27eb0c3d028d73f054530dacde2ce3804` |
+| helper DSO | `88028ef48dd4b065c996b1ecd2621cc64e67340db1e2851dbc901d925373428d` | `6bc6f17188bc25a90f9bb891af22a40776300bdbb22c3599cb5b68b308d16ace` |
+
+The DSO build digests differ, but both builds used the same helper source
+and compiler and emitted the readiness marker. Logs and manifests:
+`/orangefs/training/llm-granite-n10/exit-group-29566/` and `exit-group-29567/`.
+The compiler change and receipt were pushed to `fix/linux-x86-exit-group`
+(head `d1d7dfb61dda75fca9e560c824c8ff089b6adcde`); PR
+[#3752](https://github.com/Sounio-lang/sounio/pull/3752) targets `main` and
+was not merged. **OBSERVED:** the blocked-thread process-return regression
+fails before and passes after, with the patched Madaros built from source.
+**NOT ESTABLISHED:** actual patched-compiler CUDA inference, the exact
+cause of job 29516's timeout, and the cross-GPU bit-identity prediction
+while candidate jobs remain pending. The original audit pin is unchanged.
