@@ -68,7 +68,7 @@ mkdir -p "$WORK/home" || die mkdir
 ART="$(dirname "$MODEL_DIR")/audit-$JOB"
 mkdir -p "$ART" || die "artifact-directory"
 # Save failed-build diagnostics and partial TSV under a distinct name.
-trap 'rc=$?; if (( rc != 0 )); then cp "$WORK/"*.log "$ART/" 2>/dev/null || true; if [[ -s "$WORK/cuda.tsv" ]]; then cp "$WORK/cuda.tsv" "$ART/cuda.partial.tsv"; sha256sum "$ART/cuda.partial.tsv" > "$ART/partial.sha256"; fi; printf "%s\n" "$rc" > "$ART/exit-code"; fi' EXIT
+trap 'rc=$?; if (( rc != 0 )); then cp "$WORK/"*.log "$ART/" 2>/dev/null || true; if [[ ! -s "$ART/cuda.tsv" && -s "$WORK/cuda.tsv" ]]; then cp "$WORK/cuda.tsv" "$ART/cuda.partial.tsv"; sha256sum "$ART/cuda.partial.tsv" > "$ART/partial.sha256"; fi; printf "%s\n" "$rc" > "$ART/exit-code"; fi' EXIT
 export HOME="$WORK/home" XDG_CACHE_HOME="$WORK/home/.cache"
 awk 'f { print } /^__CA_BUNDLE__$/ { f = 1 }' "$SELF" > "$CA"
 grep -q 'BEGIN CERTIFICATE' "$CA" 2>/dev/null || cp /etc/ssl/certs/ca-certificates.crt "$CA" 2>/dev/null || die "no CA"
