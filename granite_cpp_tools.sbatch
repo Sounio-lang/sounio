@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=granite-cpp-tools
 #SBATCH --no-requeue
+#SBATCH --comment=lane:llm-granite
 #SBATCH --partition=all
 #SBATCH --nodelist=dl380-dl380-proxmox
 #SBATCH --cpus-per-task=2
@@ -41,6 +42,13 @@ cd "$work"
 git init -q src
 git -C src fetch -q --depth 1 https://github.com/Sounio-lang/sounio.git "$1"
 git -C src checkout -q --detach FETCH_HEAD
+[[ $(git -C src rev-parse HEAD) == "$1" ]]
+# The numerical audit remains pinned; the independently tested oracle may be
+# repaired at a separate source commit. Preserve the pinned comparator bytes.
+if [[ -n "${2:-}" && "$2" != "$1" ]]; then
+  git -C src fetch -q --depth 1 https://github.com/Sounio-lang/sounio.git "$2"
+  git -C src checkout -q FETCH_HEAD -- tools/sounio-llm/granite_prompt_ids.cpp
+fi
 "$zigdir/zig" c++ -std=c++23 -O2 -Wall -Wextra -Werror src/tools/sounio-llm/cmp_61440.cpp -o "$art/cmp_61440" > "$work/build-cmp.log" 2>&1
 "$art/cmp_61440" --selftest > "$work/cmp-selftest.log" 2>&1
 rec cmp-selftest-pass

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=llm-granite-parity
 #SBATCH --no-requeue
+#SBATCH --comment=lane:llm-granite
 #SBATCH --partition=gpu-orangefs
 #SBATCH --qos=normal
 #SBATCH --cpus-per-task=8

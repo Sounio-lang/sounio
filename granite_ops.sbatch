@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=granite-tail
 #SBATCH --no-requeue
+#SBATCH --comment=lane:llm-granite
 #SBATCH --partition=gpu-orangefs
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=12G

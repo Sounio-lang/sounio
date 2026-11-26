@@ -92,11 +92,17 @@ struct Tokenizer {
         }
         if (!s.eof() || vocab.empty() || merges.empty() || specials.empty()) throw std::runtime_error("incomplete tokenizer tables");
         auto alphabet = byte_alphabet();
-        for (size_t i = 0; i < alphabet.size(); ++i) bytes[i] = lookup(alphabet[i]);
+        for (size_t i = 0; i < alphabet.size(); ++i) {
+            auto it = vocab.find(alphabet[i]);
+            bytes[i] = it == vocab.end() ? absent : it->second;
+        }
     }
     void bpe(std::string_view text, std::vector<ID>& out) const {
         std::vector<ID> seq;
-        for (unsigned char c : text) seq.push_back(bytes[c]);
+        for (unsigned char c : text) {
+            if (bytes[c] == absent) throw std::runtime_error("input byte absent from Granite vocabulary: " + std::to_string(c));
+            seq.push_back(bytes[c]);
+        }
         while (seq.size() > 1) {
             size_t best = std::numeric_limits<size_t>::max(), at = 0;
             ID product = absent;
@@ -154,6 +160,14 @@ int main(int argc, char** argv) {
         Tokenizer tok;
         tok.load(argv[1], argv[2], argv[3]);
         if (std::string_view(argv[4]) == "--smoke") {
+            // The pinned Granite vocabulary does not contain all 256 ByteLevel symbols.
+            // Accept sparse tables, but fail closed on an unrepresentable input byte.
+            if (std::count(tok.bytes.begin(), tok.bytes.end(), absent) != 14)
+                throw std::runtime_error("unexpected Granite byte alphabet coverage");
+            bool missing_rejected = false;
+            try { std::vector<ID> ids; tok.bpe(std::string(1, static_cast<char>(192)), ids); }
+            catch (const std::runtime_error& e) { missing_rejected = std::string_view(e.what()).starts_with("input byte absent"); }
+            if (!missing_rejected) throw std::runtime_error("missing input byte not rejected");
             if (tok.encode("hello") != std::vector<ID>{7656} ||
                 tok.encode(" hello!") != std::vector<ID>{17964, 19} ||
                 tok.encode("123") != std::vector<ID>{35, 36, 37} ||

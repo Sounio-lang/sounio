@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=granite-reference-ids
 #SBATCH --no-requeue
+#SBATCH --comment=lane:llm-granite
 #SBATCH --partition=all
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=4G

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=granite-collect-receipt
 #SBATCH --no-requeue
+#SBATCH --comment=lane:llm-granite
 #SBATCH --partition=all
 #SBATCH --nodelist=dl380-dl380-proxmox
 #SBATCH --cpus-per-task=1
@@ -12,6 +13,8 @@
 set -euo pipefail
 stage=/orangefs/training/llm-granite-n10
 rtx=${1:?RTX audit job id}
+l4=${5:-}
+ref_job=${l4:-$rtx}
 a5=${2:?A5000 audit job id}
 joblist=${3:?comma-separated dependency job ids}
 head_c=${4:?pinned audit commit}
@@ -27,7 +30,8 @@ out="$stage/cluster-receipt-$SLURM_JOB_ID.txt"
     cat "$model/MODEL_REVISION" "$model/SHA256SUMS"
     sha256sum "$model/SHA256SUMS"
   fi
-  for j in "$rtx" "$a5"; do
+  for j in "$l4" "$rtx" "$a5"; do
+    [[ -n "$j" ]] || continue
     art="$stage/audit-$j"
     printf '\nAudit job %s artifacts:\n' "$j"
     if [[ -s "$art/SHA256SUMS" ]]; then
@@ -38,9 +42,9 @@ out="$stage/cluster-receipt-$SLURM_JOB_ID.txt"
     if [[ -s "$art/exit-code" ]]; then printf 'exit-code='; cat "$art/exit-code"; fi
     if [[ -s "$art/cmp.out" ]]; then cat "$art/cmp.out"; fi
   done
-  if [[ -s "$stage/audit-$rtx/cuda.tsv" ]]; then
-    printf '\nREF_TSV for Mac lane: %s\n' "$stage/audit-$rtx/cuda.tsv"
-    sha256sum "$stage/audit-$rtx/cuda.tsv"
+  if [[ -s "$stage/audit-$ref_job/cuda.tsv" ]]; then
+    printf '\nREF_TSV for Mac lane: %s\n' "$stage/audit-$ref_job/cuda.tsv"
+    sha256sum "$stage/audit-$ref_job/cuda.tsv"
   else printf '\nREF_TSV unavailable; no complete reference run.\n'; fi
   printf '\nA divergent tuple is not a localized causal diagnosis. No fix is applied by this collector.\n'
 } > "$out.tmp"
