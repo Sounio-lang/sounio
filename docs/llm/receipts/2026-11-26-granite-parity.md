@@ -454,3 +454,12 @@ All new jobs are tagged `lane:llm-granite`, R770 requests stay under 56G,
 no new jobs on dl380p or 5860, no node state changes, and coordinator-owned
 29217 remains RUNNING and untouched. The **prediction remains NOT TESTED**;
 no final compared artifact hashes/PR yet.
+
+**Reference gate completed:** 29551 finished `COMPLETED 0:0`, elapsed
+00:02:01, batch MaxRSS 6289988K, recording `registered-corpus-sha-` with
+exact registered digest and `GRANITE_REFERENCE_480_PASS`. The offline 480-ID
+reference is `/orangefs/training/llm-granite-n10/granite_480_prompt_ids.tsv`,
+SHA256 `739880da2d40ff74b9a409f8a76d22d22ebc146b1afdb14007ae095512b8c22e`.
+At the next controller readback 29553 was **RUNNING** on
+`gpuorangefs-r770-proxmox`. This releases the L4 leg, not a completed audit
+or comparison. Both R740 audit jobs still wait for its successful result.
