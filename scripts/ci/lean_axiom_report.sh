@@ -41,7 +41,7 @@ case "${1:-}" in
     run_report "$REPO_ROOT/formal" Bootstrap/AxiomReport.lean Bootstrap.SporosX1Comp
     ;;
   "")
-    run_report "$REPO_ROOT/formal" AxiomReport.lean OntologyELPlusClosureComplete ElfLinker TypeChecker TrustSemiring EpistemicSafety EpistemicStat EpistemicJoint
+    run_report "$REPO_ROOT/formal" AxiomReport.lean OntologyELPlusClosureComplete ElfLinker TypeChecker TrustSemiring EpistemicSafety EpistemicStat EpistemicJoint SCCore
     run_report "$REPO_ROOT/formal/lean4" AxiomReport.lean SounioHydrogenPbox SounioGradedModal
     ;;
   *) fail "usage: $0 [--bootstrap]" ;;
