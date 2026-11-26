@@ -24,6 +24,7 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
   exit 0
 fi
 
+reused_from=""
 declare -A impact=()
 keys=(docs website compiler runtime stdlib tests lean bootstrap math ontology clinical sio full)
 for key in "${keys[@]}"; do impact["$key"]=false; done
@@ -68,6 +69,22 @@ else
     fi
     mapfile -t paths <"$diff_list"
     rm -f "$diff_list" "$diff_err"
+    # Reuse (decision 2026-11-26): if an earlier head of this PR already passed
+    # CI Decision and differs from HEAD only in website/docs/changelog paths, its
+    # heavy-job verdict still holds. Classify by that delta, so only the jobs
+    # those paths select run again. See ci_reuse_green_ancestor.sh. Fail-closed:
+    # no qualifying green head means the full BASE..HEAD classification above.
+    if [[ "$EVENT_NAME" == "pull_request" ]]; then
+      reuse_sha="$(CI_HEAD_SHA="$HEAD_SHA" bash "$(dirname "${BASH_SOURCE[0]}")/ci_reuse_green_ancestor.sh" || true)"
+      if [[ -n "$reuse_sha" ]]; then
+        mapfile -t reuse_paths < <(git diff --name-only "$reuse_sha" "$HEAD_SHA")
+        if ((${#reuse_paths[@]})); then
+          echo "reuse: CI Decision passed on $reuse_sha; classifying the ${#reuse_paths[@]} path(s) of $reuse_sha..$HEAD_SHA instead of ${#paths[@]}" >&2
+          paths=("${reuse_paths[@]}")
+          reused_from="$reuse_sha"
+        fi
+      fi
+    fi
   fi
 
   for path in "${paths[@]}"; do
@@ -131,3 +148,6 @@ for key in "${keys[@]}"; do
   echo "$row"
   [[ -z "$OUTPUT_FILE" ]] || echo "$row" >>"$OUTPUT_FILE"
 done
+row="reused_from=${reused_from:-}"
+echo "$row"
+[[ -z "$OUTPUT_FILE" ]] || echo "$row" >>"$OUTPUT_FILE"
