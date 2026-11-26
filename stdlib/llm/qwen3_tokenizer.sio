@@ -706,6 +706,32 @@ fn qt_populate_init_ids(tok: &!Qwen3Tokenizer, scratch: i64) with Mut {
     }
 }
 
+pub fn qwen3_special_id(tok: &Qwen3Tokenizer, literal: string) -> i64 {
+    if !tok.ok { return -1 }
+    let n = str_len(literal)
+    var s: i64 = 0
+    while s < tok.n_special {
+        let slen = qt_get_i64(tok.arena_ptr, qt_off_sp_len(), s)
+        if slen == n {
+            let soff = qt_get_i64(tok.arena_ptr, qt_off_sp_off(), s)
+            var eq = true
+            var i: i64 = 0
+            while i < n {
+                if ptr_read_u8(tok.blob_ptr, soff + i) != (str_char_at(literal, i) & 255) {
+                    eq = false
+                    break
+                }
+                i = i + 1
+            }
+            if eq {
+                return qt_get_i64(tok.arena_ptr, qt_off_sp_id(), s)
+            }
+        }
+        s = s + 1
+    }
+    -1
+}
+
 fn qt_parse_into(tok: &!Qwen3Tokenizer, shard: &MappedShard, work_ptr: i64) -> bool with Mut, Panic, Div {
     let slen = mapped_shard_len(shard)
     let s_ptr = mapped_shard_ptr(shard)
@@ -749,10 +775,14 @@ fn qt_parse_into(tok: &!Qwen3Tokenizer, shard: &MappedShard, work_ptr: i64) -> b
         return false
     }
     qt_populate_init_ids(tok, scratch_a)
+    if tok.granite && (qwen3_special_id(tok, "<|start_of_role|>") != 49152
+        || qwen3_special_id(tok, "<|end_of_role|>") != 49153
+        || qwen3_special_id(tok, "<|tool_call|>") != 49154
+        || qwen3_special_id(tok, "<|end_of_text|>") != 0) { return false }
     true
 }
 
-fn qt_load_from_shard(shard: &MappedShard) -> Qwen3Tokenizer with IO, Mut, Panic, Div, Alloc {
+fn qt_load_from_shard(shard: &MappedShard, granite: bool) -> Qwen3Tokenizer with IO, Mut, Panic, Div, Alloc {
     if !mapped_shard_is_ok(shard) { return qt_tokenizer_empty() }
     let slen = mapped_shard_len(shard)
     if slen <= 2 { return qt_tokenizer_empty() }
@@ -777,7 +807,7 @@ fn qt_load_from_shard(shard: &MappedShard) -> Qwen3Tokenizer with IO, Mut, Panic
         let PageArena { ptr: _ap, len: _al, ok: _ao } = arena
         let PageArena { ptr: _bp, len: _bl, ok: _bo } = blob
         var tok = Qwen3Tokenizer {
-            granite: false,
+            granite: granite,
             ok: false,
             n_vocab: 0,
             n_merges: 0,
@@ -806,35 +836,9 @@ fn qt_load_from_shard(shard: &MappedShard) -> Qwen3Tokenizer with IO, Mut, Panic
 
 pub fn qwen3_tokenizer_load(path: string) -> Qwen3Tokenizer with IO, Mut, Panic, Div, Alloc {
     let shard = mapped_shard_open(path)
-    let tok = qt_load_from_shard(&shard)
+    let tok = qt_load_from_shard(&shard, false)
     let _c = mapped_shard_close(shard)
     tok
-}
-
-pub fn qwen3_special_id(tok: &Qwen3Tokenizer, literal: string) -> i64 {
-    if !tok.ok { return -1 }
-    let n = str_len(literal)
-    var s: i64 = 0
-    while s < tok.n_special {
-        let slen = qt_get_i64(tok.arena_ptr, qt_off_sp_len(), s)
-        if slen == n {
-            let soff = qt_get_i64(tok.arena_ptr, qt_off_sp_off(), s)
-            var eq = true
-            var i: i64 = 0
-            while i < n {
-                if ptr_read_u8(tok.blob_ptr, soff + i) != (str_char_at(literal, i) & 255) {
-                    eq = false
-                    break
-                }
-                i = i + 1
-            }
-            if eq {
-                return qt_get_i64(tok.arena_ptr, qt_off_sp_id(), s)
-            }
-        }
-        s = s + 1
-    }
-    -1
 }
 
 // ---- Qwen3 UTF-8 & Regex Pre-Tokenization ----
@@ -844,12 +848,9 @@ pub fn qwen3_special_id(tok: &Qwen3Tokenizer, literal: string) -> i64 {
 // custom single-digit splitter. The same byte alphabet, vocabulary and BPE
 // merge parser are reused; no external tokenizer is in the inference path.
 pub fn granite_tokenizer_load(path: string) -> Qwen3Tokenizer with IO, Mut, Panic, Div, Alloc {
-    var tok = qwen3_tokenizer_load(path)
-    tok.granite = true
-    if tok.ok && (qwen3_special_id(&tok, "<|start_of_role|>") != 49152
-        || qwen3_special_id(&tok, "<|end_of_role|>") != 49153
-        || qwen3_special_id(&tok, "<|tool_call|>") != 49154
-        || qwen3_special_id(&tok, "<|end_of_text|>") != 0) { tok.ok = false }
+    let shard = mapped_shard_open(path)
+    let tok = qt_load_from_shard(&shard, true)
+    let _c = mapped_shard_close(shard)
     tok
 }
 
