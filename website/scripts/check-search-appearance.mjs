@@ -172,19 +172,37 @@ function firstParagraphAfterH1(html) {
   return decode(match[1].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim());
 }
 
-// Text of the first paragraph after the first h1, via the HTML parser.
+function elementText(node) {
+  const parts = [];
+  collectVisibleText(node, parts);
+  return parts.join('').replace(/\s+/g, ' ').trim();
+}
+
+function anchorsIn(node) {
+  const found = [];
+  function walk(current) {
+    if (!current || typeof current !== 'object') return;
+    if (current.nodeName === 'a') {
+      const href = (current.attrs || []).find((item) => item.name === 'href')?.value ?? '';
+      found.push({ href, text: elementText(current) });
+    }
+    for (const child of current.childNodes || []) walk(child);
+  }
+  walk(node);
+  return found;
+}
+
+// First paragraph after the first h1, via the HTML parser.
 // A tag-stripping regexp is not used: `<scr<script>ipt>` survives one pass.
-function firstParagraphTextAfterH1(html) {
+function firstParagraphAfterH1Node(html) {
   let seenH1 = false;
-  let text = '';
+  let found = null;
   function walk(node) {
-    if (text || !node || typeof node !== 'object') return;
+    if (found || !node || typeof node !== 'object') return;
     const name = node.nodeName;
     if (name === 'h1') seenH1 = true;
     else if (seenH1 && name === 'p') {
-      const parts = [];
-      collectVisibleText(node, parts);
-      text = parts.join('').replace(/\s+/g, ' ').trim();
+      found = node;
       return;
     }
     const children = node.childNodes;
@@ -194,7 +212,30 @@ function firstParagraphTextAfterH1(html) {
     if (node.content) walk(node.content);
   }
   walk(parse(html));
-  return text;
+  return found;
+}
+
+function firstParagraphTextAfterH1(html) {
+  const paragraph = firstParagraphAfterH1Node(html);
+  return paragraph ? elementText(paragraph) : '';
+}
+
+function effectGuideCalloutErrors(html) {
+  const errors = [];
+  const callout = `${EFFECT_CHECKER_PAGE.calloutBefore}${EFFECT_CHECKER_PAGE.calloutLink}${EFFECT_CHECKER_PAGE.calloutAfter}`;
+  const paragraph = firstParagraphAfterH1Node(html);
+  if (!paragraph) {
+    errors.push('first paragraph after H1 is missing');
+    return errors;
+  }
+  if (elementText(paragraph) !== callout) {
+    errors.push('first paragraph after H1 is not the effect-guide callout');
+  }
+  const guide = anchorsIn(paragraph).find(
+    (anchor) => anchor.href === EFFECT_CHECKER_PAGE.calloutHref && anchor.text === EFFECT_CHECKER_PAGE.calloutLink,
+  );
+  if (!guide) errors.push('effect-guide callout anchor is missing or points elsewhere');
+  return errors;
 }
 
 function attr(tag, name) {
@@ -236,6 +277,23 @@ function selfTest() {
   assert.equal(
     firstParagraphTextAfterH1('<h1>Title</h1><p>Start with the <a href="/learn/effects/">Effect System guide</a>. Done.</p>'),
     'Start with the Effect System guide. Done.',
+  );
+  const calloutParagraph = `${EFFECT_CHECKER_PAGE.calloutBefore}<a href="${EFFECT_CHECKER_PAGE.calloutHref}">${EFFECT_CHECKER_PAGE.calloutLink}</a>${EFFECT_CHECKER_PAGE.calloutAfter}`;
+  const calloutText = `${EFFECT_CHECKER_PAGE.calloutBefore}${EFFECT_CHECKER_PAGE.calloutLink}${EFFECT_CHECKER_PAGE.calloutAfter}`;
+  assert.deepEqual(
+    effectGuideCalloutErrors(`<h1>T</h1><p>${calloutParagraph}</p><p><a href="/learn/elsewhere/">later</a></p>`),
+    [],
+  );
+  const anchorElsewhere = `<h1>T</h1><p>${calloutText}</p><p><a href="${EFFECT_CHECKER_PAGE.calloutHref}">${EFFECT_CHECKER_PAGE.calloutLink}</a></p>`;
+  assert.equal(anchorElsewhere.includes(`href="${EFFECT_CHECKER_PAGE.calloutHref}"`), true);
+  assert.equal(
+    effectGuideCalloutErrors(anchorElsewhere).some((error) => error.includes('anchor')),
+    true,
+  );
+  const wrongCalloutHref = `<h1>T</h1><p>${EFFECT_CHECKER_PAGE.calloutBefore}<a href="/learn/compiler/effect-system/">${EFFECT_CHECKER_PAGE.calloutLink}</a>${EFFECT_CHECKER_PAGE.calloutAfter}</p><p><a href="${EFFECT_CHECKER_PAGE.calloutHref}">${EFFECT_CHECKER_PAGE.calloutLink}</a></p>`;
+  assert.equal(
+    effectGuideCalloutErrors(wrongCalloutHref).some((error) => error.includes('anchor')),
+    true,
   );
 
   const aboutSnippet = `<section><h1>About</h1><p>
@@ -651,13 +709,7 @@ for await (const file of walk(dist)) {
     if (headings[0] !== EFFECT_CHECKER_PAGE.h1) {
       errors.push(`${route}: H1 is ${JSON.stringify(headings[0])}, expected ${JSON.stringify(EFFECT_CHECKER_PAGE.h1)}`);
     }
-    const callout = `${EFFECT_CHECKER_PAGE.calloutBefore}${EFFECT_CHECKER_PAGE.calloutLink}${EFFECT_CHECKER_PAGE.calloutAfter}`;
-    if (firstParagraphTextAfterH1(html) !== callout) {
-      errors.push(`${route}: first paragraph after H1 is not the effect-guide callout`);
-    }
-    if (!html.includes(`href="${EFFECT_CHECKER_PAGE.calloutHref}"`)) {
-      errors.push(`${route}: missing link ${EFFECT_CHECKER_PAGE.calloutHref}`);
-    }
+    for (const failure of effectGuideCalloutErrors(html)) errors.push(`${route}: ${failure}`);
     const canonicalTag = html.match(/<link\b[^>]*rel="canonical"[^>]*>/i)?.[0] ?? '';
     if (attr(canonicalTag, 'href') !== 'https://www.souniolang.org/learn/compiler/effect-system/') {
       errors.push(`${route}: canonical is ${attr(canonicalTag, 'href')}`);
