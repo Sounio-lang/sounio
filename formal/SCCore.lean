@@ -1,23 +1,28 @@
 /-
   SCCore.lean — ADR-032 step 1: the Lean fragment of Sounio Core (SC).
 
-  Scope of this fragment (docs/core/SC_GRAMMAR_AND_TYPING.md §5):
+  Scope of this fragment (docs/compiler/SC_GRAMMAR_AND_TYPING.md §5):
     literals, `let`, linear and bilinear arithmetic, Knowledge values whose
-    Knightian (K) source sets are tracked, named Knightian sources with
-    declared bounds, calls to earlier-defined functions instantiated per call
-    site, opaque calls (recursion / extern) summarised as `Unknown`, and the
-    precise requirement `require`.
+    aleatory (A) and Knightian (K) source sets are tracked separately, named
+    Knightian sources with declared bounds, named aleatory sources, pairs with
+    per-field projection, calls to earlier-defined functions instantiated per
+    call site, opaque calls (recursion / extern) summarised as `Unknown`, the
+    precise requirement `require` (no Knightian source) and the exact
+    requirement `requireExact` (no source at all).
 
-  Not in this fragment (stated, not hidden): aleatoric (A) sets, fields and
-  projection, Core Lint, semantic refinement (theorem d), summaries as data.
+  Not in this fragment (stated, not hidden): Core Lint, semantic refinement
+  (theorem d), summaries as data (calls are typed by instantiating the body).
 
   Theorems:
     (a) `sc_sound` — a well-typed expression never gets stuck, and its value
-        has its type.
+        has its type: each runtime term lies in the static set of its kind.
     (b) the same theorem, read for the refusals: a well-typed `require` never
-        fails at run time as imprecise (E230 is sound), and a program whose
-        named-bound table is consistent never meets two runtime terms of one
-        named source with different bounds (E314 is sound).
+        fails at run time as imprecise (E230 is sound), a well-typed
+        `requireExact` never either, and a program whose named-bound table is
+        consistent never meets two runtime terms of one named Knightian source
+        with different bounds (E314 is sound).
+    `proj_carries_field_set`: a projection's type is the field's type, not a
+    join over the aggregate.
 
   No `sorry`, no `axiom`, no `native_decide`.
 -/
@@ -26,15 +31,17 @@ namespace SCCore
 
 /-! ## 1. Sources, sets, types -/
 
-/-- A Knightian source. `named n` is a declared source (`knight("n", lo, hi)`);
-    `fresh node path` is a residue created by the bilinear node `node` under the
-    call path `path` (innermost call site first). -/
+/-- A source. `named n` is a declared source; `fresh node path` is a residue
+    created by the bilinear node `node` under the call path `path` (innermost
+    call site first). Whether a source is aleatory or Knightian is carried by
+    the runtime term (`Term.kn`), not by the name. -/
 inductive Src where
   | named (n : Nat)
   | fresh (node : Nat) (path : List Nat)
   deriving DecidableEq, Repr
 
-/-- The static K set: `known S` (every runtime source is in `S`) or `unknown`. -/
+/-- A static set: `known S` (every runtime source of that kind is in `S`) or
+    `unknown`. -/
 inductive SSet where
   | known (s : List Src)
   | unknown
@@ -45,43 +52,69 @@ def SSet.join : SSet → SSet → SSet
   | .known a, .known b => .known (a ++ b)
   | _, _ => .unknown
 
+/-- Membership in a static set; everything is a member of `unknown`. -/
+def inSet : SSet → Src → Prop
+  | .known S, s => s ∈ S
+  | .unknown, _ => True
+
+theorem inSet_join_l {a b : SSet} {s : Src} (h : inSet a s) : inSet (a.join b) s := by
+  cases a <;> cases b <;> simp_all [SSet.join, inSet]
+
+theorem inSet_join_r {a b : SSet} {s : Src} (h : inSet b s) : inSet (a.join b) s := by
+  cases a <;> cases b <;> simp_all [SSet.join, inSet]
+
 inductive Ty where
   | num
-  | kn (k : SSet)
+  /-- Knowledge with an aleatory set `a` and a Knightian set `k`. -/
+  | kn (a k : SSet)
+  | pair (t u : Ty)
   deriving DecidableEq, Repr
 
 /-! ## 2. Expressions -/
 
 inductive Expr where
   | lit (v : Int)
+  /-- A named Knightian source with declared bounds. -/
   | knight (n : Nat) (lo hi : Int)
+  /-- A named aleatory source with standard uncertainty `sd`. -/
+  | gauss (n : Nat) (sd : Int)
   | var (x : Nat)
   | let_ (x : Nat) (e b : Expr)
   | add (a b : Expr)
   | sub (a b : Expr)
   | scale (c : Int) (a : Expr)
   | mulk (node : Nat) (a b : Expr)
+  | pair (a b : Expr)
+  | fst (a : Expr)
+  | snd (a : Expr)
   /-- Call of function `f` (one argument, bound to variable 0) at site `site`. -/
   | call (site f : Nat) (a : Expr)
   /-- Call whose body is not analysed (recursion, extern): summary `Unknown`. -/
   | opq (f : Nat) (a : Expr)
   /-- Precise requirement: the value must carry no Knightian source. -/
   | require (a : Expr)
+  /-- Exact requirement: the value must carry no source at all. -/
+  | requireExact (a : Expr)
   deriving DecidableEq, Repr
 
-/-- The named-source declarations occurring in an expression. -/
+/-- The named Knightian declarations occurring in an expression. -/
 def knights : Expr → List (Nat × Int × Int)
   | .lit _ => []
   | .knight n lo hi => [(n, lo, hi)]
+  | .gauss _ _ => []
   | .var _ => []
   | .let_ _ e b => knights e ++ knights b
   | .add a b => knights a ++ knights b
   | .sub a b => knights a ++ knights b
   | .scale _ a => knights a
   | .mulk _ a b => knights a ++ knights b
+  | .pair a b => knights a ++ knights b
+  | .fst a => knights a
+  | .snd a => knights a
   | .call _ _ a => knights a
   | .opq _ a => knights a
   | .require a => knights a
+  | .requireExact a => knights a
 
 /-! ## 3. Values and dynamic semantics -/
 
@@ -90,11 +123,14 @@ structure Term where
   lo : Int
   hi : Int
   c : Int
+  /-- `true`: Knightian; `false`: aleatory. -/
+  kn : Bool
   deriving DecidableEq, Repr
 
 inductive Val where
   | num (v : Int)
   | kn (c : Int) (ts : List Term)
+  | pair (v w : Val)
   deriving DecidableEq, Repr
 
 inductive Err where
@@ -104,10 +140,10 @@ inductive Err where
   | conflict
   deriving DecidableEq, Repr
 
-/-- Two terms of one named source with different bounds. -/
+/-- Two Knightian terms of one named source with different bounds. -/
 def clash (t u : Term) : Bool :=
   match t.src, u.src with
-  | .named n, .named m => n == m && (t.lo != u.lo || t.hi != u.hi)
+  | .named n, .named m => t.kn && u.kn && n == m && (t.lo != u.lo || t.hi != u.hi)
   | _, _ => false
 
 def conflict (ts : List Term) : Bool :=
@@ -129,23 +165,23 @@ def addV : Val → Val → Except Err Val
   | .num a, .kn c ts => .ok (.kn (a + c) ts)
   | .kn c ts, .num b => .ok (.kn (c + b) ts)
   | .kn c ts, .kn d us => mkKn (c + d) (ts ++ us)
+  | _, _ => .error .stuck
 
-def negV : Val → Val
-  | .num a => .num (-a)
-  | .kn c ts => .kn (-c) (ts.map (Term.scale (-1)))
-
-def scaleV (k : Int) : Val → Val
-  | .num a => .num (k * a)
-  | .kn c ts => .kn (k * c) (ts.map (Term.scale k))
+def scaleV (k : Int) : Val → Except Err Val
+  | .num a => .ok (.num (k * a))
+  | .kn c ts => .ok (.kn (k * c) (ts.map (Term.scale k)))
+  | .pair _ _ => .error .stuck
 
 def mulV (node : Nat) (p : List Nat) : Val → Val → Except Err Val
   | .num a, .num b => .ok (.num (a * b))
-  | .num a, v@(.kn _ _) => .ok (scaleV a v)
-  | v@(.kn _ _), .num b => .ok (scaleV b v)
+  | .num a, .kn c ts => .ok (.kn (a * c) (ts.map (Term.scale a)))
+  | .kn c ts, .num b => .ok (.kn (b * c) (ts.map (Term.scale b)))
   | .kn c ts, .kn d us =>
       let r := rad ts * rad us
       mkKn (c * d) (ts.map (Term.scale d) ++ us.map (Term.scale c)
-                     ++ [{ src := .fresh node p, lo := -r, hi := r, c := 1 }])
+                     ++ [{ src := .fresh node p, lo := -r, hi := r, c := 1,
+                           kn := (ts ++ us).any (·.kn) }])
+  | _, _ => .error .stuck
 
 def lookupE {α : Type} (x : Nat) : List (Nat × α) → Option α
   | [] => none
@@ -161,8 +197,9 @@ def eval (orc : Nat → Val → Val) (fns : List Expr) :
     match e with
     | .lit v => .ok (.num v)
     | .knight n lo hi =>
-        if lo ≤ hi then .ok (.kn 0 [{ src := .named n, lo := lo, hi := hi, c := 1 }])
+        if lo ≤ hi then .ok (.kn 0 [{ src := .named n, lo := lo, hi := hi, c := 1, kn := true }])
         else .error .conflict
+    | .gauss n sd => .ok (.kn 0 [{ src := .named n, lo := -sd, hi := sd, c := 1, kn := false }])
     | .var x =>
         match lookupE x ρ with
         | some v => .ok v
@@ -178,18 +215,36 @@ def eval (orc : Nat → Val → Val) (fns : List Expr) :
         | _, .error er => .error er
     | .sub a b =>
         match eval orc fns fuel ρ p a, eval orc fns fuel ρ p b with
-        | .ok va, .ok vb => addV va (negV vb)
+        | .ok va, .ok vb =>
+            match scaleV (-1) vb with
+            | .ok nb => addV va nb
+            | .error er => .error er
         | .error er, _ => .error er
         | _, .error er => .error er
     | .scale k a =>
         match eval orc fns fuel ρ p a with
-        | .ok v => .ok (scaleV k v)
+        | .ok v => scaleV k v
         | .error er => .error er
     | .mulk node a b =>
         match eval orc fns fuel ρ p a, eval orc fns fuel ρ p b with
         | .ok va, .ok vb => mulV node p va vb
         | .error er, _ => .error er
         | _, .error er => .error er
+    | .pair a b =>
+        match eval orc fns fuel ρ p a, eval orc fns fuel ρ p b with
+        | .ok va, .ok vb => .ok (.pair va vb)
+        | .error er, _ => .error er
+        | _, .error er => .error er
+    | .fst a =>
+        match eval orc fns fuel ρ p a with
+        | .ok (.pair v _) => .ok v
+        | .ok _ => .error .stuck
+        | .error er => .error er
+    | .snd a =>
+        match eval orc fns fuel ρ p a with
+        | .ok (.pair _ w) => .ok w
+        | .ok _ => .error .stuck
+        | .error er => .error er
     | .call site f a =>
         match eval orc fns fuel ρ p a with
         | .error er => .error er
@@ -205,21 +260,41 @@ def eval (orc : Nat → Val → Val) (fns : List Expr) :
         match eval orc fns fuel ρ p a with
         | .error er => .error er
         | .ok (.num v) => .ok (.num v)
+        | .ok (.kn c ts) => if ts.any (·.kn) then .error .imprecise else .ok (.num c)
+        | .ok (.pair _ _) => .error .stuck
+    | .requireExact a =>
+        match eval orc fns fuel ρ p a with
+        | .error er => .error er
+        | .ok (.num v) => .ok (.num v)
         | .ok (.kn c ts) => if ts.isEmpty then .ok (.num c) else .error .imprecise
+        | .ok (.pair _ _) => .error .stuck
 
 /-! ## 4. Static typing (the checker's view, instantiated per call path) -/
 
-def tyAdd : Ty → Ty → Ty
-  | .num, .num => .num
-  | .num, .kn k => .kn k
-  | .kn k, .num => .kn k
-  | .kn k, .kn k' => .kn (k.join k')
+def tyAdd : Ty → Ty → Option Ty
+  | .num, .num => some .num
+  | .num, .kn a k => some (.kn a k)
+  | .kn a k, .num => some (.kn a k)
+  | .kn a k, .kn a' k' => some (.kn (a.join a') (k.join k'))
+  | _, _ => none
 
-def tyMul (node : Nat) (p : List Nat) : Ty → Ty → Ty
-  | .num, .num => .num
-  | .num, .kn k => .kn k
-  | .kn k, .num => .kn k
-  | .kn k, .kn k' => .kn ((k.join k').join (.known [.fresh node p]))
+def tyScale : Ty → Option Ty
+  | .num => some .num
+  | .kn a k => some (.kn a k)
+  | .pair _ _ => none
+
+/-- The residue of a bilinear node always enters the A set. It enters the K set
+    too unless both K sets are provably empty, in which case no Knightian term
+    can reach the product and the residue is aleatory. -/
+def tyMul (node : Nat) (p : List Nat) : Ty → Ty → Option Ty
+  | .num, .num => some .num
+  | .num, .kn a k => some (.kn a k)
+  | .kn a k, .num => some (.kn a k)
+  | .kn a k, .kn a' k' =>
+      let fr : SSet := .known [.fresh node p]
+      some (.kn ((a.join a').join fr)
+        (if k = .known [] ∧ k' = .known [] then k.join k' else (k.join k').join fr))
+  | _, _ => none
 
 def typeOf (fns : List Expr) :
     Nat → List (Nat × Ty) → List Nat → Expr → Option Ty
@@ -227,25 +302,38 @@ def typeOf (fns : List Expr) :
   | fuel + 1, Γ, p, e =>
     match e with
     | .lit _ => some .num
-    | .knight n lo hi => if lo ≤ hi then some (.kn (.known [.named n])) else none
+    | .knight n lo hi =>
+        if lo ≤ hi then some (.kn (.known []) (.known [.named n])) else none
+    | .gauss n _ => some (.kn (.known [.named n]) (.known []))
     | .var x => lookupE x Γ
     | .let_ x e1 b =>
         match typeOf fns fuel Γ p e1 with
         | none => none
         | some t => typeOf fns fuel ((x, t) :: Γ) p b
-    | .add a b =>
+    | .add a b | .sub a b =>
         match typeOf fns fuel Γ p a, typeOf fns fuel Γ p b with
-        | some ta, some tb => some (tyAdd ta tb)
+        | some ta, some tb => tyAdd ta tb
         | _, _ => none
-    | .sub a b =>
-        match typeOf fns fuel Γ p a, typeOf fns fuel Γ p b with
-        | some ta, some tb => some (tyAdd ta tb)
-        | _, _ => none
-    | .scale _ a => typeOf fns fuel Γ p a
+    | .scale _ a =>
+        match typeOf fns fuel Γ p a with
+        | some ta => tyScale ta
+        | none => none
     | .mulk node a b =>
         match typeOf fns fuel Γ p a, typeOf fns fuel Γ p b with
-        | some ta, some tb => some (tyMul node p ta tb)
+        | some ta, some tb => tyMul node p ta tb
         | _, _ => none
+    | .pair a b =>
+        match typeOf fns fuel Γ p a, typeOf fns fuel Γ p b with
+        | some ta, some tb => some (.pair ta tb)
+        | _, _ => none
+    | .fst a =>
+        match typeOf fns fuel Γ p a with
+        | some (.pair t _) => some t
+        | _ => none
+    | .snd a =>
+        match typeOf fns fuel Γ p a with
+        | some (.pair _ u) => some u
+        | _ => none
     | .call site f a =>
         match typeOf fns fuel Γ p a with
         | none => none
@@ -256,11 +344,16 @@ def typeOf (fns : List Expr) :
     | .opq _ a =>
         match typeOf fns fuel Γ p a with
         | none => none
-        | some _ => some (.kn .unknown)
+        | some _ => some (.kn .unknown .unknown)
     | .require a =>
         match typeOf fns fuel Γ p a with
         | some .num => some .num
-        | some (.kn (.known [])) => some .num
+        | some (.kn _ (.known [])) => some .num
+        | _ => none
+    | .requireExact a =>
+        match typeOf fns fuel Γ p a with
+        | some .num => some .num
+        | some (.kn (.known []) (.known [])) => some .num
         | _ => none
 
 /-! ## 5. The invariant -/
@@ -268,23 +361,18 @@ def typeOf (fns : List Expr) :
 def terms : Val → List Term
   | .num _ => []
   | .kn _ ts => ts
+  | .pair v w => terms v ++ terms w
 
+/-- Each runtime term lies in the static set of its own kind. -/
 def HasTy : Val → Ty → Prop
   | .num _, .num => True
-  | .kn _ ts, .kn (.known S) => ∀ t ∈ ts, t.src ∈ S
-  | .kn _ _, .kn .unknown => True
+  | .kn _ ts, .kn a k => ∀ t ∈ ts, inSet (if t.kn then k else a) t.src
+  | .pair v w, .pair t u => HasTy v t ∧ HasTy w u
   | _, _ => False
 
-/-- The type of a Knowledge value depends on its terms, not on its centre. -/
-theorem hasTy_center {c d : Int} {ts : List Term} {t : Ty}
-    (h : HasTy (.kn c ts) t) : HasTy (.kn d ts) t := by
-  cases t with
-  | num => exact absurd h (by simp [HasTy])
-  | kn k => cases k <;> exact h
-
-/-- Every named term of `v` carries bounds declared somewhere in `occ`. -/
+/-- Every named Knightian term of `v` carries bounds declared in `occ`. -/
 def NamedOK (occ : List (Nat × Int × Int)) (v : Val) : Prop :=
-  ∀ t ∈ terms v, ∀ n, t.src = .named n → (n, t.lo, t.hi) ∈ occ
+  ∀ t ∈ terms v, t.kn = true → ∀ n, t.src = .named n → (n, t.lo, t.hi) ∈ occ
 
 /-- E314 as a property of the program's declaration table. -/
 def Consistent (occ : List (Nat × Int × Int)) : Prop :=
@@ -301,8 +389,8 @@ def OrcOK (orc : Nat → Val → Val) : Prop :=
 
 /-! ## 6. Lemmas -/
 
-theorem lookup_rel {occ : List (Nat × Int × Int)} {Γ : List (Nat × Ty)} {ρ : List (Nat × Val)} (h : EnvRel occ Γ ρ) (x : Nat) (t : Ty)
-    (ht : lookupE x Γ = some t) :
+theorem lookup_rel {occ : List (Nat × Int × Int)} {Γ : List (Nat × Ty)} {ρ : List (Nat × Val)}
+    (h : EnvRel occ Γ ρ) (x : Nat) (t : Ty) (ht : lookupE x Γ = some t) :
     ∃ v, lookupE x ρ = some v ∧ HasTy v t ∧ NamedOK occ v := by
   induction h with
   | nil => simp [lookupE] at ht
@@ -316,7 +404,7 @@ theorem lookup_rel {occ : List (Nat × Int × Int)} {Γ : List (Nat × Ty)} {ρ 
       exact ih ht
 
 theorem conflict_false {occ : List (Nat × Int × Int)} (hc : Consistent occ) (ts : List Term)
-    (hn : ∀ t ∈ ts, ∀ n, t.src = .named n → (n, t.lo, t.hi) ∈ occ) :
+    (hn : ∀ t ∈ ts, t.kn = true → ∀ n, t.src = .named n → (n, t.lo, t.hi) ∈ occ) :
     conflict ts = false := by
   unfold conflict
   rw [Bool.eq_false_iff]
@@ -333,182 +421,265 @@ theorem conflict_false {occ : List (Nat × Int × Int)} (hc : Consistent occ) (t
     | fresh _ _ => simp [hts, hus] at h
     | named m =>
       simp [hts, hus] at h
-      obtain ⟨hnm, hb⟩ := h
+      obtain ⟨⟨⟨htk, huk⟩, hnm⟩, hb⟩ := h
       subst hnm
-      have h1 := hn t ht n hts
-      have h2 := hn u hu n hus
+      have h1 := hn t ht htk n hts
+      have h2 := hn u hu huk n hus
       obtain ⟨hl, hh⟩ := hc n _ _ _ _ h1 h2
       cases hb with
       | inl hb => exact hb hl
       | inr hb => exact hb hh
 
 theorem mkKn_ok {occ : List (Nat × Int × Int)} (hc : Consistent occ) (c : Int) (ts : List Term)
-    (hn : ∀ t ∈ ts, ∀ n, t.src = .named n → (n, t.lo, t.hi) ∈ occ) :
+    (hn : ∀ t ∈ ts, t.kn = true → ∀ n, t.src = .named n → (n, t.lo, t.hi) ∈ occ) :
     mkKn c ts = .ok (.kn c ts) := by
   unfold mkKn
   rw [conflict_false hc ts hn]
   rfl
 
-theorem namedOK_append {occ : List (Nat × Int × Int)} {c d : Int} {ts us : List Term}
-    (h1 : NamedOK occ (.kn c ts)) (h2 : NamedOK occ (.kn d us)) :
-    ∀ t ∈ ts ++ us, ∀ n, t.src = .named n → (n, t.lo, t.hi) ∈ occ := by
-  intro t ht n hs
-  rcases List.mem_append.mp ht with h | h
-  · exact h1 t h n hs
-  · exact h2 t h n hs
-
-theorem namedOK_map_scale {occ : List (Nat × Int × Int)} {ts : List Term} (k : Int)
-    (h : ∀ t ∈ ts, ∀ n, t.src = .named n → (n, t.lo, t.hi) ∈ occ) :
-    ∀ t ∈ ts.map (Term.scale k), ∀ n, t.src = .named n → (n, t.lo, t.hi) ∈ occ := by
-  intro t ht n hs
+theorem named_map_scale {occ : List (Nat × Int × Int)} {ts : List Term} (k : Int)
+    (h : ∀ t ∈ ts, t.kn = true → ∀ n, t.src = .named n → (n, t.lo, t.hi) ∈ occ) :
+    ∀ t ∈ ts.map (Term.scale k), t.kn = true → ∀ n, t.src = .named n → (n, t.lo, t.hi) ∈ occ := by
+  intro t ht hk n hs
   rw [List.mem_map] at ht
   obtain ⟨u, hu, rfl⟩ := ht
-  exact h u hu n hs
+  exact h u hu hk n hs
 
-theorem src_map_scale {ts : List Term} {S : List Src} (k : Int)
-    (h : ∀ t ∈ ts, t.src ∈ S) : ∀ t ∈ ts.map (Term.scale k), t.src ∈ S := by
+theorem inset_map_scale {ts : List Term} {a k : SSet} (s : Int)
+    (h : ∀ t ∈ ts, inSet (if t.kn then k else a) t.src) :
+    ∀ t ∈ ts.map (Term.scale s), inSet (if t.kn then k else a) t.src := by
   intro t ht
   rw [List.mem_map] at ht
   obtain ⟨u, hu, rfl⟩ := ht
   exact h u hu
 
-theorem scaleV_ok {occ : List (Nat × Int × Int)} {v : Val} {t : Ty} (k : Int) (hv : HasTy v t) (hn : NamedOK occ v) :
-    HasTy (scaleV k v) t ∧ NamedOK occ (scaleV k v) := by
+/-- Monotonicity of the kind-indexed membership in both sets. -/
+theorem inset_mono {t : Term} {a k a' k' : SSet}
+    (ha : ∀ s, inSet a s → inSet a' s) (hk : ∀ s, inSet k s → inSet k' s)
+    (h : inSet (if t.kn then k else a) t.src) : inSet (if t.kn then k' else a') t.src := by
+  cases hb : t.kn <;> simp [hb] at h ⊢
+  · exact ha _ h
+  · exact hk _ h
+
+theorem scaleV_ok {occ : List (Nat × Int × Int)} {v : Val} {t t' : Ty} (k : Int)
+    (hv : HasTy v t) (hn : NamedOK occ v) (ht : tyScale t = some t') :
+    ∃ v', scaleV k v = .ok v' ∧ HasTy v' t' ∧ NamedOK occ v' := by
   cases v with
   | num a =>
     cases t with
-    | num => exact ⟨trivial, by intro t ht; simp [scaleV, terms] at ht⟩
-    | kn _ => exact absurd hv (by simp [HasTy])
+    | num =>
+      simp [tyScale] at ht; subst ht
+      exact ⟨_, rfl, trivial, by intro t ht; simp [terms] at ht⟩
+    | kn _ _ => exact absurd hv (by simp [HasTy])
+    | pair _ _ => exact absurd hv (by simp [HasTy])
   | kn c ts =>
-    refine ⟨?_, namedOK_map_scale k hn⟩
     cases t with
     | num => exact absurd hv (by simp [HasTy])
-    | kn k' =>
-      cases k' with
-      | unknown => trivial
-      | known S => exact src_map_scale k hv
-
-theorem negV_ok {occ : List (Nat × Int × Int)} {v : Val} {t : Ty} (hv : HasTy v t) (hn : NamedOK occ v) :
-    HasTy (negV v) t ∧ NamedOK occ (negV v) := by
-  have h := scaleV_ok (occ := occ) (-1) hv hn
-  cases v with
-  | num a =>
-    refine ⟨?_, by intro t ht; simp [negV, terms] at ht⟩
+    | kn a kk =>
+      simp [tyScale] at ht; subst ht
+      exact ⟨_, rfl, inset_map_scale k hv, named_map_scale k hn⟩
+    | pair _ _ => exact absurd hv (by simp [HasTy])
+  | pair _ _ =>
     cases t with
-    | num => trivial
-    | kn _ => exact absurd hv (by simp [HasTy])
-  | kn c ts =>
-    have e : negV (.kn c ts) = scaleV (-1) (.kn c ts) := by simp [negV, scaleV]
-    rw [e]; exact h
+    | pair _ _ => simp [tyScale] at ht
+    | num => exact absurd hv (by simp [HasTy])
+    | kn _ _ => exact absurd hv (by simp [HasTy])
 
-theorem addV_ok {occ : List (Nat × Int × Int)} (hc : Consistent occ) {va vb : Val} {ta tb : Ty}
+theorem addV_ok {occ : List (Nat × Int × Int)} (hc : Consistent occ) {va vb : Val} {ta tb t : Ty}
     (ha : HasTy va ta) (hna : NamedOK occ va)
-    (hb : HasTy vb tb) (hnb : NamedOK occ vb) :
-    ∃ v, addV va vb = .ok v ∧ HasTy v (tyAdd ta tb) ∧ NamedOK occ v := by
+    (hb : HasTy vb tb) (hnb : NamedOK occ vb) (ht : tyAdd ta tb = some t) :
+    ∃ v, addV va vb = .ok v ∧ HasTy v t ∧ NamedOK occ v := by
   cases va with
-  | num a =>
-    cases vb with
-    | num b =>
-      cases ta <;> cases tb <;> simp_all [HasTy, addV, tyAdd, NamedOK, terms]
-    | kn d us =>
-      cases ta with
-      | kn _ => exact absurd ha (by simp [HasTy])
-      | num =>
-        cases tb with
-        | num => exact absurd hb (by simp [HasTy])
-        | kn kb => exact ⟨.kn (a + d) us, rfl, hasTy_center hb, hnb⟩
-  | kn c ts =>
+  | pair _ _ =>
     cases ta with
+    | pair _ _ => cases tb <;> simp [tyAdd] at ht
     | num => exact absurd ha (by simp [HasTy])
-    | kn ka =>
-      cases vb with
-      | num b =>
-        cases tb with
-        | kn _ => exact absurd hb (by simp [HasTy])
-        | num => exact ⟨.kn (c + b) ts, rfl, hasTy_center ha, hna⟩
-      | kn d us =>
-        cases tb with
-        | num => exact absurd hb (by simp [HasTy])
-        | kn kb =>
-          refine ⟨.kn (c + d) (ts ++ us), mkKn_ok hc _ _ (namedOK_append hna hnb), ?_,
-            namedOK_append hna hnb⟩
-          cases ka with
-          | unknown => simp [tyAdd, SSet.join, HasTy]
-          | known S =>
-            cases kb with
-            | unknown => simp [tyAdd, SSet.join, HasTy]
-            | known T =>
-              simp only [tyAdd, SSet.join, HasTy]
-              intro t ht
-              rcases List.mem_append.mp ht with h | h
-              · exact List.mem_append_left _ (ha t h)
-              · exact List.mem_append_right _ (hb t h)
-
-theorem mulV_ok {occ : List (Nat × Int × Int)} (hc : Consistent occ) (node : Nat) (p : List Nat) {va vb : Val} {ta tb : Ty}
-    (ha : HasTy va ta) (hna : NamedOK occ va)
-    (hb : HasTy vb tb) (hnb : NamedOK occ vb) :
-    ∃ v, mulV node p va vb = .ok v ∧ HasTy v (tyMul node p ta tb) ∧ NamedOK occ v := by
-  cases va with
-  | num a =>
+    | kn _ _ => exact absurd ha (by simp [HasTy])
+  | num x =>
     cases ta with
-    | kn _ => exact absurd ha (by simp [HasTy])
+    | kn _ _ => exact absurd ha (by simp [HasTy])
+    | pair _ _ => exact absurd ha (by simp [HasTy])
     | num =>
       cases vb with
-      | num b =>
+      | num y =>
         cases tb with
-        | kn _ => exact absurd hb (by simp [HasTy])
-        | num => exact ⟨_, rfl, trivial, by intro t ht; simp [terms] at ht⟩
+        | num =>
+          simp [tyAdd] at ht; subst ht
+          exact ⟨_, rfl, trivial, by intro t ht; simp [terms] at ht⟩
+        | kn _ _ => exact absurd hb (by simp [HasTy])
+        | pair _ _ => exact absurd hb (by simp [HasTy])
       | kn d us =>
         cases tb with
+        | kn a k =>
+          simp [tyAdd] at ht; subst ht
+          exact ⟨_, rfl, hb, hnb⟩
         | num => exact absurd hb (by simp [HasTy])
-        | kn kb =>
-          have h := scaleV_ok (occ := occ) a hb hnb
-          exact ⟨_, rfl, h.1, h.2⟩
+        | pair _ _ => exact absurd hb (by simp [HasTy])
+      | pair _ _ =>
+        cases tb with
+        | pair _ _ => simp [tyAdd] at ht
+        | num => exact absurd hb (by simp [HasTy])
+        | kn _ _ => exact absurd hb (by simp [HasTy])
   | kn c ts =>
     cases ta with
     | num => exact absurd ha (by simp [HasTy])
-    | kn ka =>
+    | pair _ _ => exact absurd ha (by simp [HasTy])
+    | kn a k =>
       cases vb with
-      | num b =>
+      | num y =>
         cases tb with
-        | kn _ => exact absurd hb (by simp [HasTy])
         | num =>
-          have h := scaleV_ok (occ := occ) b ha hna
-          exact ⟨_, rfl, h.1, h.2⟩
+          simp [tyAdd] at ht; subst ht
+          exact ⟨_, rfl, ha, hna⟩
+        | kn _ _ => exact absurd hb (by simp [HasTy])
+        | pair _ _ => exact absurd hb (by simp [HasTy])
+      | pair _ _ =>
+        cases tb with
+        | pair _ _ => simp [tyAdd] at ht
+        | num => exact absurd hb (by simp [HasTy])
+        | kn _ _ => exact absurd hb (by simp [HasTy])
       | kn d us =>
         cases tb with
         | num => exact absurd hb (by simp [HasTy])
-        | kn kb =>
+        | pair _ _ => exact absurd hb (by simp [HasTy])
+        | kn a' k' =>
+          simp [tyAdd] at ht; subst ht
+          have hn : ∀ t ∈ ts ++ us, t.kn = true → ∀ n, t.src = .named n → (n, t.lo, t.hi) ∈ occ := by
+            intro t ht hk n hs
+            rcases List.mem_append.mp ht with h | h
+            · exact hna t h hk n hs
+            · exact hnb t h hk n hs
+          refine ⟨.kn (c + d) (ts ++ us), mkKn_ok hc _ _ hn, ?_, hn⟩
+          intro t ht
+          rcases List.mem_append.mp ht with h | h
+          · exact inset_mono (fun _ => inSet_join_l) (fun _ => inSet_join_l) (ha t h)
+          · exact inset_mono (fun _ => inSet_join_r) (fun _ => inSet_join_r) (hb t h)
+
+/-- No Knightian term can live in a Knowledge value whose K set is `known []`. -/
+theorem no_kn_of_empty {c : Int} {ts : List Term} {a : SSet}
+    (h : HasTy (.kn c ts) (.kn a (.known []))) : ts.any (·.kn) = false := by
+  rw [Bool.eq_false_iff]
+  intro hany
+  rw [List.any_eq_true] at hany
+  obtain ⟨t, ht, hk⟩ := hany
+  have := h t ht
+  simp [hk, inSet] at this
+
+theorem mulV_ok {occ : List (Nat × Int × Int)} (hc : Consistent occ) (node : Nat) (p : List Nat)
+    {va vb : Val} {ta tb t : Ty}
+    (ha : HasTy va ta) (hna : NamedOK occ va)
+    (hb : HasTy vb tb) (hnb : NamedOK occ vb) (ht : tyMul node p ta tb = some t) :
+    ∃ v, mulV node p va vb = .ok v ∧ HasTy v t ∧ NamedOK occ v := by
+  cases va with
+  | pair _ _ =>
+    cases ta with
+    | pair _ _ => cases tb <;> simp [tyMul] at ht
+    | num => exact absurd ha (by simp [HasTy])
+    | kn _ _ => exact absurd ha (by simp [HasTy])
+  | num x =>
+    cases ta with
+    | kn _ _ => exact absurd ha (by simp [HasTy])
+    | pair _ _ => exact absurd ha (by simp [HasTy])
+    | num =>
+      cases vb with
+      | num y =>
+        cases tb with
+        | num =>
+          simp [tyMul] at ht; subst ht
+          exact ⟨_, rfl, trivial, by intro t ht; simp [terms] at ht⟩
+        | kn _ _ => exact absurd hb (by simp [HasTy])
+        | pair _ _ => exact absurd hb (by simp [HasTy])
+      | kn d us =>
+        cases tb with
+        | kn a k =>
+          simp [tyMul] at ht; subst ht
+          exact ⟨_, rfl, inset_map_scale x hb, named_map_scale x hnb⟩
+        | num => exact absurd hb (by simp [HasTy])
+        | pair _ _ => exact absurd hb (by simp [HasTy])
+      | pair _ _ =>
+        cases tb with
+        | pair _ _ => simp [tyMul] at ht
+        | num => exact absurd hb (by simp [HasTy])
+        | kn _ _ => exact absurd hb (by simp [HasTy])
+  | kn c ts =>
+    cases ta with
+    | num => exact absurd ha (by simp [HasTy])
+    | pair _ _ => exact absurd ha (by simp [HasTy])
+    | kn a k =>
+      cases vb with
+      | num y =>
+        cases tb with
+        | num =>
+          simp [tyMul] at ht; subst ht
+          exact ⟨_, rfl, inset_map_scale y ha, named_map_scale y hna⟩
+        | kn _ _ => exact absurd hb (by simp [HasTy])
+        | pair _ _ => exact absurd hb (by simp [HasTy])
+      | pair _ _ =>
+        cases tb with
+        | pair _ _ => simp [tyMul] at ht
+        | num => exact absurd hb (by simp [HasTy])
+        | kn _ _ => exact absurd hb (by simp [HasTy])
+      | kn d us =>
+        cases tb with
+        | num => exact absurd hb (by simp [HasTy])
+        | pair _ _ => exact absurd hb (by simp [HasTy])
+        | kn a' k' =>
+          simp only [tyMul, Option.some.injEq] at ht
+          subst ht
           let r := rad ts * rad us
-          let fr : Term := { src := .fresh node p, lo := -r, hi := r, c := 1 }
+          let fr : Term := { src := .fresh node p, lo := -r, hi := r, c := 1,
+                             kn := (ts ++ us).any (·.kn) }
           have hn : ∀ t ∈ ts.map (Term.scale d) ++ us.map (Term.scale c) ++ [fr],
-              ∀ n, t.src = .named n → (n, t.lo, t.hi) ∈ occ := by
-            intro t ht n hs
+              t.kn = true → ∀ n, t.src = .named n → (n, t.lo, t.hi) ∈ occ := by
+            intro t ht hk n hs
             rcases List.mem_append.mp ht with h | h
             · rcases List.mem_append.mp h with h | h
-              · exact namedOK_map_scale d hna t h n hs
-              · exact namedOK_map_scale c hnb t h n hs
+              · exact named_map_scale d hna t h hk n hs
+              · exact named_map_scale c hnb t h hk n hs
             · simp at h
               subst h
               simp [fr] at hs
           refine ⟨_, mkKn_ok hc _ _ hn, ?_, hn⟩
-          cases ka with
-          | unknown => simp [tyMul, SSet.join, HasTy]
-          | known S =>
-            cases kb with
-            | unknown => simp [tyMul, SSet.join, HasTy]
-            | known T =>
-              simp only [tyMul, SSet.join, HasTy]
-              intro t ht
-              rcases List.mem_append.mp ht with h | h
-              · rcases List.mem_append.mp h with h | h
-                · exact List.mem_append_left _
-                    (List.mem_append_left _ (src_map_scale d ha t h))
-                · exact List.mem_append_left _
-                    (List.mem_append_right _ (src_map_scale c hb t h))
-              · simp at h
-                subst h
-                simp
+          -- Both K sets of the product dominate k and k'.
+          have hKl : ∀ s, inSet k s → inSet (if k = .known [] ∧ k' = .known [] then k.join k'
+              else (k.join k').join (.known [.fresh node p])) s := by
+            intro s hs
+            split
+            · exact inSet_join_l hs
+            · exact inSet_join_l (inSet_join_l hs)
+          have hKr : ∀ s, inSet k' s → inSet (if k = .known [] ∧ k' = .known [] then k.join k'
+              else (k.join k').join (.known [.fresh node p])) s := by
+            intro s hs
+            split
+            · exact inSet_join_r hs
+            · exact inSet_join_l (inSet_join_r hs)
+          intro t ht
+          rcases List.mem_append.mp ht with h | h
+          · rcases List.mem_append.mp h with h | h
+            · exact inset_mono (fun _ hs => inSet_join_l (inSet_join_l hs)) hKl
+                (inset_map_scale d ha t h)
+            · exact inset_mono (fun _ hs => inSet_join_l (inSet_join_r hs)) hKr
+                (inset_map_scale c hb t h)
+          · simp at h
+            subst h
+            have hfr : inSet (SSet.known [Src.fresh node p]) (Src.fresh node p) := by simp [inSet]
+            dsimp only
+            by_cases hkind : ((ts.any fun x => x.kn) || us.any fun x => x.kn) = true
+            · rw [if_pos hkind]
+              by_cases hboth : k = .known [] ∧ k' = .known []
+              · exfalso
+                obtain ⟨hk1, hk2⟩ := hboth
+                subst hk1; subst hk2
+                have e1 := no_kn_of_empty ha
+                have e2 := no_kn_of_empty hb
+                rw [e1, e2] at hkind
+                simp at hkind
+              · rw [if_neg hboth]; exact inSet_join_r hfr
+            · rw [if_neg hkind]; exact inSet_join_r hfr
+
+theorem hasTy_kn_any {c : Int} {ts : List Term} {a : SSet} {k : SSet}
+    (h : HasTy (.kn c ts) (.kn a k)) (hk : k = .known []) : ts.any (·.kn) = false := by
+  subst hk; exact no_kn_of_empty h
 
 /-! ## 7. Theorems (a) and (b) -/
 
@@ -517,8 +688,8 @@ theorem mulV_ok {occ : List (Nat × Int × Int)} (hc : Consistent occ) (node : N
     If the checker types `e` (under an environment whose values have their
     types), then evaluation either runs out of fuel or returns a value that has
     the inferred type. In particular it is never `stuck` (theorem a), never
-    `imprecise` (the E230 refusal at a precise requirement is sound) and never
-    `conflict` (the E314 refusal of inconsistent named bounds is sound). -/
+    `imprecise` (the E230 refusals at `require`/`requireExact` are sound) and
+    never `conflict` (the E314 refusal of inconsistent named bounds is sound). -/
 theorem sc_sound (orc : Nat → Val → Val) (hOrc : OrcOK orc)
     (fns : List Expr) (occ : List (Nat × Int × Int)) (hc : Consistent occ)
     (hfns : ∀ body ∈ fns, ∀ k ∈ knights body, k ∈ occ) :
@@ -539,13 +710,20 @@ theorem sc_sound (orc : Nat → Val → Val) (hOrc : OrcOK orc)
       simp only [typeOf] at ht
       by_cases hle : lo ≤ hi
       · simp [hle] at ht; subst ht
-        refine Or.inr ⟨.kn 0 [{ src := .named n, lo := lo, hi := hi, c := 1 }], by simp [eval, hle], ?_, ?_⟩
-        · intro t ht; simp at ht; subst ht; simp
-        · intro t ht n' hs
+        refine Or.inr ⟨.kn 0 [{ src := .named n, lo := lo, hi := hi, c := 1, kn := true }],
+          by simp [eval, hle], ?_, ?_⟩
+        · intro t ht; simp at ht; subst ht; simp [inSet]
+        · intro t ht _ n' hs
           simp [terms] at ht; subst ht
           simp at hs; subst hs
           exact hk _ (by simp [knights])
       · simp [hle] at ht
+    | gauss n sd =>
+      simp [typeOf] at ht; subst ht
+      refine Or.inr ⟨.kn 0 [{ src := .named n, lo := -sd, hi := sd, c := 1, kn := false }],
+        by simp [eval], ?_, ?_⟩
+      · intro t ht; simp at ht; subst ht; simp [inSet]
+      · intro t ht hkn; simp [terms] at ht; subst ht; simp at hkn
     | var x =>
       simp only [typeOf] at ht
       obtain ⟨v, hv, hty, hn⟩ := lookup_rel hΓ x t ht
@@ -562,7 +740,7 @@ theorem sc_sound (orc : Nat → Val → Val) (hOrc : OrcOK orc)
         · exact Or.inl (by simp [eval, he])
         · have := ih ((x, t1) :: Γ) ((x, v1) :: ρ) p b t (EnvRel.cons hv1 hn1 hΓ) hkb ht
           simpa [eval, he] using this
-    | add a b | sub a b =>
+    | add a b =>
       simp only [typeOf] at ht
       have hka : ∀ k ∈ knights a, k ∈ occ := fun k h => hk k (by simp [knights, h])
       have hkb : ∀ k ∈ knights b, k ∈ occ := fun k h => hk k (by simp [knights, h])
@@ -572,28 +750,49 @@ theorem sc_sound (orc : Nat → Val → Val) (hOrc : OrcOK orc)
         cases h2 : typeOf fns fuel Γ p b with
         | none => simp [h1, h2] at ht
         | some tb =>
-          simp [h1, h2] at ht; subst ht
+          simp only [h1, h2] at ht
           rcases ih Γ ρ p a ta hΓ hka h1 with ea | ⟨va, ea, hva, hna⟩
           · exact Or.inl (by simp [eval, ea])
           · rcases ih Γ ρ p b tb hΓ hkb h2 with eb | ⟨vb, eb, hvb, hnb⟩
             · exact Or.inl (by simp [eval, ea, eb])
-            · first
-              | (obtain ⟨v, hv, hty, hn⟩ := addV_ok hc hva hna hvb hnb
-                 have he : eval orc fns (fuel + 1) ρ p (.add a b) = .ok v := by
-                   simp [eval, ea, eb, hv]
-                 exact Or.inr ⟨v, he, hty, hn⟩)
-              | (obtain ⟨hvb', hnb'⟩ := negV_ok hvb hnb
-                 obtain ⟨v, hv, hty, hn⟩ := addV_ok hc hva hna hvb' hnb'
-                 have he : eval orc fns (fuel + 1) ρ p (.sub a b) = .ok v := by
-                   simp [eval, ea, eb, hv]
-                 exact Or.inr ⟨v, he, hty, hn⟩)
+            · obtain ⟨v, hv, hty, hn⟩ := addV_ok hc hva hna hvb hnb ht
+              have he : eval orc fns (fuel + 1) ρ p (.add a b) = .ok v := by
+                simp [eval, ea, eb, hv]
+              exact Or.inr ⟨v, he, hty, hn⟩
+    | sub a b =>
+      simp only [typeOf] at ht
+      have hka : ∀ k ∈ knights a, k ∈ occ := fun k h => hk k (by simp [knights, h])
+      have hkb : ∀ k ∈ knights b, k ∈ occ := fun k h => hk k (by simp [knights, h])
+      cases h1 : typeOf fns fuel Γ p a with
+      | none => simp [h1] at ht
+      | some ta =>
+        cases h2 : typeOf fns fuel Γ p b with
+        | none => simp [h1, h2] at ht
+        | some tb =>
+          simp only [h1, h2] at ht
+          rcases ih Γ ρ p a ta hΓ hka h1 with ea | ⟨va, ea, hva, hna⟩
+          · exact Or.inl (by simp [eval, ea])
+          · rcases ih Γ ρ p b tb hΓ hkb h2 with eb | ⟨vb, eb, hvb, hnb⟩
+            · exact Or.inl (by simp [eval, ea, eb])
+            · -- tyAdd succeeded, so tb is num or kn and scaling it keeps its type.
+              have hsc : tyScale tb = some tb := by
+                cases ta <;> cases tb <;> simp_all [tyAdd, tyScale]
+              obtain ⟨nb, hnbv, hnbt, hnbn⟩ := scaleV_ok (occ := occ) (-1) hvb hnb hsc
+              obtain ⟨v, hv, hty, hn⟩ := addV_ok hc hva hna hnbt hnbn ht
+              have he : eval orc fns (fuel + 1) ρ p (.sub a b) = .ok v := by
+                simp [eval, ea, eb, hnbv, hv]
+              exact Or.inr ⟨v, he, hty, hn⟩
     | scale k a =>
       simp only [typeOf] at ht
       have hka : ∀ k ∈ knights a, k ∈ occ := fun k' h => hk k' (by simp [knights, h])
-      rcases ih Γ ρ p a t hΓ hka ht with ea | ⟨va, ea, hva, hna⟩
-      · exact Or.inl (by simp [eval, ea])
-      · obtain ⟨h1, h2⟩ := scaleV_ok (occ := occ) k hva hna
-        exact Or.inr ⟨scaleV k va, by simp [eval, ea], h1, h2⟩
+      cases h1 : typeOf fns fuel Γ p a with
+      | none => simp [h1] at ht
+      | some ta =>
+        simp only [h1] at ht
+        rcases ih Γ ρ p a ta hΓ hka h1 with ea | ⟨va, ea, hva, hna⟩
+        · exact Or.inl (by simp [eval, ea])
+        · obtain ⟨v, hv, hty, hn⟩ := scaleV_ok (occ := occ) k hva hna ht
+          exact Or.inr ⟨v, by simp [eval, ea, hv], hty, hn⟩
     | mulk node a b =>
       simp only [typeOf] at ht
       have hka : ∀ k ∈ knights a, k ∈ occ := fun k h => hk k (by simp [knights, h])
@@ -604,13 +803,72 @@ theorem sc_sound (orc : Nat → Val → Val) (hOrc : OrcOK orc)
         cases h2 : typeOf fns fuel Γ p b with
         | none => simp [h1, h2] at ht
         | some tb =>
+          simp only [h1, h2] at ht
+          rcases ih Γ ρ p a ta hΓ hka h1 with ea | ⟨va, ea, hva, hna⟩
+          · exact Or.inl (by simp [eval, ea])
+          · rcases ih Γ ρ p b tb hΓ hkb h2 with eb | ⟨vb, eb, hvb, hnb⟩
+            · exact Or.inl (by simp [eval, ea, eb])
+            · obtain ⟨v, hv, hty, hn⟩ := mulV_ok hc node p hva hna hvb hnb ht
+              exact Or.inr ⟨v, by simp [eval, ea, eb, hv], hty, hn⟩
+    | pair a b =>
+      simp only [typeOf] at ht
+      have hka : ∀ k ∈ knights a, k ∈ occ := fun k h => hk k (by simp [knights, h])
+      have hkb : ∀ k ∈ knights b, k ∈ occ := fun k h => hk k (by simp [knights, h])
+      cases h1 : typeOf fns fuel Γ p a with
+      | none => simp [h1] at ht
+      | some ta =>
+        cases h2 : typeOf fns fuel Γ p b with
+        | none => simp [h1, h2] at ht
+        | some tb =>
           simp [h1, h2] at ht; subst ht
           rcases ih Γ ρ p a ta hΓ hka h1 with ea | ⟨va, ea, hva, hna⟩
           · exact Or.inl (by simp [eval, ea])
           · rcases ih Γ ρ p b tb hΓ hkb h2 with eb | ⟨vb, eb, hvb, hnb⟩
             · exact Or.inl (by simp [eval, ea, eb])
-            · obtain ⟨v, hv, hty, hn⟩ := mulV_ok hc node p hva hna hvb hnb
-              exact Or.inr ⟨v, by simp [eval, ea, eb, hv], hty, hn⟩
+            · refine Or.inr ⟨.pair va vb, by simp [eval, ea, eb], ⟨hva, hvb⟩, ?_⟩
+              intro t ht
+              simp only [terms] at ht
+              rcases List.mem_append.mp ht with h | h
+              · exact hna t h
+              · exact hnb t h
+    | fst a =>
+      simp only [typeOf] at ht
+      have hka : ∀ k ∈ knights a, k ∈ occ := fun k h => hk k (by simp [knights, h])
+      cases h1 : typeOf fns fuel Γ p a with
+      | none => simp [h1] at ht
+      | some ta =>
+        cases ta with
+        | num => simp [h1] at ht
+        | kn _ _ => simp [h1] at ht
+        | pair t1 t2 =>
+          simp [h1] at ht; subst ht
+          rcases ih Γ ρ p a _ hΓ hka h1 with ea | ⟨va, ea, hva, hna⟩
+          · exact Or.inl (by simp [eval, ea])
+          · cases va with
+            | pair v w =>
+              refine Or.inr ⟨v, by simp [eval, ea], hva.1, ?_⟩
+              intro t ht; exact hna t (by simp [terms, ht])
+            | num _ => exact absurd hva (by simp [HasTy])
+            | kn _ _ => exact absurd hva (by simp [HasTy])
+    | snd a =>
+      simp only [typeOf] at ht
+      have hka : ∀ k ∈ knights a, k ∈ occ := fun k h => hk k (by simp [knights, h])
+      cases h1 : typeOf fns fuel Γ p a with
+      | none => simp [h1] at ht
+      | some ta =>
+        cases ta with
+        | num => simp [h1] at ht
+        | kn _ _ => simp [h1] at ht
+        | pair t1 t2 =>
+          simp [h1] at ht; subst ht
+          rcases ih Γ ρ p a _ hΓ hka h1 with ea | ⟨va, ea, hva, hna⟩
+          · exact Or.inl (by simp [eval, ea])
+          · cases va with
+            | pair v w =>
+              refine Or.inr ⟨w, by simp [eval, ea], hva.2, ?_⟩
+              intro t ht; exact hna t (by simp [terms, ht])
+            | num _ => exact absurd hva (by simp [HasTy])
+            | kn _ _ => exact absurd hva (by simp [HasTy])
     | call site f a =>
       simp only [typeOf] at ht
       have hka : ∀ k ∈ knights a, k ∈ occ := fun k h => hk k (by simp [knights, h])
@@ -639,11 +897,12 @@ theorem sc_sound (orc : Nat → Val → Val) (hOrc : OrcOK orc)
         rcases ih Γ ρ p a ta hΓ hka h1 with ea | ⟨va, ea, _, _⟩
         · exact Or.inl (by simp [eval, ea])
         · obtain ⟨c, ts, horc, hfr⟩ := hOrc f va
-          refine Or.inr ⟨orc f va, by simp [eval, ea], by rw [horc]; trivial, ?_⟩
-          intro t ht n hs
-          rw [horc] at ht
-          obtain ⟨nd, q, hq⟩ := hfr t ht
-          rw [hq] at hs; cases hs
+          refine Or.inr ⟨orc f va, by simp [eval, ea], ?_, ?_⟩
+          · rw [horc]; intro t _; cases t.kn <;> simp [inSet]
+          · intro t ht _ n hs
+            rw [horc] at ht
+            obtain ⟨nd, q, hq⟩ := hfr t ht
+            rw [hq] at hs; cases hs
     | require a =>
       simp only [typeOf] at ht
       have hka : ∀ k ∈ knights a, k ∈ occ := fun k h => hk k (by simp [knights, h])
@@ -652,15 +911,17 @@ theorem sc_sound (orc : Nat → Val → Val) (hOrc : OrcOK orc)
       | some ta =>
         rcases ih Γ ρ p a ta hΓ hka h1 with ea | ⟨va, ea, hva, hna⟩
         · exact Or.inl (by simp [eval, ea])
-        · cases ta with
+        · have hnum : ∀ v, (∀ t ∈ terms (.num v), t.kn = true → ∀ n, t.src = .named n →
+              (n, t.lo, t.hi) ∈ occ) := by intro v t ht; simp [terms] at ht
+          cases ta with
           | num =>
             simp [h1] at ht; subst ht
             cases va with
-            | num v =>
-              exact Or.inr ⟨.num v, by simp [eval, ea], trivial,
-                by intro t ht; simp [terms] at ht⟩
+            | num v => exact Or.inr ⟨.num v, by simp [eval, ea], trivial, hnum v⟩
             | kn _ _ => exact absurd hva (by simp [HasTy])
-          | kn k =>
+            | pair _ _ => exact absurd hva (by simp [HasTy])
+          | pair _ _ => simp [h1] at ht
+          | kn aa k =>
             cases k with
             | unknown => simp [h1] at ht
             | known S =>
@@ -670,14 +931,54 @@ theorem sc_sound (orc : Nat → Val → Val) (hOrc : OrcOK orc)
                 simp [h1] at ht; subst ht
                 cases va with
                 | num v => exact absurd hva (by simp [HasTy])
+                | pair _ _ => exact absurd hva (by simp [HasTy])
                 | kn c ts =>
-                  have hts : ts = [] := by
-                    cases ts with
-                    | nil => rfl
-                    | cons t ts' => exact absurd (hva t (by simp)) (by simp)
-                  subst hts
-                  exact Or.inr ⟨.num c, by simp [eval, ea], trivial,
-                    by intro t ht; simp [terms] at ht⟩
+                  have hany := no_kn_of_empty hva
+                  exact Or.inr ⟨.num c, by simp [eval, ea, hany], trivial, hnum c⟩
+    | requireExact a =>
+      simp only [typeOf] at ht
+      have hka : ∀ k ∈ knights a, k ∈ occ := fun k h => hk k (by simp [knights, h])
+      cases h1 : typeOf fns fuel Γ p a with
+      | none => simp [h1] at ht
+      | some ta =>
+        rcases ih Γ ρ p a ta hΓ hka h1 with ea | ⟨va, ea, hva, hna⟩
+        · exact Or.inl (by simp [eval, ea])
+        · have hnum : ∀ v, (∀ t ∈ terms (.num v), t.kn = true → ∀ n, t.src = .named n →
+              (n, t.lo, t.hi) ∈ occ) := by intro v t ht; simp [terms] at ht
+          cases ta with
+          | num =>
+            simp [h1] at ht; subst ht
+            cases va with
+            | num v => exact Or.inr ⟨.num v, by simp [eval, ea], trivial, hnum v⟩
+            | kn _ _ => exact absurd hva (by simp [HasTy])
+            | pair _ _ => exact absurd hva (by simp [HasTy])
+          | pair _ _ => simp [h1] at ht
+          | kn aa k =>
+            cases aa with
+            | unknown => cases k <;> simp [h1] at ht
+            | known A =>
+              cases k with
+              | unknown => cases A <;> simp [h1] at ht
+              | known S =>
+                cases A with
+                | cons _ _ => cases S <;> simp [h1] at ht
+                | nil =>
+                  cases S with
+                  | cons _ _ => simp [h1] at ht
+                  | nil =>
+                    simp [h1] at ht; subst ht
+                    cases va with
+                    | num v => exact absurd hva (by simp [HasTy])
+                    | pair _ _ => exact absurd hva (by simp [HasTy])
+                    | kn c ts =>
+                      have hts : ts = [] := by
+                        cases ts with
+                        | nil => rfl
+                        | cons t ts' =>
+                          have := hva t (by simp)
+                          cases hb : t.kn <;> simp [hb, inSet] at this
+                      subst hts
+                      exact Or.inr ⟨.num c, by simp [eval, ea], trivial, hnum c⟩
 
 /-! ## 8. Corollaries: the refusals, stated directly -/
 
@@ -694,8 +995,21 @@ theorem require_never_imprecise (orc : Nat → Val → Val) (hOrc : OrcOK orc)
   · rw [h]; intro h'; cases h'
   · rw [h]; intro h'; cases h'
 
+/-- (b, exact) A `requireExact` the checker accepts never fails as imprecise. -/
+theorem requireExact_never_imprecise (orc : Nat → Val → Val) (hOrc : OrcOK orc)
+    (fns : List Expr) (occ : List (Nat × Int × Int)) (hc : Consistent occ)
+    (hfns : ∀ body ∈ fns, ∀ k ∈ knights body, k ∈ occ)
+    (fuel : Nat) (p : List Nat) (a : Expr) (t : Ty)
+    (hk : ∀ k ∈ knights a, k ∈ occ)
+    (ht : typeOf fns fuel [] p (.requireExact a) = some t) :
+    eval orc fns fuel [] p (.requireExact a) ≠ .error .imprecise := by
+  rcases sc_sound orc hOrc fns occ hc hfns fuel [] [] p (.requireExact a) t EnvRel.nil
+      (by simpa [knights] using hk) ht with h | ⟨v, h, _, _⟩
+  · rw [h]; intro h'; cases h'
+  · rw [h]; intro h'; cases h'
+
 /-- (b, E314) A program whose named-bound table is consistent never meets two
-    runtime terms of one named source with different bounds. -/
+    runtime terms of one named Knightian source with different bounds. -/
 theorem consistent_never_conflict (orc : Nat → Val → Val) (hOrc : OrcOK orc)
     (fns : List Expr) (occ : List (Nat × Int × Int)) (hc : Consistent occ)
     (hfns : ∀ body ∈ fns, ∀ k ∈ knights body, k ∈ occ)
@@ -714,6 +1028,14 @@ theorem opaque_refused_at_require (fns : List Expr) (fuel : Nat) (Γ : List (Nat
     typeOf fns (fuel + 2) Γ p (.require (.opq f a)) = none := by
   simp only [typeOf]
   cases typeOf fns fuel Γ p a <;> rfl
+
+/-- Per-field projection: the type of `fst e` is exactly the type of the first
+    field, not a join over the aggregate. -/
+theorem proj_carries_field_set (fns : List Expr) (fuel : Nat) (Γ : List (Nat × Ty))
+    (p : List Nat) (e : Expr) (t u : Ty)
+    (h : typeOf fns fuel Γ p e = some (.pair t u)) :
+    typeOf fns (fuel + 1) Γ p (.fst e) = some t ∧ typeOf fns (fuel + 1) Γ p (.snd e) = some u := by
+  constructor <;> simp [typeOf, h]
 
 /-! ## 9. The decidable E314 check, and import order -/
 
@@ -747,21 +1069,42 @@ def wFns : List Expr := [.var 0, .mulk 7 (.var 0) (.var 0)]
 def oracle : Nat → Val → Val := fun _ _ => .kn 0 []
 
 def k3 : Expr := .knight 3 0 1
+def g5 : Expr := .gauss 5 2
 
 /-- Repeated identity calls preserve one shared source: `id(k) - id(k)` carries
     two terms of the one source `named 3`, which cancel coefficient-wise. -/
 example : eval oracle wFns 10 [] [] (.sub (.call 1 0 k3) (.call 2 0 k3)) =
-    .ok (.kn 0 [{ src := .named 3, lo := 0, hi := 1, c := 1 },
-                { src := .named 3, lo := 0, hi := 1, c := -1 }]) := by rfl
+    .ok (.kn 0 [{ src := .named 3, lo := 0, hi := 1, c := 1, kn := true },
+                { src := .named 3, lo := 0, hi := 1, c := -1, kn := true }]) := by rfl
 
 /-- Two calls that create fresh residues do not cancel: the residues of
-    `sq(k)` at call sites 1 and 2 are distinct sources, statically and at run
-    time. -/
-example : typeOf wFns 10 [] [] (.sub (.call 1 1 k3) (.call 2 1 k3)) =
-    some (.kn (.known [.named 3, .named 3, .fresh 7 [1], .named 3, .named 3, .fresh 7 [2]])) := by
-  rfl
-
+    `sq(k)` at call sites 1 and 2 are distinct sources. -/
 example : Src.fresh 7 [1] ≠ Src.fresh 7 [2] := by decide
+
+/-- The A and K sets are kept apart: a Knightian and an aleatory source. -/
+example : typeOf wFns 10 [] [] (.add k3 g5) =
+    some (.kn (.known [.named 5]) (.known [.named 3])) := by rfl
+
+/-- `require` refuses a Knightian value and accepts an aleatory one (a GUM
+    uncertainty is a precise bound); `requireExact` refuses both. -/
+example : typeOf wFns 10 [] [] (.require k3) = none := by rfl
+example : typeOf wFns 10 [] [] (.require g5) = some .num := by rfl
+example : typeOf wFns 10 [] [] (.requireExact g5) = none := by rfl
+example : typeOf wFns 10 [] [] (.requireExact (.lit 4)) = some .num := by rfl
+
+/-- The square of an aleatory value has an aleatory residue only: its K set
+    stays empty, so `require` still accepts it. -/
+example : typeOf wFns 10 [] [] (.require (.call 1 1 g5)) = some .num := by rfl
+
+/-- The square of a Knightian value puts its residue in the K set too. -/
+example : typeOf wFns 10 [] [] (.require (.call 1 1 k3)) = none := by rfl
+
+/-- Per-field projection: field 0 is Knightian, field 1 is a literal; the
+    projection of field 1 satisfies `require`, field 0 does not. -/
+def rec01 : Expr := .pair k3 (.lit 7)
+example : typeOf wFns 10 [] [] (.require (.snd rec01)) = some .num := by rfl
+example : typeOf wFns 10 [] [] (.require (.fst rec01)) = none := by rfl
+example : eval oracle wFns 10 [] [] (.require (.snd rec01)) = .ok (.num 7) := by rfl
 
 /-- An imported named source with the same bounds agrees; with conflicting
     bounds the table is refused (E314). -/
@@ -770,10 +1113,5 @@ example : consistentB [(3, 0, 1), (3, 2, 3)] = false := by decide
 
 /-- Reversed bounds are refused by the checker. -/
 example : typeOf wFns 10 [] [] (.knight 3 2 1) = none := by rfl
-
-/-- A precise requirement on a Knightian value is refused; on a constant it is
-    accepted. -/
-example : typeOf wFns 10 [] [] (.require k3) = none := by rfl
-example : typeOf wFns 10 [] [] (.require (.lit 4)) = some .num := by rfl
 
 end SCCore
