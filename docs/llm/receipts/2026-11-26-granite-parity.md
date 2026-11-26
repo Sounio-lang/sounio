@@ -316,3 +316,68 @@ R740 for the named GPU allocations. No new jobs were submitted to dl380p or
 or modified and was read back RUNNING. No node state was changed. R770 is
 untouched. Prediction remains **NOT TESTED**, and the final parity receipt
 and PR gate are still outstanding.
+
+## R770 L4-first reroute (2026-11-26, coordinator-authorized)
+
+The preceding replacement table is historical: 29509 ultimately **FAILED
+1:0**, not an active bootstrap. Task-owned jobs 29511, 29512, 29513 and 29514
+were canceled in favor of the L4-first chain. No GPU audit output was produced
+by that chain. Job 29269 remains queued; 29217 is the other lane's running
+compiler job and was not canceled or modified.
+
+`29509` ran 00:18:20 on D with batch MaxRSS 1778520K. Its comparator compiled
+and passed `CMP_61440_SELFTEST_PASS`, SHA256
+`f74a1e17ed38075f0934bfbb55097beb1c3aac92823aa9a913b414052f80acb3`.
+The first independent tokenizer binary SHA256 was
+`c016a340da84b10f48a216799ee72d042aecba08b8a0a434949323ca3664a891`;
+its smoke test failed with `missing vocabulary entry`. Diagnostic job
+**29517** (D, COMPLETED 0:0, 00:00:01, MaxRSS 28088K) found no missing merge
+operands or products and located 14 missing single-byte alphabet symbols
+(`À Á ñ õ ö ÷ ø ù ú û ü ý þ ÿ`) in the actual staged tokenizer vocabulary.
+The failure is in `Tokenizer::load` (C++ independent oracle), which had
+required every symbol in the 256-entry byte alphabet. The reference loader
+now permits sparse byte tables and rejects an actual unrepresentable input
+byte, rather than silently dropping it. Its regression smoke tests the
+14 absent entries, rejection of an absent input byte, and original fixed
+IDs. Oracle repair source: `baa3f359735f65e9d84455ae7f1366a5cc81724e`;
+verification is pending (29518). The comparator and every numerical audit
+remain at the original pinned source
+`ad4a505c1931d48552397089ca11d7cfaeabd988`.
+
+The controller reported R770 `IDLE+DYNAMIC_NORM`, `RealMemory=61440`,
+`Gres=gpu:1` before submission. **29515**, CPU-only on
+`gpuorangefs-r770-proxmox`, completed 0:0 (00:01:11, batch MaxRSS 2094284K).
+It read the shared model directory, matched its pinned revision and exact
+manifest SHA256 `10edfe81703521bea67e7a285388590c6b740a639665411c76157d82a83609e6`,
+and verified every payload hash (`L4_WEIGHT_SHA256SUMS_PASS`). It also recorded
+`L4_ORIGINAL_PROMPTS_NOT_FOUND`; the required original registered 480-line
+corpus is still absent from shared staging and R770's searched locations.
+The coordinator was notified. No substitute prompts were created. The
+reference generation job deliberately fails if the original corpus is
+still unavailable, so the first audit cannot run on a different dataset.
+
+### L4-first chain: controller readback
+
+| Job | Node / resource | State at readback | Dependency |
+|---|---|---|---|
+| 29515 | R770 CPU-only, 2G | COMPLETED 0:0 | Weight SHA256 preflight passed |
+| 29516 | R770 L4 sm_89, 12G | RUNNING | afterok 29515 |
+| 29517 | D CPU-only, 2G | COMPLETED 0:0 | Oracle diagnosis |
+| 29518 | D CPU-only, 6G | RUNNING | Corrected oracle smoke and pinned comparator self-test |
+| 29519 | D CPU-only, 4G | PENDING (Dependency) | afterok 29518; original prompt file independently required |
+| 29520 | R770 L4 sm_89, 48G | PENDING (Dependency) | afterok 29516, 29519; first unpaired audit |
+| 29269 | R740 RTX 8000 control | PENDING (ReqNodeNotAvail) | Existing control retained |
+| 29521 | R740 RTX 8000 sm_75, 48G | PENDING (Dependency) | afterok 29269, 29520 |
+| 29522 | R740 A5000 sm_86, 48G | PENDING (Dependency) | afterok 29520 |
+| 29523 | D CPU-only, 512M | PENDING (Dependency) | afterany 29269, 29516, 29518, 29519, 29520, 29521, 29522 |
+
+Every new job and retained 29269 carries `lane:llm-granite`. All R770 requests
+are within the 56G ceiling. All CPU-only allocations other than the explicit
+R770 preflight use D; no new jobs target dl380p or 5860. R740 is still busy
+with 29217; the L4 audit has **no R740 dependency**. Both subsequent GPUs
+compare directly with the exact L4 TSV and its completed artifact manifest.
+Conditional Mac reference path (not yet produced):
+`/orangefs/training/llm-granite-n10/audit-29520/cuda.tsv`. Collector output:
+`/orangefs/training/llm-granite-n10/cluster-receipt-29523.txt` and `.sha256`.
+No node state has been changed. Prediction remains **NOT TESTED**;
+no divergence claim, final comparison hashes, or PR yet.
