@@ -1613,21 +1613,25 @@ fn ns_field_set(var_name: Name, scope: i64, field_name: Name, ns_id: i64, ks_id:
     NS_FIELD_COUNT = idx + 1
 }
 
-// Find the innermost live entry for (var_name, field_name). Returns index or -1.
-fn ns_field_find_innermost(var_name: Name, field_name: Name) -> i64 with Mut, Panic, Div {
-    var best: i64 = 0 - 1
-    var best_scope: i64 = 0 - 1
-    var i: i64 = 0
-    while i < NS_FIELD_COUNT {
-        if name_eq(NS_FIELD_VAR[i as usize], var_name) && name_eq(NS_FIELD_NAME[i as usize], field_name) {
-            if NS_FIELD_SCOPE[i as usize] >= best_scope {
-                best_scope = NS_FIELD_SCOPE[i as usize]
-                best = i
-            }
+// The entry for field `field_name` of the binding of `var_name` that lives at
+// `bind_scope` (the scope of the binding the name resolves to). Returns the
+// index, or -1 when that binding has no tracked entry for the field. The scope
+// must match EXACTLY: an outer binding of the same name is a different object,
+// and reading its set for a shadowing binding that is untracked (a struct
+// returned by a call, say) would bypass the Unknown fallback. Measured before
+// this rule: an inner `let h = mk(3)` (a recursive callee, Unknown) read the outer
+// `h.k` = {a}, and `h.k + b` was accepted while the same code under another name
+// was refused with E230.
+fn ns_field_find_innermost(var_name: Name, field_name: Name, bind_scope: i64) -> i64 with Mut, Panic, Div {
+    if bind_scope < 0 { return 0 - 1 }
+    var i: i64 = NS_FIELD_COUNT - 1
+    while i >= 0 {
+        if NS_FIELD_SCOPE[i as usize] == bind_scope && name_eq(NS_FIELD_VAR[i as usize], var_name) && name_eq(NS_FIELD_NAME[i as usize], field_name) {
+            return i
         }
-        i = i + 1
+        i = i - 1
     }
-    best
+    0 - 1
 }
 
 fn ns_field_record_branch_mut(var_name: Name, field_name: Name, whole: i64, ks_id: i64) with Mut, Panic, Div {
@@ -1657,16 +1661,9 @@ fn ns_field_widen_var_entries(c: *mut Checker, var_name: Name) with Mut, Panic, 
     }
 }
 
-fn ns_field_copy_var(src_name: Name, dst_name: Name, dst_scope: i64) with Mut, Panic, Div {
-    // Find the innermost scope where src_name has tracked fields.
-    var src_scope: i64 = 0 - 1
-    var i: i64 = 0
-    while i < NS_FIELD_COUNT {
-        if name_eq(NS_FIELD_VAR[i as usize], src_name) && NS_FIELD_SCOPE[i as usize] > src_scope {
-            src_scope = NS_FIELD_SCOPE[i as usize]
-        }
-        i = i + 1
-    }
+fn ns_field_copy_var(src_name: Name, src_scope: i64, dst_name: Name, dst_scope: i64) with Mut, Panic, Div {
+    // Copy only the entries of the binding `src_name` resolves to (src_scope);
+    // an outer binding of the same name is a different object.
     if src_scope < 0 { return }
     let limit = NS_FIELD_COUNT
     var j: i64 = 0
@@ -10853,7 +10850,7 @@ fn checker_merge_ns_reassigned_inplace(c: *mut Checker) with Mut, Panic, Div, IO
                 k = k + 1
             }
         } else {
-            let fidx = ns_field_find_innermost(fvar, NS_FBR_FIELD[fi as usize])
+            let fidx = ns_field_find_innermost(fvar, NS_FBR_FIELD[fi as usize], type_env_lookup_scope(&(*c).env, fvar))
             if fidx >= 0 {
                 NS_FIELD_NS[fidx as usize] = 0 - 1
                 NS_FIELD_KS[fidx as usize] = ns_union((*c).knight_ns_table, NS_FIELD_KS[fidx as usize], NS_FBR_KS[fi as usize])
@@ -11546,7 +11543,7 @@ fn checker_check_field_access_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
                 match e.left {
                     Some(bexpr) => {
                         if (*bexpr).kind == ExprKind::ExprIdent && !NS_FIELD_OVERFLOW {
-                            let fslot = ns_field_find_innermost((*bexpr).name, e.name)
+                            let fslot = ns_field_find_innermost((*bexpr).name, e.name, type_env_lookup_scope(&(*c).env, (*bexpr).name))
                             if fslot >= 0 {
                                 tracked_field = true
                                 if !checker_ns_sabotage() {
@@ -18669,7 +18666,7 @@ fn checker_check_let_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
                         li = li + 1
                     }
                 } else if (*init_e).kind == ExprKind::ExprIdent {
-                    ns_field_copy_var((*init_e).name, s.name, (*c).env.scope_depth)
+                    ns_field_copy_var((*init_e).name, type_env_lookup_scope(&(*c).env, (*init_e).name), s.name, (*c).env.scope_depth)
                 }
             }
             None => {}
@@ -18779,7 +18776,7 @@ fn checker_check_var_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
                         li = li + 1
                     }
                 } else if (*init_e).kind == ExprKind::ExprIdent {
-                    ns_field_copy_var((*init_e).name, s.name, (*c).env.scope_depth)
+                    ns_field_copy_var((*init_e).name, type_env_lookup_scope(&(*c).env, (*init_e).name), s.name, (*c).env.scope_depth)
                 }
             }
             None => {}
@@ -19110,7 +19107,7 @@ fn checker_check_assign_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with
                     match (*target).left {
                         Some(fbase) => {
                             if (*fbase).kind == ExprKind::ExprIdent {
-                                let fslot = ns_field_find_innermost((*fbase).name, (*target).name)
+                                let fslot = ns_field_find_innermost((*fbase).name, (*target).name, type_env_lookup_scope(&(*c).env, (*fbase).name))
                                 let old_ns = if fslot >= 0 { NS_FIELD_NS[fslot as usize] } else { 0 - 1 }
                                 let old_ks = if fslot >= 0 { NS_FIELD_KS[fslot as usize] } else { target_ty.knight_set_id }
                                 let merged_ks = ns_union((*c).knight_ns_table, old_ks, val_ty.knight_set_id)
