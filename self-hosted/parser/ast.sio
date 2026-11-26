@@ -1913,11 +1913,13 @@ pub fn lower_named_item_terminal_note(n: Name) with Mut, Panic, Div {
 // `var` globals are not recorded; lean_single's constant table (CONST_*) holds
 // `let`/`const` only, and the two engines must agree.
 pub var GLOBAL_CONST_NAME_HASHES: [i64; 8192] = [0; 8192]
+pub var GLOBAL_CONST_NAME_MODS: [i64; 8192] = [0; 8192]
 pub var GLOBAL_CONST_NAME_COUNT: i64 = 0
 
 pub fn ast_record_global_const_name(name: Name) with Mut, Div {
     if GLOBAL_CONST_NAME_COUNT < 8192 {
         GLOBAL_CONST_NAME_HASHES[GLOBAL_CONST_NAME_COUNT as usize] = ast_name_hash(name)
+        GLOBAL_CONST_NAME_MODS[GLOBAL_CONST_NAME_COUNT as usize] = GLOBAL_VAR_INIT_CUR_MOD
         GLOBAL_CONST_NAME_COUNT = GLOBAL_CONST_NAME_COUNT + 1
     }
 }
@@ -1932,8 +1934,10 @@ pub fn ast_record_global_const_name(name: Name) with Mut, Div {
 // any kind (let, const, var, any module) has the same name hash. An overflow
 // of either table makes every name non-exact (fail closed).
 pub var GLOBAL_EXACT_F64_HASHES: [i64; 4096] = [0; 4096]
+pub var GLOBAL_EXACT_F64_MODS: [i64; 4096] = [0; 4096]
 pub var GLOBAL_EXACT_F64_COUNT: i64 = 0
 pub var GLOBAL_ANY_DECL_HASHES: [i64; 8192] = [0; 8192]
+pub var GLOBAL_ANY_DECL_MODS: [i64; 8192] = [0; 8192]
 pub var GLOBAL_ANY_DECL_COUNT: i64 = 0
 pub var GLOBAL_EXACT_F64_OVERFLOW: i64 = 0
 
@@ -2034,6 +2038,7 @@ pub fn ast_expr_is_float_literal_shape(e: &Expr) -> bool with Mut, Panic, Div {
 pub fn ast_record_global_any_decl(name: Name) with Mut, Div {
     if GLOBAL_ANY_DECL_COUNT < 8192 {
         GLOBAL_ANY_DECL_HASHES[GLOBAL_ANY_DECL_COUNT as usize] = ast_name_hash(name)
+        GLOBAL_ANY_DECL_MODS[GLOBAL_ANY_DECL_COUNT as usize] = GLOBAL_VAR_INIT_CUR_MOD
         GLOBAL_ANY_DECL_COUNT = GLOBAL_ANY_DECL_COUNT + 1
     } else {
         GLOBAL_EXACT_F64_OVERFLOW = 1
@@ -2043,6 +2048,7 @@ pub fn ast_record_global_any_decl(name: Name) with Mut, Div {
 pub fn ast_record_global_exact_f64(name: Name) with Mut, Div {
     if GLOBAL_EXACT_F64_COUNT < 4096 {
         GLOBAL_EXACT_F64_HASHES[GLOBAL_EXACT_F64_COUNT as usize] = ast_name_hash(name)
+        GLOBAL_EXACT_F64_MODS[GLOBAL_EXACT_F64_COUNT as usize] = GLOBAL_VAR_INIT_CUR_MOD
         GLOBAL_EXACT_F64_COUNT = GLOBAL_EXACT_F64_COUNT + 1
     } else {
         GLOBAL_EXACT_F64_OVERFLOW = 1
@@ -2158,6 +2164,7 @@ pub fn ast_record_global_deferred_init(name: Name, init: Box<Expr>) with Mut, Di
 // own entry. A full table drops the entry, and the run-time R1 guard still
 // stops the program at the same operation.
 pub var GLOBAL_INIT_OVF_HASH: [i64; 4096] = [0; 4096]
+pub var GLOBAL_INIT_OVF_MOD: [i64; 4096] = [0; 4096]
 pub var GLOBAL_INIT_OVF_FILE: [i64; 4096] = [0; 4096]
 pub var GLOBAL_INIT_OVF_ISTART: [i64; 4096] = [0; 4096]
 pub var GLOBAL_INIT_OVF_IEND: [i64; 4096] = [0; 4096]
@@ -2185,6 +2192,7 @@ pub fn ast_record_global_init_refusal(name: Name, item_span: Span, site_start: i
     if GLOBAL_INIT_OVF_COUNT >= 4096 { return }
     let n = GLOBAL_INIT_OVF_COUNT as usize
     GLOBAL_INIT_OVF_HASH[n] = h
+    GLOBAL_INIT_OVF_MOD[n] = GLOBAL_VAR_INIT_CUR_MOD
     GLOBAL_INIT_OVF_FILE[n] = item_span.file_id as i64
     GLOBAL_INIT_OVF_ISTART[n] = item_span.start
     GLOBAL_INIT_OVF_IEND[n] = item_span.end
@@ -3292,3 +3300,73 @@ pub fn ast_record_global_deferred_block(name: Name, blk: Box<Expr>) with Mut, Di
 pub fn ast_global_deferred_block_count() -> i64 { GLOBAL_DEFERRED_BLOCK_COUNT }
 pub fn ast_global_deferred_block_overflowed() -> bool { GLOBAL_DEFERRED_BLOCK_OVERFLOW != 0 }
 pub fn ast_global_deferred_block_ptr(i: i64) -> i64 with Panic { GLOBAL_DEFERRED_BLOCK_PTRS[i as usize] }
+
+// Module-qualified identity for a PRIVATE module global (review of #3743).
+// compiler/private_fn_identity renames a private global `G` of module `m` that
+// shares its name with another loaded module's symbol to `G__m<m>` in the AST,
+// before the checker and lowering run. Every parse-time side table keyed by the
+// bare name hash must follow, or the renamed global would lose its initializer,
+// its const/exact-f64 facts or its E300/E309 refusal. Entries are moved only
+// when they were recorded by module `m` (the parse serial, which equals the
+// program index the pass uses: main 0, then imports in load order). The
+// declared-type table has no module field and merges homonyms (ambiguous = -1),
+// so its entry is copied to the new name rather than moved.
+pub fn ast_global_rename_in_module(old: Name, m: i64, new_name: Name) with Mut, Panic, Div {
+    let oh = ast_name_hash(old)
+    let nh = ast_name_hash(new_name)
+    var i: i64 = 0
+    while i < GLOBAL_VAR_INIT_COUNT {
+        if GLOBAL_VAR_INIT_HASHES[i as usize] == oh && GLOBAL_VAR_INIT_MODS[i as usize] == m { GLOBAL_VAR_INIT_HASHES[i as usize] = nh }
+        i = i + 1
+    }
+    i = 0
+    while i < GLOBAL_DEFERRED_INIT_COUNT {
+        if GLOBAL_DEFERRED_INIT_HASHES[i as usize] == oh && GLOBAL_DEFERRED_INIT_MODS[i as usize] == m { GLOBAL_DEFERRED_INIT_HASHES[i as usize] = nh }
+        i = i + 1
+    }
+    i = 0
+    while i < GLOBAL_DROP_COUNT {
+        if GLOBAL_DROP_HASH[i as usize] == oh && GLOBAL_DROP_MOD[i as usize] == m { GLOBAL_DROP_HASH[i as usize] = nh }
+        i = i + 1
+    }
+    i = 0
+    while i < GLOBAL_DEFERRED_BLOCK_COUNT {
+        if GLOBAL_DEFERRED_BLOCK_HASHES[i as usize] == oh && GLOBAL_DEFERRED_BLOCK_MODS[i as usize] == m { GLOBAL_DEFERRED_BLOCK_HASHES[i as usize] = nh }
+        i = i + 1
+    }
+    i = 0
+    while i < GLOBAL_CONST_NAME_COUNT {
+        if GLOBAL_CONST_NAME_HASHES[i as usize] == oh && GLOBAL_CONST_NAME_MODS[i as usize] == m { GLOBAL_CONST_NAME_HASHES[i as usize] = nh }
+        i = i + 1
+    }
+    i = 0
+    while i < GLOBAL_ANY_DECL_COUNT {
+        if GLOBAL_ANY_DECL_HASHES[i as usize] == oh && GLOBAL_ANY_DECL_MODS[i as usize] == m { GLOBAL_ANY_DECL_HASHES[i as usize] = nh }
+        i = i + 1
+    }
+    i = 0
+    while i < GLOBAL_EXACT_F64_COUNT {
+        if GLOBAL_EXACT_F64_HASHES[i as usize] == oh && GLOBAL_EXACT_F64_MODS[i as usize] == m { GLOBAL_EXACT_F64_HASHES[i as usize] = nh }
+        i = i + 1
+    }
+    i = 0
+    while i < GLOBAL_INIT_OVF_COUNT {
+        if GLOBAL_INIT_OVF_HASH[i as usize] == oh && GLOBAL_INIT_OVF_MOD[i as usize] == m { GLOBAL_INIT_OVF_HASH[i as usize] = nh }
+        i = i + 1
+    }
+    i = 0
+    while i < GLOBAL_DECL_TYPE_COUNT {
+        if GLOBAL_DECL_TYPE_HASHES[i as usize] == oh {
+            if GLOBAL_DECL_TYPE_COUNT < 4096 {
+                GLOBAL_DECL_TYPE_HASHES[GLOBAL_DECL_TYPE_COUNT as usize] = nh
+                GLOBAL_DECL_TYPE_TYPES[GLOBAL_DECL_TYPE_COUNT as usize] = GLOBAL_DECL_TYPE_TYPES[i as usize]
+                GLOBAL_DECL_OPT_INNER[GLOBAL_DECL_TYPE_COUNT as usize] = GLOBAL_DECL_OPT_INNER[i as usize]
+                GLOBAL_DECL_TYPE_COUNT = GLOBAL_DECL_TYPE_COUNT + 1
+            } else {
+                GLOBAL_DECL_TYPE_OVERFLOW = 1
+            }
+            return
+        }
+        i = i + 1
+    }
+}
