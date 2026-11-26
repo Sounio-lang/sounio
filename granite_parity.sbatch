@@ -113,17 +113,43 @@ fi
 chmod +x "$WORK/audit" || die "chmod-audit"
 rec "r-build-audit-$(sha "$WORK/audit")-cmp-$(sha "$WORK/cmp")"
 
-# The audit tool's flags are whatever the granite PR defines; adjust this line to them.
-t0=$SECONDS; rc=0
-srun --ntasks=1 --cpus-per-task=8 --mem=0 --job-name="granite-run" --export=ALL \
-  env SOUNIO_STDLIB_PATH="$D/stdlib" SOUNIO_AUDIT_BACKEND=cuda "$WORK/audit" --arch granite --model-dir "$MODEL_DIR" \
-      --dtype bf16 --prompts 480 --tokens 128 --prompts-file "$PROMPTS_FILE" --prompt-ids "$PROMPT_IDS" --out "$WORK/cuda.tsv" < /dev/null > "$WORK/run.log" 2>&1 || rc=$?
+# The pinned executable can leave a driver thread alive after main returns.
+# Launch within the batch allocation, so the watchdog owns the exact child PID.
+complete_audit() {
+  grep -q '^AUDIT_61440_DONE backend=cuda new_prompts=480 TOTAL_CUDA_FMA_MIN_NORM_HITS=[0-9][0-9]*$' "$WORK/run.log" &&
+  grep -q GRANITE_TOKEN_IDS_480_PASS "$WORK/run.log" &&
+  [[ -s "$WORK/cuda.tsv" && $(wc -l < "$WORK/cuda.tsv") -eq 481 ]] &&
+  awk -F '\t' 'BEGIN{n=0;h=0} /^#/ {h++;next} {if(NF!=5 || $1!=n || $3!=128) exit 1; n++} END{if(n!=480 || h!=1) exit 1}' "$WORK/cuda.tsv"
+}
+t0=$SECONDS; rc=0; workaround=0
+env SOUNIO_STDLIB_PATH="$D/stdlib" SOUNIO_AUDIT_BACKEND=cuda "$WORK/audit" --arch granite --model-dir "$MODEL_DIR" \
+    --dtype bf16 --prompts 480 --tokens 128 --prompts-file "$PROMPTS_FILE" --prompt-ids "$PROMPT_IDS" --out "$WORK/cuda.tsv" < /dev/null > "$WORK/run.log" 2>&1 &
+pid=$!
+while kill -0 "$pid" 2>/dev/null; do
+  if complete_audit 2>/dev/null; then
+    sleep 10
+    if kill -0 "$pid" 2>/dev/null && complete_audit; then
+      grep -E '^(Name|State|Threads):' "/proc/$pid/status" > "$WORK/exit-hang-status.log" 2>/dev/null || true
+      kill -KILL "$pid" || die "watchdog-kill"
+      workaround=1
+      break
+    fi
+  fi
+  sleep 5
+done
+wait "$pid" || rc=$?
 rec "r-run-rc$rc-s$((SECONDS - t0))"
-[[ "$rc" -eq 0 && -s "$WORK/cuda.tsv" ]] || die "run-failed"
+if (( workaround )); then
+  [[ "$rc" -eq 137 ]] && complete_audit || die "watchdog-incomplete"
+  rec r-exit-hang-workaround
+else
+  [[ "$rc" -eq 0 ]] && complete_audit || die "run-failed"
+fi
 
 grep -q GRANITE_TOKEN_IDS_480_PASS "$WORK/run.log" || die "token-oracle-failed"
 awk -F '\t' 'BEGIN{n=0} /^#/ {next} {if(NF!=5 || $1!=n || $3!=128) exit 1; n++} END{if(n!=480) exit 1}' "$WORK/cuda.tsv" || die "incomplete-audit"
 cp "$WORK/audit" "$WORK/cuda.tsv" "$WORK/run.log" "$WORK/inputs.sha256" "$WORK/build-"*.log "$ART/" || die "artifact-copy"
+if [[ -f "$WORK/exit-hang-status.log" ]]; then cp "$WORK/exit-hang-status.log" "$ART/" || die "watchdog-log-copy"; fi
 sha256sum "$ART/audit" "$ART/cuda.tsv" "$PROMPTS_FILE" "$PROMPT_IDS" > "$ART/SHA256SUMS"
 if [[ -x "$WORK/cmp" ]]; then cp "$WORK/cmp" "$ART/cmp" || die "comparator-copy"; sha256sum "$ART/cmp" >> "$ART/SHA256SUMS"; fi
 rec "r-tsv-sha-$(sha256sum "$ART/cuda.tsv" | cut -d' ' -f1)"

@@ -15,6 +15,7 @@ stage=/orangefs/training/llm-granite-n10
 rtx=${1:?RTX audit job id}
 l4=${5:-}
 ref_job=${l4:-$rtx}
+ref_dir=${6:-$stage/audit-$ref_job}
 a5=${2:?A5000 audit job id}
 joblist=${3:?comma-separated dependency job ids}
 head_c=${4:?pinned audit commit}
@@ -33,18 +34,19 @@ out="$stage/cluster-receipt-$SLURM_JOB_ID.txt"
   for j in "$l4" "$rtx" "$a5"; do
     [[ -n "$j" ]] || continue
     art="$stage/audit-$j"
+    if [[ "$j" == "$ref_job" ]]; then art="$ref_dir"; fi
     printf '\nAudit job %s artifacts:\n' "$j"
     if [[ -s "$art/SHA256SUMS" ]]; then
       cat "$art/SHA256SUMS"
-      if sha256sum -c "$art/SHA256SUMS"; then printf 'artifact_hash_check=PASS\n'; else printf 'artifact_hash_check=FAIL\n'; fi
+      if (cd "$art" && sha256sum -c SHA256SUMS); then printf 'artifact_hash_check=PASS\n'; else printf 'artifact_hash_check=FAIL\n'; fi
     else printf 'No completed audit manifest\n'; fi
     if [[ -s "$art/partial.sha256" ]]; then cat "$art/partial.sha256"; fi
     if [[ -s "$art/exit-code" ]]; then printf 'exit-code='; cat "$art/exit-code"; fi
     if [[ -s "$art/cmp.out" ]]; then cat "$art/cmp.out"; fi
   done
-  if [[ -s "$stage/audit-$ref_job/cuda.tsv" ]]; then
-    printf '\nREF_TSV for Mac lane: %s\n' "$stage/audit-$ref_job/cuda.tsv"
-    sha256sum "$stage/audit-$ref_job/cuda.tsv"
+  if [[ -s "$ref_dir/cuda.tsv" ]]; then
+    printf '\nREF_TSV for Mac lane: %s\n' "$ref_dir/cuda.tsv"
+    sha256sum "$ref_dir/cuda.tsv"
   else printf '\nREF_TSV unavailable; no complete reference run.\n'; fi
   printf '\nA divergent tuple is not a localized causal diagnosis. No fix is applied by this collector.\n'
 } > "$out.tmp"

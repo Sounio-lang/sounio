@@ -39,8 +39,38 @@ SOUNIO_AUDIT_BACKEND=cpu SOUNIO_ADV_OUT="$work/cpu.bin" "$work/adv" > "$work/cpu
 grep -q GRANITE_ARGMAX_TAIL_CPU_PASS "$work/cpu.log"
 rec granite-tail-cpu-pass
 if [[ "${2:-cuda}" == cuda ]]; then
-  SOUNIO_AUDIT_BACKEND=cuda SOUNIO_ADV_OUT="$work/cuda.bin" "$work/adv" > "$work/cuda.log" 2>&1
-  grep -q GRANITE_ARGMAX_TAIL_CUDA_PASS "$work/cuda.log"
+  # AFTZ: 32-byte header, eleven (16-byte metadata + name + f32 array) records.
+  expected=$((32 + 11 * 16 + 13312 * 4))
+  for name in adv/mul_subnorm adv/fma_subnorm adv/add_cancel_subnorm adv/div_subnorm adv/exp_subnorm adv/rsqrt_flt_min adv/gemv_fma_subnorm adv/rmsnorm_tiny adv/div_ties adv/div_subnorm_bound adv/sqrt_ties_pow4_fltmin; do
+    expected=$((expected + ${#name}))
+  done
+  complete_tail() {
+    grep -qx GRANITE_ARGMAX_TAIL_CUDA_PASS "$work/cuda.log" &&
+    grep -q '^LLM_V2_ADVERSARIAL_FTZ_PASS backend=cuda fma_hits=[1-9][0-9]* subnormals=0$' "$work/cuda.log" &&
+    [[ -s "$work/cuda.bin" && $(stat -c %s "$work/cuda.bin") -eq $expected ]] &&
+    [[ $(od -An -tx1 -N16 "$work/cuda.bin" | tr -d ' \n') == 4146545a01000000030000000b000000 ]]
+  }
+  SOUNIO_AUDIT_BACKEND=cuda SOUNIO_ADV_OUT="$work/cuda.bin" "$work/adv" > "$work/cuda.log" 2>&1 &
+  pid=$!; rc=0; workaround=0
+  while kill -0 "$pid" 2>/dev/null; do
+    if complete_tail 2>/dev/null; then
+      sleep 10
+      if kill -0 "$pid" 2>/dev/null && complete_tail; then
+        grep -E '^(Name|State|Threads):' "/proc/$pid/status" > "$work/exit-hang-status.log" 2>/dev/null || true
+        kill -KILL "$pid"
+        workaround=1
+        break
+      fi
+    fi
+    sleep 5
+  done
+  wait "$pid" || rc=$?
+  if (( workaround )); then
+    [[ "$rc" -eq 137 ]] && complete_tail || exit 1
+    rec r-exit-hang-workaround
+  else
+    [[ "$rc" -eq 0 ]] && complete_tail || exit 1
+  fi
   rec granite-tail-cuda-pass
 fi
 sha256sum "$work/adv" "$work/"*.bin
