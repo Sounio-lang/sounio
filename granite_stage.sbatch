@@ -43,7 +43,7 @@ if [[ ! -d "$model/.git" ]]; then
 fi
 cd "$model"
 git lfs install --local
-git lfs pull --include='*.safetensors' --exclude=''
+git lfs pull --include='*.safetensors,tokenizer.json,tokenizer_config.json,config.json,model.safetensors.index.json' --exclude=''
 git lfs fsck
 printf '%s\n' "$(git rev-parse HEAD)" > MODEL_REVISION
 sha256sum *.safetensors *.json MODEL_REVISION > SHA256SUMS.tmp
