@@ -4854,21 +4854,28 @@ fn checker_collect_global_item_inplace(
     declared_ty: Option<Box<TypeExpr>>
 ) with Mut, Panic, Div, Alloc, IO {
     checker_defined_name_note(name)
+    // A module-level global is bound with its declared type. Before, every
+    // global was bound as unknown (and mutable) inside function bodies, so
+    // `let b: bool = SCALE` with `SCALE: f64` checked OK, and so did
+    // assigning to a module-level `let`. An unannotated global stays unknown:
+    // its initialiser is not typed at collection time.
+    var global_ty = ty_unknown()
     match declared_ty {
         Some(te) => {
-            // Validate the annotation at the checker boundary, but preserve the
-            // legacy TyUnknown binding until global typing has its own milestone.
-            let _validated_global_ty = checker_lower_type_expr_mut(c, *te)
+            global_ty = checker_lower_type_expr_mut(c, *te)
         }
         None => {}
     }
+    // `let` and `const` globals are immutable; `var` globals are not recorded
+    // in the const-name table and stay assignable.
+    let global_mutable = !ast_is_global_const_name(name)
     let benv_idx = (*c).env.count
     type_env_reset_conf_at(benv_idx)
     if benv_idx < TYPE_ENV_CAPACITY {
         type_env_set_binding_mut(&!(*c).env, benv_idx, TypeBinding {
             name: name,
-            ty: ty_unknown(),
-            is_mutable: true,
+            ty: global_ty,
+            is_mutable: global_mutable,
             scope_depth: (*c).env.scope_depth,
         })
         (*c).env.count = benv_idx + 1
