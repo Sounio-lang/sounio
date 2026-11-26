@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+#SBATCH --job-name=granite-reference-ids
+#SBATCH --no-requeue
+#SBATCH --partition=all
+#SBATCH --cpus-per-task=2
+#SBATCH --mem=4G
+#SBATCH --gres=none
+#SBATCH --time=00:30:00
+#SBATCH --chdir=/tmp
+#SBATCH --output=/tmp/granite-reference-%j.log
+set -euo pipefail
+head_c=${1:?source commit}
+model=${2:?model directory}
+prompts=${3:?original 480 prompt file}
+ref=${4:?output reference TSV path}
+work=/tmp/granite-reference-$SLURM_JOB_ID
+mkdir -p "$work"
+awk 'f { print } /^__CA_BUNDLE__$/ { f = 1 }' "$0" > "$work/ca.crt"
+export GIT_SSL_CAINFO="$work/ca.crt"
+(cd "$model" && sha256sum -c --quiet SHA256SUMS)
+[[ -s "$prompts" && ! -e "$ref" ]]
+command -v jq
+cd "$work"
+git init -q src
+git -C src fetch -q --depth 1 https://github.com/Sounio-lang/sounio.git "$head_c"
+git -C src checkout -q --detach FETCH_HEAD
+c++ -std=c++23 -O2 -Wall -Wextra -Werror src/tools/sounio-llm/granite_prompt_ids.cpp -lpcre2-8 -o ids
+jq -er '.model.vocab|to_entries[]|[(.key|@base64),.value]|@tsv' "$model/tokenizer.json" > vocab.tsv
+jq -er '.model.merges[]|[(.[0]|@base64),(.[1]|@base64)]|@tsv' "$model/tokenizer.json" > merges.tsv
+jq -er '.added_tokens[]|[(.content|@base64),.id]|@tsv' "$model/tokenizer.json" > specials.tsv
+./ids vocab.tsv merges.tsv specials.tsv "$prompts" > "$work/ref.tsv"
+[[ $(wc -l < "$work/ref.tsv") -eq 480 ]]
+cp "$work/ref.tsv" "$ref.tmp-$SLURM_JOB_ID"
+mv "$ref.tmp-$SLURM_JOB_ID" "$ref"
+sha256sum "$model/tokenizer.json" "$prompts" "$ref" "$work/ids" > "$ref.sha256"
+cat "$ref.sha256"
+exit 0
+__CA_BUNDLE__
