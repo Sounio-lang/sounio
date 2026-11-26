@@ -42,6 +42,7 @@ use llm::hal::{
     cuda_memcpy_h2d,
     cuda_memcpy_d2h,
     cuda_ctx_sync,
+    cuda_launch_4_async,
     cuda_launch_3param_1d,
     cuda_launch_6param_1d,
     cuda_launch_8param_1d,
@@ -57,6 +58,7 @@ use llm::qwen3::{
     qwen3_cpu_rmsnorm,
     qwen3_cpu_gemv,
     qwen3_cpu_vec_add,
+    qwen3_cpu_top2,
 }
 
 extern "C" {
@@ -1047,6 +1049,78 @@ fn cuda_read_fma_hits(s: &CudaDriverSession, d_hits: i64, out_box: i64) -> i64 {
     ptr_read_i64_le(out_box, 0)
 }
 
+// Three tail entries at 49152..49154. Cases force tail winners and ties
+// within a CUDA lane (stride 256) and across lanes.
+fn build_granite_argmax_tail(p: i64, mode: i64) with Mut {
+    var i: i64 = 0
+    while i < 49155 {
+        let _w = ptr_write_u32_le(p, i * 4, 3212836864)
+        i = i + 1
+    }
+    let _a = ptr_write_u32_le(p, 49152 * 4, 1073741824)
+    let _b = ptr_write_u32_le(p, 49153 * 4, 1073741824)
+    let _c = ptr_write_u32_le(p, 49154 * 4, 1073741824)
+    if mode == 1 {
+        let _d = ptr_write_u32_le(p, 256 * 4, 1073741824)
+        let _e = ptr_write_u32_le(p, 2 * 4, 1073741824)
+    }
+    if mode == 2 {
+        let _d = ptr_write_u32_le(p, 49154 * 4, 1082130432)
+    }
+}
+
+fn check_granite_argmax_tail(out: i64, mode: i64) -> bool {
+    let t1 = if mode == 0 { 49152 } else if mode == 1 { 2 } else { 49154 }
+    let t2 = if mode == 0 { 49153 } else if mode == 1 { 256 } else { 49152 }
+    let b1 = if mode == 2 { 1082130432 } else { 1073741824 }
+    ptr_read_i64_le(out, 0) == t1 && ptr_read_i64_le(out, 8) == t2
+        && ptr_read_u32_le(out, 16) == b1 && ptr_read_u32_le(out, 20) == 1073741824
+}
+
+fn granite_argmax_tail_cpu() -> bool with IO, Alloc, Mut {
+    let buf = heap_alloc(49155 * 4 + 32) as i64
+    let out = buf + 49155 * 4
+    var ok = buf != 0
+    if ok {
+        var mode: i64 = 0
+        while mode < 3 {
+            build_granite_argmax_tail(buf, mode)
+            let rc = qwen3_cpu_top2(buf, out, 49155)
+            if rc != 0 || !check_granite_argmax_tail(out, mode) { ok = false }
+            mode = mode + 1
+        }
+        heap_free(buf as *mut u8)
+    }
+    println(if ok { "GRANITE_ARGMAX_TAIL_CPU_PASS" } else { "GRANITE_ARGMAX_TAIL_CPU_FAIL" })
+    ok
+}
+
+fn granite_argmax_tail_cuda(cs: &CudaDriverSession, hmod: i64) -> bool with IO, Alloc, Mut {
+    let buf = heap_alloc(49155 * 4 + 32) as i64
+    let out = buf + 49155 * 4
+    let d_logits = cuda_mem_alloc(cs, 49155 * 4)
+    let d_top2 = cuda_mem_alloc(cs, 32)
+    let kernel = cuda_module_get_fn(cs, hmod, "cuda_argmax_top2_f32")
+    var ok = buf != 0 && d_logits != 0 && d_top2 != 0 && kernel != 0
+    if ok {
+        var mode: i64 = 0
+        while mode < 3 {
+            build_granite_argmax_tail(buf, mode)
+            if cuda_memcpy_h2d(cs, d_logits, buf, 49155 * 4) != 0
+                || cuda_launch_4_async(cs, kernel, 1, 256, d_logits, d_top2, 49155, 0) != 0
+                || cuda_memcpy_d2h(cs, out, d_top2, 32) != 0
+                || !check_granite_argmax_tail(out, mode) { ok = false }
+            mode = mode + 1
+        }
+    }
+    if buf != 0 { heap_free(buf as *mut u8) }
+    if d_logits != 0 { let _f = cuda_mem_free(cs, d_logits) }
+    if d_top2 != 0 { let _f = cuda_mem_free(cs, d_top2) }
+    println(if ok { "GRANITE_ARGMAX_TAIL_CUDA_PASS" } else { "GRANITE_ARGMAX_TAIL_CUDA_FAIL" })
+    ok
+}
+
+
 // ---------- Per-Backend Suites ----------
 
 fn run_cpu_suite(
@@ -1574,6 +1648,7 @@ fn run_cuda_suite(
     adv_analyze_and_print_op("adv/sqrt_ties_pow4_fltmin", buf_out, n_elem, h10, sub_total_box)
     let _w10 = adv_write_record(p_fw, fp, "adv/sqrt_ties_pow4_fltmin", buf_out, n_elem, h10)
 
+    if !granite_argmax_tail_cuda(cs, hmod) { ok = false }
     let _wh = ptr_write_i64_le(fma_hits_out, 0, fma_tot)
     heap_free(h_box as *mut u8)
     let _fda = cuda_mem_free(cs, d_a)
@@ -1678,6 +1753,7 @@ fn main() -> i64 with IO, Alloc, Mut, Div, Panic {
                 n_elem, gemv_rows, gemv_cols, rms_rows, rms_dim,
                 sub_total_box
             )
+            if !granite_argmax_tail_cpu() { ok_all = false }
         } else if backend_id == 2 {
             let sess = metal_session_open("")
             if metal_session_is_ok(&sess) {
