@@ -153,6 +153,15 @@ int main(int argc, char** argv) {
         if (argc != 5) throw std::runtime_error("usage: granite_prompt_ids vocab.tsv merges.tsv specials.tsv prompts.txt");
         Tokenizer tok;
         tok.load(argv[1], argv[2], argv[3]);
+        if (std::string_view(argv[4]) == "--smoke") {
+            if (tok.encode("hello") != std::vector<ID>{7656} ||
+                tok.encode(" hello!") != std::vector<ID>{17964, 19} ||
+                tok.encode("123") != std::vector<ID>{35, 36, 37} ||
+                tok.encode("<|start_of_role|><|end_of_role|><|end_of_text|><|tool_call|>") != std::vector<ID>{49152, 49153, 0, 49154})
+                throw std::runtime_error("Granite fixed vocabulary controls failed");
+            std::cout << "GRANITE_CPP_TOKENIZER_SMOKE_PASS\n";
+            return 0;
+        }
         std::ifstream prompts(argv[4]);
         if (!prompts) throw std::runtime_error("cannot open prompts");
         std::ostringstream result;
