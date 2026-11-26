@@ -46,9 +46,11 @@ export const ENGLISH_SEARCH = {
       'Effect system in Sounio: side effects sit in the function signature. Built-in names form a closed checked list. A caller that omits one is rejected.',
   },
   '/learn/compiler/effect-system/': {
-    title: 'Sounio effect system: how the effect checker works',
+    // The query "effect system" belongs to /learn/effects/. This title leads
+    // with compiler internals so the contributor page does not bid on it.
+    title: 'Sounio compiler internals: effect checker source map',
     description:
-      'How the Sounio compiler checks the effect system: source map of self-hosted/check/effects.sio and the effects subsystem, and what handlers do today.',
+      'Compiler internals for contributors. How Sounio checks declared effects: source map of self-hosted/check/effects.sio and what handlers do today.',
     // last_validated on en/compiler/effect-system.mdx. Not a release version.
     dateModified: '2026-10-29',
   },
@@ -79,6 +81,19 @@ export const SELF_HOSTED_PAGE = {
     name: 'Sounio',
     alternateName: FORMER_LANGUAGE_NAME,
   },
+};
+
+/**
+ * Contributor page at /learn/compiler/effect-system/.
+ * The visible H1 and the TechArticle headline stay on compiler internals.
+ * The search title stays in ENGLISH_SEARCH and must not lead with "effect system".
+ */
+export const EFFECT_CHECKER_PAGE = {
+  h1: 'Compiler internals: the Sounio effect checker',
+  calloutHref: '/learn/effects/',
+  calloutLink: 'Effect System guide',
+  calloutBefore: "Looking for how to use Sounio's effect system in your code? Start with the ",
+  calloutAfter: '. This page documents the compiler internals for contributors.',
 };
 
 /** Approved copy for the English effect-system hub. The search title stays in ENGLISH_SEARCH. */
