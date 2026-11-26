@@ -911,7 +911,7 @@ fn pfi_item_global(it: Item) -> bool with Mut, Panic, Div {
 // importer, so it is left alone (the previous, shared behaviour). A glob import is
 // attributed to its target through the use map; when the map is not valid every
 // glob import counts (conservative: the global is not renamed).
-fn pfi_global_imported_elsewhere(programs: &! [Program; 256], count: i64, not_mod: i64, n: Name) -> bool with Mut, Panic, Div {
+fn pfi_global_imported_elsewhere(programs: &! [Program; 256], count: i64, not_mod: i64, n: Name) -> bool with Mut, Panic, Div, Alloc {
     var j: i64 = 0
     while j < count && j < 256 {
         if j != not_mod {
@@ -1990,6 +1990,37 @@ fn pfi_method_bodies(methods: Option<Box<ItemList> >) with IO, Mut, Panic, Div, 
     }
 }
 
+// Initializers the parser moved out of the item list: closed initializers run
+// at `main`'s entry (parser/ast.sio ast_record_global_deferred_init) and the
+// statements that fill an array global (ast_record_global_deferred_block).
+// They name the module's globals and fns by their bare names, so a rename that
+// skipped them would leave `T[0] = ...` writing the old symbol while the
+// module reads `T__m<idx>`, which then stays zero.
+fn pfi_deferred_global_exprs(m: i64) with IO, Mut, Panic, Div, Alloc {
+    var k: i64 = 0
+    while k < ast_global_deferred_init_count() {
+        if ast_global_deferred_init_mod(k) == m {
+            let p = ast_global_deferred_init_ptr(k) as *mut Expr
+            if p != 0 as *mut Expr {
+                if PFI_MODE == 1 { pfi_rename_expr_node(p) }
+                pfi_expr(*p)
+            }
+        }
+        k = k + 1
+    }
+    k = 0
+    while k < ast_global_deferred_block_count() {
+        if ast_global_deferred_block_mod(k) == m {
+            let p = ast_global_deferred_block_ptr(k) as *mut Expr
+            if p != 0 as *mut Expr {
+                if PFI_MODE == 1 { pfi_rename_expr_node(p) }
+                pfi_expr(*p)
+            }
+        }
+        k = k + 1
+    }
+}
+
 fn pfi_items(items: Option<Box<ItemList> >) with IO, Mut, Panic, Div, Alloc {
     var node = pfi_itemlist_ptr(items)
     var use_ord: i64 = 0
@@ -2658,6 +2689,7 @@ pub fn private_fn_identity_apply(programs: &! [Program; 256], count: i64) -> i64
         if PFI_T_COUNT > 0 {
             PFI_MODE = 0
             pfi_items(prog.items)
+            pfi_deferred_global_exprs(i)
             if !pfi_record_skipped(i) {
                 pfi_error_capacity("more than 256 same-named private fns could not be renamed")
                 return 0 - 2
@@ -2665,6 +2697,7 @@ pub fn private_fn_identity_apply(programs: &! [Program; 256], count: i64) -> i64
             let before = PFI_RENAMED_TOTAL
             PFI_MODE = 1
             pfi_items(prog.items)
+            pfi_deferred_global_exprs(i)
             PFI_MODE = 0
             if PFI_RENAMED_TOTAL > before {
                 PFI_MODULES_TOUCHED = PFI_MODULES_TOUCHED + 1
