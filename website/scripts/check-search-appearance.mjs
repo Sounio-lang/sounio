@@ -651,6 +651,7 @@ for await (const file of walk(dist)) {
     if (article) {
       const isSelfHostedPage = bare === '/learn/compiler/self-hosted/';
       const isEffectsPage = bare === '/learn/effects/';
+      const isEffectCheckerPage = bare === '/learn/compiler/effect-system/';
       const isUncertaintyPage = bare === '/learn/epistemic/uncertainty/';
       const headline = isSelfHostedPage
         ? SELF_HOSTED_PAGE.h1
