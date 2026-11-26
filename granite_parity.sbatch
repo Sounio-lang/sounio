@@ -22,8 +22,8 @@
 #   REF_TSV    reference TSV (another CUDA run, or the Metal M5 Max reference
 #              from the Mac lane, history=UNCOMPARED), plus its sha256
 #              Use REF_TSV=none REF_SHA=none for the first CUDA reference.
-#   PROMPTS_FILE / PROMPT_IDS  original 480 prompts + independent oracle TSV.
-#   PROMPTS_SHA / PROMPT_IDS_SHA  expected SHA256 from the oracle receipt.
+#   PROMPTS_FILE / PROMPT_IDS  registered Granite 480 prompts + independent oracle TSV.
+#   PROMPTS_SHA registered corpus digest; PROMPT_IDS_SHA from the oracle receipt.
 #   The value "manifest" reads the expected digest from the completed
 #   dependency's SHA256SUMS (or PROMPT_IDS.sha256), never the candidate file.
 #   CPP_TOOLS_DIR may name the pinned CPU-built comparator artifact directory.
@@ -33,6 +33,7 @@
 #   order"), Granite BF16 greedy on this backend is bit-identical to the
 #   reference: token_mismatches=0, runner_up=0, top1/top2/margin bit = 0,
 #   max_margin_drift=0, verdict=CROSS_BACKEND_IDENTICAL.
+#   Registered Granite corpus: tests/llm/data/granite_480_prompts.txt SHA256=e14ac28d67b08146f5640c08a820620ceffcf0734527e1699d158245a58f85bf (before any GPU audit).
 # Model: every operation Granite adds over Qwen3 (embedding/attention/residual/
 #   logit scalar multipliers; no QK-norm) is a single contract primitive (mul or
 #   div) in a fixed position, so the cross-backend argument of
@@ -52,7 +53,7 @@ REF_TSV="__FILL_REF_TSV__"
 REF_SHA="__FILL_REF_SHA256__"
 PROMPTS_FILE="__FILL_PROMPTS_FILE__"
 PROMPT_IDS="__FILL_PROMPT_IDS__"
-PROMPTS_SHA="__FILL_PROMPTS_SHA256__"
+PROMPTS_SHA="e14ac28d67b08146f5640c08a820620ceffcf0734527e1699d158245a58f85bf"
 PROMPT_IDS_SHA="__FILL_PROMPT_IDS_SHA256__"
 CPP_TOOLS_DIR="${CPP_TOOLS_DIR:-}"
 SELF="$0"
@@ -88,8 +89,10 @@ fi
 if [[ "$PROMPTS_SHA" == manifest ]]; then PROMPTS_SHA=$(manifest_hash "$PROMPTS_FILE" "$PROMPT_IDS.sha256") || die "missing-prompts-manifest"; fi
 if [[ "$PROMPT_IDS_SHA" == manifest ]]; then PROMPT_IDS_SHA=$(manifest_hash "$PROMPT_IDS" "$PROMPT_IDS.sha256") || die "missing-ids-manifest"; fi
 [[ "$(sha256sum "$PROMPTS_FILE" | cut -d' ' -f1)" == "$PROMPTS_SHA" ]] || die "prompts-sha256"
+[[ "$(manifest_hash "$PROMPTS_FILE" "$PROMPT_IDS.sha256")" == "$PROMPTS_SHA" ]] || die "oracle-corpus-sha256"
 [[ "$(sha256sum "$PROMPT_IDS" | cut -d' ' -f1)" == "$PROMPT_IDS_SHA" ]] || die "ids-sha256"
 sha256sum "$PROMPTS_FILE" "$PROMPT_IDS" > "$WORK/inputs.sha256"
+rec "r-corpus-sha-$PROMPTS_SHA"
 
 D="$WORK/src"
 git init -q "$D" || die init

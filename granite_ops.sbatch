@@ -21,11 +21,6 @@ export HOME="$work/home" XDG_CACHE_HOME="$work/home/.cache"
 mkdir -p "$HOME"
 ulimit -s unlimited
 if [[ -s "$stage/granite-3.1-8b-instruct/SHA256SUMS" ]]; then rec "shared-model-manifest-visible"; else rec "shared-model-manifest-missing"; fi
-# Recover only the existing registered corpus; do not synthesize substitutes.
-if [[ -s /tmp/v2_480_prompts.txt ]] && [[ $(grep -cve "^[[:space:]]*$" /tmp/v2_480_prompts.txt) -eq 480 ]] && [[ -w "$stage" ]]; then
-  if [[ ! -e "$stage/v2_480_prompts.txt" ]]; then cp /tmp/v2_480_prompts.txt "$stage/v2_480_prompts.txt"; fi
-  if cmp -s /tmp/v2_480_prompts.txt "$stage/v2_480_prompts.txt"; then rec "prompts-sha-$(sha256sum "$stage/v2_480_prompts.txt" | cut -d' ' -f1)"; else rec "prompt-copy-conflict"; fi
-else rec "original-prompt-file-not-visible"; fi
 cd "$work"
 git init -q src
 git -C src fetch -q --depth 1 https://github.com/Sounio-lang/sounio.git "$1"
