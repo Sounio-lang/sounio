@@ -142,7 +142,19 @@ or trap status change was introduced by updating the witnesses.
 
 This receipt is registered as
 `repo.docs.compiler.receipts.2026-11-26-linux-x86-exit-group` with
-`repo_only` authority and `contributors` audience, with its matching
-entry in `docs/governance/topic-registry.v1.json`. CI verification of the
+`repo_only` authority and `contributors` audience; its matching effective
+registry entry is derived by the checker. CI verification of the
 follow-up is pending at this entry; the earlier pthread Slurm observations
 and the successful CI pthread step are unchanged.
+
+CI run [45910557660](https://github.com/Sounio-lang/sounio/actions/runs/45910557660)
+on `16dbb598ba44c3c7dca03548403dc9a3391529a2` **OBSERVED** Docs registry
+PASS and pthread regression PASS. A later Generated snapshot guard refused
+editing the checked-in `docs/governance/topic-registry.v1.json` in this
+ordinary compiler PR. Per that enforced rule, the snapshot is restored to
+`origin/main`; the metadata above remains, and the effective registry entry
+is rebuilt from it and the path classifier by the actual Docs registry
+checker. The checked-in snapshot is updated only by a separate
+`snapshot/refresh-*` PR after merge. No guard exemption or baseline change.
+
+The Madaros full self-test step on the same run also completed successfully; its gate requires the source-derived denominator and zero failed self-tests (including T168).
