@@ -377,3 +377,114 @@ for job in current-source-madaros sco-current-source madaros-current-source-dere
 done
 
 node "$ROOT_DIR/scripts/ci/deep_science_partition_contract.mjs" "$ROOT_DIR" --selftest
+
+# Reuse of an earlier green head (ci_reuse_green_ancestor.sh, decision
+# 2026-11-26). A scratch repository reproduces the livelock: H0 changes the
+# compiler and is green; main then gains website and changelog commits that are
+# merged in. CI_REUSE_GREEN_SHAS stands in for the GitHub API.
+reuse_dir="$(mktemp -d)"
+trap 'rm -rf "$reuse_dir"' EXIT
+(
+  set -e
+  cd "$reuse_dir"
+  G=(-c user.name=t -c user.email=t@t)
+  git init -q -b main .
+  mkdir -p self-hosted website stdlib changelog.d
+  echo a >self-hosted/c.sio; echo w >website/i.html; echo s >stdlib/s.sio
+  git add -A; git "${G[@]}" commit -q -m base
+  base=$(git rev-parse HEAD)
+  git checkout -q -b pr
+  echo b >self-hosted/c.sio; echo f >changelog.d/pr.fixed.md
+  git add -A; git "${G[@]}" commit -q -m h0
+  h0=$(git rev-parse HEAD)
+  git checkout -q main
+  mkdir -p changelog.d; echo w2 >website/i.html; echo m >changelog.d/site.internal.md
+  git add -A; git "${G[@]}" commit -q -m site1
+  git checkout -q pr; git "${G[@]}" merge -q --no-edit main
+  h1=$(git rev-parse HEAD)
+  git checkout -q main
+  echo w3 >website/i.html; git "${G[@]}" commit -q -am site2
+  git checkout -q pr; git "${G[@]}" merge -q --no-edit main
+  h2=$(git rev-parse HEAD)
+  main2=$(git rev-parse main)
+  run() { CI_EVENT_NAME=pull_request CI_BASE_SHA="$main2" CI_HEAD_SHA="$1" CI_TESTED_SHA="$1" "$CLASSIFIER" 2>/dev/null; }
+  ALL="docs,website,compiler,runtime,stdlib,tests,lean,bootstrap,math,ontology,clinical,sio,full"
+  # 1. H1 green, HEAD = H1 + website: reuse H1, compiler not selected.
+  out="$(CI_REUSE_GREEN_SHAS="$h1:$ALL" run "$h2")"
+  expect "$out" reused_from "$h1"; expect "$out" compiler false; expect "$out" website true
+  # 2. H1's run was cancelled, H0 green: the search continues to H0.
+  out="$(CI_REUSE_GREEN_SHAS="$h0:$ALL" run "$h2")"
+  expect "$out" reused_from "$h0"; expect "$out" compiler false; expect "$out" website true
+  # 3. Nothing green: full classification, compiler selected.
+  out="$(CI_REUSE_GREEN_SHAS="" run "$h2")"
+  expect "$out" reused_from ""; expect "$out" compiler true
+  # 4. Disabled: full classification even with a green ancestor.
+  out="$(CI_REUSE_DISABLE=1 CI_REUSE_GREEN_SHAS="$h1:$ALL" run "$h2")"
+  expect "$out" reused_from ""; expect "$out" compiler true
+  # 5. A stdlib change in the delta disqualifies every candidate.
+  echo s2 >stdlib/s.sio; git "${G[@]}" commit -q -am stdlib
+  h3=$(git rev-parse HEAD)
+  out="$(CI_REUSE_GREEN_SHAS="$h1:$ALL $h2:$ALL" run "$h3")"
+  expect "$out" reused_from ""; expect "$out" compiler true; expect "$out" stdlib true
+  # 6. Deleting the PR's own changelog fragment in the delta disqualifies it.
+  git reset -q --hard "$h2"; git rm -q changelog.d/pr.fixed.md; git "${G[@]}" commit -q -m drop
+  h4=$(git rev-parse HEAD)
+  out="$(CI_REUSE_GREEN_SHAS="$h2:$ALL" run "$h4")"
+  expect "$out" reused_from ""; expect "$out" compiler true
+  # 7. A workflow change in the delta disqualifies it.
+  git reset -q --hard "$h2"; mkdir -p .github/workflows; echo x >.github/workflows/ci.yml
+  git add -A; git "${G[@]}" commit -q -m wf
+  h5=$(git rev-parse HEAD)
+  out="$(CI_REUSE_GREEN_SHAS="$h2:$ALL" run "$h5")"
+  expect "$out" reused_from ""; expect "$out" full true
+  # 1b. Policy outputs keep the full classification under reuse.
+  out="$(CI_REUSE_GREEN_SHAS="$h1:$ALL" run "$h2")"
+  expect "$out" policy_compiler true; expect "$out" compiler false
+  # 8. Coverage: H1 green but its own run selected only docs/website (a stacked
+  #    base already held the compiler change): it cannot cover HEAD.
+  out="$(CI_REUSE_GREEN_SHAS="$h1:docs,website" run "$h2")"
+  expect "$out" reused_from ""; expect "$out" compiler true
+  # 9. A hand edit of CHANGELOG.md in the delta never qualifies, and the policy
+  #    flags still see the compiler change.
+  git reset -q --hard "$h2"; echo hand >CHANGELOG.md; git add -A; git "${G[@]}" commit -q -m hand
+  h6=$(git rev-parse HEAD)
+  out="$(CI_REUSE_GREEN_SHAS="$h2:$ALL" run "$h6")"
+  expect "$out" reused_from ""; expect "$out" policy_compiler true
+  echo "IMPACT_REUSE_SELFTEST_PASS controls=10"
+)
+
+# Effective tested inputs (review of #3751). R's run tested the synthetic merge of
+# R into the base of that moment. A compiler change B on that base, which main
+# later reverts, is absent from raw R..HEAD but present in what R's run tested.
+reuse_dir2="$(mktemp -d)"
+trap 'rm -rf "$reuse_dir" "$reuse_dir2"' EXIT
+(
+  set -e
+  cd "$reuse_dir2"
+  G=(-c user.name=t -c user.email=t@t)
+  ALL="docs,website,compiler,runtime,stdlib,tests,lean,bootstrap,math,ontology,clinical,sio,full"
+  git init -q -b main .
+  mkdir -p self-hosted website
+  echo a >self-hosted/a.sio; echo w >website/i.html
+  git add -A; git "${G[@]}" commit -q -m base
+  git checkout -q -b pr
+  echo a2 >self-hosted/a.sio; git "${G[@]}" commit -q -am "R: change A"
+  r=$(git rev-parse HEAD)
+  git checkout -q main
+  echo b >self-hosted/b.sio; git add -A; git "${G[@]}" commit -q -m "main: add B"
+  main_b=$(git rev-parse HEAD)
+  git rm -q self-hosted/b.sio; git "${G[@]}" commit -q -m "main: revert B"
+  echo w2 >website/i.html; git "${G[@]}" commit -q -am "main: website"
+  git checkout -q pr; git "${G[@]}" merge -q --no-edit main
+  h=$(git rev-parse HEAD); main_now=$(git rev-parse main)
+  run() { CI_EVENT_NAME=pull_request CI_BASE_SHA="$main_now" CI_HEAD_SHA="$h" CI_TESTED_SHA="$h" "$CLASSIFIER" 2>/dev/null; }
+  # The raw delta R..H is website-only, as the counterexample says.
+  [[ "$(git diff --name-only "$r" "$h")" == "website/i.html" ]] || { echo "impact-ci-selftest: counterexample setup" >&2; exit 1; }
+  # 11. R's run tested merge(R, main_b), which held B: refused.
+  out="$(CI_REUSE_GREEN_SHAS="$r:$ALL@$main_b" run)"
+  expect "$out" reused_from ""; expect "$out" compiler true
+  # 12. R's run tested R on the original base (no B): reused.
+  out="$(CI_REUSE_GREEN_SHAS="$r:$ALL@$(git rev-parse main~3)" run)"
+  expect "$out" reused_from "$r"; expect "$out" compiler false; expect "$out" policy_compiler true
+  echo "IMPACT_REUSE_TESTED_TREE_SELFTEST_PASS controls=2"
+)
