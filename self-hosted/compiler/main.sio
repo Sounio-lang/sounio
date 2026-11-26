@@ -1888,17 +1888,28 @@ fn compiler_visibility_preflight(source_path: string) -> bool with IO, Mut, Pani
     }
 
     var programs: [Program; 256] = [Program { module_path: empty_path(), items: None }; 256]
+    // One check = one global side table for the whole closure, the same
+    // contract preflight_multimodule_frontend gives compile: reset once, then
+    // accumulate every module. Without this each reload reset the tables, so
+    // the checker saw only the last-parsed module's globals -- a `var SCALE`
+    // beside an imported `pub let SCALE` counted one declaration, read as a
+    // unique constant, and refused the local write with a false E003.
+    ast_reset_global_var_inits()
+    let saved_gvi_suppress = GLOBAL_VAR_INIT_SUPPRESS_RESET
+    GLOBAL_VAR_INIT_SUPPRESS_RESET = 1
     var load_index: i64 = 0
     while load_index < closure.node_count {
         parser_reset_last_errors()
         programs[load_index] = load_module_file(closure.paths[load_index])
         if parser_last_error_count() > 0 {
+            GLOBAL_VAR_INIT_SUPPRESS_RESET = saved_gvi_suppress
             print("run_check_mode: AST reload failed for ")
             println(closure.paths[load_index])
             return false
         }
         load_index = load_index + 1
     }
+    GLOBAL_VAR_INIT_SUPPRESS_RESET = saved_gvi_suppress
 
     if closure.node_count == 1 && closure.edge_count == 0 {
         // Preserve the specialized list itself. The bootstrap drops nested

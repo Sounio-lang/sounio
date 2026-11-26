@@ -1837,7 +1837,9 @@ fn checker_lower_named_type_mut(c: *mut Checker, path: AstPath) -> TypeEntry wit
         ty_named(name)
     } else {
         // ONE registry lookup, bound to a local, mirroring the by-value spine.
-        let uidx = checker_unit_index_for(c, name)
+        // A user-declared struct or enum shadows a unit of the same spelling
+        // (ast_is_user_type_name): `enum K` is the enum, not kelvin.
+        let uidx = if ast_is_user_type_name(name) { 0 - 1 } else { checker_unit_index_for(c, name) }
         if uidx >= 0 {
         // UNITS OF MEASURE, ported here 2026-09-09 from the by-value spine
         // (lower_named_type), which has had this branch all along.
@@ -4866,9 +4868,13 @@ fn checker_collect_global_item_inplace(
         }
         None => {}
     }
-    // `let` and `const` globals are immutable; `var` globals are not recorded
-    // in the const-name table and stay assignable.
-    let global_mutable = !ast_is_global_const_name(name)
+    // `let` and `const` globals are immutable; `var` globals stay assignable.
+    // The const-name table is keyed by name hash across every loaded module,
+    // so it decides only when the name is declared once. When two modules
+    // declare the same name it cannot tell which one this is, and the binding
+    // stays mutable: a missed E003 rather than a false one (a `var SCALE`
+    // beside another module's `let SCALE` was refused, measured).
+    let global_mutable = ast_global_decl_count(name) != 1 || !ast_is_global_const_name(name)
     let benv_idx = (*c).env.count
     type_env_reset_conf_at(benv_idx)
     if benv_idx < TYPE_ENV_CAPACITY {
@@ -26441,7 +26447,7 @@ impl Checker {
             (self, ty_wide_int(name_wide_int_bits(name), (name.buf[0] as i64) == 105))
         } else {
             // Check if it's a registered unit name (mg, kg, m, s, etc.)
-            let unit_idx = self.units.find(name)
+            let unit_idx = if ast_is_user_type_name(name) { 0 - 1 } else { self.units.find(name) }
             if unit_idx >= 0 {
                 // Units resolve to f64 with a unit_id annotation
                 (self, ty_with_unit(ty_f64(), unit_idx))
