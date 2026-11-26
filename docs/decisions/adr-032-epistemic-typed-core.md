@@ -112,8 +112,8 @@ Baseline to beat: 25 predicates / 112 call sites / 72 struct-type lookups / the 
 - Cost: a new serialised artifact per module, and a second checker (the lint) to maintain. Both must enter ADR-026 phase arenas, and the gen2 memory budget (~56 GB today) is a constraint to measure, not assume.
 - The lean_single seed does not get SC; its divergences are frozen by name (decision of 2026-11-25).
 
-## Decisions left open
+## Decisions taken (2026-11-25, by the founder)
 
-1. Whether SC is a tree (by-value nodes with ids) or a graph IR with explicit effect edges (Bračevac-style).
-2. The lint's implementation language: Sounio, compiled by the compiler under test, vs a twin in an admitted non-Sounio language (diversity rule).
-3. How much of the Lean fragment precedes step 3.
+1. **SC is a graph with explicit effect edges** (Bračevac-style), not a tree. Effects and source sets are edges, so Core Lint and the Lean semantics range over the same structure the lowerer reads.
+2. **Core Lint is written in Sounio, with an independent OCaml twin.** By the diversity rule a Sounio lint is compiled by the thing it measures; the receipt is the agreement of both, and a disagreement is logged as an anomaly before either is called wrong.
+3. **Theorems (a) type soundness and (b) soundness of the E230/E314 refusals are closed before step 3.** (c) type preservation and (d) semantic refinement proceed in parallel with step 3. `#print axioms` on each.
