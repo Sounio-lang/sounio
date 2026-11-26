@@ -13,7 +13,7 @@ set -euo pipefail
 work=/tmp/granite-tokenizer-smoke-$SLURM_JOB_ID
 mkdir -p "$work"
 rec() { srun --ntasks=1 --cpus-per-task=1 --mem=0 --gres=none --job-name="$(printf '%s' "$1" | tr '\n\t' '  ' | cut -c1-120)" true </dev/null >/dev/null 2>&1 || true; }
-trap 'rc=$?; rec "tokenizer-exit-$rc"' EXIT
+trap 'rc=$?; rec "tokenizer-exit-$rc"; for f in "$work/check.log" "$work/build-smoke.log"; do if [[ -f "$f" ]]; then grep -E "error\[|= name" "$f" | head -12 | while IFS= read -r l; do rec "$l"; done; fi; done; art=/orangefs/training/llm-granite-n10/tokenizer-$SLURM_JOB_ID; if [[ -w /orangefs/training/llm-granite-n10 ]]; then mkdir -p "$art"; cp "$work/"*.log "$art/" 2>/dev/null || true; fi' EXIT
 awk 'f { print } /^__CA_BUNDLE__$/ { f = 1 }' "$0" > "$work/ca.crt"
 export GIT_SSL_CAINFO="$work/ca.crt"
 ulimit -s unlimited

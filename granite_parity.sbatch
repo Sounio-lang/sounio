@@ -22,6 +22,7 @@
 #              from the Mac lane, history=UNCOMPARED), plus its sha256
 #              Use REF_TSV=none REF_SHA=none for the first CUDA reference.
 #   PROMPTS_FILE / PROMPT_IDS  original 480 prompts + independent oracle TSV.
+#   PROMPTS_SHA / PROMPT_IDS_SHA  expected SHA256 from the oracle receipt.
 #
 # Prediction, registered before the first submission (2026-11-26):
 #   With the Option A float model unchanged ("binary32, RNE, FTZ+DAZ, fixed op
@@ -47,6 +48,8 @@ REF_TSV="__FILL_REF_TSV__"
 REF_SHA="__FILL_REF_SHA256__"
 PROMPTS_FILE="__FILL_PROMPTS_FILE__"
 PROMPT_IDS="__FILL_PROMPT_IDS__"
+PROMPTS_SHA="__FILL_PROMPTS_SHA256__"
+PROMPT_IDS_SHA="__FILL_PROMPT_IDS_SHA256__"
 SELF="$0"
 REMOTE="https://github.com/Sounio-lang/sounio.git"
 JOB="${SLURM_JOB_ID:-manual}"
@@ -55,8 +58,12 @@ CA="$WORK/ca.crt"
 rec() { srun --ntasks=1 --cpus-per-task=1 --mem=0 --gres=none --job-name="$1" true < /dev/null > /dev/null 2>&1 || true; }
 die() { rec "r-abort-$(echo "$*" | tr -c 'A-Za-z0-9_.-' '_' | cut -c1-60)"; exit 2; }
 sha() { [[ -s "$1" ]] && sha256sum "$1" | cut -c1-12 || echo none; }
-case "$HEAD_C$MODEL_DIR$REF_TSV$REF_SHA$PROMPTS_FILE$PROMPT_IDS" in *__FILL_*) die "placeholders-not-filled";; esac
+case "$HEAD_C$MODEL_DIR$REF_TSV$REF_SHA$PROMPTS_FILE$PROMPT_IDS$PROMPTS_SHA$PROMPT_IDS_SHA" in *__FILL_*) die "placeholders-not-filled";; esac
 mkdir -p "$WORK/home" || die mkdir
+ART="$MODEL_DIR/../audit-$JOB"
+mkdir -p "$ART" || die "artifact-directory"
+# Save failed-build diagnostics and partial TSV under a distinct name.
+trap 'rc=$?; if (( rc != 0 )); then cp "$WORK/"*.log "$ART/" 2>/dev/null || true; if [[ -s "$WORK/cuda.tsv" ]]; then cp "$WORK/cuda.tsv" "$ART/cuda.partial.tsv"; sha256sum "$ART/cuda.partial.tsv" > "$ART/partial.sha256"; fi; printf "%s\n" "$rc" > "$ART/exit-code"; fi' EXIT
 export HOME="$WORK/home" XDG_CACHE_HOME="$WORK/home/.cache"
 awk 'f { print } /^__CA_BUNDLE__$/ { f = 1 }' "$SELF" > "$CA"
 grep -q 'BEGIN CERTIFICATE' "$CA" 2>/dev/null || cp /etc/ssl/certs/ca-certificates.crt "$CA" 2>/dev/null || die "no CA"
@@ -71,6 +78,8 @@ else
   [[ "$REF_SHA" == none ]] || die "ref-sha256"
 fi
 [[ -s "$PROMPTS_FILE" && -s "$PROMPT_IDS" ]] || die "missing-prompt-oracle"
+[[ "$(sha256sum "$PROMPTS_FILE" | cut -d' ' -f1)" == "$PROMPTS_SHA" ]] || die "prompts-sha256"
+[[ "$(sha256sum "$PROMPT_IDS" | cut -d' ' -f1)" == "$PROMPT_IDS_SHA" ]] || die "ids-sha256"
 sha256sum "$PROMPTS_FILE" "$PROMPT_IDS" > "$WORK/inputs.sha256"
 
 D="$WORK/src"
@@ -81,7 +90,9 @@ git -C "$D" -c advice.detachedHead=false checkout -q --detach FETCH_HEAD || die 
 
 ( cd "$D" && bash scripts/ci/build_modular_madaros.sh "$WORK/madaros" > "$WORK/build-madaros.log" 2>&1 ) || die "build-madaros"
 ( cd "$D" && SOUNIO_STDLIB_PATH="$D/stdlib" "$WORK/madaros" build tests/llm/llm_v2_61440_audit.sio -o "$WORK/audit" > "$WORK/build-audit.log" 2>&1 ) || die "build-audit"
-( cd "$D" && c++ -std=c++23 -O2 -Wall -Wextra -Werror tools/sounio-llm/cmp_61440.cpp -o "$WORK/cmp" > "$WORK/build-cmp.log" 2>&1 ) || die "build-cmp"
+if [[ "$REF_TSV" != none ]]; then
+  ( cd "$D" && "${CXX:-c++}" -std=c++23 -O2 -Wall -Wextra -Werror tools/sounio-llm/cmp_61440.cpp -o "$WORK/cmp" > "$WORK/build-cmp.log" 2>&1 ) || die "build-cmp"
+fi
 chmod +x "$WORK/audit" || die "chmod-audit"
 rec "r-build-audit-$(sha "$WORK/audit")-cmp-$(sha "$WORK/cmp")"
 
@@ -95,10 +106,9 @@ rec "r-run-rc$rc-s$((SECONDS - t0))"
 
 grep -q GRANITE_TOKEN_IDS_480_PASS "$WORK/run.log" || die "token-oracle-failed"
 awk -F '\t' 'BEGIN{n=0} /^#/ {next} {if(NF!=5 || $1!=n || $3!=128) exit 1; n++} END{if(n!=480) exit 1}' "$WORK/cuda.tsv" || die "incomplete-audit"
-ART="$MODEL_DIR/../audit-$JOB"
-mkdir -p "$ART" || die "artifact-directory"
-cp "$WORK/audit" "$WORK/cmp" "$WORK/cuda.tsv" "$WORK/run.log" "$WORK/inputs.sha256" "$WORK/build-"*.log "$ART/" || die "artifact-copy"
-sha256sum "$ART/audit" "$ART/cmp" "$ART/cuda.tsv" "$PROMPTS_FILE" "$PROMPT_IDS" > "$ART/SHA256SUMS"
+cp "$WORK/audit" "$WORK/cuda.tsv" "$WORK/run.log" "$WORK/inputs.sha256" "$WORK/build-"*.log "$ART/" || die "artifact-copy"
+sha256sum "$ART/audit" "$ART/cuda.tsv" "$PROMPTS_FILE" "$PROMPT_IDS" > "$ART/SHA256SUMS"
+if [[ -x "$WORK/cmp" ]]; then cp "$WORK/cmp" "$ART/cmp" || die "comparator-copy"; sha256sum "$ART/cmp" >> "$ART/SHA256SUMS"; fi
 rec "r-tsv-sha-$(sha256sum "$ART/cuda.tsv" | cut -d' ' -f1)"
 if [[ "$REF_TSV" == none ]]; then
   rec "r-reference-UNCOMPARED"
