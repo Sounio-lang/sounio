@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.compiler.receipts.2026-11-26-linux-x86-exit-group
+authority: repo_only
+audience: contributors
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.compiler.receipts.2026-11-26-linux-x86-exit-group
+-->
+
 # Linux x86-64 thread-group termination regression (2026-11-26)
 
 ## Defect and scope
@@ -103,3 +112,37 @@ the Fast Checks workflow-reference ratchet. Impact then refused the missing
 release-note fragment, so the current-source compiler and witness jobs were
 skipped in that run. Added the user-visible `linux-x86-exit-group.fixed.md`
 fragment; no CI policy or gate is bypassed.
+
+## CI byte-witness and docs-registry follow-up
+
+CI run [45898928768](https://github.com/Sounio-lang/sounio/actions/runs/45898928768)
+**OBSERVED** the newly wired pthread gate returning 37 and passing, and the
+workflow-reference and changelog gates passing. The subsequent Madaros
+self-test failed T168 (1171/1172), because its pinned slow-allocation trap
+still expected syscall 60 rather than the changed process exit. Contracts
+Core (core-b) also refused this receipt's missing registry metadata.
+
+The tracked source/test tree (`self-hosted/compiler`, `self-hosted/native`,
+`tests`) was searched for hexadecimal `0x3c`, decimal syscall 60 in byte
+assertions, and literal x86 `mov rax/eax, 60` byte sequences. The affected
+witnesses and their disposition are:
+
+| File / witness | Correction |
+|---|---|
+| `self-hosted/compiler/main.sio`, `compiler_main_test_native_v2_alloc_slow_path_trap` (T168) | `seq[3] = 0xE7`, exit_group(231); trap status 181 and remaining bytes unchanged. |
+| `self-hosted/native/suite.sio`, `native_test_emit_exit_bytes` (T01) | Expected sequence and asserted immediate changed from 60 to 231. |
+| `self-hosted/native/test_encode.sio`, `te_test_emit_exit_bytes` (T01) | Already changed in the original fix; verified the 231 expectation. |
+| `tests/run-pass/sprint235_print_f64_e2e.sio`, `emit_main` | Independently hand-emitted Linux process-exit fixture now uses 231, keeping its other instructions unchanged. |
+
+Other matches are unrelated byte values (e.g. `cmp` ModR/M encodings,
+floating-point constants, bit masks, font and hash data), or independent
+compiler emitters rather than pinned witnesses of this Madaros x86 exit
+path. The post-fork child-only exit calls remain unchanged. No numerical
+or trap status change was introduced by updating the witnesses.
+
+This receipt is registered as
+`repo.docs.compiler.receipts.2026-11-26-linux-x86-exit-group` with
+`repo_only` authority and `contributors` audience, with its matching
+entry in `docs/governance/topic-registry.v1.json`. CI verification of the
+follow-up is pending at this entry; the earlier pthread Slurm observations
+and the successful CI pthread step are unchanged.
