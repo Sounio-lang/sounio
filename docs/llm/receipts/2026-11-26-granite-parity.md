@@ -463,3 +463,89 @@ SHA256 `739880da2d40ff74b9a409f8a76d22d22ebc146b1afdb14007ae095512b8c22e`.
 At the next controller readback 29553 was **RUNNING** on
 `gpuorangefs-r770-proxmox`. This releases the L4 leg, not a completed audit
 or comparison. Both R740 audit jobs still wait for its successful result.
+
+## Resume after t560 reboot: completed L4 reference, process-exit hang
+
+**OBSERVED (coordinator):** the L4 leg 29553 completed all 480 prompts;
+`run.log` ended `AUDIT_61440_DONE backend=cuda new_prompts=480 TOTAL_CUDA_FMA_MIN_NORM_HITS=0`.
+The process did not exit: thread-group leader Z, live `cuda00001800007`
+thread blocked in poll, GPU utilization 0%; `srun` waited indefinitely.
+The coordinator preserved the outputs before cancellation in
+`/orangefs/training/llm-granite-n10/l4-ref-29553/`.
+
+**OBSERVED (independent Slurm readback):** job 29565 on D, CPU-only,
+COMPLETED 0:0, 00:00:02, batch MaxRSS 13092K, verified every preserved
+manifest payload, exact reference digest, 481 lines (one header, 480
+indexed prompt records of 128 tokens), and the exact completion marker.
+Preserved hashes:
+
+| Artifact | SHA256 |
+|---|---|
+| cuda.tsv | `74b22db3f82221c5550593f2ce73f9b8430e8723ca219e45ce73b62b6c7c5fc5` |
+| run.log | `cee2bfcb33d786b04072f18f2062fae751dbe65c74c0a6d0f6ff8da957b21eef` |
+| inputs.sha256 | `d39c72d31dcff7fbe25ba53cf1509fa0c0835c55adde41aa92268f9c062ecb85` |
+| build-audit.log | `0d7d30c472a768d3ef7882fa8a23be8c5c463637890d96ab2d8dc9590951bbb0` |
+
+The run header reports binary SHA256
+`8c74378a189919e4733847a100a72e976120f4b48b261ccdffcbe25e08bbd04c`
+(the binary itself is not listed in the preserved manifest). Job 29553 was
+canceled after preservation: elapsed 02:26:23, batch MaxRSS 15042524K,
+`granite-run` step elapsed 02:23:50, MaxRSS 13666696K. This is complete
+numerical reference evidence, **not** a successful Slurm termination.
+
+**OBSERVED (source inspection):** at the pinned audit commit, the entry
+trampoline returns from main using Linux x86-64 syscall 60 (`exit`, only
+calling thread). `nc_emit_exit_code`, alternate trampoline and heap-reserve
+failure paths likewise emit 60; the imported `native::encode::emit_exit`
+helper also emits 60. This explains why a driver-owned thread can survive
+main's return. **NOT ESTABLISHED:** whether the earlier 29516 timeout had
+exactly the same thread-group state (numerical PASS was recovered, but no
+live-thread observation from that job).
+
+### A. Watchdog reroute, unchanged numerical pin
+
+Canceled only owned jobs 29552–29556, by ID, including stuck 29553. New
+runner commit `8f96c1bc4` leaves the numerical audit pin
+`ad4a505c1931d48552397089ca11d7cfaeabd988` unchanged. It launches the pinned
+binary directly in the Slurm batch allocation, retains the exact PID, polls
+for the done marker, tokenizer PASS and validated output record count/shape,
+then allows 10 seconds for normal teardown. Only if the process remains
+alive and the output is still complete does it signal that exact child,
+record process status, require the resulting SIGKILL status and revalidate
+the file, and report `r-exit-hang-workaround`. The CUDA tail control similarly
+requires the tail and full FTZ-suite PASS markers plus a complete AFTZ binary
+(header/record count/expected byte length). Genuine failures remain failures.
+The comparator runs unchanged against the independently pinned L4 TSV.
+
+| Job | Resource | State at submission/readback | Dependency |
+|---|---|---|---|
+| 29559 | R740 RTX 8000 control | PENDING (ReqNodeNotAvail) | None |
+| 29560 | R740 RTX 8000 audit, 48G | PENDING (Dependency) | afterok 29559 |
+| 29561 | R740 A5000 audit, 48G | PENDING (ReqNodeNotAvail) | None |
+| 29562 | D CPU collector | PENDING (Dependency) | afterany 29559, 29560, 29561 |
+| 29565 | D CPU reference verification | COMPLETED 0:0 | None |
+
+Neither numerical comparison depends on 29553's job exit. The preserved
+reference, also for the Mac lane, is
+`/orangefs/training/llm-granite-n10/l4-ref-29553/cuda.tsv`. Pending collector
+`/orangefs/training/llm-granite-n10/cluster-receipt-29562.txt` verifies that
+reference directory and both candidate manifests. R740 is still unavailable
+for new allocations at readback; no node state changes, no allocations on
+dl380p or 5860. Job 29217 completed independently; it was never modified.
+**NOT ESTABLISHED:** cross-GPU identity until candidate audits and comparator
+outputs are collected.
+
+### B. Separate compiler correction
+
+Branch `fix/linux-x86-exit-group`, based on origin/main
+`ad5beda241dc61f2abfc5ba09355c8d74401fa13`. Test-only source commit
+`648d25bfdb959fe7407e81fb99b7d0f75bdd3789`; patch changes all direct process
+exit paths in `codegen_x86_linux.sio` and the shared x86 `emit_exit` helper in
+`encode.sio` to syscall 231, with corresponding encoder byte expectation.
+Both post-fork execve-failure child-only `_exit(127)` calls retain syscall
+60. Regression loads a small DSO whose pthread signals readiness via a pipe
+then blocks on a second pipe; Sounio main returns 37. Gate requires exit 37
+within 5 seconds. Before job 29563 and after job 29564 (D CPU-only) both build
+Madaros from their respective source checkout; after depends on the
+reproduced before failure. **NOT ESTABLISHED:** before/after execution
+results until those jobs finish. No compiler changes on the Granite branch.
