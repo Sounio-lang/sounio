@@ -96,3 +96,10 @@ checks and compiles the Sounio probe with that exact compiler, and enforces
 the same five-second exit-status test. No frozen ratchet baseline is
 relaxed. CI execution on the updated head is tracked separately from the
 observed Slurm results above.
+
+CI run [45898638135](https://github.com/Sounio-lang/sounio/actions/runs/45898638135)
+on signed-off merge `5aa6c3b0ca5073e64b13f789cd6d4b65bf4a7899` **passed**
+the Fast Checks workflow-reference ratchet. Impact then refused the missing
+release-note fragment, so the current-source compiler and witness jobs were
+skipped in that run. Added the user-visible `linux-x86-exit-group.fixed.md`
+fragment; no CI policy or gate is bypassed.
