@@ -12617,6 +12617,27 @@ fn lower_type_expr_is_integer(te: &TypeExpr) -> bool with Mut, Panic, Div {
 // query in the body. Everything else keeps the existing call-site analysis.
 // Parameter kinds (TG_PKIND): 0 integer/bool, 1 f64, 2 Knowledge, 3 struct,
 // 4 function.
+// True when the body of `fd` is exactly one expression statement whose
+// expression is a binary operation or a call.
+fn tg_kret_body_is_tail_expr(fd: &FnDef) -> bool with Mut, Panic, Div {
+    match (*fd).body.stmts {
+        Some(sl) => {
+            match (*sl).tail {
+                Some(_) => { return false }
+                None => {}
+            }
+            if (*sl).head.kind != StmtKind::StmtExpr { return false }
+            match (*sl).head.expr {
+                Some(x) => {
+                    return (*x).kind == ExprKind::ExprBinary || (*x).kind == ExprKind::ExprCall
+                }
+                None => { return false }
+            }
+        }
+        None => { return false }
+    }
+}
+
 fn tg_note(name: Name, fd: &FnDef, self_type: Name) with Mut, Panic, Div, Alloc {
     if (*fd).is_extern || (*fd).is_kernel { return }
     tg_fn_note(name, fd)
@@ -12627,6 +12648,15 @@ fn tg_note(name: Name, fd: &FnDef, self_type: Name) with Mut, Panic, Div, Alloc 
         Some(rt) => {
             if !lower_type_expr_is_f64(&(*rt)) {
                 if (*rt).kind == TypeExprKind::TypeKnowledge && lower_type_expr_knowledge_value_float(&(*rt)) == 1 {
+                    // A Knowledge return goes through the tangent path only when
+                    // the body is one tail expression the re-lowering reads
+                    // exactly (Knowledge arithmetic or a call). A body with a
+                    // `let`, or one that rebuilds the result as a struct literal,
+                    // gave a zero-sensitivity answer here that overrode the
+                    // callee's runtime variance: `knowledge_branded_return`
+                    // printed variance 0 instead of 4.04. Those bodies keep the
+                    // runtime variance (a fresh channel: conservative).
+                    if !tg_kret_body_is_tail_expr(fd) { return }
                     ret_kind = 2
                 } else {
                     // A struct by value: its scalar f64 fields are the outputs. The
