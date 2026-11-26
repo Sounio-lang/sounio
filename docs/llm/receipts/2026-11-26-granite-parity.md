@@ -381,3 +381,76 @@ Conditional Mac reference path (not yet produced):
 `/orangefs/training/llm-granite-n10/cluster-receipt-29523.txt` and `.sha256`.
 No node state has been changed. Prediction remains **NOT TESTED**;
 no divergence claim, final comparison hashes, or PR yet.
+
+## Coordinator-approved corpus registration (before any Granite GPU audit)
+
+**Protocol anomaly:** the original Qwen3 61,440 audit corpus
+(`/tmp/v2_480_prompts.txt`) was never committed and was not preserved; the
+reference JSON retains output token IDs only. The coordinator confirmed it
+is irrecoverable and authorized a new, deterministic Granite corpus. This
+changes the input corpus, not the registered within-Granite cross-backend
+prediction or its 480 × 128 shape. It is not a reconstruction of the Qwen3
+corpus. Corpus recovery is closed.
+
+- Repository corpus: `tests/llm/data/granite_480_prompts.txt`.
+- Generator: `tests/llm/data/generate_granite_480.cpp` (C++23, 20 subjects ×
+  24 fixed templates, subject-major order; ASCII, LF termination, no RNG,
+  clock, external input, or platform-dependent arithmetic).
+- Corpus SHA256: `e14ac28d67b08146f5640c08a820620ceffcf0734527e1699d158245a58f85bf`.
+- 480 nonblank **distinct** records, 26,568 bytes. The generator ran on D
+  in CPU-only Slurm job **29549**, COMPLETED 0:0, 00:01:18, batch MaxRSS
+  1226.50M. Its exact compressed output was read back from 40 numbered
+  accounting steps, decoded and SHA256-verified on t560. That output, not
+  a separately constructed approximation, was committed.
+- Staged corpus: `/orangefs/training/llm-granite-n10/granite_480_prompts.txt`;
+  sidecar `.sha256` written by the generator job. The reference job verifies
+  the registered digest and compares the staged bytes against the pinned
+  Git blob. Both the reference and audit job headers carry the digest;
+  every numerical audit additionally checks the oracle manifest and actual
+  staged corpus bytes against it before build/inference.
+- Registration commit `094ec9e472b7f0313efbf13049c9b5ba9ef90888` was pushed
+  **before** the new GPU audit submissions. Original numerical audit source
+  stays `ad4a505c1931d48552397089ca11d7cfaeabd988`.
+
+### Superseded chain terminal evidence
+
+- **29518** D: COMPLETED 0:0, 00:01:31, batch MaxRSS 1536384K. The repaired
+  oracle smoke and comparator self-test both passed. Comparator SHA256:
+  `4072e34b5bb725bfcf6c5f09cf95a3783ecb208bd52fc59f0cb4cb2d7afecb8a`;
+  oracle SHA256:
+  `491f4baf489289a3003529fbc63a621842d22ea07b28b08d3b9d61f85a2cda31`.
+- **29519** D: FAILED 1:0, 00:01:16, batch MaxRSS 4192264K; the original
+  prompt file was not staged. 29520–29522 were canceled by dependency;
+  task-owned collector 29523 was canceled. No numerical audit ran.
+- **29516** R770: TIMEOUT, 01:00:17, batch MaxRSS 3462420K. CPU control
+  recorded `granite-tail-cpu-pass`. Recovery job **29550**, R770 L4,
+  COMPLETED 0:0, 00:00:01, batch MaxRSS 25948K, recovered the shared copy of
+  the CUDA log from 29516 and recorded `CUDA_TARGET sm=89 driver=13020`,
+  `GRANITE_ARGMAX_TAIL_CUDA_PASS`, and
+  `LLM_V2_ADVERSARIAL_FTZ_PASS backend=cuda fma_hits=1112 subnormals=0`.
+  All 11 operations were reported with zero subnormal outputs. This is
+  affirmative numerical control evidence, not a successful batch exit;
+  the cause of the post-PASS timeout has not been established. Probe GPU:
+  NVIDIA L4, compute capability 8.9, 23034 MiB, driver 595.71.05. The audit
+  does not wait for a redundant L4 control. RTX control remains required.
+
+### Registered-corpus replacement chain
+
+| Job | Node/resource | State at controller readback | Dependency |
+|---|---|---|---|
+| 29549 | D CPU-only | COMPLETED 0:0 | Corpus generated and staged |
+| 29550 | R770 L4, 2G | COMPLETED 0:0 | Prior L4 control log recovered |
+| 29551 | D CPU-only, 6G | RUNNING | Replaces failed 29519; uses verified tools 29518 and registered corpus |
+| 29552 | R740 RTX 8000, 12G | PENDING (ReqNodeNotAvail) | Replaces canceled 29269; obsolete corpus recovery removed |
+| 29553 | R770 L4 sm_89, 48G | PENDING (Dependency) | afterok 29551; first audit |
+| 29554 | R740 RTX 8000 sm_75, 48G | PENDING (Dependency) | afterok 29552, 29553 |
+| 29555 | R740 A5000 sm_86, 48G | PENDING (Dependency) | afterok 29553 |
+| 29556 | D CPU-only, 512M | PENDING (Dependency) | afterany 29551, 29552, 29553, 29554, 29555 |
+
+Both R740 comparisons and the later Mac lane use the same registered corpus
+and conditional reference `/orangefs/training/llm-granite-n10/audit-29553/cuda.tsv`.
+Collector: `/orangefs/training/llm-granite-n10/cluster-receipt-29556.txt`.
+All new jobs are tagged `lane:llm-granite`, R770 requests stay under 56G,
+no new jobs on dl380p or 5860, no node state changes, and coordinator-owned
+29217 remains RUNNING and untouched. The **prediction remains NOT TESTED**;
+no final compared artifact hashes/PR yet.
