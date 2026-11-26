@@ -13,18 +13,26 @@ head_c=${1:?source commit}
 model=${2:?model directory}
 prompts=${3:?original 480 prompt file}
 ref=${4:?output reference TSV path}
+cpp_art=${5:-}
 work=/tmp/granite-reference-$SLURM_JOB_ID
 mkdir -p "$work"
 awk 'f { print } /^__CA_BUNDLE__$/ { f = 1 }' "$0" > "$work/ca.crt"
 export GIT_SSL_CAINFO="$work/ca.crt"
 (cd "$model" && sha256sum -c --quiet SHA256SUMS)
 [[ -s "$prompts" && ! -e "$ref" ]]
+kit="$(dirname "$model")/tooling/cpp-kit"
+if ! command -v jq >/dev/null; then export PATH="$kit/bin:$PATH" LD_LIBRARY_PATH="$kit/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"; fi
 command -v jq
 cd "$work"
 git init -q src
 git -C src fetch -q --depth 1 https://github.com/Sounio-lang/sounio.git "$head_c"
 git -C src checkout -q --detach FETCH_HEAD
-c++ -std=c++23 -O2 -Wall -Wextra -Werror src/tools/sounio-llm/granite_prompt_ids.cpp -lpcre2-8 -o ids
+if [[ -n "$cpp_art" ]]; then
+  (cd "$cpp_art" && sha256sum -c --quiet SHA256SUMS)
+  cp "$cpp_art/granite_prompt_ids" ids
+else
+  "${CXX:-c++}" -std=c++23 -O2 -Wall -Wextra -Werror src/tools/sounio-llm/granite_prompt_ids.cpp -lpcre2-8 -o ids
+fi
 jq -er '.model.vocab|to_entries[]|[(.key|@base64),.value]|@tsv' "$model/tokenizer.json" > vocab.tsv
 jq -er '.model.merges[]|[(.[0]|@base64),(.[1]|@base64)]|@tsv' "$model/tokenizer.json" > merges.tsv
 jq -er '.added_tokens[]|[(.content|@base64),.id]|@tsv' "$model/tokenizer.json" > specials.tsv
@@ -32,7 +40,8 @@ jq -er '.added_tokens[]|[(.content|@base64),.id]|@tsv' "$model/tokenizer.json" >
 [[ $(wc -l < "$work/ref.tsv") -eq 480 ]]
 cp "$work/ref.tsv" "$ref.tmp-$SLURM_JOB_ID"
 mv "$ref.tmp-$SLURM_JOB_ID" "$ref"
-sha256sum "$model/tokenizer.json" "$prompts" "$ref" "$work/ids" > "$ref.sha256"
+cp "$work/ids" "$ref.ids.bin"
+sha256sum "$model/tokenizer.json" "$prompts" "$ref" "$ref.ids.bin" > "$ref.sha256"
 cat "$ref.sha256"
 exit 0
 __CA_BUNDLE__

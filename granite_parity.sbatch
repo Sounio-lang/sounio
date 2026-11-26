@@ -23,6 +23,9 @@
 #              Use REF_TSV=none REF_SHA=none for the first CUDA reference.
 #   PROMPTS_FILE / PROMPT_IDS  original 480 prompts + independent oracle TSV.
 #   PROMPTS_SHA / PROMPT_IDS_SHA  expected SHA256 from the oracle receipt.
+#   The value "manifest" reads the expected digest from the completed
+#   dependency's SHA256SUMS (or PROMPT_IDS.sha256), never the candidate file.
+#   CPP_TOOLS_DIR may name the pinned CPU-built comparator artifact directory.
 #
 # Prediction, registered before the first submission (2026-11-26):
 #   With the Option A float model unchanged ("binary32, RNE, FTZ+DAZ, fixed op
@@ -50,6 +53,7 @@ PROMPTS_FILE="__FILL_PROMPTS_FILE__"
 PROMPT_IDS="__FILL_PROMPT_IDS__"
 PROMPTS_SHA="__FILL_PROMPTS_SHA256__"
 PROMPT_IDS_SHA="__FILL_PROMPT_IDS_SHA256__"
+CPP_TOOLS_DIR="${CPP_TOOLS_DIR:-}"
 SELF="$0"
 REMOTE="https://github.com/Sounio-lang/sounio.git"
 JOB="${SLURM_JOB_ID:-manual}"
@@ -58,9 +62,10 @@ CA="$WORK/ca.crt"
 rec() { srun --ntasks=1 --cpus-per-task=1 --mem=0 --gres=none --job-name="$1" true < /dev/null > /dev/null 2>&1 || true; }
 die() { rec "r-abort-$(echo "$*" | tr -c 'A-Za-z0-9_.-' '_' | cut -c1-60)"; exit 2; }
 sha() { [[ -s "$1" ]] && sha256sum "$1" | cut -c1-12 || echo none; }
+manifest_hash() { awk -v p="$1" '$2==p { print $1; n++ } END { if (n!=1) exit 1 }' "$2"; }
 case "$HEAD_C$MODEL_DIR$REF_TSV$REF_SHA$PROMPTS_FILE$PROMPT_IDS$PROMPTS_SHA$PROMPT_IDS_SHA" in *__FILL_*) die "placeholders-not-filled";; esac
 mkdir -p "$WORK/home" || die mkdir
-ART="$MODEL_DIR/../audit-$JOB"
+ART="$(dirname "$MODEL_DIR")/audit-$JOB"
 mkdir -p "$ART" || die "artifact-directory"
 # Save failed-build diagnostics and partial TSV under a distinct name.
 trap 'rc=$?; if (( rc != 0 )); then cp "$WORK/"*.log "$ART/" 2>/dev/null || true; if [[ -s "$WORK/cuda.tsv" ]]; then cp "$WORK/cuda.tsv" "$ART/cuda.partial.tsv"; sha256sum "$ART/cuda.partial.tsv" > "$ART/partial.sha256"; fi; printf "%s\n" "$rc" > "$ART/exit-code"; fi' EXIT
@@ -73,11 +78,14 @@ rec "r-gpu-$(nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader 2>/de
 
 ( cd "$MODEL_DIR" && sha256sum -c --quiet SHA256SUMS ) > "$WORK/weights.check" 2>&1 || die "weights-sha256"
 if [[ "$REF_TSV" != none ]]; then
+  if [[ "$REF_SHA" == manifest ]]; then REF_SHA=$(manifest_hash "$REF_TSV" "$(dirname "$REF_TSV")/SHA256SUMS") || die "missing-ref-manifest"; fi
   [[ "$(sha256sum "$REF_TSV" | cut -d' ' -f1)" == "$REF_SHA" ]] || die "ref-sha256"
 else
   [[ "$REF_SHA" == none ]] || die "ref-sha256"
 fi
 [[ -s "$PROMPTS_FILE" && -s "$PROMPT_IDS" ]] || die "missing-prompt-oracle"
+if [[ "$PROMPTS_SHA" == manifest ]]; then PROMPTS_SHA=$(manifest_hash "$PROMPTS_FILE" "$PROMPT_IDS.sha256") || die "missing-prompts-manifest"; fi
+if [[ "$PROMPT_IDS_SHA" == manifest ]]; then PROMPT_IDS_SHA=$(manifest_hash "$PROMPT_IDS" "$PROMPT_IDS.sha256") || die "missing-ids-manifest"; fi
 [[ "$(sha256sum "$PROMPTS_FILE" | cut -d' ' -f1)" == "$PROMPTS_SHA" ]] || die "prompts-sha256"
 [[ "$(sha256sum "$PROMPT_IDS" | cut -d' ' -f1)" == "$PROMPT_IDS_SHA" ]] || die "ids-sha256"
 sha256sum "$PROMPTS_FILE" "$PROMPT_IDS" > "$WORK/inputs.sha256"
@@ -91,7 +99,12 @@ git -C "$D" -c advice.detachedHead=false checkout -q --detach FETCH_HEAD || die 
 ( cd "$D" && bash scripts/ci/build_modular_madaros.sh "$WORK/madaros" > "$WORK/build-madaros.log" 2>&1 ) || die "build-madaros"
 ( cd "$D" && SOUNIO_STDLIB_PATH="$D/stdlib" "$WORK/madaros" build tests/llm/llm_v2_61440_audit.sio -o "$WORK/audit" > "$WORK/build-audit.log" 2>&1 ) || die "build-audit"
 if [[ "$REF_TSV" != none ]]; then
-  ( cd "$D" && "${CXX:-c++}" -std=c++23 -O2 -Wall -Wextra -Werror tools/sounio-llm/cmp_61440.cpp -o "$WORK/cmp" > "$WORK/build-cmp.log" 2>&1 ) || die "build-cmp"
+  if [[ -n "$CPP_TOOLS_DIR" ]]; then
+    (cd "$CPP_TOOLS_DIR" && sha256sum -c --quiet SHA256SUMS) || die "cmp-tool-manifest"
+    cp "$CPP_TOOLS_DIR/cmp_61440" "$WORK/cmp" || die "cmp-tool-copy"
+  else
+    ( cd "$D" && "${CXX:-c++}" -std=c++23 -O2 -Wall -Wextra -Werror tools/sounio-llm/cmp_61440.cpp -o "$WORK/cmp" > "$WORK/build-cmp.log" 2>&1 ) || die "build-cmp"
+  fi
 fi
 chmod +x "$WORK/audit" || die "chmod-audit"
 rec "r-build-audit-$(sha "$WORK/audit")-cmp-$(sha "$WORK/cmp")"
