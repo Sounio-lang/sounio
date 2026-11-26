@@ -2,7 +2,7 @@
 
 **Status at 13:08 UTC: CPU controls PASS; staged checkpoint verified; GPU
 prediction NOT TESTED.** This is an interim accounting receipt, not a claim
-of cross-GPU or Metal identity. The queued dependency chain is fail-closed.
+of cross-GPU or Metal identity. The original dependency chain became dead when kit job 29286 failed; it has been superseded by the replacement chain recorded below.
 No 61,440-token artifact is available yet; no drift or mismatch count can be
 reported as zero. The registered prediction remains unchanged.
 
@@ -53,8 +53,17 @@ training directory:
 It downloaded the weights once. No model weights were committed to GitHub.
 The full manifest is at
 `/orangefs/training/llm-granite-n10/granite-3.1-8b-instruct/SHA256SUMS`.
-Manifest readback job 29268 is queued; the actual revision and per-shard
-hashes will be included by the terminal receipt collector. Direct visibility
+Manifest readback job 29268 completed (00:00:03, MaxRSS 9512K, exit 0:0).
+Revision: `4009206d5fc95d2e65a7b7633e159d6e97e25d35`; manifest SHA256:
+`10edfe81703521bea67e7a285388590c6b740a639665411c76157d82a83609e6`.
+The four shard SHA256 values, in order:
+
+- `191c4e9c6263d9cf591104f2d16ab2c39dcc43c1ad0680cc5a34d5c86d61ee41`
+- `c7c38b0d5a436775b09d764465ed6e6eb7a8c4e302d05e301e151c96e3076f22`
+- `f02784b72391fa04e9b986313c1a1720ce88f0eb40f7ae81fa0daadc93049457`
+- `9d86d201ff8e73d8a46e92b543c9dd44f133e60b35ccada4a76439af62f22212`
+
+Direct visibility
 from r740/r770 has not yet been measured (GPU slots unavailable); the r740
 ops job checks the shared manifest before running.
 
@@ -103,8 +112,10 @@ Job **29284**, source `66e64b558` (runtime argument built-ins),
 - Expected IDs from the pinned vocabulary: `hello` → 7656; ` hello!` →
   17964, 19; `123` → 35, 36, 37; role delimiters/end-of-text/tool-call →
   49152, 49153, 0, 49154. These four controls passed, not the 480-prompt gate.
-- The current audit's `arg_count()` / `get_arg()` revision is scheduled for
-  full recheck/rebuild and CLI refusal controls in job 29285. A previous
+- The current audit's `arg_count()` / `get_arg()` revision passed full
+  recheck/rebuild and both CLI refusal controls in job 29285 (00:02:33,
+  MaxRSS 3489640K, exit 0:0). Audit ELF SHA256:
+  `08ac3a474a4a3c9a9c19e766874e2184386c6954a390cba6c51bd67c93613905`. A previous
   native `main(argc,argv)` smoke build returned 1 at the argc guard (29266);
   the runtime-argument built-in smoke then passed (29284).
 
@@ -176,7 +187,7 @@ measurement. Node abbreviations: **P**=`dl380p-dl380p-proxmox`,
 | 29266 | D | FAILED 1:0 | 00:01:45 | 1850704K | Smoke check/build passed, argc guard rc1 |
 | 29284 | D | COMPLETED 0:0 | 00:01:49 | 1915092K | Actual staged Granite tokenizer smoke PASS |
 
-## Scheduled continuation — no fabricated comparison
+## Original continuation — failed and superseded
 
 At the snapshot, R740 was **ALLOCATED** (both `gpu:quadro_rtx_8000:1` and
 `gpu:a5000:1`); R770 was **DRAINING** (`gpu:1`, L4); both Sparks were
@@ -187,15 +198,15 @@ reservation guarantee). R740 is used for both CUDA legs; R770 is untouched.
 
 | Submitted job | Requested lane | State at snapshot | Purpose / gate |
 |---|---|---|---|
-| 29268 | D, CPU only | PENDING | Read back staged manifest/revision after completed stage |
+| 29268 | D, CPU only | COMPLETED 0:0 | Read back staged manifest/revision after completed stage |
 | 29269 | R740 RTX 8000 sm_75 | PENDING | Rebuild and run actual CPU/CUDA adversarial test; check shared model visibility; recover exact `/tmp/v2_480_prompts.txt` if visible |
-| 29285 | D, CPU only | PENDING | Current audit argument built-ins check/build/refusal controls and durable CPU witnesses |
-| 29286 | D, CPU only | PENDING | Transfer SHA-checked tool kit for missing C++ dependencies |
-| 29288 | D, CPU only | PENDING (afterok 29286) | Compile exact C++23 tools, run cmp selftest and independent tokenizer smoke; no Python/Rust/Julia |
-| 29297 | D, CPU only | PENDING (afterany 29269, afterok 29288) | Generate reference token IDs for the original 480 prompts only |
-| 29298 | R740 RTX 8000 sm_75 | PENDING (afterok 29269 and 29297) | First 480 × 128 BF16 CUDA **reference**, no preclaimed comparison |
-| 29299 | R740 A5000 sm_86 | PENDING (afterok 29298) | Same commit, same weights and SHA-verified prompt oracle; `cmp_61440.cpp` against 29298 |
-| 29304 | D, CPU only | PENDING (afterany terminal predecessors) | Collect accounting, full artifact manifests, SHA checks, comparator verdict and reference TSV path |
+| 29285 | D, CPU only | COMPLETED 0:0 | Current audit argument built-ins check/build/refusal controls and durable CPU witnesses |
+| 29286 | D, CPU only | FAILED 1:0 | Transfer SHA-checked tool kit for missing C++ dependencies |
+| 29288 | D, CPU only | DependencyNeverSatisfied; subsequently CANCELLED | Compile exact C++23 tools, run cmp selftest and independent tokenizer smoke; no Python/Rust/Julia |
+| 29297 | D, CPU only | Dead dependency; subsequently CANCELLED | Generate reference token IDs for the original 480 prompts only |
+| 29298 | R740 RTX 8000 sm_75 | Dead dependency; subsequently CANCELLED | First 480 × 128 BF16 CUDA **reference**, no preclaimed comparison |
+| 29299 | R740 A5000 sm_86 | Dead dependency; subsequently CANCELLED | Same commit, same weights and SHA-verified prompt oracle; `cmp_61440.cpp` against 29298 |
+| 29304 | D, CPU only | Dead dependency; subsequently CANCELLED | Collect accounting, full artifact manifests, SHA checks, comparator verdict and reference TSV path |
 
 The original 480-prompt file was not present in the scoped t560 worktree
 search or the Ceph search. No replacement corpus was invented. The queued
@@ -210,13 +221,9 @@ pending job will report actual results. The two GPU audit scripts resolve
 expected input hashes from the completed predecessor manifests and verify the
 candidate bytes before inference/comparison.
 
-The intended Mac-lane reference is
-`/orangefs/training/llm-granite-n10/audit-29298/cuda.tsv` with its sibling
-`SHA256SUMS`, **only if job 29298 succeeds**. It does not yet exist as a
-completed reference. The terminal collector will publish its accounting
-artifact in the shared stage directory at
-`/orangefs/training/llm-granite-n10/cluster-receipt-29304.txt` plus
-`.sha256`. The comparator's first divergent tuple, if any, is retained;
+The former intended reference (audit-29298/cuda.tsv) and collector
+(cluster-receipt-29304.txt) are superseded and will not be produced by
+those canceled jobs. Replacement paths are recorded in the recovery addendum. The comparator's first divergent tuple, if any, is retained;
 it is not by itself a causal diagnosis and no automatic fix is applied.
 
 **Prediction:** untested, neither held nor refuted. **Compared-artifact
@@ -233,3 +240,79 @@ blank line from `top2.sio`; the numerical source is unchanged. Job **29308**
 compiler wrapper: `COMPLETED 0:0`, elapsed `00:00:23`, batch MaxRSS `1022M`.
 `git diff --check 575d1eb57..HEAD` is clean. Both GPU jobs remain pinned to
 `ad4a505c1931d48552397089ca11d7cfaeabd988` for a matched-source comparison.
+
+## Coordinator correction and dependency recovery (2026-11-26 14:33 UTC)
+
+**Correction:** the original chain was dead, not merely queued. Kit job
+29286 finished `FAILED 1:0` (elapsed 00:00:00, MaxRSS 9800K, D), and
+29288 became `DependencyNeverSatisfied`; 29297/29298/29299/29304 consequently
+could not run. Those five task-owned dead jobs were canceled; no GPU ran.
+
+The accounting path for the original log was `/tmp/granite-cpp-kit-%j.log`.
+Diagnostic job **29506** (D, 00:00:01, MaxRSS 10640K, exit 0:0) attempted
+readback of `/tmp/granite-cpp-kit-29286.log`, but that prior job-local log
+was no longer visible. It reproduced the exact checksum failure against the
+staged kit and recorded the check output in `sacct` steps: `./SHA256SUMS:
+FAILED`, all seven payload files `OK`, and `1 computed checksum did NOT
+match`. The local original payload manifest confirms the cause: generating
+`find . -type f ... | sha256sum > SHA256SUMS` created the output file before
+enumeration, thereby hashing its own empty contents (`e3b0c442...`). The
+incorrect manifest SHA256 was
+`0917d6bd7d281c51dd2e921a6292dd6ba08b4207bebe6465c071a61f6a35d07f`.
+This is a reproduced diagnosis, not a claim of having retrieved the absent
+original stdout.
+
+Repair job **29507** (D, 00:00:02, MaxRSS 8596K) independently verified all
+seven payload hashes, preserved `SHA256SUMS.failed-29286`, and atomically
+removed only the erroneous self-entry. Corrected manifest SHA256:
+`0ea6574786cb3292aee211dd06e3dce0cf4458e8a2fb75d06497d4843ca24ff9`.
+The subsequent `curl --version` preflight exposed a host/worker shared-library
+symbol lookup error, so the job deliberately exited 127 rather than mark
+the tool kit operational.
+
+Job **29508** (D, 00:00:00, MaxRSS 15544K, exit 0:0) staged a statically
+linked Debian `busybox-static` package (package SHA256
+`598a3fd92bdafc34cd81196b2952ad36e910e47a4ecf162f8ce5e8e262598e53`,
+executable SHA256
+`7ae95c260622412ceba6eb9f45d68f616cdc091a1d71d6c0a08b5875bb2c31dd`)
+into the existing private kit directory. It checked the `wget`/`xzcat`
+applets and ran `jq --version` (1.7), recording
+`KIT_STATIC_WGET_JQ_PASS`. All payload bytes were reverified. The new kit
+manifest SHA256 is
+`015380bcc3e907bd9d524a6d03f7c24c075a5ef16c581a753a9bd273c29330d1`.
+The C++ tool bootstrap now uses this static download/decompression path
+and still checks the pinned publisher SHA256 of the compiler archive before
+extraction; it no longer calls the incompatible copied curl. No package was
+installed on a node.
+
+### Replacement chain (controller readback)
+
+Both numerical audits and the C++ tool source checkout remain pinned to
+`ad4a505c1931d48552397089ca11d7cfaeabd988`. The prediction and 480 × 128
+shape are unchanged. Completed stage 29242 has aged out of the live
+controller, so the new reference job checks its actual staged SHA256SUMS
+rather than requiring a stale live dependency ID. At the readback:
+
+| Job | Node/lane | State | Dependency |
+|---|---|---|---|
+| 29509 | D, CPU only | RUNNING | Corrected kit 29508 passed; compiler download/build in progress |
+| 29269 | R740, RTX 8000 control | PENDING | Preserved existing control; scheduler estimate 2026-11-27 19:40 UTC |
+| 29511 | D, CPU only | PENDING (Dependency) | afterany 29269; afterok 29509 |
+| 29512 | R740, RTX 8000 sm_75 | PENDING (Dependency) | afterok 29269 and 29511 |
+| 29513 | R740, A5000 sm_86 | PENDING (Dependency) | afterok 29512 |
+| 29514 | D, CPU only | PENDING (Dependency) | afterany 29269, 29509, 29511, 29512, 29513 |
+
+These are real replacement submissions with live dependencies, not completed
+results. The C++ bootstrap is running; eventual build/test success is not yet
+established. The intended replacement reference, **only if 29512 succeeds**,
+is `/orangefs/training/llm-granite-n10/audit-29512/cuda.tsv`. The replacement
+terminal collector path is
+`/orangefs/training/llm-granite-n10/cluster-receipt-29514.txt` plus `.sha256`.
+The original missing-prompt gate remains in force.
+
+The coordinator restricted future work to D for CPU-only allocations and
+R740 for the named GPU allocations. No new jobs were submitted to dl380p or
+5860; prior job 29308 is historical. Coordinator job 29217 was not canceled
+or modified and was read back RUNNING. No node state was changed. R770 is
+untouched. Prediction remains **NOT TESTED**, and the final parity receipt
+and PR gate are still outstanding.

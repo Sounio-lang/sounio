@@ -16,7 +16,7 @@ kit="$stage/tooling/cpp-kit"
 art="$stage/cpp-tools-$SLURM_JOB_ID"
 mkdir -p "$work" "$art"
 rec() { srun --ntasks=1 --cpus-per-task=1 --mem=0 --gres=none --job-name="$(printf '%s' "$1" | tr '\n\t' '  ' | cut -c1-120)" true </dev/null >/dev/null 2>&1 || true; }
-trap 'rc=$?; rec "cpp-tools-exit-$rc"; cp "$work/"*.log "$art/" 2>/dev/null || true' EXIT
+trap 'rc=$?; rec "cpp-tools-exit-$rc"; cp "$work/"*.log "$art/" 2>/dev/null || true; if (( rc != 0 )); then for f in "$work/download.log" "$work/build-cmp.log" "$work/build-ids.log" "$work/ids-smoke.log" "$work/cmp-selftest.log"; do if [[ -s "$f" ]]; then rec "failure-log-$(basename "$f")"; tail -10 "$f" | sed -E "s@https?://[^ ]+@[URL]@g" | while IFS= read -r line; do rec "$line"; done; fi; done; fi' EXIT
 awk 'f { print } /^__CA_BUNDLE__$/ { f = 1 }' "$0" > "$work/ca.crt"
 export GIT_SSL_CAINFO="$work/ca.crt"
 export PATH="$kit/bin:$PATH" LD_LIBRARY_PATH="$kit/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
@@ -27,9 +27,11 @@ url=https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz
 sha=02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239
 zigdir="$stage/tooling/zig-x86_64-linux-0.15.2"
 if [[ ! -x "$zigdir/zig" ]]; then
-  "$kit/bin/curl" --fail --location --cacert "$work/ca.crt" --retry 2 "$url" -o "$work/zig.tar.xz" > "$work/download.log" 2>&1
+  # The original host curl binary cannot link to the worker libcurl.
+  # The SHA-verified static BusyBox removes that shared-library dependency.
+  SSL_CERT_FILE="$work/ca.crt" "$kit/bin/busybox" wget -O "$work/zig.tar.xz" "$url" > "$work/download.log" 2>&1
   printf '%s  %s\n' "$sha" "$work/zig.tar.xz" | sha256sum -c -
-  tar -C "$work" -xJf "$work/zig.tar.xz"
+  "$kit/bin/busybox" xzcat "$work/zig.tar.xz" | tar -C "$work" -xf -
   mv "$work/zig-x86_64-linux-0.15.2" "$zigdir"
 fi
 export ZIG_GLOBAL_CACHE_DIR="$work/cache" ZIG_LOCAL_CACHE_DIR="$work/local-cache"
