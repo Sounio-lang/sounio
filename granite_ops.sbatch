@@ -11,12 +11,20 @@ set -euo pipefail
 work=/tmp/granite-tail-$SLURM_JOB_ID
 mkdir -p "$work"
 rec() { srun --ntasks=1 --cpus-per-task=1 --mem=0 --gres=none --job-name="$1" true </dev/null >/dev/null 2>&1 || true; }
-trap 'rc=$?; rec "tail-exit-$rc"' EXIT
+stage=/orangefs/training/llm-granite-n10
+art="$stage/ops-$SLURM_JOB_ID"
+trap 'rc=$?; rec "tail-exit-$rc"; if [[ -w "$stage" ]]; then mkdir -p "$art"; cp "$work/"*.log "$work/"*.bin "$work/adv" "$art/" 2>/dev/null || true; (cd "$art" && find . -maxdepth 1 -type f ! -name "SHA256SUMS*" -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.tmp && mv SHA256SUMS.tmp SHA256SUMS); fi' EXIT
 awk 'f { print } /^__CA_BUNDLE__$/ { f = 1 }' "$0" > "$work/ca.crt"
 export GIT_SSL_CAINFO="$work/ca.crt"
 export HOME="$work/home" XDG_CACHE_HOME="$work/home/.cache"
 mkdir -p "$HOME"
 ulimit -s unlimited
+if [[ -s "$stage/granite-3.1-8b-instruct/SHA256SUMS" ]]; then rec "shared-model-manifest-visible"; else rec "shared-model-manifest-missing"; fi
+# Recover only the existing registered corpus; do not synthesize substitutes.
+if [[ -s /tmp/v2_480_prompts.txt ]] && [[ $(grep -cve "^[[:space:]]*$" /tmp/v2_480_prompts.txt) -eq 480 ]] && [[ -w "$stage" ]]; then
+  if [[ ! -e "$stage/v2_480_prompts.txt" ]]; then cp /tmp/v2_480_prompts.txt "$stage/v2_480_prompts.txt"; fi
+  if cmp -s /tmp/v2_480_prompts.txt "$stage/v2_480_prompts.txt"; then rec "prompts-sha-$(sha256sum "$stage/v2_480_prompts.txt" | cut -d' ' -f1)"; else rec "prompt-copy-conflict"; fi
+else rec "original-prompt-file-not-visible"; fi
 cd "$work"
 git init -q src
 git -C src fetch -q --depth 1 https://github.com/Sounio-lang/sounio.git "$1"
@@ -40,9 +48,5 @@ if [[ "${2:-cuda}" == cuda ]]; then
   rec granite-tail-cuda-pass
 fi
 sha256sum "$work/adv" "$work/"*.bin
-if [[ -d /orangefs/training/llm-granite-n10 ]]; then
-  mkdir -p "/orangefs/training/llm-granite-n10/ops-$SLURM_JOB_ID"
-  cp "$work/"*.log "$work/"*.bin "/orangefs/training/llm-granite-n10/ops-$SLURM_JOB_ID/"
-fi
 exit 0
 __CA_BUNDLE__

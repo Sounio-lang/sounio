@@ -18,6 +18,7 @@ if [[ -d "$model" ]]; then
   if [[ -d "$model/.git/lfs" ]]; then rec "lfs-bytes-$(du -sb "$model/.git/lfs" | cut -f1)"; fi
   for f in "$model"/*.safetensors; do [[ ! -f "$f" ]] || rec "$(basename "$f")-bytes-$(stat -c '%s' "$f")"; done
   for f in "$model"/tokenizer.json "$model"/tokenizer_config.json "$model"/config.json; do [[ ! -f "$f" ]] || rec "$(basename "$f")-bytes-$(stat -c '%s' "$f")"; done
+  if [[ -s "$model/MODEL_REVISION" ]]; then rec "model-revision-$(cat "$model/MODEL_REVISION")"; fi
   if [[ -s "$model/SHA256SUMS" ]]; then rec "SHA256SUMS-$(sha256sum "$model/SHA256SUMS" | cut -d' ' -f1)"; while IFS= read -r line; do rec "$line"; done < "$model/SHA256SUMS"; fi
 fi
 for f in "$stage"/stage-*.log; do
