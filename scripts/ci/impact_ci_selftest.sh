@@ -408,33 +408,47 @@ trap 'rm -rf "$reuse_dir"' EXIT
   h2=$(git rev-parse HEAD)
   main2=$(git rev-parse main)
   run() { CI_EVENT_NAME=pull_request CI_BASE_SHA="$main2" CI_HEAD_SHA="$1" "$CLASSIFIER" 2>/dev/null; }
+  ALL="docs,website,compiler,runtime,stdlib,tests,lean,bootstrap,math,ontology,clinical,sio,full"
   # 1. H1 green, HEAD = H1 + website: reuse H1, compiler not selected.
-  out="$(CI_REUSE_GREEN_SHAS="$h1" run "$h2")"
+  out="$(CI_REUSE_GREEN_SHAS="$h1:$ALL" run "$h2")"
   expect "$out" reused_from "$h1"; expect "$out" compiler false; expect "$out" website true
   # 2. H1's run was cancelled, H0 green: the search continues to H0.
-  out="$(CI_REUSE_GREEN_SHAS="$h0" run "$h2")"
+  out="$(CI_REUSE_GREEN_SHAS="$h0:$ALL" run "$h2")"
   expect "$out" reused_from "$h0"; expect "$out" compiler false; expect "$out" website true
   # 3. Nothing green: full classification, compiler selected.
   out="$(CI_REUSE_GREEN_SHAS="" run "$h2")"
   expect "$out" reused_from ""; expect "$out" compiler true
   # 4. Disabled: full classification even with a green ancestor.
-  out="$(CI_REUSE_DISABLE=1 CI_REUSE_GREEN_SHAS="$h1" run "$h2")"
+  out="$(CI_REUSE_DISABLE=1 CI_REUSE_GREEN_SHAS="$h1:$ALL" run "$h2")"
   expect "$out" reused_from ""; expect "$out" compiler true
   # 5. A stdlib change in the delta disqualifies every candidate.
   echo s2 >stdlib/s.sio; git "${G[@]}" commit -q -am stdlib
   h3=$(git rev-parse HEAD)
-  out="$(CI_REUSE_GREEN_SHAS="$h1 $h2" run "$h3")"
+  out="$(CI_REUSE_GREEN_SHAS="$h1:$ALL $h2:$ALL" run "$h3")"
   expect "$out" reused_from ""; expect "$out" compiler true; expect "$out" stdlib true
   # 6. Deleting the PR's own changelog fragment in the delta disqualifies it.
   git reset -q --hard "$h2"; git rm -q changelog.d/pr.fixed.md; git "${G[@]}" commit -q -m drop
   h4=$(git rev-parse HEAD)
-  out="$(CI_REUSE_GREEN_SHAS="$h2" run "$h4")"
+  out="$(CI_REUSE_GREEN_SHAS="$h2:$ALL" run "$h4")"
   expect "$out" reused_from ""; expect "$out" compiler true
   # 7. A workflow change in the delta disqualifies it.
   git reset -q --hard "$h2"; mkdir -p .github/workflows; echo x >.github/workflows/ci.yml
   git add -A; git "${G[@]}" commit -q -m wf
   h5=$(git rev-parse HEAD)
-  out="$(CI_REUSE_GREEN_SHAS="$h2" run "$h5")"
+  out="$(CI_REUSE_GREEN_SHAS="$h2:$ALL" run "$h5")"
   expect "$out" reused_from ""; expect "$out" full true
-  echo "IMPACT_REUSE_SELFTEST_PASS controls=7"
+  # 1b. Policy outputs keep the full classification under reuse.
+  out="$(CI_REUSE_GREEN_SHAS="$h1:$ALL" run "$h2")"
+  expect "$out" policy_compiler true; expect "$out" compiler false
+  # 8. Coverage: H1 green but its own run selected only docs/website (a stacked
+  #    base already held the compiler change): it cannot cover HEAD.
+  out="$(CI_REUSE_GREEN_SHAS="$h1:docs,website" run "$h2")"
+  expect "$out" reused_from ""; expect "$out" compiler true
+  # 9. A hand edit of CHANGELOG.md in the delta never qualifies, and the policy
+  #    flags still see the compiler change.
+  git reset -q --hard "$h2"; echo hand >CHANGELOG.md; git add -A; git "${G[@]}" commit -q -m hand
+  h6=$(git rev-parse HEAD)
+  out="$(CI_REUSE_GREEN_SHAS="$h2:$ALL" run "$h6")"
+  expect "$out" reused_from ""; expect "$out" policy_compiler true
+  echo "IMPACT_REUSE_SELFTEST_PASS controls=10"
 )

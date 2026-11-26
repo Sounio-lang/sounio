@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ci_reuse_green_ancestor.sh — find an earlier head of this pull request whose
-# CI Decision already passed and that differs from HEAD only in paths no heavy
-# job reads. Prints that commit's sha on stdout, or nothing.
+# CI run already covered every job HEAD needs, and that differs from HEAD only
+# in paths no heavy job reads. Prints that commit's sha on stdout, or nothing.
 #
 # WHY THIS EXISTS
 #
@@ -16,49 +16,97 @@
 # RULE (decision 2026-11-26, "CI rápido quando só o site mudou")
 #
 # Let R be a commit on HEAD's first-parent chain, other than HEAD and at most
-# 12 back, such that:
-#   1. every path in `git diff --name-only R HEAD` is reusable: website/**,
-#      docs/**, a top-level *.md, or changelog.d/*.md; and
-#   2. the check run "CI Decision" on R concluded success.
-# Then every input of every heavy job is byte-identical between R and HEAD.
-# The impact of HEAD can be classified by the R..HEAD diff, and the heavy jobs
-# keep R's verdict. A workflow file, a script, stdlib/, tests/ or self-hosted/
-# in the delta disqualifies R. Fail-closed: if the API is unavailable, a call
-# fails or no candidate qualifies, nothing is printed and the caller
-# classifies by the full BASE..HEAD diff as before.
+# 12 back. R qualifies when all of these hold:
+#   1. Delta. Every path in R..HEAD is website/**, docs/**, a top-level *.md
+#      other than CHANGELOG.md, or an added or edited changelog.d/*.md.
+#   2. Same PR, same workflow, green. The GitHub Actions run of
+#      .github/workflows/ci.yml for head_sha R has event pull_request, lists
+#      THIS pull request (CI_PR_NUMBER), and concluded success.
+#   3. Coverage. That run's own Impact job selected, by itself (its reused_from
+#      is empty), every lane that HEAD's full BASE..HEAD classification selects
+#      (CI_REUSE_REQUIRED). A green docs-only run, a run on a stacked base that
+#      already held the compiler changes, or a run that itself reused a verdict
+#      does not qualify. Since CI Decision passed on R, every job its
+#      classification selected passed. Those jobs cover HEAD's jobs, and their
+#      inputs are byte-identical between R and HEAD.
+# The caller then classifies the impact of HEAD by the R..HEAD delta, for job
+# scheduling only. Policy gates (the changelog fragment gate) keep the full
+# BASE..HEAD classification. Fail-closed: if the API is unavailable, a call
+# fails, evidence is missing or ambiguous, or no candidate qualifies, nothing
+# is printed, and the caller classifies by the full diff.
 #
 # ENV
-#   CI_HEAD_SHA               head to classify (default HEAD)
-#   CI_REUSE_GREEN_SHAS       space-separated shas treated as green, instead of
-#                             asking the GitHub API (selftests only)
-#   GITHUB_REPOSITORY, GH_TOKEN  for the API lookup
-#   CI_REUSE_DISABLE=1        never reuse
+#   CI_HEAD_SHA            head to classify (default HEAD)
+#   CI_REUSE_REQUIRED      space-separated impact keys HEAD's full
+#                          classification selects (e.g. "compiler stdlib tests")
+#   CI_PR_NUMBER           this pull request's number (required for the API)
+#   GITHUB_REPOSITORY, GH_TOKEN   for the API lookup
+#   CI_REUSE_GREEN_SHAS    selftests only, instead of the API: entries
+#                          "<sha>:<key>,<key>,..." (the keys R's own run selected)
+#   CI_REUSE_DISABLE=1     never reuse
 set -uo pipefail
 
 HEAD_SHA="${CI_HEAD_SHA:-HEAD}"
+REQUIRED="${CI_REUSE_REQUIRED:-}"
 [[ "${CI_REUSE_DISABLE:-0}" == 1 ]] && exit 0
 
 reusable_path() {
   case "$1" in
     website/*|docs/*|changelog.d/*.md) return 0 ;;
+    CHANGELOG.md) return 1 ;;
     */*) return 1 ;;
     *.md) return 0 ;;
   esac
   return 1
 }
 
-is_green() {
+# covers <selected keys (space-separated)>: rc 0 iff every REQUIRED key is in it.
+covers() {
+  local have=" $1 " k
+  for k in $REQUIRED; do
+    [[ "$have" == *" $k "* ]] || return 1
+  done
+  return 0
+}
+
+# own_run_selection <sha>: prints the impact keys that R's own PR run of ci.yml
+# selected, or fails. Fails when the run is missing, not green, not this PR's,
+# or itself reused an earlier verdict.
+own_run_selection() {
   local c="$1"
   if [[ -n "${CI_REUSE_GREEN_SHAS+set}" ]]; then
-    [[ " $CI_REUSE_GREEN_SHAS " == *" $c "* ]]
-    return
+    local e
+    for e in $CI_REUSE_GREEN_SHAS; do
+      if [[ "${e%%:*}" == "$c" ]]; then
+        printf '%s\n' "${e#*:}" | tr ',' ' '
+        return 0
+      fi
+    done
+    return 1
   fi
-  [[ -n "${GITHUB_REPOSITORY:-}" ]] || return 1
+  [[ -n "${GITHUB_REPOSITORY:-}" && -n "${CI_PR_NUMBER:-}" ]] || return 1
   command -v gh >/dev/null 2>&1 || return 1
-  local concl
-  concl="$(gh api "repos/$GITHUB_REPOSITORY/commits/$c/check-runs?check_name=CI%20Decision&filter=latest" \
-            --jq '[.check_runs[] | select(.status == "completed") | .conclusion] | first // ""' 2>/dev/null)" || return 1
-  [[ "$concl" == "success" ]]
+  local run_id job_id log keys k v reused=""
+  run_id="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$c&event=pull_request&status=completed&per_page=30" \
+      --jq "[.workflow_runs[] | select(.path == \".github/workflows/ci.yml\" and .head_sha == \"$c\" and .conclusion == \"success\" and any(.pull_requests[]; .number == $CI_PR_NUMBER)) | .id] | first // empty" 2>/dev/null)" || return 1
+  [[ "$run_id" =~ ^[0-9]+$ ]] || return 1
+  job_id="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs?per_page=100" \
+      --jq '[.jobs[] | select(.name == "Impact" and .conclusion == "success") | .id] | first // empty' 2>/dev/null)" || return 1
+  [[ "$job_id" =~ ^[0-9]+$ ]] || return 1
+  log="$(gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$job_id/logs" 2>/dev/null)" || return 1
+  keys=""
+  while IFS= read -r line; do
+    line="${line#*Z }"
+    k="${line%%=*}"; v="${line#*=}"
+    case "$k" in
+      docs|website|compiler|runtime|stdlib|tests|lean|bootstrap|math|ontology|clinical|sio|full)
+        [[ "$v" == true ]] && keys="$keys $k" ;;
+      reused_from) reused="$v" ;;
+    esac
+  done < <(grep -E 'Z (docs|website|compiler|runtime|stdlib|tests|lean|bootstrap|math|ontology|clinical|sio|full|reused_from)=' <<<"$log")
+  [[ -z "$reused" ]] || return 1
+  [[ -n "$keys" ]] || return 1
+  printf '%s\n' "$keys"
 }
 
 head_full="$(git rev-parse --verify -q "$HEAD_SHA^{commit}")" || exit 0
@@ -71,15 +119,14 @@ for c in "${chain[@]}"; do
   while IFS=$'\t' read -r st p; do
     [[ -z "$p" ]] && continue
     reusable_path "$p" || { ok=0; break; }
-    # A changelog fragment may be added or edited in the delta, never deleted:
-    # the fragment gate reads this classification, and a PR's own fragment
-    # vanishing between R and HEAD must not pass as a docs-only change.
+    # A changelog fragment may be added or edited in the delta, never deleted.
     if [[ "$p" == changelog.d/* && "$st" != A && "$st" != M ]]; then ok=0; break; fi
   done <<<"$delta"
-  # A qualifying candidate that is not green (its run was cancelled when a
-  # newer push superseded it, say) does not end the search: an older head can
-  # still qualify on its own delta to HEAD.
-  if [[ $ok == 1 ]] && is_green "$c"; then
+  [[ $ok == 1 ]] || continue
+  # A qualifying candidate whose run was cancelled, or that does not cover HEAD,
+  # does not end the search: an older head can still qualify on its own.
+  sel="$(own_run_selection "$c")" || continue
+  if covers "$sel"; then
     echo "$c"
     exit 0
   fi

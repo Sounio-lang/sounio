@@ -69,17 +69,29 @@ else
     fi
     mapfile -t paths <"$diff_list"
     rm -f "$diff_list" "$diff_err"
-    # Reuse (decision 2026-11-26): if an earlier head of this PR already passed
-    # CI Decision and differs from HEAD only in website/docs/changelog paths, its
-    # heavy-job verdict still holds. Classify by that delta, so only the jobs
-    # those paths select run again. See ci_reuse_green_ancestor.sh. Fail-closed:
-    # no qualifying green head means the full BASE..HEAD classification above.
-    if [[ "$EVENT_NAME" == "pull_request" ]]; then
-      reuse_sha="$(CI_HEAD_SHA="$HEAD_SHA" bash "$(dirname "${BASH_SOURCE[0]}")/ci_reuse_green_ancestor.sh" || true)"
+    # Reuse (decision 2026-11-26): if an earlier head of this PR already ran,
+    # and passed, every lane HEAD needs, and differs from HEAD only in
+    # website/docs/changelog paths, its heavy-job verdict still holds. The jobs
+    # are scheduled by that delta. The full BASE..HEAD classification is computed
+    # first (a recursive run with reuse disabled). It is what R must cover, and it
+    # is published as policy_* for the policy gates. See
+    # ci_reuse_green_ancestor.sh. Fail-closed: no qualifying head means the full
+    # classification.
+    if [[ "$EVENT_NAME" == "pull_request" && "${CI_REUSE_DISABLE:-0}" != 1 ]]; then
+      full_rows="$(CI_REUSE_DISABLE=1 GITHUB_OUTPUT= bash "${BASH_SOURCE[0]}" 2>/dev/null)" || full_rows=""
+      required=""
+      while IFS== read -r k v; do
+        case "$k" in policy_*|reused_from) continue ;; esac
+        [[ "$v" == true ]] && required="$required $k"
+      done <<<"$full_rows"
+      reuse_sha=""
+      if [[ -n "$full_rows" ]]; then
+        reuse_sha="$(CI_HEAD_SHA="$HEAD_SHA" CI_REUSE_REQUIRED="$required" bash "$(dirname "${BASH_SOURCE[0]}")/ci_reuse_green_ancestor.sh" || true)"
+      fi
       if [[ -n "$reuse_sha" ]]; then
         mapfile -t reuse_paths < <(git diff --name-only "$reuse_sha" "$HEAD_SHA")
         if ((${#reuse_paths[@]})); then
-          echo "reuse: CI Decision passed on $reuse_sha; classifying the ${#reuse_paths[@]} path(s) of $reuse_sha..$HEAD_SHA instead of ${#paths[@]}" >&2
+          echo "reuse: $reuse_sha already ran and passed every lane HEAD needs (${required# }); classifying the ${#reuse_paths[@]} path(s) of $reuse_sha..$HEAD_SHA instead of ${#paths[@]}" >&2
           paths=("${reuse_paths[@]}")
           reused_from="$reuse_sha"
         fi
@@ -151,3 +163,18 @@ done
 row="reused_from=${reused_from:-}"
 echo "$row"
 [[ -z "$OUTPUT_FILE" ]] || echo "$row" >>"$OUTPUT_FILE"
+# policy_<key>: the full BASE..HEAD classification, never reduced by reuse.
+# Policy gates (the changelog fragment gate, ADR-018) read these, so a reused
+# execution verdict cannot hide what the pull request changes.
+declare -A policy=()
+for key in "${keys[@]}"; do policy["$key"]="${impact[$key]}"; done
+if [[ -n "${full_rows:-}" ]]; then
+  while IFS== read -r k v; do
+    [[ -n "${policy[$k]+set}" ]] && policy["$k"]="$v"
+  done <<<"$full_rows"
+fi
+for key in "${keys[@]}"; do
+  row="policy_$key=${policy[$key]}"
+  echo "$row"
+  [[ -z "$OUTPUT_FILE" ]] || echo "$row" >>"$OUTPUT_FILE"
+done
