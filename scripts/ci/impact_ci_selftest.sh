@@ -486,5 +486,10 @@ trap 'rm -rf "$reuse_dir" "$reuse_dir2"' EXIT
   # 12. R's run tested R on the original base (no B): reused.
   out="$(CI_REUSE_GREEN_SHAS="$r:$ALL@$(git rev-parse main~3)" run)"
   expect "$out" reused_from "$r"; expect "$out" compiler false; expect "$out" policy_compiler true
-  echo "IMPACT_REUSE_TESTED_TREE_SELFTEST_PASS controls=2"
+  # 13. A refused candidate says why on stderr, which the Impact log keeps.
+  why="$(CI_REUSE_GREEN_SHAS="$r:$ALL@$main_b" CI_EVENT_NAME=pull_request CI_BASE_SHA="$main_now" \
+      CI_HEAD_SHA="$h" CI_TESTED_SHA="$h" "$CLASSIFIER" 2>&1 >/dev/null)"
+  [[ "$why" == *"ci-reuse: skip ${r:0:10}: its tested tree differs"* ]] \
+    || { echo "impact-ci-selftest: control 13: no skip reason for ${r:0:10}: $why" >&2; exit 1; }
+  echo "IMPACT_REUSE_TESTED_TREE_SELFTEST_PASS controls=3"
 )
