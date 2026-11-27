@@ -9,6 +9,8 @@
 //   prompt_idx \t prompt_tokens \t gen_tokens \t fma_min_norm_hits \t top1:top2:b1_u32:b2_u32:margin_u32:exactness=VERIFIED_EXACT:history=UNCOMPARED,...
 // Supports append+resume across interruptions and reports TOTAL_CUDA_FMA_MIN_NORM_HITS.
 
+use llm::raw_memory::{ptr_read_i64_le, ptr_read_u32_le, ptr_read_u8, ptr_write_i64_le, ptr_write_u8}
+
 use llm::mmap::{
     PageArena,
     MappedShard,
@@ -40,6 +42,8 @@ use llm::qwen3_paged_kv::{
 use llm::qwen3_tokenizer::{
     Qwen3Tokenizer,
     qwen3_tokenizer_load,
+    granite_tokenizer_load,
+    granite_format_audit_chat_bytes,
     qwen3_tokenizer_free,
     qwen3_tokenizer_is_ok,
     qwen3_format_chat_bytes,
@@ -503,7 +507,7 @@ fn run_61440_metal(
                 continue
             }
 
-            let chat_len = qwen3_format_chat_bytes(0, 0, line_ptr, ll, true, false, chat_ptr, prompt_cap)
+            let chat_len = if tok.granite { granite_format_audit_chat_bytes(line_ptr, ll, chat_ptr, prompt_cap) } else { qwen3_format_chat_bytes(0, 0, line_ptr, ll, true, false, chat_ptr, prompt_cap) }
             if chat_len <= 0 { ok = false; break }
             let n_prompt = qwen3_encode_bytes(tok, chat_ptr, chat_len, tok_ptr, tokens_cap)
             if n_prompt <= 0 || n_prompt + max_tokens > max_seq { ok = false; break }
@@ -540,6 +544,7 @@ fn run_61440_metal(
         }
     }
 
+    if max_prompts > 0 && done_prompts + resume_skip != max_prompts { ok = false }
     let _fw = page_arena_free(work_arena)
     let _fr = qwen3_metal_runner_free(rt)
     let _fk = qwen3_kv_free(kv)
@@ -597,7 +602,7 @@ fn run_61440_cuda(
                 continue
             }
 
-            let chat_len = qwen3_format_chat_bytes(0, 0, line_ptr, ll, true, false, chat_ptr, prompt_cap)
+            let chat_len = if tok.granite { granite_format_audit_chat_bytes(line_ptr, ll, chat_ptr, prompt_cap) } else { qwen3_format_chat_bytes(0, 0, line_ptr, ll, true, false, chat_ptr, prompt_cap) }
             if chat_len <= 0 { ok = false; break }
             let n_prompt = qwen3_encode_bytes(tok, chat_ptr, chat_len, tok_ptr, tokens_cap)
             if n_prompt <= 0 || n_prompt + max_tokens > max_seq { ok = false; break }
@@ -649,6 +654,7 @@ fn run_61440_cuda(
         }
     }
 
+    if max_prompts > 0 && done_prompts + resume_skip != max_prompts { ok = false }
     let _fw = page_arena_free(work_arena)
     let _fr = qwen3_cuda_runner_free(rt)
     if ok {
@@ -661,7 +667,110 @@ fn run_61440_cuda(
     ok
 }
 
-fn main() -> i64 with IO, Alloc, Mut, Div, Panic {
+fn arg_eq(p: string, s: string) -> bool {
+    if str_len(p) != str_len(s) { return false }
+    var i: i64 = 0
+    while i < str_len(s) {
+        if str_char_at(p, i) != str_char_at(s, i) { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn copy_arg(dst: i64, src: string) -> i64 with Mut {
+    let n = str_len(src)
+    if n >= 4090 { return -1 }
+    var i: i64 = 0
+    while i < n {
+        let _w = ptr_write_u8(dst, i, str_char_at(src, i) & 255)
+        i = i + 1
+    }
+    let _z = ptr_write_u8(dst, i, 0)
+    n
+}
+
+fn decimal_arg(p: string) -> i64 with Div {
+    let n = str_len(p)
+    if n <= 0 || n > 8 { return -1 }
+    var i: i64 = 0
+    var v: i64 = 0
+    while i < n {
+        let b = str_char_at(p, i)
+        if b < 48 || b > 57 { return -1 }
+        v = v * 10 + b - 48
+        i = i + 1
+    }
+    v
+}
+
+// Offline oracle: one line per prompt, unsigned decimal token IDs separated
+// by spaces/tabs; exact order and length, no omitted or extra prompts.
+fn matches_token_ids(line: i64, len: i64, ids: i64, count: i64) -> bool with Div {
+    var p: i64 = 0
+    var i: i64 = 0
+    while p < len {
+        while p < len && (ptr_read_u8(line, p) == 32 || ptr_read_u8(line, p) == 9) { p = p + 1 }
+        if p == len { break }
+        var v: i64 = 0
+        var digits: i64 = 0
+        while p < len {
+            let b = ptr_read_u8(line, p)
+            if b == 32 || b == 9 { break }
+            if b < 48 || b > 57 || digits >= 6 { return false }
+            v = v * 10 + b - 48
+            digits = digits + 1
+            p = p + 1
+        }
+        if digits == 0 || i >= count || v != ptr_read_i64_le(ids, i * 8) { return false }
+        i = i + 1
+    }
+    i == count
+}
+
+fn verify_granite_prompt_ids(tok: &Qwen3Tokenizer, prompts: &MappedShard, slen: i64, ref_path: i64) -> bool with IO, Alloc, Mut, Panic, Div {
+    let ref = mapped_shard_open((ref_path as *mut u8) as string)
+    let arena = page_arena_alloc(4 * 65536 + 32)
+    var ok = mapped_shard_is_ok(&ref) && page_arena_is_ok(&arena)
+    if ok {
+        let base = page_arena_ptr(&arena)
+        let prompt = base
+        let chat = base + 65536
+        let ids = base + 131072
+        let oracle_line = base + 196608
+        let pi = base + 262144
+        let ri = pi + 8
+        let _z0 = ptr_write_i64_le(pi, 0, 0)
+        let _z1 = ptr_write_i64_le(ri, 0, 0)
+        let rlen = mapped_shard_len(&ref)
+        var i: i64 = 0
+        while i < 480 && ok {
+            let ll = next_prompt_from_shard(prompts, slen, pi, prompt, 65536)
+            let rl = next_prompt_from_shard(&ref, rlen, ri, oracle_line, 65536)
+            if ll <= 0 || rl <= 0 { ok = false; break }
+            let cl = granite_format_audit_chat_bytes(prompt, ll, chat, 65536)
+            if cl <= 0 { ok = false; break }
+            let n = qwen3_encode_bytes(tok, chat, cl, ids, 8192)
+            if n <= 0 || !matches_token_ids(oracle_line, rl, ids, n) {
+                print("GRANITE_TOKEN_IDS_MISMATCH prompt=")
+                print_int(i)
+                println("")
+                ok = false
+                break
+            }
+            i = i + 1
+        }
+        if ok {
+            ok = next_prompt_from_shard(prompts, slen, pi, prompt, 65536) == 0
+                && next_prompt_from_shard(&ref, rlen, ri, oracle_line, 65536) == 0
+        }
+    }
+    let _f = page_arena_free(arena)
+    let _r = mapped_shard_close(ref)
+    println(if ok { "GRANITE_TOKEN_IDS_480_PASS" } else { "GRANITE_TOKEN_IDS_480_FAIL" })
+    ok
+}
+
+pub fn main() -> i64 with IO, Alloc, Mut, Div, Panic {
     let force_cuda = env_equals("SOUNIO_AUDIT_BACKEND", "cuda")
     let probe_sess = metal_session_open("")
     let use_metal = (!force_cuda) && metal_session_is_ok(&probe_sess)
@@ -672,14 +781,40 @@ fn main() -> i64 with IO, Alloc, Mut, Div, Panic {
     let prompts_buf = heap_alloc(4096) as i64
     let out_buf = heap_alloc(4096) as i64
 
-    let dlen = cstr_env_or_default(model_buf, "SOUNIO_MODEL_DIR", "/tmp/models/Qwen3-0.6B")
-    join_tok_json(tok_buf, model_buf, dlen)
+    var dlen = cstr_env_or_default(model_buf, "SOUNIO_MODEL_DIR", "/tmp/models/Qwen3-0.6B")
     let _plen = cstr_env_or_default(prompts_buf, "SOUNIO_PROMPTS_FILE", "/tmp/v2_480_prompts.txt")
     let _olen = cstr_env_or_default(out_buf, "SOUNIO_OUT_FILE", "/tmp/v2_61440_out.tsv")
 
-    let max_tokens = env_i64_or("SOUNIO_MAX_TOKENS", 128)
+    var max_tokens = env_i64_or("SOUNIO_MAX_TOKENS", 128)
     let max_seq = env_i64_or("SOUNIO_MAX_SEQ", 512)
-    let max_prompts = env_i64_or("SOUNIO_MAX_PROMPTS", 0)
+    var max_prompts = env_i64_or("SOUNIO_MAX_PROMPTS", 0)
+    var granite = false
+    let ref_buf = heap_alloc(4096) as i64
+    let _rl = cstr_env_or_default(ref_buf, "SOUNIO_GRANITE_PROMPT_IDS", "")
+    let argc = arg_count()
+    var ai: i64 = 0
+    while ai < argc {
+        if ai + 1 >= argc { println("AUDIT_BAD_ARG"); return 1 }
+        let key = get_arg(ai)
+        let val = get_arg(ai + 1)
+        if arg_eq(key, "--arch") {
+            if arg_eq(val, "granite") { granite = true }
+            else if arg_eq(val, "qwen3") { granite = false }
+            else { println("AUDIT_UNKNOWN_ARCH"); return 1 }
+        } else if arg_eq(key, "--model-dir") { dlen = copy_arg(model_buf, val) }
+        else if arg_eq(key, "--prompts-file") { if copy_arg(prompts_buf, val) < 0 { return 1 } }
+        else if arg_eq(key, "--prompt-ids") { if copy_arg(ref_buf, val) < 0 { return 1 } }
+        else if arg_eq(key, "--out") { if copy_arg(out_buf, val) < 0 { return 1 } }
+        else if arg_eq(key, "--prompts") { max_prompts = decimal_arg(val) }
+        else if arg_eq(key, "--tokens") { max_tokens = decimal_arg(val) }
+        else if arg_eq(key, "--dtype") { if !arg_eq(val, "bf16") { return 1 } }
+        else { println("AUDIT_UNKNOWN_ARG"); return 1 }
+        ai = ai + 2
+    }
+    if dlen < 0 || max_prompts < 0 { return 1 }
+    if granite && max_prompts == 0 { max_prompts = 480 }
+    if granite && (max_prompts != 480 || max_tokens != 128) { println("GRANITE_REGISTERED_SHAPE_REQUIRED"); return 1 }
+    join_tok_json(tok_buf, model_buf, dlen)
     let has_hdr_box = heap_alloc(8) as i64
     let _zh0 = ptr_write_i64_le(has_hdr_box, 0, 0)
     let resume_skip = count_existing_lines(out_buf, has_hdr_box)
@@ -687,14 +822,18 @@ fn main() -> i64 with IO, Alloc, Mut, Div, Panic {
     heap_free(has_hdr_box as *mut u8)
 
     let m = qwen3_model_open((model_buf as *mut u8) as string)
-    let tok = qwen3_tokenizer_load((tok_buf as *mut u8) as string)
+    let tok = if granite { granite_tokenizer_load((tok_buf as *mut u8) as string) } else { qwen3_tokenizer_load((tok_buf as *mut u8) as string) }
     let shard = mapped_shard_open((prompts_buf as *mut u8) as string)
     let slen = if mapped_shard_is_ok(&shard) { mapped_shard_len(&shard) } else { 0 }
     let of = out_open_append(out_buf)
 
     var ok = qwen3_model_is_ok(&m) && qwen3_tokenizer_is_ok(&tok)
         && mapped_shard_is_ok(&shard) && slen > 0 && of.ok
-        && max_tokens > 0 && max_seq > max_tokens
+        && max_tokens > 0 && max_seq > max_tokens && qwen3_model_cfg(&m).granite == granite
+
+    if ok && granite {
+        ok = verify_granite_prompt_ids(&tok, &shard, slen, ref_buf)
+    }
 
     if ok && resume_skip > 0 && has_header == 0 {
         println("AUDIT_61440_HEADER_MISSING_IN_EXISTING_OUT")
@@ -734,6 +873,7 @@ fn main() -> i64 with IO, Alloc, Mut, Div, Panic {
     let _cs = mapped_shard_close(shard)
     let _ft = qwen3_tokenizer_free(tok)
     let _fm = qwen3_model_free(m)
+    heap_free(ref_buf as *mut u8)
     heap_free(model_buf as *mut u8)
     heap_free(tok_buf as *mut u8)
     heap_free(prompts_buf as *mut u8)

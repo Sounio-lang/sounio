@@ -369,8 +369,8 @@ pub fn emit_qwen3_kernels_msl_cstr() -> i64 with Alloc, Mut {
     p = bf16_cstr_append(buf, p, "inline void qwen3_paged_gqa_head_simd(\n")
     p = bf16_cstr_append(buf, p, "    device const float* q_vec, device const uchar* kv_base, device const uint* table,\n")
     p = bf16_cstr_append(buf, p, "    ulong k_layer_off, ulong v_layer_off, device float* out_vec,\n")
-    p = bf16_cstr_append(buf, p, "    ulong n_kv, ulong kv_h, ulong head_dim, ulong seq_len, ulong block_size, uint lane) {\n")
-    p = bf16_cstr_append(buf, p, "    float scale = precise::divide(1.0f, precise::sqrt(float(head_dim)));\n")
+    p = bf16_cstr_append(buf, p, "    ulong n_kv, ulong kv_h, ulong head_dim, ulong seq_len, ulong packed_block_size, uint lane) {\n")
+    p = bf16_cstr_append(buf, p, "    uint scale_bits = uint(packed_block_size >> 32); ulong block_size = packed_block_size & 0xfffffffful; float scale = scale_bits ? as_type<float>(scale_bits) : precise::divide(1.0f, precise::sqrt(float(head_dim)));\n")
     p = bf16_cstr_append(buf, p, "    uint n_chunks = (uint)((min(head_dim, 256ul) + 31ul) >> 5);\n")
     p = bf16_cstr_append(buf, p, "    float q_reg[8]; float acc_reg[8];\n")
     p = bf16_cstr_append(buf, p, "    for (uint c = 0; c < n_chunks; ++c) {\n")
@@ -430,11 +430,11 @@ pub fn emit_qwen3_kernels_msl_cstr() -> i64 with Alloc, Mut {
     p = bf16_cstr_append(buf, p, "kernel void qwen3_vec_add_f32(\n")
     p = bf16_cstr_append(buf, p, "    device uchar* a_base [[buffer(0)]], constant ulong& a_off [[buffer(1)]],\n")
     p = bf16_cstr_append(buf, p, "    device const uchar* b_base [[buffer(2)]], constant ulong& b_off [[buffer(3)]],\n")
-    p = bf16_cstr_append(buf, p, "    constant ulong& len [[buffer(4)]], uint gid [[thread_position_in_grid]]) {\n")
-    p = bf16_cstr_append(buf, p, "    if ((ulong)gid >= len) return;\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& packed_len [[buffer(4)]], uint gid [[thread_position_in_grid]]) {\n")
+    p = bf16_cstr_append(buf, p, "    ulong len = packed_len & 0xfffffffful; uint scale_bits = uint(packed_len >> 32); if ((ulong)gid >= len) return;\n")
     p = bf16_cstr_append(buf, p, "    device float* a = (device float*)(a_base + a_off);\n")
     p = bf16_cstr_append(buf, p, "    device const float* b = (device const float*)(b_base + b_off);\n")
-    p = bf16_cstr_append(buf, p, "    a[gid] = a[gid] + b[gid];\n}\n\n")
+    p = bf16_cstr_append(buf, p, "    if (scale_bits) { float v = b[gid] * as_type<float>(scale_bits); a[gid] = (a == b) ? v : a[gid] + v; } else { a[gid] = a[gid] + b[gid]; }\n}\n\n")
 
     // 9. qwen3_kv_scatter_f32
     p = bf16_cstr_append(buf, p, "kernel void qwen3_kv_scatter_f32(\n")
@@ -1410,8 +1410,9 @@ pub fn qwen3_metal_encode_vec_add(
         || metal_cmd_set_u64(s, cid, 4, len) != 0 {
         return -1
     }
-    let group_threads = if len < 64 { len } else { 64 }
-    if metal_cmd_dispatch_1d(s, cid, pipe, len, group_threads) != 0 {
+    let count = len & 4294967295
+    let group_threads = if count < 64 { count } else { 64 }
+    if metal_cmd_dispatch_1d(s, cid, pipe, count, group_threads) != 0 {
         return -1
     }
     0
@@ -1507,7 +1508,7 @@ pub fn qwen3_cuda_rmsnorm(
     n_groups: i64,
     dim: i64,
     eps_f32_bits: i64
-) -> i64 with Alloc {
+) -> i64 with Alloc, Mut {
     cuda_launch_6param_1d(s, hfn, n_groups, 1, d_x, d_w, d_out, n_groups, dim, eps_f32_bits)
 }
 
@@ -1519,7 +1520,7 @@ pub fn qwen3_cuda_rope(
     head_dim: i64,
     pos: i64,
     theta_f32_bits: i64
-) -> i64 with Alloc {
+) -> i64 with Alloc, Mut {
     cuda_launch_6param_1d(s, hfn, n_heads, 1, d_v, n_heads, head_dim, pos, theta_f32_bits, 0)
 }
 
@@ -1531,7 +1532,7 @@ pub fn qwen3_cuda_gemv(
     d_y: i64,
     out_dim: i64,
     in_dim: i64
-) -> i64 with Alloc {
+) -> i64 with Alloc, Mut {
     cuda_launch_6param_1d(s, hfn, out_dim, 1, d_w, d_x, d_y, out_dim, in_dim, 0)
 }
 
@@ -1542,7 +1543,7 @@ pub fn qwen3_cuda_swiglu(
     d_up: i64,
     d_out: i64,
     inter_dim: i64
-) -> i64 with Alloc {
+) -> i64 with Alloc, Mut {
     cuda_launch_6param_1d(s, hfn, inter_dim, 1, d_gate, d_up, d_out, inter_dim, 0, 0)
 }
 
@@ -1557,7 +1558,7 @@ pub fn qwen3_cuda_paged_gqa(
     n_q: i64,
     seq_len: i64,
     cfg: i64
-) -> i64 with Alloc {
+) -> i64 with Alloc, Mut {
     cuda_launch_8param_1d(s, hfn, n_q, 1, d_q, d_k, d_v, d_table, d_out, n_q, seq_len, cfg)
 }
 

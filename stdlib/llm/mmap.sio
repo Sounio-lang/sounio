@@ -1,10 +1,78 @@
 // stdlib::llm::mmap — Zero-copy shard mapping & page-aligned arenas.
 //
-// Backed by native OS mmap_ro / mmap_rw / munmap_ro and unaligned little-endian
+// Backed by POSIX mmap via the existing dynamic FFI lane and unaligned little-endian
 // pointer accessors so multi-GB Safetensors shards stay out of the Sounio heap
 // and bind zero-copy to Metal (unified memory) or host-staging for PTX.
 
+use llm::raw_memory::{ptr_read_i64_le, ptr_read_u16_le, ptr_read_u32_le, ptr_read_u8, ptr_write_u32_le, ptr_write_u8}
+
 use tensor2::convert::{f32_bits_to_f64}
+
+extern "C" {
+    fn dlopen(filename: *mut u8, flags: i32) -> *mut u8
+    fn dlsym(handle: *mut u8, symbol: *mut u8) -> *mut u8
+    fn dlclose(handle: *mut u8) -> i32
+}
+
+// The upstream Linux Madaros has no mmap_ro/rw/munmap_ro intrinsics. Use
+// the existing POSIX dlopen/dlsym call-through ABI instead. /dev/zero gives
+// private zero-filled writable pages without platform-specific MAP_ANON bits.
+fn llm_map_symbol(h: *mut u8, packed_name: i64) -> *mut u8 with Alloc, Mut {
+    let p = heap_alloc(8) as *mut i64
+    if p as i64 == 0 { return 0 as *mut u8 }
+    (*p) = packed_name
+    let s = dlsym(h, p as *mut u8)
+    heap_free(p as *mut u8)
+    s
+}
+
+fn llm_mmap_file(path: string, len: i64, writable: bool) -> i64 with IO, Alloc, Mut {
+    if len <= 0 { return 0 }
+    let n = str_len(path)
+    if n <= 0 || n > 65535 { return 0 }
+    let cpath = heap_alloc(n + 1) as i64
+    if cpath == 0 { return 0 }
+    var i: i64 = 0
+    while i < n {
+        let _w = ptr_write_u8(cpath, i, str_char_at(path, i))
+        i = i + 1
+    }
+    let _z = ptr_write_u8(cpath, n, 0)
+    let h = dlopen(0 as *mut u8, 1)
+    if h as i64 == 0 { heap_free(cpath as *mut u8); return 0 }
+    let open_raw = llm_map_symbol(h, 0x6e65706f)
+    let close_raw = llm_map_symbol(h, 0x65736f6c63)
+    let map_raw = llm_map_symbol(h, 0x70616d6d)
+    var addr: i64 = 0
+    if open_raw as i64 != 0 && close_raw as i64 != 0 && map_raw as i64 != 0 {
+        let open_fn = open_raw as fn(i64, i64, i64) -> i32
+        let close_fn = close_raw as fn(i64) -> i32
+        let map_fn = map_raw as fn(i64, i64, i64, i64, i64, i64) -> i64
+        let fd = open_fn(cpath, if writable { 2 } else { 0 }, 0)
+        if fd >= 0 {
+            let p = map_fn(0, len, if writable { 3 } else { 1 }, 2, fd as i64, 0)
+            let _c = close_fn(fd as i64)
+            if p > 0 { addr = p }
+        }
+    }
+    let _d = dlclose(h)
+    heap_free(cpath as *mut u8)
+    addr
+}
+
+pub fn munmap_ro(ptr: i64, len: i64) -> i64 with IO, Alloc, Mut {
+    if ptr <= 0 || len <= 0 { return -1 }
+    let h = dlopen(0 as *mut u8, 1)
+    if h as i64 == 0 { return -1 }
+    let raw = llm_map_symbol(h, 0x70616d6e756d)
+    var rc: i64 = -1
+    if raw as i64 != 0 {
+        let f = raw as fn(i64, i64) -> i32
+        rc = f(ptr, len) as i64
+    }
+    let _d = dlclose(h)
+    rc
+}
 
 pub linear struct MappedShard {
     pub ptr: i64,
@@ -26,19 +94,19 @@ pub fn page_arena_is_ok(a: &PageArena) -> bool { a.ok }
 pub fn page_arena_ptr(a: &PageArena) -> i64 { a.ptr }
 pub fn page_arena_len(a: &PageArena) -> i64 { a.len }
 
-pub fn mapped_shard_open(path: string) -> MappedShard with IO, Mut, Panic {
+pub fn mapped_shard_open(path: string) -> MappedShard with IO, Alloc, Mut, Panic {
     let sz = file_size(path)
     if sz <= 0 {
         return MappedShard { ptr: 0, len: 0, ok: false }
     }
-    let p = mmap_ro(path)
+    let p = llm_mmap_file(path, sz, false)
     if p <= 0 {
         return MappedShard { ptr: 0, len: 0, ok: false }
     }
     MappedShard { ptr: p, len: sz, ok: true }
 }
 
-pub fn mapped_shard_close(s: MappedShard) -> i64 with IO, Mut {
+pub fn mapped_shard_close(s: MappedShard) -> i64 with IO, Alloc, Mut {
     let MappedShard { ptr, len, ok } = s
     if !ok || ptr <= 0 || len <= 0 {
         return 0
@@ -46,20 +114,20 @@ pub fn mapped_shard_close(s: MappedShard) -> i64 with IO, Mut {
     munmap_ro(ptr, len)
 }
 
-pub fn page_arena_alloc(byte_len: i64) -> PageArena with IO, Mut {
+pub fn page_arena_alloc(byte_len: i64) -> PageArena with IO, Alloc, Mut {
     if byte_len <= 0 || byte_len > 9223372036854759424 {
         return PageArena { ptr: 0, len: 0, ok: false }
     }
     let rem = byte_len % 16384
     let aligned_len = if rem == 0 { byte_len } else { byte_len + (16384 - rem) }
-    let p = mmap_rw(aligned_len)
+    let p = llm_mmap_file("/dev/zero", aligned_len, true)
     if p <= 0 {
         return PageArena { ptr: 0, len: 0, ok: false }
     }
     PageArena { ptr: p, len: aligned_len, ok: true }
 }
 
-pub fn page_arena_free(a: PageArena) -> i64 with IO, Mut {
+pub fn page_arena_free(a: PageArena) -> i64 with IO, Alloc, Mut {
     let PageArena { ptr, len, ok } = a
     if !ok || ptr <= 0 || len <= 0 {
         return 0
@@ -107,7 +175,7 @@ pub fn page_arena_read_u32_le(a: &PageArena, byte_off: i64) -> (i64, bool) {
     (ptr_read_u32_le(a.ptr, byte_off), true)
 }
 
-pub fn page_arena_write_u32_le(a: &PageArena, byte_off: i64, val: i64) -> bool {
+pub fn page_arena_write_u32_le(a: &PageArena, byte_off: i64, val: i64) -> bool with Mut {
     if !a.ok || !shard_in_bounds(a.len, byte_off, 4) {
         return false
     }

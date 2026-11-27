@@ -1,0 +1,1 @@
+Add Granite-3.1-8B BF16 inference and tokenizer support to the v2 audit. The L4, Quadro RTX 8000 and RTX A5000 produced identical token, runner-up and logit-bit records on the committed 480-prompt corpus.
