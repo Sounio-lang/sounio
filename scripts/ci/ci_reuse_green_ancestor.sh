@@ -58,6 +58,11 @@ HEAD_SHA="${CI_HEAD_SHA:-HEAD}"
 REQUIRED="${CI_REUSE_REQUIRED:-}"
 [[ "${CI_REUSE_DISABLE:-0}" == 1 ]] && exit 0
 
+# skip <commit> <reason>: say on stderr why a candidate was not reused, and fail.
+# The Impact log keeps stderr, so a reuse that did not happen can be diagnosed
+# from the run itself (first live miss: #3750 @ 3aefd8f93a, 2026-11-27).
+skip() { echo "ci-reuse: skip ${1:0:10}: $2" >&2; return 1; }
+
 reusable_path() {
   case "$1" in
     website/*|docs/*|changelog.d/*.md) return 0 ;;
@@ -98,16 +103,24 @@ own_run_selection() {
     done
     return 1
   fi
-  [[ -n "${GITHUB_REPOSITORY:-}" && -n "${CI_PR_NUMBER:-}" ]] || return 1
-  command -v gh >/dev/null 2>&1 || return 1
-  local run_id job_id log keys k v reused=""
-  run_id="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$c&event=pull_request&status=completed&per_page=30" \
-      --jq "[.workflow_runs[] | select(.path == \".github/workflows/ci.yml\" and .head_sha == \"$c\" and .conclusion == \"success\" and any(.pull_requests[]; .number == $CI_PR_NUMBER)) | .id] | first // empty" 2>/dev/null)" || return 1
-  [[ "$run_id" =~ ^[0-9]+$ ]] || return 1
+  [[ -n "${GITHUB_REPOSITORY:-}" && -n "${CI_PR_NUMBER:-}" ]] || { skip "$c" "GITHUB_REPOSITORY or CI_PR_NUMBER unset"; return 1; }
+  command -v gh >/dev/null 2>&1 || { skip "$c" "gh not on PATH"; return 1; }
+  local run_id job_id log keys k v reused="" err
+  err="$(mktemp)"; trap 'rm -f "$err"' RETURN
+  # One line per green pull_request run of ci.yml for this head: "<id> <PR numbers>".
+  # Kept apart so that "no green run" and "a green run that does not list
+  # this PR" give different reasons (review of #3753); both still refuse.
+  local runs
+  runs="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$c&event=pull_request&status=completed&per_page=30" \
+      --jq "[.workflow_runs[] | select(.path == \".github/workflows/ci.yml\" and .head_sha == \"$c\" and .conclusion == \"success\")] | .[] | \"\\(.id) \\([.pull_requests[].number | tostring] | join(\",\"))\"" 2>"$err")" \
+    || { skip "$c" "runs query failed: $(head -c 200 "$err")"; return 1; }
+  [[ -n "$runs" ]] || { skip "$c" "no successful pull_request run of ci.yml for this head"; return 1; }
+  run_id="$(awk -v pr="$CI_PR_NUMBER" '{ n = split($2, a, ","); for (i = 1; i <= n; i++) if (a[i] == pr) { print $1; exit } }' <<<"$runs")"
+  [[ "$run_id" =~ ^[0-9]+$ ]] || { skip "$c" "green run(s) $(awk '{printf "%s[prs=%s] ", $1, ($2 == "" ? "none" : $2)}' <<<"$runs")do not list PR $CI_PR_NUMBER"; return 1; }
   job_id="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs?per_page=100" \
-      --jq '[.jobs[] | select(.name == "Impact" and .conclusion == "success") | .id] | first // empty' 2>/dev/null)" || return 1
-  [[ "$job_id" =~ ^[0-9]+$ ]] || return 1
-  log="$(gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$job_id/logs" 2>/dev/null)" || return 1
+      --jq '[.jobs[] | select(.name == "Impact" and .conclusion == "success") | .id] | first // empty'  2>"$err")" || { skip "$c" "jobs query failed for run $run_id: $(head -c 200 "$err")"; return 1; }
+  [[ "$job_id" =~ ^[0-9]+$ ]] || { skip "$c" "run $run_id has no successful Impact job"; return 1; }
+  log="$(gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$job_id/logs"  2>"$err")" || { skip "$c" "log fetch failed for job $job_id: $(head -c 200 "$err")"; return 1; }
   keys=""
   while IFS= read -r line; do
     line="${line#*Z }"
@@ -118,11 +131,11 @@ own_run_selection() {
       reused_from) reused="$v" ;;
     esac
   done < <(grep -E 'Z (docs|website|compiler|runtime|stdlib|tests|lean|bootstrap|math|ontology|clinical|sio|full|reused_from)=' <<<"$log")
-  [[ -z "$reused" ]] || return 1
-  [[ -n "$keys" ]] || return 1
+  [[ -z "$reused" ]] || { skip "$c" "run $run_id itself reused $reused"; return 1; }
+  [[ -n "$keys" ]] || { skip "$c" "no impact rows in the Impact log of job $job_id"; return 1; }
   local base
   base="$(grep -oE "HEAD is now at [0-9a-f]+ Merge $c into [0-9a-f]{40}" <<<"$log" | head -1 | grep -oE "[0-9a-f]{40}\$")"
-  [[ "$base" =~ ^[0-9a-f]{40}$ ]] || return 1
+  [[ "$base" =~ ^[0-9a-f]{40}$ ]] || { skip "$c" "no \"Merge <R> into <base>\" checkout line in job $job_id"; return 1; }
   printf '%s %s\n' "$base" "$keys"
 }
 
@@ -160,21 +173,22 @@ mapfile -t chain < <(git rev-list --first-parent --max-count=13 "$head_full" 2>/
 for c in "${chain[@]}"; do
   [[ -n "$c" ]] || continue
   # 1. The raw delta (which the caller schedules jobs by) is reusable.
-  delta_reusable "$c" "$head_full" || continue
+  delta_reusable "$c" "$head_full" || { skip "$c" "raw delta to HEAD is empty or touches a non-reusable path"; continue; }
   # 2-3. R's own covering run of this PR. A cancelled or non-covering run does
   # not end the search: an older head can still qualify on its own.
   sel="$(own_run_selection "$c")" || continue
   base="${sel%% *}"; keys="${sel#* }"
-  covers "$keys" || continue
+  covers "$keys" || { skip "$c" "its run selected ($keys ) but HEAD needs ($REQUIRED)"; continue; }
   # 4. Effective inputs. The tree R's run tested (its synthetic merge with the
   # base of that moment) differs from the tree tested now only in reusable
   # paths. The raw delta alone is not enough: a base change that R's run
   # tested and main later reverted is absent from R..HEAD (review of #3751).
-  t_r="$(tested_tree "$c" "$base")" || continue
-  [[ -n "$t_r" ]] || continue
+  t_r="$(tested_tree "$c" "$base")" || { skip "$c" "cannot rebuild its tested merge with base ${base:0:10}"; continue; }
+  [[ -n "$t_r" ]] || { skip "$c" "empty tested tree"; continue; }
   if [[ "$t_r" == "$tested_now" ]] || delta_reusable "$t_r" "$tested_now"; then
     echo "$c"
     exit 0
   fi
+  skip "$c" "its tested tree differs from the tree tested now outside the reusable paths"
 done
 exit 0
