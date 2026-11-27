@@ -226,6 +226,14 @@ var PFI_T_DEF: [i64; 512]
 // different names must not share the user suffix, but one builtin-shadow name
 // is by definition one definer.
 var PFI_T_USER: [i64; 512]
+// 1 when the entry is a private module GLOBAL (pfi_item_global). A global that
+// cannot be renamed safely keeps its shared name, as before; it is never escalated
+// to a refusal (pfi_record_skipped), because main's behaviour for it was sharing.
+var PFI_T_GLOBAL: [i64; 512]
+// Whether the `use` map was valid when this compile's pass began. The pub phase
+// consumes PFI_UM_VALID before the private phase runs, so the glob-importer test
+// for private globals reads this snapshot instead.
+var PFI_GLOB_MAP_OK: i64 = 0
 let PFI_BSH_MAX: i64 = 64
 var PFI_BSH_BUF: [i8; 24576]
 var PFI_BSH_LEN: [i64; 64]
@@ -839,6 +847,7 @@ fn pfi_table_add(programs: &! [Program; 256], count: i64, n: Name, mod_idx: i64,
     PFI_T_REASON[idx as usize] = 0
     PFI_T_TGT[idx as usize] = mod_idx
     PFI_T_DEF[idx as usize] = 1
+    PFI_T_GLOBAL[idx as usize] = 0
     PFI_T_USER[idx as usize] = 0
     let base = idx * 384
     var k: i64 = 0
@@ -877,6 +886,78 @@ fn pfi_table_add(programs: &! [Program; 256], count: i64, n: Name, mod_idx: i64,
     }
 }
 
+// A module-level global (`let` / `var` / `const` at top level) is an ItemFn with
+// no fn_def: parse_global_let_item / parse_global_var_item build it that way, and
+// lowering gives it a BSS slot in the same name-keyed table as fns. Two modules'
+// private globals of one name therefore shared ONE slot: a leaf's private
+// `let SCALE: i64` read the root's `var SCALE: f64` bits (review of #3743,
+// tests/run-pass/global_homonym_keeps_local_type.sio). A private global gets the
+// same module-qualified rename as a private fn, and its parse-time side tables
+// follow (ast_global_rename_in_module).
+fn pfi_item_global(it: Item) -> bool with Mut, Panic, Div {
+    if it.kind != ItemKind::ItemFn { return false }
+    match it.fn_def {
+        Some(_) => { return false }
+        None => {}
+    }
+    !name_is_empty(it.name)
+}
+
+// May a module other than `not_mod` reach `n` through a `use`? Visibility is not
+// enforced on globals, so a "private" global is still importable: by name (a
+// braced entry, or the last segment of a path-form import) or by a glob import of
+// its module -- the compiler itself does this (`use parser::ast::*` reaches the
+// private `let VISIBILITY_PRIVATE`). Renaming such a global would break the
+// importer, so it is left alone (the previous, shared behaviour). A glob import is
+// attributed to its target through the use map; when the map is not valid every
+// glob import counts (conservative: the global is not renamed).
+fn pfi_global_imported_elsewhere(programs: &! [Program; 256], count: i64, not_mod: i64, n: Name) -> bool with Mut, Panic, Div, Alloc {
+    var j: i64 = 0
+    while j < count && j < 256 {
+        if j != not_mod {
+            var prog = (*programs)[j as usize]
+            var cur = prog.items
+            var going = true
+            var use_ord: i64 = 0
+            while going {
+                match cur {
+                    None => { going = false }
+                    Some(list) => {
+                        if (*list).head.kind == ItemKind::ItemUse && (*list).head.use_glob {
+                            if PFI_GLOB_MAP_OK != 1 { return true }
+                            if use_ord >= PFI_UM_LEN[j as usize] { return true }
+                            let tgt = PFI_UM_TGT[(PFI_UM_START[j as usize] + use_ord) as usize]
+                            if tgt == not_mod || tgt < 0 { return true }
+                        }
+                        if (*list).head.kind == ItemKind::ItemUse { use_ord = use_ord + 1 }
+                        if (*list).head.kind == ItemKind::ItemUse && !(*list).head.use_glob {
+                            var ic = (*list).head.use_items
+                            var any_items = false
+                            var igo = true
+                            while igo {
+                                match ic {
+                                    None => { igo = false }
+                                    Some(il) => {
+                                        any_items = true
+                                        if name_eq((*il).head, n) { return true }
+                                        ic = (*il).tail
+                                    }
+                                }
+                            }
+                            if !any_items && (*list).head.use_path.seg_count > 0 {
+                                if name_eq(ir_path_last_name((*list).head.use_path), n) { return true }
+                            }
+                        }
+                        cur = (*list).tail
+                    }
+                }
+            }
+        }
+        j = j + 1
+    }
+    false
+}
+
 // This module's rename table: its PRIVATE real fns whose exact name is also
 // defined by some other module (fn, extern, kernel, global or method symbol).
 fn pfi_build_table(programs: &! [Program; 256], count: i64, items: Option<Box<ItemList> >, mod_idx: i64) with Mut, Panic, Div, Alloc {
@@ -890,12 +971,22 @@ fn pfi_build_table(programs: &! [Program; 256], count: i64, items: Option<Box<It
                 // Private fns are renamed; restricted-public ones (kind 2/3/4) are only
                 // tracked so an unresolved collision with them is refused. Plain `pub`
                 // (kind 1) is the module's interface and is left alone.
-                if pfi_item_real_fn((*list).head) && (*list).head.visibility.kind != 1 {
+                let is_priv_global = pfi_item_global((*list).head) && (*list).head.visibility.kind == 0
+                    && !pfi_global_imported_elsewhere(programs, count, mod_idx, (*list).head.name)
+                if (pfi_item_real_fn((*list).head) || is_priv_global) && (*list).head.visibility.kind != 1 {
                     // Hash prefilter first (cheap), exact scan second.
                     if pfi_census_mods(ast_name_hash((*list).head.name)) >= 2 {
                         if pfi_table_find_name((*list).head.name) < 0 {
                             if pfi_defined_elsewhere(programs, count, mod_idx, (*list).head.name) >= 0 {
                                 pfi_table_add(programs, count, (*list).head.name, mod_idx, (*list).head.visibility.kind)
+                                if is_priv_global && !pfi_item_real_fn((*list).head) {
+                                    let gi = pfi_table_find_name((*list).head.name)
+                                    if gi >= 0 { PFI_T_GLOBAL[gi as usize] = 1 }
+                                }
+                                if is_priv_global && !pfi_item_real_fn((*list).head) {
+                                    let gi = pfi_table_find_name((*list).head.name)
+                                    if gi >= 0 { PFI_T_GLOBAL[gi as usize] = 1 }
+                                }
                             }
                         }
                     }
@@ -1110,6 +1201,7 @@ fn pfi_pattern_bind(p: Pattern) with Mut, Panic, Div, Alloc {
 // pfi_use_map_module_begin per loaded module followed by one
 // pfi_use_map_note per `use` item of that module, in item order.
 pub fn pfi_use_map_reset() with Mut {
+    ast_type_reach_reset()
     PFI_UM_COUNT = 0
     PFI_UM_VALID = 1
     PFI_UM_OVERFLOW = 0
@@ -1397,7 +1489,7 @@ fn pfi_qual_target(path: AstPath) -> i64 with Mut, Panic, Div, Alloc {
 fn pfi_record_skipped(mod_idx: i64) -> bool with Mut, Panic, Div {
     var i: i64 = 0
     while i < PFI_T_COUNT {
-        if PFI_T_UNSAFE[i as usize] != 0 {
+        if PFI_T_UNSAFE[i as usize] != 0 && PFI_T_GLOBAL[i as usize] == 0 {
             if PFI_SK_COUNT >= PFI_SK_MAX { return false }
             let slot = PFI_SK_COUNT
             PFI_SK_MOD[slot as usize] = mod_idx
@@ -1604,7 +1696,8 @@ fn pfi_rename_item_def(node: *mut ItemList) with IO, Mut, Panic, Div, Alloc {
     } else {
         if (*node).head.visibility.kind != 0 { return }
     }
-    if !pfi_item_real_fn((*node).head) { return }
+    let is_global = pfi_item_global((*node).head)
+    if !pfi_item_real_fn((*node).head) && !(is_global && PFI_PHASE == 0 && (*node).head.visibility.kind == 0) { return }
     let idx = pfi_table_find_name((*node).head.name)
     if idx < 0 { return }
     if PFI_T_UNSAFE[idx as usize] != 0 { return }
@@ -1612,6 +1705,7 @@ fn pfi_rename_item_def(node: *mut ItemList) with IO, Mut, Panic, Div, Alloc {
     if PFI_T_TGT[idx as usize] != PFI_CUR_MOD { return }
     let m = pfi_mangle_entry(idx)
     if m.len <= 0 { return }
+    if is_global { ast_global_rename_in_module((*node).head.name, PFI_CUR_MOD, m) }
     (*node).head.name = m
     let fdp = pfi_fn_def_ptr((*node).head.fn_def)
     if fdp != 0 as *mut FnDef {
@@ -1894,6 +1988,37 @@ fn pfi_method_bodies(methods: Option<Box<ItemList> >) with IO, Mut, Panic, Div, 
                 cur = (*mlist).tail
             }
         }
+    }
+}
+
+// Initializers the parser moved out of the item list: closed initializers run
+// at `main`'s entry (parser/ast.sio ast_record_global_deferred_init) and the
+// statements that fill an array global (ast_record_global_deferred_block).
+// They name the module's globals and fns by their bare names, so a rename that
+// skipped them would leave `T[0] = ...` writing the old symbol while the
+// module reads `T__m<idx>`, which then stays zero.
+fn pfi_deferred_global_exprs(m: i64) with IO, Mut, Panic, Div, Alloc {
+    var k: i64 = 0
+    while k < ast_global_deferred_init_count() {
+        if ast_global_deferred_init_mod(k) == m {
+            let p = ast_global_deferred_init_ptr(k) as *mut Expr
+            if p != 0 as *mut Expr {
+                if PFI_MODE == 1 { pfi_rename_expr_node(p) }
+                pfi_expr(*p)
+            }
+        }
+        k = k + 1
+    }
+    k = 0
+    while k < ast_global_deferred_block_count() {
+        if ast_global_deferred_block_mod(k) == m {
+            let p = ast_global_deferred_block_ptr(k) as *mut Expr
+            if p != 0 as *mut Expr {
+                if PFI_MODE == 1 { pfi_rename_expr_node(p) }
+                pfi_expr(*p)
+            }
+        }
+        k = k + 1
     }
 }
 
@@ -2471,10 +2596,79 @@ fn hy_check_all(programs: &! [Program; 256], count: i64) -> bool with IO, Mut, P
     ok
 }
 
+// Hand the resolved `use` edges to the parser's type-visibility table
+// (ast_user_type_visible): one edge per imported name, or every name for a glob
+// or whole-module import. Leaves the table not ready on overflow, so visibility
+// keeps its previous, exporter-blind answer rather than a partial one.
+fn pfi_note_type_reach(programs: &! [Program; 256], count: i64) with Mut, Panic, Div, Alloc {
+    ast_type_reach_reset()
+    var i: i64 = 0
+    while i < count && i < 256 {
+        var prog = (*programs)[i as usize]
+        var ord: i64 = 0
+        var cur = prog.items
+        var going = true
+        while going {
+            match cur {
+                None => { going = false }
+                Some(list) => {
+                    if (*list).head.kind == ItemKind::ItemUse {
+                        let tgt = pfi_use_target(i, ord)
+                        let is_pub = visibility_to_bool((*list).head.visibility)
+                        if tgt >= 0 {
+                            var ok = true
+                            if (*list).head.use_glob {
+                                ok = ast_type_reach_note(i, tgt, 0, is_pub)
+                            } else {
+                                match (*list).head.use_items {
+                                    Some(names) => {
+                                        var nc: Option<Box<ImportItemList> > = Some(names)
+                                        var more = true
+                                        while more {
+                                            match nc {
+                                                None => { more = false }
+                                                Some(l) => {
+                                                    if !ast_type_reach_note(i, tgt, ast_name_hash((*l).head), is_pub) { ok = false }
+                                                    nc = (*l).tail
+                                                }
+                                            }
+                                        }
+                                    }
+                                    None => {
+                                        if pfi_use_named(i, ord) {
+                                            ok = ast_type_reach_note(i, tgt, ast_name_hash(ir_path_last_name((*list).head.use_path)), is_pub)
+                                        } else {
+                                            ok = ast_type_reach_note(i, tgt, 0, is_pub)
+                                        }
+                                    }
+                                }
+                            }
+                            if !ok {
+                                ast_type_reach_reset()
+                                return
+                            }
+                        }
+                        ord = ord + 1
+                    }
+                    cur = (*list).tail
+                }
+            }
+        }
+        i = i + 1
+    }
+    AST_TYPE_REACH_READY = 1
+}
+
 pub fn private_fn_identity_apply(programs: &! [Program; 256], count: i64) -> i64 with IO, Mut, Panic, Div, Alloc {
     if count < 2 {
         PFI_UM_VALID = 0
+        ast_type_reach_reset()
         return 0
+    }
+    if PFI_UM_VALID == 1 && PFI_UM_OVERFLOW == 0 {
+        pfi_note_type_reach(programs, count)
+    } else {
+        ast_type_reach_reset()
     }
     if pfi_disabled() {
         PFI_UM_VALID = 0
@@ -2541,6 +2735,7 @@ pub fn private_fn_identity_apply(programs: &! [Program; 256], count: i64) -> i64
     // The pub phase consumes the map's validity flag; the hygiene phase at the
     // end reads the same map.
     let hy_map_ok = PFI_UM_VALID == 1 && PFI_UM_OVERFLOW == 0
+    PFI_GLOB_MAP_OK = if hy_map_ok { 1 } else { 0 }
     if PFI_UM_VALID == 1 {
         PFI_UM_VALID = 0
         if !pfi_pub_phase(programs, count) {
@@ -2564,6 +2759,7 @@ pub fn private_fn_identity_apply(programs: &! [Program; 256], count: i64) -> i64
         if PFI_T_COUNT > 0 {
             PFI_MODE = 0
             pfi_items(prog.items)
+            pfi_deferred_global_exprs(i)
             if !pfi_record_skipped(i) {
                 pfi_error_capacity("more than 256 same-named private fns could not be renamed")
                 return 0 - 2
@@ -2571,6 +2767,7 @@ pub fn private_fn_identity_apply(programs: &! [Program; 256], count: i64) -> i64
             let before = PFI_RENAMED_TOTAL
             PFI_MODE = 1
             pfi_items(prog.items)
+            pfi_deferred_global_exprs(i)
             PFI_MODE = 0
             if PFI_RENAMED_TOTAL > before {
                 PFI_MODULES_TOUCHED = PFI_MODULES_TOUCHED + 1

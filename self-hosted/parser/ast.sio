@@ -1913,11 +1913,13 @@ pub fn lower_named_item_terminal_note(n: Name) with Mut, Panic, Div {
 // `var` globals are not recorded; lean_single's constant table (CONST_*) holds
 // `let`/`const` only, and the two engines must agree.
 pub var GLOBAL_CONST_NAME_HASHES: [i64; 8192] = [0; 8192]
+pub var GLOBAL_CONST_NAME_MODS: [i64; 8192] = [0; 8192]
 pub var GLOBAL_CONST_NAME_COUNT: i64 = 0
 
 pub fn ast_record_global_const_name(name: Name) with Mut, Div {
     if GLOBAL_CONST_NAME_COUNT < 8192 {
         GLOBAL_CONST_NAME_HASHES[GLOBAL_CONST_NAME_COUNT as usize] = ast_name_hash(name)
+        GLOBAL_CONST_NAME_MODS[GLOBAL_CONST_NAME_COUNT as usize] = GLOBAL_VAR_INIT_CUR_MOD
         GLOBAL_CONST_NAME_COUNT = GLOBAL_CONST_NAME_COUNT + 1
     }
 }
@@ -1932,10 +1934,162 @@ pub fn ast_record_global_const_name(name: Name) with Mut, Div {
 // any kind (let, const, var, any module) has the same name hash. An overflow
 // of either table makes every name non-exact (fail closed).
 pub var GLOBAL_EXACT_F64_HASHES: [i64; 4096] = [0; 4096]
+pub var GLOBAL_EXACT_F64_MODS: [i64; 4096] = [0; 4096]
 pub var GLOBAL_EXACT_F64_COUNT: i64 = 0
 pub var GLOBAL_ANY_DECL_HASHES: [i64; 8192] = [0; 8192]
+pub var GLOBAL_ANY_DECL_MODS: [i64; 8192] = [0; 8192]
 pub var GLOBAL_ANY_DECL_COUNT: i64 = 0
 pub var GLOBAL_EXACT_F64_OVERFLOW: i64 = 0
+
+// User-declared structs and enums, accumulated across every loaded module like
+// the global tables above, each with the parse serial of its module
+// (GLOBAL_VAR_INIT_CUR_MOD: main 0, then imports in load order, the same
+// numbering as the checker's current_module_id) and whether it is `pub`.
+//
+// A user type shadows a unit of measure of the same spelling in type position,
+// but only where the type is VISIBLE: declared in the module being checked, or
+// imported into it by name (`use m::{K}`), or -- conservatively -- a `pub` type
+// in a module that does a glob import. `enum K` is then the enum, not kelvin.
+// A private `enum K` in another loaded module does not change what `K` means
+// here (review of #3743: closure-wide shadowing turned kelvin into the enum in
+// an unrelated module). Filled at parse time, so the rule does not depend on
+// declaration order. On overflow the tables stop growing and
+// AST_USER_TYPE_OVERFLOW is set; a name past the cap then resolves as before
+// this rule (the unit wins), never silently as some other module's type.
+pub var AST_USER_TYPE_NAME_HASHES: [i64; 8192] = [0; 8192]
+pub var AST_USER_TYPE_NAME_MODS: [i64; 8192] = [0; 8192]
+pub var AST_USER_TYPE_NAME_PUB: [i64; 8192] = [0; 8192]
+pub var AST_USER_TYPE_NAME_COUNT: i64 = 0
+pub var AST_IMPORTED_NAME_HASHES: [i64; 8192] = [0; 8192]
+pub var AST_IMPORTED_NAME_MODS: [i64; 8192] = [0; 8192]
+pub var AST_IMPORTED_NAME_COUNT: i64 = 0
+pub var AST_GLOB_IMPORT_MODS: [i64; 1024] = [0; 1024]
+pub var AST_GLOB_IMPORT_COUNT: i64 = 0
+pub var AST_USER_TYPE_OVERFLOW: i64 = 0
+
+pub fn ast_record_user_type_name(name: Name, is_pub: bool) with Mut, Div {
+    if AST_USER_TYPE_NAME_COUNT < 8192 {
+        AST_USER_TYPE_NAME_HASHES[AST_USER_TYPE_NAME_COUNT as usize] = ast_name_hash(name)
+        AST_USER_TYPE_NAME_MODS[AST_USER_TYPE_NAME_COUNT as usize] = GLOBAL_VAR_INIT_CUR_MOD
+        AST_USER_TYPE_NAME_PUB[AST_USER_TYPE_NAME_COUNT as usize] = if is_pub { 1 } else { 0 }
+        AST_USER_TYPE_NAME_COUNT = AST_USER_TYPE_NAME_COUNT + 1
+    } else {
+        AST_USER_TYPE_OVERFLOW = 1
+    }
+}
+
+pub fn ast_record_imported_name(name: Name) with Mut, Div {
+    if AST_IMPORTED_NAME_COUNT < 8192 {
+        AST_IMPORTED_NAME_HASHES[AST_IMPORTED_NAME_COUNT as usize] = ast_name_hash(name)
+        AST_IMPORTED_NAME_MODS[AST_IMPORTED_NAME_COUNT as usize] = GLOBAL_VAR_INIT_CUR_MOD
+        AST_IMPORTED_NAME_COUNT = AST_IMPORTED_NAME_COUNT + 1
+    } else {
+        AST_USER_TYPE_OVERFLOW = 1
+    }
+}
+
+pub fn ast_record_glob_import() with Mut {
+    if AST_GLOB_IMPORT_COUNT < 1024 {
+        AST_GLOB_IMPORT_MODS[AST_GLOB_IMPORT_COUNT as usize] = GLOBAL_VAR_INIT_CUR_MOD
+        AST_GLOB_IMPORT_COUNT = AST_GLOB_IMPORT_COUNT + 1
+    } else {
+        AST_USER_TYPE_OVERFLOW = 1
+    }
+}
+
+// Resolved `use` edges, filled after module loading by private_fn_identity
+// (ast_type_reach_note), once every `use` has its loaded target module. One edge
+// per imported name (its hash), or hash 0 for a glob or whole-module import
+// (every name of the target). REACH_PUB marks a `pub use`, which re-exports what
+// it imports. While AST_TYPE_REACH_READY is 0 (single-module compile, no use
+// map, or overflow), visibility falls back to the exporter-blind rule below.
+pub var AST_TYPE_REACH_FROM: [i64; 16384] = [0; 16384]
+pub var AST_TYPE_REACH_TO: [i64; 16384] = [0; 16384]
+pub var AST_TYPE_REACH_HASH: [i64; 16384] = [0; 16384]
+pub var AST_TYPE_REACH_PUB: [i64; 16384] = [0; 16384]
+pub var AST_TYPE_REACH_COUNT: i64 = 0
+pub var AST_TYPE_REACH_READY: i64 = 0
+
+pub fn ast_type_reach_reset() with Mut {
+    AST_TYPE_REACH_COUNT = 0
+    AST_TYPE_REACH_READY = 0
+}
+
+// Module `from` imports the name with hash `name_hash` (0 = every name) from
+// module `to`. False on overflow; the caller then leaves the table not ready.
+pub fn ast_type_reach_note(from: i64, to: i64, name_hash: i64, is_pub: bool) -> bool with Mut {
+    if AST_TYPE_REACH_COUNT >= 16384 { return false }
+    AST_TYPE_REACH_FROM[AST_TYPE_REACH_COUNT as usize] = from
+    AST_TYPE_REACH_TO[AST_TYPE_REACH_COUNT as usize] = to
+    AST_TYPE_REACH_HASH[AST_TYPE_REACH_COUNT as usize] = name_hash
+    AST_TYPE_REACH_PUB[AST_TYPE_REACH_COUNT as usize] = if is_pub { 1 } else { 0 }
+    AST_TYPE_REACH_COUNT = AST_TYPE_REACH_COUNT + 1
+    true
+}
+
+// Does module `m` pass on the name with hash `h` declared in module `def`?
+// With pub_only, only its `pub use` edges count (a re-export); `depth` bounds
+// the chain.
+pub fn ast_type_reaches(m: i64, def: i64, h: i64, pub_only: bool, depth: i64) -> bool with Div {
+    if depth > 8 { return false }
+    var e: i64 = 0
+    while e < AST_TYPE_REACH_COUNT {
+        if AST_TYPE_REACH_FROM[e as usize] == m && (!pub_only || AST_TYPE_REACH_PUB[e as usize] == 1) {
+            let eh = AST_TYPE_REACH_HASH[e as usize]
+            if eh == 0 || eh == h {
+                let to = AST_TYPE_REACH_TO[e as usize]
+                if to == def { return true }
+                if to >= 0 && to != m && ast_type_reaches(to, def, h, true, depth + 1) { return true }
+            }
+        }
+        e = e + 1
+    }
+    false
+}
+
+// Is a user struct/enum named `name` visible in module `module` (the checker's
+// current_module_id)? See the table comment above for the rule. With resolved
+// `use` edges (AST_TYPE_REACH_READY), a public type declared in module d is
+// visible only when an import of `module` reaches d, directly or through a
+// `pub use` re-export. A glob import of an unrelated module, or a public K
+// loaded for another symbol, no longer turns the kelvin unit K into the enum
+// (review of #3743; tests/run-pass/unit_kelvin_beside_pub_enum_k_unrelated_glob.sio).
+pub fn ast_user_type_visible(name: Name, module: i64) -> bool with Div {
+    let h = ast_name_hash(name)
+    if AST_TYPE_REACH_READY == 1 {
+        var r: i64 = 0
+        while r < AST_USER_TYPE_NAME_COUNT {
+            if AST_USER_TYPE_NAME_HASHES[r as usize] == h {
+                let d = AST_USER_TYPE_NAME_MODS[r as usize]
+                if d == module { return true }
+                if AST_USER_TYPE_NAME_PUB[r as usize] == 1 && ast_type_reaches(module, d, h, false, 0) { return true }
+            }
+            r = r + 1
+        }
+        return false
+    }
+    var any_pub = false
+    var i: i64 = 0
+    while i < AST_USER_TYPE_NAME_COUNT {
+        if AST_USER_TYPE_NAME_HASHES[i as usize] == h {
+            if AST_USER_TYPE_NAME_MODS[i as usize] == module { return true }
+            if AST_USER_TYPE_NAME_PUB[i as usize] == 1 { any_pub = true }
+        }
+        i = i + 1
+    }
+    if !any_pub { return false }
+    var j: i64 = 0
+    while j < AST_IMPORTED_NAME_COUNT {
+        if AST_IMPORTED_NAME_HASHES[j as usize] == h && AST_IMPORTED_NAME_MODS[j as usize] == module { return true }
+        j = j + 1
+    }
+    var g: i64 = 0
+    while g < AST_GLOB_IMPORT_COUNT {
+        if AST_GLOB_IMPORT_MODS[g as usize] == module { return true }
+        g = g + 1
+    }
+    false
+}
 
 pub fn ast_expr_is_float_literal_shape(e: &Expr) -> bool with Mut, Panic, Div {
     if (*e).kind == ExprKind::ExprFloatLit { return true }
@@ -1951,6 +2105,7 @@ pub fn ast_expr_is_float_literal_shape(e: &Expr) -> bool with Mut, Panic, Div {
 pub fn ast_record_global_any_decl(name: Name) with Mut, Div {
     if GLOBAL_ANY_DECL_COUNT < 8192 {
         GLOBAL_ANY_DECL_HASHES[GLOBAL_ANY_DECL_COUNT as usize] = ast_name_hash(name)
+        GLOBAL_ANY_DECL_MODS[GLOBAL_ANY_DECL_COUNT as usize] = GLOBAL_VAR_INIT_CUR_MOD
         GLOBAL_ANY_DECL_COUNT = GLOBAL_ANY_DECL_COUNT + 1
     } else {
         GLOBAL_EXACT_F64_OVERFLOW = 1
@@ -1960,10 +2115,25 @@ pub fn ast_record_global_any_decl(name: Name) with Mut, Div {
 pub fn ast_record_global_exact_f64(name: Name) with Mut, Div {
     if GLOBAL_EXACT_F64_COUNT < 4096 {
         GLOBAL_EXACT_F64_HASHES[GLOBAL_EXACT_F64_COUNT as usize] = ast_name_hash(name)
+        GLOBAL_EXACT_F64_MODS[GLOBAL_EXACT_F64_COUNT as usize] = GLOBAL_VAR_INIT_CUR_MOD
         GLOBAL_EXACT_F64_COUNT = GLOBAL_EXACT_F64_COUNT + 1
     } else {
         GLOBAL_EXACT_F64_OVERFLOW = 1
     }
+}
+
+// Number of module-level declarations (let, const, var; every loaded module)
+// whose name hash matches. -1 when the table overflowed.
+pub fn ast_global_decl_count(name: Name) -> i64 with Div {
+    if GLOBAL_EXACT_F64_OVERFLOW != 0 { return 0 - 1 }
+    let h = ast_name_hash(name)
+    var n: i64 = 0
+    var i: i64 = 0
+    while i < GLOBAL_ANY_DECL_COUNT {
+        if GLOBAL_ANY_DECL_HASHES[i as usize] == h { n = n + 1 }
+        i = i + 1
+    }
+    n
 }
 
 pub fn ast_global_is_exact_f64_literal(name: Name) -> bool with Div {
@@ -2061,6 +2231,7 @@ pub fn ast_record_global_deferred_init(name: Name, init: Box<Expr>) with Mut, Di
 // own entry. A full table drops the entry, and the run-time R1 guard still
 // stops the program at the same operation.
 pub var GLOBAL_INIT_OVF_HASH: [i64; 4096] = [0; 4096]
+pub var GLOBAL_INIT_OVF_MOD: [i64; 4096] = [0; 4096]
 pub var GLOBAL_INIT_OVF_FILE: [i64; 4096] = [0; 4096]
 pub var GLOBAL_INIT_OVF_ISTART: [i64; 4096] = [0; 4096]
 pub var GLOBAL_INIT_OVF_IEND: [i64; 4096] = [0; 4096]
@@ -2088,6 +2259,7 @@ pub fn ast_record_global_init_refusal(name: Name, item_span: Span, site_start: i
     if GLOBAL_INIT_OVF_COUNT >= 4096 { return }
     let n = GLOBAL_INIT_OVF_COUNT as usize
     GLOBAL_INIT_OVF_HASH[n] = h
+    GLOBAL_INIT_OVF_MOD[n] = GLOBAL_VAR_INIT_CUR_MOD
     GLOBAL_INIT_OVF_FILE[n] = item_span.file_id as i64
     GLOBAL_INIT_OVF_ISTART[n] = item_span.start
     GLOBAL_INIT_OVF_IEND[n] = item_span.end
@@ -2350,6 +2522,10 @@ pub fn ast_reset_global_var_inits() with Mut {
     GLOBAL_DEFERRED_INIT_OVERFLOW = 0
     GLOBAL_CONST_NAME_COUNT = 0
     GLOBAL_EXACT_F64_COUNT = 0
+    AST_USER_TYPE_NAME_COUNT = 0
+    AST_IMPORTED_NAME_COUNT = 0
+    AST_GLOB_IMPORT_COUNT = 0
+    AST_USER_TYPE_OVERFLOW = 0
     GLOBAL_ANY_DECL_COUNT = 0
     GLOBAL_EXACT_F64_OVERFLOW = 0
     GLOBAL_VAR_INIT_COUNT = 0
@@ -3191,3 +3367,77 @@ pub fn ast_record_global_deferred_block(name: Name, blk: Box<Expr>) with Mut, Di
 pub fn ast_global_deferred_block_count() -> i64 { GLOBAL_DEFERRED_BLOCK_COUNT }
 pub fn ast_global_deferred_block_overflowed() -> bool { GLOBAL_DEFERRED_BLOCK_OVERFLOW != 0 }
 pub fn ast_global_deferred_block_ptr(i: i64) -> i64 with Panic { GLOBAL_DEFERRED_BLOCK_PTRS[i as usize] }
+pub fn ast_global_deferred_block_mod(i: i64) -> i64 with Panic {
+    if i < 0 || i >= GLOBAL_DEFERRED_BLOCK_COUNT { return 0 - 1 }
+    GLOBAL_DEFERRED_BLOCK_MODS[i as usize]
+}
+
+// Module-qualified identity for a PRIVATE module global (review of #3743).
+// compiler/private_fn_identity renames a private global `G` of module `m` that
+// shares its name with another loaded module's symbol to `G__m<m>` in the AST,
+// before the checker and lowering run. Every parse-time side table keyed by the
+// bare name hash must follow, or the renamed global would lose its initializer,
+// its const/exact-f64 facts or its E300/E309 refusal. Entries are moved only
+// when they were recorded by module `m` (the parse serial, which equals the
+// program index the pass uses: main 0, then imports in load order). The
+// declared-type table has no module field and merges homonyms (ambiguous = -1),
+// so its entry is copied to the new name rather than moved.
+pub fn ast_global_rename_in_module(old: Name, m: i64, new_name: Name) with Mut, Panic, Div {
+    let oh = ast_name_hash(old)
+    let nh = ast_name_hash(new_name)
+    var i: i64 = 0
+    while i < GLOBAL_VAR_INIT_COUNT {
+        if GLOBAL_VAR_INIT_HASHES[i as usize] == oh && GLOBAL_VAR_INIT_MODS[i as usize] == m { GLOBAL_VAR_INIT_HASHES[i as usize] = nh }
+        i = i + 1
+    }
+    i = 0
+    while i < GLOBAL_DEFERRED_INIT_COUNT {
+        if GLOBAL_DEFERRED_INIT_HASHES[i as usize] == oh && GLOBAL_DEFERRED_INIT_MODS[i as usize] == m { GLOBAL_DEFERRED_INIT_HASHES[i as usize] = nh }
+        i = i + 1
+    }
+    i = 0
+    while i < GLOBAL_DROP_COUNT {
+        if GLOBAL_DROP_HASH[i as usize] == oh && GLOBAL_DROP_MOD[i as usize] == m { GLOBAL_DROP_HASH[i as usize] = nh }
+        i = i + 1
+    }
+    i = 0
+    while i < GLOBAL_DEFERRED_BLOCK_COUNT {
+        if GLOBAL_DEFERRED_BLOCK_HASHES[i as usize] == oh && GLOBAL_DEFERRED_BLOCK_MODS[i as usize] == m { GLOBAL_DEFERRED_BLOCK_HASHES[i as usize] = nh }
+        i = i + 1
+    }
+    i = 0
+    while i < GLOBAL_CONST_NAME_COUNT {
+        if GLOBAL_CONST_NAME_HASHES[i as usize] == oh && GLOBAL_CONST_NAME_MODS[i as usize] == m { GLOBAL_CONST_NAME_HASHES[i as usize] = nh }
+        i = i + 1
+    }
+    i = 0
+    while i < GLOBAL_ANY_DECL_COUNT {
+        if GLOBAL_ANY_DECL_HASHES[i as usize] == oh && GLOBAL_ANY_DECL_MODS[i as usize] == m { GLOBAL_ANY_DECL_HASHES[i as usize] = nh }
+        i = i + 1
+    }
+    i = 0
+    while i < GLOBAL_EXACT_F64_COUNT {
+        if GLOBAL_EXACT_F64_HASHES[i as usize] == oh && GLOBAL_EXACT_F64_MODS[i as usize] == m { GLOBAL_EXACT_F64_HASHES[i as usize] = nh }
+        i = i + 1
+    }
+    i = 0
+    while i < GLOBAL_INIT_OVF_COUNT {
+        if GLOBAL_INIT_OVF_HASH[i as usize] == oh && GLOBAL_INIT_OVF_MOD[i as usize] == m { GLOBAL_INIT_OVF_HASH[i as usize] = nh }
+        i = i + 1
+    }
+    i = 0
+    while i < GLOBAL_DECL_TYPE_COUNT {
+        if GLOBAL_DECL_TYPE_HASHES[i as usize] == oh {
+            if GLOBAL_DECL_TYPE_COUNT < 4096 {
+                GLOBAL_DECL_TYPE_HASHES[GLOBAL_DECL_TYPE_COUNT as usize] = nh
+                GLOBAL_DECL_TYPE_TYPES[GLOBAL_DECL_TYPE_COUNT as usize] = GLOBAL_DECL_TYPE_TYPES[i as usize]
+                GLOBAL_DECL_OPT_INNER[GLOBAL_DECL_TYPE_COUNT as usize] = GLOBAL_DECL_OPT_INNER[i as usize]
+                GLOBAL_DECL_TYPE_COUNT = GLOBAL_DECL_TYPE_COUNT + 1
+            } else {
+                GLOBAL_DECL_TYPE_OVERFLOW = 1
+            }
+            return
+        }
+        i = i + 1
+    }
+}

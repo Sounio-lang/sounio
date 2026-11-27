@@ -2207,7 +2207,10 @@ fn checker_lower_named_type_mut(c: *mut Checker, path: AstPath) -> TypeEntry wit
         ty_named(name)
     } else {
         // ONE registry lookup, bound to a local, mirroring the by-value spine.
-        let uidx = checker_unit_index_for(c, name)
+        // A user-declared struct or enum shadows a unit of the same spelling
+        // where that type is visible in the module being checked
+        // (ast_user_type_visible): `enum K` is the enum there, not kelvin.
+        let uidx = if ast_user_type_visible(name, (*c).current_module_id) { 0 - 1 } else { checker_unit_index_for(c, name) }
         if uidx >= 0 {
         // UNITS OF MEASURE, ported here 2026-09-09 from the by-value spine
         // (lower_named_type), which has had this branch all along.
@@ -5245,21 +5248,42 @@ fn checker_collect_global_item_inplace(
     declared_ty: Option<Box<TypeExpr>>
 ) with Mut, Panic, Div, Alloc, IO {
     checker_defined_name_note(name)
-    match declared_ty {
-        Some(te) => {
-            // Validate the annotation at the checker boundary, but preserve the
-            // legacy TyUnknown binding until global typing has its own milestone.
-            let _validated_global_ty = checker_lower_type_expr_mut(c, *te)
+    // A module-level global is bound with its declared type. Before, every
+    // global was bound as unknown (and mutable) inside function bodies, so
+    // `let b: bool = SCALE` with `SCALE: f64` checked OK, and so did
+    // assigning to a module-level `let`. An unannotated global stays unknown:
+    // its initialiser is not typed at collection time.
+    //
+    // The environment holds ONE binding per name for every loaded module, and
+    // the last module collected wins. So a declared type is published only when
+    // exactly one module declares the name: with homonyms (a root `var SCALE:
+    // f64` beside a leaf's private `let SCALE: i64`) the binding stays unknown,
+    // as before typed globals, instead of giving the root the leaf's type (false
+    // E002/E001/E009, review of #3743, witness
+    // tests/run-pass/global_homonym_keeps_local_type.sio).
+    var global_ty = ty_unknown()
+    if ast_global_decl_count(name) == 1 {
+        match declared_ty {
+            Some(te) => {
+                global_ty = checker_lower_type_expr_mut(c, *te)
+            }
+            None => {}
         }
-        None => {}
     }
+    // `let` and `const` globals are immutable; `var` globals stay assignable.
+    // The const-name table is keyed by name hash across every loaded module,
+    // so it decides only when the name is declared once. When two modules
+    // declare the same name it cannot tell which one this is, and the binding
+    // stays mutable: a missed E003 rather than a false one (a `var SCALE`
+    // beside another module's `let SCALE` was refused, measured).
+    let global_mutable = ast_global_decl_count(name) != 1 || !ast_is_global_const_name(name)
     let benv_idx = (*c).env.count
     type_env_reset_conf_at(benv_idx)
     if benv_idx < TYPE_ENV_CAPACITY {
         type_env_set_binding_mut(&!(*c).env, benv_idx, TypeBinding {
             name: name,
-            ty: ty_unknown(),
-            is_mutable: true,
+            ty: global_ty,
+            is_mutable: global_mutable,
             scope_depth: (*c).env.scope_depth,
         })
         (*c).env.count = benv_idx + 1
@@ -28256,7 +28280,7 @@ impl Checker {
             (self, ty_wide_int(name_wide_int_bits(name), (name.buf[0] as i64) == 105))
         } else {
             // Check if it's a registered unit name (mg, kg, m, s, etc.)
-            let unit_idx = self.units.find(name)
+            let unit_idx = if ast_user_type_visible(name, self.current_module_id) { 0 - 1 } else { self.units.find(name) }
             if unit_idx >= 0 {
                 // Units resolve to f64 with a unit_id annotation
                 (self, ty_with_unit(ty_f64(), unit_idx))

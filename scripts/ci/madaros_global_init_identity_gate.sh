@@ -204,11 +204,21 @@ echo "$TAG PASS(ambiguous): a name two other modules define is reported, and the
 # --- aggregate / dropfold: the deferred-array path keeps module identity -------
 # Two modules with a same-named closed struct-array global: each would be
 # written by name at `main`'s entry and the second overwrote the first (43 43).
-expect_refused aggregate "$FIX/aggregate/main.sio" T
+# The identity pass now gives each private `T` its own symbol and renames the
+# statements that fill it, so both modules keep their values (23 43). With the
+# pass disabled the shared symbol is back and the compile is refused (E309).
+compile_and_run aggregate "$FIX/aggregate/main.sio"
+expect_output aggregate "$FIX/aggregate/expected.txt"
+REFUSE_ENV="SOUNIO_DISABLE_PRIVATE_FN_IDENTITY=1" expect_refused control_aggregate "$FIX/aggregate/main.sio" T
+# Private `K`, `Q` (deferred struct literal) and `T` (deferred array fill) in
+# two modules. Renaming the globals without their deferred initializers read
+# `3110` (module a's `T` stayed zero).
+compile_and_run deferred_rename "$FIX/deferred_rename/main.sio"
+expect_output deferred_rename "$FIX/deferred_rename/expected.txt"
 # A fold of `X` in one module used to cancel the refusal of another module's
 # unevaluable `X` (it read 5, not 9).
 expect_refused dropfold "$FIX/dropfold/main.sio" X
-echo "$TAG PASS(aggregate, dropfold): a same-named deferred array in two modules and a drop shadowed by another module's fold are refused (E309)"
+echo "$TAG PASS(aggregate, deferred_rename, dropfold): same-named deferred initializers keep per-module values; a drop shadowed by another module's fold is refused (E309)"
 
 # --- capacity: past the E309 table's 4096 entries the compile is refused ------
 # The table latches an overflow instead of dropping an entry; the refusal must
