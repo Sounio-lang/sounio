@@ -808,3 +808,19 @@ these conditions refutes the preregistered allocation mechanism for that
 run. If occupancy has changed or the measurement/target context is absent,
 report the precondition as not established, not a historical refutation.
 No full numerical comparison may be inferred from a diagnostic.
+
+Preregistration commit `2ae09b71a1b0de12f977ebc6e851c1f3d00b3b42` was
+pushed before the new allocations. `scontrol write batch_script` readback
+confirmed the prediction, numerical size threshold, diagnostic source pin,
+and conditional occupancy criterion in both actual R740 job headers.
+
+| Job | Resource | State at submission/readback |
+|---|---|---|
+| 29652 | D CPU-only build/check | RUNNING |
+| 29653 | R740 RTX 8000 sm_75, 24G, `OverSubscribe=YES` | PENDING afterok 29652; node drained |
+| 29654 | R740 A5000 sm_86, 24G, `OverSubscribe=YES` | PENDING afterok 29652; node drained |
+| 29655 | R770 L4 sm_89, 24G, `OverSubscribe=YES` | PENDING afterok 29652; positive control |
+
+All four carry `lane:llm-granite`; the two historical recovery/diagnosis
+jobs 29649/29650 are canceled, and the task-owned 29638 recovery job remains
+pending. No R740 result is yet observed.
