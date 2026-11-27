@@ -824,3 +824,25 @@ and conditional occupancy criterion in both actual R740 job headers.
 All four carry `lane:llm-granite`; the two historical recovery/diagnosis
 jobs 29649/29650 are canceled, and the task-owned 29638 recovery job remains
 pending. No R740 result is yet observed.
+
+**OBSERVED (instrumentation validation):** build job 29652 completed 0:0 on
+D (00:01:57, batch MaxRSS 3531384K), with source-built Madaros and the
+Sounio check/build gates. The shared diagnostic ELF SHA256 is
+`8deec6a8fc5a84c3db65f42e841bb677a43cd7c5587ed82865a1adc8c0a22193`.
+L4 control 29655 completed 0:0 on R770 (00:00:46, batch MaxRSS 189092K,
+as recorded by Slurm), using that exact ELF. `cuMemGetInfo_v2` succeeded
+with free 23,455,662,080 and total 23,661,248,512 bytes immediately before
+shard loading. Free bytes before the work allocation were 7,106,265,088.
+All four shard allocations/copies and work/K/V/RoPE allocations in the
+instrumented run returned 0; runner and arena checks were 1,
+context sync returned 0, and the first prompt completed with zero
+FMA min-norm hits. The original pinned-exit workaround returned child 137
+and diagnostic capture 0. This validates the new measurement mechanism
+on a functioning CUDA context, not the R740 hypothesis.
+
+**NOT ESTABLISHED (R740 verdict):** 29653/29654 remain PENDING
+(`ReqNodeNotAvail`), not running. The diagnostic scripts automatically
+emit a supported/refuted/not-established classification from the actual
+measured memory and allocation return codes, and preserve logs and
+manifest in `diag-run-<job>/`. The founder's node/service decision is the
+external blocker. No full audit resubmission or numerical re-pin.
