@@ -2923,7 +2923,7 @@ fn checker_lower_array_type_mut(c: *mut Checker, inner_opt: Option<Box<TypeExpr>
     match inner_opt {
         Some(inner_te) => {
             let elem_ty = checker_lower_type_expr_mut(c, *inner_te)
-            let size = lower_array_size(size_opt)
+            let size = checker_lower_array_size_mut(c, size_opt)
             ty_array(elem_ty, size)
         }
         None => ty_error()
@@ -18406,6 +18406,19 @@ fn checker_const_int_bind_value_inplace(c: *mut Checker, name: Name, value: i64)
     checker_const_int_bind_raw_inplace(c, name, 1, value)
 }
 
+// #1495: a top-level `const NAME: i64 = <int>` is recorded by the parser in the
+// GLOBAL_VAR_INIT_* side table, not in the checker's const-int table. Resolve it
+// here so an array bound (`[T; NAME]`) or a repeat-literal count (`[v; NAME]`)
+// sees the value regardless of the order items are collected or lowered in.
+// Only a single word (a scalar integer init) is a valid array length.
+fn checker_global_const_int(name: Name) -> (bool, i64) with Div {
+    if !ast_is_global_const_name(name) { return (false, 0) }
+    let m = ast_gvi_first_mod(name)
+    if m < 0 { return (false, 0) }
+    if ast_gvi_count_in(name, m) != 1 { return (false, 0) }
+    (true, ast_gvi_nth_in(name, m, 0))
+}
+
 // *mut transcription of const_int_lookup (6390) — reads the const-int table
 // through (*c) instead of copying the whole Checker by value.
 fn checker_const_int_lookup_mut(c: *mut Checker, name: Name) -> (bool, i64) with Mut, Panic, Div {
@@ -18415,11 +18428,11 @@ fn checker_const_int_lookup_mut(c: *mut Checker, name: Name) -> (bool, i64) with
             if (*(*c).const_ints).known[i as usize] == 1 {
                 return (true, (*(*c).const_ints).values[i as usize])
             }
-            return (false, 0)
+            return checker_global_const_int(name)
         }
         i = i - 1
     }
-    (false, 0)
+    checker_global_const_int(name)
 }
 
 // ADR-031 R1: does `lv op rv` stay inside i64? Written so that the test
@@ -23608,11 +23621,11 @@ impl Checker {
                 if (*t).known[i as usize] == 1 {
                     return (true, (*t).values[i as usize])
                 }
-                return (false, 0)
+                return checker_global_const_int(name)
             }
             i = i - 1
         }
-        (false, 0)
+        checker_global_const_int(name)
     }
 }
 
@@ -28348,7 +28361,7 @@ impl Checker {
                 let pair = self.lower_type_expr(*inner_te)
                 let c = pair.0
                 let elem_ty = pair.1
-                let size = lower_array_size(size_opt)
+                let size = lower_array_size_resolved(c, size_opt)
                 (c, ty_array(elem_ty, size))
             }
             None => (self, ty_error())
@@ -29125,6 +29138,34 @@ impl Checker {
             }
             None => (self, ty_error())
         }
+    }
+}
+
+// Resolve an array type's length (#1495). A literal keeps its parsed value; a
+// named const resolves through the const-int table (an identifier in the bound
+// used to be read as its zero `int_val`, so `const N: i64 = 4096; [bool; N]`
+// became a length-0 array and tripped a spurious E020 "array elements must all
+// have the same type"). Anything that is not a constant falls back to the old
+// `int_val` read, so no existing non-const bound changes meaning.
+fn checker_lower_array_size_mut(c: *mut Checker, opt: Option<Box<Expr> >) -> i64 with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(e) => {
+            let fallback = (*e).int_val
+            let pair = checker_eval_const_int_opt_expr_mut(c, Some(e))
+            if pair.0 != 0 { pair.1 } else { fallback }
+        }
+        None => -1
+    }
+}
+
+fn lower_array_size_resolved(c: Checker, opt: Option<Box<Expr> >) -> i64 with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(e) => {
+            let fallback = (*e).int_val
+            let pair = eval_const_int_opt_expr(c, Some(e))
+            if pair.0 != 0 { pair.1 } else { fallback }
+        }
+        None => -1
     }
 }
 
