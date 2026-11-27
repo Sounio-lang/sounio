@@ -31079,6 +31079,299 @@ fn compile_value_field_field_array_store_a64() with IO, Mut, Panic, Div {
     else { em32(0x3821680A) }  // strb w10, [x0, x1]
 }
 
+// a64 mirror of compile_deref_indexed_elem_field_store_x86. It serves the three
+// deep-root assignment shapes the a64 statement compiler was missing entirely —
+// `(*name.field…) <chain> = v`, `(*name).arr[i].field… = v` and the auto-deref
+// `name.arr[i].field… = v` — so they no longer fall through to the generic path,
+// which on a64 reported them as `parse error: expected expression … found '='`.
+// The logic is verbatim from the x86 twin; only the instruction emission differs
+// (x0 base, x9 index, x10 value, emit_*_a64 primitives).
+fn compile_deref_indexed_elem_field_store_a64() with IO, Mut, Panic, Div {
+    var name_tok = EP
+    var chain_start = EP + 1
+    var root_inner: i64 = 0   // 1 = `(*name.field…)` root: deref of a pointer FIELD
+    var inner_start = EP + 3  // first `.` of the inner field chain
+    if TK[EP as usize] == 6 {
+        name_tok = EP + 2
+        chain_start = EP + 4
+        if deref_inner_root_explicit(EP) {
+            name_tok = EP + 4
+            inner_start = EP + 6
+        }
+        if TK[inner_start as usize] == 50 && (inner_start == EP + 6 || TK[(EP + 3) as usize] == 50) {
+            root_inner = 1
+            var rp = inner_start
+            while rp < TC && TK[rp as usize] == 50 && TK[(rp + 1) as usize] == 3 {
+                rp = rp + 2
+            }
+            chain_start = rp + 1  // past the `)`
+        }
+    }
+    let ns = TS[name_tok as usize]
+    let ne = TE[name_tok as usize]
+    // Locate the terminating `=` up front so every diagnostic path can consume the
+    // whole statement instead of leaving a tail for the statement loop to re-parse.
+    var eq_pos = chain_start
+    while eq_pos < TC && TK[eq_pos as usize] != 16 {
+        if TK[eq_pos as usize] == 41 {
+            var sdepth: i64 = 1
+            eq_pos = eq_pos + 1
+            while eq_pos < TC && sdepth > 0 {
+                if TK[eq_pos as usize] == 41 { sdepth = sdepth + 1 }
+                if TK[eq_pos as usize] == 42 { sdepth = sdepth - 1 }
+                eq_pos = eq_pos + 1
+            }
+        } else {
+            eq_pos = eq_pos + 1
+        }
+    }
+    if current_fn_allows_mutation() == false {
+        tc_effect_violation(name_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
+    }
+    var failed: i64 = 0
+    let lslot = var_find(ns, ne)
+    let lvi = var_find_idx(ns, ne)
+    if lslot < 0 || lvi < 0 {
+        tc_error_hard(name_tok, "field access through deref requires ref or pointer binding")
+        EP = eq_pos + 1
+        compile_or_a64()
+        return
+    }
+    var cur_ty = VAR_TY[lvi as usize]
+    var cur_hash = VAR_TY_HASH[lvi as usize]
+    if type_is_pointer_like(cur_ty, cur_hash) {
+        cur_ty = ptr_hash_inner_ty(VAR_TY_HASH[lvi as usize])
+        cur_hash = ptr_hash_inner_hash(VAR_TY_HASH[lvi as usize])
+    } else {
+        if TK[EP as usize] == 6 && root_inner == 0 {
+            tc_error_hard(name_tok, "field access through deref requires ref or pointer binding")
+            EP = eq_pos + 1
+            compile_or_a64()
+            return
+        }
+    }
+    if cur_ty != 6 && cur_ty != 8 {
+        tc_error_hard(name_tok, "field access through pointer/ref requires struct or array pointee")
+        EP = eq_pos + 1
+        compile_or_a64()
+        return
+    }
+    EP = chain_start  // past `( * name … )` or past the bare `name`
+    emit_load_var_a64(lslot)  // x0 = base pointer
+    var pending_off: i64 = 0
+    // `(*name.field…)` root: walk the INNER chain inside the parens, then LOAD the
+    // pointer held in the final inner field — that load is the deref the `(* )` spells.
+    if root_inner == 1 {
+        var ip = inner_start
+        var inner_off: i64 = 0
+        var inner_bad: i64 = 0
+        while inner_bad == 0 && TK[ip as usize] == 50 {
+            let itok = ip + 1
+            if cur_ty != 6 {
+                tc_error_hard(itok, "field access requires struct value")
+                inner_bad = 1
+                continue
+            }
+            let isi = st_find(cur_hash)
+            if isi < 0 {
+                tc_error_hard(itok, "unknown field access")
+                inner_bad = 1
+                continue
+            }
+            if st_private_access_denied(isi, itok) {
+                tc_error_hard(itok, "private struct field access")
+                inner_bad = 1
+                continue
+            }
+            let ifh = gl_name_hash(TS[itok as usize], TE[itok as usize])
+            ST_QUERY_NS = TS[itok as usize]
+            ST_QUERY_NE = TE[itok as usize]
+            let ioff = st_field_offset(isi, ifh)
+            let ifty = st_field_ty(isi, ifh)
+            let ifhash = st_field_hash(isi, ifh)
+            ST_QUERY_NS = -1
+            ST_QUERY_NE = -1
+            if ioff < 0 {
+                tc_error_hard(itok, "unknown field access")
+                inner_bad = 1
+                continue
+            }
+            inner_off = inner_off + ioff
+            cur_ty = ifty
+            cur_hash = ifhash
+            ip = ip + 2
+        }
+        if inner_bad == 1 {
+            EP = eq_pos + 1
+            compile_or_a64()
+            return
+        }
+        if type_is_pointer_like(cur_ty, cur_hash) == false {
+            tc_error_hard(name_tok, "deref of a struct field requires a pointer-typed field")
+            EP = eq_pos + 1
+            compile_or_a64()
+            return
+        }
+        if inner_off != 0 { emit_imm64_reg_a64(11, inner_off); em32(0x8B0B0000) }  // add x0,x0,x11
+        em32(0xF9400000)  // ldr x0,[x0] — the pointer held in the field
+        cur_ty = ptr_hash_inner_ty(cur_hash)
+        cur_hash = ptr_hash_inner_hash(cur_hash)
+        if cur_ty != 6 && cur_ty != 8 {
+            tc_error_hard(name_tok, "field access through pointer/ref requires struct or array pointee")
+            EP = eq_pos + 1
+            compile_or_a64()
+            return
+        }
+    }
+    var target_ty: i64 = 0
+    var target_hash: i64 = 0
+    var done: i64 = 0
+    while done == 0 {
+        if TK[EP as usize] == 50 {
+            let ftok = EP + 1
+            let fh = gl_name_hash(TS[ftok as usize], TE[ftok as usize])
+            if cur_ty != 6 {
+                tc_error_hard(ftok, "field access requires struct value")
+                failed = 1
+                done = 1
+                continue
+            }
+            let si = st_find(cur_hash)
+            if si < 0 {
+                tc_error_hard(ftok, "unknown field access")
+                failed = 1
+                done = 1
+                continue
+            }
+            if st_private_access_denied(si, ftok) {
+                tc_error_hard(ftok, "private struct field access")
+                failed = 1
+                done = 1
+                continue
+            }
+            ST_QUERY_NS = TS[ftok as usize]
+            ST_QUERY_NE = TE[ftok as usize]
+            let foff = st_field_offset(si, fh)
+            let fty = st_field_ty(si, fh)
+            let fhash = st_field_hash(si, fh)
+            ST_QUERY_NS = -1
+            ST_QUERY_NE = -1
+            if foff < 0 {
+                tc_error_hard(ftok, "unknown field access")
+                failed = 1
+                done = 1
+                continue
+            }
+            pending_off = pending_off + foff
+            cur_ty = fty
+            cur_hash = fhash
+            EP = EP + 2
+            if TK[EP as usize] == 16 {
+                target_ty = fty
+                target_hash = fhash
+                done = 1
+            }
+            continue
+        }
+        if TK[EP as usize] == 41 {
+            if cur_ty != 8 {
+                tc_error_hard(EP, "indexed store requires array field")
+                failed = 1
+                done = 1
+                continue
+            }
+            // Terminal `… [ idx ] = expr` stores the array ELEMENT (aggregate elements
+            // are pointer-per-slot, so the POINTER is written into the slot).
+            var term_p = EP + 1
+            var term_depth: i64 = 1
+            while term_p < TC && term_depth > 0 {
+                if TK[term_p as usize] == 41 { term_depth = term_depth + 1 }
+                if TK[term_p as usize] == 42 { term_depth = term_depth - 1 }
+                term_p = term_p + 1
+            }
+            if TK[term_p as usize] == 16 {
+                let esiz_t = arr_hash_esiz(cur_hash)
+                let elem_ty_t = arr_hash_elem_ty(cur_hash)
+                let elem_hash_t = arr_hash_elem_hash(cur_hash)
+                if pending_off != 0 { emit_imm64_reg_a64(11, pending_off); em32(0x8B0B0000) }
+                let arr_slot = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                emit_store_var_a64(arr_slot)  // save the array base address
+                EP = EP + 1               // skip [
+                compile_or_a64()          // index in x0
+                if TK[EP as usize] == 37 { EP = EP + 1; EP = EP + 1 }  // 'as usize'
+                if TK[EP as usize] == 42 { EP = EP + 1 }  // ]
+                if TK[EP as usize] == 16 { EP = EP + 1 }  // =
+                emit_push_a64()           // push index
+                compile_or_a64()          // rhs in x0
+                let rhs_ty_t = EXPR_TY
+                let rhs_hash_t = EXPR_TY_HASH
+                if ty_eq(elem_ty_t, elem_hash_t, rhs_ty_t, rhs_hash_t) == false {
+                    tc_error(EP - 1, "assignment type mismatch")
+                }
+                materialize_aggregate_array_element_a64(cur_hash)
+                em32(0xAA0003EA)      // mov x10, x0 (value or fresh element ptr)
+                emit_pop_x1_a64()     // x1 = index
+                emit_load_var_a64(arr_slot)  // x0 = array base
+                if esiz_t == 8 {
+                    em32(0xF821780A)  // str x10,[x0,x1,lsl #3]
+                } else {
+                    em32(0x3821680A)  // strb w10,[x0,x1]
+                }
+                return
+            }
+            if arr_hash_esiz(cur_hash) != 8 {
+                tc_error_hard(EP, "indexed element field store requires 8-byte array elements")
+                failed = 1
+                done = 1
+                continue
+            }
+            let elem_ty = arr_hash_elem_ty(cur_hash)
+            let elem_hash = arr_hash_elem_hash(cur_hash)
+            if elem_ty != 6 && elem_ty != 8 {
+                tc_error_hard(EP, "indexed element field store requires aggregate elements")
+                failed = 1
+                done = 1
+                continue
+            }
+            if pending_off != 0 { emit_imm64_reg_a64(11, pending_off); em32(0x8B0B0000) }
+            pending_off = 0
+            emit_push_a64()      // push array base
+            EP = EP + 1          // skip [
+            compile_or_a64()     // index in x0
+            if TK[EP as usize] == 37 { EP = EP + 1; EP = EP + 1 }  // 'as usize'
+            if TK[EP as usize] == 42 { EP = EP + 1 }  // ]
+            em32(0xAA0003E9)     // mov x9, x0 (index)
+            emit_pop_x1_a64()    // x1 = array base
+            em32(0xAA0103E0)     // mov x0, x1 (base)
+            em32(0xF8697800)     // ldr x0,[x0,x9,lsl #3] (element ptr)
+            cur_ty = elem_ty
+            cur_hash = elem_hash
+            continue
+        }
+        tc_error_hard(EP, "unsupported assignment target")
+        failed = 1
+        done = 1
+    }
+    if failed == 1 {
+        EP = eq_pos + 1
+        compile_or_a64()
+        return
+    }
+    // x0 = pointer to the object that owns the final field.
+    let addr_slot = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_store_var_a64(addr_slot)
+    if TK[EP as usize] == 16 { EP = EP + 1 }  // skip =
+    compile_or_a64()  // rhs in x0
+    let rhs_ty = EXPR_TY
+    let rhs_ty_hash = EXPR_TY_HASH
+    if ty_eq(target_ty, target_hash, rhs_ty, rhs_ty_hash) == false {
+        tc_error(EP - 1, "assignment type mismatch")
+    }
+    emit_store_to_pointer_offset_a64(addr_slot, pending_off, target_ty, target_hash)
+}
+
 // ARRAY[idx].field(.field)* = expr — store into a struct element of an array.
 // Array-of-struct slots hold 8-byte pointers to heap-materialized struct copies
 // (see materialize_aggregate_array_element_x86), so the element pointer is
@@ -49258,7 +49551,7 @@ fn compile_stmt_a64_body() with IO, Mut, Panic, Div {
     }
 
     // x.field = expr
-    if k == 3 && TK[(EP + 1) as usize] == 50 && TK[(EP + 3) as usize] == 16 {
+    if (k == 3 || k == 79) && TK[(EP + 1) as usize] == 50 && TK[(EP + 3) as usize] == 16 {
         let name_tok = EP
         if current_fn_allows_mutation() == false {
             tc_effect_violation(name_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
@@ -49318,7 +49611,7 @@ fn compile_stmt_a64_body() with IO, Mut, Panic, Div {
         return
     }
     // x = expr
-    if k == 3 && TK[(EP + 1) as usize] == 16 {
+    if (k == 3 || k == 79) && TK[(EP + 1) as usize] == 16 {
         let name_tok = EP
         if current_fn_allows_mutation() == false {
             tc_effect_violation(name_tok, 2, FN_EFFECTS[CURRENT_FN as usize])
@@ -49818,6 +50111,23 @@ fn compile_stmt_a64_body() with IO, Mut, Panic, Div {
         } else {
             tc_undefined_var(name_tok)
         }
+        return
+    }
+    // (*name).arr[i].field… = expr and the auto-deref name.arr[i].field… twin, plus
+    // (*name.field…)<chain> = expr — the deep roots the a64 statement compiler had no
+    // handler for. Same emitter as the x86 twins (compile_deref_indexed_elem_field_store_x86).
+    if stmt_is_deref_indexed_elem_field_store(EP) {
+        compile_deref_indexed_elem_field_store_a64()
+        return
+    }
+    if stmt_is_ident_indexed_elem_field_store(EP) {
+        if ident_chain_root_supported(EP) {
+            compile_deref_indexed_elem_field_store_a64()
+            return
+        }
+    }
+    if stmt_is_deref_inner_root_store(EP) {
+        compile_deref_indexed_elem_field_store_a64()
         return
     }
     // return
