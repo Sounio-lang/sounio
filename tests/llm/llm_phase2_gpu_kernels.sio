@@ -1,0 +1,473 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: LLM_PHASE2_GPU_KERNELS_PASS
+//
+// Phase 2 GPU Kernels test on real Apple M5 Max Metal NoCopy:
+// 1. QK-RMSNorm (32 x 128, BF16 weights, eps=1e-6)
+// 2. RoPE (32 heads, head_dim=128, pos=7, theta=1e6)
+// 3. Qwen3-8B scale BF16 GEMV (4096 x 4096, 32 MiB zero-copy matrix in PageArena)
+// 4. SwiGLU (inter_dim = 12288)
+// 5. Paged GQA (32Q, 8KV, head_dim=128, seq_len=16, block_size=16)
+
+use llm::mmap::{
+    PageArena,
+    page_arena_alloc,
+    page_arena_free,
+    page_arena_ptr,
+    page_arena_is_ok,
+    page_arena_read_u32_le,
+}
+use tensor2::convert::{f64_to_f32_bits, f32_bits_to_f64}
+use llm::hal::{
+    MetalSession,
+    metal_session_open,
+    metal_session_close,
+    metal_session_is_ok,
+    metal_buffer_nocopy,
+    metal_buffer_free,
+}
+use llm::qwen3_kernels::{
+    Qwen3MetalPipelines,
+    qwen3_metal_pipelines_compile,
+    qwen3_metal_rmsnorm,
+    qwen3_metal_rope,
+    qwen3_metal_gemv,
+    qwen3_metal_swiglu,
+    qwen3_metal_paged_gqa,
+}
+
+extern "C" {
+    fn sqrt(x: f64) -> f64
+    fn exp(x: f64) -> f64
+    fn pow(x: f64, y: f64) -> f64
+    fn sin(x: f64) -> f64
+    fn cos(x: f64) -> f64
+}
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { -x } else { x }
+}
+
+fn write_f32_at(arena: &PageArena, idx: i64, val: f64) with Mut {
+    let bits = f64_to_f32_bits(val)
+    let p = page_arena_ptr(arena)
+    let _rc = ptr_write_u32_le(p, idx * 4, bits)
+}
+
+fn read_f32_at(arena: &PageArena, idx: i64) -> f64 with Mut {
+    let r = page_arena_read_u32_le(arena, idx * 4)
+    if !r.1 { return 0.0 }
+    f32_bits_to_f64(r.0)
+}
+
+fn test_rmsnorm(sess: &MetalSession, pipes: &Qwen3MetalPipelines) -> bool with IO, Mut, Alloc {
+    let n_groups = 32
+    let dim = 128
+    let total = n_groups * dim
+
+    let arena_x = page_arena_alloc(total * 4)
+    let arena_w = page_arena_alloc(dim * 2)
+    let arena_out = page_arena_alloc(total * 4)
+    var pass = true
+
+    if !page_arena_is_ok(&arena_x) || !page_arena_is_ok(&arena_w) || !page_arena_is_ok(&arena_out) {
+        pass = false
+    } else {
+        var i: i64 = 0
+        while i < total {
+            let v = (((i % 17) - 8) as f64) * 0.125
+            write_f32_at(&arena_x, i, v)
+            i = i + 1
+        }
+
+        let p_w = page_arena_ptr(&arena_w)
+        var j: i64 = 0
+        while j < dim {
+            let _w = ptr_write_u16_le(p_w, j * 2, 0x3F80)
+            j = j + 1
+        }
+
+        let buf_x = metal_buffer_nocopy(sess, page_arena_ptr(&arena_x), total * 4)
+        let buf_w = metal_buffer_nocopy(sess, p_w, dim * 2)
+        let buf_out = metal_buffer_nocopy(sess, page_arena_ptr(&arena_out), total * 4)
+
+        let rc = qwen3_metal_rmsnorm(sess, pipes, buf_x, 0, buf_w, 0, 2, buf_out, 0, n_groups, dim, 0x358637bd)
+        let _f0 = metal_buffer_free(sess, buf_x)
+        let _f1 = metal_buffer_free(sess, buf_w)
+        let _f2 = metal_buffer_free(sess, buf_out)
+        if rc != 0 {
+            pass = false
+        } else {
+            var g: i64 = 0
+            while g < n_groups {
+                var sum_sq: f64 = 0.0
+                var d: i64 = 0
+                while d < dim {
+                    let v = ((((g * dim + d) % 17) - 8) as f64) * 0.125
+                    sum_sq = sum_sq + v * v
+                    d = d + 1
+                }
+                let inv_rms = 1.0 / sqrt(sum_sq / (dim as f64) + 0.000001)
+
+                d = 0
+                while d < dim {
+                    let v = ((((g * dim + d) % 17) - 8) as f64) * 0.125
+                    let expected = v * inv_rms * 1.0
+                    let actual = read_f32_at(&arena_out, g * dim + d)
+                    if abs_f64(actual - expected) >= 0.0001 {
+                        pass = false
+                    }
+                    d = d + 1
+                }
+                g = g + 1
+            }
+        }
+    }
+
+    let _c0 = page_arena_free(arena_x)
+    let _c1 = page_arena_free(arena_w)
+    let _c2 = page_arena_free(arena_out)
+    pass
+}
+
+fn test_rope(sess: &MetalSession, pipes: &Qwen3MetalPipelines) -> bool with IO, Mut, Alloc {
+    let n_heads = 32
+    let head_dim = 128
+    let total = n_heads * head_dim
+    let pos = 7
+    let theta = 1000000.0
+
+    let arena_v = page_arena_alloc(total * 4)
+    var pass = true
+
+    if !page_arena_is_ok(&arena_v) {
+        pass = false
+    } else {
+        var i: i64 = 0
+        while i < total {
+            let val = (((i % 23) - 11) as f64) * 0.125
+            write_f32_at(&arena_v, i, val)
+            i = i + 1
+        }
+
+        let buf_v = metal_buffer_nocopy(sess, page_arena_ptr(&arena_v), total * 4)
+        let rc = qwen3_metal_rope(sess, pipes, buf_v, 0, n_heads, head_dim, pos, 0x49742400)
+        let _f0 = metal_buffer_free(sess, buf_v)
+        if rc != 0 {
+            pass = false
+        } else {
+            let half = head_dim / 2
+            var h: i64 = 0
+            while h < n_heads {
+                var j: i64 = 0
+                while j < half {
+                    let freq = pow(theta, -((2 * j) as f64) / (head_dim as f64))
+                    let angle = (pos as f64) * freq
+                    let cos_a = cos(angle)
+                    let sin_a = sin(angle)
+                    let x0 = ((((h * head_dim + j) % 23) - 11) as f64) * 0.125
+                    let x1 = ((((h * head_dim + j + half) % 23) - 11) as f64) * 0.125
+                    let exp0 = x0 * cos_a - x1 * sin_a
+                    let exp1 = x1 * cos_a + x0 * sin_a
+
+                    let act0 = read_f32_at(&arena_v, h * head_dim + j)
+                    let act1 = read_f32_at(&arena_v, h * head_dim + j + half)
+                    if abs_f64(act0 - exp0) >= 0.0001 || abs_f64(act1 - exp1) >= 0.0001 {
+                        pass = false
+                    }
+                    j = j + 1
+                }
+                h = h + 1
+            }
+        }
+    }
+
+    let _c0 = page_arena_free(arena_v)
+    pass
+}
+
+fn test_gemv_4096(sess: &MetalSession, pipes: &Qwen3MetalPipelines) -> bool with IO, Mut, Alloc {
+    let out_dim = 4096
+    let in_dim = 4096
+    let matrix_bytes = out_dim * in_dim * 2
+
+    let arena_w = page_arena_alloc(matrix_bytes)
+    let arena_x = page_arena_alloc(in_dim * 4)
+    let arena_y = page_arena_alloc(out_dim * 4)
+    var pass = true
+
+    if !page_arena_is_ok(&arena_w) || !page_arena_is_ok(&arena_x) || !page_arena_is_ok(&arena_y) {
+        pass = false
+    } else {
+        var c: i64 = 0
+        var sum_x: f64 = 0.0
+        while c < in_dim {
+            let val = (((c % 4) + 1) as f64) * 0.25
+            write_f32_at(&arena_x, c, val)
+            sum_x = sum_x + val
+            c = c + 1
+        }
+
+        let p_w = page_arena_ptr(&arena_w)
+        var r: i64 = 0
+        while r < out_dim {
+            let w_val_bf16 = 0x3C00 + (r % 4) * 0x0080
+            let quad_w = w_val_bf16 | (w_val_bf16 << 16) | (w_val_bf16 << 32) | (w_val_bf16 << 48)
+            let row_base = p_w + r * in_dim * 2
+            var k: i64 = 0
+            while k < in_dim {
+                let _w = ptr_write_i64_le(row_base, k * 2, quad_w)
+                k = k + 4
+            }
+            r = r + 1
+        }
+
+        let buf_w = metal_buffer_nocopy(sess, p_w, matrix_bytes)
+        let buf_x = metal_buffer_nocopy(sess, page_arena_ptr(&arena_x), in_dim * 4)
+        let buf_y = metal_buffer_nocopy(sess, page_arena_ptr(&arena_y), out_dim * 4)
+
+        let rc = qwen3_metal_gemv(sess, pipes, buf_w, 0, 2, buf_x, 0, buf_y, 0, out_dim, in_dim)
+        let _f0 = metal_buffer_free(sess, buf_w)
+        let _f1 = metal_buffer_free(sess, buf_x)
+        let _f2 = metal_buffer_free(sess, buf_y)
+        if rc != 0 {
+            pass = false
+        } else {
+            r = 0
+            while r < out_dim {
+                let w_float = 0.0078125 * pow(2.0, (r % 4) as f64)
+                let expected = w_float * sum_x
+                let actual = read_f32_at(&arena_y, r)
+                if abs_f64(actual - expected) >= 0.0001 {
+                    pass = false
+                }
+                r = r + 1
+            }
+        }
+    }
+
+    let _c0 = page_arena_free(arena_w)
+    let _c1 = page_arena_free(arena_x)
+    let _c2 = page_arena_free(arena_y)
+    pass
+}
+
+fn test_swiglu(sess: &MetalSession, pipes: &Qwen3MetalPipelines) -> bool with IO, Mut, Alloc {
+    let inter_dim = 12288
+
+    let arena_g = page_arena_alloc(inter_dim * 4)
+    let arena_u = page_arena_alloc(inter_dim * 4)
+    let arena_o = page_arena_alloc(inter_dim * 4)
+    var pass = true
+
+    if !page_arena_is_ok(&arena_g) || !page_arena_is_ok(&arena_u) || !page_arena_is_ok(&arena_o) {
+        pass = false
+    } else {
+        var i: i64 = 0
+        while i < inter_dim {
+            let g_val = (((i % 19) - 9) as f64) * 0.125
+            let u_val = (((i % 13) - 6) as f64) * 0.125
+            write_f32_at(&arena_g, i, g_val)
+            write_f32_at(&arena_u, i, u_val)
+            i = i + 1
+        }
+
+        let buf_g = metal_buffer_nocopy(sess, page_arena_ptr(&arena_g), inter_dim * 4)
+        let buf_u = metal_buffer_nocopy(sess, page_arena_ptr(&arena_u), inter_dim * 4)
+        let buf_o = metal_buffer_nocopy(sess, page_arena_ptr(&arena_o), inter_dim * 4)
+
+        let rc = qwen3_metal_swiglu(sess, pipes, buf_g, 0, buf_u, 0, buf_o, 0, inter_dim)
+        let _f0 = metal_buffer_free(sess, buf_g)
+        let _f1 = metal_buffer_free(sess, buf_u)
+        let _f2 = metal_buffer_free(sess, buf_o)
+        if rc != 0 {
+            pass = false
+        } else {
+            i = 0
+            while i < inter_dim {
+                let g_val = (((i % 19) - 9) as f64) * 0.125
+                let u_val = (((i % 13) - 6) as f64) * 0.125
+                let silu_g = g_val / (1.0 + exp(-g_val))
+                let expected = silu_g * u_val
+                let actual = read_f32_at(&arena_o, i)
+                if abs_f64(actual - expected) >= 0.0001 {
+                    pass = false
+                }
+                i = i + 1
+            }
+        }
+    }
+
+    let _c0 = page_arena_free(arena_g)
+    let _c1 = page_arena_free(arena_u)
+    let _c2 = page_arena_free(arena_o)
+    pass
+}
+
+fn test_paged_gqa(sess: &MetalSession, pipes: &Qwen3MetalPipelines) -> bool with IO, Mut, Alloc {
+    let n_q = 32
+    let n_kv = 8
+    let head_dim = 128
+    let seq_len = 16
+    let block_size = 16
+
+    let arena_q = page_arena_alloc(n_q * head_dim * 4)
+    let arena_kv = page_arena_alloc(262144)
+    let arena_out = page_arena_alloc(n_q * head_dim * 4)
+    let arena_scores = page_arena_alloc(seq_len * 4)
+    var pass = true
+
+    if !page_arena_is_ok(&arena_q) || !page_arena_is_ok(&arena_kv) || !page_arena_is_ok(&arena_out) || !page_arena_is_ok(&arena_scores) {
+        pass = false
+    } else {
+        let table_off = 0
+        let k_off = 256
+        let v_off = 131072
+
+        let p_kv = page_arena_ptr(&arena_kv)
+        let _wt = ptr_write_u32_le(p_kv, table_off, 0)
+
+        var i: i64 = 0
+        while i < n_q * head_dim {
+            let v = (((i % 11) - 5) as f64) * 0.0625
+            write_f32_at(&arena_q, i, v)
+            i = i + 1
+        }
+
+        var pos: i64 = 0
+        while pos < seq_len {
+            var kv_h: i64 = 0
+            while kv_h < n_kv {
+                var d: i64 = 0
+                while d < head_dim {
+                    let kv_idx = (pos * n_kv + kv_h) * head_dim + d
+                    let val_k = ((((pos + kv_h + d) % 9) - 4) as f64) * 0.0625
+                    let val_v = ((((pos * 2 + kv_h + d) % 7) - 3) as f64) * 0.125
+                    let _wk = ptr_write_u32_le(p_kv, k_off + kv_idx * 4, f64_to_f32_bits(val_k))
+                    let _wv = ptr_write_u32_le(p_kv, v_off + kv_idx * 4, f64_to_f32_bits(val_v))
+                    d = d + 1
+                }
+                kv_h = kv_h + 1
+            }
+            pos = pos + 1
+        }
+
+        let buf_q = metal_buffer_nocopy(sess, page_arena_ptr(&arena_q), n_q * head_dim * 4)
+        let buf_kv = metal_buffer_nocopy(sess, p_kv, 262144)
+        let buf_out = metal_buffer_nocopy(sess, page_arena_ptr(&arena_out), n_q * head_dim * 4)
+
+        let rc = qwen3_metal_paged_gqa(sess, pipes, buf_q, 0, buf_kv, table_off, k_off, v_off, buf_out, 0, n_q, n_kv, head_dim, seq_len, block_size)
+        let _f0 = metal_buffer_free(sess, buf_q)
+        let _f1 = metal_buffer_free(sess, buf_kv)
+        let _f2 = metal_buffer_free(sess, buf_out)
+        if rc != 0 {
+            pass = false
+        } else {
+            let scale = 1.0 / sqrt(head_dim as f64)
+            let group_size = n_q / n_kv
+
+            var q_h: i64 = 0
+            while q_h < n_q {
+                let kv_h = q_h / group_size
+                var max_s: f64 = -1000000.0
+
+                pos = 0
+                while pos < seq_len {
+                    var dot: f64 = 0.0
+                    var d: i64 = 0
+                    while d < head_dim {
+                        let q_val = ((((q_h * head_dim + d) % 11) - 5) as f64) * 0.0625
+                        let k_val = ((((pos + kv_h + d) % 9) - 4) as f64) * 0.0625
+                        dot = dot + q_val * k_val
+                        d = d + 1
+                    }
+                    let s = dot * scale
+                    if s > max_s { max_s = s }
+                    write_f32_at(&arena_scores, pos, s)
+                    pos = pos + 1
+                }
+
+                var denom: f64 = 0.0
+                pos = 0
+                while pos < seq_len {
+                    let s = read_f32_at(&arena_scores, pos)
+                    denom = denom + exp(s - max_s)
+                    pos = pos + 1
+                }
+
+                var d: i64 = 0
+                while d < head_dim {
+                    var acc: f64 = 0.0
+                    pos = 0
+                    while pos < seq_len {
+                        let s = read_f32_at(&arena_scores, pos)
+                        let weight = exp(s - max_s) / denom
+                        let v_val = ((((pos * 2 + kv_h + d) % 7) - 3) as f64) * 0.125
+                        acc = acc + weight * v_val
+                        pos = pos + 1
+                    }
+                    let actual = read_f32_at(&arena_out, q_h * head_dim + d)
+                    if abs_f64(actual - acc) >= 0.0001 {
+                        pass = false
+                    }
+                    d = d + 1
+                }
+                q_h = q_h + 1
+            }
+        }
+    }
+
+    let _c0 = page_arena_free(arena_q)
+    let _c1 = page_arena_free(arena_kv)
+    let _c2 = page_arena_free(arena_out)
+    let _c3 = page_arena_free(arena_scores)
+    pass
+}
+
+fn main() -> i32 with IO, Mut, Alloc {
+    let sess = metal_session_open("")
+    var ok = false
+    if !metal_session_is_ok(&sess) {
+        println("FAIL: metal_session_open")
+    } else {
+        let pipes = qwen3_metal_pipelines_compile(&sess)
+        if !pipes.ok {
+            println("FAIL: qwen3_metal_pipelines_compile")
+        } else {
+            let ok_norm = test_rmsnorm(&sess, &pipes)
+            if !ok_norm {
+                println("FAIL: test_rmsnorm")
+            } else {
+                let ok_rope = test_rope(&sess, &pipes)
+                if !ok_rope {
+                    println("FAIL: test_rope")
+                } else {
+                    let ok_gemv = test_gemv_4096(&sess, &pipes)
+                    if !ok_gemv {
+                        println("FAIL: test_gemv_4096")
+                    } else {
+                        let ok_swiglu = test_swiglu(&sess, &pipes)
+                        if !ok_swiglu {
+                            println("FAIL: test_swiglu")
+                        } else {
+                            let ok_gqa = test_paged_gqa(&sess, &pipes)
+                            if !ok_gqa {
+                                println("FAIL: test_paged_gqa")
+                            } else {
+                                ok = true
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let _sc = metal_session_close(sess)
+    if ok {
+        println("LLM_PHASE2_GPU_KERNELS_PASS")
+        0
+    } else {
+        1
+    }
+}

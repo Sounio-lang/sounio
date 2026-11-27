@@ -1,0 +1,573 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: LLM_PHASE11_Q4_PRUNED_PASS
+//
+// Phase 11: Q4 Coalesced GEMV + O(1) Tile-Pruned Conformal Head Verification
+// t1: qwen3_gemv_q4_fast CPU vs Metal vs qwen3_gemv_q4_eisa_cpu (aligned in_dim=256 & tail in_dim=40)
+// t2: q4_head_tiled (V=512 = 8 tiles, in_dim=256) + certify_pruned_conformal
+//     CPU vs Metal vs unpruned eisa_certify_global across certified (q=0.5),
+//     boundary (q=3.0), tie, and uncertified (q=200.0) regimes.
+// t3: Untied 2-shard /tmp/sounio_p11_multishard end-to-end q4_exact_scrub (mode 20)
+//     vs bf16 (mode 0) exact token parity on CPU and Metal.
+
+use llm::mmap::{
+    page_arena_alloc,
+    page_arena_free,
+    page_arena_is_ok,
+    page_arena_ptr,
+    mapped_shard_open,
+    mapped_shard_close,
+    mapped_shard_is_ok,
+    mapped_shard_len,
+}
+use llm::hal::{
+    MetalSession,
+    hal_getenv_ptr,
+    metal_session_open,
+    metal_session_close,
+    metal_session_is_ok,
+    metal_buffer_nocopy,
+    metal_buffer_free,
+    metal_cmd_begin,
+    metal_cmd_cancel,
+    metal_cmd_commit_sync,
+}
+use llm::qwen3::{
+    qwen3_model_open,
+    qwen3_model_free,
+    qwen3_model_is_ok,
+    qwen3_model_cfg,
+    qwen3_conformal_q_for_mode_layers,
+}
+use llm::qwen3_paged_kv::{
+    qwen3_kv_alloc,
+    qwen3_kv_free,
+    qwen3_kv_is_ok,
+}
+use llm::qwen3_tokenizer::{
+    qwen3_tokenizer_load,
+    qwen3_tokenizer_free,
+    qwen3_tokenizer_is_ok,
+}
+use llm::qwen3_ossm::{
+    qwen3_ossm_state_alloc,
+    qwen3_ossm_state_free,
+    qwen3_ossm_state_is_ok,
+}
+use llm::sounio_llm_cli::{
+    SounioLlmRunCfg,
+    sounio_llm_run_chat_generation_q,
+}
+use llm::qwen3_quant_eisa::{
+    EisaConeCert,
+    qwen3_eisa_q4_bytes,
+    qwen3_quantize_f32_to_q4_eisa,
+    qwen3_gemv_q4_eisa_cpu,
+    eisa_certify_global,
+    conformal_q8_metal_pipelines_compile,
+    qwen3_metal_gemv_q4_fast,
+    qwen3_gemv_q4_fast_cpu,
+    qwen3_compute_row_scale_cpu,
+    qwen3_metal_encode_compute_row_scale,
+    qwen3_compute_tile_smax_cpu,
+    qwen3_metal_encode_compute_tile_smax,
+    qwen3_gemv_head_tiled_cpu,
+    qwen3_metal_encode_gemv_head_tiled,
+    qwen3_certify_pruned_conformal_cpu,
+    qwen3_metal_encode_certify_pruned_conformal,
+}
+use tensor2::convert::{
+    f32_bits_to_f64,
+    f64_to_f32_bits,
+}
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn metal_expected_by_env() -> bool with Alloc, Mut {
+    let p = hal_getenv_ptr("SOUNIO_METAL_RUNTIME")
+    p != 0 && ptr_read_u8(p, 0) != 0
+}
+
+fn p11_bytes_match(a: i64, b: i64, n: i64) -> bool {
+    var i: i64 = 0
+    while i < n {
+        if ptr_read_u8(a, i) != ptr_read_u8(b, i) {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+// ----------------------------------------------------------------------------
+// Test 1: qwen3_gemv_q4_fast CPU vs Metal vs q4_eisa parity (aligned & tail)
+// ----------------------------------------------------------------------------
+fn run_q4_fast_case(out_dim: i64, in_dim: i64) -> bool with Alloc, Mut, Div, Panic, IO {
+    let w_bytes = out_dim * in_dim * 4
+    let q4_bytes = out_dim * qwen3_eisa_q4_bytes(in_dim)
+    let x_bytes = in_dim * 4
+    let y_bytes = out_dim * 4
+    let total = w_bytes + q4_bytes + x_bytes + y_bytes * 3 + out_dim * 4 + 1024
+    let arena = page_arena_alloc(total)
+    if !page_arena_is_ok(&arena) { return false }
+
+    let base = page_arena_ptr(&arena)
+    let w_off: i64 = 0
+    let q4_off = w_off + w_bytes
+    let x_off = q4_off + q4_bytes
+    let y_fast_cpu_off = x_off + x_bytes
+    let y_eisa_cpu_off = y_fast_cpu_off + y_bytes
+    let err_eisa_off = y_eisa_cpu_off + y_bytes
+    let y_gpu_off = err_eisa_off + out_dim * 4
+
+    var r: i64 = 0
+    while r < out_dim {
+        var c: i64 = 0
+        while c < in_dim {
+            let v = ((((r * 13 + c * 7 + 3) % 29) as f64) - 14.0) * 0.075
+            let _w = ptr_write_u32_le(base + w_off, (r * in_dim + c) * 4, f64_to_f32_bits(v))
+            c = c + 1
+        }
+        r = r + 1
+    }
+    var k: i64 = 0
+    while k < in_dim {
+        let xv = ((((k * 11 + 5) % 19) as f64) - 9.0) * 0.125
+        let _wx = ptr_write_u32_le(base + x_off, k * 4, f64_to_f32_bits(xv))
+        k = k + 1
+    }
+
+    var ok = qwen3_quantize_f32_to_q4_eisa(base + w_off, base + q4_off, out_dim, in_dim)
+    ok = ok && qwen3_gemv_q4_fast_cpu(base + q4_off, base + x_off, base + y_fast_cpu_off, out_dim, in_dim)
+    ok = ok && qwen3_gemv_q4_eisa_cpu(base + q4_off, base + x_off, 0, base + y_eisa_cpu_off, base + err_eisa_off, 0, out_dim, in_dim)
+
+    r = 0
+    while r < out_dim {
+        let vf = f32_bits_to_f64(ptr_read_u32_le(base + y_fast_cpu_off, r * 4))
+        let ve = f32_bits_to_f64(ptr_read_u32_le(base + y_eisa_cpu_off, r * 4))
+        if abs_f64(vf - ve) > 0.0005 {
+            ok = false
+        }
+        r = r + 1
+    }
+
+    let msess = metal_session_open("")
+    if metal_session_is_ok(&msess) {
+        let pipes = conformal_q8_metal_pipelines_compile(&msess)
+        let buf = metal_buffer_nocopy(&msess, base, total)
+        if !pipes.ok || buf <= 0 {
+            ok = false
+        } else {
+            let rc = qwen3_metal_gemv_q4_fast(&msess, pipes.q4_gemv_fast, buf, q4_off, buf, x_off, buf, y_gpu_off, out_dim, in_dim)
+            if rc != 0 {
+                ok = false
+            } else {
+                r = 0
+                while r < out_dim {
+                    let vc = f32_bits_to_f64(ptr_read_u32_le(base + y_fast_cpu_off, r * 4))
+                    let vg = f32_bits_to_f64(ptr_read_u32_le(base + y_gpu_off, r * 4))
+                    if abs_f64(vc - vg) > 0.0005 {
+                        ok = false
+                    }
+                    r = r + 1
+                }
+            }
+        }
+        if buf > 0 { let _bf = metal_buffer_free(&msess, buf) }
+    } else if metal_expected_by_env() {
+        ok = false
+    }
+    let _mc = metal_session_close(msess)
+    let _af = page_arena_free(arena)
+    ok
+}
+
+fn test_q4_fast_gemv_parity() -> bool with Alloc, Mut, Div, Panic, IO {
+    run_q4_fast_case(16, 256) && run_q4_fast_case(8, 40)
+}
+
+// ----------------------------------------------------------------------------
+// Test 2: q4_head_tiled + certify_pruned_conformal CPU vs Metal vs unpruned
+// ----------------------------------------------------------------------------
+fn fill_err_from_conf(conf_ptr: i64, err_ptr: i64, out_dim: i64) -> bool with Mut {
+    let raw_dh = f32_bits_to_f64(ptr_read_u32_le(conf_ptr, 0))
+    let dh_hat = if raw_dh > 0.000001 { raw_dh } else { 0.000001 }
+    let raw_q = f32_bits_to_f64(ptr_read_u32_le(conf_ptr, 4))
+    let q_val = if raw_q > 0.0 { raw_q } else { 0.0 }
+    let delta = f32_bits_to_f64(f64_to_f32_bits(q_val * dh_hat))
+    var r: i64 = 0
+    while r < out_dim {
+        let ws = f32_bits_to_f64(ptr_read_u32_le(conf_ptr, 64 + r * 4))
+        let _we = ptr_write_u32_le(err_ptr, r * 4, f64_to_f32_bits(delta * ws))
+        r = r + 1
+    }
+    true
+}
+
+fn check_pruned_case(
+    base: i64,
+    q4_off: i64,
+    x_off: i64,
+    conf_cpu_off: i64,
+    conf_gpu_off: i64,
+    tile_smax_off: i64,
+    tile_summary_off: i64,
+    val_cpu_off: i64,
+    err_eisa_off: i64,
+    val_gpu_off: i64,
+    pkt_gpu_off: i64,
+    out_dim: i64,
+    in_dim: i64,
+    dh_val: f64,
+    q_val: f64,
+    expect_cert: bool,
+    min_pruned_tiles: i64,
+    expect_tie_cone: bool,
+    msess: &MetalSession,
+    has_metal: bool,
+    pipe_head: i64,
+    pipe_cert: i64,
+    buf: i64
+) -> bool with Alloc, Mut, Div, Panic, IO {
+    let _wdc = ptr_write_u32_le(base + conf_cpu_off, 0, f64_to_f32_bits(dh_val))
+    let _wqc = ptr_write_u32_le(base + conf_cpu_off, 4, f64_to_f32_bits(q_val))
+    let _wdg = ptr_write_u32_le(base + conf_gpu_off, 0, f64_to_f32_bits(dh_val))
+    let _wqg = ptr_write_u32_le(base + conf_gpu_off, 4, f64_to_f32_bits(q_val))
+
+    var ok = qwen3_gemv_head_tiled_cpu(
+        4, base + q4_off, base + x_off, base + conf_cpu_off, tile_summary_off, base + val_cpu_off, out_dim, in_dim
+    )
+    let cert_p = qwen3_certify_pruned_conformal_cpu(
+        base + val_cpu_off, base + conf_cpu_off, tile_smax_off, tile_summary_off, out_dim
+    )
+    let cpu_pruned_tiles = ptr_read_i64_le(base + conf_cpu_off, 8)
+    let _fe = fill_err_from_conf(base + conf_cpu_off, base + err_eisa_off, out_dim)
+    let cert_e = eisa_certify_global(base + val_cpu_off, base + err_eisa_off, out_dim)
+
+    if cert_p.strict_global_certified != expect_cert { ok = false }
+    if cert_p.top1_id != cert_e.top1_id || cert_p.runner_up_id != cert_e.runner_up_id { ok = false }
+    if cert_p.strict_global_certified != cert_e.strict_global_certified { ok = false }
+    if cert_p.cone_size != cert_e.cone_size { ok = false }
+    if abs_f64(cert_p.global_margin - cert_e.global_margin) > 0.0001 { ok = false }
+    if cpu_pruned_tiles < min_pruned_tiles { ok = false }
+    if expect_tie_cone && cert_p.cone_size < 2 { ok = false }
+
+    if has_metal {
+        let cid = metal_cmd_begin(msess)
+        if cid <= 0 {
+            ok = false
+        } else {
+            let rh = qwen3_metal_encode_gemv_head_tiled(
+                msess, cid, pipe_head,
+                buf, q4_off,
+                buf, x_off,
+                buf, conf_gpu_off, tile_summary_off,
+                buf, val_gpu_off,
+                out_dim, in_dim
+            )
+            let rc = qwen3_metal_encode_certify_pruned_conformal(
+                msess, cid, pipe_cert,
+                buf, val_gpu_off,
+                buf, conf_gpu_off, tile_smax_off, tile_summary_off,
+                buf, pkt_gpu_off,
+                out_dim
+            )
+            if rh != 0 || rc != 0 {
+                let _cc = metal_cmd_cancel(msess, cid)
+                ok = false
+            } else if metal_cmd_commit_sync(msess, cid) != 0 {
+                ok = false
+            } else {
+                let g_top1 = ptr_read_i64_le(base + pkt_gpu_off, 0)
+                let g_run = ptr_read_i64_le(base + pkt_gpu_off, 8)
+                let g_cone = ptr_read_i64_le(base + pkt_gpu_off, 16)
+                let g_cert = ptr_read_i64_le(base + pkt_gpu_off, 24)
+                let g_margin = f32_bits_to_f64(ptr_read_u32_le(base + pkt_gpu_off, 44))
+                let g_pruned = ptr_read_i64_le(base + pkt_gpu_off, 48)
+                let g_conf_pruned = ptr_read_i64_le(base + conf_gpu_off, 8)
+
+                if g_top1 != cert_p.top1_id || g_run != cert_p.runner_up_id { ok = false }
+                if g_cone != cert_p.cone_size { ok = false }
+                if g_cert != (if cert_p.strict_global_certified { 1 } else { 0 }) { ok = false }
+                if abs_f64(g_margin - cert_p.global_margin) > 0.0005 { ok = false }
+                if g_pruned != g_conf_pruned || g_pruned < min_pruned_tiles { ok = false }
+
+                var r: i64 = 0
+                while r < out_dim {
+                    let vc = f32_bits_to_f64(ptr_read_u32_le(base + val_cpu_off, r * 4))
+                    let vg = f32_bits_to_f64(ptr_read_u32_le(base + val_gpu_off, r * 4))
+                    if abs_f64(vc - vg) > 0.0005 { ok = false }
+                    r = r + 1
+                }
+            }
+        }
+    }
+    ok
+}
+
+fn test_pruned_tiled_head_parity() -> bool with Alloc, Mut, Div, Panic, IO {
+    let out_dim: i64 = 512
+    let in_dim: i64 = 256
+    let n_tiles = (out_dim + 63) / 64
+    let wf32_bytes = out_dim * in_dim * 4
+    let q4_bytes = out_dim * qwen3_eisa_q4_bytes(in_dim)
+    let x_bytes = in_dim * 4
+    let tile_smax_off = 64 + ((out_dim * 4 + 63) / 64) * 64
+    let tile_summary_off = tile_smax_off + ((n_tiles * 4 + 63) / 64) * 64
+    let conf_bytes = tile_summary_off + n_tiles * 32 + 128
+
+    let total = wf32_bytes + q4_bytes * 2 + x_bytes + conf_bytes * 2 + out_dim * 4 * 4 + 1024
+    let arena = page_arena_alloc(total)
+    if !page_arena_is_ok(&arena) { return false }
+
+    let base = page_arena_ptr(&arena)
+    let wf32_off: i64 = 0
+    let q4_off = wf32_off + wf32_bytes
+    let q4_tie_off = q4_off + q4_bytes
+    let x_off = q4_tie_off + q4_bytes
+    let conf_cpu_off = x_off + x_bytes
+    let conf_gpu_off = conf_cpu_off + conf_bytes
+    let val_cpu_off = conf_gpu_off + conf_bytes
+    let err_eisa_off = val_cpu_off + out_dim * 4
+    let val_gpu_off = err_eisa_off + out_dim * 4
+    let pkt_gpu_off = val_gpu_off + out_dim * 4
+
+    // Main matrix: row 0 strong (dot ~ 128), row 5 boundary competitor (dot ~ 122.88),
+    // remaining rows small noise across all 8 tiles (tiles 1..7 easily pruned).
+    var r: i64 = 0
+    while r < out_dim {
+        var c: i64 = 0
+        while c < in_dim {
+            let wv = if r == 0 {
+                0.5
+            } else if r == 5 {
+                0.48
+            } else {
+                0.02 * ((((r * 17 + c * 5 + 1) % 5) as f64) - 2.0)
+            }
+            let _wf = ptr_write_u32_le(base + wf32_off, (r * in_dim + c) * 4, f64_to_f32_bits(wv))
+            c = c + 1
+        }
+        r = r + 1
+    }
+    var c: i64 = 0
+    while c < in_dim {
+        let _wx = ptr_write_u32_le(base + x_off, c * 4, f64_to_f32_bits(1.0))
+        c = c + 1
+    }
+
+    var ok = qwen3_quantize_f32_to_q4_eisa(base + wf32_off, base + q4_off, out_dim, in_dim)
+    ok = ok && qwen3_compute_row_scale_cpu(base + wf32_off, 4, base + conf_cpu_off, out_dim, in_dim)
+    ok = ok && qwen3_compute_tile_smax_cpu(base + conf_cpu_off, tile_smax_off, out_dim)
+
+    var msess = metal_session_open("")
+    let has_metal = metal_session_is_ok(&msess)
+    var pipe_scale: i64 = 0
+    var pipe_smax: i64 = 0
+    var pipe_head: i64 = 0
+    var pipe_cert: i64 = 0
+    var buf: i64 = 0
+
+    if has_metal {
+        let pipes = conformal_q8_metal_pipelines_compile(&msess)
+        buf = metal_buffer_nocopy(&msess, base, total)
+        if !pipes.ok || buf <= 0 {
+            ok = false
+        } else {
+            pipe_scale = pipes.compute_row_scale_f32
+            pipe_smax = pipes.compute_tile_smax
+            pipe_head = pipes.q4_head_tiled
+            pipe_cert = pipes.certify_pruned
+            let cid = metal_cmd_begin(&msess)
+            if cid <= 0 {
+                ok = false
+            } else {
+                let rs = qwen3_metal_encode_compute_row_scale(&msess, cid, pipe_scale, buf, wf32_off, buf, conf_gpu_off, out_dim, in_dim)
+                let rt = qwen3_metal_encode_compute_tile_smax(&msess, cid, pipe_smax, buf, conf_gpu_off, tile_smax_off, out_dim)
+                if rs != 0 || rt != 0 {
+                    let _cc = metal_cmd_cancel(&msess, cid)
+                    ok = false
+                } else if metal_cmd_commit_sync(&msess, cid) != 0 {
+                    ok = false
+                } else {
+                    var t: i64 = 0
+                    while t < n_tiles {
+                        let sc = f32_bits_to_f64(ptr_read_u32_le(base + conf_cpu_off, tile_smax_off + t * 4))
+                        let sg = f32_bits_to_f64(ptr_read_u32_le(base + conf_gpu_off, tile_smax_off + t * 4))
+                        if abs_f64(sc - sg) > 0.0001 { ok = false }
+                        t = t + 1
+                    }
+                }
+            }
+        }
+    } else if metal_expected_by_env() {
+        ok = false
+    }
+
+    if ok {
+        // 1) Certified: q = 0.5, dh_hat = 2.0 (margin ~ +4.1 > 0, all 7 non-top tiles pruned)
+        ok = ok && check_pruned_case(
+            base, q4_off, x_off, conf_cpu_off, conf_gpu_off, tile_smax_off, tile_summary_off,
+            val_cpu_off, err_eisa_off, val_gpu_off, pkt_gpu_off, out_dim, in_dim,
+            2.0, 0.5, true, 6, false, &msess, has_metal, pipe_head, pipe_cert, buf
+        )
+        // 2) Boundary: q = 3.0, dh_hat = 2.0 (margin ~ -0.76, cone_size = 2, tiles 1..7 still pruned)
+        ok = ok && check_pruned_case(
+            base, q4_off, x_off, conf_cpu_off, conf_gpu_off, tile_smax_off, tile_summary_off,
+            val_cpu_off, err_eisa_off, val_gpu_off, pkt_gpu_off, out_dim, in_dim,
+            2.0, 3.0, false, 6, true, &msess, has_metal, pipe_head, pipe_cert, buf
+        )
+        // 3) Uncertified: q = 200.0, dh_hat = 2.0
+        ok = ok && check_pruned_case(
+            base, q4_off, x_off, conf_cpu_off, conf_gpu_off, tile_smax_off, tile_summary_off,
+            val_cpu_off, err_eisa_off, val_gpu_off, pkt_gpu_off, out_dim, in_dim,
+            2.0, 200.0, false, 0, true, &msess, has_metal, pipe_head, pipe_cert, buf
+        )
+    }
+
+    // 4) Exact tie case: make row 1 identical to row 0 (0.5)
+    if ok {
+        c = 0
+        while c < in_dim {
+            let _wt = ptr_write_u32_le(base + wf32_off, (1 * in_dim + c) * 4, f64_to_f32_bits(0.5))
+            c = c + 1
+        }
+        ok = ok && qwen3_quantize_f32_to_q4_eisa(base + wf32_off, base + q4_tie_off, out_dim, in_dim)
+        ok = ok && qwen3_compute_row_scale_cpu(base + wf32_off, 4, base + conf_cpu_off, out_dim, in_dim)
+        ok = ok && qwen3_compute_tile_smax_cpu(base + conf_cpu_off, tile_smax_off, out_dim)
+        if has_metal {
+            let cid_t = metal_cmd_begin(&msess)
+            if cid_t <= 0 {
+                ok = false
+            } else {
+                let rs2 = qwen3_metal_encode_compute_row_scale(&msess, cid_t, pipe_scale, buf, wf32_off, buf, conf_gpu_off, out_dim, in_dim)
+                let rt2 = qwen3_metal_encode_compute_tile_smax(&msess, cid_t, pipe_smax, buf, conf_gpu_off, tile_smax_off, out_dim)
+                if rs2 != 0 || rt2 != 0 {
+                    let _cc = metal_cmd_cancel(&msess, cid_t)
+                    ok = false
+                } else if metal_cmd_commit_sync(&msess, cid_t) != 0 {
+                    ok = false
+                }
+            }
+        }
+        ok = ok && check_pruned_case(
+            base, q4_tie_off, x_off, conf_cpu_off, conf_gpu_off, tile_smax_off, tile_summary_off,
+            val_cpu_off, err_eisa_off, val_gpu_off, pkt_gpu_off, out_dim, in_dim,
+            2.0, 0.5, false, 0, true, &msess, has_metal, pipe_head, pipe_cert, buf
+        )
+    }
+
+    if buf > 0 { let _bf = metal_buffer_free(&msess, buf) }
+    let _mc = metal_session_close(msess)
+    let _af = page_arena_free(arena)
+    ok
+}
+
+// ----------------------------------------------------------------------------
+// Test 3: Untied 2-shard end-to-end q4_exact_scrub (mode 20) vs bf16 (mode 0)
+// ----------------------------------------------------------------------------
+fn run_untied_multishard_case(use_metal: bool) -> bool with Alloc, Mut, Div, Panic, IO {
+    let model_dir = "/tmp/sounio_p11_multishard"
+    let tok_path = "/tmp/sounio_p11_multishard/tokenizer.json"
+    let chk = mapped_shard_open(tok_path)
+    let has_model = mapped_shard_is_ok(&chk) && mapped_shard_len(&chk) > 0
+    let _cc = mapped_shard_close(chk)
+    if !has_model { return false }
+
+    let tok = qwen3_tokenizer_load(tok_path)
+    let m = qwen3_model_open(model_dir)
+    var ok = qwen3_tokenizer_is_ok(&tok) && qwen3_model_is_ok(&m)
+    if ok {
+        let cfg = qwen3_model_cfg(&m)
+        ok = !cfg.tied && cfg.layers == 2 && cfg.vocab == 256
+        var kv = qwen3_kv_alloc(cfg.layers, 8, 16, cfg.n_kv, cfg.head_dim)
+        var ossm = qwen3_ossm_state_alloc(cfg.layers, cfg.hidden)
+        let arena = page_arena_alloc(32768)
+        ok = ok && qwen3_kv_is_ok(&kv) && qwen3_ossm_state_is_ok(&ossm) && page_arena_is_ok(&arena)
+
+        if ok {
+            let base = page_arena_ptr(&arena)
+            let prompt_str = "abcd"
+            let p_len = str_len(prompt_str)
+            let p_ptr = base
+            var i: i64 = 0
+            while i < p_len {
+                let _wp = ptr_write_u8(p_ptr, i, str_char_at(prompt_str, i) as u8)
+                i = i + 1
+            }
+            let _wp0 = ptr_write_u8(p_ptr, p_len, 0)
+
+            let out_bf = base + 4096
+            let out_q4 = base + 12288
+            let len_bf = base + 24576
+            let len_q4 = base + 24584
+
+            let cfg_bf = SounioLlmRunCfg {
+                use_metal: use_metal, enable_thinking: false, max_tokens: 4, max_seq: 64,
+                temp: 0.0, top_p: 0.0, seed: 42, ossm_every: 0, quant_mode: 0,
+                stream_stdout: false, raw_prompt: true, ossm_weights_ptr: 0, ossm_weights_len: 0, use_tensor_core_prefill: false, ok: true,
+            }
+            let cfg_q4 = SounioLlmRunCfg {
+                use_metal: use_metal, enable_thinking: false, max_tokens: 4, max_seq: 64,
+                temp: 0.0, top_p: 0.0, seed: 42, ossm_every: 0, quant_mode: 20,
+                stream_stdout: false, raw_prompt: true, ossm_weights_ptr: 0, ossm_weights_len: 0, use_tensor_core_prefill: false, ok: true,
+            }
+            let s_bf = sounio_llm_run_chat_generation_q(&tok, &m, &!kv, &!ossm, 0, 0, p_ptr, p_len, &cfg_bf, -1.0, out_bf, 4096, len_bf)
+            let s_q4a = sounio_llm_run_chat_generation_q(&tok, &m, &!kv, &!ossm, 0, 0, p_ptr, p_len, &cfg_q4, 0.0001, out_q4, 4096, len_q4)
+            let lb = ptr_read_i64_le(len_bf, 0)
+            let la = ptr_read_i64_le(len_q4, 0)
+            if !s_bf.ok || !s_q4a.ok || s_bf.generated_tokens != 4 || s_q4a.generated_tokens != 4 { ok = false }
+            if s_q4a.last_token_id != s_bf.last_token_id || la != lb || !p11_bytes_match(out_bf, out_q4, lb) { ok = false }
+
+            let s_q4b = sounio_llm_run_chat_generation_q(&tok, &m, &!kv, &!ossm, 0, 0, p_ptr, p_len, &cfg_q4, 10000.0, out_q4, 4096, len_q4)
+            let lbb = ptr_read_i64_le(len_q4, 0)
+            if !s_q4b.ok || s_q4b.generated_tokens != 4 || s_q4b.last_token_id != s_bf.last_token_id || lbb != lb || !p11_bytes_match(out_bf, out_q4, lb) {
+                ok = false
+            }
+        }
+
+        let _af = page_arena_free(arena)
+        let _of = qwen3_ossm_state_free(ossm)
+        let _kf = qwen3_kv_free(kv)
+    }
+    let _mf = qwen3_model_free(m)
+    let _tkf = qwen3_tokenizer_free(tok)
+    ok
+}
+
+fn test_untied_multishard_parity() -> bool with Alloc, Mut, Div, Panic, IO {
+    var ok = abs_f64(qwen3_conformal_q_for_mode_layers(18, 36) - 3.0) < 0.000001
+        && abs_f64(qwen3_conformal_q_for_mode_layers(19, 36) - 1.15) < 0.000001
+        && abs_f64(qwen3_conformal_q_for_mode_layers(20, 36) - 3.0) < 0.000001
+        && abs_f64(qwen3_conformal_q_for_mode_layers(21, 36) - 1.15) < 0.000001
+    ok = ok && run_untied_multishard_case(false)
+    let msess = metal_session_open("")
+    let has_metal = metal_session_is_ok(&msess)
+    let _mc = metal_session_close(msess)
+    if has_metal {
+        ok = ok && run_untied_multishard_case(true)
+    } else if metal_expected_by_env() {
+        ok = false
+    }
+    ok
+}
+
+pub fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
+    let t1 = test_q4_fast_gemv_parity()
+    let t2 = test_pruned_tiled_head_parity()
+    let t3 = test_untied_multishard_parity()
+    if t1 && t2 && t3 {
+        println("LLM_PHASE11_Q4_PRUNED_PASS")
+        return 0
+    }
+    print("LLM_PHASE11_Q4_PRUNED_FAIL t1=")
+    print_int(if t1 { 1 } else { 0 })
+    print(" t2=")
+    print_int(if t2 { 1 } else { 0 })
+    print(" t3=")
+    print_int(if t3 { 1 } else { 0 })
+    print("\n")
+    1
+}

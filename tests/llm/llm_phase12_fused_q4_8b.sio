@@ -1,0 +1,1036 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: LLM_PHASE12_FUSED_PASS
+//
+// Phase 12: Motor Soberano Fundido — Kernels, Fused Forward, Jacobian Conformal & Untied 2-Shard Parity
+// Test 1: SIMD paged_gqa + paged_gqa_batch + tiled gemv_bf16 + gemm_bf16 CPU vs Metal parity.
+// Test 2: Fused projections & norms: gemv_bf16_qkv, gemv_bf16_gate_up_swiglu, q4/q8_qkv_fast,
+//         q4/q8_gate_up_swiglu, qk_norm_rope_kv_scatter, add_accum_rmsnorm (use_inv_rms=0 and 1).
+// Test 3: Untied 2-shard /tmp/sounio_p11_multishard CPU vs Metal parity across
+//         bf16 (mode 0), q4_conformal (mode 17) + Jacobian (c_add=12.5, use_inv_rms=true),
+//         and q4_exact_scrub (mode 20 at q=0.0001 and q=10000.0).
+
+use llm::mmap::{
+    page_arena_alloc,
+    page_arena_free,
+    page_arena_is_ok,
+    page_arena_ptr,
+    page_arena_len,
+    mapped_shard_open,
+    mapped_shard_close,
+    mapped_shard_is_ok,
+    mapped_shard_len,
+}
+use llm::hal::{
+    MetalSession,
+    hal_getenv_ptr,
+    metal_session_open,
+    metal_session_close,
+    metal_session_is_ok,
+    metal_buffer_nocopy,
+    metal_buffer_free,
+    metal_cmd_begin,
+    metal_cmd_cancel,
+    metal_cmd_commit_sync,
+}
+use llm::qwen3_paged_kv::{
+    Qwen3PagedKv,
+    qwen3_kv_alloc,
+    qwen3_kv_free,
+    qwen3_kv_is_ok,
+    qwen3_kv_arena_ptr,
+    qwen3_kv_arena_len,
+    qwen3_kv_table_off,
+    qwen3_kv_k_layer_off,
+    qwen3_kv_v_layer_off,
+    qwen3_kv_block_size,
+    qwen3_kv_truncate,
+    qwen3_kv_ensure_pos,
+    qwen3_kv_write_kv_f32_buf,
+    qwen3_kv_read_k_f64,
+    qwen3_kv_read_v_f64,
+}
+use llm::qwen3_kernels::{
+    qwen3_metal_pipelines_compile,
+    qwen3_metal_gemv,
+    qwen3_metal_gemm,
+    qwen3_metal_paged_gqa,
+    qwen3_metal_encode_paged_gqa_batch,
+    qwen3_metal_encode_rmsnorm,
+    qwen3_metal_encode_rope,
+    qwen3_metal_encode_rope_table,
+    qwen3_metal_encode_kv_scatter,
+    qwen3_metal_encode_gemv,
+    qwen3_metal_encode_swiglu,
+    qwen3_metal_encode_qk_norm_rope_kv_scatter,
+    qwen3_metal_encode_gemv_bf16_qkv,
+    qwen3_metal_encode_gemv_bf16_gate_up_swiglu,
+}
+use llm::qwen3_quant_eisa::{
+    conformal_q8_metal_pipelines_compile,
+    eisa_certify_global,
+    qwen3_eisa_q4_bytes,
+    qwen3_eisa_q8_bytes,
+    qwen3_quantize_f32_to_q4_eisa,
+    qwen3_quantize_f32_to_q8_eisa,
+    qwen3_metal_encode_gemv_quant_qkv_fast,
+    qwen3_metal_encode_gemv_quant_gate_up_swiglu,
+    qwen3_metal_encode_add_accum_rmsnorm,
+    qwen3_gemv_quant_qkv_fast_cpu,
+    qwen3_gemv_quant_gate_up_swiglu_cpu,
+    qwen3_add_accum_rmsnorm_cpu,
+}
+use llm::qwen3::{
+    Qwen3Model,
+    qwen3_model_open,
+    qwen3_model_free,
+    qwen3_model_is_ok,
+    qwen3_model_cfg,
+    qwen3_fill_rope_table,
+    qwen3_metal_runner_init,
+    qwen3_metal_runner_free,
+    qwen3_metal_runner_is_ok,
+    qwen3_eisa_model_quantize_bits,
+    qwen3_eisa_model_quantize_cpu_bits,
+    qwen3_eisa_model_free,
+    qwen3_eisa_model_free_cpu,
+    qwen3_eisa_model_is_ok,
+    qwen3_conformal_ctx_init,
+    qwen3_conformal_ctx_init_cpu,
+    qwen3_conformal_ctx_free,
+    qwen3_conformal_ctx_free_cpu,
+    qwen3_conformal_ctx_is_ok,
+    qwen3_conformal_ctx_set_q,
+    qwen3_conformal_ctx_set_jacobian,
+    qwen3_forward_token_q8_try_metal,
+    qwen3_forward_token_q8_try_cpu,
+}
+use llm::qwen3_tokenizer::{
+    Qwen3Tokenizer,
+    qwen3_tokenizer_load,
+    qwen3_tokenizer_free,
+    qwen3_tokenizer_is_ok,
+}
+use llm::qwen3_ossm::{
+    qwen3_ossm_state_alloc,
+    qwen3_ossm_state_free,
+    qwen3_ossm_state_is_ok,
+}
+use llm::sounio_llm_cli::{
+    SounioLlmRunCfg,
+    sounio_llm_run_chat_generation_q,
+}
+use tensor2::convert::{f32_bits_to_f64, f64_to_f32_bits}
+use math::pure::{sqrt, exp}
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn metal_expected_by_env() -> bool with Alloc, Mut {
+    let p = hal_getenv_ptr("SOUNIO_METAL_RUNTIME")
+    p != 0 && ptr_read_u8(p, 0) != 0
+}
+
+fn p12_bytes_match(a: i64, b: i64, n: i64) -> bool {
+    var i: i64 = 0
+    while i < n {
+        if ptr_read_u8(a, i) != ptr_read_u8(b, i) {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn write_bf16(ptr: i64, idx: i64, val: f64) with Mut {
+    let bits = f64_to_f32_bits(val)
+    let bf = ((bits >> 16) & 65535) as u16
+    let _w = ptr_write_u16_le(ptr, idx * 2, bf)
+}
+
+fn read_bf16(ptr: i64, idx: i64) -> f64 with Mut {
+    let bf = ptr_read_u16_le(ptr, idx * 2) & 65535
+    f32_bits_to_f64(bf << 16)
+}
+
+fn cpu_paged_gqa_token(
+    q_ptr: i64,
+    kv: &Qwen3PagedKv,
+    layer_idx: i64,
+    out_ptr: i64,
+    scores_ptr: i64,
+    n_q: i64,
+    n_kv: i64,
+    head_dim: i64,
+    seq_len: i64
+) with Mut, Div, Panic {
+    let gqa_ratio = n_q / n_kv
+    let scale = 1.0 / sqrt(head_dim as f64)
+    var h: i64 = 0
+    while h < n_q {
+        let kv_h = h / gqa_ratio
+        let q_head = q_ptr + h * head_dim * 4
+        var max_s: f64 = -1e30
+        var t: i64 = 0
+        while t < seq_len {
+            var dot: f64 = 0.0
+            var d: i64 = 0
+            while d < head_dim {
+                let qv = f32_bits_to_f64(ptr_read_u32_le(q_head, d * 4))
+                let kvv = qwen3_kv_read_k_f64(kv, layer_idx, t, kv_h, d)
+                dot = dot + qv * kvv
+                d = d + 1
+            }
+            let sc = dot * scale
+            let _ws = ptr_write_u32_le(scores_ptr, t * 4, f64_to_f32_bits(sc))
+            if sc > max_s { max_s = sc }
+            t = t + 1
+        }
+        var sum_e: f64 = 0.0
+        t = 0
+        while t < seq_len {
+            let sc = f32_bits_to_f64(ptr_read_u32_le(scores_ptr, t * 4))
+            let e = exp(sc - max_s)
+            let _we = ptr_write_u32_le(scores_ptr, t * 4, f64_to_f32_bits(e))
+            sum_e = sum_e + e
+            t = t + 1
+        }
+        let inv_s = 1.0 / sum_e
+        var d: i64 = 0
+        while d < head_dim {
+            var acc: f64 = 0.0
+            t = 0
+            while t < seq_len {
+                let w = f32_bits_to_f64(ptr_read_u32_le(scores_ptr, t * 4)) * inv_s
+                let vv = qwen3_kv_read_v_f64(kv, layer_idx, t, kv_h, d)
+                acc = acc + w * vv
+                t = t + 1
+            }
+            let _wo = ptr_write_u32_le(out_ptr, (h * head_dim + d) * 4, f64_to_f32_bits(acc))
+            d = d + 1
+        }
+        h = h + 1
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Test 1: SIMD paged_gqa + paged_gqa_batch + tiled gemv_bf16 + gemm_bf16
+// ----------------------------------------------------------------------------
+fn test_simd_gqa_and_tiled_bf16() -> bool with Alloc, Mut, Div, Panic, IO {
+    let n_q: i64 = 8
+    let n_kv: i64 = 2
+    let head_dim: i64 = 128
+    let block_size: i64 = 16
+    let seq_len: i64 = 25
+    let n_toks: i64 = 4
+    let pos_start: i64 = 21
+
+    let gemv_out: i64 = 36
+    let gemv_in: i64 = 288
+
+    var kv = qwen3_kv_alloc(1, 4, block_size, n_kv, head_dim)
+    let kv_tmp_bytes = n_kv * head_dim * 4
+    let q_batch_bytes = n_toks * n_q * head_dim * 4
+    let out_bytes = n_q * head_dim * 4
+    let out_batch_bytes = n_toks * n_q * head_dim * 4
+    let scores_bytes = seq_len * 4
+
+    let w_bf16_bytes = gemv_out * gemv_in * 2
+    let x_gemm_bytes = n_toks * gemv_in * 4
+    let y_gemv_bytes = gemv_out * 4
+    let y_gemm_bytes = n_toks * gemv_out * 4
+
+    let total = kv_tmp_bytes * 2 + q_batch_bytes + out_bytes * 2 + out_batch_bytes * 2 + scores_bytes
+        + w_bf16_bytes + x_gemm_bytes + y_gemv_bytes * 2 + y_gemm_bytes * 2 + 2048
+    let arena = page_arena_alloc(total)
+    var ok = qwen3_kv_is_ok(&kv) && page_arena_is_ok(&arena)
+    if ok {
+
+    let base = page_arena_ptr(&arena)
+    let k_tmp_off: i64 = 0
+    let v_tmp_off = k_tmp_off + kv_tmp_bytes
+    let q_off = v_tmp_off + kv_tmp_bytes
+    let out_cpu_off = q_off + q_batch_bytes
+    let out_gpu_off = out_cpu_off + out_bytes
+    let bout_cpu_off = out_gpu_off + out_bytes
+    let bout_gpu_off = bout_cpu_off + out_batch_bytes
+    let scores_off = bout_gpu_off + out_batch_bytes
+
+    let w_off = scores_off + scores_bytes + 64
+    let x_off = w_off + w_bf16_bytes + 64
+    let ygv_cpu_off = x_off + x_gemm_bytes
+    let ygv_gpu_off = ygv_cpu_off + y_gemv_bytes
+    let ygm_cpu_off = ygv_gpu_off + y_gemv_bytes
+    let ygm_gpu_off = ygm_cpu_off + y_gemm_bytes
+
+    // Populate 25 positions of KV cache (crossing block_size=16)
+    var p: i64 = 0
+    while p < seq_len {
+        var i: i64 = 0
+        while i < n_kv * head_dim {
+            let kv_v = ((((p * 13 + i * 7 + 3) % 19) - 9) as f64) * 0.03
+            let vv_v = ((((p * 11 + i * 5 + 1) % 17) - 8) as f64) * 0.04
+            let _wk = ptr_write_u32_le(base + k_tmp_off, i * 4, f64_to_f32_bits(kv_v))
+            let _wv = ptr_write_u32_le(base + v_tmp_off, i * 4, f64_to_f32_bits(vv_v))
+            i = i + 1
+        }
+        if !qwen3_kv_write_kv_f32_buf(&!kv, 0, p, base + k_tmp_off, base + v_tmp_off) {
+            ok = false
+        }
+        p = p + 1
+    }
+
+    var t: i64 = 0
+    while t < n_toks {
+        var qi: i64 = 0
+        while qi < n_q * head_dim {
+            let qv = ((((t * 23 + qi * 3 + 5) % 15) - 7) as f64) * 0.05
+            let _wq = ptr_write_u32_le(base + q_off, (t * n_q * head_dim + qi) * 4, f64_to_f32_bits(qv))
+            qi = qi + 1
+        }
+        t = t + 1
+    }
+
+    cpu_paged_gqa_token(base + q_off, &kv, 0, base + out_cpu_off, base + scores_off, n_q, n_kv, head_dim, seq_len)
+    t = 0
+    while t < n_toks {
+        cpu_paged_gqa_token(
+            base + q_off + t * n_q * head_dim * 4,
+            &kv, 0,
+            base + bout_cpu_off + t * n_q * head_dim * 4,
+            base + scores_off,
+            n_q, n_kv, head_dim, pos_start + t + 1
+        )
+        t = t + 1
+    }
+
+    // Populate tiled BF16 GEMV/GEMM inputs
+    var r: i64 = 0
+    while r < gemv_out {
+        var c: i64 = 0
+        while c < gemv_in {
+            let wv = ((((r * 19 + c * 7 + 1) % 21) - 10) as f64) * 0.025
+            write_bf16(base + w_off, r * gemv_in + c, wv)
+            c = c + 1
+        }
+        r = r + 1
+    }
+    t = 0
+    while t < n_toks {
+        var c: i64 = 0
+        while c < gemv_in {
+            let xv = ((((t * 17 + c * 5 + 2) % 13) - 6) as f64) * 0.04
+            let _wx = ptr_write_u32_le(base + x_off, (t * gemv_in + c) * 4, f64_to_f32_bits(xv))
+            c = c + 1
+        }
+        t = t + 1
+    }
+    t = 0
+    while t < n_toks {
+        r = 0
+        while r < gemv_out {
+            var acc: f64 = 0.0
+            var c: i64 = 0
+            while c < gemv_in {
+                let wv = read_bf16(base + w_off, r * gemv_in + c)
+                let xv = f32_bits_to_f64(ptr_read_u32_le(base + x_off, (t * gemv_in + c) * 4))
+                acc = acc + wv * xv
+                c = c + 1
+            }
+            if t == 0 {
+                let _wgv = ptr_write_u32_le(base + ygv_cpu_off, r * 4, f64_to_f32_bits(acc))
+            }
+            let _wgm = ptr_write_u32_le(base + ygm_cpu_off, (t * gemv_out + r) * 4, f64_to_f32_bits(acc))
+            r = r + 1
+        }
+        t = t + 1
+    }
+
+    let msess = metal_session_open("")
+    if metal_session_is_ok(&msess) {
+        let pipes = qwen3_metal_pipelines_compile(&msess)
+        let b_work = metal_buffer_nocopy(&msess, base, total)
+        let b_kv = metal_buffer_nocopy(&msess, qwen3_kv_arena_ptr(&kv), qwen3_kv_arena_len(&kv))
+        if !pipes.ok || b_work <= 0 || b_kv <= 0 {
+            ok = false
+        } else {
+            let rc_gqa = qwen3_metal_paged_gqa(
+                &msess, &pipes, b_work, q_off, b_kv,
+                qwen3_kv_table_off(&kv), qwen3_kv_k_layer_off(&kv, 0), qwen3_kv_v_layer_off(&kv, 0),
+                b_work, out_gpu_off, n_q, n_kv, head_dim, seq_len, block_size
+            )
+            let cid = metal_cmd_begin(&msess)
+            let rc_bgqa = if cid > 0 {
+                qwen3_metal_encode_paged_gqa_batch(
+                    &msess, cid, pipes.paged_gqa_batch,
+                    b_work, q_off, b_kv,
+                    qwen3_kv_table_off(&kv), qwen3_kv_k_layer_off(&kv, 0), qwen3_kv_v_layer_off(&kv, 0),
+                    b_work, bout_gpu_off, n_q, n_kv, head_dim, pos_start, n_toks, block_size
+                )
+            } else { -1 }
+            if rc_bgqa != 0 {
+                if cid > 0 { let _cc = metal_cmd_cancel(&msess, cid) }
+                ok = false
+            } else if metal_cmd_commit_sync(&msess, cid) != 0 {
+                ok = false
+            }
+            let rc_gv = qwen3_metal_gemv(&msess, &pipes, b_work, w_off, 2, b_work, x_off, b_work, ygv_gpu_off, gemv_out, gemv_in)
+            let rc_gm = qwen3_metal_gemm(&msess, &pipes, b_work, w_off, 2, b_work, x_off, b_work, ygm_gpu_off, gemv_out, gemv_in, n_toks)
+            if rc_gqa != 0 || rc_gv != 0 || rc_gm != 0 { ok = false }
+
+            if ok {
+                var i: i64 = 0
+                while i < n_q * head_dim {
+                    let df = abs_f64(f32_bits_to_f64(ptr_read_u32_le(base + out_cpu_off, i * 4)) - f32_bits_to_f64(ptr_read_u32_le(base + out_gpu_off, i * 4)))
+                    if df > 0.0005 { ok = false }
+                    i = i + 1
+                }
+                i = 0
+                while i < n_toks * n_q * head_dim {
+                    let dbf = abs_f64(f32_bits_to_f64(ptr_read_u32_le(base + bout_cpu_off, i * 4)) - f32_bits_to_f64(ptr_read_u32_le(base + bout_gpu_off, i * 4)))
+                    if dbf > 0.0005 { ok = false }
+                    i = i + 1
+                }
+                r = 0
+                while r < gemv_out {
+                    let dg = abs_f64(f32_bits_to_f64(ptr_read_u32_le(base + ygv_cpu_off, r * 4)) - f32_bits_to_f64(ptr_read_u32_le(base + ygv_gpu_off, r * 4)))
+                    if dg > 0.0005 { ok = false }
+                    r = r + 1
+                }
+                i = 0
+                while i < n_toks * gemv_out {
+                    let dm = abs_f64(f32_bits_to_f64(ptr_read_u32_le(base + ygm_cpu_off, i * 4)) - f32_bits_to_f64(ptr_read_u32_le(base + ygm_gpu_off, i * 4)))
+                    if dm > 0.0005 { ok = false }
+                    i = i + 1
+                }
+            }
+        }
+        if b_kv > 0 { let _bfk = metal_buffer_free(&msess, b_kv) }
+        if b_work > 0 { let _bfw = metal_buffer_free(&msess, b_work) }
+    } else if metal_expected_by_env() {
+        ok = false
+    }
+    let _mc = metal_session_close(msess)
+    }
+    let _af = page_arena_free(arena)
+    let _kf = qwen3_kv_free(kv)
+    ok
+}
+
+// ----------------------------------------------------------------------------
+// Test 2: Fused kernels parity (BF16 QKV/GateUpSwiGLU, Q4/Q8 QKV/GateUpSwiGLU,
+//         qk_norm_rope_kv_scatter, add_accum_rmsnorm with use_inv_rms=0 & 1)
+// ----------------------------------------------------------------------------
+fn check_add_accum_case(
+    base: i64,
+    x_init_off: i64,
+    h_off: i64,
+    w_bf16_off: i64,
+    x_cpu_off: i64,
+    out_cpu_off: i64,
+    conf_cpu_off: i64,
+    x_gpu_off: i64,
+    out_gpu_off: i64,
+    conf_gpu_off: i64,
+    dim: i64,
+    c_add: f64,
+    use_inv_rms: i64,
+    weight: f64,
+    eps: f64,
+    flags: i64,
+    msess: &MetalSession,
+    has_metal: bool,
+    pipe: i64,
+    buf: i64
+) -> bool with Mut, Div, Panic {
+    var i: i64 = 0
+    var sq: f64 = 0.0
+    while i < dim {
+        let xb = ptr_read_u32_le(base + x_init_off, i * 4)
+        let _wc = ptr_write_u32_le(base + x_cpu_off, i * 4, xb)
+        let _wg = ptr_write_u32_le(base + x_gpu_off, i * 4, xb)
+        let s = f32_bits_to_f64(xb) + f32_bits_to_f64(ptr_read_u32_le(base + h_off, i * 4))
+        sq = sq + s * s
+        i = i + 1
+    }
+    let inv_rms = 1.0 / sqrt(sq / (dim as f64) + eps)
+    var expected_dh = c_add + weight * sqrt(sq)
+    if (flags & 4) != 0 && use_inv_rms != 0 {
+        expected_dh = expected_dh * inv_rms
+    }
+
+    let _cc0 = ptr_write_u32_le(base + conf_cpu_off, 0, f64_to_f32_bits(0.0))
+    let _cc4 = ptr_write_u32_le(base + conf_cpu_off, 16, f64_to_f32_bits(c_add))
+    let _cc5 = ptr_write_u32_le(base + conf_cpu_off, 20, use_inv_rms)
+    let _cg0 = ptr_write_u32_le(base + conf_gpu_off, 0, f64_to_f32_bits(0.0))
+    let _cg4 = ptr_write_u32_le(base + conf_gpu_off, 16, f64_to_f32_bits(c_add))
+    let _cg5 = ptr_write_u32_le(base + conf_gpu_off, 20, use_inv_rms)
+
+    var ok = qwen3_add_accum_rmsnorm_cpu(
+        base + x_cpu_off, base + h_off, base + w_bf16_off, 2, base + out_cpu_off, base + conf_cpu_off,
+        dim, eps, weight, flags
+    )
+    let cpu_dh = f32_bits_to_f64(ptr_read_u32_le(base + conf_cpu_off, 0))
+    if abs_f64(cpu_dh - expected_dh) > 0.01 { ok = false }
+
+    if has_metal {
+        let cid = metal_cmd_begin(msess)
+        if cid <= 0 {
+            ok = false
+        } else {
+            let rc = qwen3_metal_encode_add_accum_rmsnorm(
+                msess, cid, pipe,
+                buf, buf, buf, buf, buf,
+                x_gpu_off, h_off, w_bf16_off, out_gpu_off, conf_gpu_off,
+                dim, f64_to_f32_bits(eps), f64_to_f32_bits(weight), flags
+            )
+            if rc != 0 {
+                let _cc = metal_cmd_cancel(msess, cid)
+                ok = false
+            } else if metal_cmd_commit_sync(msess, cid) != 0 {
+                ok = false
+            } else {
+                let gpu_dh = f32_bits_to_f64(ptr_read_u32_le(base + conf_gpu_off, 0))
+                if abs_f64(cpu_dh - gpu_dh) > 0.005 { ok = false }
+                i = 0
+                while i < dim {
+                    let dx = abs_f64(f32_bits_to_f64(ptr_read_u32_le(base + x_cpu_off, i * 4)) - f32_bits_to_f64(ptr_read_u32_le(base + x_gpu_off, i * 4)))
+                    let do_v = abs_f64(f32_bits_to_f64(ptr_read_u32_le(base + out_cpu_off, i * 4)) - f32_bits_to_f64(ptr_read_u32_le(base + out_gpu_off, i * 4)))
+                    if dx > 0.001 || do_v > 0.001 { ok = false }
+                    i = i + 1
+                }
+            }
+        }
+    }
+    ok
+}
+
+fn test_fused_projections_and_norms() -> bool with Alloc, Mut, Div, Panic, IO {
+    let q_dim: i64 = 128
+    let kv_dim: i64 = 64
+    let in_dim: i64 = 128
+    let inter_dim: i64 = 96
+    let n_q: i64 = 4
+    let n_kv: i64 = 2
+    let head_dim: i64 = 32
+
+    let w_q_f32_bytes = q_dim * in_dim * 4
+    let w_k_f32_bytes = kv_dim * in_dim * 4
+    let w_g_f32_bytes = inter_dim * in_dim * 4
+
+    let w_q_bf16_bytes = q_dim * in_dim * 2
+    let w_k_bf16_bytes = kv_dim * in_dim * 2
+    let w_g_bf16_bytes = inter_dim * in_dim * 2
+
+    let w_q_q4_bytes = q_dim * qwen3_eisa_q4_bytes(in_dim)
+    let w_k_q4_bytes = kv_dim * qwen3_eisa_q4_bytes(in_dim)
+    let w_g_q4_bytes = inter_dim * qwen3_eisa_q4_bytes(in_dim)
+
+    let w_q_q8_bytes = q_dim * qwen3_eisa_q8_bytes(in_dim)
+    let w_k_q8_bytes = kv_dim * qwen3_eisa_q8_bytes(in_dim)
+    let w_g_q8_bytes = inter_dim * qwen3_eisa_q8_bytes(in_dim)
+
+    let total = w_q_f32_bytes + w_k_f32_bytes * 2 + w_g_f32_bytes * 2
+        + w_q_bf16_bytes + w_k_bf16_bytes * 2 + w_g_bf16_bytes * 2
+        + w_q_q4_bytes + w_k_q4_bytes * 2 + w_g_q4_bytes * 2
+        + w_q_q8_bytes + w_k_q8_bytes * 2 + w_g_q8_bytes * 2
+        + 65536
+    let arena = page_arena_alloc(total)
+    var kv_ref = qwen3_kv_alloc(1, 2, 16, n_kv, head_dim)
+    var kv_fus = qwen3_kv_alloc(1, 2, 16, n_kv, head_dim)
+    var ok = page_arena_is_ok(&arena) && qwen3_kv_is_ok(&kv_ref) && qwen3_kv_is_ok(&kv_fus)
+    if ok {
+
+    let base = page_arena_ptr(&arena)
+    let wq_f32: i64 = 0
+    let wk_f32 = wq_f32 + w_q_f32_bytes
+    let wv_f32 = wk_f32 + w_k_f32_bytes
+    let wg_f32 = wv_f32 + w_k_f32_bytes
+    let wu_f32 = wg_f32 + w_g_f32_bytes
+
+    let wq_bf = wu_f32 + w_g_f32_bytes
+    let wk_bf = wq_bf + w_q_bf16_bytes
+    let wv_bf = wk_bf + w_k_bf16_bytes
+    let wg_bf = wv_bf + w_k_bf16_bytes
+    let wu_bf = wg_bf + w_g_bf16_bytes
+
+    let wq_q4 = wu_bf + w_g_bf16_bytes
+    let wk_q4 = wq_q4 + w_q_q4_bytes
+    let wv_q4 = wk_q4 + w_k_q4_bytes
+    let wg_q4 = wv_q4 + w_k_q4_bytes
+    let wu_q4 = wg_q4 + w_g_q4_bytes
+
+    let wq_q8 = wu_q4 + w_g_q4_bytes
+    let wk_q8 = wq_q8 + w_q_q8_bytes
+    let wv_q8 = wk_q8 + w_k_q8_bytes
+    let wg_q8 = wv_q8 + w_k_q8_bytes
+    let wu_q8 = wg_q8 + w_g_q8_bytes
+
+    let act_base = wu_q8 + w_g_q8_bytes + 64
+    let x_off = act_base
+    let x2_off = x_off + 1024
+    let h_off = x2_off + 1024
+    let nw_bf_off = h_off + 1024
+    let qw_bf_off = nw_bf_off + 1024
+    let kw_bf_off = qw_bf_off + 512
+
+    let yq_ref_off = kw_bf_off + 512
+    let yk_ref_off = yq_ref_off + 1024
+    let yv_ref_off = yk_ref_off + 1024
+    let yq_fus_off = yv_ref_off + 1024
+    let yk_fus_off = yq_fus_off + 1024
+    let yv_fus_off = yk_fus_off + 1024
+
+    let yg_ref_off = yv_fus_off + 1024
+    let yu_ref_off = yg_ref_off + 1024
+    let ysw_ref_off = yu_ref_off + 1024
+    let ysw_fus_off = ysw_ref_off + 1024
+
+    let q_norm_ref_off = ysw_fus_off + 1024
+    let k_norm_ref_off = q_norm_ref_off + 1024
+    let q_norm_fus_off = k_norm_ref_off + 1024
+    let k_norm_fus_off = q_norm_fus_off + 1024
+    let v_norm_off = k_norm_fus_off + 1024
+
+    let x_cpu_off = v_norm_off + 1024
+    let out_cpu_off = x_cpu_off + 1024
+    let conf_cpu_off = out_cpu_off + 1024
+    let x_gpu_off = conf_cpu_off + 512
+    let out_gpu_off = x_gpu_off + 1024
+    let conf_gpu_off = out_gpu_off + 1024
+
+    // Fill weights (F32 & BF16) and activations
+    var r: i64 = 0
+    while r < q_dim {
+        var c: i64 = 0
+        while c < in_dim {
+            let v = ((((r * 13 + c * 7 + 1) % 19) - 9) as f64) * 0.03
+            let _wf = ptr_write_u32_le(base + wq_f32, (r * in_dim + c) * 4, f64_to_f32_bits(v))
+            write_bf16(base + wq_bf, r * in_dim + c, v)
+            c = c + 1
+        }
+        r = r + 1
+    }
+    r = 0
+    while r < kv_dim {
+        var c: i64 = 0
+        while c < in_dim {
+            let vk = ((((r * 11 + c * 5 + 2) % 17) - 8) as f64) * 0.035
+            let vv = ((((r * 17 + c * 3 + 4) % 15) - 7) as f64) * 0.03
+            let _wkf = ptr_write_u32_le(base + wk_f32, (r * in_dim + c) * 4, f64_to_f32_bits(vk))
+            let _wvf = ptr_write_u32_le(base + wv_f32, (r * in_dim + c) * 4, f64_to_f32_bits(vv))
+            write_bf16(base + wk_bf, r * in_dim + c, vk)
+            write_bf16(base + wv_bf, r * in_dim + c, vv)
+            c = c + 1
+        }
+        r = r + 1
+    }
+    r = 0
+    while r < inter_dim {
+        var c: i64 = 0
+        while c < in_dim {
+            let vg = ((((r * 19 + c * 3 + 1) % 21) - 10) as f64) * 0.025
+            let vu = ((((r * 7 + c * 11 + 3) % 19) - 9) as f64) * 0.025
+            let _wgf = ptr_write_u32_le(base + wg_f32, (r * in_dim + c) * 4, f64_to_f32_bits(vg))
+            let _wuf = ptr_write_u32_le(base + wu_f32, (r * in_dim + c) * 4, f64_to_f32_bits(vu))
+            write_bf16(base + wg_bf, r * in_dim + c, vg)
+            write_bf16(base + wu_bf, r * in_dim + c, vu)
+            c = c + 1
+        }
+        r = r + 1
+    }
+    var i: i64 = 0
+    while i < in_dim {
+        let xv = ((((i * 9 + 2) % 15) - 7) as f64) * 0.06
+        let hv = ((((i * 5 + 1) % 13) - 6) as f64) * 0.05
+        let nw = 0.8 + ((i % 7) as f64) * 0.05
+        let _wx = ptr_write_u32_le(base + x_off, i * 4, f64_to_f32_bits(xv))
+        let _wx2 = ptr_write_u32_le(base + x2_off, i * 4, f64_to_f32_bits(xv))
+        let _wh = ptr_write_u32_le(base + h_off, i * 4, f64_to_f32_bits(hv))
+        write_bf16(base + nw_bf_off, i, nw)
+        i = i + 1
+    }
+    i = 0
+    while i < head_dim {
+        write_bf16(base + qw_bf_off, i, 0.9 + ((i % 5) as f64) * 0.04)
+        write_bf16(base + kw_bf_off, i, 0.85 + ((i % 6) as f64) * 0.03)
+        i = i + 1
+    }
+    i = 0
+    while i < n_q * head_dim {
+        let vq = ((((i * 11 + 3) % 19) - 9) as f64) * 0.08
+        let _wqr = ptr_write_u32_le(base + q_norm_ref_off, i * 4, f64_to_f32_bits(vq))
+        let _wqf = ptr_write_u32_le(base + q_norm_fus_off, i * 4, f64_to_f32_bits(vq))
+        i = i + 1
+    }
+    i = 0
+    while i < n_kv * head_dim {
+        let vk = ((((i * 7 + 5) % 17) - 8) as f64) * 0.07
+        let vv = ((((i * 13 + 1) % 15) - 7) as f64) * 0.06
+        let _wkr = ptr_write_u32_le(base + k_norm_ref_off, i * 4, f64_to_f32_bits(vk))
+        let _wkf = ptr_write_u32_le(base + k_norm_fus_off, i * 4, f64_to_f32_bits(vk))
+        let _wv = ptr_write_u32_le(base + v_norm_off, i * 4, f64_to_f32_bits(vv))
+        i = i + 1
+    }
+
+    ok = ok && qwen3_quantize_f32_to_q4_eisa(base + wq_f32, base + wq_q4, q_dim, in_dim)
+    ok = ok && qwen3_quantize_f32_to_q4_eisa(base + wk_f32, base + wk_q4, kv_dim, in_dim)
+    ok = ok && qwen3_quantize_f32_to_q4_eisa(base + wv_f32, base + wv_q4, kv_dim, in_dim)
+    ok = ok && qwen3_quantize_f32_to_q4_eisa(base + wg_f32, base + wg_q4, inter_dim, in_dim)
+    ok = ok && qwen3_quantize_f32_to_q4_eisa(base + wu_f32, base + wu_q4, inter_dim, in_dim)
+
+    ok = ok && qwen3_quantize_f32_to_q8_eisa(base + wq_f32, base + wq_q8, q_dim, in_dim)
+    ok = ok && qwen3_quantize_f32_to_q8_eisa(base + wk_f32, base + wk_q8, kv_dim, in_dim)
+    ok = ok && qwen3_quantize_f32_to_q8_eisa(base + wv_f32, base + wv_q8, kv_dim, in_dim)
+    ok = ok && qwen3_quantize_f32_to_q8_eisa(base + wg_f32, base + wg_q8, inter_dim, in_dim)
+    ok = ok && qwen3_quantize_f32_to_q8_eisa(base + wu_f32, base + wu_q8, inter_dim, in_dim)
+
+    // Pre-allocate pos 3 in both KV caches before scatter
+    let pos_test: i64 = 3
+    let eps_bits = f64_to_f32_bits(0.000001)
+    ok = ok && qwen3_kv_ensure_pos(&!kv_ref, pos_test) && qwen3_kv_ensure_pos(&!kv_fus, pos_test)
+
+    var rope_arena = page_arena_alloc(4096)
+    var b_rope: i64 = 0
+    var msess = metal_session_open("")
+    let has_metal = metal_session_is_ok(&msess)
+    var buf: i64 = 0
+    var b_kv_r: i64 = 0
+    var b_kv_f: i64 = 0
+    var pipe_add_acc: i64 = 0
+
+    if has_metal {
+        let kpipes = qwen3_metal_pipelines_compile(&msess)
+        let qpipes = conformal_q8_metal_pipelines_compile(&msess)
+        buf = metal_buffer_nocopy(&msess, base, total)
+        b_kv_r = metal_buffer_nocopy(&msess, qwen3_kv_arena_ptr(&kv_ref), qwen3_kv_arena_len(&kv_ref))
+        b_kv_f = metal_buffer_nocopy(&msess, qwen3_kv_arena_ptr(&kv_fus), qwen3_kv_arena_len(&kv_fus))
+        if page_arena_is_ok(&rope_arena) && qwen3_fill_rope_table(page_arena_ptr(&rope_arena), 8, head_dim, 1000000.0) {
+            b_rope = metal_buffer_nocopy(&msess, page_arena_ptr(&rope_arena), page_arena_len(&rope_arena))
+        }
+        pipe_add_acc = qpipes.add_accum_rmsnorm_bf16
+        if !kpipes.ok || !qpipes.ok || buf <= 0 || b_kv_r <= 0 || b_kv_f <= 0 || b_rope <= 0 {
+            ok = false
+        } else {
+            // A) BF16 QKV & GateUpSwiGLU + qk_norm_rope_kv_scatter
+            let cid = metal_cmd_begin(&msess)
+            if cid <= 0 {
+                ok = false
+            } else {
+                let e1 = qwen3_metal_encode_gemv(&msess, cid, kpipes.gemv_bf16, buf, wq_bf, buf, x_off, buf, yq_ref_off, q_dim, in_dim)
+                let e2 = qwen3_metal_encode_gemv(&msess, cid, kpipes.gemv_bf16, buf, wk_bf, buf, x_off, buf, yk_ref_off, kv_dim, in_dim)
+                let e3 = qwen3_metal_encode_gemv(&msess, cid, kpipes.gemv_bf16, buf, wv_bf, buf, x_off, buf, yv_ref_off, kv_dim, in_dim)
+                let e4 = qwen3_metal_encode_gemv_bf16_qkv(&msess, cid, kpipes.gemv_bf16_qkv, buf, buf, buf, buf, buf, wq_bf, wk_bf, wv_bf, x_off, yq_fus_off, yk_fus_off, yv_fus_off, q_dim, kv_dim, in_dim)
+
+                let e5 = qwen3_metal_encode_gemv(&msess, cid, kpipes.gemv_bf16, buf, wg_bf, buf, x_off, buf, yg_ref_off, inter_dim, in_dim)
+                let e6 = qwen3_metal_encode_gemv(&msess, cid, kpipes.gemv_bf16, buf, wu_bf, buf, x_off, buf, yu_ref_off, inter_dim, in_dim)
+                let e7 = qwen3_metal_encode_swiglu(&msess, cid, kpipes.swiglu, buf, yg_ref_off, buf, yu_ref_off, buf, ysw_ref_off, inter_dim)
+                let e8 = qwen3_metal_encode_gemv_bf16_gate_up_swiglu(&msess, cid, kpipes.gemv_bf16_gate_up_swiglu, buf, buf, buf, buf, wg_bf, wu_bf, x_off, ysw_fus_off, inter_dim, in_dim)
+
+                let r1 = qwen3_metal_encode_rmsnorm(&msess, cid, kpipes.rmsnorm_bf16, buf, q_norm_ref_off, buf, qw_bf_off, buf, q_norm_ref_off, n_q, head_dim, eps_bits)
+                let r2 = qwen3_metal_encode_rmsnorm(&msess, cid, kpipes.rmsnorm_bf16, buf, k_norm_ref_off, buf, kw_bf_off, buf, k_norm_ref_off, n_kv, head_dim, eps_bits)
+                let r3 = qwen3_metal_encode_rope_table(&msess, cid, kpipes.rope_table, buf, q_norm_ref_off, b_rope, pos_test * head_dim * 4, n_q, head_dim)
+                let r4 = qwen3_metal_encode_rope_table(&msess, cid, kpipes.rope_table, buf, k_norm_ref_off, b_rope, pos_test * head_dim * 4, n_kv, head_dim)
+                let r5 = qwen3_metal_encode_kv_scatter(&msess, cid, kpipes.kv_scatter, buf, k_norm_ref_off, buf, v_norm_off, b_kv_r, qwen3_kv_table_off(&kv_ref), qwen3_kv_k_layer_off(&kv_ref, 0), qwen3_kv_v_layer_off(&kv_ref, 0), kv_dim, pos_test, 16)
+                let r6 = qwen3_metal_encode_qk_norm_rope_kv_scatter(&msess, cid, kpipes.qk_norm_rope_kv_bf16, buf, buf, buf, buf, buf, b_kv_f, q_norm_fus_off, k_norm_fus_off, v_norm_off, qw_bf_off, kw_bf_off, qwen3_kv_table_off(&kv_fus), qwen3_kv_k_layer_off(&kv_fus, 0), qwen3_kv_v_layer_off(&kv_fus, 0), n_q, n_kv, head_dim, pos_test, 16, eps_bits, b_rope, pos_test * head_dim * 4)
+
+                if e1 != 0 || e2 != 0 || e3 != 0 || e4 != 0 || e5 != 0 || e6 != 0 || e7 != 0 || e8 != 0
+                    || r1 != 0 || r2 != 0 || r3 != 0 || r4 != 0 || r5 != 0 || r6 != 0 {
+                    let _cc = metal_cmd_cancel(&msess, cid)
+                    ok = false
+                } else if metal_cmd_commit_sync(&msess, cid) != 0 {
+                    ok = false
+                } else {
+                    i = 0
+                    while i < q_dim {
+                        if abs_f64(f32_bits_to_f64(ptr_read_u32_le(base + yq_ref_off, i * 4)) - f32_bits_to_f64(ptr_read_u32_le(base + yq_fus_off, i * 4))) > 0.0005 { ok = false }
+                        i = i + 1
+                    }
+                    i = 0
+                    while i < kv_dim {
+                        if abs_f64(f32_bits_to_f64(ptr_read_u32_le(base + yk_ref_off, i * 4)) - f32_bits_to_f64(ptr_read_u32_le(base + yk_fus_off, i * 4))) > 0.0005 { ok = false }
+                        if abs_f64(f32_bits_to_f64(ptr_read_u32_le(base + yv_ref_off, i * 4)) - f32_bits_to_f64(ptr_read_u32_le(base + yv_fus_off, i * 4))) > 0.0005 { ok = false }
+                        i = i + 1
+                    }
+                    i = 0
+                    while i < inter_dim {
+                        if abs_f64(f32_bits_to_f64(ptr_read_u32_le(base + ysw_ref_off, i * 4)) - f32_bits_to_f64(ptr_read_u32_le(base + ysw_fus_off, i * 4))) > 0.0005 { ok = false }
+                        i = i + 1
+                    }
+                    i = 0
+                    while i < n_q * head_dim {
+                        if abs_f64(f32_bits_to_f64(ptr_read_u32_le(base + q_norm_ref_off, i * 4)) - f32_bits_to_f64(ptr_read_u32_le(base + q_norm_fus_off, i * 4))) > 0.0005 { ok = false }
+                        i = i + 1
+                    }
+                    var kh: i64 = 0
+                    while kh < n_kv {
+                        var hd: i64 = 0
+                        while hd < head_dim {
+                            if abs_f64(qwen3_kv_read_k_f64(&kv_ref, 0, pos_test, kh, hd) - qwen3_kv_read_k_f64(&kv_fus, 0, pos_test, kh, hd)) > 0.0005 { ok = false }
+                            if abs_f64(qwen3_kv_read_v_f64(&kv_ref, 0, pos_test, kh, hd) - qwen3_kv_read_v_f64(&kv_fus, 0, pos_test, kh, hd)) > 0.0005 { ok = false }
+                            hd = hd + 1
+                        }
+                        kh = kh + 1
+                    }
+                }
+            }
+
+            // B) Quantized Q4 & Q8 QKV + GateUpSwiGLU CPU vs Metal parity
+            if ok {
+                // Q4 first
+                ok = ok && qwen3_gemv_quant_qkv_fast_cpu(4, base + wq_q4, base + wk_q4, base + wv_q4, base + x_off, base + yq_ref_off, base + yk_ref_off, base + yv_ref_off, q_dim, kv_dim, in_dim)
+                ok = ok && qwen3_gemv_quant_gate_up_swiglu_cpu(4, base + wg_q4, base + wu_q4, base + x_off, base + ysw_ref_off, inter_dim, in_dim)
+                let cid4 = metal_cmd_begin(&msess)
+                if cid4 <= 0 { ok = false } else {
+                    let eq = qwen3_metal_encode_gemv_quant_qkv_fast(&msess, cid4, qpipes.q4_qkv_fast, buf, buf, buf, wq_q4, wk_q4, wv_q4, x_off, yq_fus_off, yk_fus_off, yv_fus_off, q_dim, kv_dim, in_dim)
+                    let eg = qwen3_metal_encode_gemv_quant_gate_up_swiglu(&msess, cid4, qpipes.q4_gate_up_swiglu, buf, buf, buf, wg_q4, wu_q4, x_off, ysw_fus_off, inter_dim, in_dim)
+                    if eq != 0 || eg != 0 {
+                        let _cc = metal_cmd_cancel(&msess, cid4)
+                        ok = false
+                    } else if metal_cmd_commit_sync(&msess, cid4) != 0 {
+                        ok = false
+                    } else {
+                        i = 0
+                        while i < q_dim {
+                            if abs_f64(f32_bits_to_f64(ptr_read_u32_le(base + yq_ref_off, i * 4)) - f32_bits_to_f64(ptr_read_u32_le(base + yq_fus_off, i * 4))) > 0.001 { ok = false }
+                            i = i + 1
+                        }
+                        i = 0
+                        while i < kv_dim {
+                            if abs_f64(f32_bits_to_f64(ptr_read_u32_le(base + yk_ref_off, i * 4)) - f32_bits_to_f64(ptr_read_u32_le(base + yk_fus_off, i * 4))) > 0.001 { ok = false }
+                            if abs_f64(f32_bits_to_f64(ptr_read_u32_le(base + yv_ref_off, i * 4)) - f32_bits_to_f64(ptr_read_u32_le(base + yv_fus_off, i * 4))) > 0.001 { ok = false }
+                            i = i + 1
+                        }
+                        i = 0
+                        while i < inter_dim {
+                            if abs_f64(f32_bits_to_f64(ptr_read_u32_le(base + ysw_ref_off, i * 4)) - f32_bits_to_f64(ptr_read_u32_le(base + ysw_fus_off, i * 4))) > 0.001 { ok = false }
+                            i = i + 1
+                        }
+                    }
+                }
+            }
+            if ok {
+                // Q8 next
+                ok = ok && qwen3_gemv_quant_qkv_fast_cpu(8, base + wq_q8, base + wk_q8, base + wv_q8, base + x_off, base + yq_ref_off, base + yk_ref_off, base + yv_ref_off, q_dim, kv_dim, in_dim)
+                ok = ok && qwen3_gemv_quant_gate_up_swiglu_cpu(8, base + wg_q8, base + wu_q8, base + x_off, base + ysw_ref_off, inter_dim, in_dim)
+                let cid8 = metal_cmd_begin(&msess)
+                if cid8 <= 0 { ok = false } else {
+                    let eq = qwen3_metal_encode_gemv_quant_qkv_fast(&msess, cid8, qpipes.q8_qkv_fast, buf, buf, buf, wq_q8, wk_q8, wv_q8, x_off, yq_fus_off, yk_fus_off, yv_fus_off, q_dim, kv_dim, in_dim)
+                    let eg = qwen3_metal_encode_gemv_quant_gate_up_swiglu(&msess, cid8, qpipes.q8_gate_up_swiglu, buf, buf, buf, wg_q8, wu_q8, x_off, ysw_fus_off, inter_dim, in_dim)
+                    if eq != 0 || eg != 0 {
+                        let _cc = metal_cmd_cancel(&msess, cid8)
+                        ok = false
+                    } else if metal_cmd_commit_sync(&msess, cid8) != 0 {
+                        ok = false
+                    } else {
+                        i = 0
+                        while i < q_dim {
+                            if abs_f64(f32_bits_to_f64(ptr_read_u32_le(base + yq_ref_off, i * 4)) - f32_bits_to_f64(ptr_read_u32_le(base + yq_fus_off, i * 4))) > 0.001 { ok = false }
+                            i = i + 1
+                        }
+                        i = 0
+                        while i < kv_dim {
+                            if abs_f64(f32_bits_to_f64(ptr_read_u32_le(base + yk_ref_off, i * 4)) - f32_bits_to_f64(ptr_read_u32_le(base + yk_fus_off, i * 4))) > 0.001 { ok = false }
+                            if abs_f64(f32_bits_to_f64(ptr_read_u32_le(base + yv_ref_off, i * 4)) - f32_bits_to_f64(ptr_read_u32_le(base + yv_fus_off, i * 4))) > 0.001 { ok = false }
+                            i = i + 1
+                        }
+                        i = 0
+                        while i < inter_dim {
+                            if abs_f64(f32_bits_to_f64(ptr_read_u32_le(base + ysw_ref_off, i * 4)) - f32_bits_to_f64(ptr_read_u32_le(base + ysw_fus_off, i * 4))) > 0.001 { ok = false }
+                            i = i + 1
+                        }
+                    }
+                }
+            }
+        }
+    } else if metal_expected_by_env() {
+        ok = false
+    } else {
+        // CPU-only check on Linux x86-64 for Q4/Q8 QKV & GateUpSwiGLU
+        ok = ok && qwen3_gemv_quant_qkv_fast_cpu(4, base + wq_q4, base + wk_q4, base + wv_q4, base + x_off, base + yq_ref_off, base + yk_ref_off, base + yv_ref_off, q_dim, kv_dim, in_dim)
+        ok = ok && qwen3_gemv_quant_gate_up_swiglu_cpu(4, base + wg_q4, base + wu_q4, base + x_off, base + ysw_ref_off, inter_dim, in_dim)
+        ok = ok && qwen3_gemv_quant_qkv_fast_cpu(8, base + wq_q8, base + wk_q8, base + wv_q8, base + x_off, base + yq_fus_off, base + yk_fus_off, base + yv_fus_off, q_dim, kv_dim, in_dim)
+        ok = ok && qwen3_gemv_quant_gate_up_swiglu_cpu(8, base + wg_q8, base + wu_q8, base + x_off, base + ysw_fus_off, inter_dim, in_dim)
+    }
+
+    // C) add_accum_rmsnorm (use_inv_rms = 0 and use_inv_rms = 1)
+    if ok {
+        ok = ok && check_add_accum_case(
+            base, x2_off, h_off, nw_bf_off,
+            x_cpu_off, out_cpu_off, conf_cpu_off,
+            x_gpu_off, out_gpu_off, conf_gpu_off,
+            in_dim, 5.0, 0, 0.25, 0.000001, 1 | 2,
+            &msess, has_metal, pipe_add_acc, buf
+        )
+        ok = ok && check_add_accum_case(
+            base, x2_off, h_off, nw_bf_off,
+            x_cpu_off, out_cpu_off, conf_cpu_off,
+            x_gpu_off, out_gpu_off, conf_gpu_off,
+            in_dim, 12.5, 1, 0.25, 0.000001, 1 | 2 | 4,
+            &msess, has_metal, pipe_add_acc, buf
+        )
+    }
+
+    if b_rope > 0 { let _brp = metal_buffer_free(&msess, b_rope) }
+    let _frp = page_arena_free(rope_arena)
+    if b_kv_r > 0 { let _bkr = metal_buffer_free(&msess, b_kv_r) }
+    if b_kv_f > 0 { let _bkf = metal_buffer_free(&msess, b_kv_f) }
+    if buf > 0 { let _bw = metal_buffer_free(&msess, buf) }
+    let _mc = metal_session_close(msess)
+    }
+    let _kf1 = qwen3_kv_free(kv_ref)
+    let _kf2 = qwen3_kv_free(kv_fus)
+    let _af = page_arena_free(arena)
+    ok
+}
+
+// ----------------------------------------------------------------------------
+// Test 3: Untied 2-shard /tmp/sounio_p11_multishard end-to-end CPU == Metal parity
+//         across bf16, q4_conformal+Jacobian, and q4_exact_scrub
+// ----------------------------------------------------------------------------
+fn run_untied_multishard_mode_pair(use_metal: bool, tok: &Qwen3Tokenizer, m: &Qwen3Model, out_bf: i64, out_q4: i64, p_ptr: i64, p_len: i64, len_bf: i64, len_q4: i64) -> bool with Alloc, Mut, Div, Panic, IO {
+    let cfg = qwen3_model_cfg(m)
+    var kv = qwen3_kv_alloc(cfg.layers, 8, 16, cfg.n_kv, cfg.head_dim)
+    var ossm = qwen3_ossm_state_alloc(cfg.layers, cfg.hidden)
+    var ok = qwen3_kv_is_ok(&kv) && qwen3_ossm_state_is_ok(&ossm)
+    if ok {
+        let cfg_bf = SounioLlmRunCfg {
+            use_metal: use_metal, enable_thinking: false, max_tokens: 4, max_seq: 64,
+            temp: 0.0, top_p: 0.0, seed: 42, ossm_every: 0, quant_mode: 0,
+            stream_stdout: false, raw_prompt: true, ossm_weights_ptr: 0, ossm_weights_len: 0, use_tensor_core_prefill: false, ok: true,
+        }
+        let cfg_q4_exact = SounioLlmRunCfg {
+            use_metal: use_metal, enable_thinking: false, max_tokens: 4, max_seq: 64,
+            temp: 0.0, top_p: 0.0, seed: 42, ossm_every: 0, quant_mode: 20,
+            stream_stdout: false, raw_prompt: true, ossm_weights_ptr: 0, ossm_weights_len: 0, use_tensor_core_prefill: false, ok: true,
+        }
+        let s_bf = sounio_llm_run_chat_generation_q(tok, m, &!kv, &!ossm, 0, 0, p_ptr, p_len, &cfg_bf, -1.0, out_bf, 4096, len_bf)
+        let s_q4a = sounio_llm_run_chat_generation_q(tok, m, &!kv, &!ossm, 0, 0, p_ptr, p_len, &cfg_q4_exact, 0.0001, out_q4, 4096, len_q4)
+        let lb = ptr_read_i64_le(len_bf, 0)
+        let la = ptr_read_i64_le(len_q4, 0)
+        if !s_bf.ok || !s_q4a.ok || s_bf.generated_tokens != 4 || s_q4a.generated_tokens != 4 { ok = false }
+        if s_q4a.last_token_id != s_bf.last_token_id || la != lb || !p12_bytes_match(out_bf, out_q4, lb) { ok = false }
+
+        let s_q4b = sounio_llm_run_chat_generation_q(tok, m, &!kv, &!ossm, 0, 0, p_ptr, p_len, &cfg_q4_exact, 10000.0, out_q4, 4096, len_q4)
+        let lbb = ptr_read_i64_le(len_q4, 0)
+        if !s_q4b.ok || s_q4b.generated_tokens != 4 || s_q4b.last_token_id != s_bf.last_token_id || lbb != lb || !p12_bytes_match(out_bf, out_q4, lb) {
+            ok = false
+        }
+    }
+    let _of = qwen3_ossm_state_free(ossm)
+    let _kf = qwen3_kv_free(kv)
+    ok
+}
+
+fn test_untied_multishard_jac_parity() -> bool with Alloc, Mut, Div, Panic, IO {
+    let model_dir = "/tmp/sounio_p11_multishard"
+    let tok_path = "/tmp/sounio_p11_multishard/tokenizer.json"
+    let chk = mapped_shard_open(tok_path)
+    let has_model = mapped_shard_is_ok(&chk) && mapped_shard_len(&chk) > 0
+    let _cc = mapped_shard_close(chk)
+    if !has_model { return false }
+
+    let tok = qwen3_tokenizer_load(tok_path)
+    let m = qwen3_model_open(model_dir)
+    let arena = page_arena_alloc(32768)
+    var ok = qwen3_tokenizer_is_ok(&tok) && qwen3_model_is_ok(&m) && page_arena_is_ok(&arena)
+    if ok {
+        let cfg = qwen3_model_cfg(&m)
+        ok = !cfg.tied && cfg.layers == 2 && cfg.vocab == 256
+        let base = page_arena_ptr(&arena)
+        let p_ptr = base
+        let prompt_str = "abcd"
+        let p_len = str_len(prompt_str)
+        var i: i64 = 0
+        while i < p_len {
+            let _wp = ptr_write_u8(p_ptr, i, str_char_at(prompt_str, i) as u8)
+            i = i + 1
+        }
+        let _wp0 = ptr_write_u8(p_ptr, p_len, 0)
+
+        let out_cpu = base + 4096
+        let out_q4_c = base + 8192
+        let out_metal = base + 12288
+        let out_q4_m = base + 16384
+        let len_cpu = base + 24576
+        let len_q4_c = base + 24584
+        let len_metal = base + 24592
+        let len_q4_m = base + 24600
+
+        ok = ok && run_untied_multishard_mode_pair(false, &tok, &m, out_cpu, out_q4_c, p_ptr, p_len, len_cpu, len_q4_c)
+
+        // Direct Jacobian conformal forward step (mode 17 + c_add=12.5 + use_inv_rms=true) CPU vs Metal parity
+        var kv_cpu = qwen3_kv_alloc(cfg.layers, 8, 16, cfg.n_kv, cfg.head_dim)
+        let em_cpu = qwen3_eisa_model_quantize_cpu_bits(&m, 4)
+        var conf_cpu = qwen3_conformal_ctx_init_cpu(&m, 17)
+        let jac_c_ok = qwen3_kv_is_ok(&kv_cpu) && qwen3_eisa_model_is_ok(&em_cpu) && qwen3_conformal_ctx_is_ok(&conf_cpu)
+            && qwen3_conformal_ctx_set_q(&!conf_cpu, 0.5) && qwen3_conformal_ctx_set_jacobian(&!conf_cpu, 12.5, true)
+        let c_try = if jac_c_ok {
+            let _c0 = qwen3_forward_token_q8_try_cpu(&m, &em_cpu, &conf_cpu, &!kv_cpu, 1, 0, false)
+            qwen3_forward_token_q8_try_cpu(&m, &em_cpu, &conf_cpu, &!kv_cpu, 2, 1, true)
+        } else {
+            ok = false
+            eisa_certify_global(0, 0, 0)
+        }
+
+        let msess = metal_session_open("")
+        let has_metal = metal_session_is_ok(&msess)
+        let _mc = metal_session_close(msess)
+        if has_metal {
+            ok = ok && run_untied_multishard_mode_pair(true, &tok, &m, out_metal, out_q4_m, p_ptr, p_len, len_metal, len_q4_m)
+            let lc = ptr_read_i64_le(len_cpu, 0)
+            let lm = ptr_read_i64_le(len_metal, 0)
+            if lc != lm || !p12_bytes_match(out_cpu, out_metal, lc) { ok = false }
+
+            var kv_m = qwen3_kv_alloc(cfg.layers, 8, 16, cfg.n_kv, cfg.head_dim)
+            let rt = qwen3_metal_runner_init(&m, &kv_m, "")
+            let em_m = qwen3_eisa_model_quantize_bits(&m, &rt, 4)
+            var conf_m = qwen3_conformal_ctx_init(&m, &rt, 17)
+            let jac_m_ok = qwen3_kv_is_ok(&kv_m) && qwen3_metal_runner_is_ok(&rt) && qwen3_eisa_model_is_ok(&em_m) && qwen3_conformal_ctx_is_ok(&conf_m)
+                && qwen3_conformal_ctx_set_q(&!conf_m, 0.5) && qwen3_conformal_ctx_set_jacobian(&!conf_m, 12.5, true)
+            if jac_m_ok {
+                let _m0 = qwen3_forward_token_q8_try_metal(&m, &em_m, &conf_m, &!kv_m, &rt, 1, 0, false)
+                let m_try = qwen3_forward_token_q8_try_metal(&m, &em_m, &conf_m, &!kv_m, &rt, 2, 1, true)
+                if c_try.top1_id != m_try.top1_id || abs_f64(c_try.top1_err - m_try.top1_err) > 0.005 || abs_f64(c_try.global_margin - m_try.global_margin) > 0.005 {
+                    ok = false
+                }
+            } else {
+                ok = false
+            }
+            let _cfm = qwen3_conformal_ctx_free(conf_m, &rt)
+            let _efm = qwen3_eisa_model_free(em_m, &rt)
+            let _rfm = qwen3_metal_runner_free(rt)
+            let _kfm = qwen3_kv_free(kv_m)
+        } else if metal_expected_by_env() {
+            ok = false
+        }
+
+        let _cfc = qwen3_conformal_ctx_free_cpu(conf_cpu)
+        let _efc = qwen3_eisa_model_free_cpu(em_cpu)
+        let _kfc = qwen3_kv_free(kv_cpu)
+    }
+
+    let _af = page_arena_free(arena)
+    let _mf = qwen3_model_free(m)
+    let _tkf = qwen3_tokenizer_free(tok)
+    ok
+}
+
+pub fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
+    let t1 = test_simd_gqa_and_tiled_bf16()
+    let t2 = test_fused_projections_and_norms()
+    let t3 = test_untied_multishard_jac_parity()
+    if t1 && t2 && t3 {
+        println("LLM_PHASE12_FUSED_PASS")
+        return 0
+    }
+    print("LLM_PHASE12_FUSED_FAIL t1=")
+    print_int(if t1 { 1 } else { 0 })
+    print(" t2=")
+    print_int(if t2 { 1 } else { 0 })
+    print(" t3=")
+    print_int(if t3 { 1 } else { 0 })
+    print("\n")
+    1
+}

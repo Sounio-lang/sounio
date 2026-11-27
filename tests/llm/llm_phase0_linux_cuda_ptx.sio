@@ -1,0 +1,136 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: LLM_PHASE0_LINUX_CUDA_PTX_PASS
+//
+// Fase 0 witness (Linux x86-64 ELF + PTX + libcuda.so.1 / SOUNIO_CUDA_DRIVER_LIB):
+// maps a 2.5 GiB sparse shard via mmap_ro, emits deterministic bf16_to_f32 PTX,
+// loads CUDA Driver API via dlopen/dlsym, transfers the 2.25 GiB window,
+// launches the PTX kernel, copies results back into PageArena, and checks
+// exact IEEE FP32 bits.
+
+use llm::mmap::{
+    MappedShard, PageArena,
+    mapped_shard_is_ok, mapped_shard_ptr, mapped_shard_len,
+    page_arena_is_ok, page_arena_ptr, page_arena_len,
+    mapped_shard_open, mapped_shard_close,
+    page_arena_alloc, page_arena_free, page_arena_read_u32_le,
+}
+use llm::bf16_kernels::{emit_bf16_to_f32_ptx_cstr}
+use llm::hal::{
+    CudaDriverSession,
+    cuda_session_is_ok, cuda_session_open, cuda_session_close,
+    cuda_module_load_ptx_ptr, cuda_module_unload, cuda_module_get_fn,
+    cuda_mem_alloc, cuda_mem_free, cuda_memcpy_h2d, cuda_memcpy_d2h,
+    cuda_launch_3param_1d,
+}
+
+fn check_out_word(arena: &PageArena, idx: i64, expected: i64) -> bool {
+    let r = page_arena_read_u32_le(arena, idx * 4)
+    if !r.1 { return false }
+    r.0 == expected
+}
+
+fn cleanup_cuda(
+    shard: MappedShard,
+    arena: PageArena,
+    sess: CudaDriverSession
+) -> i64 with IO, Mut {
+    let _sc = cuda_session_close(sess)
+    let _ac = page_arena_free(arena)
+    let _mc = mapped_shard_close(shard)
+    0
+}
+
+fn run_cuda_with_sess(
+    shard: &MappedShard,
+    arena: &PageArena,
+    sess: &CudaDriverSession,
+    offset_225gib: i64
+) -> bool with IO, Mut, Alloc {
+    let ptx_cstr = emit_bf16_to_f32_ptx_cstr()
+    let hmod = cuda_module_load_ptx_ptr(sess, ptx_cstr)
+    heap_free(ptx_cstr as *mut u8)
+    let hfn = cuda_module_get_fn(sess, hmod, "bf16_to_f32")
+    if hmod == 0 || hfn == 0 {
+        if hmod != 0 { let _u = cuda_module_unload(sess, hmod) }
+        println("LLM_PHASE0_LINUX_CUDA_PTX_FAIL: module load")
+        return false
+    }
+
+    let d_in = cuda_mem_alloc(sess, 12)
+    let d_out = cuda_mem_alloc(sess, 24)
+    if d_in == 0 || d_out == 0 {
+        if d_in != 0 { let _f0 = cuda_mem_free(sess, d_in) }
+        if d_out != 0 { let _f1 = cuda_mem_free(sess, d_out) }
+        let _u = cuda_module_unload(sess, hmod)
+        println("LLM_PHASE0_LINUX_CUDA_PTX_FAIL: mem alloc")
+        return false
+    }
+
+    let src_ptr = mapped_shard_ptr(shard) + offset_225gib
+    let dst_host = page_arena_ptr(arena)
+    var ok = false
+    if cuda_memcpy_h2d(sess, d_in, src_ptr, 12) != 0 {
+        println("LLM_PHASE0_LINUX_CUDA_PTX_FAIL: h2d")
+    } else if cuda_launch_3param_1d(sess, hfn, 1, 32, d_in, d_out, 6) != 0 {
+        println("LLM_PHASE0_LINUX_CUDA_PTX_FAIL: launch")
+    } else if cuda_memcpy_d2h(sess, dst_host, d_out, 24) != 0 {
+        println("LLM_PHASE0_LINUX_CUDA_PTX_FAIL: d2h")
+    } else {
+        let ok0 = check_out_word(arena, 0, 0x3F800000)
+        let ok1 = check_out_word(arena, 1, 0xC0200000)
+        let ok2 = check_out_word(arena, 2, 0x40490000)
+        let ok3 = check_out_word(arena, 3, 0x00000000)
+        let ok4 = check_out_word(arena, 4, 0x80000000)
+        let ok5 = check_out_word(arena, 5, 0x477F0000)
+        if ok0 && ok1 && ok2 && ok3 && ok4 && ok5 {
+            ok = true
+        } else {
+            println("LLM_PHASE0_LINUX_CUDA_PTX_FAIL: bit mismatch")
+        }
+    }
+
+    let _f0 = cuda_mem_free(sess, d_in)
+    let _f1 = cuda_mem_free(sess, d_out)
+    let _u = cuda_module_unload(sess, hmod)
+    ok
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
+    let small_a = page_arena_alloc(5000)
+    let small_ok = page_arena_is_ok(&small_a) && page_arena_len(&small_a) == 16384
+    let small_freed = page_arena_free(small_a) == 0
+    if !small_ok || !small_freed {
+        println("LLM_PHASE0_LINUX_CUDA_PTX_FAIL: small arena alloc/free")
+        return 1
+    }
+
+    var shard_path = "/tmp/llm_phase0_shard.bin"
+    let cfg_file = "/tmp/sounio_llm_phase0_linux_shard.txt"
+    if file_size(cfg_file) > 0 {
+        shard_path = read_file(cfg_file)
+    }
+
+    let offset_225gib: i64 = 2415919104
+    let shard = mapped_shard_open(shard_path)
+    let arena = page_arena_alloc(16384)
+    let sess = cuda_session_open("", 0)
+
+    var ok = false
+    if !mapped_shard_is_ok(&shard) || mapped_shard_len(&shard) < offset_225gib + 12 {
+        println("LLM_PHASE0_LINUX_CUDA_PTX_FAIL: open shard")
+    } else if !page_arena_is_ok(&arena) {
+        println("LLM_PHASE0_LINUX_CUDA_PTX_FAIL: alloc arena")
+    } else if !cuda_session_is_ok(&sess) {
+        println("LLM_PHASE0_LINUX_CUDA_PTX_FAIL: cuda session")
+    } else {
+        ok = run_cuda_with_sess(&shard, &arena, &sess, offset_225gib)
+    }
+
+    let _z = cleanup_cuda(shard, arena, sess)
+    if ok {
+        println("LLM_PHASE0_LINUX_CUDA_PTX_PASS")
+        return 0
+    }
+    1
+}

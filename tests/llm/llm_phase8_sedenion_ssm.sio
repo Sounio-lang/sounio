@@ -1,0 +1,398 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: LLM_PHASE8_SEDENION_SSM_PASS
+//
+// Phase 8 Sedenion Delta SSM Verification:
+// Test 1: Canonical ZD (e3 + e10) * (e6 - e15) == 0 (< 1e-6)
+// Test 2: Stiefel V_{7,2} + Moreno-Lagrange P_4 idempotence, kernel annihilation, symmetry, trace == 4.0
+// Test 3: Octonion vanishing vs Sedenion rank-4 contrast
+// Test 4: Sedenion delta step CPU 1-step kernel overwrite and orthogonal preservation
+
+use llm::mmap::{
+    page_arena_alloc,
+    page_arena_free,
+    page_arena_is_ok,
+    page_arena_ptr,
+}
+use llm::sedenion_ssm::{
+    sedenion_mul_f32,
+    sedenion_stiefel_v72_f32,
+    sedenion_lagrange_kill4_f32,
+    sedenion_delta_step_cpu,
+}
+use tensor2::convert::{
+    f32_bits_to_f64,
+    f64_to_f32_bits,
+}
+use math::pure::{
+    sqrt,
+    abs,
+}
+
+// ============================================================================
+// Test Memory and Metric Helpers
+// ============================================================================
+
+fn test_read_f32(ptr: i64, idx: i64) -> f64 with Mut {
+    f32_bits_to_f64(ptr_read_u32_le(ptr, idx * 4))
+}
+
+fn test_write_f32(ptr: i64, idx: i64, val: f64) with Mut {
+    let _w = ptr_write_u32_le(ptr, idx * 4, f64_to_f32_bits(val))
+}
+
+fn test_vec_zero(ptr: i64, n: i64) with Mut {
+    var i: i64 = 0
+    while i < n {
+        test_write_f32(ptr, i, 0.0)
+        i = i + 1
+    }
+}
+
+fn test_l2_norm(ptr: i64, n: i64) -> f64 with Mut, Div, Panic {
+    var sum: f64 = 0.0
+    var i: i64 = 0
+    while i < n {
+        let v = test_read_f32(ptr, i)
+        sum = sum + v * v
+        i = i + 1
+    }
+    sqrt(sum)
+}
+
+fn test_l2_diff(ptr_a: i64, ptr_b: i64, n: i64) -> f64 with Mut, Div, Panic {
+    var sum: f64 = 0.0
+    var i: i64 = 0
+    while i < n {
+        let a = test_read_f32(ptr_a, i)
+        let b = test_read_f32(ptr_b, i)
+        let d = a - b
+        sum = sum + d * d
+        i = i + 1
+    }
+    sqrt(sum)
+}
+
+// ============================================================================
+// Property 1: Canonical Zero-Divisor Annihilation
+// ============================================================================
+
+fn test_property_1_canonical_zd() -> bool with IO, Mut, Div, Panic {
+    let arena = page_arena_alloc(1024)
+    if !page_arena_is_ok(&arena) {
+        return false
+    }
+    let a_ptr = page_arena_ptr(&arena)
+    let z_ptr = a_ptr
+    let w_ptr = a_ptr + 64
+    let out_ptr = a_ptr + 128
+
+    test_vec_zero(z_ptr, 16)
+    test_vec_zero(w_ptr, 16)
+    test_vec_zero(out_ptr, 16)
+
+    // z = e3 + e10
+    test_write_f32(z_ptr, 3, 1.0)
+    test_write_f32(z_ptr, 10, 1.0)
+
+    // w = e6 - e15
+    test_write_f32(w_ptr, 6, 1.0)
+    test_write_f32(w_ptr, 15, 0.0 - 1.0)
+
+    sedenion_mul_f32(z_ptr, w_ptr, out_ptr)
+
+    let norm_zw = test_l2_norm(out_ptr, 16)
+    let ok = norm_zw < 1.0e-6
+
+    let _f = page_arena_free(arena)
+    ok
+}
+
+// ============================================================================
+// Property 2: Stiefel V_{7,2} & Moreno-Lagrange Projector Properties
+// ============================================================================
+
+fn test_property_2_stiefel_and_lagrange() -> bool with IO, Mut, Div, Panic, Alloc {
+    let arena = page_arena_alloc(4096)
+    if !page_arena_is_ok(&arena) {
+        return false
+    }
+    let a_ptr = page_arena_ptr(&arena)
+    let u7_ptr = a_ptr
+    let w7_ptr = a_ptr + 32
+    let z_ptr = a_ptr + 64
+    let v_ptr = a_ptr + 128
+    let p1_ptr = a_ptr + 192
+    let p2_ptr = a_ptr + 256
+    let k_ptr = a_ptr + 320
+    let e_ptr = a_ptr + 384
+    let pe_ptr = a_ptr + 448
+    let mat_ptr = a_ptr + 512
+
+    // Arbitrary non-axis u (7 components)
+    test_write_f32(u7_ptr, 0, 1.2)
+    test_write_f32(u7_ptr, 1, 0.0 - 0.8)
+    test_write_f32(u7_ptr, 2, 2.1)
+    test_write_f32(u7_ptr, 3, 0.5)
+    test_write_f32(u7_ptr, 4, 0.0 - 1.7)
+    test_write_f32(u7_ptr, 5, 1.1)
+    test_write_f32(u7_ptr, 6, 0.0 - 0.9)
+
+    // Arbitrary non-axis w (7 components)
+    test_write_f32(w7_ptr, 0, 0.4)
+    test_write_f32(w7_ptr, 1, 1.9)
+    test_write_f32(w7_ptr, 2, 0.0 - 1.3)
+    test_write_f32(w7_ptr, 3, 2.0)
+    test_write_f32(w7_ptr, 4, 0.7)
+    test_write_f32(w7_ptr, 5, 0.0 - 0.6)
+    test_write_f32(w7_ptr, 6, 1.5)
+
+    let st_ok = sedenion_stiefel_v72_f32(u7_ptr, w7_ptr, z_ptr)
+
+    // Verify z norm is 1.0 (< 1e-6)
+    let z_norm = test_l2_norm(z_ptr, 16)
+    let z_norm_ok = abs(z_norm - 1.0) < 1.0e-6
+
+    // Arbitrary non-axis v (16 components)
+    test_write_f32(v_ptr, 0, 0.7)
+    test_write_f32(v_ptr, 1, 0.0 - 1.1)
+    test_write_f32(v_ptr, 2, 2.3)
+    test_write_f32(v_ptr, 3, 0.4)
+    test_write_f32(v_ptr, 4, 0.0 - 0.8)
+    test_write_f32(v_ptr, 5, 1.5)
+    test_write_f32(v_ptr, 6, 0.0 - 2.0)
+    test_write_f32(v_ptr, 7, 0.9)
+    test_write_f32(v_ptr, 8, 0.0 - 1.3)
+    test_write_f32(v_ptr, 9, 1.8)
+    test_write_f32(v_ptr, 10, 0.2)
+    test_write_f32(v_ptr, 11, 0.0 - 0.5)
+    test_write_f32(v_ptr, 12, 1.4)
+    test_write_f32(v_ptr, 13, 0.0 - 1.6)
+    test_write_f32(v_ptr, 14, 0.6)
+    test_write_f32(v_ptr, 15, 0.0 - 0.3)
+
+    // Idempotence: ||P4(P4 v) - P4 v|| < 1e-5
+    sedenion_lagrange_kill4_f32(z_ptr, v_ptr, p1_ptr)
+    sedenion_lagrange_kill4_f32(z_ptr, p1_ptr, p2_ptr)
+    let idem_diff = test_l2_diff(p2_ptr, p1_ptr, 16)
+    let idem_ok = idem_diff < 1.0e-5
+
+    // Kernel annihilation: ||L_z(P4 v)|| < 1e-5
+    sedenion_mul_f32(z_ptr, p1_ptr, k_ptr)
+    let annihil_norm = test_l2_norm(k_ptr, 16)
+    let annihil_ok = annihil_norm < 1.0e-5
+
+    // Symmetry and Trace:
+    // Build 16x16 matrix P_ij = (P4 e_j)_i
+    var j: i64 = 0
+    while j < 16 {
+        test_vec_zero(e_ptr, 16)
+        test_write_f32(e_ptr, j, 1.0)
+        sedenion_lagrange_kill4_f32(z_ptr, e_ptr, pe_ptr)
+        var i: i64 = 0
+        while i < 16 {
+            let val = test_read_f32(pe_ptr, i)
+            test_write_f32(mat_ptr, i * 16 + j, val)
+            i = i + 1
+        }
+        j = j + 1
+    }
+
+    // Trace: sum_i P_ii
+    var trace: f64 = 0.0
+    var t: i64 = 0
+    while t < 16 {
+        let diag = test_read_f32(mat_ptr, t * 16 + t)
+        trace = trace + diag
+        t = t + 1
+    }
+    let trace_ok = abs(trace - 4.0) < 1.0e-4
+
+    // Symmetry: e_i^T P4 e_j ≈ e_j^T P4 e_i -> abs(P_ij - P_ji) < 1e-5
+    var sym_ok: bool = true
+    var row: i64 = 0
+    while row < 16 {
+        var col: i64 = 0
+        while col < 16 {
+            let pij = test_read_f32(mat_ptr, row * 16 + col)
+            let pji = test_read_f32(mat_ptr, col * 16 + row)
+            if abs(pij - pji) >= 1.0e-5 {
+                sym_ok = false
+            }
+            col = col + 1
+        }
+        row = row + 1
+    }
+
+    let _f = page_arena_free(arena)
+    st_ok && z_norm_ok && idem_ok && annihil_ok && trace_ok && sym_ok
+}
+
+// ============================================================================
+// Property 3: Octonion Vanishing vs Sedenion Rank-4 Contrast
+// ============================================================================
+
+fn test_property_3_octonion_vanishing_and_rank4_contrast() -> bool with IO, Mut, Div, Panic, Alloc {
+    let arena = page_arena_alloc(1024)
+    if !page_arena_is_ok(&arena) {
+        return false
+    }
+    let a_ptr = page_arena_ptr(&arena)
+    let z_ptr = a_ptr
+    let v_ptr = a_ptr + 64
+    let out_ptr = a_ptr + 128
+    let wcan_ptr = a_ptr + 192
+
+    // Part A: z = e1 inside octonion subalgebra O -> ||P4(e1) v|| < 1e-5
+    test_vec_zero(z_ptr, 16)
+    test_write_f32(z_ptr, 1, 1.0)
+
+    test_vec_zero(v_ptr, 16)
+    test_write_f32(v_ptr, 0, 1.0)
+    test_write_f32(v_ptr, 1, 2.0)
+    test_write_f32(v_ptr, 5, 0.0 - 1.5)
+    test_write_f32(v_ptr, 10, 3.2)
+    test_write_f32(v_ptr, 14, 0.0 - 0.7)
+
+    sedenion_lagrange_kill4_f32(z_ptr, v_ptr, out_ptr)
+    let oct_vanish_norm = test_l2_norm(out_ptr, 16)
+    let oct_ok = oct_vanish_norm < 1.0e-5
+
+    // Part B: z = (e3 + e10) / sqrt(2), w_can = e6 - e15 -> preserves w_can exactly
+    let inv_sqrt2 = 1.0 / sqrt(2.0)
+    test_vec_zero(z_ptr, 16)
+    test_write_f32(z_ptr, 3, inv_sqrt2)
+    test_write_f32(z_ptr, 10, inv_sqrt2)
+
+    test_vec_zero(wcan_ptr, 16)
+    test_write_f32(wcan_ptr, 6, 1.0)
+    test_write_f32(wcan_ptr, 15, 0.0 - 1.0)
+
+    sedenion_lagrange_kill4_f32(z_ptr, wcan_ptr, out_ptr)
+    let preserve_diff = test_l2_diff(out_ptr, wcan_ptr, 16)
+    let preserve_ok = preserve_diff < 1.0e-5
+
+    let _f = page_arena_free(arena)
+    oct_ok && preserve_ok
+}
+
+// ============================================================================
+// Property 4: Sedenion Delta Step CPU Overwrite & Preservation
+// ============================================================================
+
+fn test_property_4_delta_step() -> bool with IO, Mut, Div, Panic, Alloc {
+    let arena = page_arena_alloc(4096)
+    if !page_arena_is_ok(&arena) {
+        return false
+    }
+    let a_ptr = page_arena_ptr(&arena)
+    let h_ptr = a_ptr
+    let u_ptr = a_ptr + 128
+    let w_ptr = a_ptr + 192
+    let v_ptr = a_ptr + 256
+    let beta_ptr = a_ptr + 384
+    let h_init_ptr = a_ptr + 400
+    let z_ptr = a_ptr + 464
+    let k_v_ptr = a_ptr + 528
+    let k_h_ptr = a_ptr + 592
+    let o_init_ptr = a_ptr + 656
+    let o_new_ptr = a_ptr + 720
+
+    // Channel 0 u and w
+    test_write_f32(u_ptr, 0, 1.0)
+    test_write_f32(u_ptr, 1, 0.0 - 0.5)
+    test_write_f32(u_ptr, 2, 2.0)
+    test_write_f32(u_ptr, 3, 0.8)
+    test_write_f32(u_ptr, 4, 0.0 - 1.2)
+    test_write_f32(u_ptr, 5, 0.7)
+    test_write_f32(u_ptr, 6, 0.0 - 0.4)
+
+    test_write_f32(w_ptr, 0, 0.3)
+    test_write_f32(w_ptr, 1, 1.5)
+    test_write_f32(w_ptr, 2, 0.0 - 1.0)
+    test_write_f32(w_ptr, 3, 0.9)
+    test_write_f32(w_ptr, 4, 0.0 - 0.6)
+    test_write_f32(w_ptr, 5, 1.8)
+    test_write_f32(w_ptr, 6, 0.2)
+
+    // Build z for channel 0
+    let _s = sedenion_stiefel_v72_f32(u_ptr, w_ptr, z_ptr)
+
+    // Initial h and v for channel 0
+    var i: i64 = 0
+    while i < 16 {
+        let v_val = 0.5 * (i as f64) - 3.0
+        let h_val = 0.3 * (i as f64) + 1.2
+        test_write_f32(v_ptr, i, v_val)
+        test_write_f32(h_ptr, i, h_val)
+        test_write_f32(h_init_ptr, i, h_val)
+        i = i + 1
+    }
+
+    // Raw beta = 20.0 -> sigmoid(20.0) ≈ 1.0
+    test_write_f32(beta_ptr, 0, 20.0)
+
+    // Compute initial orthogonal component of h: o_init = h_init - P4(z)(h_init)
+    sedenion_lagrange_kill4_f32(z_ptr, h_init_ptr, k_h_ptr)
+    i = 0
+    while i < 16 {
+        let h_val = test_read_f32(h_init_ptr, i)
+        let kh_val = test_read_f32(k_h_ptr, i)
+        test_write_f32(o_init_ptr, i, h_val - kh_val)
+        i = i + 1
+    }
+
+    // Compute kernel component of v: k_v = P4(z) v
+    sedenion_lagrange_kill4_f32(z_ptr, v_ptr, k_v_ptr)
+
+    // Run delta step for 1 channel
+    let ret_norm = sedenion_delta_step_cpu(h_ptr, u_ptr, w_ptr, v_ptr, beta_ptr, 1)
+    let ret_ok = ret_norm > 0.0
+
+    // Compute new kernel component of h: k_h_new = P4(z) h_new
+    sedenion_lagrange_kill4_f32(z_ptr, h_ptr, k_h_ptr)
+
+    // Overwrites 4D kernel subspace: ||k_h_new - k_v|| < 1e-5
+    let kernel_diff = test_l2_diff(k_h_ptr, k_v_ptr, 16)
+    let kernel_ok = kernel_diff < 1.0e-5
+
+    // Preserves 12D orthogonal subspace: drift < 1e-5
+    i = 0
+    while i < 16 {
+        let h_val = test_read_f32(h_ptr, i)
+        let kh_val = test_read_f32(k_h_ptr, i)
+        test_write_f32(o_new_ptr, i, h_val - kh_val)
+        i = i + 1
+    }
+    let ortho_drift = test_l2_diff(o_new_ptr, o_init_ptr, 16)
+    let ortho_ok = ortho_drift < 1.0e-5
+
+    let _f = page_arena_free(arena)
+    ret_ok && kernel_ok && ortho_ok
+}
+
+// ============================================================================
+// Main Entrypoint
+// ============================================================================
+
+pub fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
+    if !test_property_1_canonical_zd() {
+        println("FAIL: test_property_1_canonical_zd")
+        return 1
+    }
+    if !test_property_2_stiefel_and_lagrange() {
+        println("FAIL: test_property_2_stiefel_and_lagrange")
+        return 2
+    }
+    if !test_property_3_octonion_vanishing_and_rank4_contrast() {
+        println("FAIL: test_property_3_octonion_vanishing_and_rank4_contrast")
+        return 3
+    }
+    if !test_property_4_delta_step() {
+        println("FAIL: test_property_4_delta_step")
+        return 4
+    }
+
+    println("LLM_PHASE8_SEDENION_SSM_PASS")
+    0
+}

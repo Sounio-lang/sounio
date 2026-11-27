@@ -1,0 +1,415 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: LLM_PHASE9_RANK4_LONGCTX_PASS
+//
+// Phase 9 Sedenion Gated Delta SSM Verification:
+// Test 1: 128-Step Immortal (e0, e8) Witness
+// Test 2: Gated Decay + Rank-4 Overwrite
+// Test 3: Metal GPU vs CPU 64-Channel 16-Step Parity
+
+use llm::mmap::{
+    PageArena,
+    page_arena_alloc,
+    page_arena_free,
+    page_arena_is_ok,
+    page_arena_ptr,
+}
+use llm::hal::{
+    MetalSession,
+    metal_session_open,
+    metal_session_close,
+    metal_session_is_ok,
+    metal_buffer_nocopy,
+    metal_buffer_free,
+}
+use llm::sedenion_ssm::{
+    sedenion_mul_f32,
+    sedenion_stiefel_v72_f32,
+    sedenion_lagrange_kill4_f32,
+    sedenion_delta_step_cpu,
+    sedenion_gated_delta_step_cpu,
+    SedenionMetalPipelines,
+    sedenion_metal_pipelines_empty,
+    sedenion_metal_pipelines_compile,
+    sedenion_metal_gated_delta_step,
+}
+use tensor2::convert::{
+    f32_bits_to_f64,
+    f64_to_f32_bits,
+}
+use math::pure::{
+    sqrt,
+    abs,
+    exp,
+}
+
+// ============================================================================
+// Test Memory and Metric Helpers
+// ============================================================================
+
+fn test_read_f32(ptr: i64, idx: i64) -> f64 with Mut {
+    f32_bits_to_f64(ptr_read_u32_le(ptr, idx * 4))
+}
+
+fn test_write_f32(ptr: i64, idx: i64, val: f64) with Mut {
+    let _w = ptr_write_u32_le(ptr, idx * 4, f64_to_f32_bits(val))
+}
+
+fn test_vec_zero(ptr: i64, n: i64) with Mut {
+    var i: i64 = 0
+    while i < n {
+        test_write_f32(ptr, i, 0.0)
+        i = i + 1
+    }
+}
+
+fn test_l2_norm(ptr: i64, n: i64) -> f64 with Mut, Div, Panic {
+    var sum: f64 = 0.0
+    var i: i64 = 0
+    while i < n {
+        let v = test_read_f32(ptr, i)
+        sum = sum + v * v
+        i = i + 1
+    }
+    sqrt(sum)
+}
+
+fn test_l2_diff(ptr_a: i64, ptr_b: i64, n: i64) -> f64 with Mut, Div, Panic {
+    var sum: f64 = 0.0
+    var i: i64 = 0
+    while i < n {
+        let a = test_read_f32(ptr_a, i)
+        let b = test_read_f32(ptr_b, i)
+        let d = a - b
+        sum = sum + d * d
+        i = i + 1
+    }
+    sqrt(sum)
+}
+
+// ============================================================================
+// Test 1: 128-Step Immortal (e0, e8) Witness
+// ============================================================================
+
+fn test_1_immortal_witness_128_steps() -> bool with IO, Alloc, Mut, Div, Panic {
+    let arena = page_arena_alloc(1024)
+    if !page_arena_is_ok(&arena) {
+        return false
+    }
+    let a_ptr = page_arena_ptr(&arena)
+    let h_ptr = a_ptr
+    let u_ptr = a_ptr + 64
+    let w_ptr = a_ptr + 128
+    let v_ptr = a_ptr + 192
+    let beta_ptr = a_ptr + 256
+
+    test_vec_zero(h_ptr, 16)
+    test_write_f32(h_ptr, 0, 3.14159)
+    test_write_f32(h_ptr, 8, 0.0 - 2.71828)
+
+    // Other components initialize non-zero
+    var i: i64 = 1
+    while i < 16 {
+        if i != 8 {
+            test_write_f32(h_ptr, i, 0.15 * (i as f64) - 0.7)
+        }
+        i = i + 1
+    }
+
+    test_write_f32(beta_ptr, 0, 25.0)
+
+    var t: i64 = 0
+    while t < 128 {
+        // Varying non-axis u_t and w_t
+        var k: i64 = 0
+        while k < 7 {
+            let uk = 0.5 + 0.3 * (((t * 7 + k * 11 + 3) % 17) as f64)
+            let wk = 0.4 + 0.25 * (((t * 13 + k * 5 + 7) % 19) as f64)
+            test_write_f32(u_ptr, k, uk)
+            test_write_f32(w_ptr, k, wk)
+            k = k + 1
+        }
+
+        // Varying v_t with non-zero v[0] and v[8]
+        var m: i64 = 0
+        while m < 16 {
+            let vm = 0.2 * (((t * 19 + m * 23 + 5) % 31) as f64) - 2.5
+            test_write_f32(v_ptr, m, vm)
+            m = m + 1
+        }
+        test_write_f32(v_ptr, 0, 1.5 + 0.05 * (t as f64))
+        test_write_f32(v_ptr, 8, 0.0 - 4.2 - 0.03 * (t as f64))
+
+        let _step_norm = sedenion_delta_step_cpu(h_ptr, u_ptr, w_ptr, v_ptr, beta_ptr, 1)
+
+        t = t + 1
+    }
+
+    let h0 = test_read_f32(h_ptr, 0)
+    let h8 = test_read_f32(h_ptr, 8)
+
+    let ok0 = abs(h0 - 3.14159) < 1.0e-4
+    let ok8 = abs(h8 + 2.71828) < 1.0e-4
+
+    let _f = page_arena_free(arena)
+    ok0 && ok8
+}
+
+// ============================================================================
+// Test 2: Gated Decay + Rank-4 Overwrite
+// ============================================================================
+
+fn test_2_gated_decay_and_rank4_overwrite() -> bool with IO, Alloc, Mut, Div, Panic {
+    let arena = page_arena_alloc(2048)
+    if !page_arena_is_ok(&arena) {
+        return false
+    }
+    let a_ptr = page_arena_ptr(&arena)
+    let h_ptr = a_ptr
+    let u_ptr = a_ptr + 64
+    let w_ptr = a_ptr + 128
+    let v_ptr = a_ptr + 192
+    let alpha_ptr = a_ptr + 256
+    let beta_ptr = a_ptr + 272
+    let z_ptr = a_ptr + 288
+    let kv_ptr = a_ptr + 352
+    let kh_ptr = a_ptr + 416
+
+    // Set non-axis u and w
+    test_write_f32(u_ptr, 0, 1.2)
+    test_write_f32(u_ptr, 1, 0.0 - 0.7)
+    test_write_f32(u_ptr, 2, 2.0)
+    test_write_f32(u_ptr, 3, 0.4)
+    test_write_f32(u_ptr, 4, 0.0 - 1.1)
+    test_write_f32(u_ptr, 5, 0.8)
+    test_write_f32(u_ptr, 6, 0.0 - 0.5)
+
+    test_write_f32(w_ptr, 0, 0.5)
+    test_write_f32(w_ptr, 1, 1.4)
+    test_write_f32(w_ptr, 2, 0.0 - 0.9)
+    test_write_f32(w_ptr, 3, 1.8)
+    test_write_f32(w_ptr, 4, 0.3)
+    test_write_f32(w_ptr, 5, 0.0 - 0.6)
+    test_write_f32(w_ptr, 6, 1.1)
+
+    // Build z in V_{7,2}
+    let _st = sedenion_stiefel_v72_f32(u_ptr, w_ptr, z_ptr)
+
+    // Initial state with non-zero e0 and e8 entries
+    var i: i64 = 0
+    while i < 16 {
+        test_write_f32(h_ptr, i, 0.3 * (i as f64) + 1.5)
+        test_write_f32(v_ptr, i, 0.5 * (i as f64) - 2.0)
+        i = i + 1
+    }
+    test_write_f32(h_ptr, 0, 4.0)
+    test_write_f32(h_ptr, 8, 0.0 - 3.0)
+
+    // alpha_raw = 0.0 => alpha = sigmoid(0.0) = 0.5
+    test_write_f32(alpha_ptr, 0, 0.0)
+    // beta_raw = 20.0 => beta = sigmoid(20.0) ≈ 1.0
+    test_write_f32(beta_ptr, 0, 20.0)
+
+    // Compute expected rank-4 kernel of v: kv = P_4(z) v
+    sedenion_lagrange_kill4_f32(z_ptr, v_ptr, kv_ptr)
+
+    // Run 1 step of gated delta SSM
+    let _norm = sedenion_gated_delta_step_cpu(h_ptr, u_ptr, w_ptr, v_ptr, alpha_ptr, beta_ptr, 1)
+
+    // Check decay of e0 and e8: h[0] was 4.0, should now be 0.5 * 4.0 = 2.0
+    let h0_decay = test_read_f32(h_ptr, 0)
+    let ok_decay0 = abs(h0_decay - 2.0) < 1.0e-4
+
+    // h[8] was -3.0, should now be 0.5 * (-3.0) = -1.5
+    let h8_decay = test_read_f32(h_ptr, 8)
+    let ok_decay8 = abs(h8_decay + 1.5) < 1.0e-4
+
+    // Check rank-4 subspace overwrite: kh = P_4(z) h_new should equal kv
+    sedenion_lagrange_kill4_f32(z_ptr, h_ptr, kh_ptr)
+    let overwrite_diff = test_l2_diff(kh_ptr, kv_ptr, 16)
+    let ok_overwrite = overwrite_diff < 1.0e-4
+
+    // Run 16 more steps with alpha = 0.5 to verify complete exponential decay of stale entries
+    var s: i64 = 0
+    while s < 16 {
+        let _st2 = sedenion_stiefel_v72_f32(u_ptr, w_ptr, z_ptr)
+        let _step_n = sedenion_gated_delta_step_cpu(h_ptr, u_ptr, w_ptr, v_ptr, alpha_ptr, beta_ptr, 1)
+        s = s + 1
+    }
+    let h0_final = test_read_f32(h_ptr, 0)
+    let h8_final = test_read_f32(h_ptr, 8)
+    let ok_final_decay = abs(h0_final) < 1.0e-4 && abs(h8_final) < 1.0e-4
+
+    let _f = page_arena_free(arena)
+    ok_decay0 && ok_decay8 && ok_overwrite && ok_final_decay
+}
+
+// ============================================================================
+// Test 3: Metal GPU vs CPU 64-Channel 16-Step Parity
+// ============================================================================
+
+fn run_parity_with_sess(
+    arena: &PageArena,
+    sess: &MetalSession
+) -> bool with IO, Alloc, Mut, Div, Panic {
+    let a_ptr = page_arena_ptr(arena)
+    let h_gpu_ptr = a_ptr
+    let u7_ptr = a_ptr + 4096
+    let w7_ptr = a_ptr + 8192
+    let v16_ptr = a_ptr + 12288
+    let alpha_ptr = a_ptr + 16384
+    let beta_ptr = a_ptr + 20480
+    let h_cpu_ptr = a_ptr + 24576
+
+    let n_channels: i64 = 64
+
+    // Initialize initial state identically on CPU and GPU
+    var c: i64 = 0
+    while c < n_channels {
+        var i: i64 = 0
+        while i < 16 {
+            let val = 0.1 * (((c * 17 + i * 13) % 23) as f64) - 1.1
+            test_write_f32(h_gpu_ptr, c * 16 + i, val)
+            test_write_f32(h_cpu_ptr, c * 16 + i, val)
+            i = i + 1
+        }
+        c = c + 1
+    }
+
+    let pipes = sedenion_metal_pipelines_compile(sess)
+    if !pipes.ok || pipes.gated_delta_step <= 0 {
+        println("FAIL: could not compile sedenion metal pipelines")
+        return false
+    }
+
+    let b_work = metal_buffer_nocopy(sess, a_ptr, 65536)
+    if b_work <= 0 {
+        println("FAIL: metal_buffer_nocopy failed")
+        return false
+    }
+
+    // Run 16 gated steps
+    var step: i64 = 0
+    var step_ok = true
+    while step < 16 && step_ok {
+        // Populate inputs for all 64 channels
+        var ch: i64 = 0
+        while ch < n_channels {
+            let a_val = 0.2 * (((step * 5 + ch * 7) % 11) as f64) - 0.5
+            let b_val = 0.3 * (((step * 3 + ch * 13) % 17) as f64) + 0.5
+            test_write_f32(alpha_ptr, ch, a_val)
+            test_write_f32(beta_ptr, ch, b_val)
+
+            var k: i64 = 0
+            while k < 7 {
+                let uk = 0.3 + 0.1 * (((step * 7 + ch * 3 + k) % 13) as f64)
+                let wk = 0.2 + 0.15 * (((step * 11 + ch * 5 + k) % 17) as f64)
+                test_write_f32(u7_ptr, ch * 7 + k, uk)
+                test_write_f32(w7_ptr, ch * 7 + k, wk)
+                k = k + 1
+            }
+
+            var m: i64 = 0
+            while m < 16 {
+                let vm = 0.25 * (((step * 13 + ch * 9 + m) % 19) as f64) - 2.0
+                test_write_f32(v16_ptr, ch * 16 + m, vm)
+                m = m + 1
+            }
+            ch = ch + 1
+        }
+
+        // Run CPU gated step
+        let _cpu_norm = sedenion_gated_delta_step_cpu(h_cpu_ptr, u7_ptr, w7_ptr, v16_ptr, alpha_ptr, beta_ptr, n_channels)
+
+        // Run Metal GPU gated step
+        let rc = sedenion_metal_gated_delta_step(
+            sess,
+            &pipes,
+            b_work, 0,
+            b_work, 4096,
+            b_work, 8192,
+            b_work, 12288,
+            b_work, 16384,
+            b_work, 20480,
+            n_channels
+        )
+        if rc != 0 {
+            println("FAIL: sedenion_metal_gated_delta_step returned non-zero")
+            step_ok = false
+        }
+
+        step = step + 1
+    }
+
+    if !step_ok {
+        let _f = metal_buffer_free(sess, b_work)
+        return false
+    }
+
+    // Verify max diff and L2 diff across all 1,024 state floats
+    var max_diff: f64 = 0.0
+    var idx: i64 = 0
+    while idx < 1024 {
+        let vc = test_read_f32(h_cpu_ptr, idx)
+        let vg = test_read_f32(h_gpu_ptr, idx)
+        let d = abs(vc - vg)
+        if d > max_diff {
+            max_diff = d
+        }
+        idx = idx + 1
+    }
+
+    let l2_diff = test_l2_diff(h_cpu_ptr, h_gpu_ptr, 1024)
+    let parity_ok = max_diff < 1.0e-4 && l2_diff < 1.0e-4
+
+    let _f = metal_buffer_free(sess, b_work)
+
+    if parity_ok {
+        println("METAL_SEDENION_PARITY_OK")
+        true
+    } else {
+        println("FAIL: max_diff or l2_diff >= 1e-4")
+        false
+    }
+}
+
+fn test_3_metal_gpu_cpu_parity() -> bool with IO, Alloc, Mut, Div, Panic {
+    let arena = page_arena_alloc(65536)
+    let sess = metal_session_open("")
+
+    var ok = false
+    if !page_arena_is_ok(&arena) {
+        println("FAIL: could not allocate page arena for parity test")
+    } else if !metal_session_is_ok(&sess) {
+        println("Metal session not available on this platform (skipping GPU execution)")
+        ok = true
+    } else {
+        ok = run_parity_with_sess(&arena, &sess)
+    }
+
+    let _c = metal_session_close(sess)
+    let _f = page_arena_free(arena)
+    ok
+}
+
+// ============================================================================
+// Main Entrypoint
+// ============================================================================
+
+pub fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
+    if !test_1_immortal_witness_128_steps() {
+        println("FAIL: test_1_immortal_witness_128_steps")
+        return 1
+    }
+    if !test_2_gated_decay_and_rank4_overwrite() {
+        println("FAIL: test_2_gated_decay_and_rank4_overwrite")
+        return 2
+    }
+    if !test_3_metal_gpu_cpu_parity() {
+        println("FAIL: test_3_metal_gpu_cpu_parity")
+        return 3
+    }
+
+    println("LLM_PHASE9_RANK4_LONGCTX_PASS")
+    0
+}

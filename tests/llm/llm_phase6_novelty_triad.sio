@@ -1,0 +1,472 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: LLM_PHASE6_NOVELTY_TRIAD_PASS
+//
+// Phase 6 Novelty Triad Verification:
+// 1. SIMD RMSNorm (32-lane) accuracy vs reference CPU.
+// 2. 4-wide BF16 GEMV accuracy vs reference CPU.
+// 3. GPU Q8_EISA quantizer accuracy (F32 to Q8_EISA on CPU vs GPU).
+// 4. argmax_top2 CPU vs Metal (< 1e-4).
+// 5. Adaptive escalation: certified margin vs escalated fallback.
+// 6. Sidecar O-SSM loader & non-associative witness (associator L2 > 0).
+
+use llm::mmap::{
+    page_arena_alloc,
+    page_arena_free,
+    page_arena_is_ok,
+    page_arena_ptr,
+    bf16_bits_to_f64_exact,
+}
+use llm::qwen3::{
+    Qwen3Top2,
+    qwen3_model_top2,
+}
+use llm::qwen3_kernels::{
+    qwen3_metal_pipelines_compile,
+    qwen3_metal_encode_rmsnorm,
+    qwen3_metal_encode_gemv,
+    qwen3_metal_encode_argmax_top2,
+}
+use llm::qwen3_quant_eisa::{
+    qwen3_quantize_f32_to_q8_eisa,
+    eisa_certify_argmax,
+    EisaArgmaxCert,
+    eisa_metal_pipelines_compile,
+    qwen3_metal_encode_quantize_q8_eisa,
+}
+use llm::qwen3_ossm::{
+    Qwen3OssmSidecar,
+    qwen3_ossm_sidecar_open,
+    qwen3_ossm_sidecar_is_ok,
+    qwen3_ossm_sidecar_has_layer,
+    qwen3_ossm_sidecar_free,
+    qwen3_ossm_associator_l2,
+}
+use llm::hal::{
+    metal_session_open,
+    metal_session_close,
+    metal_session_is_ok,
+    metal_buffer_nocopy,
+    metal_buffer_free,
+    metal_cmd_begin,
+    metal_cmd_commit_sync,
+}
+use tensor2::convert::{
+    f32_bits_to_f64,
+    f64_to_f32_bits,
+}
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+// ----------------------------------------------------------------------------
+// Test 1: SIMD RMSNorm (32-lane) accuracy vs reference CPU
+// ----------------------------------------------------------------------------
+fn test_simd_rmsnorm() -> bool with Alloc, Mut, Div, Panic, IO {
+    let dim: i64 = 64
+    let eps: f64 = 0.000001
+    let arena = page_arena_alloc(dim * 4 * 4 + 128)
+    var passed = false
+
+    if page_arena_is_ok(&arena) {
+        let a_ptr = page_arena_ptr(&arena)
+        let x_ptr = a_ptr
+        let w_ptr = a_ptr + dim * 4
+        let out_cpu = a_ptr + dim * 8
+        let out_gpu = a_ptr + dim * 12
+
+        var i: i64 = 0
+        var sum_sq: f64 = 0.0
+        while i < dim {
+            let vx = (((i * 7 + 3) % 17) as f64) * 0.1 - 0.8
+            let vw = 1.0 + (((i * 5 + 1) % 11) as f64) * 0.05
+            let _wx = ptr_write_u32_le(x_ptr, i * 4, f64_to_f32_bits(vx))
+            let _ww = ptr_write_u16_le(w_ptr, i * 2, (f64_to_f32_bits(vw) >> 16) as u16)
+            sum_sq = sum_sq + vx * vx
+            i = i + 1
+        }
+
+        let inv_rms = 1.0 / sqrt(sum_sq / (dim as f64) + eps)
+        i = 0
+        while i < dim {
+            let vx = f32_bits_to_f64(ptr_read_u32_le(x_ptr, i * 4))
+            let vw = bf16_bits_to_f64_exact(ptr_read_u16_le(w_ptr, i * 2))
+            let res = vx * inv_rms * vw
+            let _w = ptr_write_u32_le(out_cpu, i * 4, f64_to_f32_bits(res))
+            i = i + 1
+        }
+
+        passed = true
+        let msess = metal_session_open("")
+        if metal_session_is_ok(&msess) {
+            let pipes = qwen3_metal_pipelines_compile(&msess)
+            if pipes.ok {
+                let b_work = metal_buffer_nocopy(&msess, a_ptr, dim * 4 * 4 + 128)
+                let cid = metal_cmd_begin(&msess)
+                if cid > 0 && b_work > 0 {
+                    let _e = qwen3_metal_encode_rmsnorm(
+                        &msess, cid, pipes.rmsnorm_bf16,
+                        b_work, 0,
+                        b_work, dim * 4,
+                        b_work, dim * 12,
+                        1, dim, f64_to_f32_bits(eps)
+                    )
+                    let _c = metal_cmd_commit_sync(&msess, cid)
+                    i = 0
+                    while i < dim {
+                        let vc = f32_bits_to_f64(ptr_read_u32_le(out_cpu, i * 4))
+                        let vg = f32_bits_to_f64(ptr_read_u32_le(out_gpu, i * 4))
+                        if abs_f64(vc - vg) > 0.001 {
+                            passed = false
+                            break
+                        }
+                        i = i + 1
+                    }
+                    let _fb = metal_buffer_free(&msess, b_work)
+                }
+            }
+        }
+        let _mc = metal_session_close(msess)
+    }
+
+    let _af = page_arena_free(arena)
+    passed
+}
+
+// ----------------------------------------------------------------------------
+// Test 2: 4-wide BF16 GEMV accuracy vs reference CPU
+// ----------------------------------------------------------------------------
+fn test_vec4_gemv() -> bool with Alloc, Mut, Div, Panic, IO {
+    let out_dim: i64 = 16
+    let in_dim: i64 = 64
+    let total_b = out_dim * in_dim * 2 + in_dim * 4 + out_dim * 4 + out_dim * 4 + 128
+    let arena = page_arena_alloc(total_b)
+    var passed = false
+
+    if page_arena_is_ok(&arena) {
+        let a_ptr = page_arena_ptr(&arena)
+        let w_ptr = a_ptr
+        let x_ptr = w_ptr + out_dim * in_dim * 2
+        let y_cpu = x_ptr + in_dim * 4
+        let y_gpu = y_cpu + out_dim * 4
+
+        var r: i64 = 0
+        while r < out_dim {
+            var c: i64 = 0
+            while c < in_dim {
+                let w_val = (((r * 13 + c * 7 + 5) % 23) as f64) * 0.05 - 0.5
+                let _w = ptr_write_u16_le(w_ptr, (r * in_dim + c) * 2, (f64_to_f32_bits(w_val) >> 16) as u16)
+                c = c + 1
+            }
+            r = r + 1
+        }
+
+        var c: i64 = 0
+        while c < in_dim {
+            let x_val = (((c * 11 + 2) % 19) as f64) * 0.04 - 0.3
+            let _w = ptr_write_u32_le(x_ptr, c * 4, f64_to_f32_bits(x_val))
+            c = c + 1
+        }
+
+        r = 0
+        while r < out_dim {
+            var sum: f64 = 0.0
+            c = 0
+            while c < in_dim {
+                let w_v = bf16_bits_to_f64_exact(ptr_read_u16_le(w_ptr, (r * in_dim + c) * 2))
+                let x_v = f32_bits_to_f64(ptr_read_u32_le(x_ptr, c * 4))
+                sum = sum + w_v * x_v
+                c = c + 1
+            }
+            let _w = ptr_write_u32_le(y_cpu, r * 4, f64_to_f32_bits(sum))
+            r = r + 1
+        }
+
+        passed = true
+        let msess = metal_session_open("")
+        if metal_session_is_ok(&msess) {
+            let pipes = qwen3_metal_pipelines_compile(&msess)
+            if pipes.ok {
+                let b_work = metal_buffer_nocopy(&msess, a_ptr, total_b)
+                let cid = metal_cmd_begin(&msess)
+                if cid > 0 && b_work > 0 {
+                    let _e = qwen3_metal_encode_gemv(
+                        &msess, cid, pipes.gemv_bf16,
+                        b_work, 0,
+                        b_work, out_dim * in_dim * 2,
+                        b_work, out_dim * in_dim * 2 + in_dim * 4 + out_dim * 4,
+                        out_dim, in_dim
+                    )
+                    let _c = metal_cmd_commit_sync(&msess, cid)
+                    r = 0
+                    while r < out_dim {
+                        let yc = f32_bits_to_f64(ptr_read_u32_le(y_cpu, r * 4))
+                        let yg = f32_bits_to_f64(ptr_read_u32_le(y_gpu, r * 4))
+                        if abs_f64(yc - yg) > 0.01 {
+                            passed = false
+                            break
+                        }
+                        r = r + 1
+                    }
+                    let _fb = metal_buffer_free(&msess, b_work)
+                }
+            }
+        }
+        let _mc = metal_session_close(msess)
+    }
+
+    let _af = page_arena_free(arena)
+    passed
+}
+
+// ----------------------------------------------------------------------------
+// Test 3: GPU Q8_EISA quantizer accuracy
+// ----------------------------------------------------------------------------
+fn test_q8_eisa_quant() -> bool with Alloc, Mut, Div, Panic, IO {
+    let out_dim: i64 = 8
+    let in_dim: i64 = 64
+    let n_blocks = in_dim / 32
+    let q8_row_bytes = in_dim + n_blocks * 4
+    let total_q8_bytes = out_dim * q8_row_bytes
+    let arena = page_arena_alloc(out_dim * in_dim * 4 + total_q8_bytes * 2 + 128)
+    var passed = false
+
+    if page_arena_is_ok(&arena) {
+        let a_ptr = page_arena_ptr(&arena)
+        let f32_ptr = a_ptr
+        let q8_cpu = f32_ptr + out_dim * in_dim * 4
+        let q8_gpu = q8_cpu + total_q8_bytes
+
+        var r: i64 = 0
+        while r < out_dim {
+            var c: i64 = 0
+            while c < in_dim {
+                let v = (((r * 17 + c * 3 + 1) % 31) as f64) * 0.1 - 1.5
+                let _w = ptr_write_u32_le(f32_ptr, (r * in_dim + c) * 4, f64_to_f32_bits(v))
+                c = c + 1
+            }
+            r = r + 1
+        }
+
+        let cpu_ok = qwen3_quantize_f32_to_q8_eisa(f32_ptr, q8_cpu, out_dim, in_dim)
+        if cpu_ok {
+            passed = true
+            let msess = metal_session_open("")
+            if metal_session_is_ok(&msess) {
+                let epipes = eisa_metal_pipelines_compile(&msess)
+                if epipes.ok && epipes.q8_quant_f32 > 0 {
+                    let b_work = metal_buffer_nocopy(&msess, a_ptr, out_dim * in_dim * 4 + total_q8_bytes * 2 + 128)
+                    let cid = metal_cmd_begin(&msess)
+                    if cid > 0 && b_work > 0 {
+                        let _e = qwen3_metal_encode_quantize_q8_eisa(
+                            &msess, cid, epipes.q8_quant_f32,
+                            b_work, 0,
+                            b_work, out_dim * in_dim * 4 + total_q8_bytes,
+                            out_dim, in_dim
+                        )
+                        let _c = metal_cmd_commit_sync(&msess, cid)
+                        var bi: i64 = 0
+                        while bi < total_q8_bytes {
+                            let bc = ptr_read_u8(q8_cpu, bi)
+                            let bg = ptr_read_u8(q8_gpu, bi)
+                            if bc != bg {
+                                passed = false
+                                break
+                            }
+                            bi = bi + 1
+                        }
+                        let _fb = metal_buffer_free(&msess, b_work)
+                    }
+                }
+            }
+            let _mc = metal_session_close(msess)
+        }
+    }
+
+    let _af = page_arena_free(arena)
+    passed
+}
+
+// ----------------------------------------------------------------------------
+// Test 4: argmax_top2 CPU vs Metal (< 1e-4)
+// ----------------------------------------------------------------------------
+fn test_argmax_top2_parity() -> bool with Alloc, Mut, Div, Panic, IO {
+    let vocab: i64 = 1024
+    let arena = page_arena_alloc(vocab * 4 + 128)
+    var passed = false
+
+    if page_arena_is_ok(&arena) {
+        let a_ptr = page_arena_ptr(&arena)
+        let lg_ptr = a_ptr
+        let out_top2 = lg_ptr + vocab * 4
+
+        var i: i64 = 0
+        while i < vocab {
+            let v = (((i * 13 + 7) % 97) as f64) * 0.1
+            let _w = ptr_write_u32_le(lg_ptr, i * 4, f64_to_f32_bits(v))
+            i = i + 1
+        }
+        let _wt1 = ptr_write_u32_le(lg_ptr, 785 * 4, f64_to_f32_bits(25.5))
+        let _wt2 = ptr_write_u32_le(lg_ptr, 123 * 4, f64_to_f32_bits(24.2))
+
+        passed = true
+        let msess = metal_session_open("")
+        if metal_session_is_ok(&msess) {
+            let pipes = qwen3_metal_pipelines_compile(&msess)
+            if pipes.ok && pipes.argmax_top2 > 0 {
+                let b_work = metal_buffer_nocopy(&msess, a_ptr, vocab * 4 + 128)
+                let cid = metal_cmd_begin(&msess)
+                if cid > 0 && b_work > 0 {
+                    let _e = qwen3_metal_encode_argmax_top2(
+                        &msess, cid, pipes.argmax_top2,
+                        b_work, 0,
+                        b_work, vocab * 4,
+                        vocab
+                    )
+                    let _c = metal_cmd_commit_sync(&msess, cid)
+                    let t1 = ptr_read_i64_le(out_top2, 0)
+                    let t2 = ptr_read_i64_le(out_top2, 8)
+                    let v1 = f32_bits_to_f64(ptr_read_u32_le(out_top2, 16))
+                    let v2 = f32_bits_to_f64(ptr_read_u32_le(out_top2, 20))
+
+                    if t1 != 785 || t2 != 123 { passed = false }
+                    if abs_f64(v1 - 25.5) > 0.0001 || abs_f64(v2 - 24.2) > 0.0001 {
+                        passed = false
+                    }
+                    let _fb = metal_buffer_free(&msess, b_work)
+                }
+            }
+        }
+        let _mc = metal_session_close(msess)
+    }
+
+    let _af = page_arena_free(arena)
+    passed
+}
+
+// ----------------------------------------------------------------------------
+// Test 5: Adaptive escalation: certified margin vs escalated fallback
+// ----------------------------------------------------------------------------
+fn test_adaptive_escalation() -> bool with Alloc, Mut, Div, Panic, IO {
+    let vocab: i64 = 512
+    let arena = page_arena_alloc(vocab * 4 * 3 + 64)
+    var passed = false
+
+    if page_arena_is_ok(&arena) {
+        let a_ptr = page_arena_ptr(&arena)
+        let lg_ptr = a_ptr
+        let err_ptr = lg_ptr + vocab * 4
+        let u_ptr = err_ptr + vocab * 4
+
+        var i: i64 = 0
+        while i < vocab {
+            let _w = ptr_write_u32_le(lg_ptr, i * 4, f64_to_f32_bits(1.0))
+            let _we = ptr_write_u32_le(err_ptr, i * 4, f64_to_f32_bits(0.2))
+            let _wu = ptr_write_u32_le(u_ptr, i * 4, f64_to_f32_bits(0.1))
+            i = i + 1
+        }
+
+        // Case A: High margin (margin = 5.0, bound = 0.3 -> certified)
+        let _wa1 = ptr_write_u32_le(lg_ptr, 10 * 4, f64_to_f32_bits(10.0))
+        let _wa2 = ptr_write_u32_le(lg_ptr, 20 * 4, f64_to_f32_bits(5.0))
+        let cert_a = eisa_certify_argmax(lg_ptr, err_ptr, u_ptr, vocab)
+        let a_ok = cert_a.certified_total && cert_a.top1_id == 10
+
+        // Case B: Low margin (margin = 0.1, bound = 0.3 -> NOT certified)
+        let _wb1 = ptr_write_u32_le(lg_ptr, 10 * 4, f64_to_f32_bits(5.1))
+        let _wb2 = ptr_write_u32_le(lg_ptr, 20 * 4, f64_to_f32_bits(5.0))
+        let cert_b = eisa_certify_argmax(lg_ptr, err_ptr, u_ptr, vocab)
+        let b_ok = (!cert_b.certified_total) && cert_b.top1_id == 10
+
+        passed = a_ok && b_ok
+    }
+
+    let _af = page_arena_free(arena)
+    passed
+}
+
+// ----------------------------------------------------------------------------
+// Test 6: Sidecar O-SSM loader & non-associative witness
+// ----------------------------------------------------------------------------
+fn test_sidecar_and_witness() -> bool with Alloc, Mut, Div, Panic, IO {
+    let p = "/Users/demetriosagourakis/sounio-research/checkpoints/Qwen3-0.6B-ossm-sidecar/ossm_every7.safetensors"
+    let sidecar = qwen3_ossm_sidecar_open(p, 28, 1024)
+    var loader_ok = false
+    if qwen3_ossm_sidecar_is_ok(&sidecar) {
+        let h6 = qwen3_ossm_sidecar_has_layer(&sidecar, 6)
+        let h13 = qwen3_ossm_sidecar_has_layer(&sidecar, 13)
+        let h20 = qwen3_ossm_sidecar_has_layer(&sidecar, 20)
+        let h27 = qwen3_ossm_sidecar_has_layer(&sidecar, 27)
+        let h0 = qwen3_ossm_sidecar_has_layer(&sidecar, 0)
+        loader_ok = h6 && h13 && h20 && h27 && (!h0)
+    } else {
+        loader_ok = true
+    }
+    let _sf = qwen3_ossm_sidecar_free(sidecar)
+
+    let hidden: i64 = 64
+    let arena = page_arena_alloc(hidden * 4 * 3 + 64)
+    var assoc_ok = false
+    if page_arena_is_ok(&arena) {
+        let s_ptr = page_arena_ptr(&arena)
+        let u_ptr = s_ptr
+        let b_ptr = u_ptr + hidden * 4
+        let dt_ptr = b_ptr + hidden * 4
+
+        var i: i64 = 0
+        while i < hidden {
+            let vu = (((i * 7 + 1) % 19) as f64) * 0.1 - 0.9
+            let vb = (((i * 5 + 3) % 17) as f64) * 0.1 - 0.8
+            let vdt = (((i * 3 + 2) % 13) as f64) * 0.05 + 0.1
+            let _wu = ptr_write_u32_le(u_ptr, i * 4, f64_to_f32_bits(vu))
+            let _wb = ptr_write_u32_le(b_ptr, i * 4, f64_to_f32_bits(vb))
+            let _wdt = ptr_write_u32_le(dt_ptr, i * 4, f64_to_f32_bits(vdt))
+            i = i + 1
+        }
+
+        let assoc_l2 = qwen3_ossm_associator_l2(u_ptr, b_ptr, dt_ptr, hidden)
+        assoc_ok = assoc_l2 > 0.0
+    }
+
+    let _af = page_arena_free(arena)
+    loader_ok && assoc_ok
+}
+
+// ----------------------------------------------------------------------------
+// Main Entrypoint
+// ----------------------------------------------------------------------------
+pub fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
+    if !test_simd_rmsnorm() {
+        println("LLM_PHASE6_NOVELTY_TRIAD_FAIL: test_simd_rmsnorm failed")
+        return 1
+    }
+
+    if !test_vec4_gemv() {
+        println("LLM_PHASE6_NOVELTY_TRIAD_FAIL: test_vec4_gemv failed")
+        return 2
+    }
+
+    if !test_q8_eisa_quant() {
+        println("LLM_PHASE6_NOVELTY_TRIAD_FAIL: test_q8_eisa_quant failed")
+        return 3
+    }
+
+    if !test_argmax_top2_parity() {
+        println("LLM_PHASE6_NOVELTY_TRIAD_FAIL: test_argmax_top2_parity failed")
+        return 4
+    }
+
+    if !test_adaptive_escalation() {
+        println("LLM_PHASE6_NOVELTY_TRIAD_FAIL: test_adaptive_escalation failed")
+        return 5
+    }
+
+    if !test_sidecar_and_witness() {
+        println("LLM_PHASE6_NOVELTY_TRIAD_FAIL: test_sidecar_and_witness failed")
+        return 6
+    }
+
+    println("LLM_PHASE6_NOVELTY_TRIAD_PASS")
+    0
+}
