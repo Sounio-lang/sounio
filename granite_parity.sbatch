@@ -56,6 +56,10 @@ PROMPT_IDS="__FILL_PROMPT_IDS__"
 PROMPTS_SHA="e14ac28d67b08146f5640c08a820620ceffcf0734527e1699d158245a58f85bf"
 PROMPT_IDS_SHA="__FILL_PROMPT_IDS_SHA256__"
 CPP_TOOLS_DIR="${CPP_TOOLS_DIR:-}"
+AUDIT_BINARY_PATH="${AUDIT_BINARY_PATH:-}"
+AUDIT_BINARY_SHA="${AUDIT_BINARY_SHA:-}"
+VRAM_PREFLIGHT_DIR="${VRAM_PREFLIGHT_DIR:-}"
+EXPECTED_SM="${EXPECTED_SM:-}"
 SELF="$0"
 REMOTE="https://github.com/Sounio-lang/sounio.git"
 JOB="${SLURM_JOB_ID:-manual}"
@@ -95,13 +99,24 @@ sha256sum "$PROMPTS_FILE" "$PROMPT_IDS" > "$WORK/inputs.sha256"
 rec "r-corpus-sha-$PROMPTS_SHA"
 
 D="$WORK/src"
-git init -q "$D" || die init
-git -C "$D" -c http.sslCAInfo="$CA" fetch -q --depth 1 --no-tags "$REMOTE" "$HEAD_C" > /dev/null 2>&1 || die fetch
-git -C "$D" -c advice.detachedHead=false checkout -q --detach FETCH_HEAD || die checkout
-[[ "$(git -C "$D" rev-parse HEAD)" == "$HEAD_C" ]] || die "HEAD-mismatch"
-
-( cd "$D" && bash scripts/ci/build_modular_madaros.sh "$WORK/madaros" > "$WORK/build-madaros.log" 2>&1 ) || die "build-madaros"
-( cd "$D" && SOUNIO_STDLIB_PATH="$D/stdlib" "$WORK/madaros" build tests/llm/llm_v2_61440_audit.sio -o "$WORK/audit" > "$WORK/build-audit.log" 2>&1 ) || die "build-audit"
+if [[ -n "$AUDIT_BINARY_PATH" ]]; then
+  # The historical L4 executable was reconstructed byte-for-byte from the pin.
+  [[ "$HEAD_C" == ad4a505c1931d48552397089ca11d7cfaeabd988 && "$AUDIT_BINARY_SHA" == 8c74378a189919e4733847a100a72e976120f4b48b261ccdffcbe25e08bbd04c ]] || die "shared-audit-pin"
+  [[ "$(sha256sum "$AUDIT_BINARY_PATH" | cut -d' ' -f1)" == "$AUDIT_BINARY_SHA" ]] || die "shared-audit-sha256"
+  cp "$AUDIT_BINARY_PATH" "$WORK/audit" || die "shared-audit-copy"
+  [[ "$(sha256sum "$WORK/audit" | cut -d' ' -f1)" == "$AUDIT_BINARY_SHA" ]] || die "shared-audit-copy-sha256"
+  printf 'source=%s\nexecutable=%s\nsha256=%s\n' "$HEAD_C" "$AUDIT_BINARY_PATH" "$AUDIT_BINARY_SHA" > "$WORK/build-audit.log"
+  rec "r-identical-l4-binary-$AUDIT_BINARY_SHA"
+  unset SOUNIO_STDLIB_PATH
+else
+  git init -q "$D" || die init
+  git -C "$D" -c http.sslCAInfo="$CA" fetch -q --depth 1 --no-tags "$REMOTE" "$HEAD_C" > /dev/null 2>&1 || die fetch
+  git -C "$D" -c advice.detachedHead=false checkout -q --detach FETCH_HEAD || die checkout
+  [[ "$(git -C "$D" rev-parse HEAD)" == "$HEAD_C" ]] || die "HEAD-mismatch"
+  ( cd "$D" && bash scripts/ci/build_modular_madaros.sh "$WORK/madaros" > "$WORK/build-madaros.log" 2>&1 ) || die "build-madaros"
+  ( cd "$D" && SOUNIO_STDLIB_PATH="$D/stdlib" "$WORK/madaros" build tests/llm/llm_v2_61440_audit.sio -o "$WORK/audit" > "$WORK/build-audit.log" 2>&1 ) || die "build-audit"
+  export SOUNIO_STDLIB_PATH="$D/stdlib"
+fi
 if [[ "$REF_TSV" != none ]]; then
   if [[ -n "$CPP_TOOLS_DIR" ]]; then
     (cd "$CPP_TOOLS_DIR" && sha256sum -c --quiet SHA256SUMS) || die "cmp-tool-manifest"
@@ -112,6 +127,19 @@ if [[ "$REF_TSV" != none ]]; then
 fi
 chmod +x "$WORK/audit" || die "chmod-audit"
 rec "r-build-audit-$(sha "$WORK/audit")-cmp-$(sha "$WORK/cmp")"
+
+# Admission is measured in a CUDA context on the allocated GPU immediately
+# before launching the pinned audit, not inferred from scheduler host memory.
+[[ -n "$VRAM_PREFLIGHT_DIR" && "$EXPECTED_SM" =~ ^(75|86|89)$ ]] || die "vram-preflight-config"
+(cd "$VRAM_PREFLIGHT_DIR" && sha256sum -c --quiet SHA256SUMS) || die "vram-preflight-manifest"
+cp "$VRAM_PREFLIGHT_DIR/vram_preflight" "$WORK/vram_preflight" || die "vram-preflight-copy"
+export SOUNIO_CUDA_DEVICE=0
+vram_rc=0
+timeout -k 2s 30s "$WORK/vram_preflight" "$EXPECTED_SM" > "$WORK/vram-preflight.log" 2>&1 || vram_rc=$?
+while IFS= read -r line; do rec "$(printf '%s' "$line" | cut -c1-120)"; done < "$WORK/vram-preflight.log"
+if [[ "$vram_rc" -eq 42 ]]; then rec r-vram-insufficient; die "vram-insufficient"; fi
+[[ "$vram_rc" -eq 0 ]] && grep -qx VRAM_ADMISSION_PASS "$WORK/vram-preflight.log" || die "vram-preflight-failed"
+rec r-vram-admission-pass
 
 # The pinned executable can leave a driver thread alive after main returns.
 # Launch within the batch allocation, so the watchdog owns the exact child PID.
@@ -135,7 +163,7 @@ stop_audit_child() {
   return 1
 }
 t0=$SECONDS; rc=0; workaround=0
-env SOUNIO_STDLIB_PATH="$D/stdlib" SOUNIO_AUDIT_BACKEND=cuda "$WORK/audit" --arch granite --model-dir "$MODEL_DIR" \
+env SOUNIO_AUDIT_BACKEND=cuda "$WORK/audit" --arch granite --model-dir "$MODEL_DIR" \
     --dtype bf16 --prompts 480 --tokens 128 --prompts-file "$PROMPTS_FILE" --prompt-ids "$PROMPT_IDS" --out "$WORK/cuda.tsv" < /dev/null > "$WORK/run.log" 2>&1 &
 pid=$!
 while kill -0 "$pid" 2>/dev/null; do
@@ -169,9 +197,9 @@ fi
 
 grep -q GRANITE_TOKEN_IDS_480_PASS "$WORK/run.log" || die "token-oracle-failed"
 awk -F '\t' 'BEGIN{n=0} /^#/ {next} {if(NF!=5 || $1!=n || $3!=128) exit 1; n++} END{if(n!=480) exit 1}' "$WORK/cuda.tsv" || die "incomplete-audit"
-cp "$WORK/audit" "$WORK/cuda.tsv" "$WORK/run.log" "$WORK/inputs.sha256" "$WORK/build-"*.log "$ART/" || die "artifact-copy"
+cp "$WORK/audit" "$WORK/cuda.tsv" "$WORK/run.log" "$WORK/inputs.sha256" "$WORK/build-"*.log "$WORK/vram-preflight.log" "$WORK/vram_preflight" "$ART/" || die "artifact-copy"
 if [[ -f "$WORK/exit-hang-status.log" ]]; then cp "$WORK/exit-hang-status.log" "$ART/" || die "watchdog-log-copy"; fi
-sha256sum "$ART/audit" "$ART/cuda.tsv" "$PROMPTS_FILE" "$PROMPT_IDS" > "$ART/SHA256SUMS"
+sha256sum "$ART/audit" "$ART/cuda.tsv" "$ART/vram-preflight.log" "$ART/vram_preflight" "$PROMPTS_FILE" "$PROMPT_IDS" > "$ART/SHA256SUMS"
 if [[ -x "$WORK/cmp" ]]; then cp "$WORK/cmp" "$ART/cmp" || die "comparator-copy"; sha256sum "$ART/cmp" >> "$ART/SHA256SUMS"; fi
 rec "r-tsv-sha-$(sha256sum "$ART/cuda.tsv" | cut -d' ' -f1)"
 if [[ "$REF_TSV" == none ]]; then

@@ -41,6 +41,11 @@ out="$stage/cluster-receipt-$SLURM_JOB_ID.txt"
       if (cd "$art" && sha256sum -c SHA256SUMS); then printf 'artifact_hash_check=PASS\n'; else printf 'artifact_hash_check=FAIL\n'; fi
     else printf 'No completed audit manifest\n'; fi
     if [[ -s "$art/partial.sha256" ]]; then cat "$art/partial.sha256"; fi
+    if [[ -s "$art/failure.sha256" ]]; then
+      cat "$art/failure.sha256"
+      if (cd "$art" && sha256sum -c failure.sha256); then printf 'failure_artifact_hash_check=PASS\n'; else printf 'failure_artifact_hash_check=FAIL\n'; fi
+    fi
+    if [[ -s "$art/vram-preflight.log" ]]; then cat "$art/vram-preflight.log"; fi
     if [[ -s "$art/exit-code" ]]; then printf 'exit-code='; cat "$art/exit-code"; fi
     if [[ -s "$art/cmp.out" ]]; then cat "$art/cmp.out"; fi
   done
