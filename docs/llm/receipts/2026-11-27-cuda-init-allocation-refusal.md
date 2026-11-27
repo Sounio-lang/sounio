@@ -54,17 +54,31 @@ this test concerns allocation refusal, not VRAM measurement. Evidence logs
 and hashes are under `/orangefs/training/llm-granite-n10/alloc-refusal-29667/`
 and `alloc-refusal-29668/`.
 
-**NOT ESTABLISHED:** native Linux test execution on the narrower PR branch
-based directly on `feat/llm-backend-v2` (`575d1eb57a2ff0215ec87ae7e502230b9ef2c13a`).
-Jobs 29663 (test-only baseline, 00:01:27, MaxRSS 2079148K) and 29664
-(production fix, 00:01:28, MaxRSS 2072304K) both failed the compiler check
-before execution with E137 undeclared `ptr_write_u8` in
-`llm/bf16_kernels::bf16_cstr_append`. This pre-existing Linux raw-memory
-compatibility defect is already addressed in the Granite branch's separate
-runtime work; it is not folded into this allocator-only PR. Jobs 29665
-and 29666 were invalid intermediate attempts rejected by the linear model
-cleanup check (E039); the fixture was corrected to one disposal path
-before the meaningful before/after executions. The production change is
-mirrored from the working diagnostic branch, but a direct validation on
-the older base awaits its runtime prerequisites. No claim of a passing
-PR-target runtime test or real-GPU test with this patched source.
+## Direct target-branch regression
+
+**OBSERVED.** On the first PR revision, jobs 29663 (00:01:27, 2079148K)
+and 29664 (00:01:28, 2072304K) stopped at E137 before the probe could run.
+The v2 base was missing a declaration of `ptr_write_u8` in
+`bf16_cstr_append`. Two intermediate fixture runs, 29665 and 29666,
+stopped at E039 until the fixture used a single model disposal path.
+
+Commit `12eed46a3dbfcdc3144b19a4996cbb3c7cc7ec52` supplies the ported
+native raw-memory accessors, POSIX mappings and effect declarations used
+by the runner on the v2 base. This commit contains the old allocator and
+serves as the control. Job 29735 overlaid only the two fixture source
+files from `5be76e3a3307936266d033896c9edac578f51342`. Job 29736 built
+that revision of the PR directly. Both jobs used the same C++23 mock and
+source-built Madaros with the hash recorded above.
+
+| Job | Slurm result | Wall | Batch MaxRSS | Observation |
+|---|---|---:|---:|---|
+| 29735 · before | COMPLETED 0:0 | 00:02:29 | 3528412K | Second allocation returned 2, then the runner made five further allocation calls. Seven allocations attempted, six freed, no named refusal. |
+| 29736 · after | COMPLETED 0:0 | 00:02:10 | 3272432K | `CUDA_DEVICE_ALLOC_REFUSED stage=shard bytes=64 CUresult=2` at the second call. Two allocations attempted, one freed, probe exit 0 and `CUDA_INIT_ALLOC_REFUSAL_PASS`. |
+| 29737 · verification | COMPLETED 0:0 | 00:00:32 | 2041980K | Verified both artifact manifests, checked all eleven affected Sounio library modules, built and ran the raw memory and mapping contract tests. Both printed PASS. |
+
+All three jobs ran CPU-only on `dl380-dl380-proxmox`. Executables, driver
+doubles, run logs and SHA256SUMS are under
+`/orangefs/training/llm-granite-n10/alloc-refusal-{29735,29736}/`.
+The fixture exercises the real runner with an injected driver return code.
+**NOT ESTABLISHED.** This patched source has no real-GPU measurement in
+this receipt. The three-GPU numerical campaign used its original audit pin.
