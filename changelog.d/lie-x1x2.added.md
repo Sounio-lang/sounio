@@ -1,0 +1,1 @@
+Add opaque left-censored assay observations and explicitly marked concentration imputations, a Gaussian censored likelihood consumer, and fit standard-uncertainty results with separate residual-estimated (Type A) and absolute-sigma (Type B) provenance. External lie-corpus tests distinguish these types from observations and from each other.
