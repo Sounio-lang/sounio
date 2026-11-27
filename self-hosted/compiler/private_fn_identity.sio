@@ -1201,6 +1201,7 @@ fn pfi_pattern_bind(p: Pattern) with Mut, Panic, Div, Alloc {
 // pfi_use_map_module_begin per loaded module followed by one
 // pfi_use_map_note per `use` item of that module, in item order.
 pub fn pfi_use_map_reset() with Mut {
+    ast_type_reach_reset()
     PFI_UM_COUNT = 0
     PFI_UM_VALID = 1
     PFI_UM_OVERFLOW = 0
@@ -2595,10 +2596,79 @@ fn hy_check_all(programs: &! [Program; 256], count: i64) -> bool with IO, Mut, P
     ok
 }
 
+// Hand the resolved `use` edges to the parser's type-visibility table
+// (ast_user_type_visible): one edge per imported name, or every name for a glob
+// or whole-module import. Leaves the table not ready on overflow, so visibility
+// keeps its previous, exporter-blind answer rather than a partial one.
+fn pfi_note_type_reach(programs: &! [Program; 256], count: i64) with Mut, Panic, Div, Alloc {
+    ast_type_reach_reset()
+    var i: i64 = 0
+    while i < count && i < 256 {
+        var prog = (*programs)[i as usize]
+        var ord: i64 = 0
+        var cur = prog.items
+        var going = true
+        while going {
+            match cur {
+                None => { going = false }
+                Some(list) => {
+                    if (*list).head.kind == ItemKind::ItemUse {
+                        let tgt = pfi_use_target(i, ord)
+                        let is_pub = visibility_to_bool((*list).head.visibility)
+                        if tgt >= 0 {
+                            var ok = true
+                            if (*list).head.use_glob {
+                                ok = ast_type_reach_note(i, tgt, 0, is_pub)
+                            } else {
+                                match (*list).head.use_items {
+                                    Some(names) => {
+                                        var nc: Option<Box<ImportItemList> > = Some(names)
+                                        var more = true
+                                        while more {
+                                            match nc {
+                                                None => { more = false }
+                                                Some(l) => {
+                                                    if !ast_type_reach_note(i, tgt, ast_name_hash((*l).head), is_pub) { ok = false }
+                                                    nc = (*l).tail
+                                                }
+                                            }
+                                        }
+                                    }
+                                    None => {
+                                        if pfi_use_named(i, ord) {
+                                            ok = ast_type_reach_note(i, tgt, ast_name_hash(ir_path_last_name((*list).head.use_path)), is_pub)
+                                        } else {
+                                            ok = ast_type_reach_note(i, tgt, 0, is_pub)
+                                        }
+                                    }
+                                }
+                            }
+                            if !ok {
+                                ast_type_reach_reset()
+                                return
+                            }
+                        }
+                        ord = ord + 1
+                    }
+                    cur = (*list).tail
+                }
+            }
+        }
+        i = i + 1
+    }
+    AST_TYPE_REACH_READY = 1
+}
+
 pub fn private_fn_identity_apply(programs: &! [Program; 256], count: i64) -> i64 with IO, Mut, Panic, Div, Alloc {
     if count < 2 {
         PFI_UM_VALID = 0
+        ast_type_reach_reset()
         return 0
+    }
+    if PFI_UM_VALID == 1 && PFI_UM_OVERFLOW == 0 {
+        pfi_note_type_reach(programs, count)
+    } else {
+        ast_type_reach_reset()
     }
     if pfi_disabled() {
         PFI_UM_VALID = 0

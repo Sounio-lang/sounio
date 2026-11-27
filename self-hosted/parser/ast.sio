@@ -1997,10 +1997,77 @@ pub fn ast_record_glob_import() with Mut {
     }
 }
 
+// Resolved `use` edges, filled after module loading by private_fn_identity
+// (ast_type_reach_note), once every `use` has its loaded target module. One edge
+// per imported name (its hash), or hash 0 for a glob or whole-module import
+// (every name of the target). REACH_PUB marks a `pub use`, which re-exports what
+// it imports. While AST_TYPE_REACH_READY is 0 (single-module compile, no use
+// map, or overflow), visibility falls back to the exporter-blind rule below.
+pub var AST_TYPE_REACH_FROM: [i64; 16384] = [0; 16384]
+pub var AST_TYPE_REACH_TO: [i64; 16384] = [0; 16384]
+pub var AST_TYPE_REACH_HASH: [i64; 16384] = [0; 16384]
+pub var AST_TYPE_REACH_PUB: [i64; 16384] = [0; 16384]
+pub var AST_TYPE_REACH_COUNT: i64 = 0
+pub var AST_TYPE_REACH_READY: i64 = 0
+
+pub fn ast_type_reach_reset() with Mut {
+    AST_TYPE_REACH_COUNT = 0
+    AST_TYPE_REACH_READY = 0
+}
+
+// Module `from` imports the name with hash `name_hash` (0 = every name) from
+// module `to`. False on overflow; the caller then leaves the table not ready.
+pub fn ast_type_reach_note(from: i64, to: i64, name_hash: i64, is_pub: bool) -> bool with Mut {
+    if AST_TYPE_REACH_COUNT >= 16384 { return false }
+    AST_TYPE_REACH_FROM[AST_TYPE_REACH_COUNT as usize] = from
+    AST_TYPE_REACH_TO[AST_TYPE_REACH_COUNT as usize] = to
+    AST_TYPE_REACH_HASH[AST_TYPE_REACH_COUNT as usize] = name_hash
+    AST_TYPE_REACH_PUB[AST_TYPE_REACH_COUNT as usize] = if is_pub { 1 } else { 0 }
+    AST_TYPE_REACH_COUNT = AST_TYPE_REACH_COUNT + 1
+    true
+}
+
+// Does module `m` pass on the name with hash `h` declared in module `def`?
+// With pub_only, only its `pub use` edges count (a re-export); `depth` bounds
+// the chain.
+pub fn ast_type_reaches(m: i64, def: i64, h: i64, pub_only: bool, depth: i64) -> bool with Div {
+    if depth > 8 { return false }
+    var e: i64 = 0
+    while e < AST_TYPE_REACH_COUNT {
+        if AST_TYPE_REACH_FROM[e as usize] == m && (!pub_only || AST_TYPE_REACH_PUB[e as usize] == 1) {
+            let eh = AST_TYPE_REACH_HASH[e as usize]
+            if eh == 0 || eh == h {
+                let to = AST_TYPE_REACH_TO[e as usize]
+                if to == def { return true }
+                if to >= 0 && to != m && ast_type_reaches(to, def, h, true, depth + 1) { return true }
+            }
+        }
+        e = e + 1
+    }
+    false
+}
+
 // Is a user struct/enum named `name` visible in module `module` (the checker's
-// current_module_id)? See the table comment above for the rule.
+// current_module_id)? See the table comment above for the rule. With resolved
+// `use` edges (AST_TYPE_REACH_READY), a public type declared in module d is
+// visible only when an import of `module` reaches d, directly or through a
+// `pub use` re-export. A glob import of an unrelated module, or a public K
+// loaded for another symbol, no longer turns the kelvin unit K into the enum
+// (review of #3743; tests/run-pass/unit_kelvin_beside_pub_enum_k_unrelated_glob.sio).
 pub fn ast_user_type_visible(name: Name, module: i64) -> bool with Div {
     let h = ast_name_hash(name)
+    if AST_TYPE_REACH_READY == 1 {
+        var r: i64 = 0
+        while r < AST_USER_TYPE_NAME_COUNT {
+            if AST_USER_TYPE_NAME_HASHES[r as usize] == h {
+                let d = AST_USER_TYPE_NAME_MODS[r as usize]
+                if d == module { return true }
+                if AST_USER_TYPE_NAME_PUB[r as usize] == 1 && ast_type_reaches(module, d, h, false, 0) { return true }
+            }
+            r = r + 1
+        }
+        return false
+    }
     var any_pub = false
     var i: i64 = 0
     while i < AST_USER_TYPE_NAME_COUNT {
