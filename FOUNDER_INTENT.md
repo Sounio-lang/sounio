@@ -2,7 +2,7 @@
 
 Status: binding project context for AI collaborators  
 Owner: Demetrios Chiuratto Agourakis  
-Last revised: 2026-07-11
+Last revised: 2026-11-22
 
 ## Why this document exists
 
@@ -201,6 +201,61 @@ not be silently replaced for convenience.
   evidence level remain explicit.
 - Compiler limitations do not refute the scientific hypothesis. Conversely,
   successful compilation does not validate the hypothesis.
+
+### Closed by meaning
+
+In my own voice: Sounio is a language in which nothing that matters is left
+without an owner. Every bit of a program's output is answered by its text,
+declared as a typed freedom, or refused. I want that to hold down to the
+physics: the compiler should know where its own reliability comes from, from the
+particle flux on the chip to its own fixed point, and every number in that
+account should say whether it was derived, measured or assumed.
+
+This is not Wheeler's question. Diverse double-compiling asks how to distrust a
+compiler. I ask how a compiler stays identical to itself while knowing what
+sustains it. My references are von Foerster's eigenforms, Maturana and Varela's
+operational closure, and the observer inside the description.
+
+The commitments that follow:
+
+- **Meaning is a function and the comparison is equality.**
+  ⟦P⟧ : Input → Output ⊎ Refusal. A binary is honest when it behaves exactly as
+  the text means, not when it refines it. Under equality the honest
+  self-compiling binary is unique: h = ⟦S⟧(S).
+- **A word in the text must answer something.** A construct whose value comes
+  from outside the text (stack garbage, an unhandled effect, an effect name
+  accepted in silence) is an open construct and must be closed or refused.
+  Openness is allowed only when declared.
+- **Freedom is typed.** An implementation choice that can change output, such
+  as a reduction order, reaches output only as a declared envelope. Freedom in
+  a compiler's own output has a price: it enlarges the root that someone must
+  prove.
+- **The world is answered through a declared boundary.** What the program asks
+  of the operating system is part of its meaning. An address chosen by the
+  kernel is opaque by default and must not reach output.
+- **The levels of the construct differ in kind.** The bit is probabilistic,
+  because it is physics. The binary is exact, because meaning is equality.
+  Credibility is plural, because it is a relation between artifacts, procedures
+  and observers. No level certifies itself. That covers a compiler attesting
+  itself (Thompson's attack), an author acting as the last judge of their own
+  work, and an observer attesting its own independence.
+- **The same algebra of uncertainty serves pharmacokinetics and silicon.** A
+  compartmental model with a certified matrix exponential describes a drug in
+  a body and an error moving through the layers of a machine.
+
+Evidence status (2026-11-22). Measured:
+
+- PR #3700 closed the five open reads in `lean_single.sio`.
+- Madaros built from current source and the seed agree byte for byte on the
+  self-compilation fixed point.
+- The seed's questions to the kernel were traced.
+- Lean toys of the uniqueness lemma (L3) and its failure under refinement (L6)
+  check.
+
+Hypotheses: the probabilistic model of physical corruption of the fixed point,
+and the certified reliability chain from physics to output. The literature
+review behind those estimates, with the wording each claim may use, is in the
+project research notes. Do not cite these hypotheses as results.
 
 ## How to challenge the founder well
 
