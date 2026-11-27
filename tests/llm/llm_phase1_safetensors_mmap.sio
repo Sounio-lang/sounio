@@ -1,0 +1,334 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: LLM_PHASE1_SAFETENSORS_MMAP_PASS
+//
+// Fase 1A witness: zero-copy Safetensors + multi-shard index reader backed by
+// llm::mmap ONLY. Reads directory path from `/tmp/sounio_llm_phase1_st_cfg.txt`
+// (fallback `/tmp/sounio_llm_phase1_st`), resolves tensors across 2 shards in
+// `model.safetensors.index.json` (`model-00001-of-00002.safetensors` and sparse
+// 2.5 GiB `model-00002-of-00002.safetensors` with tensor offset >= 2.25 GiB),
+// verifies zero-copy `host_ptr`, validates BF16/F32 (and optional extra dtypes),
+// and consumes all MappedShard linear structs cleanly.
+
+use llm::mmap::{
+    MappedShard,
+    mapped_shard_is_ok,
+    mapped_shard_ptr,
+    mapped_shard_len,
+    mapped_shard_open,
+    mapped_shard_close,
+}
+use llm::safetensors_mmap::{
+    StMmapHeader,
+    StTensorView,
+    st_mm_dtype_f32,
+    st_mm_dtype_bf16,
+    st_mm_dtype_f16,
+    st_mm_dtype_f64,
+    st_mm_dtype_i64,
+    st_mm_dtype_u8,
+    st_mm_dtype_i32,
+    st_bytes_eq_str,
+    st_mmap_parse_header,
+    st_mmap_find_tensor,
+    st_index_resolve_shard_bytes,
+    st_index_match_shard_2,
+    st_view_dim,
+    st_view_read_bf16_bits,
+    st_view_read_f64,
+}
+
+fn trim_dir_len(dir: string) -> i64 with Mut {
+    var n = str_len(dir)
+    while n > 0 {
+        let c = str_char_at(dir, n - 1) & 255
+        if c == 10 || c == 13 || c == 32 || c == 9 || c == 47 {
+            n = n - 1
+        } else {
+            break
+        }
+    }
+    n
+}
+
+fn open_dir_file_str(dir: string, rel: string) -> MappedShard with IO, Mut, Panic, Alloc {
+    let dlen = trim_dir_len(dir)
+    let flen = str_len(rel)
+    let buf = heap_alloc(dlen + flen + 2) as i64
+    var i: i64 = 0
+    while i < dlen {
+        let _w = ptr_write_u8(buf, i, str_char_at(dir, i) & 255)
+        i = i + 1
+    }
+    let _sl = ptr_write_u8(buf, dlen, 47)
+    var j: i64 = 0
+    while j < flen {
+        let _w = ptr_write_u8(buf, dlen + 1 + j, str_char_at(rel, j) & 255)
+        j = j + 1
+    }
+    let _z = ptr_write_u8(buf, dlen + 1 + flen, 0)
+    let s = mapped_shard_open((buf as *mut u8) as string)
+    heap_free(buf as *mut u8)
+    s
+}
+
+fn open_dir_file_bytes(dir: string, src_ptr: i64, off: i64, flen: i64) -> MappedShard with IO, Mut, Panic, Alloc {
+    let dlen = trim_dir_len(dir)
+    let buf = heap_alloc(dlen + flen + 2) as i64
+    var i: i64 = 0
+    while i < dlen {
+        let _w = ptr_write_u8(buf, i, str_char_at(dir, i) & 255)
+        i = i + 1
+    }
+    let _sl = ptr_write_u8(buf, dlen, 47)
+    var j: i64 = 0
+    while j < flen {
+        let _w = ptr_write_u8(buf, dlen + 1 + j, ptr_read_u8(src_ptr, off + j))
+        j = j + 1
+    }
+    let _z = ptr_write_u8(buf, dlen + 1 + flen, 0)
+    let s = mapped_shard_open((buf as *mut u8) as string)
+    heap_free(buf as *mut u8)
+    s
+}
+
+fn check_bf16_vec6(v: &StTensorView) -> bool with IO, Mut {
+    let b0 = st_view_read_bf16_bits(v, 0)
+    let b1 = st_view_read_bf16_bits(v, 1)
+    let b2 = st_view_read_bf16_bits(v, 2)
+    let b3 = st_view_read_bf16_bits(v, 3)
+    let b4 = st_view_read_bf16_bits(v, 4)
+    let b5 = st_view_read_bf16_bits(v, 5)
+    if !b0.1 || !b1.1 || !b2.1 || !b3.1 || !b4.1 || !b5.1 {
+        println("LLM_PHASE1_SAFETENSORS_MMAP_FAIL: bf16 read failed")
+        return false
+    }
+    if b0.0 != 0x3F80 || b1.0 != 0xC020 || b2.0 != 0x4049 || b3.0 != 0x0000 || b4.0 != 0x8000 || b5.0 != 0x477F {
+        println("LLM_PHASE1_SAFETENSORS_MMAP_FAIL: bf16 bits mismatch")
+        return false
+    }
+    let f0 = st_view_read_f64(v, 0)
+    let f1 = st_view_read_f64(v, 1)
+    let f2 = st_view_read_f64(v, 2)
+    let f3 = st_view_read_f64(v, 3)
+    let f4 = st_view_read_f64(v, 4)
+    let f5 = st_view_read_f64(v, 5)
+    if !f0.1 || !f1.1 || !f2.1 || !f3.1 || !f4.1 || !f5.1 {
+        println("LLM_PHASE1_SAFETENSORS_MMAP_FAIL: bf16 f64 read failed")
+        return false
+    }
+    let neg_zero_sign = (f64_to_bits(f4.0) >> 63) & 1
+    if f0.0 != 1.0 || f1.0 != -2.5 || f2.0 != 3.140625 || f3.0 != 0.0 || f4.0 != 0.0 || neg_zero_sign != 1 || f5.0 != 65280.0 {
+        println("LLM_PHASE1_SAFETENSORS_MMAP_FAIL: bf16 f64 mismatch")
+        return false
+    }
+    let oob_neg = st_view_read_bf16_bits(v, -1)
+    let oob_hi = st_view_read_bf16_bits(v, 6)
+    let oob_f64 = st_view_read_f64(v, 6)
+    if oob_neg.1 || oob_hi.1 || oob_f64.1 {
+        println("LLM_PHASE1_SAFETENSORS_MMAP_FAIL: bf16 oob accepted")
+        return false
+    }
+    true
+}
+
+fn verify_optional_dtypes(shard1: &MappedShard, hdr1: &StMmapHeader) -> bool with IO, Mut {
+    let vf16 = st_mmap_find_tensor(shard1, hdr1, "extra.f16_probe")
+    if vf16.found {
+        let a0 = st_view_read_f64(&vf16, 0)
+        let a1 = st_view_read_f64(&vf16, 1)
+        if vf16.dtype != st_mm_dtype_f16() || !a0.1 || !a1.1 || a0.0 != 1.0 || a1.0 != -2.0 {
+            println("LLM_PHASE1_SAFETENSORS_MMAP_FAIL: f16 probe mismatch")
+            return false
+        }
+    }
+    let vf64 = st_mmap_find_tensor(shard1, hdr1, "extra.f64_probe")
+    if vf64.found {
+        let a0 = st_view_read_f64(&vf64, 0)
+        if vf64.dtype != st_mm_dtype_f64() || !a0.1 || a0.0 != -3.25 {
+            println("LLM_PHASE1_SAFETENSORS_MMAP_FAIL: f64 probe mismatch")
+            return false
+        }
+    }
+    let vi64 = st_mmap_find_tensor(shard1, hdr1, "extra.i64_probe")
+    if vi64.found {
+        let a0 = st_view_read_f64(&vi64, 0)
+        if vi64.dtype != st_mm_dtype_i64() || !a0.1 || a0.0 != -987654321.0 {
+            println("LLM_PHASE1_SAFETENSORS_MMAP_FAIL: i64 probe mismatch")
+            return false
+        }
+    }
+    let vu8 = st_mmap_find_tensor(shard1, hdr1, "extra.u8_probe")
+    if vu8.found {
+        let a0 = st_view_read_f64(&vu8, 0)
+        let a1 = st_view_read_f64(&vu8, 1)
+        if vu8.dtype != st_mm_dtype_u8() || !a0.1 || !a1.1 || a0.0 != 7.0 || a1.0 != 255.0 {
+            println("LLM_PHASE1_SAFETENSORS_MMAP_FAIL: u8 probe mismatch")
+            return false
+        }
+    }
+    let vi32 = st_mmap_find_tensor(shard1, hdr1, "extra.i32_probe")
+    if vi32.found {
+        let a0 = st_view_read_f64(&vi32, 0)
+        let a1 = st_view_read_f64(&vi32, 1)
+        if vi32.dtype != st_mm_dtype_i32() || !a0.1 || !a1.1 || a0.0 != -42.0 || a1.0 != 123456.0 {
+            println("LLM_PHASE1_SAFETENSORS_MMAP_FAIL: i32 probe mismatch")
+            return false
+        }
+    }
+    true
+}
+
+fn verify_shard1(shard1: &MappedShard) -> bool with IO, Mut {
+    if !mapped_shard_is_ok(shard1) {
+        println("LLM_PHASE1_SAFETENSORS_MMAP_FAIL: shard1 invalid")
+        return false
+    }
+    let hdr1 = st_mmap_parse_header(shard1)
+    if !hdr1.ok || hdr1.hdr_len <= 0 || hdr1.data_base_off != 8 + hdr1.hdr_len {
+        println("LLM_PHASE1_SAFETENSORS_MMAP_FAIL: shard1 header")
+        return false
+    }
+    let meta = st_mmap_find_tensor(shard1, &hdr1, "__metadata__")
+    if meta.found {
+        println("LLM_PHASE1_SAFETENSORS_MMAP_FAIL: __metadata__ not skipped")
+        return false
+    }
+    let absent = st_mmap_find_tensor(shard1, &hdr1, "nonexistent.weight")
+    if absent.found {
+        println("LLM_PHASE1_SAFETENSORS_MMAP_FAIL: absent tensor found")
+        return false
+    }
+
+    let s1_ptr = mapped_shard_ptr(shard1)
+    let v_emb = st_mmap_find_tensor(shard1, &hdr1, "model.embed_tokens.weight")
+    if !v_emb.found || v_emb.dtype != st_mm_dtype_bf16() || v_emb.rank != 2 || st_view_dim(&v_emb, 0) != 2 || st_view_dim(&v_emb, 1) != 3 || v_emb.count != 6 || v_emb.byte_len != 12 {
+        println("LLM_PHASE1_SAFETENSORS_MMAP_FAIL: shard1 embed metadata")
+        return false
+    }
+    if v_emb.host_ptr != s1_ptr + v_emb.data_off || v_emb.data_off < hdr1.data_base_off {
+        println("LLM_PHASE1_SAFETENSORS_MMAP_FAIL: shard1 embed host_ptr")
+        return false
+    }
+    if !check_bf16_vec6(&v_emb) {
+        return false
+    }
+
+    let v_norm = st_mmap_find_tensor(shard1, &hdr1, "model.norm.weight")
+    if !v_norm.found || v_norm.dtype != st_mm_dtype_f32() || v_norm.rank != 1 || st_view_dim(&v_norm, 0) != 4 || v_norm.count != 4 || v_norm.byte_len != 16 {
+        println("LLM_PHASE1_SAFETENSORS_MMAP_FAIL: shard1 norm metadata")
+        return false
+    }
+    if v_norm.host_ptr != s1_ptr + v_norm.data_off || v_norm.data_off < hdr1.data_base_off {
+        println("LLM_PHASE1_SAFETENSORS_MMAP_FAIL: shard1 norm host_ptr")
+        return false
+    }
+    let wrong_dtype = st_view_read_bf16_bits(&v_norm, 0)
+    if wrong_dtype.1 {
+        println("LLM_PHASE1_SAFETENSORS_MMAP_FAIL: f32 accepted by read_bf16_bits")
+        return false
+    }
+    let n0 = st_view_read_f64(&v_norm, 0)
+    let n1 = st_view_read_f64(&v_norm, 1)
+    let n2 = st_view_read_f64(&v_norm, 2)
+    let n3 = st_view_read_f64(&v_norm, 3)
+    if !n0.1 || !n1.1 || !n2.1 || !n3.1 || n0.0 != 1.0 || n1.0 != -0.5 || n2.0 != 2.25 || n3.0 != 0.0 {
+        println("LLM_PHASE1_SAFETENSORS_MMAP_FAIL: shard1 f32 mismatch")
+        return false
+    }
+
+    verify_optional_dtypes(shard1, &hdr1)
+}
+
+fn verify_shard2(shard2: &MappedShard, offset_225gib: i64, size_25gib: i64) -> bool with IO, Mut {
+    if !mapped_shard_is_ok(shard2) || mapped_shard_len(shard2) < size_25gib {
+        println("LLM_PHASE1_SAFETENSORS_MMAP_FAIL: shard2 size")
+        return false
+    }
+    let hdr2 = st_mmap_parse_header(shard2)
+    if !hdr2.ok || hdr2.hdr_len <= 0 || hdr2.data_base_off != 8 + hdr2.hdr_len {
+        println("LLM_PHASE1_SAFETENSORS_MMAP_FAIL: shard2 header")
+        return false
+    }
+    let s2_ptr = mapped_shard_ptr(shard2)
+    let v_q = st_mmap_find_tensor(shard2, &hdr2, "model.layers.0.self_attn.q_proj.weight")
+    if !v_q.found || v_q.dtype != st_mm_dtype_bf16() || v_q.rank != 2 || st_view_dim(&v_q, 0) != 2 || st_view_dim(&v_q, 1) != 3 || v_q.count != 6 || v_q.byte_len != 12 {
+        println("LLM_PHASE1_SAFETENSORS_MMAP_FAIL: shard2 q_proj metadata")
+        return false
+    }
+    if v_q.data_off < hdr2.data_base_off + offset_225gib {
+        println("LLM_PHASE1_SAFETENSORS_MMAP_FAIL: shard2 offset <= 2.25 GiB")
+        return false
+    }
+    if v_q.host_ptr != s2_ptr + v_q.data_off {
+        println("LLM_PHASE1_SAFETENSORS_MMAP_FAIL: shard2 host_ptr mismatch")
+        return false
+    }
+    check_bf16_vec6(&v_q)
+}
+
+fn run_with_index(cfg_dir: string, idx_shard: &MappedShard) -> bool with IO, Mut, Panic, Div, Alloc {
+    let shard1_name = "model-00001-of-00002.safetensors"
+    let shard2_name = "model-00002-of-00002.safetensors"
+    let t_emb = "model.embed_tokens.weight"
+    let t_norm = "model.norm.weight"
+    let t_q = "model.layers.0.self_attn.q_proj.weight"
+
+    let idx_ptr = mapped_shard_ptr(idx_shard)
+    let r1 = st_index_resolve_shard_bytes(idx_shard, t_emb)
+    let r_norm = st_index_resolve_shard_bytes(idx_shard, t_norm)
+    let r2 = st_index_resolve_shard_bytes(idx_shard, t_q)
+    let r_miss = st_index_resolve_shard_bytes(idx_shard, "missing.weight")
+
+    let m1 = st_index_match_shard_2(idx_shard, t_emb, shard1_name, shard2_name)
+    let m_norm = st_index_match_shard_2(idx_shard, t_norm, shard1_name, shard2_name)
+    let m2 = st_index_match_shard_2(idx_shard, t_q, shard1_name, shard2_name)
+    let m_miss = st_index_match_shard_2(idx_shard, "missing.weight", shard1_name, shard2_name)
+
+    let idx_ok = r1.2 && r_norm.2 && r2.2 && !r_miss.2
+        && st_bytes_eq_str(idx_ptr, r1.0, r1.1, shard1_name)
+        && st_bytes_eq_str(idx_ptr, r2.0, r2.1, shard2_name)
+        && m1 == 0 && m_norm == 0 && m2 == 1 && m_miss == -1
+
+    if !idx_ok {
+        println("LLM_PHASE1_SAFETENSORS_MMAP_FAIL: index resolution")
+        return false
+    }
+
+    let shard1 = open_dir_file_bytes(cfg_dir, idx_ptr, r1.0, r1.1)
+    let shard2 = open_dir_file_bytes(cfg_dir, idx_ptr, r2.0, r2.1)
+
+    let offset_225gib: i64 = 2415919104
+    let size_25gib: i64 = 2684354560
+    var ok = verify_shard1(&shard1)
+    if ok {
+        ok = verify_shard2(&shard2, offset_225gib, size_25gib)
+    }
+
+    let _c1 = mapped_shard_close(shard1)
+    let _c2 = mapped_shard_close(shard2)
+    ok
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
+    var cfg_dir = "/tmp/sounio_llm_phase1_st"
+    let cfg_file = "/tmp/sounio_llm_phase1_st_cfg.txt"
+    if file_size(cfg_file) > 0 {
+        cfg_dir = read_file(cfg_file)
+    }
+
+    let idx_shard = open_dir_file_str(cfg_dir, "model.safetensors.index.json")
+    var ok = false
+    if !mapped_shard_is_ok(&idx_shard) {
+        println("LLM_PHASE1_SAFETENSORS_MMAP_FAIL: open index")
+    } else {
+        ok = run_with_index(cfg_dir, &idx_shard)
+    }
+    let _ci = mapped_shard_close(idx_shard)
+
+    if ok {
+        println("LLM_PHASE1_SAFETENSORS_MMAP_PASS")
+        return 0
+    }
+    1
+}

@@ -1,0 +1,305 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: LLM_PHASE2_PAGED_KV_PASS
+//
+// Fase 2 witness: block-paged FP32 KV cache for Qwen3 / Llama.
+// Backed by single PageArena, 64-byte aligned sub-regions.
+// Verifies:
+// 1. qwen3_kv_bf16_plan_bytes(36, 8192, 8, 128) == 1207959552
+// 2. Allocation and initial geometry (block_size=16, 2 layers, 4 heads x 128)
+// 3. 40 tokens written across 3 logical blocks
+// 4. Bit-exact FP32->FP64 readback across both layers
+// 5. qwen3_kv_truncate(&!kv, 10) frees logical blocks 1 and 2 (used_blocks == 1)
+// 6. Regrowth up to 40 tokens cleanly reuses freed blocks (used_blocks == 3)
+// 7. Full cleanup and zero-leak release
+
+use llm::mmap::{
+    PageArena,
+    page_arena_alloc,
+    page_arena_is_ok,
+    page_arena_ptr,
+    page_arena_len,
+    page_arena_free,
+}
+use llm::qwen3_paged_kv::{
+    Qwen3PagedKv,
+    qwen3_kv_bf16_plan_bytes,
+    qwen3_kv_alloc,
+    qwen3_kv_free,
+    qwen3_kv_is_ok,
+    qwen3_kv_arena_ptr,
+    qwen3_kv_arena_len,
+    qwen3_kv_seq_len,
+    qwen3_kv_block_size,
+    qwen3_kv_table_off,
+    qwen3_kv_free_off,
+    qwen3_kv_k_base_off,
+    qwen3_kv_v_base_off,
+    qwen3_kv_n_layers,
+    qwen3_kv_max_blocks,
+    qwen3_kv_n_kv_heads,
+    qwen3_kv_head_dim,
+    qwen3_kv_free_top,
+    qwen3_kv_used_blocks,
+    qwen3_kv_k_layer_off,
+    qwen3_kv_v_layer_off,
+    qwen3_kv_ensure_pos,
+    qwen3_kv_truncate,
+    qwen3_kv_write_kv_f32_buf,
+    qwen3_kv_read_k_f64,
+    qwen3_kv_read_v_f64,
+}
+use tensor2::convert::{f64_to_f32_bits, f32_bits_to_f64}
+
+fn token_k_val(token_pos: i64, layer: i64, kv_head: i64, d: i64, scale: i64) -> f64 {
+    let base = (token_pos + 1) * scale * 1000 + (layer + 1) * 100 + (kv_head + 1) * 10 + d
+    base as f64
+}
+
+fn token_v_val(token_pos: i64, layer: i64, kv_head: i64, d: i64, scale: i64) -> f64 {
+    let base = (token_pos + 1) * scale * 2000 + (layer + 1) * 200 + (kv_head + 1) * 20 + d
+    base as f64
+}
+
+fn fill_token_buffers(
+    k_ptr: i64,
+    v_ptr: i64,
+    token_pos: i64,
+    layer: i64,
+    n_kv_heads: i64,
+    head_dim: i64,
+    scale: i64,
+) with Mut {
+    var h: i64 = 0
+    while h < n_kv_heads {
+        var d: i64 = 0
+        while d < head_dim {
+            let idx = h * head_dim + d
+            let k_v = token_k_val(token_pos, layer, h, d, scale)
+            let k_bits = f64_to_f32_bits(k_v)
+            let _w1 = ptr_write_u32_le(k_ptr, idx * 4, k_bits)
+
+            let v_v = token_v_val(token_pos, layer, h, d, scale)
+            let v_bits = f64_to_f32_bits(v_v)
+            let _w2 = ptr_write_u32_le(v_ptr, idx * 4, v_bits)
+
+            d = d + 1
+        }
+        h = h + 1
+    }
+}
+
+fn verify_token_readback(
+    kv: &Qwen3PagedKv,
+    token_pos: i64,
+    layer: i64,
+    n_kv_heads: i64,
+    head_dim: i64,
+    scale: i64,
+) -> bool with Mut, Div {
+    var h: i64 = 0
+    while h < n_kv_heads {
+        var d: i64 = 0
+        while d < head_dim {
+            let exp_k = token_k_val(token_pos, layer, h, d, scale)
+            let exp_k_bits = f64_to_f32_bits(exp_k)
+            let act_k = qwen3_kv_read_k_f64(kv, layer, token_pos, h, d)
+            let act_k_bits = f64_to_f32_bits(act_k)
+            if act_k_bits != exp_k_bits {
+                return false
+            }
+
+            let exp_v = token_v_val(token_pos, layer, h, d, scale)
+            let exp_v_bits = f64_to_f32_bits(exp_v)
+            let act_v = qwen3_kv_read_v_f64(kv, layer, token_pos, h, d)
+            let act_v_bits = f64_to_f32_bits(act_v)
+            if act_v_bits != exp_v_bits {
+                return false
+            }
+
+            d = d + 1
+        }
+        h = h + 1
+    }
+    true
+}
+
+fn test_paged_kv_main() -> bool with IO, Mut, Div {
+    // 1. Plan bytes check
+    let plan = qwen3_kv_bf16_plan_bytes(36, 8192, 8, 128)
+    if plan != 1207959552 {
+        println("FAIL: plan bytes")
+        return false
+    }
+
+    // 2. Allocate KV cache and scratch buffers
+    let n_layers: i64 = 2
+    let max_blocks: i64 = 8
+    let block_size: i64 = 16
+    let n_kv_heads: i64 = 4
+    let head_dim: i64 = 128
+
+    var kv = qwen3_kv_alloc(n_layers, max_blocks, block_size, n_kv_heads, head_dim)
+    let k_buf = page_arena_alloc(16384)
+    let v_buf = page_arena_alloc(16384)
+
+    var ok: bool = true
+    if !qwen3_kv_is_ok(&kv) {
+        println("FAIL: kv alloc not ok")
+        ok = false
+    } else if !page_arena_is_ok(&k_buf) || !page_arena_is_ok(&v_buf) {
+        println("FAIL: alloc scratch buffers")
+        ok = false
+    } else if qwen3_kv_arena_ptr(&kv) <= 0 || qwen3_kv_arena_len(&kv) <= 0 {
+        println("FAIL: kv arena ptr/len")
+        ok = false
+    } else if qwen3_kv_seq_len(&kv) != 0 || qwen3_kv_used_blocks(&kv) != 0 || qwen3_kv_free_top(&kv) != 8 {
+        println("FAIL: kv initial state")
+        ok = false
+    } else {
+        let k_ptr = page_arena_ptr(&k_buf)
+        let v_ptr = page_arena_ptr(&v_buf)
+
+        // 3. Write 40 tokens across block_size=16 (needs 3 logical blocks: 0, 1, 2)
+        var p: i64 = 0
+        while p < 40 && ok {
+            var l: i64 = 0
+            while l < n_layers && ok {
+                fill_token_buffers(k_ptr, v_ptr, p, l, n_kv_heads, head_dim, 1)
+                let w_ok = qwen3_kv_write_kv_f32_buf(&!kv, l, p, k_ptr, v_ptr)
+                if !w_ok {
+                    println("FAIL: write_kv_f32_buf")
+                    ok = false
+                }
+                l = l + 1
+            }
+            p = p + 1
+        }
+
+        if ok && qwen3_kv_seq_len(&kv) != 40 {
+            println("FAIL: seq_len != 40")
+            ok = false
+        }
+
+        if ok && (qwen3_kv_used_blocks(&kv) != 3 || qwen3_kv_free_top(&kv) != 5) {
+            println("FAIL: used_blocks != 3 after 40 tokens")
+            ok = false
+        }
+
+        // 4. Verify bit-exact readback of all 40 tokens across both layers
+        p = 0
+        while p < 40 && ok {
+            var l: i64 = 0
+            while l < n_layers && ok {
+                let rb_ok = verify_token_readback(&kv, p, l, n_kv_heads, head_dim, 1)
+                if !rb_ok {
+                    println("FAIL: readback mismatch on 40 tokens")
+                    ok = false
+                }
+                l = l + 1
+            }
+            p = p + 1
+        }
+
+        // 5. Truncate to 10 tokens: frees blocks 1 and 2, keeping block 0
+        if ok {
+            let trunc_ok = qwen3_kv_truncate(&!kv, 10)
+            if !trunc_ok {
+                println("FAIL: truncate")
+                ok = false
+            } else if qwen3_kv_seq_len(&kv) != 10 {
+                println("FAIL: seq_len != 10 after truncate")
+                ok = false
+            } else if qwen3_kv_used_blocks(&kv) != 1 || qwen3_kv_free_top(&kv) != 7 {
+                println("FAIL: used_blocks != 1 after truncate")
+                ok = false
+            }
+        }
+
+        // Verify tokens 0..9 still read back correctly
+        p = 0
+        while p < 10 && ok {
+            var l: i64 = 0
+            while l < n_layers && ok {
+                let rb_ok = verify_token_readback(&kv, p, l, n_kv_heads, head_dim, 1)
+                if !rb_ok {
+                    println("FAIL: readback mismatch after truncate for prefix")
+                    ok = false
+                }
+                l = l + 1
+            }
+            p = p + 1
+        }
+
+        // 6. Regrow up to 40 tokens: writes tokens 10..39 with scale=2
+        p = 10
+        while p < 40 && ok {
+            var l: i64 = 0
+            while l < n_layers && ok {
+                fill_token_buffers(k_ptr, v_ptr, p, l, n_kv_heads, head_dim, 2)
+                let w_ok = qwen3_kv_write_kv_f32_buf(&!kv, l, p, k_ptr, v_ptr)
+                if !w_ok {
+                    println("FAIL: write_kv_f32_buf during regrow")
+                    ok = false
+                }
+                l = l + 1
+            }
+            p = p + 1
+        }
+
+        if ok && qwen3_kv_seq_len(&kv) != 40 {
+            println("FAIL: seq_len != 40 after regrow")
+            ok = false
+        }
+
+        if ok && (qwen3_kv_used_blocks(&kv) != 3 || qwen3_kv_free_top(&kv) != 5) {
+            println("FAIL: used_blocks != 3 after regrow")
+            ok = false
+        }
+
+        // Verify readback: 0..9 has scale 1, 10..39 has scale 2
+        p = 0
+        while p < 10 && ok {
+            var l: i64 = 0
+            while l < n_layers && ok {
+                let rb_ok = verify_token_readback(&kv, p, l, n_kv_heads, head_dim, 1)
+                if !rb_ok {
+                    println("FAIL: readback mismatch for tokens 0..9 after regrow")
+                    ok = false
+                }
+                l = l + 1
+            }
+            p = p + 1
+        }
+
+        p = 10
+        while p < 40 && ok {
+            var l: i64 = 0
+            while l < n_layers && ok {
+                let rb_ok = verify_token_readback(&kv, p, l, n_kv_heads, head_dim, 2)
+                if !rb_ok {
+                    println("FAIL: readback mismatch for tokens 10..39 after regrow")
+                    ok = false
+                }
+                l = l + 1
+            }
+            p = p + 1
+        }
+    }
+
+    // Clean up all resources exactly once at single exit point
+    let _f1 = page_arena_free(k_buf)
+    let _f2 = page_arena_free(v_buf)
+    let _f3 = qwen3_kv_free(kv)
+
+    ok
+}
+
+fn main() -> i64 with IO, Mut, Div {
+    let ok = test_paged_kv_main()
+    if ok {
+        println("LLM_PHASE2_PAGED_KV_PASS")
+        return 0
+    }
+    1
+}

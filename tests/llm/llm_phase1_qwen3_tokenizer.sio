@@ -1,0 +1,251 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: LLM_PHASE1_QWEN3_TOKENIZER_PASS
+//
+// Fase 1B witness: loads a Qwen3 tokenizer.json through llm::mmap ONLY,
+// validates Qwen3 special token IDs (151643, 151644, 151645, 151667, 151668),
+// verifies single-digit pre-token split of "2026", verifies ChatML formatting
+// + Sounio code + PT-BR UTF-8 + <think>...</think> exact encode & byte-for-byte
+// decode round-trip.
+
+use llm::mmap::{
+    PageArena,
+    page_arena_alloc,
+    page_arena_free,
+    page_arena_is_ok,
+    page_arena_ptr,
+}
+use llm::qwen3_tokenizer::{
+    Qwen3Tokenizer,
+    qwen3_tokenizer_load,
+    qwen3_tokenizer_is_ok,
+    qwen3_tokenizer_free,
+    qwen3_special_id,
+    qwen3_encode_bytes,
+    qwen3_encode_str,
+    qwen3_decode_bytes,
+    qwen3_format_chat_bytes,
+}
+
+fn test_append_str(dst: i64, pos: i64, s: string) -> i64 with Mut {
+    let n = str_len(s)
+    var i: i64 = 0
+    while i < n {
+        let _w = ptr_write_u8(dst, pos + i, str_char_at(s, i) & 255)
+        i = i + 1
+    }
+    pos + n
+}
+
+fn test_bytes_eq(a: i64, b: i64, len: i64) -> bool {
+    var i: i64 = 0
+    while i < len {
+        if ptr_read_u8(a, i) != ptr_read_u8(b, i) { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn test_count_id(ids_ptr: i64, n_ids: i64, target: i64) -> i64 {
+    var cnt: i64 = 0
+    var i: i64 = 0
+    while i < n_ids {
+        if ptr_read_i64_le(ids_ptr, i * 8) == target {
+            cnt = cnt + 1
+        }
+        i = i + 1
+    }
+    cnt
+}
+
+fn test_count_seq4(ids_ptr: i64, n_ids: i64, a: i64, b: i64, c: i64, d: i64) -> i64 {
+    var cnt: i64 = 0
+    var i: i64 = 0
+    while i + 3 < n_ids {
+        if ptr_read_i64_le(ids_ptr, i * 8) == a
+            && ptr_read_i64_le(ids_ptr, (i + 1) * 8) == b
+            && ptr_read_i64_le(ids_ptr, (i + 2) * 8) == c
+            && ptr_read_i64_le(ids_ptr, (i + 3) * 8) == d {
+            cnt = cnt + 1
+        }
+        i = i + 1
+    }
+    cnt
+}
+
+fn test_decode_single_byte(tok: &Qwen3Tokenizer, id: i64, tmp_ptr: i64, expected_byte: i64) -> bool with Mut, Panic, Div {
+    let _w = ptr_write_i64_le(tmp_ptr, 0, id)
+    let out_ptr = tmp_ptr + 64
+    let n = qwen3_decode_bytes(tok, tmp_ptr, 1, out_ptr, 64)
+    n == 1 && ptr_read_u8(out_ptr, 0) == expected_byte
+}
+
+fn run_tokenizer_checks(tok: &Qwen3Tokenizer, work_ptr: i64) -> bool with IO, Mut, Panic, Div {
+    let ids_ptr = work_ptr
+    let sys_ptr = work_ptr + 32768
+    let user_ptr = work_ptr + 40960
+    let chat_ptr = work_ptr + 65536
+    let dec_ptr = work_ptr + 131072
+    let tmp_ptr = work_ptr + 196608
+
+    // 1. Validate Qwen3 special token IDs (and negative check for absent token).
+    let id_eot = qwen3_special_id(tok, "<|endoftext|>")
+    let id_ims = qwen3_special_id(tok, "<|im_start|>")
+    let id_ime = qwen3_special_id(tok, "<|im_end|>")
+    let id_th0 = qwen3_special_id(tok, "<think>")
+    let id_th1 = qwen3_special_id(tok, "</think>")
+    let id_abs = qwen3_special_id(tok, "<|absent_special_token|>")
+    if id_eot != 151643 || id_ims != 151644 || id_ime != 151645 || id_th0 != 151667 || id_th1 != 151668 || id_abs != -1 {
+        println("LLM_PHASE1_QWEN3_TOKENIZER_FAIL: special ids")
+        return false
+    }
+
+    // 2. Validate individual single-digit split of "2026".
+    let n2026 = qwen3_encode_str(tok, "2026", ids_ptr, 4096)
+    if n2026 != 4 {
+        println("LLM_PHASE1_QWEN3_TOKENIZER_FAIL: 2026 split count")
+        return false
+    }
+    let d0 = ptr_read_i64_le(ids_ptr, 0)
+    let d1 = ptr_read_i64_le(ids_ptr, 8)
+    let d2 = ptr_read_i64_le(ids_ptr, 16)
+    let d3 = ptr_read_i64_le(ids_ptr, 24)
+    if d0 != d2 || d0 == d1 || d0 == d3 || d1 == d3 {
+        println("LLM_PHASE1_QWEN3_TOKENIZER_FAIL: 2026 digit id identity")
+        return false
+    }
+    if !test_decode_single_byte(tok, d0, tmp_ptr, 50)
+        || !test_decode_single_byte(tok, d1, tmp_ptr, 48)
+        || !test_decode_single_byte(tok, d2, tmp_ptr, 50)
+        || !test_decode_single_byte(tok, d3, tmp_ptr, 54) {
+        println("LLM_PHASE1_QWEN3_TOKENIZER_FAIL: 2026 digit decode")
+        return false
+    }
+    let dec2026 = qwen3_decode_bytes(tok, ids_ptr, 4, dec_ptr, 65536)
+    if dec2026 != 4
+        || ptr_read_u8(dec_ptr, 0) != 50
+        || ptr_read_u8(dec_ptr, 1) != 48
+        || ptr_read_u8(dec_ptr, 2) != 50
+        || ptr_read_u8(dec_ptr, 3) != 54 {
+        println("LLM_PHASE1_QWEN3_TOKENIZER_FAIL: 2026 full decode")
+        return false
+    }
+
+    // 3. ChatML + Sounio code + PT-BR UTF-8 + <think> exact encode & round-trip.
+    var sys_len: i64 = 0
+    sys_len = test_append_str(sys_ptr, sys_len, "You are a Sounio compiler assistant.")
+
+    var user_len: i64 = 0
+    user_len = test_append_str(user_ptr, user_len, "Olá, mundo! Ação, coração, é, ç, ã, õ, â, ê, ô — teste 2026:\n")
+    user_len = test_append_str(user_ptr, user_len, "fn soma(x: &!i64, n: i64) -> i64 with Mut {\n    var acc: i64 = *x\n    acc = acc + n\n    acc\n}\n")
+
+    var chat_len = qwen3_format_chat_bytes(sys_ptr, sys_len, user_ptr, user_len, true, true, chat_ptr, 65536)
+    if chat_len <= 0 {
+        println("LLM_PHASE1_QWEN3_TOKENIZER_FAIL: chat format")
+        return false
+    }
+    chat_len = test_append_str(chat_ptr, chat_len, "<think>\nAnalisando função em Sounio 2026.\n</think>\nCódigo válido em Sounio.<|im_end|>\n")
+
+    let n_chat = qwen3_encode_bytes(tok, chat_ptr, chat_len, ids_ptr, 4096)
+    let dump_cfg = "/tmp/sounio_llm_phase1_tok_dump_cfg.txt"
+    if file_size(dump_cfg) > 0 {
+        print("[QWEN3_CHAT_TOKENS:")
+        var k: i64 = 0
+        while k < n_chat {
+            print(" ")
+            print_int(ptr_read_i64_le(ids_ptr, k * 8))
+            k = k + 1
+        }
+        println(" ]")
+    }
+    if n_chat <= 20 {
+        println("LLM_PHASE1_QWEN3_TOKENIZER_FAIL: chat encode")
+        return false
+    }
+    if test_count_id(ids_ptr, n_chat, 151644) != 3
+        || test_count_id(ids_ptr, n_chat, 151645) != 3
+        || test_count_id(ids_ptr, n_chat, 151667) != 1
+        || test_count_id(ids_ptr, n_chat, 151668) != 1 {
+        println("LLM_PHASE1_QWEN3_TOKENIZER_FAIL: chat special token counts")
+        return false
+    }
+    if test_count_seq4(ids_ptr, n_chat, d0, d1, d2, d3) != 2 {
+        println("LLM_PHASE1_QWEN3_TOKENIZER_FAIL: chat 2026 digit sequence")
+        return false
+    }
+
+    let dec_chat = qwen3_decode_bytes(tok, ids_ptr, n_chat, dec_ptr, 65536)
+    if dec_chat != chat_len || !test_bytes_eq(dec_ptr, chat_ptr, chat_len) {
+        println("LLM_PHASE1_QWEN3_TOKENIZER_FAIL: chat byte round-trip")
+        return false
+    }
+
+    // 4. Non-thinking ChatML format + empty input + whitespace/contraction round-trip.
+    let nt_len = qwen3_format_chat_bytes(sys_ptr, sys_len, user_ptr, user_len, true, false, chat_ptr, 65536)
+    if nt_len <= 0 {
+        println("LLM_PHASE1_QWEN3_TOKENIZER_FAIL: non-thinking format")
+        return false
+    }
+    let n_nt = qwen3_encode_bytes(tok, chat_ptr, nt_len, ids_ptr, 4096)
+    if n_nt <= 0 || test_count_id(ids_ptr, n_nt, 151667) != 1 || test_count_id(ids_ptr, n_nt, 151668) != 1 {
+        println("LLM_PHASE1_QWEN3_TOKENIZER_FAIL: non-thinking encode")
+        return false
+    }
+    let dec_nt = qwen3_decode_bytes(tok, ids_ptr, n_nt, dec_ptr, 65536)
+    if dec_nt != nt_len || !test_bytes_eq(dec_ptr, chat_ptr, nt_len) {
+        println("LLM_PHASE1_QWEN3_TOKENIZER_FAIL: non-thinking round-trip")
+        return false
+    }
+
+    if qwen3_encode_str(tok, "", ids_ptr, 4096) != 0 {
+        println("LLM_PHASE1_QWEN3_TOKENIZER_FAIL: empty encode")
+        return false
+    }
+
+    // Build "  \t\n  don't 2026  " using ASCII 39 to exercise contraction + whitespace rules.
+    var e_len: i64 = 0
+    e_len = test_append_str(user_ptr, e_len, "  \t\n  don")
+    let _wa = ptr_write_u8(user_ptr, e_len, 39)
+    e_len = e_len + 1
+    e_len = test_append_str(user_ptr, e_len, "t 2026  ")
+    let n_edge = qwen3_encode_bytes(tok, user_ptr, e_len, ids_ptr, 4096)
+    if n_edge <= 0 {
+        println("LLM_PHASE1_QWEN3_TOKENIZER_FAIL: edge encode")
+        return false
+    }
+    let dec_edge = qwen3_decode_bytes(tok, ids_ptr, n_edge, dec_ptr, 65536)
+    if dec_edge != e_len || !test_bytes_eq(dec_ptr, user_ptr, e_len) {
+        println("LLM_PHASE1_QWEN3_TOKENIZER_FAIL: edge round-trip")
+        return false
+    }
+
+    true
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    var tok_path = "/tmp/llm_phase1_tokenizer.json"
+    let cfg_file = "/tmp/sounio_llm_phase1_tok_cfg.txt"
+    if file_size(cfg_file) > 0 {
+        tok_path = read_file(cfg_file)
+    }
+
+    let tok = qwen3_tokenizer_load(tok_path)
+    let work = page_arena_alloc(262144)
+
+    var ok = false
+    if !qwen3_tokenizer_is_ok(&tok) {
+        println("LLM_PHASE1_QWEN3_TOKENIZER_FAIL: load")
+    } else if !page_arena_is_ok(&work) {
+        println("LLM_PHASE1_QWEN3_TOKENIZER_FAIL: work arena")
+    } else {
+        ok = run_tokenizer_checks(&tok, page_arena_ptr(&work))
+    }
+
+    let _fw = page_arena_free(work)
+    let _ft = qwen3_tokenizer_free(tok)
+    if ok {
+        println("LLM_PHASE1_QWEN3_TOKENIZER_PASS")
+        return 0
+    }
+    1
+}

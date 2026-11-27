@@ -1,0 +1,255 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: LLM_PHASE2_QWEN3_FORWARD_PASS
+//
+// Phase 2 witness: Qwen3 sovereign inference engine.
+// Verifies:
+// 1. Config invariants for Qwen3-0.6B and Qwen3-8B
+// 2. Zero-copy multi-shard Safetensors model loading
+// 3. CPU forward pass full-sequence prefill vs KV truncate+redecode bit-exact parity
+// 4. In "metal_and_cpu" mode, Apple Silicon real Metal NoCopy parity vs CPU (< 1e-3, top-1 match, 3-step generation match)
+// 5. Clean linear consumption of all models, arenas, and sessions.
+
+use llm::mmap::{
+    MappedShard,
+    mapped_shard_close,
+}
+use llm::qwen3_paged_kv::{
+    Qwen3PagedKv,
+    qwen3_kv_alloc,
+    qwen3_kv_free,
+    qwen3_kv_is_ok,
+    qwen3_kv_truncate,
+}
+use llm::qwen3::{
+    Qwen3Config,
+    qwen3_cfg_0_6b,
+    qwen3_cfg_8b,
+    Qwen3Model,
+    qwen3_model_open,
+    qwen3_model_free,
+    qwen3_model_is_ok,
+    qwen3_model_cfg,
+    qwen3_logits_argmax,
+    qwen3_logit_f64,
+    qwen3_forward_token_cpu,
+    Qwen3MetalRunner,
+    qwen3_metal_runner_is_ok,
+    qwen3_metal_runner_init,
+    qwen3_metal_runner_free,
+    qwen3_forward_token_metal,
+}
+use math::pure::{abs}
+
+fn check_config_invariants() -> bool {
+    let c0 = qwen3_cfg_0_6b()
+    let c0_ok = c0.ok && c0.layers == 28 && c0.hidden == 1024 && c0.inter == 3072
+        && c0.n_q == 16 && c0.n_kv == 8 && c0.head_dim == 128 && c0.vocab == 151936
+        && c0.tied && c0.eps == 0.000001 && c0.rope_theta == 1000000.0
+
+    let c8 = qwen3_cfg_8b()
+    let c8_ok = c8.ok && c8.layers == 36 && c8.hidden == 4096 && c8.inter == 12288
+        && c8.n_q == 32 && c8.n_kv == 8 && c8.head_dim == 128 && c8.vocab == 151936
+        && !c8.tied && c8.eps == 0.000001 && c8.rope_theta == 1000000.0
+
+    c0_ok && c8_ok
+}
+
+fn test_metal_nocopy(
+    m: &Qwen3Model,
+    cfg: &Qwen3Config,
+    tok0: i64,
+    tok1: i64,
+    tok2: i64,
+    saved_top: f64,
+    saved_l0: f64,
+    saved_l1: f64,
+    top1_prefill: i64,
+    kv_cpu: &!Qwen3PagedKv
+) -> bool with Alloc, Mut, Div, Panic, IO {
+    var kv_metal = qwen3_kv_alloc(cfg.layers, 16, 16, cfg.n_kv, cfg.head_dim)
+    let rt = qwen3_metal_runner_init(m, &kv_metal, "")
+    var ok = false
+
+    if qwen3_kv_is_ok(&kv_metal) && qwen3_metal_runner_is_ok(&rt) {
+        let mok0 = qwen3_forward_token_metal(m, &!kv_metal, &rt, tok0, 0)
+        let mok1 = qwen3_forward_token_metal(m, &!kv_metal, &rt, tok1, 1)
+        let mok2 = qwen3_forward_token_metal(m, &!kv_metal, &rt, tok2, 2)
+        if mok0 && mok1 && mok2 {
+            let top1_metal = qwen3_logits_argmax(m)
+            let metal_top = qwen3_logit_f64(m, top1_metal)
+            let metal_l0 = qwen3_logit_f64(m, 0)
+            let metal_l1 = qwen3_logit_f64(m, 1)
+
+            let diff_top = abs(saved_top - metal_top)
+            let diff_l0 = abs(saved_l0 - metal_l0)
+            let diff_l1 = abs(saved_l1 - metal_l1)
+
+            var max_diff = diff_top
+            if diff_l0 > max_diff { max_diff = diff_l0 }
+            if diff_l1 > max_diff { max_diff = diff_l1 }
+
+            if top1_metal == top1_prefill && max_diff < 0.001 {
+                // 3-step greedy generation match:
+                // Step 1: feed top1 at pos 3
+                let next1_cpu_ok = qwen3_forward_token_cpu(m, kv_cpu, top1_prefill, 3)
+                let gen1_cpu = qwen3_logits_argmax(m)
+                let next1_met_ok = qwen3_forward_token_metal(m, &!kv_metal, &rt, top1_metal, 3)
+                let gen1_metal = qwen3_logits_argmax(m)
+
+                // Step 2: feed gen1 at pos 4
+                let next2_cpu_ok = qwen3_forward_token_cpu(m, kv_cpu, gen1_cpu, 4)
+                let gen2_cpu = qwen3_logits_argmax(m)
+                let next2_met_ok = qwen3_forward_token_metal(m, &!kv_metal, &rt, gen1_metal, 4)
+                let gen2_metal = qwen3_logits_argmax(m)
+
+                // Step 3: feed gen2 at pos 5
+                let next3_cpu_ok = qwen3_forward_token_cpu(m, kv_cpu, gen2_cpu, 5)
+                let gen3_cpu = qwen3_logits_argmax(m)
+                let next3_met_ok = qwen3_forward_token_metal(m, &!kv_metal, &rt, gen2_metal, 5)
+                let gen3_metal = qwen3_logits_argmax(m)
+
+                ok = next1_cpu_ok && next1_met_ok && gen1_cpu == gen1_metal
+                    && next2_cpu_ok && next2_met_ok && gen2_cpu == gen2_metal
+                    && next3_cpu_ok && next3_met_ok && gen3_cpu == gen3_metal
+            }
+        }
+    }
+
+    let _rf = qwen3_metal_runner_free(rt)
+    let _kf = qwen3_kv_free(kv_metal)
+    ok
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
+    if !check_config_invariants() {
+        println("LLM_PHASE2_QWEN3_FORWARD_FAIL: config invariants mismatch")
+        return 1
+    }
+
+    var model_dir = "/tmp/sounio_llm_phase2_model"
+    let model_cfg_file = "/tmp/sounio_llm_phase2_model_cfg.txt"
+    if file_size(model_cfg_file) > 0 {
+        model_dir = read_file(model_cfg_file)
+    }
+
+    var mode = "cpu"
+    let mode_cfg_file = "/tmp/sounio_llm_phase2_mode_cfg.txt"
+    if file_size(mode_cfg_file) > 0 {
+        mode = read_file(mode_cfg_file)
+    }
+    let is_metal_and_cpu = str_len(mode) >= 5 && str_char_at(mode, 0) == 109 // m
+
+    let dump_cfg_file = "/tmp/sounio_llm_phase2_dump_cfg.txt"
+    let do_dump = file_size(dump_cfg_file) > 0
+
+    let m = qwen3_model_open(model_dir)
+    let cfg = qwen3_model_cfg(&m)
+    var kv_cpu = qwen3_kv_alloc(cfg.layers, 16, 16, cfg.n_kv, cfg.head_dim)
+
+    var all_ok = qwen3_model_is_ok(&m) && qwen3_kv_is_ok(&kv_cpu)
+
+    if all_ok {
+        // Sequence of 3 prompt tokens
+        let tok0: i64 = 7
+        let tok1: i64 = 23
+        let tok2: i64 = 42
+
+        // 1. CPU Prefill
+        let ok0 = qwen3_forward_token_cpu(&m, &!kv_cpu, tok0, 0)
+        let ok1 = qwen3_forward_token_cpu(&m, &!kv_cpu, tok1, 1)
+        let ok2 = qwen3_forward_token_cpu(&m, &!kv_cpu, tok2, 2)
+        if !ok0 || !ok1 || !ok2 {
+            all_ok = false
+            println("LLM_PHASE2_QWEN3_FORWARD_FAIL: cpu prefill failed")
+        }
+
+        if all_ok {
+            let top1_prefill = qwen3_logits_argmax(&m)
+
+            // Save top logits from prefill for bit-exact comparison
+            let saved_l0 = qwen3_logit_f64(&m, 0)
+            let saved_l1 = qwen3_logit_f64(&m, 1)
+            let saved_l2 = qwen3_logit_f64(&m, 2)
+            let saved_l3 = qwen3_logit_f64(&m, 3)
+            let saved_top = qwen3_logit_f64(&m, top1_prefill)
+
+            // 2. KV Truncate and Redecode Bit Parity
+            let trunc_ok = qwen3_kv_truncate(&!kv_cpu, 1)
+            if !trunc_ok {
+                all_ok = false
+                println("LLM_PHASE2_QWEN3_FORWARD_FAIL: kv truncate")
+            } else {
+                let re_ok1 = qwen3_forward_token_cpu(&m, &!kv_cpu, tok1, 1)
+                let re_ok2 = qwen3_forward_token_cpu(&m, &!kv_cpu, tok2, 2)
+                if !re_ok1 || !re_ok2 {
+                    all_ok = false
+                    println("LLM_PHASE2_QWEN3_FORWARD_FAIL: cpu redecode failed")
+                } else {
+                    let top1_redecode = qwen3_logits_argmax(&m)
+                    let re_l0 = qwen3_logit_f64(&m, 0)
+                    let re_l1 = qwen3_logit_f64(&m, 1)
+                    let re_l2 = qwen3_logit_f64(&m, 2)
+                    let re_l3 = qwen3_logit_f64(&m, 3)
+                    let re_top = qwen3_logit_f64(&m, top1_redecode)
+
+                    let parity_ok = (top1_prefill == top1_redecode)
+                        && (saved_l0 == re_l0) && (saved_l1 == re_l1)
+                        && (saved_l2 == re_l2) && (saved_l3 == re_l3)
+                        && (saved_top == re_top)
+
+                    if !parity_ok {
+                        all_ok = false
+                        println("LLM_PHASE2_QWEN3_FORWARD_FAIL: KV truncate redecode bit parity mismatch")
+                    }
+                }
+            }
+
+            // 3. Optional Dump of Logits
+            if all_ok && do_dump {
+                print("[QWEN3_FORWARD_LOGITS: top1=")
+                print_int(top1_prefill)
+                print(" val=")
+                print_f64(saved_top)
+                print(" l0=")
+                print_f64(saved_l0)
+                print(" l1=")
+                print_f64(saved_l1)
+                print(" l2=")
+                print_f64(saved_l2)
+                print("]\n")
+            }
+
+            // 4. Metal NoCopy Parity Check
+            if all_ok && is_metal_and_cpu {
+                let metal_ok = test_metal_nocopy(
+                    &m,
+                    &cfg,
+                    tok0,
+                    tok1,
+                    tok2,
+                    saved_top,
+                    saved_l0,
+                    saved_l1,
+                    top1_prefill,
+                    &!kv_cpu
+                )
+                if !metal_ok {
+                    all_ok = false
+                    println("LLM_PHASE2_QWEN3_FORWARD_FAIL: metal nocopy parity")
+                }
+            }
+        }
+    } else {
+        println("LLM_PHASE2_QWEN3_FORWARD_FAIL: init failed")
+    }
+
+    let _kf = qwen3_kv_free(kv_cpu)
+    let _mf = qwen3_model_free(m)
+
+    if all_ok {
+        println("LLM_PHASE2_QWEN3_FORWARD_PASS")
+        return 0
+    }
+    1
+}

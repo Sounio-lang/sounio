@@ -15,6 +15,7 @@ var A64M_ENTRY: i64 = 0
 var A64M_BSS: i64 = 16384
 var A64M_ERROR: bool = false
 var A64M_TRACE: bool = false
+var A64M_LINUX: bool = false
 var A64M_FLOAT: [bool; 65536] = [false; 65536]
 var A64M_INT: [bool; 65536] = [false; 65536]
 var A64M_FN: [i64; 16384] = [-1; 16384]
@@ -103,10 +104,32 @@ fn a64m_epilogue() with Mut, Panic {
     a64m_word(0xA8C17BFD)
     a64m_word(0xD65F03C0)
 }
+fn a64m_map_anon_flags() -> i64 {
+    if A64M_LINUX { 0x22 } else { 0x1002 }
+}
+fn a64m_syscall(macos_num: i64, linux_num: i64) with Mut, Panic {
+    if A64M_LINUX {
+        a64m_imm(8, linux_num)
+        a64m_word(0xD4000001) // svc #0
+        a64m_word(0xB13FFC1F) // cmn x0, #4095 -> C=1 iff -4095 <= x0 <= -1
+    } else {
+        a64m_imm(16, macos_num)
+        a64m_word(0xD4001001) // svc #0x80
+    }
+}
+fn a64m_exit_syscall() with Mut, Panic {
+    // Keep strictly 5 words so callers with hardcoded branch offsets (e.g. __rgn_exit_scalar +40) stay valid.
+    if A64M_LINUX {
+        a64m_imm(8, 94) // SYS_exit_group
+        a64m_word(0xD4000001)
+    } else {
+        a64m_imm(16, 1) // SYS_exit
+        a64m_word(0xD4001001)
+    }
+}
 fn a64m_write() with Mut, Panic {
     a64m_imm(0, 1)
-    a64m_imm(16, 4)
-    a64m_word(0xD4001001)
+    a64m_syscall(4, 64)
 }
 fn a64m_print_string() with Mut, Panic, Div {
     a64m_word(0xAA0003E1) // x1=string
@@ -295,9 +318,16 @@ fn a64m_string_length() with Mut, Panic, Div {
 fn a64m_open_file_info() with Mut, Panic, Div {
     // Return x0=fd, x1=length; -1/-1 on an open/stat error or a directory.
     a64m_word(0xD10303FF) // sub sp,sp,#192
-    a64m_imm(1, 0)
-    a64m_imm(16, 5)
-    a64m_word(0xD4001001)
+    if A64M_LINUX {
+        a64m_word(0xAA0003E1) // mov x1, x0
+        a64m_imm(0, -100)     // AT_FDCWD
+        a64m_imm(2, 0)        // O_RDONLY
+        a64m_imm(3, 0)
+        a64m_syscall(5, 56)   // SYS_openat
+    } else {
+        a64m_imm(1, 0)
+        a64m_syscall(5, 56)
+    }
     let opened = A64M_LEN
     a64m_word(0x54000003)
     a64m_imm(0, -1)
@@ -307,29 +337,181 @@ fn a64m_open_file_info() with Mut, Panic, Div {
     a64m_branch(opened, A64M_LEN, 5)
     a64m_word(0xF90003E0)
     a64m_word(0x910043E1) // stat buffer at sp+16
-    a64m_imm(16, 339)
-    a64m_word(0xD4001001)
+    a64m_syscall(339, 80) // SYS_fstat
     let stat_failed = A64M_LEN
     a64m_word(0x54000002)
-    a64m_word(0x79402BEA) // ldrh w10,[sp,#20] (stat.st_mode)
+    if A64M_LINUX {
+        a64m_word(0xB94023EA) // ldr w10,[sp,#32] (stat.st_mode on aarch64-linux at +16)
+    } else {
+        a64m_word(0x79402BEA) // ldrh w10,[sp,#20] (stat.st_mode)
+    }
     a64m_word(0x12140D4A)
     a64m_word(0x7140115F)
     let directory = A64M_LEN
     a64m_word(0x54000000)
-    a64m_word(0xF9403BE1) // stat.st_size at sp+16+96
+    if A64M_LINUX {
+        a64m_word(0xF94023E1) // ldr x1,[sp,#64] (stat.st_size on aarch64-linux at +48)
+    } else {
+        a64m_word(0xF9403BE1) // stat.st_size at sp+16+96
+    }
     a64m_word(0xF94003E0)
     let okay = A64M_LEN
     a64m_word(0x14000000)
     a64m_branch(stat_failed, A64M_LEN, 4)
     a64m_branch(directory, A64M_LEN, 2)
     a64m_word(0xF94003E0)
-    a64m_imm(16, 6)
-    a64m_word(0xD4001001)
+    a64m_syscall(6, 57) // SYS_close
     a64m_imm(0, -1)
     a64m_imm(1, -1)
     a64m_branch(okay, A64M_LEN, 0)
     a64m_branch(failed, A64M_LEN, 0)
     a64m_word(0x910303FF)
+}
+fn a64m_mmap_ro() with Mut, Panic, Div {
+    a64m_word(0xD10083FF) // sub sp, sp, #32
+    a64m_open_file_info()
+    a64m_word(0xF90003E0) // str x0, [sp] (fd)
+    a64m_word(0xF90007E1) // str x1, [sp, #8] (st_size)
+    a64m_word(0xF100001F) // cmp x0, #0
+    let bad_fd = A64M_LEN
+    a64m_word(0x54000000)
+    a64m_word(0xF100003F) // cmp x1, #0
+    let bad_sz = A64M_LEN
+    a64m_word(0x54000000)
+    a64m_imm(9, 16383)
+    a64m_imm(10, -16384)
+    a64m_word(0x8B090021) // add x1, x1, x9
+    a64m_word(0xF100003F) // cmp x1, #0
+    let ovf_sz = A64M_LEN
+    a64m_word(0x54000000)
+    a64m_word(0x8A0A0021) // and x1, x1, x10
+    a64m_word(0xF94003E4) // ldr x4, [sp] (fd)
+    a64m_imm(0, 0)
+    a64m_imm(2, 1)        // PROT_READ
+    a64m_imm(3, 2)        // MAP_PRIVATE
+    a64m_imm(5, 0)
+    a64m_syscall(197, 222) // SYS_mmap
+    let mmap_ok = A64M_LEN
+    a64m_word(0x54000000)
+    a64m_imm(0, 0)
+    a64m_branch(mmap_ok, A64M_LEN, 5)
+    a64m_word(0xF9000BE0) // str x0, [sp, #16]
+    a64m_word(0xF94003E0) // ldr x0, [sp]
+    a64m_syscall(6, 57)   // SYS_close
+    a64m_word(0xF9400BE0) // ldr x0, [sp, #16]
+    let done = A64M_LEN
+    a64m_word(0x14000000)
+    let fail_close = A64M_LEN
+    a64m_word(0xF94003E0)
+    a64m_syscall(6, 57)
+    let fail_ret0 = A64M_LEN
+    a64m_imm(0, 0)
+    a64m_branch(bad_fd, fail_ret0, 13)
+    a64m_branch(bad_sz, fail_close, 15)
+    a64m_branch(ovf_sz, fail_close, 15)
+    a64m_branch(done, A64M_LEN, 0)
+    a64m_word(0x910083FF) // add sp, sp, #32
+}
+fn a64m_mmap_rw() with Mut, Panic, Div {
+    a64m_word(0xF100001F) // cmp x0, #0
+    let bad_sz = A64M_LEN
+    a64m_word(0x54000000)
+    a64m_imm(9, 16383)
+    a64m_imm(10, -16384)
+    a64m_word(0x8B090001) // add x1, x0, x9
+    a64m_word(0xF100003F) // cmp x1, #0
+    let ovf_sz = A64M_LEN
+    a64m_word(0x54000000)
+    a64m_word(0x8A0A0021) // and x1, x1, x10
+    a64m_imm(0, 0)
+    a64m_imm(2, 3)        // PROT_READ | PROT_WRITE
+    a64m_imm(3, a64m_map_anon_flags()) // MAP_PRIVATE | MAP_ANON
+    a64m_imm(4, -1)
+    a64m_imm(5, 0)
+    a64m_syscall(197, 222) // SYS_mmap
+    let ok = A64M_LEN
+    a64m_word(0x54000000)
+    let fail = A64M_LEN
+    a64m_imm(0, 0)
+    a64m_branch(bad_sz, fail, 15)
+    a64m_branch(ovf_sz, fail, 15)
+    a64m_branch(ok, A64M_LEN, 5)
+}
+fn a64m_munmap_ro() with Mut, Panic, Div {
+    a64m_word(0xF100001F) // cmp x0, #0
+    let bad_ptr = A64M_LEN
+    a64m_word(0x54000000)
+    a64m_word(0xF100003F) // cmp x1, #0
+    let bad_sz = A64M_LEN
+    a64m_word(0x54000000)
+    a64m_imm(9, 16383)
+    a64m_imm(10, -16384)
+    a64m_word(0x8B090021) // add x1, x1, x9
+    a64m_word(0xF100003F) // cmp x1, #0
+    let ovf_sz = A64M_LEN
+    a64m_word(0x54000000)
+    a64m_word(0x8A0A0021) // and x1, x1, x10
+    a64m_syscall(73, 215)  // SYS_munmap
+    let ok = A64M_LEN
+    a64m_word(0x54000000)
+    a64m_imm(0, 0)
+    let done = A64M_LEN
+    a64m_word(0x14000000)
+    let fail = A64M_LEN
+    a64m_imm(0, -1)
+    a64m_branch(bad_ptr, fail, 15)
+    a64m_branch(bad_sz, fail, 15)
+    a64m_branch(ovf_sz, fail, 15)
+    a64m_branch(ok, fail, 4)
+    a64m_branch(done, A64M_LEN, 0)
+}
+fn a64m_heap_alloc() with Mut, Panic, Div {
+    a64m_word(0xD10043FF) // sub sp, sp, #16
+    a64m_word(0xF100001F) // cmp x0, #0
+    let bad_sz = A64M_LEN
+    a64m_word(0x54000000)
+    a64m_word(0xF90003E0) // str x0, [sp]
+    a64m_imm(9, 16399)    // 16 + 16383
+    a64m_imm(10, -16384)
+    a64m_word(0x8B090001) // add x1, x0, x9
+    a64m_word(0xF100003F) // cmp x1, #0
+    let ovf_sz = A64M_LEN
+    a64m_word(0x54000000)
+    a64m_word(0x8A0A0021) // and x1, x1, x10
+    a64m_word(0xF90007E1) // str x1, [sp, #8]
+    a64m_imm(0, 0)
+    a64m_imm(2, 3)
+    a64m_imm(3, a64m_map_anon_flags())
+    a64m_imm(4, -1)
+    a64m_imm(5, 0)
+    a64m_syscall(197, 222)
+    let ok = A64M_LEN
+    a64m_word(0x54000000)
+    a64m_word(0xF94003E9) // ldr x9, [sp]
+    a64m_word(0xF94007EA) // ldr x10, [sp, #8]
+    a64m_word(0xF9000009) // str x9, [x0]
+    a64m_word(0xF900040A) // str x10, [x0, #8]
+    a64m_word(0x91004000) // add x0, x0, #16
+    let done = A64M_LEN
+    a64m_word(0x14000000)
+    let fail = A64M_LEN
+    a64m_imm(0, 0)
+    a64m_branch(bad_sz, fail, 15)
+    a64m_branch(ovf_sz, fail, 15)
+    a64m_branch(ok, fail, 4)
+    a64m_branch(done, A64M_LEN, 0)
+    a64m_word(0x910043FF) // add sp, sp, #16
+}
+fn a64m_heap_free() with Mut, Panic, Div {
+    a64m_word(0xF100001F) // cmp x0, #0
+    let null_ptr = A64M_LEN
+    a64m_word(0x54000000)
+    a64m_word(0xD1004000) // sub x0, x0, #16
+    a64m_word(0xF9400401) // ldr x1, [x0, #8]
+    a64m_syscall(73, 215)  // SYS_munmap
+    let done = A64M_LEN
+    a64m_imm(0, 0)
+    a64m_branch(null_ptr, done, 2)
 }
 fn a64m_file_size() with Mut, Panic, Div {
     a64m_word(0xD10043FF)
@@ -338,8 +520,7 @@ fn a64m_file_size() with Mut, Panic, Div {
     a64m_word(0xF100001F)
     let absent = A64M_LEN
     a64m_word(0x5400000B)
-    a64m_imm(16, 6)
-    a64m_word(0xD4001001)
+    a64m_syscall(6, 57)
     a64m_branch(absent, A64M_LEN, 13)
     a64m_word(0xF94003E0)
     a64m_word(0x910043FF)
@@ -358,11 +539,10 @@ fn a64m_read_file() with Mut, Panic, Div {
     a64m_word(0x91000421)
     a64m_imm(0, 0)
     a64m_imm(2, 3)
-    a64m_imm(3, 0x1002)
+    a64m_imm(3, a64m_map_anon_flags())
     a64m_imm(4, -1)
     a64m_imm(5, 0)
-    a64m_imm(16, 197)
-    a64m_word(0xD4001001)
+    a64m_syscall(197, 222)
     a64m_word(0x54000043)
     a64m_word(0xD4200000)
     a64m_word(0xF9000BE0)
@@ -377,8 +557,7 @@ fn a64m_read_file() with Mut, Panic, Div {
     a64m_word(0x8B090021)
     a64m_word(0xCB090142)
     a64m_word(0xF94003E0)
-    a64m_imm(16, 3)
-    a64m_word(0xD4001001)
+    a64m_syscall(3, 63)
     a64m_word(0x54000043)
     a64m_word(0xD4200000) // read failure must not fabricate a truncated result
     a64m_word(0xF100001F)
@@ -396,8 +575,7 @@ fn a64m_read_file() with Mut, Panic, Div {
     a64m_word(0xF100001F)
     let absent = A64M_LEN
     a64m_word(0x5400000B)
-    a64m_imm(16, 6)
-    a64m_word(0xD4001001)
+    a64m_syscall(6, 57)
     a64m_branch(absent, A64M_LEN, 13)
     a64m_word(0xF9400BE0)
     a64m_word(0x910103FF)
@@ -407,8 +585,13 @@ fn a64m_read_file() with Mut, Panic, Div {
 // wrapping. Three fixed words, so the guards skip them with b.cond +16.
 fn a64m_overflow_trap() with Mut, Panic {
     a64m_word(0xD2800020) // mov x0, #1
-    a64m_word(0xD2800030) // mov x16, #1 (SYS_exit)
-    a64m_word(0xD4001001) // svc #0x80
+    if A64M_LINUX {
+        a64m_word(0xD2800BC8) // mov x8, #94 (SYS_exit_group)
+        a64m_word(0xD4000001) // svc #0
+    } else {
+        a64m_word(0xD2800030) // mov x16, #1 (SYS_exit)
+        a64m_word(0xD4001001) // svc #0x80
+    }
 }
 fn a64m_binary(op: BinaryOp) -> bool with Mut, Panic {
     if op == BinaryOp::OpDiv || op == BinaryOp::OpUDiv || op == BinaryOp::OpRem || op == BinaryOp::OpURem {
@@ -573,6 +756,13 @@ fn a64m_import_call(symbol: string) -> bool with Mut, Panic, Div {
     a64m_word(0xD63F01C0)
     true
 }
+fn a64m_system_dl(name: string, argc: i64) -> bool with Mut, Panic, Div {
+    if name == "dlopen" && argc == 2 { return a64m_import_call("dlopen") }
+    if name == "dlsym" && argc == 2 { return a64m_import_call("dlsym") }
+    if name == "dlclose" && argc == 1 { return a64m_import_call("dlclose") }
+    if name == "dlerror" && argc == 0 { return a64m_import_call("dlerror") }
+    false
+}
 fn a64m_string_address(reg: i64, text: string) with Mut, Panic, Div {
     a64m_word(0x10000040 | reg) // adr reg,+8
     let skip = A64M_LEN
@@ -588,8 +778,7 @@ fn a64m_require_result(nonzero: bool) with Mut, Panic, Div {
     let okay = A64M_LEN
     a64m_word(0x54000000)
     a64m_imm(0, 1)
-    a64m_imm(16, 1)
-    a64m_word(0xD4001001)
+    a64m_exit_syscall()
     a64m_branch(okay, A64M_LEN, if nonzero { 3 } else { 2 })
 }
 fn a64m_metal_launch(id: i64, name: string, at: i64, argc: i64) -> bool with IO, Mut, Panic, Div {
@@ -1003,11 +1192,10 @@ fn a64m_emit_instr(module: &IrModule, func: &IrFunction, ii: i64) -> bool with I
         a64m_imm(0, 0)
         a64m_imm(1, native_v2_alloc_size_from_tag(instr.imm_i64) + 32)
         a64m_imm(2, 3)
-        a64m_imm(3, 0x1002)
+        a64m_imm(3, a64m_map_anon_flags())
         a64m_imm(4, -1)
         a64m_imm(5, 0)
-        a64m_imm(16, 197)
-        a64m_word(0xD4001001)
+        a64m_syscall(197, 222)
         a64m_word(0x54000043) // b.cc +8
         a64m_word(0xD4200000) // allocation failure traps
         a64m_imm(9, if instr.field_idx < 0 { 0 } else { instr.field_idx })
@@ -1064,8 +1252,7 @@ fn a64m_emit_instr(module: &IrModule, func: &IrFunction, ii: i64) -> bool with I
         if instr.arg_count >= 64 {
             // An environment plus 64 explicit args exceeds the internal ABI.
             a64m_imm(0, 1)
-            a64m_imm(16, 1)
-            a64m_word(0xD4001001)
+            a64m_exit_syscall()
         } else {
             let env_cleanup = a64m_stack_args(instr.arg_count + 1)
             var ai: i64 = 0
@@ -1146,7 +1333,13 @@ fn a64m_emit_instr(module: &IrModule, func: &IrFunction, ii: i64) -> bool with I
         if instr.arg_count > 8 { return false }
         let cleanup = a64m_args(at, instr.arg_count)
         let external_name = ir_name_at(instr.name_id)
-        if !a64m_system_math(str_from_bytes(external_name.buf, external_name.len), instr.arg_count) { return false }
+        let ext_sym = str_from_bytes(external_name.buf, external_name.len)
+        if a64m_system_dl(ext_sym, instr.arg_count) {
+            if cleanup > 0 { a64m_word(0x910003FF | (cleanup << 10)) }
+            a64m_store(0, instr.dst)
+            return !A64M_ERROR
+        }
+        if !a64m_system_math(ext_sym, instr.arg_count) { return false }
         if cleanup > 0 { a64m_word(0x910003FF | (cleanup << 10)) }
         a64m_store(0, instr.dst)
         if instr.dst >= 0 { A64M_FLOAT[instr.dst as usize] = true; A64M_INT[instr.dst as usize] = false }
@@ -1174,8 +1367,7 @@ fn a64m_emit_instr(module: &IrModule, func: &IrFunction, ii: i64) -> bool with I
             // a real region close if a future producer introduces one.
             a64m_word(0xB4000140) // cbz x0,+40 (two four-word immediates + svc)
             a64m_imm(0, 1)
-            a64m_imm(16, 1)
-            a64m_word(0xD4001001)
+            a64m_exit_syscall()
             a64m_imm(0, 0)
         } else if target.instr_count == 0 && (name == "__rgn_escaped") {
             a64m_imm(0, 1) // conservative: disable any attempted region reset/copy
@@ -1185,8 +1377,7 @@ fn a64m_emit_instr(module: &IrModule, func: &IrFunction, ii: i64) -> bool with I
             // copy ran on this runtime: exit 1 rather than return an array the
             // copy never filled.
             a64m_imm(0, 1)
-            a64m_imm(16, 1)
-            a64m_word(0xD4001001)
+            a64m_exit_syscall()
             a64m_imm(0, 0)
         } else if target.instr_count == 0 && (name == "__rgn_leave" || name == "__rgn_young" || name == "__rgn_cursor" || name == "__rgn_count" || name == "__rgn_reset_fits" || name == "__rgn_barrier" || name == "__rgn_mark_all" || name == "__rgn_reset" || name == "__rgn_settle") {
             // No region can open on the process-lifetime mmap allocator.
@@ -1210,8 +1401,7 @@ fn a64m_emit_instr(module: &IrModule, func: &IrFunction, ii: i64) -> bool with I
             let okay = A64M_LEN
             a64m_word(0x54000001)
             a64m_imm(0, 1)
-            a64m_imm(16, 1)
-            a64m_word(0xD4001001)
+            a64m_exit_syscall()
             a64m_branch(okay, A64M_LEN, 3)
         } else if target.instr_count == 0 && (name == "f64_to_bits" || name == "bits_to_f64") {
             // Internal ABI already transports scalar f64 as raw x-register bits.
@@ -1220,8 +1410,7 @@ fn a64m_emit_instr(module: &IrModule, func: &IrFunction, ii: i64) -> bool with I
             a64m_word(0x1E61C000)
             a64m_word(0x9E660000)
         } else if target.instr_count == 0 && (name == "getpid" || name == "ffi_getpid") {
-            a64m_imm(16, 20)
-            a64m_word(0xD4001001)
+            a64m_syscall(20, 172)
         } else if target.instr_count == 0 && name == "str_len" {
             a64m_string_length()
         } else if target.instr_count == 0 && name == "str_char_at" {
@@ -1231,6 +1420,44 @@ fn a64m_emit_instr(module: &IrModule, func: &IrFunction, ii: i64) -> bool with I
             a64m_file_size()
         } else if target.instr_count == 0 && name == "read_file" {
             a64m_read_file()
+        } else if target.instr_count == 0 && name == "mmap_ro" {
+            a64m_mmap_ro()
+        } else if target.instr_count == 0 && name == "mmap_rw" {
+            a64m_mmap_rw()
+        } else if target.instr_count == 0 && name == "munmap_ro" {
+            a64m_munmap_ro()
+        } else if target.instr_count == 0 && (name == "heap_alloc" || name == "malloc") {
+            a64m_heap_alloc()
+        } else if target.instr_count == 0 && (name == "heap_free" || name == "free") {
+            a64m_heap_free()
+        } else if target.instr_count == 0 && name == "ptr_read_u8" {
+            a64m_word(0x38616800)
+        } else if target.instr_count == 0 && name == "ptr_read_u16_le" {
+            a64m_word(0x78616800)
+        } else if target.instr_count == 0 && name == "ptr_read_u32_le" {
+            a64m_word(0xB8616800)
+        } else if target.instr_count == 0 && name == "ptr_read_i64_le" {
+            a64m_word(0xF8616800)
+        } else if target.instr_count == 0 && name == "ptr_write_u8" {
+            a64m_word(0x38216802)
+            a64m_imm(0, 0)
+        } else if target.instr_count == 0 && name == "ptr_write_u16_le" {
+            a64m_word(0x78216802)
+            a64m_imm(0, 0)
+        } else if target.instr_count == 0 && name == "ptr_write_u32_le" {
+            a64m_word(0xB8216802)
+            a64m_imm(0, 0)
+        } else if target.instr_count == 0 && name == "ptr_write_i64_le" {
+            a64m_word(0xF8216802)
+            a64m_imm(0, 0)
+        } else if target.instr_count == 0 && (name == "read_i64" || name == "read_f64") {
+            a64m_word(0xF8617800)
+            if instr.dst >= 0 && name == "read_f64" { A64M_FLOAT[instr.dst as usize] = true }
+        } else if target.instr_count == 0 && (name == "write_i64" || name == "write_f64") {
+            a64m_word(0xF8217802)
+            a64m_imm(0, 0)
+        } else if target.instr_count == 0 && a64m_system_dl(name, instr.arg_count) {
+            // dlopen/dlsym/dlclose/dlerror return pointer/i32 in x0 (not float)
         } else if target.instr_count == 0 && (name == "floor" || name == "ffi_floor" || name == "ceil" || name == "ffi_ceil") {
             a64m_word(0x9E670000)
             if name == "floor" || name == "ffi_floor" { a64m_word(0x1E654000) }
@@ -1238,8 +1465,7 @@ fn a64m_emit_instr(module: &IrModule, func: &IrFunction, ii: i64) -> bool with I
             a64m_word(0x9E660000)
         } else if target.instr_count == 0 && (name == "panic" || name == "__int_overflow") {
             a64m_imm(0, 1)
-            a64m_imm(16, 1)
-            a64m_word(0xD4001001)
+            a64m_exit_syscall()
         } else if target.instr_count == 0 && name == "print_char" {
             a64m_word(0xD10043FF)
             a64m_word(0x390003E0)
@@ -1652,11 +1878,187 @@ fn a64m_write_image(output: string) -> i64 with IO, Mut, Panic, Div {
 
 
 
-pub fn compile_arm64_macos_to_file(module: &IrModule, output: string) -> i32 with IO, Mut, Panic, Div {
-    if native_metal_failed() {
+fn a64m_elf_phdr(off: i64, p_type: i64, p_flags: i64, p_offset: i64, p_vaddr: i64, p_filesz: i64, p_memsz: i64, p_align: i64) with Mut, Panic {
+    a64m_image32(off + 0, p_type)
+    a64m_image32(off + 4, p_flags)
+    a64m_image64(off + 8, p_offset)
+    a64m_image64(off + 16, p_vaddr)
+    a64m_image64(off + 24, p_vaddr)
+    a64m_image64(off + 32, p_filesz)
+    a64m_image64(off + 40, p_memsz)
+    a64m_image64(off + 48, p_align)
+}
+
+fn a64m_elf_cstr(off: i64, s: string) with Mut, Panic {
+    let n = str_len(s)
+    var i: i64 = 0
+    while i < n {
+        a64m_image8(off + i, s[i as usize] as i64)
+        i = i + 1
+    }
+    a64m_image8(off + n, 0)
+}
+
+fn a64m_elf_dyn(off: i64, tag: i64, val: i64) with Mut, Panic {
+    a64m_image64(off + 0, tag)
+    a64m_image64(off + 8, val)
+}
+
+fn a64m_write_elf_linux(output: string) -> i64 with IO, Mut, Panic, Div {
+    let vm_base: i64 = 4294967296
+    let page_size: i64 = 16384
+    let data_vm: i64 = 4429185024
+    let text_file_off: i64 = page_size
+    let text_file_size = ((A64M_LEN + page_size - 1) / page_size) * page_size
+    let data_file_off = text_file_off + text_file_size
+    let data_seg_vmsize = ((A64M_BSS + page_size + page_size - 1) / page_size) * page_size
+    let total_file_size = data_file_off + page_size
+    if vm_base + data_file_off > data_vm {
+        print("error: elf_arm64 .text overlaps .data\n")
+        return 1
+    }
+    if total_file_size > 16777216 || A64M_ERROR {
+        print("error: elf_arm64 image exceeds 16 MiB buffer or codegen error\n")
+        return 1
+    }
+
+    var zi: i64 = 0
+    while zi < total_file_size { A64M_IMAGE[zi as usize] = 0; zi = zi + 1 }
+
+    let needs_dyn = A64M_IMPORT_N > 0
+    let phnum: i64 = if needs_dyn { 6 } else { 3 }
+
+    // ELF64 Header (e_machine = 183 EM_AARCH64)
+    a64m_image8(0, 127); a64m_image8(1, 69); a64m_image8(2, 76); a64m_image8(3, 70)
+    a64m_image8(4, 2); a64m_image8(5, 1); a64m_image8(6, 1)
+    a64m_image16(16, 2); a64m_image16(18, 183); a64m_image32(20, 1)
+    a64m_image64(24, vm_base + text_file_off + A64M_ENTRY)
+    a64m_image64(32, 64); a64m_image64(40, 0); a64m_image32(48, 0)
+    a64m_image16(52, 64); a64m_image16(54, 56); a64m_image16(56, phnum)
+    a64m_image16(58, 64); a64m_image16(60, 0); a64m_image16(62, 0)
+
+    let interp_off: i64 = 512
+    let interp_len: i64 = 27 // "/lib/ld-linux-aarch64.so.1\0"
+
+    // Layout dynamic metadata in [data_vm + 512 .. data_vm + 16383]
+    var dynstr_rel: i64 = 512
+    var dynamic_rel: i64 = 0
+    var dynamic_size: i64 = 0
+    if needs_dyn {
+        let dynstr_off = data_file_off + dynstr_rel
+        a64m_image8(dynstr_off, 0)
+        var sc: i64 = 1
+        let lib0_off = sc; a64m_elf_cstr(dynstr_off + sc, "libc.so.6"); sc = sc + 10
+        let lib1_off = sc; a64m_elf_cstr(dynstr_off + sc, "libm.so.6"); sc = sc + 10
+        let lib2_off = sc; a64m_elf_cstr(dynstr_off + sc, "libdl.so.2"); sc = sc + 11
+
+        var sym_str_off: [i64; 64] = [0; 64]
+        var si: i64 = 0
+        while si < A64M_IMPORT_N {
+            let nm = A64M_IMPORT_NAMES[si as usize]
+            sym_str_off[si as usize] = sc
+            var ki: i64 = 0
+            while ki < nm.len {
+                a64m_image8(dynstr_off + sc + ki, nm.buf[ki as usize] as i64)
+                ki = ki + 1
+            }
+            a64m_image8(dynstr_off + sc + nm.len, 0)
+            sc = sc + nm.len + 1
+            si = si + 1
+        }
+        let dynstr_len = ((sc + 7) / 8) * 8
+        let dynsym_rel = dynstr_rel + dynstr_len
+        let dynsym_count = 1 + A64M_IMPORT_N
+        let dynsym_off = data_file_off + dynsym_rel
+        si = 0
+        while si < A64M_IMPORT_N {
+            let ent = dynsym_off + (si + 1) * 24
+            a64m_image32(ent + 0, sym_str_off[si as usize])
+            a64m_image8(ent + 4, 0x12) // STB_GLOBAL | STT_FUNC
+            a64m_image16(ent + 6, 0)
+            si = si + 1
+        }
+
+        let hash_rel = dynsym_rel + dynsym_count * 24
+        let hash_off = data_file_off + hash_rel
+        a64m_image32(hash_off + 0, 1)
+        a64m_image32(hash_off + 4, dynsym_count)
+        a64m_image32(hash_off + 8, 1)
+        a64m_image32(hash_off + 12, 0)
+        var hi: i64 = 1
+        while hi < dynsym_count {
+            let next_h = if hi + 1 < dynsym_count { hi + 1 } else { 0 }
+            a64m_image32(hash_off + 12 + hi * 4, next_h)
+            hi = hi + 1
+        }
+
+        let hash_size = (4 + dynsym_count) * 4
+        let rela_rel = ((hash_rel + hash_size + 7) / 8) * 8
+        let rela_size = A64M_IMPORT_N * 24
+        let rela_off = data_file_off + rela_rel
+        si = 0
+        while si < A64M_IMPORT_N {
+            let rent = rela_off + si * 24
+            a64m_image64(rent + 0, data_vm + si * 8)
+            a64m_image64(rent + 8, ((si + 1) << 32) | 1025) // R_AARCH64_GLOB_DAT = 1025
+            a64m_image64(rent + 16, 0)
+            si = si + 1
+        }
+
+        dynamic_rel = rela_rel + rela_size
+        dynamic_size = 12 * 16
+        if dynamic_rel + dynamic_size > page_size {
+            print("error: elf_arm64 dynamic tables exceed 16 KiB data page\n")
+            return 1
+        }
+        let dyn_off = data_file_off + dynamic_rel
+        a64m_elf_dyn(dyn_off + 0, 1, lib0_off)
+        a64m_elf_dyn(dyn_off + 16, 1, lib1_off)
+        a64m_elf_dyn(dyn_off + 32, 1, lib2_off)
+        a64m_elf_dyn(dyn_off + 48, 5, data_vm + dynstr_rel)
+        a64m_elf_dyn(dyn_off + 64, 6, data_vm + dynsym_rel)
+        a64m_elf_dyn(dyn_off + 80, 10, dynstr_len)
+        a64m_elf_dyn(dyn_off + 96, 11, 24)
+        a64m_elf_dyn(dyn_off + 112, 4, data_vm + hash_rel)
+        a64m_elf_dyn(dyn_off + 128, 7, data_vm + rela_rel)
+        a64m_elf_dyn(dyn_off + 144, 8, rela_size)
+        a64m_elf_dyn(dyn_off + 160, 9, 24)
+        a64m_elf_dyn(dyn_off + 176, 0, 0)
+        a64m_elf_cstr(interp_off, "/lib/ld-linux-aarch64.so.1")
+    }
+
+    var po: i64 = 64
+    if needs_dyn {
+        a64m_elf_phdr(po, 1, 4, 0, vm_base, 4096, 4096, 4096); po = po + 56
+        a64m_elf_phdr(po, 1, 5, text_file_off, vm_base + text_file_off, A64M_LEN, text_file_size, 4096); po = po + 56
+        a64m_elf_phdr(po, 3, 4, interp_off, vm_base + interp_off, interp_len, interp_len, 1); po = po + 56
+        a64m_elf_phdr(po, 1, 6, data_file_off, data_vm, page_size, data_seg_vmsize, 4096); po = po + 56
+        a64m_elf_phdr(po, 2, 6, data_file_off + dynamic_rel, data_vm + dynamic_rel, dynamic_size, dynamic_size, 8); po = po + 56
+        a64m_elf_phdr(po, 0x6474e551, 6, 0, 0, 0, 0, 16)
+    } else {
+        a64m_elf_phdr(po, 1, 5, 0, vm_base, text_file_off + A64M_LEN, text_file_off + text_file_size, 4096); po = po + 56
+        a64m_elf_phdr(po, 1, 6, data_file_off, data_vm, page_size, data_seg_vmsize, 4096); po = po + 56
+        a64m_elf_phdr(po, 0x6474e551, 6, 0, 0, 0, 0, 16)
+    }
+
+    var ci: i64 = 0
+    while ci < A64M_LEN {
+        A64M_IMAGE[(text_file_off + ci) as usize] = A64M_CODE[ci as usize]
+        ci = ci + 1
+    }
+    if A64M_ERROR { return 1 }
+    let ok = write_file(output, A64M_IMAGE, total_file_size)
+    if ok != total_file_size { return 1 }
+    print("elf_arm64: "); print(output); print(" "); print_int(total_file_size); print(" bytes\n")
+    return 0
+}
+
+fn a64m_compile_to_file_impl(module: &IrModule, output: string, is_linux: bool) -> i32 with IO, Mut, Panic, Div {
+    if !is_linux && native_metal_failed() {
         print("error: native Metal kernel contains an unsupported AST/parameter shape; refusing output\n")
         return 1
     }
+    A64M_LINUX = is_linux
     A64M_LEN = 0
     A64M_ERROR = false
     A64M_TRACE = read_env("SOUNIO_ARM64_IR_TRACE") == "1"
@@ -1710,9 +2112,12 @@ pub fn compile_arm64_macos_to_file(module: &IrModule, output: string) -> i32 wit
     }
     A64M_ENTRY = A64M_LEN
     a64m_global_inits(module)
+    if is_linux {
+        a64m_word(0xF94003E0) // ldr x0, [sp] -> argc
+        a64m_word(0x910023E1) // add x1, sp, #8 -> argv
+    }
     a64m_call(main_fn)
-    a64m_imm(16, 1)
-    a64m_word(0xD4001001)
+    a64m_exit_syscall()
     var pi: i64 = 0
     while pi < A64M_CALL_N {
         let target = A64M_CALL_FN[pi as usize]
@@ -1743,5 +2148,17 @@ pub fn compile_arm64_macos_to_file(module: &IrModule, output: string) -> i32 wit
         a64m_patch(p + 4, 0x91000129 | ((address & 4095) << 10))
         pi = pi + 1
     }
-    a64m_write_image(output) as i32
+    if is_linux {
+        a64m_write_elf_linux(output) as i32
+    } else {
+        a64m_write_image(output) as i32
+    }
+}
+
+pub fn compile_arm64_macos_to_file(module: &IrModule, output: string) -> i32 with IO, Mut, Panic, Div {
+    a64m_compile_to_file_impl(module, output, false)
+}
+
+pub fn compile_arm64_linux_to_file(module: &IrModule, output: string) -> i32 with IO, Mut, Panic, Div {
+    a64m_compile_to_file_impl(module, output, true)
 }

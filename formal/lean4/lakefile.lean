@@ -798,3 +798,12 @@ lean_lib «SounioNumericBuffer» where
 -- Exact rational sign check for the selected RODAS4 time coefficient.
 @[default_target]
 lean_lib «SounioRodas4TimeConsistency» where
+
+@[default_target]
+lean_lib «SounioSedenionProjector» where
+
+@[default_target]
+lean_lib «SounioDischargeTrichotomy» where
+
+@[default_target]
+lean_lib «SounioConformalArgmax» where

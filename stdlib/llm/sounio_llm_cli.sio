@@ -1,0 +1,4108 @@
+// stdlib::llm::sounio_llm_cli — Sovereign CLI & chat orchestration
+//
+// Greedy & nucleus (top-p) sampling, ChatML generation loop with epistemic
+// telemetry, thinking block support, and zero-allocation parameter parsing.
+
+use llm::mmap::{
+    PageArena,
+    page_arena_alloc,
+    page_arena_free,
+    page_arena_is_ok,
+    page_arena_ptr,
+    MappedShard,
+    mapped_shard_open,
+    mapped_shard_close,
+    mapped_shard_is_ok,
+    mapped_shard_len,
+    mapped_shard_read_u8,
+}
+use llm::qwen3::{
+    Qwen3Model,
+    qwen3_model_is_ok,
+    qwen3_logits_argmax,
+    Qwen3Top2,
+    qwen3_model_top2,
+    qwen3_forward_token_cpu,
+    qwen3_forward_token_metal,
+    qwen3_forward_token_metal_opt,
+    qwen3_forward_batch_bf16_metal,
+    qwen3_forward_batch_bf16_cpu,
+    Qwen3MetalRunner,
+    qwen3_metal_runner_init,
+    qwen3_metal_runner_free,
+    qwen3_metal_runner_is_ok,
+    Qwen3EisaModel,
+    qwen3_eisa_model_quantize,
+    qwen3_eisa_model_quantize_bits,
+    qwen3_eisa_model_quantize_cpu,
+    qwen3_eisa_model_quantize_cpu_bits,
+    qwen3_eisa_model_quantize_mlp_head_bits,
+    qwen3_eisa_model_quantize_mlp_head_cpu_bits,
+    qwen3_eisa_model_free,
+    qwen3_eisa_model_free_cpu,
+    qwen3_eisa_model_is_ok,
+    qwen3_forward_token_eisa_metal,
+    qwen3_forward_token_eisa_metal_opt,
+    qwen3_forward_token_eisa_adaptive_metal,
+    qwen3_forward_token_eisa_cpu,
+    qwen3_eisa_model_quantize_lm_head_bits,
+    qwen3_eisa_model_quantize_lm_head_cpu_bits,
+    qwen3_forward_token_cone_metal_opt,
+    qwen3_forward_token_cone_cpu,
+    Qwen3ConformalCtx,
+    qwen3_conformal_ctx_init,
+    qwen3_conformal_ctx_init_cpu,
+    qwen3_conformal_ctx_is_ok,
+    qwen3_conformal_ctx_set_q,
+    qwen3_conformal_ctx_set_layer_weight,
+    qwen3_conformal_ctx_free,
+    qwen3_conformal_ctx_free_cpu,
+    qwen3_forward_token_q8_conformal_metal_opt,
+    qwen3_forward_token_q8_conformal_cpu,
+    qwen3_forward_token_q8_mlp_conformal_metal_opt,
+    qwen3_forward_token_q8_mlp_conformal_cpu,
+    qwen3_forward_token_q8_try_metal,
+    qwen3_forward_token_q8_try_cpu,
+    Qwen3CudaRunner,
+    qwen3_cuda_runner_init,
+    qwen3_cuda_runner_free,
+    qwen3_cuda_runner_is_ok,
+    qwen3_cuda_sync_logits,
+    qwen3_forward_token_cuda_opt,
+    qwen3_forward_batch_bf16_cuda,
+    Qwen3CudaConformal,
+    qwen3_cuda_conformal_init,
+    qwen3_cuda_conformal_free,
+    qwen3_cuda_conformal_is_ok,
+    qwen3_cuda_conformal_set_q,
+    qwen3_forward_token_q4_try_cuda,
+    qwen3_forward_token_q4_conformal_cuda,
+}
+use llm::hal::{hal_getenv_ptr}
+use llm::qwen3_tokenizer::{
+    Qwen3Tokenizer,
+    qwen3_format_chat_bytes,
+    qwen3_encode_bytes,
+    qwen3_decode_bytes,
+}
+use llm::qwen3_paged_kv::{
+    Qwen3PagedKv,
+    qwen3_kv_truncate,
+}
+use llm::qwen3_quant_eisa::{
+    EisaArgmaxCert,
+    eisa_certify_argmax,
+    EisaConeCert,
+    eisa_certify_global,
+}
+use llm::qwen3_ossm::{
+    Qwen3OssmSidecar,
+    qwen3_ossm_sidecar_open,
+    qwen3_ossm_sidecar_free,
+    Qwen3OssmState,
+    qwen3_hybrid_forward_token_cpu,
+    qwen3_hybrid_forward_token_cpu_sidecar,
+    qwen3_hybrid_forward_token_metal,
+    qwen3_hybrid_forward_token_metal_sidecar,
+    ossm_metal_pipelines_compile,
+    ossm_metal_pipelines_compile_runner,
+    ossm_metal_pipelines_empty,
+}
+use tensor2::convert::{f32_bits_to_f64, f64_to_f32_bits}
+use math::pure::{exp}
+
+fn sounio_llm_trace_steps_enabled() -> bool with Alloc, Mut {
+    let p = hal_getenv_ptr("SOUNIO_LLM_TRACE_STEPS")
+    if p == 0 { return false }
+    ptr_read_u8(p, 0) == 49 && ptr_read_u8(p, 1) == 0
+}
+
+fn sounio_llm_parse_env_pos_f64(var_name: string) -> f64 with Alloc, Mut, Div {
+    let p = hal_getenv_ptr(var_name)
+    if p == 0 { return -1.0 }
+    var int_part: f64 = 0.0
+    var frac_part: f64 = 0.0
+    var frac_div: f64 = 1.0
+    var seen_dot = false
+    var seen_digit = false
+    var i: i64 = 0
+    while true {
+        let b = ptr_read_u8(p, i)
+        if b == 0 { break }
+        if b == 46 {
+            seen_dot = true
+        } else if b >= 48 && b <= 57 {
+            seen_digit = true
+            let d = (b - 48) as f64
+            if seen_dot {
+                frac_div = frac_div * 10.0
+                frac_part = frac_part + d / frac_div
+            } else {
+                int_part = int_part * 10.0 + d
+            }
+        } else {
+            break
+        }
+        i = i + 1
+    }
+    if !seen_digit { return -1.0 }
+    int_part + frac_part
+}
+
+fn sounio_llm_parse_env_nonneg_i64(var_name: string) -> i64 with Alloc, Mut {
+    let p = hal_getenv_ptr(var_name)
+    if p == 0 { return -1 }
+    var val: i64 = 0
+    var seen_digit = false
+    var i: i64 = 0
+    while true {
+        let b = ptr_read_u8(p, i)
+        if b == 0 { break }
+        if b >= 48 && b <= 57 {
+            seen_digit = true
+            val = val * 10 + (b - 48)
+        } else {
+            return -1
+        }
+        i = i + 1
+    }
+    if !seen_digit { return -1 }
+    val
+}
+
+fn sounio_llm_apply_conformal_q_override(conf: &!Qwen3ConformalCtx, q_override: f64) with Alloc, Mut, Div {
+    if !qwen3_conformal_ctx_is_ok(conf) { return }
+    if q_override >= 0.0 {
+        let _sq = qwen3_conformal_ctx_set_q(conf, q_override)
+        return
+    }
+    let q_env = sounio_llm_parse_env_pos_f64("SOUNIO_CONFORMAL_Q")
+    if q_env >= 0.0 {
+        let _sq = qwen3_conformal_ctx_set_q(conf, q_env)
+    }
+}
+
+fn sounio_llm_record_trace_step(
+    trace_buf: i64,
+    idx: i64,
+    tok_id: i64,
+    q8_top1_id: i64,
+    cert_flag: i64,
+    esc_flag: i64,
+    margin: f64
+) with Mut {
+    let off = idx * 32
+    let _w0 = ptr_write_i64_le(trace_buf, off + 0, tok_id)
+    let _w1 = ptr_write_i64_le(trace_buf, off + 8, q8_top1_id)
+    let _w2 = ptr_write_i64_le(trace_buf, off + 16, cert_flag)
+    let _w3 = ptr_write_u32_le(trace_buf, off + 24, esc_flag as u32)
+    let _w4 = ptr_write_u32_le(trace_buf, off + 28, f64_to_f32_bits(margin))
+}
+
+fn sounio_llm_emit_step_trace_impl(prompt_idx: i64, trace_buf: i64, count: i64) with IO, Mut {
+    var k: i64 = 0
+    while k < count {
+        let off = k * 32
+        let tok_id = ptr_read_i64_le(trace_buf, off + 0)
+        let q8_id = ptr_read_i64_le(trace_buf, off + 8)
+        let cert_flag = ptr_read_i64_le(trace_buf, off + 16)
+        let esc_bits = ptr_read_u32_le(trace_buf, off + 24)
+        let esc_flag = esc_bits as i64
+        let m_val = f32_bits_to_f64(ptr_read_u32_le(trace_buf, off + 28))
+        print("[trace_step")
+        if prompt_idx >= 0 {
+            print(" prompt=")
+            print_int(prompt_idx)
+        }
+        print(" idx=")
+        print_int(k)
+        print(" tok=")
+        print_int(tok_id)
+        print(" q8_top1=")
+        print_int(q8_id)
+        print(" cert=")
+        print_int(cert_flag)
+        print(" esc=")
+        print_int(esc_flag)
+        print(" margin=")
+        print_f64(m_val)
+        print("]\n")
+        k = k + 1
+    }
+}
+
+fn sounio_llm_emit_step_trace(trace_buf: i64, count: i64) with IO, Mut {
+    sounio_llm_emit_step_trace_impl(-1, trace_buf, count)
+}
+
+extern fn dlopen(path: i64, mode: i32) -> i64
+extern fn dlsym(handle: i64, symbol: string) -> i64
+
+pub struct SounioLlmRunCfg {
+    pub use_metal: bool,
+    pub enable_thinking: bool,
+    pub max_tokens: i64,
+    pub max_seq: i64,
+    pub temp: f64,
+    pub top_p: f64,
+    pub seed: i64,
+    pub ossm_every: i64,
+    pub quant_mode: i64,
+    pub stream_stdout: bool,
+    pub raw_prompt: bool,
+    pub ossm_weights_ptr: i64,
+    pub ossm_weights_len: i64,
+    pub ok: bool,
+}
+
+pub struct SounioLlmGenStats {
+    pub prompt_tokens: i64,
+    pub generated_tokens: i64,
+    pub last_token_id: i64,
+    pub top1_margin: f64,
+    pub last_associator_l2: f64,
+    pub elapsed_ms: f64,
+    pub tok_per_sec: f64,
+    pub certified_count: i64,
+    pub last_combined_err: f64,
+    pub prefill_ms: f64,
+    pub decode_ms: f64,
+    pub decode_tok_per_sec: f64,
+    pub escalated_count: i64,
+    pub ok: bool,
+}
+
+pub type SounioLlmRunStats = SounioLlmGenStats
+
+pub fn sounio_llm_now_ns() -> i64 with Alloc, Mut {
+    let lib = dlopen(0, 1)
+    if lib == 0 { return 0 }
+    let fn_clock = dlsym(lib, "clock_gettime")
+    if fn_clock == 0 { return 0 }
+    let clock_fn = fn_clock as fn(i32, i64) -> i32
+
+    let scratch = heap_alloc(16) as i64
+    let rc = clock_fn(0, scratch)
+    if rc != 0 {
+        heap_free(scratch as *mut u8)
+        return 0
+    }
+    let sec = ptr_read_i64_le(scratch, 0)
+    let nsec = ptr_read_i64_le(scratch, 8)
+    heap_free(scratch as *mut u8)
+    sec * 1000000000 + nsec
+}
+
+pub fn sounio_llm_sample_greedy(m: &Qwen3Model) -> i64 with Mut {
+    let top2 = qwen3_model_top2(m)
+    top2.top1_id
+}
+
+fn xorshift64_step(state: i64) -> i64 {
+    var x = if state == 0 { 88172645463325252 } else { state }
+    x = x ^ (x << 13)
+    x = x ^ (x >> 7)
+    x = x ^ (x << 17)
+    x
+}
+
+pub fn sounio_llm_sample_top_p(
+    m: &Qwen3Model,
+    temp: f64,
+    top_p: f64,
+    rng_state_ptr: i64
+) -> i64 with Alloc, Mut, Div, Panic, IO {
+    if !qwen3_model_is_ok(m) || m.cfg.vocab <= 0 { return 0 }
+    if temp <= 0.0 || top_p <= 0.0 {
+        return sounio_llm_sample_greedy(m)
+    }
+
+    let arena = page_arena_alloc(8192)
+    var chosen_idx: i64 = 0
+
+    if page_arena_is_ok(&arena) {
+        let cand_ptr = page_arena_ptr(&arena)
+        let logits_base = page_arena_ptr(&m.arena) + m.buf_logits_off
+
+        var k_count: i64 = 0
+        var i: i64 = 0
+        while i < m.cfg.vocab {
+            let u32_bits = ptr_read_u32_le(logits_base, i * 4)
+            let val = f32_bits_to_f64(u32_bits)
+
+            if k_count < 256 {
+                var pos: i64 = k_count
+                while pos > 0 {
+                    let prev_val = f32_bits_to_f64(ptr_read_u32_le(cand_ptr, (pos - 1) * 16 + 8))
+                    if val > prev_val {
+                        let prev_tid = ptr_read_i64_le(cand_ptr, (pos - 1) * 16)
+                        let prev_bits = ptr_read_u32_le(cand_ptr, (pos - 1) * 16 + 8)
+                        let _wt = ptr_write_i64_le(cand_ptr, pos * 16, prev_tid)
+                        let _wb = ptr_write_u32_le(cand_ptr, pos * 16 + 8, prev_bits)
+                        pos = pos - 1
+                    } else {
+                        break
+                    }
+                }
+                let _wt = ptr_write_i64_le(cand_ptr, pos * 16, i)
+                let _wb = ptr_write_u32_le(cand_ptr, pos * 16 + 8, u32_bits)
+                k_count = k_count + 1
+            } else {
+                let min_val = f32_bits_to_f64(ptr_read_u32_le(cand_ptr, 255 * 16 + 8))
+                if val > min_val {
+                    var pos: i64 = 255
+                    while pos > 0 {
+                        let prev_val = f32_bits_to_f64(ptr_read_u32_le(cand_ptr, (pos - 1) * 16 + 8))
+                        if val > prev_val {
+                            let prev_tid = ptr_read_i64_le(cand_ptr, (pos - 1) * 16)
+                            let prev_bits = ptr_read_u32_le(cand_ptr, (pos - 1) * 16 + 8)
+                            let _wt = ptr_write_i64_le(cand_ptr, pos * 16, prev_tid)
+                            let _wb = ptr_write_u32_le(cand_ptr, pos * 16 + 8, prev_bits)
+                            pos = pos - 1
+                        } else {
+                            break
+                        }
+                    }
+                    let _wt = ptr_write_i64_le(cand_ptr, pos * 16, i)
+                    let _wb = ptr_write_u32_le(cand_ptr, pos * 16 + 8, u32_bits)
+                }
+            }
+            i = i + 1
+        }
+
+        let max_l = f32_bits_to_f64(ptr_read_u32_le(cand_ptr, 8))
+        var sum_exp: f64 = 0.0
+        var ci: i64 = 0
+        while ci < k_count {
+            let val = f32_bits_to_f64(ptr_read_u32_le(cand_ptr, ci * 16 + 8))
+            sum_exp = sum_exp + exp((val - max_l) / temp)
+            ci = ci + 1
+        }
+        if sum_exp <= 0.0 { sum_exp = 1.0 }
+
+        var cur_rng: i64 = 123456789
+        if rng_state_ptr != 0 {
+            cur_rng = ptr_read_i64_le(rng_state_ptr, 0)
+        }
+        cur_rng = xorshift64_step(cur_rng)
+        if rng_state_ptr != 0 {
+            let _w = ptr_write_i64_le(rng_state_ptr, 0, cur_rng)
+        }
+
+        let u_raw = cur_rng & 2147483647
+        let u = (u_raw as f64) / 2147483648.0
+        let target = u * top_p
+
+        var cum: f64 = 0.0
+        chosen_idx = ptr_read_i64_le(cand_ptr, 0)
+        ci = 0
+        while ci < k_count {
+            let cand_tid = ptr_read_i64_le(cand_ptr, ci * 16)
+            let val = f32_bits_to_f64(ptr_read_u32_le(cand_ptr, ci * 16 + 8))
+            let p = exp((val - max_l) / temp) / sum_exp
+            cum = cum + p
+            if cum >= target {
+                chosen_idx = cand_tid
+                break
+            }
+            ci = ci + 1
+        }
+    }
+
+    let _f = page_arena_free(arena)
+    chosen_idx
+}
+
+pub fn sounio_llm_parse_bool_flag(path: string, default_val: bool) -> bool with IO, Mut, Panic {
+    let shard = mapped_shard_open(path)
+    var res = default_val
+    if mapped_shard_is_ok(&shard) && mapped_shard_len(&shard) > 0 {
+        let r = mapped_shard_read_u8(&shard, 0)
+        if r.1 {
+            let b = r.0
+            res = (b == 49) || (b == 116) || (b == 84)
+        }
+    }
+    let _c = mapped_shard_close(shard)
+    res
+}
+
+pub fn sounio_llm_parse_i64_file(path: string, default_val: i64) -> i64 with IO, Mut, Panic, Div {
+    let shard = mapped_shard_open(path)
+    var res = default_val
+    if mapped_shard_is_ok(&shard) {
+        let slen = mapped_shard_len(&shard)
+        if slen > 0 {
+            var val: i64 = 0
+            var sign: i64 = 1
+            var i: i64 = 0
+            var seen_digit = false
+
+            while i < slen {
+                let r = mapped_shard_read_u8(&shard, i)
+                if !r.1 { break }
+                let b = r.0
+                if b == 45 && !seen_digit {
+                    sign = -1
+                } else if b >= 48 && b <= 57 {
+                    val = val * 10 + (b - 48)
+                    seen_digit = true
+                } else if seen_digit {
+                    break
+                }
+                i = i + 1
+            }
+            if seen_digit {
+                res = sign * val
+            }
+        }
+    }
+    let _c = mapped_shard_close(shard)
+    res
+}
+
+pub fn sounio_llm_parse_f64_file(path: string, default_val: f64) -> f64 with IO, Mut, Panic, Div {
+    let shard = mapped_shard_open(path)
+    var res = default_val
+    if mapped_shard_is_ok(&shard) {
+        let slen = mapped_shard_len(&shard)
+        if slen > 0 {
+            var sign: f64 = 1.0
+            var int_part: f64 = 0.0
+            var frac_part: f64 = 0.0
+            var frac_div: f64 = 1.0
+            var in_frac = false
+            var seen_digit = false
+            var i: i64 = 0
+
+            while i < slen {
+                let r = mapped_shard_read_u8(&shard, i)
+                if !r.1 { break }
+                let b = r.0
+                if b == 45 && !seen_digit && !in_frac {
+                    sign = -1.0
+                } else if b == 46 && !in_frac {
+                    in_frac = true
+                } else if b >= 48 && b <= 57 {
+                    seen_digit = true
+                    let digit = (b - 48) as f64
+                    if in_frac {
+                        frac_div = frac_div * 10.0
+                        frac_part = frac_part + digit / frac_div
+                    } else {
+                        int_part = int_part * 10.0 + digit
+                    }
+                } else if seen_digit {
+                    break
+                }
+                i = i + 1
+            }
+            if seen_digit {
+                res = sign * (int_part + frac_part)
+            }
+        }
+    }
+    let _c = mapped_shard_close(shard)
+    res
+}
+
+fn prepare_prompt_bytes(
+    raw_prompt: bool,
+    enable_thinking: bool,
+    sys_ptr: i64,
+    sys_len: i64,
+    user_ptr: i64,
+    user_len: i64,
+    p_buf: i64,
+    prompt_cap: i64
+) -> i64 with Mut {
+    if raw_prompt {
+        var cpi: i64 = 0
+        while cpi < user_len && cpi < prompt_cap {
+            let _w = ptr_write_u8(p_buf, cpi, ptr_read_u8(user_ptr, cpi))
+            cpi = cpi + 1
+        }
+        cpi
+    } else {
+        qwen3_format_chat_bytes(
+            sys_ptr,
+            sys_len,
+            user_ptr,
+            user_len,
+            true,
+            enable_thinking,
+            p_buf,
+            prompt_cap
+        )
+    }
+}
+
+fn sounio_llm_empty_stats() -> SounioLlmGenStats {
+    SounioLlmGenStats {
+        prompt_tokens: 0,
+        generated_tokens: 0,
+        last_token_id: -1,
+        top1_margin: 0.0,
+        last_associator_l2: 0.0,
+        elapsed_ms: 0.0,
+        tok_per_sec: 0.0,
+        certified_count: 0,
+        last_combined_err: 0.0,
+        prefill_ms: 0.0,
+        decode_ms: 0.0,
+        decode_tok_per_sec: 0.0,
+        escalated_count: 0,
+        ok: false,
+    }
+}
+
+fn sounio_llm_print_bench_prompt(
+    prompt_idx: i64,
+    gen_buf: i64,
+    trace_buf: i64,
+    trace_steps: bool,
+    stats: &SounioLlmGenStats
+) with IO, Mut {
+    print("[bench_tokens idx=")
+    print_int(prompt_idx)
+    print(" n=")
+    print_int(stats.generated_tokens)
+    print(" ids=")
+    var ti: i64 = 0
+    while ti < stats.generated_tokens {
+        if ti > 0 { print(",") }
+        print_int(ptr_read_i64_le(gen_buf, ti * 8))
+        ti = ti + 1
+    }
+    print("]\n")
+
+    print("[bench_prompt idx=")
+    print_int(prompt_idx)
+    print(" prompt_tokens=")
+    print_int(stats.prompt_tokens)
+    print(" gen_tokens=")
+    print_int(stats.generated_tokens)
+    print(" prefill_ms=")
+    print_f64(stats.prefill_ms)
+    print(" decode_ms=")
+    print_f64(stats.decode_ms)
+    print(" decode_tok_per_sec=")
+    print_f64(stats.decode_tok_per_sec)
+    print(" elapsed_ms=")
+    print_f64(stats.elapsed_ms)
+    print(" tok_per_sec=")
+    print_f64(stats.tok_per_sec)
+    print(" certified=")
+    print_int(stats.certified_count)
+    print(" escalated=")
+    print_int(stats.escalated_count)
+    print("]\n")
+
+    if trace_steps && trace_buf != 0 {
+        sounio_llm_emit_step_trace_impl(prompt_idx, trace_buf, stats.generated_tokens)
+    }
+}
+
+fn sounio_llm_run_bf16_chunks_cpu(
+    m: &Qwen3Model,
+    kv: &!Qwen3PagedKv,
+    toks_ptr: i64,
+    pos_start: i64,
+    n_toks: i64,
+    compute_all_top1: bool,
+    compute_final_logits: bool,
+    top1_out_ptr: i64
+) -> bool with Mut, Div, Panic {
+    if n_toks <= 0 { return true }
+    var done: i64 = 0
+    while done < n_toks {
+        let rem = n_toks - done
+        let c_len = if rem > 8 { 8 } else { rem }
+        let is_last = (done + c_len == n_toks)
+        let ok = qwen3_forward_batch_bf16_cpu(
+            m,
+            kv,
+            toks_ptr + done * 8,
+            pos_start + done,
+            c_len,
+            compute_all_top1,
+            compute_final_logits && is_last,
+            top1_out_ptr
+        )
+        if !ok { return false }
+        done = done + c_len
+    }
+    true
+}
+
+fn sounio_llm_run_bf16_chunks_metal(
+    m: &Qwen3Model,
+    kv: &!Qwen3PagedKv,
+    rt: &Qwen3MetalRunner,
+    toks_ptr: i64,
+    pos_start: i64,
+    n_toks: i64,
+    compute_all_top1: bool,
+    compute_final_logits: bool,
+    top1_out_ptr: i64
+) -> bool with Mut, Div, Panic {
+    if n_toks <= 0 { return true }
+    var done: i64 = 0
+    while done < n_toks {
+        let rem = n_toks - done
+        let c_len = if rem > 8 { 8 } else { rem }
+        let is_last = (done + c_len == n_toks)
+        let ok = qwen3_forward_batch_bf16_metal(
+            m,
+            kv,
+            rt,
+            toks_ptr + done * 8,
+            pos_start + done,
+            c_len,
+            compute_all_top1,
+            compute_final_logits && is_last,
+            top1_out_ptr
+        )
+        if !ok { return false }
+        done = done + c_len
+    }
+    true
+}
+
+fn sounio_llm_prefill_bf16_cpu(
+    m: &Qwen3Model,
+    kv: &!Qwen3PagedKv,
+    tok_buf: i64,
+    n_toks: i64,
+    max_seq: i64,
+    compute_final_logits: bool
+) -> bool with Mut, Div, Panic {
+    if n_toks < 0 || n_toks > max_seq { return false }
+    if !qwen3_kv_truncate(kv, 0) { return false }
+    sounio_llm_run_bf16_chunks_cpu(m, kv, tok_buf, 0, n_toks, false, compute_final_logits, 0)
+}
+
+fn sounio_llm_prefill_bf16_metal(
+    m: &Qwen3Model,
+    kv: &!Qwen3PagedKv,
+    rt: &Qwen3MetalRunner,
+    tok_buf: i64,
+    n_toks: i64,
+    max_seq: i64,
+    compute_final_logits: bool
+) -> bool with Mut, Div, Panic {
+    if n_toks < 0 || n_toks > max_seq { return false }
+    if !qwen3_kv_truncate(kv, 0) { return false }
+    sounio_llm_run_bf16_chunks_metal(m, kv, rt, tok_buf, 0, n_toks, false, compute_final_logits, 0)
+}
+
+fn sounio_llm_exec_bf16_cpu(
+    tok: &Qwen3Tokenizer,
+    m: &Qwen3Model,
+    kv: &!Qwen3PagedKv,
+    ossm: &!Qwen3OssmState,
+    sidecar: &Qwen3OssmSidecar,
+    scratch: &PageArena,
+    prompt_cap: i64,
+    tokens_cap: i64,
+    trace_steps: bool,
+    sys_ptr: i64,
+    sys_len: i64,
+    user_ptr: i64,
+    user_len: i64,
+    cfg: &SounioLlmRunCfg,
+    out_text_ptr: i64,
+    out_text_cap: i64,
+    out_text_len_ptr: i64,
+    bench_prompt_idx: i64
+) -> SounioLlmGenStats with Alloc, Mut, Div, Panic, IO {
+    var out_stats = sounio_llm_empty_stats()
+    if !page_arena_is_ok(scratch) || cfg.max_seq <= 0 {
+        return out_stats
+    }
+
+    let s_ptr = page_arena_ptr(scratch)
+    let p_buf = s_ptr
+    let tok_buf = s_ptr + prompt_cap
+    let gen_buf = tok_buf + tokens_cap * 8
+    let assoc_buf = gen_buf + tokens_cap * 8
+    let rng_buf = assoc_buf + 16
+    let single_tok_buf = rng_buf + 16
+    let char_buf = single_tok_buf + 16
+    let trace_buf = char_buf + 64
+
+    let _w_assoc = ptr_write_u32_le(assoc_buf, 0, 0)
+    let _w_rng = ptr_write_i64_le(rng_buf, 0, cfg.seed)
+
+    let p_len = prepare_prompt_bytes(
+        cfg.raw_prompt,
+        cfg.enable_thinking,
+        sys_ptr,
+        sys_len,
+        user_ptr,
+        user_len,
+        p_buf,
+        prompt_cap
+    )
+    if p_len < 0 { return out_stats }
+    let n_prompt = qwen3_encode_bytes(tok, p_buf, p_len, tok_buf, tokens_cap)
+    if n_prompt <= 0 { return out_stats }
+
+    let t_pref_start = sounio_llm_now_ns()
+    var pos: i64 = 0
+    var prefill_ok = true
+
+    if cfg.ossm_every <= 0 {
+        prefill_ok = sounio_llm_prefill_bf16_cpu(m, kv, tok_buf, n_prompt, cfg.max_seq, true)
+        if prefill_ok { pos = n_prompt }
+    } else {
+        let _tr0 = qwen3_kv_truncate(kv, 0)
+        while pos < n_prompt && pos < cfg.max_seq {
+            let tid = ptr_read_i64_le(tok_buf, pos * 8)
+            let compute_logits = (pos == n_prompt - 1)
+            let fwd_ok = qwen3_hybrid_forward_token_cpu_sidecar(m, kv, ossm, sidecar, cfg.ossm_every, tid, pos, compute_logits, assoc_buf)
+            if !fwd_ok {
+                prefill_ok = false
+                break
+            }
+            pos = pos + 1
+        }
+        if pos < n_prompt { prefill_ok = false }
+    }
+    let t_pref_end = sounio_llm_now_ns()
+    if !prefill_ok { return out_stats }
+
+    let t_dec_start = sounio_llm_now_ns()
+    var gen_count: i64 = 0
+    var last_tid: i64 = -1
+    var last_margin: f64 = 0.0
+
+    while gen_count < cfg.max_tokens && pos < cfg.max_seq {
+        let top2 = qwen3_model_top2(m)
+        last_margin = top2.top1_val - top2.second_val
+
+        let next_tok = if cfg.temp <= 0.0 || cfg.top_p <= 0.0 {
+            top2.top1_id
+        } else {
+            sounio_llm_sample_top_p(m, cfg.temp, cfg.top_p, rng_buf)
+        }
+
+        let _w_tok = ptr_write_i64_le(gen_buf, gen_count * 8, next_tok)
+        if trace_steps {
+            sounio_llm_record_trace_step(trace_buf, gen_count, next_tok, next_tok, 1, 0, last_margin)
+        }
+        gen_count = gen_count + 1
+        last_tid = next_tok
+
+        if cfg.stream_stdout && bench_prompt_idx < 0 {
+            let _w_st = ptr_write_i64_le(single_tok_buf, 0, next_tok)
+            let slen = qwen3_decode_bytes(tok, single_tok_buf, 1, char_buf, 64)
+            var ci: i64 = 0
+            while ci < slen {
+                print_char(ptr_read_u8(char_buf, ci) as i32)
+                ci = ci + 1
+            }
+        }
+
+        if next_tok == 151643 || next_tok == 151645 {
+            break
+        }
+        if gen_count >= cfg.max_tokens || pos + 1 >= cfg.max_seq {
+            break
+        }
+
+        let fwd_step_ok = if cfg.ossm_every > 0 {
+            qwen3_hybrid_forward_token_cpu_sidecar(m, kv, ossm, sidecar, cfg.ossm_every, next_tok, pos, true, assoc_buf)
+        } else {
+            qwen3_forward_token_cpu(m, kv, next_tok, pos)
+        }
+        if !fwd_step_ok { break }
+        pos = pos + 1
+    }
+    let t_dec_end = sounio_llm_now_ns()
+
+    if bench_prompt_idx < 0 && out_text_ptr != 0 {
+        let dec_len = qwen3_decode_bytes(tok, gen_buf, gen_count, out_text_ptr, out_text_cap)
+        if out_text_len_ptr != 0 {
+            let _w_len = ptr_write_i64_le(out_text_len_ptr, 0, dec_len)
+        }
+        if trace_steps {
+            sounio_llm_emit_step_trace(trace_buf, gen_count)
+        }
+    }
+
+    let prefill_ms = if t_pref_end > t_pref_start { ((t_pref_end - t_pref_start) as f64) / 1000000.0 } else { 0.0 }
+    let decode_ms = if t_dec_end > t_dec_start { ((t_dec_end - t_dec_start) as f64) / 1000000.0 } else { 0.0 }
+    let decode_tok_per_sec = if decode_ms > 0.0 { (gen_count as f64) * 1000.0 / decode_ms } else { 0.0 }
+    let elapsed_ms = if t_dec_end > t_pref_start { ((t_dec_end - t_pref_start) as f64) / 1000000.0 } else { 0.0 }
+    let tok_per_sec = if elapsed_ms > 0.0 { (gen_count as f64) * 1000.0 / elapsed_ms } else { 0.0 }
+
+    let last_assoc = f32_bits_to_f64(ptr_read_u32_le(assoc_buf, 0))
+    out_stats = SounioLlmGenStats {
+        prompt_tokens: n_prompt,
+        generated_tokens: gen_count,
+        last_token_id: last_tid,
+        top1_margin: last_margin,
+        last_associator_l2: last_assoc,
+        elapsed_ms: elapsed_ms,
+        tok_per_sec: tok_per_sec,
+        certified_count: 0,
+        last_combined_err: 0.0,
+        prefill_ms: prefill_ms,
+        decode_ms: decode_ms,
+        decode_tok_per_sec: decode_tok_per_sec,
+        escalated_count: 0,
+        ok: true,
+    }
+    if bench_prompt_idx >= 0 {
+        sounio_llm_print_bench_prompt(bench_prompt_idx, gen_buf, trace_buf, trace_steps, &out_stats)
+    }
+    out_stats
+}
+
+fn sounio_llm_run_chat_bf16_cpu(
+    tok: &Qwen3Tokenizer,
+    m: &Qwen3Model,
+    kv: &!Qwen3PagedKv,
+    ossm: &!Qwen3OssmState,
+    sidecar: &Qwen3OssmSidecar,
+    sys_ptr: i64,
+    sys_len: i64,
+    user_ptr: i64,
+    user_len: i64,
+    cfg: &SounioLlmRunCfg,
+    out_text_ptr: i64,
+    out_text_cap: i64,
+    out_text_len_ptr: i64,
+    t_start: i64
+) -> SounioLlmGenStats with Alloc, Mut, Div, Panic, IO {
+    let prompt_cap: i64 = 65536
+    let tokens_cap: i64 = 8192
+    let trace_steps = sounio_llm_trace_steps_enabled()
+    let scratch_bytes = prompt_cap + tokens_cap * 8 + tokens_cap * 8 + tokens_cap * 32 + 128
+    let scratch = page_arena_alloc(scratch_bytes)
+    let out_stats = sounio_llm_exec_bf16_cpu(
+        tok, m, kv, ossm, sidecar, &scratch, prompt_cap, tokens_cap, trace_steps,
+        sys_ptr, sys_len, user_ptr, user_len, cfg, out_text_ptr, out_text_cap, out_text_len_ptr, -1
+    )
+    let _f = page_arena_free(scratch)
+    out_stats
+}
+
+fn sounio_llm_exec_bf16_metal(
+    tok: &Qwen3Tokenizer,
+    m: &Qwen3Model,
+    kv: &!Qwen3PagedKv,
+    ossm: &!Qwen3OssmState,
+    sidecar: &!Qwen3OssmSidecar,
+    rt: &Qwen3MetalRunner,
+    opipes: &Qwen3MetalRunner,
+    has_ossm_pipe: bool,
+    ossm_pipe_step: i64,
+    scratch: &PageArena,
+    prompt_cap: i64,
+    tokens_cap: i64,
+    trace_steps: bool,
+    sys_ptr: i64,
+    sys_len: i64,
+    user_ptr: i64,
+    user_len: i64,
+    cfg: &SounioLlmRunCfg,
+    out_text_ptr: i64,
+    out_text_cap: i64,
+    out_text_len_ptr: i64,
+    bench_prompt_idx: i64
+) -> SounioLlmGenStats with Alloc, Mut, Div, Panic, IO {
+    var out_stats = sounio_llm_empty_stats()
+    if !page_arena_is_ok(scratch) || !qwen3_metal_runner_is_ok(rt) || cfg.max_seq <= 0 {
+        return out_stats
+    }
+
+    let s_ptr = page_arena_ptr(scratch)
+    let p_buf = s_ptr
+    let tok_buf = s_ptr + prompt_cap
+    let gen_buf = tok_buf + tokens_cap * 8
+    let assoc_buf = gen_buf + tokens_cap * 8
+    let rng_buf = assoc_buf + 16
+    let single_tok_buf = rng_buf + 16
+    let char_buf = single_tok_buf + 16
+    let trace_buf = char_buf + 64
+
+    let _w_assoc = ptr_write_u32_le(assoc_buf, 0, 0)
+    let _w_rng = ptr_write_i64_le(rng_buf, 0, cfg.seed)
+
+    let p_len = prepare_prompt_bytes(
+        cfg.raw_prompt,
+        cfg.enable_thinking,
+        sys_ptr,
+        sys_len,
+        user_ptr,
+        user_len,
+        p_buf,
+        prompt_cap
+    )
+    if p_len < 0 { return out_stats }
+    let n_prompt = qwen3_encode_bytes(tok, p_buf, p_len, tok_buf, tokens_cap)
+    if n_prompt <= 0 { return out_stats }
+
+    let t_pref_start = sounio_llm_now_ns()
+    var pos: i64 = 0
+    var prefill_ok = true
+
+    if cfg.ossm_every <= 0 {
+        prefill_ok = sounio_llm_prefill_bf16_metal(m, kv, rt, tok_buf, n_prompt, cfg.max_seq, true)
+        if prefill_ok { pos = n_prompt }
+    } else {
+        let _tr0 = qwen3_kv_truncate(kv, 0)
+        while pos < n_prompt && pos < cfg.max_seq {
+            let tid = ptr_read_i64_le(tok_buf, pos * 8)
+            let compute_logits = (pos == n_prompt - 1)
+            let fwd_ok = qwen3_hybrid_forward_token_metal_sidecar(m, kv, ossm, sidecar, rt, ossm_pipe_step, cfg.ossm_every, tid, pos, compute_logits, assoc_buf)
+            if !fwd_ok {
+                prefill_ok = false
+                break
+            }
+            pos = pos + 1
+        }
+        if pos < n_prompt { prefill_ok = false }
+    }
+    let t_pref_end = sounio_llm_now_ns()
+    if !prefill_ok { return out_stats }
+
+    let t_dec_start = sounio_llm_now_ns()
+    var gen_count: i64 = 0
+    var last_tid: i64 = -1
+    var last_margin: f64 = 0.0
+
+    while gen_count < cfg.max_tokens && pos < cfg.max_seq {
+        let top2 = qwen3_model_top2(m)
+        last_margin = top2.top1_val - top2.second_val
+
+        let next_tok = if cfg.temp <= 0.0 || cfg.top_p <= 0.0 {
+            top2.top1_id
+        } else {
+            sounio_llm_sample_top_p(m, cfg.temp, cfg.top_p, rng_buf)
+        }
+
+        let _w_tok = ptr_write_i64_le(gen_buf, gen_count * 8, next_tok)
+        if trace_steps {
+            sounio_llm_record_trace_step(trace_buf, gen_count, next_tok, next_tok, 1, 0, last_margin)
+        }
+        gen_count = gen_count + 1
+        last_tid = next_tok
+
+        if cfg.stream_stdout && bench_prompt_idx < 0 {
+            let _w_st = ptr_write_i64_le(single_tok_buf, 0, next_tok)
+            let slen = qwen3_decode_bytes(tok, single_tok_buf, 1, char_buf, 64)
+            var ci: i64 = 0
+            while ci < slen {
+                print_char(ptr_read_u8(char_buf, ci) as i32)
+                ci = ci + 1
+            }
+        }
+
+        if next_tok == 151643 || next_tok == 151645 {
+            break
+        }
+        if gen_count >= cfg.max_tokens || pos + 1 >= cfg.max_seq {
+            break
+        }
+
+        let fwd_step_ok = if cfg.ossm_every > 0 {
+            qwen3_hybrid_forward_token_metal_sidecar(m, kv, ossm, sidecar, rt, ossm_pipe_step, cfg.ossm_every, next_tok, pos, true, assoc_buf)
+        } else {
+            qwen3_forward_token_metal_opt(m, kv, rt, next_tok, pos, true)
+        }
+        if !fwd_step_ok { break }
+        pos = pos + 1
+    }
+    let t_dec_end = sounio_llm_now_ns()
+
+    if bench_prompt_idx < 0 {
+        if trace_steps {
+            sounio_llm_emit_step_trace(trace_buf, gen_count)
+        }
+        if out_text_ptr != 0 {
+            let dec_len = qwen3_decode_bytes(tok, gen_buf, gen_count, out_text_ptr, out_text_cap)
+            if out_text_len_ptr != 0 {
+                let _w_len = ptr_write_i64_le(out_text_len_ptr, 0, dec_len)
+            }
+        }
+    }
+
+    let prefill_ms = if t_pref_end > t_pref_start { ((t_pref_end - t_pref_start) as f64) / 1000000.0 } else { 0.0 }
+    let decode_ms = if t_dec_end > t_dec_start { ((t_dec_end - t_dec_start) as f64) / 1000000.0 } else { 0.0 }
+    let decode_tok_per_sec = if decode_ms > 0.0 { (gen_count as f64) * 1000.0 / decode_ms } else { 0.0 }
+    let elapsed_ms = if t_dec_end > t_pref_start { ((t_dec_end - t_pref_start) as f64) / 1000000.0 } else { 0.0 }
+    let tok_per_sec = if elapsed_ms > 0.0 { (gen_count as f64) * 1000.0 / elapsed_ms } else { 0.0 }
+
+    let last_assoc = f32_bits_to_f64(ptr_read_u32_le(assoc_buf, 0))
+    out_stats = SounioLlmGenStats {
+        prompt_tokens: n_prompt,
+        generated_tokens: gen_count,
+        last_token_id: last_tid,
+        top1_margin: last_margin,
+        last_associator_l2: last_assoc,
+        elapsed_ms: elapsed_ms,
+        tok_per_sec: tok_per_sec,
+        certified_count: 0,
+        last_combined_err: 0.0,
+        prefill_ms: prefill_ms,
+        decode_ms: decode_ms,
+        decode_tok_per_sec: decode_tok_per_sec,
+        escalated_count: 0,
+        ok: true,
+    }
+    if bench_prompt_idx >= 0 {
+        sounio_llm_print_bench_prompt(bench_prompt_idx, gen_buf, trace_buf, trace_steps, &out_stats)
+    }
+    out_stats
+}
+
+fn sounio_llm_run_chat_bf16_metal(
+    tok: &Qwen3Tokenizer,
+    m: &Qwen3Model,
+    kv: &!Qwen3PagedKv,
+    ossm: &!Qwen3OssmState,
+    sidecar: &!Qwen3OssmSidecar,
+    sys_ptr: i64,
+    sys_len: i64,
+    user_ptr: i64,
+    user_len: i64,
+    cfg: &SounioLlmRunCfg,
+    out_text_ptr: i64,
+    out_text_cap: i64,
+    out_text_len_ptr: i64,
+    t_start: i64
+) -> SounioLlmGenStats with Alloc, Mut, Div, Panic, IO {
+    let rt = qwen3_metal_runner_init(m, kv, "")
+    let use_metal = qwen3_metal_runner_is_ok(&rt)
+    let prompt_cap: i64 = 65536
+    let tokens_cap: i64 = 8192
+    let trace_steps = sounio_llm_trace_steps_enabled()
+    let scratch_bytes = prompt_cap + tokens_cap * 8 + tokens_cap * 8 + tokens_cap * 32 + 128
+    let scratch = page_arena_alloc(scratch_bytes)
+    let opipes = if use_metal && cfg.ossm_every > 0 {
+        ossm_metal_pipelines_compile_runner(&rt)
+    } else {
+        ossm_metal_pipelines_empty()
+    }
+    let out_stats = sounio_llm_exec_bf16_metal(
+        tok, m, kv, ossm, sidecar, &rt, &rt, cfg.ossm_every > 0, opipes.pipe_step,
+        &scratch, prompt_cap, tokens_cap, trace_steps,
+        sys_ptr, sys_len, user_ptr, user_len, cfg, out_text_ptr, out_text_cap, out_text_len_ptr, -1
+    )
+    let _f = page_arena_free(scratch)
+    let _rf = qwen3_metal_runner_free(rt)
+    out_stats
+}
+
+fn sounio_llm_run_chat_eisa_cpu(
+    tok: &Qwen3Tokenizer,
+    m: &Qwen3Model,
+    kv: &!Qwen3PagedKv,
+    sys_ptr: i64,
+    sys_len: i64,
+    user_ptr: i64,
+    user_len: i64,
+    cfg: &SounioLlmRunCfg,
+    out_text_ptr: i64,
+    out_text_cap: i64,
+    out_text_len_ptr: i64,
+    t_start: i64
+) -> SounioLlmGenStats with Alloc, Mut, Div, Panic, IO {
+    let bits: i64 = if cfg.quant_mode == 2 || cfg.quant_mode == 4 { 8 } else { 4 }
+    let em = qwen3_eisa_model_quantize_cpu_bits(m, bits)
+    let em_ok = qwen3_eisa_model_is_ok(&em)
+
+    let prompt_cap: i64 = 65536
+    let tokens_cap: i64 = 8192
+    let trace_steps = sounio_llm_trace_steps_enabled()
+    let scratch_bytes = prompt_cap + tokens_cap * 8 + tokens_cap * 8 + tokens_cap * 32 + 128
+    let scratch = page_arena_alloc(scratch_bytes)
+
+    var out_stats = SounioLlmGenStats {
+        prompt_tokens: 0,
+        generated_tokens: 0,
+        last_token_id: -1,
+        top1_margin: 0.0,
+        last_associator_l2: 0.0,
+        elapsed_ms: 0.0,
+        tok_per_sec: 0.0,
+        certified_count: 0,
+        last_combined_err: 0.0,
+        prefill_ms: 0.0,
+        decode_ms: 0.0,
+        decode_tok_per_sec: 0.0,
+        escalated_count: 0,
+        ok: false,
+    }
+
+    if page_arena_is_ok(&scratch) && em_ok && cfg.max_seq > 0 {
+        let s_ptr = page_arena_ptr(&scratch)
+        let p_buf = s_ptr
+        let tok_buf = s_ptr + prompt_cap
+        let gen_buf = tok_buf + tokens_cap * 8
+        let rng_buf = gen_buf + tokens_cap * 8
+        let single_tok_buf = rng_buf + 16
+        let char_buf = single_tok_buf + 16
+
+        let _w_rng = ptr_write_i64_le(rng_buf, 0, cfg.seed)
+
+        let p_len = prepare_prompt_bytes(
+            cfg.raw_prompt,
+            cfg.enable_thinking,
+            sys_ptr,
+            sys_len,
+            user_ptr,
+            user_len,
+            p_buf,
+            prompt_cap
+        )
+        if p_len >= 0 {
+            let n_prompt = qwen3_encode_bytes(tok, p_buf, p_len, tok_buf, tokens_cap)
+            if n_prompt > 0 {
+                let t_pref_start = sounio_llm_now_ns()
+                var pos: i64 = 0
+                var prefill_ok = true
+                var certified_count: i64 = 0
+                var last_combined_err: f64 = 0.0
+                var last_cert = eisa_certify_argmax(0, 0, 0, 0)
+
+                while pos < n_prompt && pos < cfg.max_seq {
+                    let tid = ptr_read_i64_le(tok_buf, pos * 8)
+                    let cert = qwen3_forward_token_eisa_cpu(m, &em, kv, tid, pos)
+                    if cert.certified_numerical || cert.certified_total {
+                        certified_count = certified_count + 1
+                    }
+                    last_combined_err = cert.combined_err
+                    last_cert = cert
+                    pos = pos + 1
+                }
+                let t_pref_end = sounio_llm_now_ns()
+                if pos < n_prompt {
+                    prefill_ok = false
+                }
+
+                if prefill_ok {
+                    let t_dec_start = sounio_llm_now_ns()
+                    var gen_count: i64 = 0
+                    var last_tid: i64 = -1
+                    var last_margin: f64 = 0.0
+
+                    while gen_count < cfg.max_tokens && pos < cfg.max_seq {
+                        last_margin = last_cert.margin_val
+                        let next_tok = if cfg.temp <= 0.0 || cfg.top_p <= 0.0 {
+                            last_cert.top1_id
+                        } else {
+                            sounio_llm_sample_top_p(m, cfg.temp, cfg.top_p, rng_buf)
+                        }
+
+                        let _w_tok = ptr_write_i64_le(gen_buf, gen_count * 8, next_tok)
+                        gen_count = gen_count + 1
+                        last_tid = next_tok
+
+                        if cfg.stream_stdout {
+                            let _w_st = ptr_write_i64_le(single_tok_buf, 0, next_tok)
+                            let slen = qwen3_decode_bytes(tok, single_tok_buf, 1, char_buf, 64)
+                            var ci: i64 = 0
+                            while ci < slen {
+                                print_char(ptr_read_u8(char_buf, ci) as i32)
+                                ci = ci + 1
+                            }
+                        }
+
+                        if next_tok == 151643 || next_tok == 151645 {
+                            break
+                        }
+                        if gen_count >= cfg.max_tokens || pos + 1 >= cfg.max_seq {
+                            break
+                        }
+
+                        let cert_step = qwen3_forward_token_eisa_cpu(m, &em, kv, next_tok, pos)
+                        if cert_step.certified_numerical || cert_step.certified_total {
+                            certified_count = certified_count + 1
+                        }
+                        last_combined_err = cert_step.combined_err
+                        last_cert = cert_step
+                        pos = pos + 1
+                    }
+                    let t_dec_end = sounio_llm_now_ns()
+
+                    let dec_len = qwen3_decode_bytes(tok, gen_buf, gen_count, out_text_ptr, out_text_cap)
+                    if out_text_len_ptr != 0 {
+                        let _w_len = ptr_write_i64_le(out_text_len_ptr, 0, dec_len)
+                    }
+
+                    let prefill_ms = if t_pref_end > t_pref_start { ((t_pref_end - t_pref_start) as f64) / 1000000.0 } else { 0.0 }
+                    let decode_ms = if t_dec_end > t_dec_start { ((t_dec_end - t_dec_start) as f64) / 1000000.0 } else { 0.0 }
+                    let decode_tok_per_sec = if decode_ms > 0.0 { (gen_count as f64) * 1000.0 / decode_ms } else { 0.0 }
+                    let elapsed_ms = if t_dec_end > t_pref_start { ((t_dec_end - t_pref_start) as f64) / 1000000.0 } else { 0.0 }
+                    let tok_per_sec = if elapsed_ms > 0.0 { (gen_count as f64) * 1000.0 / elapsed_ms } else { 0.0 }
+
+                    out_stats = SounioLlmGenStats {
+                        prompt_tokens: n_prompt,
+                        generated_tokens: gen_count,
+                        last_token_id: last_tid,
+                        top1_margin: last_margin,
+                        last_associator_l2: 0.0,
+                        elapsed_ms: elapsed_ms,
+                        tok_per_sec: tok_per_sec,
+                        certified_count: certified_count,
+                        last_combined_err: last_combined_err,
+                        prefill_ms: prefill_ms,
+                        decode_ms: decode_ms,
+                        decode_tok_per_sec: decode_tok_per_sec,
+                        escalated_count: 0,
+                        ok: true,
+                    }
+                }
+            }
+        }
+    }
+
+    let _f = page_arena_free(scratch)
+    let _ef = qwen3_eisa_model_free_cpu(em)
+    out_stats
+}
+
+fn sounio_llm_run_chat_eisa_metal(
+    tok: &Qwen3Tokenizer,
+    m: &Qwen3Model,
+    kv: &!Qwen3PagedKv,
+    sys_ptr: i64,
+    sys_len: i64,
+    user_ptr: i64,
+    user_len: i64,
+    cfg: &SounioLlmRunCfg,
+    out_text_ptr: i64,
+    out_text_cap: i64,
+    out_text_len_ptr: i64,
+    t_start: i64
+) -> SounioLlmGenStats with Alloc, Mut, Div, Panic, IO {
+    let rt = qwen3_metal_runner_init(m, kv, "")
+    let use_metal = qwen3_metal_runner_is_ok(&rt)
+    let bits: i64 = if cfg.quant_mode == 2 || cfg.quant_mode == 4 { 8 } else { 4 }
+    let is_adaptive = (cfg.quant_mode == 3 || cfg.quant_mode == 4)
+    let em = qwen3_eisa_model_quantize_bits(m, &rt, bits)
+    let em_ok = qwen3_eisa_model_is_ok(&em)
+
+    let prompt_cap: i64 = 65536
+    let tokens_cap: i64 = 8192
+    let scratch_bytes = prompt_cap + tokens_cap * 8 + tokens_cap * 8 + 256
+    let scratch = page_arena_alloc(scratch_bytes)
+
+    var out_stats = SounioLlmGenStats {
+        prompt_tokens: 0,
+        generated_tokens: 0,
+        last_token_id: -1,
+        top1_margin: 0.0,
+        last_associator_l2: 0.0,
+        elapsed_ms: 0.0,
+        tok_per_sec: 0.0,
+        certified_count: 0,
+        last_combined_err: 0.0,
+        prefill_ms: 0.0,
+        decode_ms: 0.0,
+        decode_tok_per_sec: 0.0,
+        escalated_count: 0,
+        ok: false,
+    }
+
+    if page_arena_is_ok(&scratch) && use_metal && em_ok && cfg.max_seq > 0 {
+        let s_ptr = page_arena_ptr(&scratch)
+        let p_buf = s_ptr
+        let tok_buf = s_ptr + prompt_cap
+        let gen_buf = tok_buf + tokens_cap * 8
+        let rng_buf = gen_buf + tokens_cap * 8
+        let single_tok_buf = rng_buf + 16
+        let char_buf = single_tok_buf + 16
+        let esc_buf = char_buf + 64
+
+        let _w_rng = ptr_write_i64_le(rng_buf, 0, cfg.seed)
+        let _w_esc = ptr_write_i64_le(esc_buf, 0, 0)
+
+        let p_len = prepare_prompt_bytes(
+            cfg.raw_prompt,
+            cfg.enable_thinking,
+            sys_ptr,
+            sys_len,
+            user_ptr,
+            user_len,
+            p_buf,
+            prompt_cap
+        )
+        if p_len >= 0 {
+            let n_prompt = qwen3_encode_bytes(tok, p_buf, p_len, tok_buf, tokens_cap)
+            if n_prompt > 0 {
+                let t_pref_start = sounio_llm_now_ns()
+                var pos: i64 = 0
+                var prefill_ok = true
+                var certified_count: i64 = 0
+                var escalated_count: i64 = 0
+                var last_combined_err: f64 = 0.0
+                var last_cert = eisa_certify_argmax(0, 0, 0, 0)
+
+                while pos < n_prompt && pos < cfg.max_seq {
+                    let tid = ptr_read_i64_le(tok_buf, pos * 8)
+                    let compute_logits = (pos == n_prompt - 1)
+                    let cert = if is_adaptive {
+                        let c = qwen3_forward_token_eisa_adaptive_metal(m, &em, kv, &rt, tid, pos, compute_logits, esc_buf)
+                        if ptr_read_i64_le(esc_buf, 0) == 1 {
+                            escalated_count = escalated_count + 1
+                        }
+                        c
+                    } else {
+                        qwen3_forward_token_eisa_metal_opt(m, &em, kv, &rt, tid, pos, compute_logits)
+                    }
+                    if compute_logits {
+                        if cert.certified_numerical || cert.certified_total {
+                            certified_count = certified_count + 1
+                        }
+                        last_combined_err = cert.combined_err
+                        last_cert = cert
+                    }
+                    pos = pos + 1
+                }
+                let t_pref_end = sounio_llm_now_ns()
+                if pos < n_prompt {
+                    prefill_ok = false
+                }
+
+                if prefill_ok {
+                    let t_dec_start = sounio_llm_now_ns()
+                    var gen_count: i64 = 0
+                    var last_tid: i64 = -1
+                    var last_margin: f64 = 0.0
+
+                    while gen_count < cfg.max_tokens && pos < cfg.max_seq {
+                        last_margin = last_cert.margin_val
+                        let next_tok = if cfg.temp <= 0.0 || cfg.top_p <= 0.0 {
+                            last_cert.top1_id
+                        } else {
+                            sounio_llm_sample_top_p(m, cfg.temp, cfg.top_p, rng_buf)
+                        }
+
+                        let _w_tok = ptr_write_i64_le(gen_buf, gen_count * 8, next_tok)
+                        gen_count = gen_count + 1
+                        last_tid = next_tok
+
+                        if cfg.stream_stdout {
+                            let _w_st = ptr_write_i64_le(single_tok_buf, 0, next_tok)
+                            let slen = qwen3_decode_bytes(tok, single_tok_buf, 1, char_buf, 64)
+                            var ci: i64 = 0
+                            while ci < slen {
+                                print_char(ptr_read_u8(char_buf, ci) as i32)
+                                ci = ci + 1
+                            }
+                        }
+
+                        if next_tok == 151643 || next_tok == 151645 {
+                            break
+                        }
+                        if gen_count >= cfg.max_tokens || pos + 1 >= cfg.max_seq {
+                            break
+                        }
+
+                        let cert_step = if is_adaptive {
+                            let c = qwen3_forward_token_eisa_adaptive_metal(m, &em, kv, &rt, next_tok, pos, true, esc_buf)
+                            if ptr_read_i64_le(esc_buf, 0) == 1 {
+                                escalated_count = escalated_count + 1
+                            }
+                            c
+                        } else {
+                            qwen3_forward_token_eisa_metal_opt(m, &em, kv, &rt, next_tok, pos, true)
+                        }
+                        if cert_step.certified_numerical || cert_step.certified_total {
+                            certified_count = certified_count + 1
+                        }
+                        last_combined_err = cert_step.combined_err
+                        last_cert = cert_step
+                        pos = pos + 1
+                    }
+                    let t_dec_end = sounio_llm_now_ns()
+
+                    let dec_len = qwen3_decode_bytes(tok, gen_buf, gen_count, out_text_ptr, out_text_cap)
+                    if out_text_len_ptr != 0 {
+                        let _w_len = ptr_write_i64_le(out_text_len_ptr, 0, dec_len)
+                    }
+
+                    let prefill_ms = if t_pref_end > t_pref_start { ((t_pref_end - t_pref_start) as f64) / 1000000.0 } else { 0.0 }
+                    let decode_ms = if t_dec_end > t_dec_start { ((t_dec_end - t_dec_start) as f64) / 1000000.0 } else { 0.0 }
+                    let decode_tok_per_sec = if decode_ms > 0.0 { (gen_count as f64) * 1000.0 / decode_ms } else { 0.0 }
+                    let elapsed_ms = if t_dec_end > t_pref_start { ((t_dec_end - t_pref_start) as f64) / 1000000.0 } else { 0.0 }
+                    let tok_per_sec = if elapsed_ms > 0.0 { (gen_count as f64) * 1000.0 / elapsed_ms } else { 0.0 }
+
+                    out_stats = SounioLlmGenStats {
+                        prompt_tokens: n_prompt,
+                        generated_tokens: gen_count,
+                        last_token_id: last_tid,
+                        top1_margin: last_margin,
+                        last_associator_l2: 0.0,
+                        elapsed_ms: elapsed_ms,
+                        tok_per_sec: tok_per_sec,
+                        certified_count: certified_count,
+                        last_combined_err: last_combined_err,
+                        prefill_ms: prefill_ms,
+                        decode_ms: decode_ms,
+                        decode_tok_per_sec: decode_tok_per_sec,
+                        escalated_count: escalated_count,
+                        ok: true,
+                    }
+                }
+            }
+        }
+    }
+
+    let _f = page_arena_free(scratch)
+    let _ef = qwen3_eisa_model_free(em, &rt)
+    let _rf = qwen3_metal_runner_free(rt)
+    out_stats
+}
+
+fn sounio_llm_exec_cone_cpu(
+    tok: &Qwen3Tokenizer,
+    m: &Qwen3Model,
+    em: &Qwen3EisaModel,
+    kv: &!Qwen3PagedKv,
+    scratch: &PageArena,
+    prompt_cap: i64,
+    tokens_cap: i64,
+    trace_steps: bool,
+    sys_ptr: i64,
+    sys_len: i64,
+    user_ptr: i64,
+    user_len: i64,
+    cfg: &SounioLlmRunCfg,
+    out_text_ptr: i64,
+    out_text_cap: i64,
+    out_text_len_ptr: i64,
+    bench_prompt_idx: i64
+) -> SounioLlmGenStats with Alloc, Mut, Div, Panic, IO {
+    var out_stats = sounio_llm_empty_stats()
+    if !page_arena_is_ok(scratch) || !qwen3_eisa_model_is_ok(em) || cfg.max_seq <= 0 {
+        return out_stats
+    }
+
+    let s_ptr = page_arena_ptr(scratch)
+    let p_buf = s_ptr
+    let tok_buf = s_ptr + prompt_cap
+    let gen_buf = tok_buf + tokens_cap * 8
+    let rng_buf = gen_buf + tokens_cap * 8
+    let single_tok_buf = rng_buf + 16
+    let char_buf = single_tok_buf + 16
+    let trace_buf = char_buf + 64
+
+    let _w_rng = ptr_write_i64_le(rng_buf, 0, cfg.seed)
+
+    let p_len = prepare_prompt_bytes(
+        cfg.raw_prompt,
+        cfg.enable_thinking,
+        sys_ptr,
+        sys_len,
+        user_ptr,
+        user_len,
+        p_buf,
+        prompt_cap
+    )
+    if p_len < 0 { return out_stats }
+    let n_prompt = qwen3_encode_bytes(tok, p_buf, p_len, tok_buf, tokens_cap)
+    if n_prompt <= 0 || n_prompt > cfg.max_seq { return out_stats }
+
+    let t_pref_start = sounio_llm_now_ns()
+    var pos: i64 = 0
+    var prefill_ok = true
+    var certified_count: i64 = 0
+    var escalated_count: i64 = 0
+    var last_combined_err: f64 = 0.0
+    var last_cert = eisa_certify_global(0, 0, 0)
+
+    if n_prompt > 1 {
+        prefill_ok = sounio_llm_prefill_bf16_cpu(m, kv, tok_buf, n_prompt - 1, cfg.max_seq, false)
+        pos = n_prompt - 1
+    } else {
+        let _tr0 = qwen3_kv_truncate(kv, 0)
+    }
+
+    if prefill_ok {
+        let tid_last = ptr_read_i64_le(tok_buf, pos * 8)
+        let cert = qwen3_forward_token_cone_cpu(m, em, kv, tid_last, pos, 0)
+        if cert.strict_global_certified {
+            certified_count = certified_count + 1
+        }
+        if cert.bf16_rows_touched > 0 {
+            escalated_count = escalated_count + 1
+        }
+        last_combined_err = cert.top1_err
+        last_cert = cert
+        pos = pos + 1
+    }
+    let t_pref_end = sounio_llm_now_ns()
+    if !prefill_ok { return out_stats }
+
+    let t_dec_start = sounio_llm_now_ns()
+    var gen_count: i64 = 0
+    var last_tid: i64 = -1
+    var last_margin: f64 = 0.0
+
+    while gen_count < cfg.max_tokens && pos < cfg.max_seq {
+        last_margin = last_cert.global_margin
+        let next_tok = if cfg.temp <= 0.0 || cfg.top_p <= 0.0 {
+            last_cert.refined_top1_id
+        } else {
+            sounio_llm_sample_top_p(m, cfg.temp, cfg.top_p, rng_buf)
+        }
+
+        let _w_tok = ptr_write_i64_le(gen_buf, gen_count * 8, next_tok)
+        if trace_steps {
+            let cflag: i64 = if last_cert.strict_global_certified { 1 } else { 0 }
+            let eflag: i64 = if last_cert.bf16_rows_touched > 0 { 1 } else { 0 }
+            sounio_llm_record_trace_step(trace_buf, gen_count, next_tok, last_cert.top1_id, cflag, eflag, last_margin)
+        }
+        gen_count = gen_count + 1
+        last_tid = next_tok
+
+        if cfg.stream_stdout && bench_prompt_idx < 0 {
+            let _w_st = ptr_write_i64_le(single_tok_buf, 0, next_tok)
+            let slen = qwen3_decode_bytes(tok, single_tok_buf, 1, char_buf, 64)
+            var ci: i64 = 0
+            while ci < slen {
+                print_char(ptr_read_u8(char_buf, ci) as i32)
+                ci = ci + 1
+            }
+        }
+
+        if next_tok == 151643 || next_tok == 151645 {
+            break
+        }
+        if gen_count >= cfg.max_tokens || pos + 1 >= cfg.max_seq {
+            break
+        }
+
+        let cert_step = qwen3_forward_token_cone_cpu(m, em, kv, next_tok, pos, 0)
+        if cert_step.strict_global_certified {
+            certified_count = certified_count + 1
+        }
+        if cert_step.bf16_rows_touched > 0 {
+            escalated_count = escalated_count + 1
+        }
+        last_combined_err = cert_step.top1_err
+        last_cert = cert_step
+        pos = pos + 1
+    }
+    let t_dec_end = sounio_llm_now_ns()
+
+    if bench_prompt_idx < 0 {
+        if trace_steps {
+            sounio_llm_emit_step_trace(trace_buf, gen_count)
+        }
+        if out_text_ptr != 0 {
+            let dec_len = qwen3_decode_bytes(tok, gen_buf, gen_count, out_text_ptr, out_text_cap)
+            if out_text_len_ptr != 0 {
+                let _w_len = ptr_write_i64_le(out_text_len_ptr, 0, dec_len)
+            }
+        }
+    }
+
+    let prefill_ms = if t_pref_end > t_pref_start { ((t_pref_end - t_pref_start) as f64) / 1000000.0 } else { 0.0 }
+    let decode_ms = if t_dec_end > t_dec_start { ((t_dec_end - t_dec_start) as f64) / 1000000.0 } else { 0.0 }
+    let decode_tok_per_sec = if decode_ms > 0.0 { (gen_count as f64) * 1000.0 / decode_ms } else { 0.0 }
+    let elapsed_ms = if t_dec_end > t_pref_start { ((t_dec_end - t_pref_start) as f64) / 1000000.0 } else { 0.0 }
+    let tok_per_sec = if elapsed_ms > 0.0 { (gen_count as f64) * 1000.0 / elapsed_ms } else { 0.0 }
+
+    out_stats = SounioLlmGenStats {
+        prompt_tokens: n_prompt,
+        generated_tokens: gen_count,
+        last_token_id: last_tid,
+        top1_margin: last_margin,
+        last_associator_l2: 0.0,
+        elapsed_ms: elapsed_ms,
+        tok_per_sec: tok_per_sec,
+        certified_count: certified_count,
+        last_combined_err: last_combined_err,
+        prefill_ms: prefill_ms,
+        decode_ms: decode_ms,
+        decode_tok_per_sec: decode_tok_per_sec,
+        escalated_count: escalated_count,
+        ok: true,
+    }
+    if bench_prompt_idx >= 0 {
+        sounio_llm_print_bench_prompt(bench_prompt_idx, gen_buf, trace_buf, trace_steps, &out_stats)
+    }
+    out_stats
+}
+
+fn sounio_llm_run_chat_cone_cpu(
+    tok: &Qwen3Tokenizer,
+    m: &Qwen3Model,
+    kv: &!Qwen3PagedKv,
+    sys_ptr: i64,
+    sys_len: i64,
+    user_ptr: i64,
+    user_len: i64,
+    cfg: &SounioLlmRunCfg,
+    out_text_ptr: i64,
+    out_text_cap: i64,
+    out_text_len_ptr: i64,
+    t_start: i64
+) -> SounioLlmGenStats with Alloc, Mut, Div, Panic, IO {
+    let bits: i64 = if cfg.quant_mode == 6 { 8 } else { 4 }
+    let em = qwen3_eisa_model_quantize_lm_head_cpu_bits(m, bits)
+    let prompt_cap: i64 = 65536
+    let tokens_cap: i64 = 8192
+    let trace_steps = sounio_llm_trace_steps_enabled()
+    let scratch_bytes = prompt_cap + tokens_cap * 8 + tokens_cap * 8 + tokens_cap * 32 + 128
+    let scratch = page_arena_alloc(scratch_bytes)
+    let out_stats = sounio_llm_exec_cone_cpu(
+        tok, m, &em, kv, &scratch, prompt_cap, tokens_cap, trace_steps,
+        sys_ptr, sys_len, user_ptr, user_len, cfg, out_text_ptr, out_text_cap, out_text_len_ptr, -1
+    )
+    let _f = page_arena_free(scratch)
+    let _ef = qwen3_eisa_model_free_cpu(em)
+    out_stats
+}
+
+fn sounio_llm_exec_cone_metal(
+    tok: &Qwen3Tokenizer,
+    m: &Qwen3Model,
+    em: &Qwen3EisaModel,
+    kv: &!Qwen3PagedKv,
+    rt: &Qwen3MetalRunner,
+    scratch: &PageArena,
+    prompt_cap: i64,
+    tokens_cap: i64,
+    trace_steps: bool,
+    sys_ptr: i64,
+    sys_len: i64,
+    user_ptr: i64,
+    user_len: i64,
+    cfg: &SounioLlmRunCfg,
+    out_text_ptr: i64,
+    out_text_cap: i64,
+    out_text_len_ptr: i64,
+    bench_prompt_idx: i64
+) -> SounioLlmGenStats with Alloc, Mut, Div, Panic, IO {
+    var out_stats = sounio_llm_empty_stats()
+    if !page_arena_is_ok(scratch) || !qwen3_metal_runner_is_ok(rt) || !qwen3_eisa_model_is_ok(em) || cfg.max_seq <= 0 {
+        return out_stats
+    }
+
+    let s_ptr = page_arena_ptr(scratch)
+    let p_buf = s_ptr
+    let tok_buf = s_ptr + prompt_cap
+    let gen_buf = tok_buf + tokens_cap * 8
+    let rng_buf = gen_buf + tokens_cap * 8
+    let single_tok_buf = rng_buf + 16
+    let char_buf = single_tok_buf + 16
+    let trace_buf = char_buf + 64
+
+    let _w_rng = ptr_write_i64_le(rng_buf, 0, cfg.seed)
+
+    let p_len = prepare_prompt_bytes(
+        cfg.raw_prompt,
+        cfg.enable_thinking,
+        sys_ptr,
+        sys_len,
+        user_ptr,
+        user_len,
+        p_buf,
+        prompt_cap
+    )
+    if p_len < 0 { return out_stats }
+    let n_prompt = qwen3_encode_bytes(tok, p_buf, p_len, tok_buf, tokens_cap)
+    if n_prompt <= 0 || n_prompt > cfg.max_seq { return out_stats }
+
+    let t_pref_start = sounio_llm_now_ns()
+    var pos: i64 = 0
+    var prefill_ok = true
+    var certified_count: i64 = 0
+    var escalated_count: i64 = 0
+    var last_combined_err: f64 = 0.0
+    var last_cert = eisa_certify_global(0, 0, 0)
+
+    if n_prompt > 1 {
+        prefill_ok = sounio_llm_prefill_bf16_metal(m, kv, rt, tok_buf, n_prompt - 1, cfg.max_seq, false)
+        pos = n_prompt - 1
+    } else {
+        let _tr0 = qwen3_kv_truncate(kv, 0)
+    }
+
+    if prefill_ok {
+        let tid_last = ptr_read_i64_le(tok_buf, pos * 8)
+        let cert = qwen3_forward_token_cone_metal_opt(m, em, kv, rt, tid_last, pos, true, 0)
+        if cert.strict_global_certified {
+            certified_count = certified_count + 1
+        }
+        if cert.bf16_rows_touched > 0 {
+            escalated_count = escalated_count + 1
+        }
+        last_combined_err = cert.top1_err
+        last_cert = cert
+        pos = pos + 1
+    }
+    let t_pref_end = sounio_llm_now_ns()
+    if !prefill_ok { return out_stats }
+
+    let t_dec_start = sounio_llm_now_ns()
+    var gen_count: i64 = 0
+    var last_tid: i64 = -1
+    var last_margin: f64 = 0.0
+
+    while gen_count < cfg.max_tokens && pos < cfg.max_seq {
+        last_margin = last_cert.global_margin
+        let next_tok = if cfg.temp <= 0.0 || cfg.top_p <= 0.0 {
+            last_cert.refined_top1_id
+        } else {
+            sounio_llm_sample_top_p(m, cfg.temp, cfg.top_p, rng_buf)
+        }
+
+        let _w_tok = ptr_write_i64_le(gen_buf, gen_count * 8, next_tok)
+        if trace_steps {
+            let cflag: i64 = if last_cert.strict_global_certified { 1 } else { 0 }
+            let eflag: i64 = if last_cert.bf16_rows_touched > 0 { 1 } else { 0 }
+            sounio_llm_record_trace_step(trace_buf, gen_count, next_tok, last_cert.top1_id, cflag, eflag, last_margin)
+        }
+        gen_count = gen_count + 1
+        last_tid = next_tok
+
+        if cfg.stream_stdout && bench_prompt_idx < 0 {
+            let _w_st = ptr_write_i64_le(single_tok_buf, 0, next_tok)
+            let slen = qwen3_decode_bytes(tok, single_tok_buf, 1, char_buf, 64)
+            var ci: i64 = 0
+            while ci < slen {
+                print_char(ptr_read_u8(char_buf, ci) as i32)
+                ci = ci + 1
+            }
+        }
+
+        if next_tok == 151643 || next_tok == 151645 {
+            break
+        }
+        if gen_count >= cfg.max_tokens || pos + 1 >= cfg.max_seq {
+            break
+        }
+
+        let cert_step = qwen3_forward_token_cone_metal_opt(m, em, kv, rt, next_tok, pos, true, 0)
+        if cert_step.strict_global_certified {
+            certified_count = certified_count + 1
+        }
+        if cert_step.bf16_rows_touched > 0 {
+            escalated_count = escalated_count + 1
+        }
+        last_combined_err = cert_step.top1_err
+        last_cert = cert_step
+        pos = pos + 1
+    }
+    let t_dec_end = sounio_llm_now_ns()
+
+    if bench_prompt_idx < 0 {
+        if trace_steps {
+            sounio_llm_emit_step_trace(trace_buf, gen_count)
+        }
+        if out_text_ptr != 0 {
+            let dec_len = qwen3_decode_bytes(tok, gen_buf, gen_count, out_text_ptr, out_text_cap)
+            if out_text_len_ptr != 0 {
+                let _w_len = ptr_write_i64_le(out_text_len_ptr, 0, dec_len)
+            }
+        }
+    }
+
+    let prefill_ms = if t_pref_end > t_pref_start { ((t_pref_end - t_pref_start) as f64) / 1000000.0 } else { 0.0 }
+    let decode_ms = if t_dec_end > t_dec_start { ((t_dec_end - t_dec_start) as f64) / 1000000.0 } else { 0.0 }
+    let decode_tok_per_sec = if decode_ms > 0.0 { (gen_count as f64) * 1000.0 / decode_ms } else { 0.0 }
+    let elapsed_ms = if t_dec_end > t_pref_start { ((t_dec_end - t_pref_start) as f64) / 1000000.0 } else { 0.0 }
+    let tok_per_sec = if elapsed_ms > 0.0 { (gen_count as f64) * 1000.0 / elapsed_ms } else { 0.0 }
+
+    out_stats = SounioLlmGenStats {
+        prompt_tokens: n_prompt,
+        generated_tokens: gen_count,
+        last_token_id: last_tid,
+        top1_margin: last_margin,
+        last_associator_l2: 0.0,
+        elapsed_ms: elapsed_ms,
+        tok_per_sec: tok_per_sec,
+        certified_count: certified_count,
+        last_combined_err: last_combined_err,
+        prefill_ms: prefill_ms,
+        decode_ms: decode_ms,
+        decode_tok_per_sec: decode_tok_per_sec,
+        escalated_count: escalated_count,
+        ok: true,
+    }
+    if bench_prompt_idx >= 0 {
+        sounio_llm_print_bench_prompt(bench_prompt_idx, gen_buf, trace_buf, trace_steps, &out_stats)
+    }
+    out_stats
+}
+
+fn sounio_llm_run_chat_cone_metal(
+    tok: &Qwen3Tokenizer,
+    m: &Qwen3Model,
+    kv: &!Qwen3PagedKv,
+    sys_ptr: i64,
+    sys_len: i64,
+    user_ptr: i64,
+    user_len: i64,
+    cfg: &SounioLlmRunCfg,
+    out_text_ptr: i64,
+    out_text_cap: i64,
+    out_text_len_ptr: i64,
+    t_start: i64
+) -> SounioLlmGenStats with Alloc, Mut, Div, Panic, IO {
+    let rt = qwen3_metal_runner_init(m, kv, "")
+    let bits: i64 = if cfg.quant_mode == 6 { 8 } else { 4 }
+    let em = qwen3_eisa_model_quantize_lm_head_bits(m, &rt, bits)
+    let prompt_cap: i64 = 65536
+    let tokens_cap: i64 = 8192
+    let trace_steps = sounio_llm_trace_steps_enabled()
+    let scratch_bytes = prompt_cap + tokens_cap * 8 + tokens_cap * 8 + tokens_cap * 32 + 128
+    let scratch = page_arena_alloc(scratch_bytes)
+    let out_stats = sounio_llm_exec_cone_metal(
+        tok, m, &em, kv, &rt, &scratch, prompt_cap, tokens_cap, trace_steps,
+        sys_ptr, sys_len, user_ptr, user_len, cfg, out_text_ptr, out_text_cap, out_text_len_ptr, -1
+    )
+    let _f = page_arena_free(scratch)
+    let _ef = qwen3_eisa_model_free(em, &rt)
+    let _rf = qwen3_metal_runner_free(rt)
+    out_stats
+}
+
+fn sounio_llm_step_conformal_r123_cpu(
+    m: &Qwen3Model,
+    em: &Qwen3EisaModel,
+    conf: &Qwen3ConformalCtx,
+    kv: &!Qwen3PagedKv,
+    quant_mode: i64,
+    tok_id: i64,
+    pos: i64,
+    seq_toks_buf: i64,
+    clean_pos_ptr: i64,
+    max_streak: i64,
+    esc_out_ptr: i64
+) -> EisaConeCert with Mut, Div, Panic {
+    if quant_mode == 11 || quant_mode == 12 {
+        return qwen3_forward_token_q8_mlp_conformal_cpu(m, em, conf, kv, tok_id, pos, true, esc_out_ptr)
+    }
+    if quant_mode == 13 || quant_mode == 14 || quant_mode == 18 || quant_mode == 19 {
+        let _we0 = ptr_write_i64_le(esc_out_ptr, 0, 0)
+        let cert = qwen3_forward_token_q8_try_cpu(m, em, conf, kv, tok_id, pos, true)
+        if cert.cone_size <= 0 {
+            return eisa_certify_global(0, 0, 0)
+        }
+        let clean_pos = ptr_read_i64_le(clean_pos_ptr, 0)
+        let streak_len = (pos - clean_pos) + 1
+        let allow_cert = cert.strict_global_certified && (max_streak <= 0 || streak_len < max_streak)
+        if allow_cert {
+            return cert
+        }
+        let _we1 = ptr_write_i64_le(esc_out_ptr, 0, 1)
+        if !qwen3_kv_truncate(kv, clean_pos) {
+            return eisa_certify_global(0, 0, 0)
+        }
+        let n_scrub = pos - clean_pos + 1
+        let s_ok = sounio_llm_run_bf16_chunks_cpu(m, kv, seq_toks_buf + clean_pos * 8, clean_pos, n_scrub, false, true, 0)
+        if !s_ok {
+            return eisa_certify_global(0, 0, 0)
+        }
+        let _wcp = ptr_write_i64_le(clean_pos_ptr, 0, pos + 1)
+        let t = qwen3_model_top2(m)
+        return EisaConeCert {
+            top1_id: cert.top1_id,
+            runner_up_id: cert.runner_up_id,
+            refined_top1_id: t.top1_id,
+            top1_val: t.top1_val,
+            top1_err: 0.0,
+            max_other_upper: t.second_val,
+            global_margin: t.top1_val - t.second_val,
+            cone_size: cert.cone_size,
+            bf16_rows_touched: m.cfg.vocab,
+            strict_global_certified: false,
+            refined_exact: true,
+        }
+    }
+    qwen3_forward_token_q8_conformal_cpu(m, em, conf, kv, tok_id, pos, true, esc_out_ptr)
+}
+
+fn sounio_llm_step_conformal_r123_metal(
+    m: &Qwen3Model,
+    em: &Qwen3EisaModel,
+    conf: &Qwen3ConformalCtx,
+    kv: &!Qwen3PagedKv,
+    rt: &Qwen3MetalRunner,
+    quant_mode: i64,
+    tok_id: i64,
+    pos: i64,
+    seq_toks_buf: i64,
+    clean_pos_ptr: i64,
+    max_streak: i64,
+    esc_out_ptr: i64
+) -> EisaConeCert with Mut, Div, Panic {
+    if quant_mode == 11 || quant_mode == 12 {
+        return qwen3_forward_token_q8_mlp_conformal_metal_opt(m, em, conf, kv, rt, tok_id, pos, true, esc_out_ptr)
+    }
+    if quant_mode == 13 || quant_mode == 14 || quant_mode == 18 || quant_mode == 19 {
+        let _we0 = ptr_write_i64_le(esc_out_ptr, 0, 0)
+        let cert = qwen3_forward_token_q8_try_metal(m, em, conf, kv, rt, tok_id, pos, true)
+        if cert.cone_size <= 0 {
+            return eisa_certify_global(0, 0, 0)
+        }
+        let clean_pos = ptr_read_i64_le(clean_pos_ptr, 0)
+        let streak_len = (pos - clean_pos) + 1
+        let allow_cert = cert.strict_global_certified && (max_streak <= 0 || streak_len < max_streak)
+        if allow_cert {
+            return cert
+        }
+        let _we1 = ptr_write_i64_le(esc_out_ptr, 0, 1)
+        if !qwen3_kv_truncate(kv, clean_pos) {
+            return eisa_certify_global(0, 0, 0)
+        }
+        let n_scrub = pos - clean_pos + 1
+        let s_ok = sounio_llm_run_bf16_chunks_metal(m, kv, rt, seq_toks_buf + clean_pos * 8, clean_pos, n_scrub, false, true, 0)
+        if !s_ok {
+            return eisa_certify_global(0, 0, 0)
+        }
+        let _wcp = ptr_write_i64_le(clean_pos_ptr, 0, pos + 1)
+        let t = qwen3_model_top2(m)
+        return EisaConeCert {
+            top1_id: cert.top1_id,
+            runner_up_id: cert.runner_up_id,
+            refined_top1_id: t.top1_id,
+            top1_val: t.top1_val,
+            top1_err: 0.0,
+            max_other_upper: t.second_val,
+            global_margin: t.top1_val - t.second_val,
+            cone_size: cert.cone_size,
+            bf16_rows_touched: m.cfg.vocab,
+            strict_global_certified: false,
+            refined_exact: true,
+        }
+    }
+    qwen3_forward_token_q8_conformal_metal_opt(m, em, conf, kv, rt, tok_id, pos, true, esc_out_ptr)
+}
+
+fn sounio_llm_stream_range(
+    tok: &Qwen3Tokenizer,
+    gen_buf: i64,
+    from_idx: i64,
+    to_idx: i64,
+    single_tok_buf: i64,
+    char_buf: i64
+) with Mut, Div, Panic, IO {
+    var k = from_idx
+    while k < to_idx {
+        let _w_st = ptr_write_i64_le(single_tok_buf, 0, ptr_read_i64_le(gen_buf, k * 8))
+        let slen = qwen3_decode_bytes(tok, single_tok_buf, 1, char_buf, 64)
+        var ci: i64 = 0
+        while ci < slen {
+            print_char(ptr_read_u8(char_buf, ci) as i32)
+            ci = ci + 1
+        }
+        k = k + 1
+    }
+}
+
+// Returns: 0 = continue chunk loop (no mismatch yet), 1 = resolved/rolled back, -1 = kv_truncate failed
+fn sounio_llm_r4_scan_chunk_impl(
+    gen_buf: i64,
+    trace_buf: i64,
+    seq_toks_buf: i64,
+    top1_chunk_buf: i64,
+    chunk_start: i64,
+    c_len: i64,
+    n_prompt: i64,
+    allow_append: bool,
+    hit_streak: bool,
+    q8_fallback_tid: i64,
+    margin: f64,
+    clean_pos_ptr: i64,
+    cur_pos_ptr: i64,
+    gen_count_ptr: i64,
+    last_tid_ptr: i64,
+    kv: &!Qwen3PagedKv,
+    truncate_kv: bool
+) -> i64 with Mut, Div {
+    let gen_count = ptr_read_i64_le(gen_count_ptr, 0)
+    var j: i64 = 0
+    while j < c_len {
+        let p = chunk_start + j
+        let pred = ptr_read_i64_le(top1_chunk_buf, j * 8)
+        let g_idx = p - (n_prompt - 1)
+        if g_idx < gen_count {
+            if ptr_read_i64_le(gen_buf, g_idx * 8) != pred {
+                let _wf = ptr_write_i64_le(gen_buf, g_idx * 8, pred)
+                let prev_q8 = ptr_read_i64_le(trace_buf, g_idx * 32 + 8)
+                sounio_llm_record_trace_step(trace_buf, g_idx, pred, prev_q8, 0, 1, 0.0)
+                let _wgc = ptr_write_i64_le(gen_count_ptr, 0, g_idx + 1)
+                let _wlt = ptr_write_i64_le(last_tid_ptr, 0, pred)
+                if truncate_kv && !qwen3_kv_truncate(kv, p + 1) { return -1 }
+                let _ws = ptr_write_i64_le(seq_toks_buf, (p + 1) * 8, pred)
+                let _wcu = ptr_write_i64_le(cur_pos_ptr, 0, p + 1)
+                let _wcl = ptr_write_i64_le(clean_pos_ptr, 0, p + 1)
+                return 1
+            }
+        } else if allow_append {
+            let q8_cand = if hit_streak { pred } else { q8_fallback_tid }
+            let _wg = ptr_write_i64_le(gen_buf, gen_count * 8, pred)
+            sounio_llm_record_trace_step(trace_buf, gen_count, pred, q8_cand, 0, 1, margin)
+            let _wgc = ptr_write_i64_le(gen_count_ptr, 0, gen_count + 1)
+            let _wlt = ptr_write_i64_le(last_tid_ptr, 0, pred)
+            let _ws = ptr_write_i64_le(seq_toks_buf, (p + 1) * 8, pred)
+            let _wcu = ptr_write_i64_le(cur_pos_ptr, 0, p + 1)
+            let _wcl = ptr_write_i64_le(clean_pos_ptr, 0, p + 1)
+            return 1
+        }
+        j = j + 1
+    }
+    0
+}
+
+fn sounio_llm_r4_scan_chunk(
+    gen_buf: i64,
+    trace_buf: i64,
+    seq_toks_buf: i64,
+    top1_chunk_buf: i64,
+    chunk_start: i64,
+    c_len: i64,
+    n_prompt: i64,
+    allow_append: bool,
+    hit_streak: bool,
+    q8_fallback_tid: i64,
+    margin: f64,
+    clean_pos_ptr: i64,
+    cur_pos_ptr: i64,
+    gen_count_ptr: i64,
+    last_tid_ptr: i64,
+    kv: &!Qwen3PagedKv
+) -> i64 with Mut, Div {
+    sounio_llm_r4_scan_chunk_impl(
+        gen_buf, trace_buf, seq_toks_buf, top1_chunk_buf, chunk_start, c_len, n_prompt,
+        allow_append, hit_streak, q8_fallback_tid, margin, clean_pos_ptr, cur_pos_ptr,
+        gen_count_ptr, last_tid_ptr, kv, true
+    )
+}
+
+fn sounio_llm_count_trace_cert(trace_buf: i64, gen_count: i64) -> i64 with Mut {
+    var cnt: i64 = 0
+    var ck: i64 = 0
+    while ck < gen_count {
+        if ptr_read_i64_le(trace_buf, ck * 32 + 16) == 1 {
+            cnt = cnt + 1
+        }
+        ck = ck + 1
+    }
+    cnt
+}
+
+fn sounio_llm_finalize_conformal_out(
+    tok: &Qwen3Tokenizer,
+    gen_buf: i64,
+    trace_buf: i64,
+    trace_steps: bool,
+    bench_prompt_idx: i64,
+    out_text_ptr: i64,
+    out_text_cap: i64,
+    out_text_len_ptr: i64,
+    n_prompt: i64,
+    gen_count: i64,
+    last_tid: i64,
+    last_margin: f64,
+    last_combined_err: f64,
+    certified_count: i64,
+    escalated_count: i64,
+    t_pref_start: i64,
+    t_pref_end: i64,
+    t_dec_start: i64,
+    t_dec_end: i64
+) -> SounioLlmGenStats with Mut, Div, Panic, IO {
+    if bench_prompt_idx < 0 {
+        if trace_steps {
+            sounio_llm_emit_step_trace(trace_buf, gen_count)
+        }
+        if out_text_ptr != 0 {
+            let dec_len = qwen3_decode_bytes(tok, gen_buf, gen_count, out_text_ptr, out_text_cap)
+            if out_text_len_ptr != 0 {
+                let _w_len = ptr_write_i64_le(out_text_len_ptr, 0, dec_len)
+            }
+        }
+    }
+    let prefill_ms = if t_pref_end > t_pref_start { ((t_pref_end - t_pref_start) as f64) / 1000000.0 } else { 0.0 }
+    let decode_ms = if t_dec_end > t_dec_start { ((t_dec_end - t_dec_start) as f64) / 1000000.0 } else { 0.0 }
+    let decode_tok_per_sec = if decode_ms > 0.0 { (gen_count as f64) * 1000.0 / decode_ms } else { 0.0 }
+    let elapsed_ms = if t_dec_end > t_pref_start { ((t_dec_end - t_pref_start) as f64) / 1000000.0 } else { 0.0 }
+    let tok_per_sec = if elapsed_ms > 0.0 { (gen_count as f64) * 1000.0 / elapsed_ms } else { 0.0 }
+
+    let out_stats = SounioLlmGenStats {
+        prompt_tokens: n_prompt,
+        generated_tokens: gen_count,
+        last_token_id: last_tid,
+        top1_margin: last_margin,
+        last_associator_l2: 0.0,
+        elapsed_ms: elapsed_ms,
+        tok_per_sec: tok_per_sec,
+        certified_count: certified_count,
+        last_combined_err: last_combined_err,
+        prefill_ms: prefill_ms,
+        decode_ms: decode_ms,
+        decode_tok_per_sec: decode_tok_per_sec,
+        escalated_count: escalated_count,
+        ok: true,
+    }
+    if bench_prompt_idx >= 0 {
+        sounio_llm_print_bench_prompt(bench_prompt_idx, gen_buf, trace_buf, trace_steps, &out_stats)
+    }
+    out_stats
+}
+
+fn sounio_llm_exec_r4_cpu(
+    tok: &Qwen3Tokenizer,
+    m: &Qwen3Model,
+    em: &Qwen3EisaModel,
+    conf: &Qwen3ConformalCtx,
+    kv: &!Qwen3PagedKv,
+    tokens_cap: i64,
+    trace_steps: bool,
+    n_prompt: i64,
+    tok_buf: i64,
+    seq_toks_buf: i64,
+    gen_buf: i64,
+    single_tok_buf: i64,
+    char_buf: i64,
+    clean_pos_buf: i64,
+    top1_chunk_buf: i64,
+    trace_buf: i64,
+    cfg: &SounioLlmRunCfg,
+    out_text_ptr: i64,
+    out_text_cap: i64,
+    out_text_len_ptr: i64,
+    bench_prompt_idx: i64
+) -> SounioLlmGenStats with Alloc, Mut, Div, Panic, IO {
+    var out_stats = sounio_llm_empty_stats()
+    let max_seq_lim = if cfg.max_seq < tokens_cap - 1 { cfg.max_seq } else { tokens_cap - 1 }
+    if n_prompt <= 0 || n_prompt > max_seq_lim { return out_stats }
+
+    var pi: i64 = 0
+    while pi < n_prompt {
+        let _w = ptr_write_i64_le(seq_toks_buf, pi * 8, ptr_read_i64_le(tok_buf, pi * 8))
+        pi = pi + 1
+    }
+
+    let t_pref_start = sounio_llm_now_ns()
+    if cfg.max_tokens <= 0 {
+        let ok0 = sounio_llm_prefill_bf16_cpu(m, kv, tok_buf, n_prompt, max_seq_lim, true)
+        let t_pref_end = sounio_llm_now_ns()
+        if !ok0 { return out_stats }
+        let top2_0 = qwen3_model_top2(m)
+        return sounio_llm_finalize_conformal_out(
+            tok, gen_buf, trace_buf, trace_steps, bench_prompt_idx, out_text_ptr, out_text_cap, out_text_len_ptr,
+            n_prompt, 0, -1, top2_0.top1_val - top2_0.second_val, 0.0, 0, 0,
+            t_pref_start, t_pref_end, t_pref_end, t_pref_end
+        )
+    }
+
+    let prefill_ok = if n_prompt > 1 {
+        sounio_llm_prefill_bf16_cpu(m, kv, tok_buf, n_prompt - 1, max_seq_lim, false)
+    } else {
+        qwen3_kv_truncate(kv, 0)
+    }
+    let t_pref_end = sounio_llm_now_ns()
+    if !prefill_ok { return out_stats }
+
+    let t_dec_start = sounio_llm_now_ns()
+    let cur_pos_buf = clean_pos_buf + 8
+    let gen_count_buf = clean_pos_buf + 16
+    let last_tid_buf = clean_pos_buf + 24
+    let _wc0 = ptr_write_i64_le(clean_pos_buf, 0, n_prompt - 1)
+    let _wc1 = ptr_write_i64_le(cur_pos_buf, 0, n_prompt - 1)
+    let _wc2 = ptr_write_i64_le(gen_count_buf, 0, 0)
+    let _wc3 = ptr_write_i64_le(last_tid_buf, 0, -1)
+
+    var streamed_count: i64 = 0
+    var last_margin: f64 = 0.0
+    var last_combined_err: f64 = 0.0
+    var escalated_count: i64 = 0
+    let is_q_zero = conf.q_threshold == 0.0
+    let max_streak = sounio_llm_parse_env_nonneg_i64("SOUNIO_SCRUB_MAX_STREAK")
+    var loop_ok = true
+
+    while loop_ok {
+        let clean_pos = ptr_read_i64_le(clean_pos_buf, 0)
+        let cur_pos = ptr_read_i64_le(cur_pos_buf, 0)
+        var gen_count = ptr_read_i64_le(gen_count_buf, 0)
+        let last_gen_tok = if gen_count > 0 { ptr_read_i64_le(gen_buf, (gen_count - 1) * 8) } else { -1 }
+        let ended = (gen_count >= cfg.max_tokens) || (cur_pos + 1 >= max_seq_lim) || (gen_count > 0 && (last_gen_tok == 151643 || last_gen_tok == 151645))
+        if ended {
+            if clean_pos >= cur_pos { break }
+            let win_end = cur_pos - 1
+            if !qwen3_kv_truncate(kv, clean_pos) {
+                loop_ok = false
+                break
+            }
+            escalated_count = escalated_count + 1
+            var chunk_start = clean_pos
+            var rolled = false
+            while chunk_start <= win_end {
+                let rem = win_end - chunk_start + 1
+                let c_len = if rem > 8 { 8 } else { rem }
+                let need_last = (chunk_start + c_len - 1 == win_end)
+                if !qwen3_forward_batch_bf16_cpu(m, kv, seq_toks_buf + chunk_start * 8, chunk_start, c_len, true, need_last, top1_chunk_buf) {
+                    loop_ok = false
+                    break
+                }
+                let rc = sounio_llm_r4_scan_chunk(
+                    gen_buf, trace_buf, seq_toks_buf, top1_chunk_buf, chunk_start, c_len, n_prompt,
+                    false, false, 0, 0.0, clean_pos_buf, cur_pos_buf, gen_count_buf, last_tid_buf, kv
+                )
+                if rc < 0 {
+                    loop_ok = false
+                    break
+                }
+                if rc > 0 {
+                    rolled = true
+                    break
+                }
+                chunk_start = chunk_start + c_len
+            }
+            if !loop_ok { break }
+            if !rolled {
+                let top2_fin = qwen3_model_top2(m)
+                last_margin = top2_fin.top1_val - top2_fin.second_val
+                let _wcl = ptr_write_i64_le(clean_pos_buf, 0, cur_pos)
+            }
+            if cfg.stream_stdout && bench_prompt_idx < 0 {
+                let verified_cnt = ptr_read_i64_le(clean_pos_buf, 0) - (n_prompt - 1)
+                if verified_cnt > streamed_count {
+                    sounio_llm_stream_range(tok, gen_buf, streamed_count, verified_cnt, single_tok_buf, char_buf)
+                    streamed_count = verified_cnt
+                }
+            }
+            if !rolled { break }
+        } else {
+            let streak_len = (cur_pos - clean_pos) + 1
+            let hit_streak = (max_streak > 0) && (streak_len >= max_streak)
+            var accept_draft = false
+            var cert = eisa_certify_global(0, 0, 0)
+            if !hit_streak {
+                let cur_tid = ptr_read_i64_le(seq_toks_buf, cur_pos * 8)
+                cert = qwen3_forward_token_q8_try_cpu(m, em, conf, kv, cur_tid, cur_pos, true)
+                if cert.cone_size <= 0 {
+                    loop_ok = false
+                    break
+                }
+                accept_draft = cert.strict_global_certified || is_q_zero
+                last_combined_err = cert.top1_err
+                last_margin = cert.global_margin
+            }
+            if accept_draft {
+                let dtok = cert.top1_id
+                let _wg = ptr_write_i64_le(gen_buf, gen_count * 8, dtok)
+                sounio_llm_record_trace_step(trace_buf, gen_count, dtok, dtok, 1, 0, cert.global_margin)
+                let _wgc = ptr_write_i64_le(gen_count_buf, 0, gen_count + 1)
+                let _wlt = ptr_write_i64_le(last_tid_buf, 0, dtok)
+                let _wcu = ptr_write_i64_le(cur_pos_buf, 0, cur_pos + 1)
+                let _ws = ptr_write_i64_le(seq_toks_buf, (cur_pos + 1) * 8, dtok)
+            } else {
+                let win_end = cur_pos
+                if !qwen3_kv_truncate(kv, clean_pos) {
+                loop_ok = false
+                break
+            }
+                escalated_count = escalated_count + 1
+                var chunk_start = clean_pos
+                var resolved = false
+                while chunk_start <= win_end {
+                    let rem = win_end - chunk_start + 1
+                    let c_len = if rem > 8 { 8 } else { rem }
+                    let need_last = (chunk_start + c_len - 1 == win_end)
+                    if !qwen3_forward_batch_bf16_cpu(m, kv, seq_toks_buf + chunk_start * 8, chunk_start, c_len, true, need_last, top1_chunk_buf) {
+                        loop_ok = false
+                        break
+                    }
+                    let rc = sounio_llm_r4_scan_chunk(
+                        gen_buf, trace_buf, seq_toks_buf, top1_chunk_buf, chunk_start, c_len, n_prompt,
+                        true, hit_streak, cert.top1_id, last_margin, clean_pos_buf, cur_pos_buf, gen_count_buf, last_tid_buf, kv
+                    )
+                    if rc < 0 {
+                        loop_ok = false
+                        break
+                    }
+                    if rc > 0 {
+                        resolved = true
+                        break
+                    }
+                    chunk_start = chunk_start + c_len
+                }
+                if !loop_ok { break }
+                let top2_fin = qwen3_model_top2(m)
+                last_margin = top2_fin.top1_val - top2_fin.second_val
+                if cfg.stream_stdout && bench_prompt_idx < 0 {
+                    let verified_cnt = ptr_read_i64_le(clean_pos_buf, 0) - (n_prompt - 1)
+                    if verified_cnt > streamed_count {
+                        sounio_llm_stream_range(tok, gen_buf, streamed_count, verified_cnt, single_tok_buf, char_buf)
+                        streamed_count = verified_cnt
+                    }
+                }
+            }
+        }
+    }
+    let t_dec_end = sounio_llm_now_ns()
+    if !loop_ok { return out_stats }
+    let final_gen_count = ptr_read_i64_le(gen_count_buf, 0)
+    let final_last_tid = ptr_read_i64_le(last_tid_buf, 0)
+    let certified_count = sounio_llm_count_trace_cert(trace_buf, final_gen_count)
+    sounio_llm_finalize_conformal_out(
+        tok, gen_buf, trace_buf, trace_steps, bench_prompt_idx, out_text_ptr, out_text_cap, out_text_len_ptr,
+        n_prompt, final_gen_count, final_last_tid, last_margin, last_combined_err, certified_count, escalated_count,
+        t_pref_start, t_pref_end, t_dec_start, t_dec_end
+    )
+}
+
+fn sounio_llm_exec_r4_metal(
+    tok: &Qwen3Tokenizer,
+    m: &Qwen3Model,
+    em: &Qwen3EisaModel,
+    conf: &Qwen3ConformalCtx,
+    kv: &!Qwen3PagedKv,
+    rt: &Qwen3MetalRunner,
+    tokens_cap: i64,
+    trace_steps: bool,
+    n_prompt: i64,
+    tok_buf: i64,
+    seq_toks_buf: i64,
+    gen_buf: i64,
+    single_tok_buf: i64,
+    char_buf: i64,
+    clean_pos_buf: i64,
+    top1_chunk_buf: i64,
+    trace_buf: i64,
+    cfg: &SounioLlmRunCfg,
+    out_text_ptr: i64,
+    out_text_cap: i64,
+    out_text_len_ptr: i64,
+    bench_prompt_idx: i64
+) -> SounioLlmGenStats with Alloc, Mut, Div, Panic, IO {
+    var out_stats = sounio_llm_empty_stats()
+    let max_seq_lim = if cfg.max_seq < tokens_cap - 1 { cfg.max_seq } else { tokens_cap - 1 }
+    if n_prompt <= 0 || n_prompt > max_seq_lim { return out_stats }
+
+    var pi: i64 = 0
+    while pi < n_prompt {
+        let _w = ptr_write_i64_le(seq_toks_buf, pi * 8, ptr_read_i64_le(tok_buf, pi * 8))
+        pi = pi + 1
+    }
+
+    let t_pref_start = sounio_llm_now_ns()
+    if cfg.max_tokens <= 0 {
+        let ok0 = sounio_llm_prefill_bf16_metal(m, kv, rt, tok_buf, n_prompt, max_seq_lim, true)
+        let t_pref_end = sounio_llm_now_ns()
+        if !ok0 { return out_stats }
+        let top2_0 = qwen3_model_top2(m)
+        return sounio_llm_finalize_conformal_out(
+            tok, gen_buf, trace_buf, trace_steps, bench_prompt_idx, out_text_ptr, out_text_cap, out_text_len_ptr,
+            n_prompt, 0, -1, top2_0.top1_val - top2_0.second_val, 0.0, 0, 0,
+            t_pref_start, t_pref_end, t_pref_end, t_pref_end
+        )
+    }
+
+    let prefill_ok = if n_prompt > 1 {
+        sounio_llm_prefill_bf16_metal(m, kv, rt, tok_buf, n_prompt - 1, max_seq_lim, false)
+    } else {
+        qwen3_kv_truncate(kv, 0)
+    }
+    let t_pref_end = sounio_llm_now_ns()
+    if !prefill_ok { return out_stats }
+
+    let t_dec_start = sounio_llm_now_ns()
+    let cur_pos_buf = clean_pos_buf + 8
+    let gen_count_buf = clean_pos_buf + 16
+    let last_tid_buf = clean_pos_buf + 24
+    let _wc0 = ptr_write_i64_le(clean_pos_buf, 0, n_prompt - 1)
+    let _wc1 = ptr_write_i64_le(cur_pos_buf, 0, n_prompt - 1)
+    let _wc2 = ptr_write_i64_le(gen_count_buf, 0, 0)
+    let _wc3 = ptr_write_i64_le(last_tid_buf, 0, -1)
+
+    var streamed_count: i64 = 0
+    var last_margin: f64 = 0.0
+    var last_combined_err: f64 = 0.0
+    var escalated_count: i64 = 0
+    let is_q_zero = conf.q_threshold == 0.0
+    let max_streak = sounio_llm_parse_env_nonneg_i64("SOUNIO_SCRUB_MAX_STREAK")
+    var loop_ok = true
+
+    while loop_ok {
+        let clean_pos = ptr_read_i64_le(clean_pos_buf, 0)
+        let cur_pos = ptr_read_i64_le(cur_pos_buf, 0)
+        var gen_count = ptr_read_i64_le(gen_count_buf, 0)
+        let last_gen_tok = if gen_count > 0 { ptr_read_i64_le(gen_buf, (gen_count - 1) * 8) } else { -1 }
+        let ended = (gen_count >= cfg.max_tokens) || (cur_pos + 1 >= max_seq_lim) || (gen_count > 0 && (last_gen_tok == 151643 || last_gen_tok == 151645))
+        if ended {
+            if clean_pos >= cur_pos { break }
+            let win_end = cur_pos - 1
+            if !qwen3_kv_truncate(kv, clean_pos) {
+                loop_ok = false
+                break
+            }
+            escalated_count = escalated_count + 1
+            var chunk_start = clean_pos
+            var rolled = false
+            while chunk_start <= win_end {
+                let rem = win_end - chunk_start + 1
+                let c_len = if rem > 8 { 8 } else { rem }
+                let need_last = (chunk_start + c_len - 1 == win_end)
+                if !qwen3_forward_batch_bf16_metal(m, kv, rt, seq_toks_buf + chunk_start * 8, chunk_start, c_len, true, need_last, top1_chunk_buf) {
+                    loop_ok = false
+                    break
+                }
+                let rc = sounio_llm_r4_scan_chunk(
+                    gen_buf, trace_buf, seq_toks_buf, top1_chunk_buf, chunk_start, c_len, n_prompt,
+                    false, false, 0, 0.0, clean_pos_buf, cur_pos_buf, gen_count_buf, last_tid_buf, kv
+                )
+                if rc < 0 {
+                    loop_ok = false
+                    break
+                }
+                if rc > 0 {
+                    rolled = true
+                    break
+                }
+                chunk_start = chunk_start + c_len
+            }
+            if !loop_ok { break }
+            if !rolled {
+                let top2_fin = qwen3_model_top2(m)
+                last_margin = top2_fin.top1_val - top2_fin.second_val
+                let _wcl = ptr_write_i64_le(clean_pos_buf, 0, cur_pos)
+            }
+            if cfg.stream_stdout && bench_prompt_idx < 0 {
+                let verified_cnt = ptr_read_i64_le(clean_pos_buf, 0) - (n_prompt - 1)
+                if verified_cnt > streamed_count {
+                    sounio_llm_stream_range(tok, gen_buf, streamed_count, verified_cnt, single_tok_buf, char_buf)
+                    streamed_count = verified_cnt
+                }
+            }
+            if !rolled { break }
+        } else {
+            let streak_len = (cur_pos - clean_pos) + 1
+            let hit_streak = (max_streak > 0) && (streak_len >= max_streak)
+            var accept_draft = false
+            var cert = eisa_certify_global(0, 0, 0)
+            if !hit_streak {
+                let cur_tid = ptr_read_i64_le(seq_toks_buf, cur_pos * 8)
+                cert = qwen3_forward_token_q8_try_metal(m, em, conf, kv, rt, cur_tid, cur_pos, true)
+                if cert.cone_size <= 0 {
+                    loop_ok = false
+                    break
+                }
+                accept_draft = cert.strict_global_certified || is_q_zero
+                last_combined_err = cert.top1_err
+                last_margin = cert.global_margin
+            }
+            if accept_draft {
+                let dtok = cert.top1_id
+                let _wg = ptr_write_i64_le(gen_buf, gen_count * 8, dtok)
+                sounio_llm_record_trace_step(trace_buf, gen_count, dtok, dtok, 1, 0, cert.global_margin)
+                let _wgc = ptr_write_i64_le(gen_count_buf, 0, gen_count + 1)
+                let _wlt = ptr_write_i64_le(last_tid_buf, 0, dtok)
+                let _wcu = ptr_write_i64_le(cur_pos_buf, 0, cur_pos + 1)
+                let _ws = ptr_write_i64_le(seq_toks_buf, (cur_pos + 1) * 8, dtok)
+            } else {
+                let win_end = cur_pos
+                if !qwen3_kv_truncate(kv, clean_pos) {
+                loop_ok = false
+                break
+            }
+                escalated_count = escalated_count + 1
+                var chunk_start = clean_pos
+                var resolved = false
+                while chunk_start <= win_end {
+                    let rem = win_end - chunk_start + 1
+                    let c_len = if rem > 8 { 8 } else { rem }
+                    let need_last = (chunk_start + c_len - 1 == win_end)
+                    if !qwen3_forward_batch_bf16_metal(m, kv, rt, seq_toks_buf + chunk_start * 8, chunk_start, c_len, true, need_last, top1_chunk_buf) {
+                        loop_ok = false
+                        break
+                    }
+                    let rc = sounio_llm_r4_scan_chunk(
+                        gen_buf, trace_buf, seq_toks_buf, top1_chunk_buf, chunk_start, c_len, n_prompt,
+                        true, hit_streak, cert.top1_id, last_margin, clean_pos_buf, cur_pos_buf, gen_count_buf, last_tid_buf, kv
+                    )
+                    if rc < 0 {
+                        loop_ok = false
+                        break
+                    }
+                    if rc > 0 {
+                        resolved = true
+                        break
+                    }
+                    chunk_start = chunk_start + c_len
+                }
+                if !loop_ok { break }
+                let top2_fin = qwen3_model_top2(m)
+                last_margin = top2_fin.top1_val - top2_fin.second_val
+                if cfg.stream_stdout && bench_prompt_idx < 0 {
+                    let verified_cnt = ptr_read_i64_le(clean_pos_buf, 0) - (n_prompt - 1)
+                    if verified_cnt > streamed_count {
+                        sounio_llm_stream_range(tok, gen_buf, streamed_count, verified_cnt, single_tok_buf, char_buf)
+                        streamed_count = verified_cnt
+                    }
+                }
+            }
+        }
+    }
+    let t_dec_end = sounio_llm_now_ns()
+    if !loop_ok { return out_stats }
+    let final_gen_count = ptr_read_i64_le(gen_count_buf, 0)
+    let final_last_tid = ptr_read_i64_le(last_tid_buf, 0)
+    let certified_count = sounio_llm_count_trace_cert(trace_buf, final_gen_count)
+    sounio_llm_finalize_conformal_out(
+        tok, gen_buf, trace_buf, trace_steps, bench_prompt_idx, out_text_ptr, out_text_cap, out_text_len_ptr,
+        n_prompt, final_gen_count, final_last_tid, last_margin, last_combined_err, certified_count, escalated_count,
+        t_pref_start, t_pref_end, t_dec_start, t_dec_end
+    )
+}
+
+fn sounio_llm_exec_conformal_cpu(
+    tok: &Qwen3Tokenizer,
+    m: &Qwen3Model,
+    em: &Qwen3EisaModel,
+    conf: &Qwen3ConformalCtx,
+    kv: &!Qwen3PagedKv,
+    scratch: &PageArena,
+    prompt_cap: i64,
+    tokens_cap: i64,
+    trace_steps: bool,
+    sys_ptr: i64,
+    sys_len: i64,
+    user_ptr: i64,
+    user_len: i64,
+    cfg: &SounioLlmRunCfg,
+    out_text_ptr: i64,
+    out_text_cap: i64,
+    out_text_len_ptr: i64,
+    bench_prompt_idx: i64
+) -> SounioLlmGenStats with Alloc, Mut, Div, Panic, IO {
+    var out_stats = sounio_llm_empty_stats()
+    if !page_arena_is_ok(scratch) || !qwen3_eisa_model_is_ok(em) || !qwen3_conformal_ctx_is_ok(conf) || cfg.max_seq <= 0 {
+        return out_stats
+    }
+
+    let s_ptr = page_arena_ptr(scratch)
+    let p_buf = s_ptr
+    let tok_buf = s_ptr + prompt_cap
+    let seq_toks_buf = tok_buf + tokens_cap * 8
+    let gen_buf = seq_toks_buf + tokens_cap * 8
+    let rng_buf = gen_buf + tokens_cap * 8
+    let single_tok_buf = rng_buf + 16
+    let char_buf = single_tok_buf + 16
+    let esc_buf = char_buf + 64
+    let clean_pos_buf = esc_buf + 32
+    let top1_chunk_buf = clean_pos_buf + 32
+    let trace_buf = top1_chunk_buf + 64
+
+    let _w_rng = ptr_write_i64_le(rng_buf, 0, cfg.seed)
+    let _w_esc = ptr_write_i64_le(esc_buf, 0, 0)
+
+    let p_len = prepare_prompt_bytes(
+        cfg.raw_prompt,
+        cfg.enable_thinking,
+        sys_ptr,
+        sys_len,
+        user_ptr,
+        user_len,
+        p_buf,
+        prompt_cap
+    )
+    if p_len < 0 { return out_stats }
+    let n_prompt = qwen3_encode_bytes(tok, p_buf, p_len, tok_buf, tokens_cap)
+    if n_prompt <= 0 || n_prompt > cfg.max_seq || n_prompt > tokens_cap { return out_stats }
+
+    if cfg.quant_mode == 15 || cfg.quant_mode == 20 || cfg.quant_mode == 21 {
+        return sounio_llm_exec_r4_cpu(
+            tok, m, em, conf, kv, tokens_cap, trace_steps,
+            n_prompt, tok_buf, seq_toks_buf, gen_buf, single_tok_buf, char_buf, clean_pos_buf, top1_chunk_buf, trace_buf,
+            cfg, out_text_ptr, out_text_cap, out_text_len_ptr, bench_prompt_idx
+        )
+    }
+
+    var pi: i64 = 0
+    while pi < n_prompt {
+        let _ws = ptr_write_i64_le(seq_toks_buf, pi * 8, ptr_read_i64_le(tok_buf, pi * 8))
+        pi = pi + 1
+    }
+
+    let max_streak = sounio_llm_parse_env_nonneg_i64("SOUNIO_SCRUB_MAX_STREAK")
+    let t_pref_start = sounio_llm_now_ns()
+    var pos: i64 = 0
+    var prefill_ok = true
+    var certified_count: i64 = 0
+    var escalated_count: i64 = 0
+    var last_esc: i64 = 0
+    var last_combined_err: f64 = 0.0
+    var last_cert = eisa_certify_global(0, 0, 0)
+
+    if n_prompt > 1 {
+        prefill_ok = sounio_llm_prefill_bf16_cpu(m, kv, tok_buf, n_prompt - 1, cfg.max_seq, false)
+        pos = n_prompt - 1
+    } else {
+        prefill_ok = qwen3_kv_truncate(kv, 0)
+    }
+    let _wcp = ptr_write_i64_le(clean_pos_buf, 0, pos)
+
+    if prefill_ok {
+        let tid_last = ptr_read_i64_le(tok_buf, pos * 8)
+        let cert = sounio_llm_step_conformal_r123_cpu(m, em, conf, kv, cfg.quant_mode, tid_last, pos, seq_toks_buf, clean_pos_buf, max_streak, esc_buf)
+        if cert.cone_size <= 0 {
+            prefill_ok = false
+        } else {
+            let eflag = ptr_read_i64_le(esc_buf, 0)
+            last_esc = eflag
+            if cert.strict_global_certified { certified_count = certified_count + 1 }
+            if eflag == 1 { escalated_count = escalated_count + 1 }
+            last_combined_err = cert.top1_err
+            last_cert = cert
+            pos = pos + 1
+        }
+    }
+    let t_pref_end = sounio_llm_now_ns()
+    if !prefill_ok { return out_stats }
+
+    let t_dec_start = sounio_llm_now_ns()
+    var gen_count: i64 = 0
+    var last_tid: i64 = -1
+    var last_margin: f64 = 0.0
+    var decode_ok = true
+
+    while gen_count < cfg.max_tokens && pos < cfg.max_seq {
+        last_margin = last_cert.global_margin
+        let next_tok = if cfg.temp <= 0.0 || cfg.top_p <= 0.0 {
+            last_cert.refined_top1_id
+        } else {
+            sounio_llm_sample_top_p(m, cfg.temp, cfg.top_p, rng_buf)
+        }
+
+        let _w_tok = ptr_write_i64_le(gen_buf, gen_count * 8, next_tok)
+        if trace_steps {
+            let cflag: i64 = if last_cert.strict_global_certified { 1 } else { 0 }
+            sounio_llm_record_trace_step(trace_buf, gen_count, next_tok, last_cert.top1_id, cflag, last_esc, last_margin)
+        }
+        gen_count = gen_count + 1
+        last_tid = next_tok
+
+        if cfg.stream_stdout && bench_prompt_idx < 0 {
+            let _w_st = ptr_write_i64_le(single_tok_buf, 0, next_tok)
+            let slen = qwen3_decode_bytes(tok, single_tok_buf, 1, char_buf, 64)
+            var ci: i64 = 0
+            while ci < slen {
+                print_char(ptr_read_u8(char_buf, ci) as i32)
+                ci = ci + 1
+            }
+        }
+
+        if next_tok == 151643 || next_tok == 151645 { break }
+        if gen_count >= cfg.max_tokens || pos + 1 >= cfg.max_seq { break }
+
+        let _ws = ptr_write_i64_le(seq_toks_buf, pos * 8, next_tok)
+        let cert_step = sounio_llm_step_conformal_r123_cpu(m, em, conf, kv, cfg.quant_mode, next_tok, pos, seq_toks_buf, clean_pos_buf, max_streak, esc_buf)
+        if cert_step.cone_size <= 0 {
+            decode_ok = false
+            break
+        }
+        let eflag_step = ptr_read_i64_le(esc_buf, 0)
+        last_esc = eflag_step
+        if cert_step.strict_global_certified { certified_count = certified_count + 1 }
+        if eflag_step == 1 { escalated_count = escalated_count + 1 }
+        last_combined_err = cert_step.top1_err
+        last_cert = cert_step
+        pos = pos + 1
+    }
+    let t_dec_end = sounio_llm_now_ns()
+    if !decode_ok { return out_stats }
+
+    sounio_llm_finalize_conformal_out(
+        tok, gen_buf, trace_buf, trace_steps, bench_prompt_idx, out_text_ptr, out_text_cap, out_text_len_ptr,
+        n_prompt, gen_count, last_tid, last_margin, last_combined_err, certified_count, escalated_count,
+        t_pref_start, t_pref_end, t_dec_start, t_dec_end
+    )
+}
+
+fn sounio_llm_exec_conformal_metal(
+    tok: &Qwen3Tokenizer,
+    m: &Qwen3Model,
+    em: &Qwen3EisaModel,
+    conf: &Qwen3ConformalCtx,
+    kv: &!Qwen3PagedKv,
+    rt: &Qwen3MetalRunner,
+    scratch: &PageArena,
+    prompt_cap: i64,
+    tokens_cap: i64,
+    trace_steps: bool,
+    sys_ptr: i64,
+    sys_len: i64,
+    user_ptr: i64,
+    user_len: i64,
+    cfg: &SounioLlmRunCfg,
+    out_text_ptr: i64,
+    out_text_cap: i64,
+    out_text_len_ptr: i64,
+    bench_prompt_idx: i64
+) -> SounioLlmGenStats with Alloc, Mut, Div, Panic, IO {
+    var out_stats = sounio_llm_empty_stats()
+    if !page_arena_is_ok(scratch) || !qwen3_metal_runner_is_ok(rt) || !qwen3_eisa_model_is_ok(em) || !qwen3_conformal_ctx_is_ok(conf) || cfg.max_seq <= 0 {
+        return out_stats
+    }
+
+    let s_ptr = page_arena_ptr(scratch)
+    let p_buf = s_ptr
+    let tok_buf = s_ptr + prompt_cap
+    let seq_toks_buf = tok_buf + tokens_cap * 8
+    let gen_buf = seq_toks_buf + tokens_cap * 8
+    let rng_buf = gen_buf + tokens_cap * 8
+    let single_tok_buf = rng_buf + 16
+    let char_buf = single_tok_buf + 16
+    let esc_buf = char_buf + 64
+    let clean_pos_buf = esc_buf + 32
+    let top1_chunk_buf = clean_pos_buf + 32
+    let trace_buf = top1_chunk_buf + 64
+
+    let _w_rng = ptr_write_i64_le(rng_buf, 0, cfg.seed)
+    let _w_esc = ptr_write_i64_le(esc_buf, 0, 0)
+
+    let p_len = prepare_prompt_bytes(
+        cfg.raw_prompt,
+        cfg.enable_thinking,
+        sys_ptr,
+        sys_len,
+        user_ptr,
+        user_len,
+        p_buf,
+        prompt_cap
+    )
+    if p_len < 0 { return out_stats }
+    let n_prompt = qwen3_encode_bytes(tok, p_buf, p_len, tok_buf, tokens_cap)
+    if n_prompt <= 0 || n_prompt > cfg.max_seq || n_prompt > tokens_cap { return out_stats }
+
+    if cfg.quant_mode == 15 || cfg.quant_mode == 20 || cfg.quant_mode == 21 {
+        return sounio_llm_exec_r4_metal(
+            tok, m, em, conf, kv, rt, tokens_cap, trace_steps,
+            n_prompt, tok_buf, seq_toks_buf, gen_buf, single_tok_buf, char_buf, clean_pos_buf, top1_chunk_buf, trace_buf,
+            cfg, out_text_ptr, out_text_cap, out_text_len_ptr, bench_prompt_idx
+        )
+    }
+
+    var pi: i64 = 0
+    while pi < n_prompt {
+        let _ws = ptr_write_i64_le(seq_toks_buf, pi * 8, ptr_read_i64_le(tok_buf, pi * 8))
+        pi = pi + 1
+    }
+
+    let max_streak = sounio_llm_parse_env_nonneg_i64("SOUNIO_SCRUB_MAX_STREAK")
+    let t_pref_start = sounio_llm_now_ns()
+    var pos: i64 = 0
+    var prefill_ok = true
+    var certified_count: i64 = 0
+    var escalated_count: i64 = 0
+    var last_esc: i64 = 0
+    var last_combined_err: f64 = 0.0
+    var last_cert = eisa_certify_global(0, 0, 0)
+
+    if n_prompt > 1 {
+        prefill_ok = sounio_llm_prefill_bf16_metal(m, kv, rt, tok_buf, n_prompt - 1, cfg.max_seq, false)
+        pos = n_prompt - 1
+    } else {
+        prefill_ok = qwen3_kv_truncate(kv, 0)
+    }
+    let _wcp = ptr_write_i64_le(clean_pos_buf, 0, pos)
+
+    if prefill_ok {
+        let tid_last = ptr_read_i64_le(tok_buf, pos * 8)
+        let cert = sounio_llm_step_conformal_r123_metal(m, em, conf, kv, rt, cfg.quant_mode, tid_last, pos, seq_toks_buf, clean_pos_buf, max_streak, esc_buf)
+        if cert.cone_size <= 0 {
+            prefill_ok = false
+        } else {
+            let eflag = ptr_read_i64_le(esc_buf, 0)
+            last_esc = eflag
+            if cert.strict_global_certified { certified_count = certified_count + 1 }
+            if eflag == 1 { escalated_count = escalated_count + 1 }
+            last_combined_err = cert.top1_err
+            last_cert = cert
+            pos = pos + 1
+        }
+    }
+    let t_pref_end = sounio_llm_now_ns()
+    if !prefill_ok { return out_stats }
+
+    let t_dec_start = sounio_llm_now_ns()
+    var gen_count: i64 = 0
+    var last_tid: i64 = -1
+    var last_margin: f64 = 0.0
+    var decode_ok = true
+
+    while gen_count < cfg.max_tokens && pos < cfg.max_seq {
+        last_margin = last_cert.global_margin
+        let next_tok = if cfg.temp <= 0.0 || cfg.top_p <= 0.0 {
+            last_cert.refined_top1_id
+        } else {
+            sounio_llm_sample_top_p(m, cfg.temp, cfg.top_p, rng_buf)
+        }
+
+        let _w_tok = ptr_write_i64_le(gen_buf, gen_count * 8, next_tok)
+        if trace_steps {
+            let cflag: i64 = if last_cert.strict_global_certified { 1 } else { 0 }
+            sounio_llm_record_trace_step(trace_buf, gen_count, next_tok, last_cert.top1_id, cflag, last_esc, last_margin)
+        }
+        gen_count = gen_count + 1
+        last_tid = next_tok
+
+        if cfg.stream_stdout && bench_prompt_idx < 0 {
+            let _w_st = ptr_write_i64_le(single_tok_buf, 0, next_tok)
+            let slen = qwen3_decode_bytes(tok, single_tok_buf, 1, char_buf, 64)
+            var ci: i64 = 0
+            while ci < slen {
+                print_char(ptr_read_u8(char_buf, ci) as i32)
+                ci = ci + 1
+            }
+        }
+
+        if next_tok == 151643 || next_tok == 151645 { break }
+        if gen_count >= cfg.max_tokens || pos + 1 >= cfg.max_seq { break }
+
+        let _ws = ptr_write_i64_le(seq_toks_buf, pos * 8, next_tok)
+        let cert_step = sounio_llm_step_conformal_r123_metal(m, em, conf, kv, rt, cfg.quant_mode, next_tok, pos, seq_toks_buf, clean_pos_buf, max_streak, esc_buf)
+        if cert_step.cone_size <= 0 {
+            decode_ok = false
+            break
+        }
+        let eflag_step = ptr_read_i64_le(esc_buf, 0)
+        last_esc = eflag_step
+        if cert_step.strict_global_certified { certified_count = certified_count + 1 }
+        if eflag_step == 1 { escalated_count = escalated_count + 1 }
+        last_combined_err = cert_step.top1_err
+        last_cert = cert_step
+        pos = pos + 1
+    }
+    let t_dec_end = sounio_llm_now_ns()
+    if !decode_ok { return out_stats }
+
+    sounio_llm_finalize_conformal_out(
+        tok, gen_buf, trace_buf, trace_steps, bench_prompt_idx, out_text_ptr, out_text_cap, out_text_len_ptr,
+        n_prompt, gen_count, last_tid, last_margin, last_combined_err, certified_count, escalated_count,
+        t_pref_start, t_pref_end, t_dec_start, t_dec_end
+    )
+}
+
+fn sounio_llm_run_chat_conformal_cpu_q(
+    tok: &Qwen3Tokenizer,
+    m: &Qwen3Model,
+    kv: &!Qwen3PagedKv,
+    sys_ptr: i64,
+    sys_len: i64,
+    user_ptr: i64,
+    user_len: i64,
+    cfg: &SounioLlmRunCfg,
+    q_override: f64,
+    out_text_ptr: i64,
+    out_text_cap: i64,
+    out_text_len_ptr: i64,
+    t_start: i64
+) -> SounioLlmGenStats with Alloc, Mut, Div, Panic, IO {
+    let is_mlp_only = (cfg.quant_mode == 11 || cfg.quant_mode == 12)
+    let bits: i64 = if cfg.quant_mode >= 16 { 4 } else { 8 }
+    let em = if is_mlp_only {
+        qwen3_eisa_model_quantize_mlp_head_cpu_bits(m, bits)
+    } else {
+        qwen3_eisa_model_quantize_cpu_bits(m, bits)
+    }
+    var conf = qwen3_conformal_ctx_init_cpu(m, cfg.quant_mode)
+    sounio_llm_apply_conformal_q_override(&!conf, q_override)
+
+    let prompt_cap: i64 = 65536
+    let tokens_cap: i64 = 8192
+    let trace_steps = sounio_llm_trace_steps_enabled()
+    let scratch_bytes = prompt_cap + tokens_cap * 8 * 3 + tokens_cap * 32 + 256
+    let scratch = page_arena_alloc(scratch_bytes)
+    let out_stats = sounio_llm_exec_conformal_cpu(
+        tok, m, &em, &conf, kv, &scratch, prompt_cap, tokens_cap, trace_steps,
+        sys_ptr, sys_len, user_ptr, user_len, cfg, out_text_ptr, out_text_cap, out_text_len_ptr, -1
+    )
+    let _f = page_arena_free(scratch)
+    let _cf = qwen3_conformal_ctx_free_cpu(conf)
+    let _ef = qwen3_eisa_model_free_cpu(em)
+    out_stats
+}
+
+fn sounio_llm_run_chat_conformal_metal_q(
+    tok: &Qwen3Tokenizer,
+    m: &Qwen3Model,
+    kv: &!Qwen3PagedKv,
+    sys_ptr: i64,
+    sys_len: i64,
+    user_ptr: i64,
+    user_len: i64,
+    cfg: &SounioLlmRunCfg,
+    q_override: f64,
+    out_text_ptr: i64,
+    out_text_cap: i64,
+    out_text_len_ptr: i64,
+    t_start: i64
+) -> SounioLlmGenStats with Alloc, Mut, Div, Panic, IO {
+    let rt = qwen3_metal_runner_init(m, kv, "")
+    let is_mlp_only = (cfg.quant_mode == 11 || cfg.quant_mode == 12)
+    let bits: i64 = if cfg.quant_mode >= 16 { 4 } else { 8 }
+    let em = if is_mlp_only {
+        qwen3_eisa_model_quantize_mlp_head_bits(m, &rt, bits)
+    } else {
+        qwen3_eisa_model_quantize_bits(m, &rt, bits)
+    }
+    var conf = qwen3_conformal_ctx_init(m, &rt, cfg.quant_mode)
+    sounio_llm_apply_conformal_q_override(&!conf, q_override)
+
+    let prompt_cap: i64 = 65536
+    let tokens_cap: i64 = 8192
+    let trace_steps = sounio_llm_trace_steps_enabled()
+    let scratch_bytes = prompt_cap + tokens_cap * 8 * 3 + tokens_cap * 32 + 256
+    let scratch = page_arena_alloc(scratch_bytes)
+    let out_stats = sounio_llm_exec_conformal_metal(
+        tok, m, &em, &conf, kv, &rt, &scratch, prompt_cap, tokens_cap, trace_steps,
+        sys_ptr, sys_len, user_ptr, user_len, cfg, out_text_ptr, out_text_cap, out_text_len_ptr, -1
+    )
+    let _f = page_arena_free(scratch)
+    let _cf = qwen3_conformal_ctx_free(conf, &rt)
+    let _ef = qwen3_eisa_model_free(em, &rt)
+    let _rf = qwen3_metal_runner_free(rt)
+    out_stats
+}
+
+pub fn sounio_llm_run_chat_generation_sidecar_q(
+    tok: &Qwen3Tokenizer,
+    m: &Qwen3Model,
+    kv: &!Qwen3PagedKv,
+    ossm: &!Qwen3OssmState,
+    sidecar: &!Qwen3OssmSidecar,
+    sys_ptr: i64,
+    sys_len: i64,
+    user_ptr: i64,
+    user_len: i64,
+    cfg: &SounioLlmRunCfg,
+    q_override: f64,
+    out_text_ptr: i64,
+    out_text_cap: i64,
+    out_text_len_ptr: i64
+) -> SounioLlmGenStats with Alloc, Mut, Div, Panic, IO {
+    if !tok.ok || !qwen3_model_is_ok(m) || !cfg.ok {
+        return sounio_llm_empty_stats()
+    }
+
+    let t_start = sounio_llm_now_ns()
+
+    if cfg.quant_mode >= 7 && cfg.quant_mode <= 21 {
+        if cfg.use_metal {
+            sounio_llm_run_chat_conformal_metal_q(tok, m, kv, sys_ptr, sys_len, user_ptr, user_len, cfg, q_override, out_text_ptr, out_text_cap, out_text_len_ptr, t_start)
+        } else {
+            sounio_llm_run_chat_conformal_cpu_q(tok, m, kv, sys_ptr, sys_len, user_ptr, user_len, cfg, q_override, out_text_ptr, out_text_cap, out_text_len_ptr, t_start)
+        }
+    } else if cfg.quant_mode == 5 || cfg.quant_mode == 6 {
+        if cfg.use_metal {
+            sounio_llm_run_chat_cone_metal(tok, m, kv, sys_ptr, sys_len, user_ptr, user_len, cfg, out_text_ptr, out_text_cap, out_text_len_ptr, t_start)
+        } else {
+            sounio_llm_run_chat_cone_cpu(tok, m, kv, sys_ptr, sys_len, user_ptr, user_len, cfg, out_text_ptr, out_text_cap, out_text_len_ptr, t_start)
+        }
+    } else if cfg.quant_mode >= 1 && cfg.quant_mode <= 4 {
+        if cfg.use_metal {
+            sounio_llm_run_chat_eisa_metal(tok, m, kv, sys_ptr, sys_len, user_ptr, user_len, cfg, out_text_ptr, out_text_cap, out_text_len_ptr, t_start)
+        } else {
+            sounio_llm_run_chat_eisa_cpu(tok, m, kv, sys_ptr, sys_len, user_ptr, user_len, cfg, out_text_ptr, out_text_cap, out_text_len_ptr, t_start)
+        }
+    } else {
+        if cfg.use_metal {
+            sounio_llm_run_chat_bf16_metal(tok, m, kv, ossm, sidecar, sys_ptr, sys_len, user_ptr, user_len, cfg, out_text_ptr, out_text_cap, out_text_len_ptr, t_start)
+        } else {
+            sounio_llm_run_chat_bf16_cpu(tok, m, kv, ossm, sidecar, sys_ptr, sys_len, user_ptr, user_len, cfg, out_text_ptr, out_text_cap, out_text_len_ptr, t_start)
+        }
+    }
+}
+
+pub fn sounio_llm_run_chat_generation_sidecar(
+    tok: &Qwen3Tokenizer,
+    m: &Qwen3Model,
+    kv: &!Qwen3PagedKv,
+    ossm: &!Qwen3OssmState,
+    sidecar: &!Qwen3OssmSidecar,
+    sys_ptr: i64,
+    sys_len: i64,
+    user_ptr: i64,
+    user_len: i64,
+    cfg: &SounioLlmRunCfg,
+    out_text_ptr: i64,
+    out_text_cap: i64,
+    out_text_len_ptr: i64
+) -> SounioLlmGenStats with Alloc, Mut, Div, Panic, IO {
+    sounio_llm_run_chat_generation_sidecar_q(
+        tok, m, kv, ossm, sidecar, sys_ptr, sys_len, user_ptr, user_len,
+        cfg, -1.0, out_text_ptr, out_text_cap, out_text_len_ptr
+    )
+}
+
+pub fn sounio_llm_run_chat_generation_q(
+    tok: &Qwen3Tokenizer,
+    m: &Qwen3Model,
+    kv: &!Qwen3PagedKv,
+    ossm: &!Qwen3OssmState,
+    sys_ptr: i64,
+    sys_len: i64,
+    user_ptr: i64,
+    user_len: i64,
+    cfg: &SounioLlmRunCfg,
+    q_override: f64,
+    out_text_ptr: i64,
+    out_text_cap: i64,
+    out_text_len_ptr: i64
+) -> SounioLlmGenStats with Alloc, Mut, Div, Panic, IO {
+    if cfg.ossm_weights_ptr != 0 && cfg.ossm_weights_len > 0 {
+        var sidecar = qwen3_ossm_sidecar_open(
+            (cfg.ossm_weights_ptr as *mut u8) as string,
+            m.cfg.layers,
+            m.cfg.hidden
+        )
+        let stats = sounio_llm_run_chat_generation_sidecar_q(
+            tok, m, kv, ossm, &!sidecar,
+            sys_ptr, sys_len, user_ptr, user_len,
+            cfg, q_override, out_text_ptr, out_text_cap, out_text_len_ptr
+        )
+        let _scf = qwen3_ossm_sidecar_free(sidecar)
+        stats
+    } else {
+        var dummy = qwen3_ossm_sidecar_open("", 0, 0)
+        let stats = sounio_llm_run_chat_generation_sidecar_q(
+            tok, m, kv, ossm, &!dummy,
+            sys_ptr, sys_len, user_ptr, user_len,
+            cfg, q_override, out_text_ptr, out_text_cap, out_text_len_ptr
+        )
+        let _scf = qwen3_ossm_sidecar_free(dummy)
+        stats
+    }
+}
+
+pub fn sounio_llm_run_chat_generation(
+    tok: &Qwen3Tokenizer,
+    m: &Qwen3Model,
+    kv: &!Qwen3PagedKv,
+    ossm: &!Qwen3OssmState,
+    sys_ptr: i64,
+    sys_len: i64,
+    user_ptr: i64,
+    user_len: i64,
+    cfg: &SounioLlmRunCfg,
+    out_text_ptr: i64,
+    out_text_cap: i64,
+    out_text_len_ptr: i64
+) -> SounioLlmGenStats with Alloc, Mut, Div, Panic, IO {
+    sounio_llm_run_chat_generation_q(
+        tok, m, kv, ossm, sys_ptr, sys_len, user_ptr, user_len,
+        cfg, -1.0, out_text_ptr, out_text_cap, out_text_len_ptr
+    )
+}
+
+fn sounio_llm_bench_step_from_shard(
+    shard: &MappedShard,
+    slen: i64,
+    bi_ptr: i64,
+    line_ptr: i64,
+    prompt_cap: i64
+) -> i64 with Mut {
+    var bi = ptr_read_i64_le(bi_ptr, 0)
+    var line_len: i64 = 0
+    while bi <= slen {
+        var is_eol = (bi == slen)
+        var ch: i64 = 0
+        if bi < slen {
+            let rr = mapped_shard_read_u8(shard, bi)
+            if !rr.1 { return -1 }
+            ch = rr.0
+            if ch == 10 { is_eol = true }
+        }
+        bi = bi + 1
+        if is_eol {
+            while line_len > 0 && ptr_read_u8(line_ptr, line_len - 1) == 13 {
+                line_len = line_len - 1
+            }
+            if line_len > 0 {
+                let _wn = ptr_write_u8(line_ptr, line_len, 0)
+                let _wb = ptr_write_i64_le(bi_ptr, 0, bi)
+                return line_len
+            }
+            line_len = 0
+        } else if line_len + 1 < prompt_cap {
+            let _wc = ptr_write_u8(line_ptr, line_len, ch as u8)
+            line_len = line_len + 1
+        }
+    }
+    let _wb = ptr_write_i64_le(bi_ptr, 0, bi)
+    0
+}
+
+pub fn sounio_llm_run_bench_prompts(
+    tok: &Qwen3Tokenizer,
+    m: &Qwen3Model,
+    kv: &!Qwen3PagedKv,
+    ossm: &!Qwen3OssmState,
+    sys_ptr: i64,
+    sys_len: i64,
+    prompts_path: string,
+    cfg: &SounioLlmRunCfg,
+    q_override: f64
+) -> i32 with Alloc, Mut, Div, Panic, IO {
+    if !tok.ok || !qwen3_model_is_ok(m) || !cfg.ok {
+        println("sounio-llm: error: bench-prompts invalid model, tokenizer or cfg")
+        return 1
+    }
+    if cfg.quant_mode >= 1 && cfg.quant_mode <= 4 {
+        println("sounio-llm: error: --bench-prompts supports bf16, cone, and conformal/scrub modes only")
+        return 1
+    }
+
+    let prompt_cap: i64 = 65536
+    let tokens_cap: i64 = 8192
+    let trace_steps = sounio_llm_trace_steps_enabled()
+    let scratch_bytes = prompt_cap + tokens_cap * 8 * 3 + tokens_cap * 32 + 256
+
+    let shard = mapped_shard_open(prompts_path)
+    let shard_ok = mapped_shard_is_ok(&shard)
+    let slen = mapped_shard_len(&shard)
+    let scratch = page_arena_alloc(scratch_bytes)
+    let line_arena = page_arena_alloc(prompt_cap + 16)
+
+    var prompt_count: i64 = 0
+    var bench_ok = shard_ok && slen > 0 && page_arena_is_ok(&scratch) && page_arena_is_ok(&line_arena)
+
+    if bench_ok {
+        let line_ptr = page_arena_ptr(&line_arena)
+        let bi_ptr = line_ptr + prompt_cap
+        let _wbi0 = ptr_write_i64_le(bi_ptr, 0, 0)
+
+        if cfg.quant_mode >= 7 && cfg.quant_mode <= 21 {
+            let is_mlp_only = (cfg.quant_mode == 11 || cfg.quant_mode == 12)
+            let bits: i64 = if cfg.quant_mode >= 16 { 4 } else { 8 }
+            if cfg.use_metal {
+                let rt = qwen3_metal_runner_init(m, kv, "")
+                let em = if is_mlp_only { qwen3_eisa_model_quantize_mlp_head_bits(m, &rt, bits) } else { qwen3_eisa_model_quantize_bits(m, &rt, bits) }
+                var conf = qwen3_conformal_ctx_init(m, &rt, cfg.quant_mode)
+                sounio_llm_apply_conformal_q_override(&!conf, q_override)
+                bench_ok = qwen3_metal_runner_is_ok(&rt) && qwen3_eisa_model_is_ok(&em) && qwen3_conformal_ctx_is_ok(&conf)
+                while bench_ok {
+                    let ll = sounio_llm_bench_step_from_shard(&shard, slen, bi_ptr, line_ptr, prompt_cap)
+                    if ll < 0 {
+                        bench_ok = false
+                        break
+                    }
+                    if ll == 0 { break }
+                    let _tr0 = qwen3_kv_truncate(kv, 0)
+                    let stats = sounio_llm_exec_conformal_metal(
+                        tok, m, &em, &conf, kv, &rt, &scratch, prompt_cap, tokens_cap, trace_steps,
+                        sys_ptr, sys_len, line_ptr, ll, cfg, 0, 0, 0, prompt_count
+                    )
+                    if !stats.ok || (cfg.max_tokens > 0 && stats.generated_tokens <= 0) {
+                        bench_ok = false
+                        break
+                    }
+                    prompt_count = prompt_count + 1
+                }
+                let _cf = qwen3_conformal_ctx_free(conf, &rt)
+                let _ef = qwen3_eisa_model_free(em, &rt)
+                let _rf = qwen3_metal_runner_free(rt)
+            } else {
+                let em = if is_mlp_only { qwen3_eisa_model_quantize_mlp_head_cpu_bits(m, bits) } else { qwen3_eisa_model_quantize_cpu_bits(m, bits) }
+                var conf = qwen3_conformal_ctx_init_cpu(m, cfg.quant_mode)
+                sounio_llm_apply_conformal_q_override(&!conf, q_override)
+                bench_ok = qwen3_eisa_model_is_ok(&em) && qwen3_conformal_ctx_is_ok(&conf)
+                while bench_ok {
+                    let ll = sounio_llm_bench_step_from_shard(&shard, slen, bi_ptr, line_ptr, prompt_cap)
+                    if ll < 0 {
+                        bench_ok = false
+                        break
+                    }
+                    if ll == 0 { break }
+                    let _tr0 = qwen3_kv_truncate(kv, 0)
+                    let stats = sounio_llm_exec_conformal_cpu(
+                        tok, m, &em, &conf, kv, &scratch, prompt_cap, tokens_cap, trace_steps,
+                        sys_ptr, sys_len, line_ptr, ll, cfg, 0, 0, 0, prompt_count
+                    )
+                    if !stats.ok || (cfg.max_tokens > 0 && stats.generated_tokens <= 0) {
+                        bench_ok = false
+                        break
+                    }
+                    prompt_count = prompt_count + 1
+                }
+                let _cf = qwen3_conformal_ctx_free_cpu(conf)
+                let _ef = qwen3_eisa_model_free_cpu(em)
+            }
+        } else if cfg.quant_mode == 5 || cfg.quant_mode == 6 {
+            let bits: i64 = if cfg.quant_mode == 6 { 8 } else { 4 }
+            if cfg.use_metal {
+                let rt = qwen3_metal_runner_init(m, kv, "")
+                let em = qwen3_eisa_model_quantize_lm_head_bits(m, &rt, bits)
+                bench_ok = qwen3_metal_runner_is_ok(&rt) && qwen3_eisa_model_is_ok(&em)
+                while bench_ok {
+                    let ll = sounio_llm_bench_step_from_shard(&shard, slen, bi_ptr, line_ptr, prompt_cap)
+                    if ll < 0 {
+                        bench_ok = false
+                        break
+                    }
+                    if ll == 0 { break }
+                    let _tr0 = qwen3_kv_truncate(kv, 0)
+                    let stats = sounio_llm_exec_cone_metal(
+                        tok, m, &em, kv, &rt, &scratch, prompt_cap, tokens_cap, trace_steps,
+                        sys_ptr, sys_len, line_ptr, ll, cfg, 0, 0, 0, prompt_count
+                    )
+                    if !stats.ok || (cfg.max_tokens > 0 && stats.generated_tokens <= 0) {
+                        bench_ok = false
+                        break
+                    }
+                    prompt_count = prompt_count + 1
+                }
+                let _ef = qwen3_eisa_model_free(em, &rt)
+                let _rf = qwen3_metal_runner_free(rt)
+            } else {
+                let em = qwen3_eisa_model_quantize_lm_head_cpu_bits(m, bits)
+                bench_ok = qwen3_eisa_model_is_ok(&em)
+                while bench_ok {
+                    let ll = sounio_llm_bench_step_from_shard(&shard, slen, bi_ptr, line_ptr, prompt_cap)
+                    if ll < 0 {
+                        bench_ok = false
+                        break
+                    }
+                    if ll == 0 { break }
+                    let _tr0 = qwen3_kv_truncate(kv, 0)
+                    let stats = sounio_llm_exec_cone_cpu(
+                        tok, m, &em, kv, &scratch, prompt_cap, tokens_cap, trace_steps,
+                        sys_ptr, sys_len, line_ptr, ll, cfg, 0, 0, 0, prompt_count
+                    )
+                    if !stats.ok || (cfg.max_tokens > 0 && stats.generated_tokens <= 0) {
+                        bench_ok = false
+                        break
+                    }
+                    prompt_count = prompt_count + 1
+                }
+                let _ef = qwen3_eisa_model_free_cpu(em)
+            }
+        } else {
+            var sidecar = if cfg.ossm_weights_ptr != 0 && cfg.ossm_weights_len > 0 {
+                qwen3_ossm_sidecar_open((cfg.ossm_weights_ptr as *mut u8) as string, m.cfg.layers, m.cfg.hidden)
+            } else {
+                qwen3_ossm_sidecar_open("", 0, 0)
+            }
+            if cfg.use_metal {
+                let rt = qwen3_metal_runner_init(m, kv, "")
+                let opipes = if qwen3_metal_runner_is_ok(&rt) && cfg.ossm_every > 0 {
+                    ossm_metal_pipelines_compile_runner(&rt)
+                } else {
+                    ossm_metal_pipelines_empty()
+                }
+                bench_ok = qwen3_metal_runner_is_ok(&rt)
+                while bench_ok {
+                    let ll = sounio_llm_bench_step_from_shard(&shard, slen, bi_ptr, line_ptr, prompt_cap)
+                    if ll < 0 {
+                        bench_ok = false
+                        break
+                    }
+                    if ll == 0 { break }
+                    let _tr0 = qwen3_kv_truncate(kv, 0)
+                    let stats = sounio_llm_exec_bf16_metal(
+                        tok, m, kv, ossm, &!sidecar, &rt, &rt, cfg.ossm_every > 0, opipes.pipe_step,
+                        &scratch, prompt_cap, tokens_cap, trace_steps,
+                        sys_ptr, sys_len, line_ptr, ll, cfg, 0, 0, 0, prompt_count
+                    )
+                    if !stats.ok || (cfg.max_tokens > 0 && stats.generated_tokens <= 0) {
+                        bench_ok = false
+                        break
+                    }
+                    prompt_count = prompt_count + 1
+                }
+                let _rf = qwen3_metal_runner_free(rt)
+            } else {
+                while bench_ok {
+                    let ll = sounio_llm_bench_step_from_shard(&shard, slen, bi_ptr, line_ptr, prompt_cap)
+                    if ll < 0 {
+                        bench_ok = false
+                        break
+                    }
+                    if ll == 0 { break }
+                    let _tr0 = qwen3_kv_truncate(kv, 0)
+                    let stats = sounio_llm_exec_bf16_cpu(
+                        tok, m, kv, ossm, &sidecar, &scratch, prompt_cap, tokens_cap, trace_steps,
+                        sys_ptr, sys_len, line_ptr, ll, cfg, 0, 0, 0, prompt_count
+                    )
+                    if !stats.ok || (cfg.max_tokens > 0 && stats.generated_tokens <= 0) {
+                        bench_ok = false
+                        break
+                    }
+                    prompt_count = prompt_count + 1
+                }
+            }
+            let _scf = qwen3_ossm_sidecar_free(sidecar)
+        }
+    }
+
+    let _fl = page_arena_free(line_arena)
+    let _fs = page_arena_free(scratch)
+    let _cs = mapped_shard_close(shard)
+
+    if !bench_ok || prompt_count <= 0 {
+        println("sounio-llm: error: --bench-prompts failed, missing/empty file, or produced 0 prompts")
+        return 1
+    }
+    0
+}
+
+fn sounio_llm_apply_cuda_q_override(
+    cc: &!Qwen3CudaConformal,
+    rt: &Qwen3CudaRunner,
+    q_override: f64
+) with Alloc, Mut, Div {
+    if !qwen3_cuda_conformal_is_ok(cc) || !qwen3_cuda_runner_is_ok(rt) { return }
+    if q_override >= 0.0 {
+        let _sq = qwen3_cuda_conformal_set_q(cc, rt, q_override)
+        return
+    }
+    let q_env = sounio_llm_parse_env_pos_f64("SOUNIO_CONFORMAL_Q")
+    if q_env >= 0.0 {
+        let _sq = qwen3_cuda_conformal_set_q(cc, rt, q_env)
+    }
+}
+
+fn sounio_llm_run_bf16_chunks_cuda(
+    m: &Qwen3Model,
+    rt: &Qwen3CudaRunner,
+    toks_ptr: i64,
+    pos_start: i64,
+    n_toks: i64,
+    compute_all_top1: bool,
+    compute_final_logits: bool,
+    top1_out_ptr: i64
+) -> bool with Mut, Div, Panic {
+    if n_toks <= 0 { return true }
+    var done: i64 = 0
+    while done < n_toks {
+        let rem = n_toks - done
+        let c_len = if rem > 8 { 8 } else { rem }
+        let is_last = (done + c_len == n_toks)
+        let ok = qwen3_forward_batch_bf16_cuda(
+            m,
+            rt,
+            toks_ptr + done * 8,
+            pos_start + done,
+            c_len,
+            compute_all_top1,
+            compute_final_logits && is_last,
+            if top1_out_ptr != 0 { top1_out_ptr + done * 8 } else { 0 }
+        )
+        if !ok { return false }
+        done = done + c_len
+    }
+    true
+}
+
+fn sounio_llm_prefill_bf16_cuda(
+    m: &Qwen3Model,
+    rt: &Qwen3CudaRunner,
+    tok_buf: i64,
+    n_toks: i64,
+    max_seq: i64,
+    compute_final_logits: bool
+) -> bool with Mut, Div, Panic {
+    if n_toks < 0 || n_toks > max_seq { return false }
+    sounio_llm_run_bf16_chunks_cuda(m, rt, tok_buf, 0, n_toks, false, compute_final_logits, 0)
+}
+
+fn sounio_llm_step_conformal_r123_cuda(
+    m: &Qwen3Model,
+    cc: &Qwen3CudaConformal,
+    rt: &Qwen3CudaRunner,
+    quant_mode: i64,
+    tok_id: i64,
+    pos: i64,
+    seq_toks_buf: i64,
+    clean_pos_ptr: i64,
+    max_streak: i64,
+    esc_out_ptr: i64
+) -> EisaConeCert with Mut, Div, Panic {
+    if quant_mode == 18 || quant_mode == 19 {
+        let _we0 = ptr_write_i64_le(esc_out_ptr, 0, 0)
+        let cert = qwen3_forward_token_q4_try_cuda(m, cc, rt, tok_id, pos, true, false)
+        if cert.cone_size <= 0 {
+            return eisa_certify_global(0, 0, 0)
+        }
+        let clean_pos = ptr_read_i64_le(clean_pos_ptr, 0)
+        let streak_len = (pos - clean_pos) + 1
+        let allow_cert = cert.strict_global_certified && (max_streak <= 0 || streak_len < max_streak)
+        if allow_cert {
+            return cert
+        }
+        let _we1 = ptr_write_i64_le(esc_out_ptr, 0, 1)
+        let n_scrub = pos - clean_pos + 1
+        let s_ok = sounio_llm_run_bf16_chunks_cuda(m, rt, seq_toks_buf + clean_pos * 8, clean_pos, n_scrub, false, true, 0)
+        if !s_ok {
+            return eisa_certify_global(0, 0, 0)
+        }
+        let _wcp = ptr_write_i64_le(clean_pos_ptr, 0, pos + 1)
+        let t = qwen3_model_top2(m)
+        return EisaConeCert {
+            top1_id: cert.top1_id,
+            runner_up_id: cert.runner_up_id,
+            refined_top1_id: t.top1_id,
+            top1_val: t.top1_val,
+            top1_err: 0.0,
+            max_other_upper: t.second_val,
+            global_margin: t.top1_val - t.second_val,
+            cone_size: cert.cone_size,
+            bf16_rows_touched: m.cfg.vocab,
+            strict_global_certified: false,
+            refined_exact: true,
+        }
+    }
+    qwen3_forward_token_q4_conformal_cuda(m, cc, rt, tok_id, pos, true, esc_out_ptr)
+}
+
+fn sounio_llm_exec_r4_cuda(
+    tok: &Qwen3Tokenizer,
+    m: &Qwen3Model,
+    cc: &Qwen3CudaConformal,
+    kv: &!Qwen3PagedKv,
+    rt: &Qwen3CudaRunner,
+    tokens_cap: i64,
+    trace_steps: bool,
+    n_prompt: i64,
+    tok_buf: i64,
+    seq_toks_buf: i64,
+    gen_buf: i64,
+    single_tok_buf: i64,
+    char_buf: i64,
+    clean_pos_buf: i64,
+    top1_chunk_buf: i64,
+    trace_buf: i64,
+    cfg: &SounioLlmRunCfg,
+    out_text_ptr: i64,
+    out_text_cap: i64,
+    out_text_len_ptr: i64,
+    bench_prompt_idx: i64
+) -> SounioLlmGenStats with Alloc, Mut, Div, Panic, IO {
+    var out_stats = sounio_llm_empty_stats()
+    let max_seq_lim = if cfg.max_seq < tokens_cap - 1 { cfg.max_seq } else { tokens_cap - 1 }
+    if n_prompt <= 0 || n_prompt > max_seq_lim { return out_stats }
+
+    var pi: i64 = 0
+    while pi < n_prompt {
+        let _w = ptr_write_i64_le(seq_toks_buf, pi * 8, ptr_read_i64_le(tok_buf, pi * 8))
+        pi = pi + 1
+    }
+
+    let t_pref_start = sounio_llm_now_ns()
+    if cfg.max_tokens <= 0 {
+        let ok0 = sounio_llm_prefill_bf16_cuda(m, rt, tok_buf, n_prompt, max_seq_lim, true)
+        let t_pref_end = sounio_llm_now_ns()
+        if !ok0 { return out_stats }
+        let top2_0 = qwen3_model_top2(m)
+        return sounio_llm_finalize_conformal_out(
+            tok, gen_buf, trace_buf, trace_steps, bench_prompt_idx, out_text_ptr, out_text_cap, out_text_len_ptr,
+            n_prompt, 0, -1, top2_0.top1_val - top2_0.second_val, 0.0, 0, 0,
+            t_pref_start, t_pref_end, t_pref_end, t_pref_end
+        )
+    }
+
+    let prefill_ok = if n_prompt > 1 {
+        sounio_llm_prefill_bf16_cuda(m, rt, tok_buf, n_prompt - 1, max_seq_lim, false)
+    } else {
+        true
+    }
+    let t_pref_end = sounio_llm_now_ns()
+    if !prefill_ok { return out_stats }
+
+    let t_dec_start = sounio_llm_now_ns()
+    let cur_pos_buf = clean_pos_buf + 8
+    let gen_count_buf = clean_pos_buf + 16
+    let last_tid_buf = clean_pos_buf + 24
+    let _wc0 = ptr_write_i64_le(clean_pos_buf, 0, n_prompt - 1)
+    let _wc1 = ptr_write_i64_le(cur_pos_buf, 0, n_prompt - 1)
+    let _wc2 = ptr_write_i64_le(gen_count_buf, 0, 0)
+    let _wc3 = ptr_write_i64_le(last_tid_buf, 0, -1)
+
+    var streamed_count: i64 = 0
+    var last_margin: f64 = 0.0
+    var last_combined_err: f64 = 0.0
+    var escalated_count: i64 = 0
+    let is_q_zero = cc.q_threshold == 0.0
+    let max_streak = sounio_llm_parse_env_nonneg_i64("SOUNIO_SCRUB_MAX_STREAK")
+    var loop_ok = true
+
+    while loop_ok {
+        let clean_pos = ptr_read_i64_le(clean_pos_buf, 0)
+        let cur_pos = ptr_read_i64_le(cur_pos_buf, 0)
+        var gen_count = ptr_read_i64_le(gen_count_buf, 0)
+        let last_gen_tok = if gen_count > 0 { ptr_read_i64_le(gen_buf, (gen_count - 1) * 8) } else { -1 }
+        let ended = (gen_count >= cfg.max_tokens) || (cur_pos + 1 >= max_seq_lim) || (gen_count > 0 && (last_gen_tok == 151643 || last_gen_tok == 151645))
+        if ended {
+            if clean_pos >= cur_pos { break }
+            let win_end = cur_pos - 1
+            escalated_count = escalated_count + 1
+            var chunk_start = clean_pos
+            var rolled = false
+            while chunk_start <= win_end {
+                let rem = win_end - chunk_start + 1
+                let c_len = if rem > 8 { 8 } else { rem }
+                let need_last = (chunk_start + c_len - 1 == win_end)
+                if !qwen3_forward_batch_bf16_cuda(m, rt, seq_toks_buf + chunk_start * 8, chunk_start, c_len, true, need_last, top1_chunk_buf) {
+                    loop_ok = false
+                    break
+                }
+                let rc = sounio_llm_r4_scan_chunk_impl(
+                    gen_buf, trace_buf, seq_toks_buf, top1_chunk_buf, chunk_start, c_len, n_prompt,
+                    false, false, 0, 0.0, clean_pos_buf, cur_pos_buf, gen_count_buf, last_tid_buf, kv, false
+                )
+                if rc < 0 {
+                    loop_ok = false
+                    break
+                }
+                if rc > 0 {
+                    rolled = true
+                    break
+                }
+                chunk_start = chunk_start + c_len
+            }
+            if !loop_ok { break }
+            if !rolled {
+                let top2_fin = qwen3_model_top2(m)
+                last_margin = top2_fin.top1_val - top2_fin.second_val
+                let _wcl = ptr_write_i64_le(clean_pos_buf, 0, cur_pos)
+            }
+            if cfg.stream_stdout && bench_prompt_idx < 0 {
+                let verified_cnt = ptr_read_i64_le(clean_pos_buf, 0) - (n_prompt - 1)
+                if verified_cnt > streamed_count {
+                    sounio_llm_stream_range(tok, gen_buf, streamed_count, verified_cnt, single_tok_buf, char_buf)
+                    streamed_count = verified_cnt
+                }
+            }
+            if !rolled { break }
+        } else {
+            let streak_len = (cur_pos - clean_pos) + 1
+            let hit_streak = (max_streak > 0) && (streak_len >= max_streak)
+            var accept_draft = false
+            var cert = eisa_certify_global(0, 0, 0)
+            if !hit_streak {
+                let cur_tid = ptr_read_i64_le(seq_toks_buf, cur_pos * 8)
+                cert = qwen3_forward_token_q4_try_cuda(m, cc, rt, cur_tid, cur_pos, true, false)
+                if cert.cone_size <= 0 {
+                    loop_ok = false
+                    break
+                }
+                accept_draft = cert.strict_global_certified || is_q_zero
+                last_combined_err = cert.top1_err
+                last_margin = cert.global_margin
+            }
+            if accept_draft {
+                let dtok = cert.top1_id
+                let _wg = ptr_write_i64_le(gen_buf, gen_count * 8, dtok)
+                sounio_llm_record_trace_step(trace_buf, gen_count, dtok, dtok, 1, 0, cert.global_margin)
+                let _wgc = ptr_write_i64_le(gen_count_buf, 0, gen_count + 1)
+                let _wlt = ptr_write_i64_le(last_tid_buf, 0, dtok)
+                let _wcu = ptr_write_i64_le(cur_pos_buf, 0, cur_pos + 1)
+                let _ws = ptr_write_i64_le(seq_toks_buf, (cur_pos + 1) * 8, dtok)
+            } else {
+                let win_end = cur_pos
+                escalated_count = escalated_count + 1
+                var chunk_start = clean_pos
+                while chunk_start <= win_end {
+                    let rem = win_end - chunk_start + 1
+                    let c_len = if rem > 8 { 8 } else { rem }
+                    let need_last = (chunk_start + c_len - 1 == win_end)
+                    if !qwen3_forward_batch_bf16_cuda(m, rt, seq_toks_buf + chunk_start * 8, chunk_start, c_len, true, need_last, top1_chunk_buf) {
+                        loop_ok = false
+                        break
+                    }
+                    let rc = sounio_llm_r4_scan_chunk_impl(
+                        gen_buf, trace_buf, seq_toks_buf, top1_chunk_buf, chunk_start, c_len, n_prompt,
+                        true, hit_streak, cert.top1_id, last_margin, clean_pos_buf, cur_pos_buf, gen_count_buf, last_tid_buf, kv, false
+                    )
+                    if rc < 0 {
+                        loop_ok = false
+                        break
+                    }
+                    if rc > 0 { break }
+                    chunk_start = chunk_start + c_len
+                }
+                if !loop_ok { break }
+                let top2_fin = qwen3_model_top2(m)
+                last_margin = top2_fin.top1_val - top2_fin.second_val
+                if cfg.stream_stdout && bench_prompt_idx < 0 {
+                    let verified_cnt = ptr_read_i64_le(clean_pos_buf, 0) - (n_prompt - 1)
+                    if verified_cnt > streamed_count {
+                        sounio_llm_stream_range(tok, gen_buf, streamed_count, verified_cnt, single_tok_buf, char_buf)
+                        streamed_count = verified_cnt
+                    }
+                }
+            }
+        }
+    }
+    let t_dec_end = sounio_llm_now_ns()
+    if !loop_ok { return out_stats }
+    let final_gen_count = ptr_read_i64_le(gen_count_buf, 0)
+    let final_last_tid = ptr_read_i64_le(last_tid_buf, 0)
+    let certified_count = sounio_llm_count_trace_cert(trace_buf, final_gen_count)
+    sounio_llm_finalize_conformal_out(
+        tok, gen_buf, trace_buf, trace_steps, bench_prompt_idx, out_text_ptr, out_text_cap, out_text_len_ptr,
+        n_prompt, final_gen_count, final_last_tid, last_margin, last_combined_err, certified_count, escalated_count,
+        t_pref_start, t_pref_end, t_dec_start, t_dec_end
+    )
+}
+
+fn sounio_llm_exec_conformal_cuda(
+    tok: &Qwen3Tokenizer,
+    m: &Qwen3Model,
+    cc: &Qwen3CudaConformal,
+    kv: &!Qwen3PagedKv,
+    rt: &Qwen3CudaRunner,
+    scratch: &PageArena,
+    prompt_cap: i64,
+    tokens_cap: i64,
+    trace_steps: bool,
+    sys_ptr: i64,
+    sys_len: i64,
+    user_ptr: i64,
+    user_len: i64,
+    cfg: &SounioLlmRunCfg,
+    out_text_ptr: i64,
+    out_text_cap: i64,
+    out_text_len_ptr: i64,
+    bench_prompt_idx: i64
+) -> SounioLlmGenStats with Alloc, Mut, Div, Panic, IO {
+    var out_stats = sounio_llm_empty_stats()
+    if !page_arena_is_ok(scratch) || !qwen3_cuda_runner_is_ok(rt) || !qwen3_cuda_conformal_is_ok(cc) || cfg.max_seq <= 0 {
+        return out_stats
+    }
+
+    let s_ptr = page_arena_ptr(scratch)
+    let p_buf = s_ptr
+    let tok_buf = s_ptr + prompt_cap
+    let seq_toks_buf = tok_buf + tokens_cap * 8
+    let gen_buf = seq_toks_buf + tokens_cap * 8
+    let rng_buf = gen_buf + tokens_cap * 8
+    let single_tok_buf = rng_buf + 16
+    let char_buf = single_tok_buf + 16
+    let esc_buf = char_buf + 64
+    let clean_pos_buf = esc_buf + 32
+    let top1_chunk_buf = clean_pos_buf + 32
+    let trace_buf = top1_chunk_buf + 64
+
+    let _w_rng = ptr_write_i64_le(rng_buf, 0, cfg.seed)
+    let _w_esc = ptr_write_i64_le(esc_buf, 0, 0)
+
+    let p_len = prepare_prompt_bytes(
+        cfg.raw_prompt,
+        cfg.enable_thinking,
+        sys_ptr,
+        sys_len,
+        user_ptr,
+        user_len,
+        p_buf,
+        prompt_cap
+    )
+    if p_len < 0 { return out_stats }
+    let n_prompt = qwen3_encode_bytes(tok, p_buf, p_len, tok_buf, tokens_cap)
+    if n_prompt <= 0 || n_prompt > cfg.max_seq || n_prompt > tokens_cap { return out_stats }
+
+    if cfg.quant_mode == 20 || cfg.quant_mode == 21 {
+        return sounio_llm_exec_r4_cuda(
+            tok, m, cc, kv, rt, tokens_cap, trace_steps,
+            n_prompt, tok_buf, seq_toks_buf, gen_buf, single_tok_buf, char_buf, clean_pos_buf, top1_chunk_buf, trace_buf,
+            cfg, out_text_ptr, out_text_cap, out_text_len_ptr, bench_prompt_idx
+        )
+    }
+
+    var pi: i64 = 0
+    while pi < n_prompt {
+        let _ws = ptr_write_i64_le(seq_toks_buf, pi * 8, ptr_read_i64_le(tok_buf, pi * 8))
+        pi = pi + 1
+    }
+
+    let max_streak = sounio_llm_parse_env_nonneg_i64("SOUNIO_SCRUB_MAX_STREAK")
+    let t_pref_start = sounio_llm_now_ns()
+    var pos: i64 = 0
+    var prefill_ok = true
+    var certified_count: i64 = 0
+    var escalated_count: i64 = 0
+    var last_esc: i64 = 0
+    var last_combined_err: f64 = 0.0
+    var last_cert = eisa_certify_global(0, 0, 0)
+
+    if n_prompt > 1 {
+        prefill_ok = sounio_llm_prefill_bf16_cuda(m, rt, tok_buf, n_prompt - 1, cfg.max_seq, false)
+        pos = n_prompt - 1
+    }
+    let _wcp = ptr_write_i64_le(clean_pos_buf, 0, pos)
+
+    if prefill_ok {
+        let tid_last = ptr_read_i64_le(tok_buf, pos * 8)
+        let cert = sounio_llm_step_conformal_r123_cuda(m, cc, rt, cfg.quant_mode, tid_last, pos, seq_toks_buf, clean_pos_buf, max_streak, esc_buf)
+        if cert.cone_size <= 0 {
+            prefill_ok = false
+        } else {
+            let eflag = ptr_read_i64_le(esc_buf, 0)
+            last_esc = eflag
+            if cert.strict_global_certified { certified_count = certified_count + 1 }
+            if eflag == 1 { escalated_count = escalated_count + 1 }
+            last_combined_err = cert.top1_err
+            last_cert = cert
+            pos = pos + 1
+        }
+    }
+    let t_pref_end = sounio_llm_now_ns()
+    if !prefill_ok { return out_stats }
+
+    let t_dec_start = sounio_llm_now_ns()
+    var gen_count: i64 = 0
+    var last_tid: i64 = -1
+    var last_margin: f64 = 0.0
+    var decode_ok = true
+
+    while gen_count < cfg.max_tokens && pos < cfg.max_seq {
+        last_margin = last_cert.global_margin
+        let next_tok = if cfg.temp <= 0.0 || cfg.top_p <= 0.0 {
+            last_cert.refined_top1_id
+        } else {
+            let _sl = qwen3_cuda_sync_logits(m, rt)
+            sounio_llm_sample_top_p(m, cfg.temp, cfg.top_p, rng_buf)
+        }
+
+        let _w_tok = ptr_write_i64_le(gen_buf, gen_count * 8, next_tok)
+        if trace_steps {
+            let cflag: i64 = if last_cert.strict_global_certified { 1 } else { 0 }
+            sounio_llm_record_trace_step(trace_buf, gen_count, next_tok, last_cert.top1_id, cflag, last_esc, last_margin)
+        }
+        gen_count = gen_count + 1
+        last_tid = next_tok
+
+        if cfg.stream_stdout && bench_prompt_idx < 0 {
+            let _w_st = ptr_write_i64_le(single_tok_buf, 0, next_tok)
+            let slen = qwen3_decode_bytes(tok, single_tok_buf, 1, char_buf, 64)
+            var ci: i64 = 0
+            while ci < slen {
+                print_char(ptr_read_u8(char_buf, ci) as i32)
+                ci = ci + 1
+            }
+        }
+
+        if next_tok == 151643 || next_tok == 151645 { break }
+        if gen_count >= cfg.max_tokens || pos + 1 >= cfg.max_seq { break }
+
+        let _ws = ptr_write_i64_le(seq_toks_buf, pos * 8, next_tok)
+        let cert_step = sounio_llm_step_conformal_r123_cuda(m, cc, rt, cfg.quant_mode, next_tok, pos, seq_toks_buf, clean_pos_buf, max_streak, esc_buf)
+        if cert_step.cone_size <= 0 {
+            decode_ok = false
+            break
+        }
+        let eflag_step = ptr_read_i64_le(esc_buf, 0)
+        last_esc = eflag_step
+        if cert_step.strict_global_certified { certified_count = certified_count + 1 }
+        if eflag_step == 1 { escalated_count = escalated_count + 1 }
+        last_combined_err = cert_step.top1_err
+        last_cert = cert_step
+        pos = pos + 1
+    }
+    let t_dec_end = sounio_llm_now_ns()
+    if !decode_ok { return out_stats }
+    if bench_prompt_idx < 0 {
+        let _sl2 = qwen3_cuda_sync_logits(m, rt)
+    }
+
+    sounio_llm_finalize_conformal_out(
+        tok, gen_buf, trace_buf, trace_steps, bench_prompt_idx, out_text_ptr, out_text_cap, out_text_len_ptr,
+        n_prompt, gen_count, last_tid, last_margin, last_combined_err, certified_count, escalated_count,
+        t_pref_start, t_pref_end, t_dec_start, t_dec_end
+    )
+}
+
+fn sounio_llm_exec_bf16_cuda(
+    tok: &Qwen3Tokenizer,
+    m: &Qwen3Model,
+    rt: &Qwen3CudaRunner,
+    scratch: &PageArena,
+    prompt_cap: i64,
+    tokens_cap: i64,
+    trace_steps: bool,
+    sys_ptr: i64,
+    sys_len: i64,
+    user_ptr: i64,
+    user_len: i64,
+    cfg: &SounioLlmRunCfg,
+    out_text_ptr: i64,
+    out_text_cap: i64,
+    out_text_len_ptr: i64,
+    bench_prompt_idx: i64
+) -> SounioLlmGenStats with Alloc, Mut, Div, Panic, IO {
+    var out_stats = sounio_llm_empty_stats()
+    if !page_arena_is_ok(scratch) || !qwen3_cuda_runner_is_ok(rt) || cfg.max_seq <= 0 {
+        return out_stats
+    }
+
+    let s_ptr = page_arena_ptr(scratch)
+    let p_buf = s_ptr
+    let tok_buf = s_ptr + prompt_cap
+    let gen_buf = tok_buf + tokens_cap * 8
+    let assoc_buf = gen_buf + tokens_cap * 8
+    let rng_buf = assoc_buf + 16
+    let single_tok_buf = rng_buf + 16
+    let char_buf = single_tok_buf + 16
+    let trace_buf = char_buf + 64
+
+    let _w_assoc = ptr_write_u32_le(assoc_buf, 0, 0)
+    let _w_rng = ptr_write_i64_le(rng_buf, 0, cfg.seed)
+
+    let p_len = prepare_prompt_bytes(
+        cfg.raw_prompt,
+        cfg.enable_thinking,
+        sys_ptr,
+        sys_len,
+        user_ptr,
+        user_len,
+        p_buf,
+        prompt_cap
+    )
+    if p_len < 0 { return out_stats }
+    let n_prompt = qwen3_encode_bytes(tok, p_buf, p_len, tok_buf, tokens_cap)
+    if n_prompt <= 0 { return out_stats }
+
+    let t_pref_start = sounio_llm_now_ns()
+    var pos: i64 = 0
+    let prefill_ok = sounio_llm_prefill_bf16_cuda(m, rt, tok_buf, n_prompt, cfg.max_seq, true)
+    if prefill_ok { pos = n_prompt }
+    let t_pref_end = sounio_llm_now_ns()
+    if !prefill_ok { return out_stats }
+
+    let t_dec_start = sounio_llm_now_ns()
+    var gen_count: i64 = 0
+    var last_tid: i64 = -1
+    var last_margin: f64 = 0.0
+
+    while gen_count < cfg.max_tokens && pos < cfg.max_seq {
+        let top2 = qwen3_model_top2(m)
+        last_margin = top2.top1_val - top2.second_val
+
+        let next_tok = if cfg.temp <= 0.0 || cfg.top_p <= 0.0 {
+            top2.top1_id
+        } else {
+            let _sl = qwen3_cuda_sync_logits(m, rt)
+            sounio_llm_sample_top_p(m, cfg.temp, cfg.top_p, rng_buf)
+        }
+
+        let _w_tok = ptr_write_i64_le(gen_buf, gen_count * 8, next_tok)
+        if trace_steps {
+            sounio_llm_record_trace_step(trace_buf, gen_count, next_tok, next_tok, 1, 0, last_margin)
+        }
+        gen_count = gen_count + 1
+        last_tid = next_tok
+
+        if cfg.stream_stdout && bench_prompt_idx < 0 {
+            let _w_st = ptr_write_i64_le(single_tok_buf, 0, next_tok)
+            let slen = qwen3_decode_bytes(tok, single_tok_buf, 1, char_buf, 64)
+            var ci: i64 = 0
+            while ci < slen {
+                print_char(ptr_read_u8(char_buf, ci) as i32)
+                ci = ci + 1
+            }
+        }
+
+        if next_tok == 151643 || next_tok == 151645 { break }
+        if gen_count >= cfg.max_tokens || pos + 1 >= cfg.max_seq { break }
+
+        if !qwen3_forward_token_cuda_opt(m, rt, next_tok, pos, true) { break }
+        pos = pos + 1
+    }
+    let t_dec_end = sounio_llm_now_ns()
+    if bench_prompt_idx < 0 {
+        let _sl2 = qwen3_cuda_sync_logits(m, rt)
+        if trace_steps {
+            sounio_llm_emit_step_trace(trace_buf, gen_count)
+        }
+        if out_text_ptr != 0 {
+            let dec_len = qwen3_decode_bytes(tok, gen_buf, gen_count, out_text_ptr, out_text_cap)
+            if out_text_len_ptr != 0 {
+                let _w_len = ptr_write_i64_le(out_text_len_ptr, 0, dec_len)
+            }
+        }
+    }
+
+    let prefill_ms = if t_pref_end > t_pref_start { ((t_pref_end - t_pref_start) as f64) / 1000000.0 } else { 0.0 }
+    let decode_ms = if t_dec_end > t_dec_start { ((t_dec_end - t_dec_start) as f64) / 1000000.0 } else { 0.0 }
+    let decode_tok_per_sec = if decode_ms > 0.0 { (gen_count as f64) * 1000.0 / decode_ms } else { 0.0 }
+    let elapsed_ms = if t_dec_end > t_pref_start { ((t_dec_end - t_pref_start) as f64) / 1000000.0 } else { 0.0 }
+    let tok_per_sec = if elapsed_ms > 0.0 { (gen_count as f64) * 1000.0 / elapsed_ms } else { 0.0 }
+
+    out_stats = SounioLlmGenStats {
+        prompt_tokens: n_prompt,
+        generated_tokens: gen_count,
+        last_token_id: last_tid,
+        top1_margin: last_margin,
+        last_associator_l2: 0.0,
+        elapsed_ms: elapsed_ms,
+        tok_per_sec: tok_per_sec,
+        certified_count: 0,
+        last_combined_err: 0.0,
+        prefill_ms: prefill_ms,
+        decode_ms: decode_ms,
+        decode_tok_per_sec: decode_tok_per_sec,
+        escalated_count: 0,
+        ok: true,
+    }
+    if bench_prompt_idx >= 0 {
+        sounio_llm_print_bench_prompt(bench_prompt_idx, gen_buf, trace_buf, trace_steps, &out_stats)
+    }
+    out_stats
+}
+
+pub fn sounio_llm_run_chat_generation_cuda_q(
+    tok: &Qwen3Tokenizer,
+    m: &Qwen3Model,
+    kv: &!Qwen3PagedKv,
+    sys_ptr: i64,
+    sys_len: i64,
+    user_ptr: i64,
+    user_len: i64,
+    cfg: &SounioLlmRunCfg,
+    q_override: f64,
+    out_text_ptr: i64,
+    out_text_cap: i64,
+    out_text_len_ptr: i64
+) -> SounioLlmGenStats with Alloc, Mut, Div, Panic, IO {
+    if !tok.ok || !qwen3_model_is_ok(m) || !cfg.ok || cfg.ossm_every > 0 {
+        return sounio_llm_empty_stats()
+    }
+    if cfg.quant_mode != 0 && (cfg.quant_mode < 16 || cfg.quant_mode > 21) {
+        println("sounio-llm: error: --backend cuda supports bf16, q4_conformal, q4_scrub, q4_exact_scrub")
+        return sounio_llm_empty_stats()
+    }
+    let max_seq_cap = if cfg.max_seq > 16 { cfg.max_seq } else { 16 }
+    let rt = qwen3_cuda_runner_init(m, max_seq_cap, "", -1)
+    let prompt_cap: i64 = 65536
+    let tokens_cap: i64 = 8192
+    let trace_steps = sounio_llm_trace_steps_enabled()
+    let scratch_bytes = prompt_cap + tokens_cap * 8 * 3 + tokens_cap * 32 + 256
+    let scratch = page_arena_alloc(scratch_bytes)
+    var out_stats = sounio_llm_empty_stats()
+
+    if !qwen3_cuda_runner_is_ok(&rt) {
+        println("sounio-llm: error: failed to initialize CUDA PTX runner")
+    } else if !page_arena_is_ok(&scratch) {
+        println("sounio-llm: error: failed to allocate CUDA scratch arena")
+    } else if cfg.quant_mode == 0 {
+        out_stats = sounio_llm_exec_bf16_cuda(
+            tok, m, &rt, &scratch, prompt_cap, tokens_cap, trace_steps,
+            sys_ptr, sys_len, user_ptr, user_len, cfg, out_text_ptr, out_text_cap, out_text_len_ptr, -1
+        )
+    } else {
+        var cc = qwen3_cuda_conformal_init(m, &rt, cfg.quant_mode, q_override)
+        sounio_llm_apply_cuda_q_override(&!cc, &rt, q_override)
+        if qwen3_cuda_conformal_is_ok(&cc) {
+            out_stats = sounio_llm_exec_conformal_cuda(
+                tok, m, &cc, kv, &rt, &scratch, prompt_cap, tokens_cap, trace_steps,
+                sys_ptr, sys_len, user_ptr, user_len, cfg, out_text_ptr, out_text_cap, out_text_len_ptr, -1
+            )
+        } else {
+            println("sounio-llm: error: failed to initialize CUDA Q4 conformal state")
+        }
+        let _cf = qwen3_cuda_conformal_free(cc, &rt)
+    }
+    let _fs = page_arena_free(scratch)
+    let _rf = qwen3_cuda_runner_free(rt)
+    out_stats
+}
+
+pub fn sounio_llm_run_bench_prompts_cuda(
+    tok: &Qwen3Tokenizer,
+    m: &Qwen3Model,
+    kv: &!Qwen3PagedKv,
+    sys_ptr: i64,
+    sys_len: i64,
+    prompts_path: string,
+    cfg: &SounioLlmRunCfg,
+    q_override: f64
+) -> i32 with Alloc, Mut, Div, Panic, IO {
+    if !tok.ok || !qwen3_model_is_ok(m) || !cfg.ok || cfg.ossm_every > 0 {
+        println("sounio-llm: error: bench-prompts CUDA invalid model, tokenizer, cfg or ossm_every")
+        return 1
+    }
+    if cfg.quant_mode != 0 && (cfg.quant_mode < 16 || cfg.quant_mode > 21) {
+        println("sounio-llm: error: --backend cuda --bench-prompts supports bf16, q4_conformal, q4_scrub, q4_exact_scrub")
+        return 1
+    }
+
+    let prompt_cap: i64 = 65536
+    let tokens_cap: i64 = 8192
+    let trace_steps = sounio_llm_trace_steps_enabled()
+    let scratch_bytes = prompt_cap + tokens_cap * 8 * 3 + tokens_cap * 32 + 256
+    let shard = mapped_shard_open(prompts_path)
+    let shard_ok = mapped_shard_is_ok(&shard)
+    let slen = mapped_shard_len(&shard)
+    let scratch = page_arena_alloc(scratch_bytes)
+    let line_arena = page_arena_alloc(prompt_cap + 16)
+    let max_seq_cap = if cfg.max_seq > 16 { cfg.max_seq } else { 16 }
+    let rt = qwen3_cuda_runner_init(m, max_seq_cap, "", -1)
+
+    var prompt_count: i64 = 0
+    var bench_ok = shard_ok && slen > 0 && page_arena_is_ok(&scratch) && page_arena_is_ok(&line_arena) && qwen3_cuda_runner_is_ok(&rt)
+
+    if bench_ok {
+        let line_ptr = page_arena_ptr(&line_arena)
+        let bi_ptr = line_ptr + prompt_cap
+        let _wbi0 = ptr_write_i64_le(bi_ptr, 0, 0)
+
+        if cfg.quant_mode == 0 {
+            while bench_ok {
+                let ll = sounio_llm_bench_step_from_shard(&shard, slen, bi_ptr, line_ptr, prompt_cap)
+                if ll < 0 {
+                    bench_ok = false
+                    break
+                }
+                if ll == 0 { break }
+                let stats = sounio_llm_exec_bf16_cuda(
+                    tok, m, &rt, &scratch, prompt_cap, tokens_cap, trace_steps,
+                    sys_ptr, sys_len, line_ptr, ll, cfg, 0, 0, 0, prompt_count
+                )
+                if !stats.ok || (cfg.max_tokens > 0 && stats.generated_tokens <= 0) {
+                    bench_ok = false
+                    break
+                }
+                prompt_count = prompt_count + 1
+            }
+        } else {
+            var cc = qwen3_cuda_conformal_init(m, &rt, cfg.quant_mode, q_override)
+            sounio_llm_apply_cuda_q_override(&!cc, &rt, q_override)
+            bench_ok = qwen3_cuda_conformal_is_ok(&cc)
+            while bench_ok {
+                let ll = sounio_llm_bench_step_from_shard(&shard, slen, bi_ptr, line_ptr, prompt_cap)
+                if ll < 0 {
+                    bench_ok = false
+                    break
+                }
+                if ll == 0 { break }
+                let stats = sounio_llm_exec_conformal_cuda(
+                    tok, m, &cc, kv, &rt, &scratch, prompt_cap, tokens_cap, trace_steps,
+                    sys_ptr, sys_len, line_ptr, ll, cfg, 0, 0, 0, prompt_count
+                )
+                if !stats.ok || (cfg.max_tokens > 0 && stats.generated_tokens <= 0) {
+                    bench_ok = false
+                    break
+                }
+                prompt_count = prompt_count + 1
+            }
+            let _cf = qwen3_cuda_conformal_free(cc, &rt)
+        }
+    }
+
+    let _rf = qwen3_cuda_runner_free(rt)
+    let _fl = page_arena_free(line_arena)
+    let _fs = page_arena_free(scratch)
+    let _cs = mapped_shard_close(shard)
+
+    if !bench_ok || prompt_count <= 0 {
+        println("sounio-llm: error: --bench-prompts CUDA failed, missing/empty file, or produced 0 prompts")
+        return 1
+    }
+    0
+}

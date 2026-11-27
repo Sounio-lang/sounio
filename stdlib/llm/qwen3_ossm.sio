@@ -1,0 +1,1982 @@
+// stdlib::llm::qwen3_ossm — Non-Associative Octonion Selective State Space (O-SSM)
+//
+// Sovereign O-SSM linear state management, exact Cayley-Dickson octonion
+// algebra, non-associativity associator witness, Apple Silicon Metal NoCopy,
+// and CUDA Driver PTX execution.
+
+use llm::mmap::{
+    MappedShard,
+    mapped_shard_open,
+    mapped_shard_close,
+    mapped_shard_is_ok,
+    mapped_shard_ptr,
+    mapped_shard_len,
+    PageArena,
+    page_arena_alloc,
+    page_arena_free,
+    page_arena_is_ok,
+    page_arena_ptr,
+    page_arena_len,
+    bf16_bits_to_f64_exact,
+}
+use llm::safetensors_mmap::{
+    StMmapHeader,
+    StTensorView,
+    st_mmap_parse_header,
+    st_mmap_find_tensor_bytes,
+}
+use llm::qwen3::{
+    Qwen3Model,
+    qwen3_model_is_ok,
+    qwen3_model_work_ptr,
+    Qwen3MetalRunner,
+    qwen3_metal_runner_is_ok,
+}
+use llm::qwen3_kernels::{
+    qwen3_metal_encode_rmsnorm,
+    qwen3_metal_encode_rope,
+    qwen3_metal_encode_gemv,
+    qwen3_metal_encode_swiglu,
+    qwen3_metal_encode_paged_gqa,
+    qwen3_metal_encode_vec_add,
+    qwen3_metal_encode_kv_scatter,
+    qwen3_metal_encode_argmax_top2,
+}
+use llm::qwen3_paged_kv::{
+    Qwen3PagedKv,
+    qwen3_kv_is_ok,
+    qwen3_kv_write_kv_f32_buf,
+    qwen3_kv_read_k_f64,
+    qwen3_kv_read_v_f64,
+    qwen3_kv_ensure_pos,
+    qwen3_kv_table_off,
+    qwen3_kv_k_layer_off,
+    qwen3_kv_v_layer_off,
+    qwen3_kv_block_size,
+}
+use llm::hal::{
+    MetalSession,
+    metal_session_is_ok,
+    metal_compile_msl_ptr,
+    metal_cmd_begin,
+    metal_cmd_cancel,
+    metal_cmd_set_buf,
+    metal_cmd_set_u64,
+    metal_cmd_dispatch_1d,
+    metal_cmd_commit_sync,
+    metal_buffer_nocopy,
+    metal_buffer_free,
+    CudaDriverSession,
+    cuda_launch_8param_1d,
+}
+use llm::bf16_kernels::{bf16_cstr_append}
+use llm::ptx_kernels_sm80::{emit_ossm_ptx_sm80_cstr}
+use tensor2::convert::{f32_bits_to_f64, f64_to_f32_bits}
+use math::pure::{sqrt, exp, cos, sin, pow}
+
+// ============================================================================
+// Internal Memory Helpers
+// ============================================================================
+
+fn ossm_read_f32(ptr: i64, idx: i64) -> f64 with Mut {
+    f32_bits_to_f64(ptr_read_u32_le(ptr, idx * 4))
+}
+
+fn ossm_write_f32(ptr: i64, idx: i64, val: f64) with Mut {
+    let _w = ptr_write_u32_le(ptr, idx * 4, f64_to_f32_bits(val))
+}
+
+fn ossm_model_tensor_host_ptr(m: &Qwen3Model, slot: i64) -> i64 {
+    let p = page_arena_ptr(&m.arena) + m.table_off + slot * 48
+    ptr_read_i64_le(p, 40)
+}
+
+fn ossm_model_tensor_dtype(m: &Qwen3Model, slot: i64) -> i32 {
+    let p = page_arena_ptr(&m.arena) + m.table_off + slot * 48
+    ptr_read_i64_le(p, 16) as i32
+}
+
+fn ossm_model_tensor_shard_idx(m: &Qwen3Model, slot: i64) -> i64 {
+    let p = page_arena_ptr(&m.arena) + m.table_off + slot * 48
+    ptr_read_i64_le(p, 0)
+}
+
+fn ossm_model_tensor_data_off(m: &Qwen3Model, slot: i64) -> i64 {
+    let p = page_arena_ptr(&m.arena) + m.table_off + slot * 48
+    ptr_read_i64_le(p, 8)
+}
+
+// ============================================================================
+// Cayley-Dickson Octonion Algebra (verified norm-multiplicative)
+// ============================================================================
+
+pub fn qwen3_ossm_oct_mul_f32(a_ptr: i64, b_ptr: i64, out_ptr: i64) with Mut {
+    let a0 = ossm_read_f32(a_ptr, 0)
+    let a1 = ossm_read_f32(a_ptr, 1)
+    let a2 = ossm_read_f32(a_ptr, 2)
+    let a3 = ossm_read_f32(a_ptr, 3)
+    let a4 = ossm_read_f32(a_ptr, 4)
+    let a5 = ossm_read_f32(a_ptr, 5)
+    let a6 = ossm_read_f32(a_ptr, 6)
+    let a7 = ossm_read_f32(a_ptr, 7)
+
+    let b0 = ossm_read_f32(b_ptr, 0)
+    let b1 = ossm_read_f32(b_ptr, 1)
+    let b2 = ossm_read_f32(b_ptr, 2)
+    let b3 = ossm_read_f32(b_ptr, 3)
+    let b4 = ossm_read_f32(b_ptr, 4)
+    let b5 = ossm_read_f32(b_ptr, 5)
+    let b6 = ossm_read_f32(b_ptr, 6)
+    let b7 = ossm_read_f32(b_ptr, 7)
+
+    let c0 = a0*b0 - a1*b1 - a2*b2 - a3*b3 - a4*b4 - a5*b5 - a6*b6 - a7*b7
+    let c1 = a0*b1 + a1*b0 + a2*b3 - a3*b2 + a4*b5 - a5*b4 - a6*b7 + a7*b6
+    let c2 = a0*b2 - a1*b3 + a2*b0 + a3*b1 + a4*b6 + a5*b7 - a6*b4 - a7*b5
+    let c3 = a0*b3 + a1*b2 - a2*b1 + a3*b0 + a4*b7 - a5*b6 + a6*b5 - a7*b4
+    let c4 = a0*b4 - a1*b5 - a2*b6 - a3*b7 + a4*b0 + a5*b1 + a6*b2 + a7*b3
+    let c5 = a0*b5 + a1*b4 - a2*b7 + a3*b6 - a4*b1 + a5*b0 - a6*b3 + a7*b2
+    let c6 = a0*b6 + a1*b7 + a2*b4 - a3*b5 - a4*b2 + a5*b3 + a6*b0 - a7*b1
+    let c7 = a0*b7 - a1*b6 + a2*b5 + a3*b4 - a4*b3 - a5*b2 + a6*b1 + a7*b0
+
+    ossm_write_f32(out_ptr, 0, c0)
+    ossm_write_f32(out_ptr, 1, c1)
+    ossm_write_f32(out_ptr, 2, c2)
+    ossm_write_f32(out_ptr, 3, c3)
+    ossm_write_f32(out_ptr, 4, c4)
+    ossm_write_f32(out_ptr, 5, c5)
+    ossm_write_f32(out_ptr, 6, c6)
+    ossm_write_f32(out_ptr, 7, c7)
+}
+
+pub fn qwen3_ossm_oct_mul_f64(a_ptr: i64, b_ptr: i64, out_ptr: i64) with Mut {
+    qwen3_ossm_oct_mul_f32(a_ptr, b_ptr, out_ptr)
+}
+
+pub fn qwen3_ossm_associator_l2(
+    b_f32_ptr: i64,
+    u_f32_ptr: i64,
+    dt_f32_ptr: i64,
+    n_oct_channels: i64
+) -> f64 with Alloc, Mut, Div, Panic {
+    if b_f32_ptr == 0 || u_f32_ptr == 0 || dt_f32_ptr == 0 || n_oct_channels <= 0 {
+        return 0.0
+    }
+    let scratch = heap_alloc(128) as i64
+    let bu_ptr = scratch
+    let left_ptr = scratch + 32
+    let udt_ptr = scratch + 64
+    let right_ptr = scratch + 96
+
+    var sum_sq: f64 = 0.0
+    var c: i64 = 0
+    while c < n_oct_channels {
+        let b_c = b_f32_ptr + c * 32
+        let u_c = u_f32_ptr + c * 32
+        let dt_c = dt_f32_ptr + c * 32
+
+        qwen3_ossm_oct_mul_f32(b_c, u_c, bu_ptr)
+        qwen3_ossm_oct_mul_f32(bu_ptr, dt_c, left_ptr)
+
+        qwen3_ossm_oct_mul_f32(u_c, dt_c, udt_ptr)
+        qwen3_ossm_oct_mul_f32(b_c, udt_ptr, right_ptr)
+
+        var k: i64 = 0
+        while k < 8 {
+            let l_k = ossm_read_f32(left_ptr, k)
+            let r_k = ossm_read_f32(right_ptr, k)
+            let diff = l_k - r_k
+            sum_sq = sum_sq + diff * diff
+            k = k + 1
+        }
+        c = c + 1
+    }
+
+    heap_free(scratch as *mut u8)
+    sqrt(sum_sq)
+}
+
+// ============================================================================
+// O(1) Context State Linear Struct: Qwen3OssmState
+// ============================================================================
+
+pub linear struct Qwen3OssmState {
+    pub arena_ptr: i64,
+    pub arena_len: i64,
+    pub n_layers: i64,
+    pub n_oct: i64,
+    pub b_st: i64,
+    pub ok: bool,
+}
+
+pub fn qwen3_ossm_state_is_ok(st: &Qwen3OssmState) -> bool {
+    st.ok
+}
+
+pub fn qwen3_ossm_state_ptr(st: &Qwen3OssmState) -> i64 {
+    st.arena_ptr
+}
+
+pub fn qwen3_ossm_state_len(st: &Qwen3OssmState) -> i64 {
+    st.arena_len
+}
+
+pub fn qwen3_ossm_state_n_oct(st: &Qwen3OssmState) -> i64 {
+    st.n_oct
+}
+
+pub fn qwen3_ossm_state_layer_off(st: &Qwen3OssmState, layer: i64) -> i64 {
+    layer * st.n_oct * 32
+}
+
+pub fn qwen3_ossm_state_bytes(n_layers: i64, hidden: i64) -> i64 {
+    n_layers * hidden * 4
+}
+
+pub fn qwen3_ossm_state_alloc(n_layers: i64, hidden: i64) -> Qwen3OssmState with IO, Mut, Div {
+    if n_layers <= 0 || hidden <= 0 || (hidden % 8) != 0 {
+        return Qwen3OssmState {
+            arena_ptr: 0,
+            arena_len: 0,
+            n_layers: 0,
+            n_oct: 0,
+            b_st: 0,
+            ok: false,
+        }
+    }
+    let total_bytes = qwen3_ossm_state_bytes(n_layers, hidden) + 128 + 6 * hidden * 4 + 64
+    let arena = page_arena_alloc(total_bytes)
+    let a_ok = page_arena_is_ok(&arena)
+    let ptr = page_arena_ptr(&arena)
+    let len = page_arena_len(&arena)
+    if a_ok {
+        var i: i64 = 0
+        while i < len {
+            let _w = ptr_write_u8(ptr, i, 0)
+            i = i + 1
+        }
+        let PageArena { ptr: _ap, len: _al, ok: _ao } = arena
+        Qwen3OssmState {
+            arena_ptr: ptr,
+            arena_len: len,
+            n_layers: n_layers,
+            n_oct: hidden / 8,
+            b_st: 0,
+            ok: true,
+        }
+    } else {
+        let _f = page_arena_free(arena)
+        Qwen3OssmState {
+            arena_ptr: 0,
+            arena_len: 0,
+            n_layers: 0,
+            n_oct: 0,
+            b_st: 0,
+            ok: false,
+        }
+    }
+}
+
+pub fn qwen3_ossm_state_free(st: Qwen3OssmState) -> i64 with IO, Mut {
+    let Qwen3OssmState {
+        arena_ptr,
+        arena_len,
+        n_layers: _,
+        n_oct: _,
+        b_st: _,
+        ok: _,
+    } = st
+    if arena_ptr != 0 {
+        let arena = PageArena {
+            ptr: arena_ptr,
+            len: arena_len,
+            ok: true,
+        }
+        let _f = page_arena_free(arena)
+    }
+    0
+}
+
+pub fn qwen3_ossm_state_reset(st: &!Qwen3OssmState) -> bool with Mut {
+    if !st.ok || st.arena_ptr == 0 { return false }
+    var i: i64 = 0
+    while i < st.arena_len {
+        let _w = ptr_write_u8(st.arena_ptr, i, 0)
+        i = i + 1
+    }
+    true
+}
+
+pub fn qwen3_ossm_state_metal_free(sess: &MetalSession, ossm: &!Qwen3OssmState) with Mut {
+    if ossm.b_st > 0 {
+        let _f = metal_buffer_free(sess, ossm.b_st)
+        ossm.b_st = 0
+    }
+}
+
+// ============================================================================
+// Zero-Copy Sidecar O-SSM
+// ============================================================================
+
+fn ossm_copy_lit(buf: i64, p: i64, s: string) -> i64 with Mut {
+    let n = str_len(s)
+    var i: i64 = 0
+    while i < n {
+        let _w = ptr_write_u8(buf, p + i, str_char_at(s, i) & 255)
+        i = i + 1
+    }
+    p + n
+}
+
+fn ossm_copy_num(buf: i64, p: i64, n: i64) -> i64 with Mut, Div {
+    if n == 0 {
+        let _w = ptr_write_u8(buf, p, 48)
+        return p + 1
+    }
+    var digits: i64 = 0
+    var temp = n
+    while temp > 0 {
+        digits = digits + 1
+        temp = temp / 10
+    }
+    var pos = p + digits - 1
+    temp = n
+    while temp > 0 {
+        let d = temp % 10
+        let _w = ptr_write_u8(buf, pos, 48 + (d as i32))
+        pos = pos - 1
+        temp = temp / 10
+    }
+    p + digits
+}
+
+fn ossm_format_key_name(buf: i64, layer: i64, kind: i32) -> i64 with Mut, Div {
+    var p = ossm_copy_lit(buf, 0, "ossm.layers.")
+    p = ossm_copy_num(buf, p, layer)
+    if kind == 0 { p = ossm_copy_lit(buf, p, ".u_proj.weight") }
+    else if kind == 1 { p = ossm_copy_lit(buf, p, ".b_proj.weight") }
+    else if kind == 2 { p = ossm_copy_lit(buf, p, ".c_proj.weight") }
+    else if kind == 3 { p = ossm_copy_lit(buf, p, ".dt_proj.weight") }
+    else if kind == 4 { p = ossm_copy_lit(buf, p, ".alpha_proj.weight") }
+    else if kind == 5 { p = ossm_copy_lit(buf, p, ".out_proj.weight") }
+    p
+}
+
+pub linear struct Qwen3OssmSidecar {
+    pub shard: MappedShard,
+    pub meta: PageArena,
+    pub b_sidecar: i64,
+    pub n_layers: i64,
+    pub hidden: i64,
+    pub ok: bool,
+}
+
+pub fn qwen3_ossm_sidecar_empty() -> Qwen3OssmSidecar {
+    Qwen3OssmSidecar {
+        shard: MappedShard { ptr: 0, len: 0, ok: false },
+        meta: PageArena { ptr: 0, len: 0, ok: false },
+        b_sidecar: 0,
+        n_layers: 0,
+        hidden: 0,
+        ok: false,
+    }
+}
+
+pub fn qwen3_ossm_sidecar_is_ok(sidecar: &Qwen3OssmSidecar) -> bool {
+    sidecar.ok
+}
+
+pub fn qwen3_ossm_sidecar_has_layer(sidecar: &Qwen3OssmSidecar, layer: i64) -> bool {
+    if !sidecar.ok || layer < 0 || layer >= sidecar.n_layers { return false }
+    let m_ptr = page_arena_ptr(&sidecar.meta)
+    if m_ptr <= 0 { return false }
+    let found = ptr_read_i64_le(m_ptr, (layer * 6) * 32 + 24)
+    found == 1
+}
+
+pub fn qwen3_ossm_sidecar_free(sidecar: Qwen3OssmSidecar) -> i64 with IO, Mut {
+    let Qwen3OssmSidecar {
+        shard,
+        meta,
+        b_sidecar: _,
+        n_layers: _,
+        hidden: _,
+        ok: _,
+    } = sidecar
+    let _fm = page_arena_free(meta)
+    let _fc = mapped_shard_close(shard)
+    0
+}
+
+pub fn qwen3_ossm_sidecar_metal_free(sess: &MetalSession, sidecar: &!Qwen3OssmSidecar) with Mut {
+    if sidecar.b_sidecar > 0 {
+        let _f = metal_buffer_free(sess, sidecar.b_sidecar)
+        sidecar.b_sidecar = 0
+    }
+}
+
+pub fn qwen3_ossm_sidecar_open(path: string, n_layers: i64, hidden: i64) -> Qwen3OssmSidecar with IO, Mut, Alloc, Div, Panic {
+    let shard = if str_len(path) > 0 && n_layers > 0 && hidden > 0 {
+        mapped_shard_open(path)
+    } else {
+        MappedShard { ptr: 0, len: 0, ok: false }
+    }
+    let shard_ok = mapped_shard_is_ok(&shard)
+    let hdr = if shard_ok { st_mmap_parse_header(&shard) } else { StMmapHeader { hdr_len: 0, data_base_off: 0, ok: false } }
+    let meta_bytes = if shard_ok && hdr.ok { n_layers * 6 * 32 } else { 0 }
+    let meta = if meta_bytes > 0 { page_arena_alloc(meta_bytes) } else { PageArena { ptr: 0, len: 0, ok: false } }
+
+    var sidecar_ok = false
+    if shard_ok && hdr.ok && page_arena_is_ok(&meta) {
+        let m_ptr = page_arena_ptr(&meta)
+        var i: i64 = 0
+        while i < meta_bytes {
+            let _w = ptr_write_u8(m_ptr, i, 0)
+            i = i + 1
+        }
+
+        let name_buf = heap_alloc(128) as i64
+        var found_any = false
+
+        var l: i64 = 0
+        while l < n_layers {
+            var k: i32 = 0
+            var layer_complete = true
+            while k < 6 {
+                let n_len = ossm_format_key_name(name_buf, l, k)
+                let tv = st_mmap_find_tensor_bytes(&shard, &hdr, name_buf, n_len)
+                let slot_off = (l * 6 + (k as i64)) * 32
+                if tv.found && tv.rank == 2 && tv.d0 == hidden && tv.d1 == hidden {
+                    let _w0 = ptr_write_i64_le(m_ptr, slot_off + 0, tv.data_off)
+                    let _w1 = ptr_write_i64_le(m_ptr, slot_off + 8, tv.byte_len)
+                    let _w2 = ptr_write_i64_le(m_ptr, slot_off + 16, tv.dtype as i64)
+                    let _w3 = ptr_write_i64_le(m_ptr, slot_off + 24, 1)
+                } else {
+                    layer_complete = false
+                }
+                k = k + 1
+            }
+            if layer_complete {
+                found_any = true
+            } else {
+                var j: i64 = 0
+                while j < 6 {
+                    let slot_off = (l * 6 + j) * 32
+                    let _w3 = ptr_write_i64_le(m_ptr, slot_off + 24, 0)
+                    j = j + 1
+                }
+            }
+            l = l + 1
+        }
+
+        heap_free(name_buf as *mut u8)
+        sidecar_ok = found_any
+    }
+
+    Qwen3OssmSidecar {
+        shard: shard,
+        meta: meta,
+        b_sidecar: 0,
+        n_layers: n_layers,
+        hidden: hidden,
+        ok: sidecar_ok,
+    }
+}
+
+// ============================================================================
+// Hybrid Schedule & Selective Step (CPU)
+// ============================================================================
+
+pub fn qwen3_hybrid_layer_is_ossm(layer: i64, ossm_every: i64) -> bool with Div {
+    ossm_every > 0 && (layer % ossm_every) == (ossm_every - 1)
+}
+
+pub fn qwen3_ossm_step_cpu(
+    st: &!Qwen3OssmState,
+    layer: i64,
+    u_f32_ptr: i64,
+    alpha_f32_ptr: i64,
+    b_f32_ptr: i64,
+    dt_f32_ptr: i64,
+    c_f32_ptr: i64,
+    y_f32_ptr: i64
+) -> bool with Alloc, Mut, Div {
+    if !st.ok || layer < 0 || layer >= st.n_layers || u_f32_ptr == 0 || alpha_f32_ptr == 0
+        || b_f32_ptr == 0 || dt_f32_ptr == 0 || c_f32_ptr == 0 || y_f32_ptr == 0 {
+        return false
+    }
+
+    let scratch = st.arena_ptr + st.n_layers * st.n_oct * 32
+    let bu_ptr = scratch
+    let inj_ptr = scratch + 32
+    let h_new_ptr = scratch + 64
+
+    let layer_base = st.arena_ptr + qwen3_ossm_state_layer_off(st, layer)
+    var c: i64 = 0
+    while c < st.n_oct {
+        let h_c = layer_base + c * 32
+        let u_c = u_f32_ptr + c * 32
+        let alpha_c = alpha_f32_ptr + c * 32
+        let b_c = b_f32_ptr + c * 32
+        let dt_c = dt_f32_ptr + c * 32
+        let c_c = c_f32_ptr + c * 32
+        let y_c = y_f32_ptr + c * 32
+
+        // 1) Decay gate
+        let alpha_0 = ossm_read_f32(alpha_c, 0)
+        let decay = 1.0 / (1.0 + exp(0.0 - alpha_0))
+
+        // 2) Left-parenthesized inject: (B * U) * dt (NEVER reassociated!)
+        qwen3_ossm_oct_mul_f32(b_c, u_c, bu_ptr)
+        qwen3_ossm_oct_mul_f32(bu_ptr, dt_c, inj_ptr)
+
+        // 3) Update state: H_new = decay * H_prev + inj
+        var k: i64 = 0
+        while k < 8 {
+            let h_prev = ossm_read_f32(h_c, k)
+            let inj_k = ossm_read_f32(inj_ptr, k)
+            let h_new = decay * h_prev + inj_k
+            ossm_write_f32(h_c, k, h_new)
+            ossm_write_f32(h_new_ptr, k, h_new)
+            k = k + 1
+        }
+
+        // 4) Output: Y_c = C_c * H_new
+        qwen3_ossm_oct_mul_f32(c_c, h_new_ptr, y_c)
+
+        c = c + 1
+    }
+
+    true
+}
+
+// ============================================================================
+// Metal MSL Pipelines
+// ============================================================================
+
+pub struct OssmMetalPipelines {
+    pub pipe_step: i64,
+    pub ok: bool,
+}
+
+pub fn ossm_metal_pipelines_empty() -> OssmMetalPipelines {
+    OssmMetalPipelines {
+        pipe_step: 0,
+        ok: false,
+    }
+}
+
+pub fn emit_ossm_kernels_msl_cstr() -> i64 with Alloc, Mut {
+    let buf = heap_alloc(4096) as i64
+    var p: i64 = 0
+    p = bf16_cstr_append(buf, p, "#include <metal_stdlib>\nusing namespace metal;\n\n")
+    p = bf16_cstr_append(buf, p, "struct OctF32 {\n    float c0, c1, c2, c3, c4, c5, c6, c7;\n};\n\n")
+
+    p = bf16_cstr_append(buf, p, "static inline OctF32 msl_oct_mul(OctF32 a, OctF32 b) {\n    OctF32 r;\n")
+    p = bf16_cstr_append(buf, p, "    r.c0 = a.c0*b.c0 - a.c1*b.c1 - a.c2*b.c2 - a.c3*b.c3 - a.c4*b.c4 - a.c5*b.c5 - a.c6*b.c6 - a.c7*b.c7;\n")
+    p = bf16_cstr_append(buf, p, "    r.c1 = a.c0*b.c1 + a.c1*b.c0 + a.c2*b.c3 - a.c3*b.c2 + a.c4*b.c5 - a.c5*b.c4 - a.c6*b.c7 + a.c7*b.c6;\n")
+    p = bf16_cstr_append(buf, p, "    r.c2 = a.c0*b.c2 - a.c1*b.c3 + a.c2*b.c0 + a.c3*b.c1 + a.c4*b.c6 + a.c5*b.c7 - a.c6*b.c4 - a.c7*b.c5;\n")
+    p = bf16_cstr_append(buf, p, "    r.c3 = a.c0*b.c3 + a.c1*b.c2 - a.c2*b.c1 + a.c3*b.c0 + a.c4*b.c7 - a.c5*b.c6 + a.c6*b.c5 - a.c7*b.c4;\n")
+    p = bf16_cstr_append(buf, p, "    r.c4 = a.c0*b.c4 - a.c1*b.c5 - a.c2*b.c6 - a.c3*b.c7 + a.c4*b.c0 + a.c5*b.c1 + a.c6*b.c2 + a.c7*b.c3;\n")
+    p = bf16_cstr_append(buf, p, "    r.c5 = a.c0*b.c5 + a.c1*b.c4 - a.c2*b.c7 + a.c3*b.c6 - a.c4*b.c1 + a.c5*b.c0 - a.c6*b.c3 + a.c7*b.c2;\n")
+    p = bf16_cstr_append(buf, p, "    r.c6 = a.c0*b.c6 + a.c1*b.c7 + a.c2*b.c4 - a.c3*b.c5 - a.c4*b.c2 + a.c5*b.c3 + a.c6*b.c0 - a.c7*b.c1;\n")
+    p = bf16_cstr_append(buf, p, "    r.c7 = a.c0*b.c7 - a.c1*b.c6 + a.c2*b.c5 + a.c3*b.c4 - a.c4*b.c3 - a.c5*b.c2 + a.c6*b.c1 + a.c7*b.c0;\n")
+    p = bf16_cstr_append(buf, p, "    return r;\n}\n\n")
+
+    p = bf16_cstr_append(buf, p, "kernel void qwen3_ossm_step_f32(\n")
+    p = bf16_cstr_append(buf, p, "    device uchar* st_base [[buffer(0)]],\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* u_base [[buffer(1)]],\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* alpha_base [[buffer(2)]],\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* b_base [[buffer(3)]],\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* dt_base [[buffer(4)]],\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* c_base [[buffer(5)]],\n")
+    p = bf16_cstr_append(buf, p, "    device uchar* y_base [[buffer(6)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& st_off [[buffer(7)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& u_off [[buffer(8)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& alpha_off [[buffer(9)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& b_off [[buffer(10)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& dt_off [[buffer(11)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& c_off [[buffer(12)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& y_off [[buffer(13)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& n_oct [[buffer(14)]],\n")
+    p = bf16_cstr_append(buf, p, "    uint gid [[thread_position_in_grid]]) {\n")
+    p = bf16_cstr_append(buf, p, "    if ((ulong)gid >= n_oct) return;\n")
+    p = bf16_cstr_append(buf, p, "    ulong c = (ulong)gid;\n")
+    p = bf16_cstr_append(buf, p, "    device float* h_ptr = (device float*)(st_base + st_off) + c * 8;\n")
+    p = bf16_cstr_append(buf, p, "    device const float* u_ptr = (device const float*)(u_base + u_off) + c * 8;\n")
+    p = bf16_cstr_append(buf, p, "    device const float* alpha_ptr = (device const float*)(alpha_base + alpha_off) + c * 8;\n")
+    p = bf16_cstr_append(buf, p, "    device const float* b_ptr = (device const float*)(b_base + b_off) + c * 8;\n")
+    p = bf16_cstr_append(buf, p, "    device const float* dt_ptr = (device const float*)(dt_base + dt_off) + c * 8;\n")
+    p = bf16_cstr_append(buf, p, "    device const float* c_ptr = (device const float*)(c_base + c_off) + c * 8;\n")
+    p = bf16_cstr_append(buf, p, "    device float* y_ptr = (device float*)(y_base + y_off) + c * 8;\n\n")
+
+    p = bf16_cstr_append(buf, p, "    float decay = 1.0f / (1.0f + exp(-alpha_ptr[0]));\n")
+    p = bf16_cstr_append(buf, p, "    OctF32 B = {b_ptr[0], b_ptr[1], b_ptr[2], b_ptr[3], b_ptr[4], b_ptr[5], b_ptr[6], b_ptr[7]};\n")
+    p = bf16_cstr_append(buf, p, "    OctF32 U = {u_ptr[0], u_ptr[1], u_ptr[2], u_ptr[3], u_ptr[4], u_ptr[5], u_ptr[6], u_ptr[7]};\n")
+    p = bf16_cstr_append(buf, p, "    OctF32 DT = {dt_ptr[0], dt_ptr[1], dt_ptr[2], dt_ptr[3], dt_ptr[4], dt_ptr[5], dt_ptr[6], dt_ptr[7]};\n")
+    p = bf16_cstr_append(buf, p, "    OctF32 C = {c_ptr[0], c_ptr[1], c_ptr[2], c_ptr[3], c_ptr[4], c_ptr[5], c_ptr[6], c_ptr[7]};\n\n")
+
+    p = bf16_cstr_append(buf, p, "    OctF32 BU = msl_oct_mul(B, U);\n")
+    p = bf16_cstr_append(buf, p, "    OctF32 INJ = msl_oct_mul(BU, DT);\n\n")
+
+    p = bf16_cstr_append(buf, p, "    OctF32 H_new;\n")
+    p = bf16_cstr_append(buf, p, "    H_new.c0 = decay * h_ptr[0] + INJ.c0;\n")
+    p = bf16_cstr_append(buf, p, "    H_new.c1 = decay * h_ptr[1] + INJ.c1;\n")
+    p = bf16_cstr_append(buf, p, "    H_new.c2 = decay * h_ptr[2] + INJ.c2;\n")
+    p = bf16_cstr_append(buf, p, "    H_new.c3 = decay * h_ptr[3] + INJ.c3;\n")
+    p = bf16_cstr_append(buf, p, "    H_new.c4 = decay * h_ptr[4] + INJ.c4;\n")
+    p = bf16_cstr_append(buf, p, "    H_new.c5 = decay * h_ptr[5] + INJ.c5;\n")
+    p = bf16_cstr_append(buf, p, "    H_new.c6 = decay * h_ptr[6] + INJ.c6;\n")
+    p = bf16_cstr_append(buf, p, "    H_new.c7 = decay * h_ptr[7] + INJ.c7;\n\n")
+
+    p = bf16_cstr_append(buf, p, "    h_ptr[0] = H_new.c0;\n    h_ptr[1] = H_new.c1;\n    h_ptr[2] = H_new.c2;\n    h_ptr[3] = H_new.c3;\n")
+    p = bf16_cstr_append(buf, p, "    h_ptr[4] = H_new.c4;\n    h_ptr[5] = H_new.c5;\n    h_ptr[6] = H_new.c6;\n    h_ptr[7] = H_new.c7;\n\n")
+
+    p = bf16_cstr_append(buf, p, "    OctF32 Y = msl_oct_mul(C, H_new);\n")
+    p = bf16_cstr_append(buf, p, "    y_ptr[0] = Y.c0;\n    y_ptr[1] = Y.c1;\n    y_ptr[2] = Y.c2;\n    y_ptr[3] = Y.c3;\n")
+    p = bf16_cstr_append(buf, p, "    y_ptr[4] = Y.c4;\n    y_ptr[5] = Y.c5;\n    y_ptr[6] = Y.c6;\n    y_ptr[7] = Y.c7;\n}\n\n")
+
+    buf
+}
+
+pub fn ossm_metal_pipelines_compile(s: &MetalSession) -> OssmMetalPipelines with Alloc, Mut {
+    if !s.ok { return ossm_metal_pipelines_empty() }
+    let c_msl = emit_ossm_kernels_msl_cstr()
+    if c_msl == 0 { return ossm_metal_pipelines_empty() }
+    let p_step = metal_compile_msl_ptr(s, c_msl, "qwen3_ossm_step_f32")
+    heap_free(c_msl as *mut u8)
+    if p_step <= 0 {
+        return ossm_metal_pipelines_empty()
+    }
+    OssmMetalPipelines {
+        pipe_step: p_step,
+        ok: true,
+    }
+}
+
+pub fn ossm_metal_pipelines_compile_runner(rt: &Qwen3MetalRunner) -> OssmMetalPipelines with Alloc, Mut {
+    ossm_metal_pipelines_compile(&rt.sess)
+}
+
+pub fn qwen3_metal_encode_ossm_step(
+    s: &MetalSession,
+    cid: i64,
+    pipe: i64,
+    buf_st: i64, st_off: i64,
+    buf_u: i64, u_off: i64,
+    buf_alpha: i64, alpha_off: i64,
+    buf_b: i64, b_off: i64,
+    buf_dt: i64, dt_off: i64,
+    buf_c: i64, c_off: i64,
+    buf_y: i64, y_off: i64,
+    n_oct: i64
+) -> i64 {
+    if !s.ok || cid <= 0 || pipe <= 0 || buf_st <= 0 || buf_u <= 0 || buf_alpha <= 0
+        || buf_b <= 0 || buf_dt <= 0 || buf_c <= 0 || buf_y <= 0 || n_oct <= 0 {
+        return -1
+    }
+
+    if metal_cmd_set_buf(s, cid, 0, buf_st, 0) != 0
+        || metal_cmd_set_buf(s, cid, 1, buf_u, 0) != 0
+        || metal_cmd_set_buf(s, cid, 2, buf_alpha, 0) != 0
+        || metal_cmd_set_buf(s, cid, 3, buf_b, 0) != 0
+        || metal_cmd_set_buf(s, cid, 4, buf_dt, 0) != 0
+        || metal_cmd_set_buf(s, cid, 5, buf_c, 0) != 0
+        || metal_cmd_set_buf(s, cid, 6, buf_y, 0) != 0
+        || metal_cmd_set_u64(s, cid, 7, st_off) != 0
+        || metal_cmd_set_u64(s, cid, 8, u_off) != 0
+        || metal_cmd_set_u64(s, cid, 9, alpha_off) != 0
+        || metal_cmd_set_u64(s, cid, 10, b_off) != 0
+        || metal_cmd_set_u64(s, cid, 11, dt_off) != 0
+        || metal_cmd_set_u64(s, cid, 12, c_off) != 0
+        || metal_cmd_set_u64(s, cid, 13, y_off) != 0
+        || metal_cmd_set_u64(s, cid, 14, n_oct) != 0 {
+        return -1
+    }
+
+    let group_threads = if n_oct < 32 { n_oct } else { 32 }
+    if metal_cmd_dispatch_1d(s, cid, pipe, n_oct, group_threads) != 0 {
+        return -1
+    }
+    0
+}
+
+pub fn qwen3_metal_ossm_step(
+    s: &MetalSession,
+    pipe: i64,
+    buf_st: i64, st_off: i64,
+    buf_u: i64, u_off: i64,
+    buf_alpha: i64, alpha_off: i64,
+    buf_b: i64, b_off: i64,
+    buf_dt: i64, dt_off: i64,
+    buf_c: i64, c_off: i64,
+    buf_y: i64, y_off: i64,
+    n_oct: i64
+) -> i64 {
+    if !s.ok || pipe <= 0 || buf_st <= 0 || buf_u <= 0 || buf_alpha <= 0
+        || buf_b <= 0 || buf_dt <= 0 || buf_c <= 0 || buf_y <= 0 || n_oct <= 0 {
+        return -1
+    }
+    let cid = metal_cmd_begin(s)
+    if cid <= 0 { return -1 }
+
+    if qwen3_metal_encode_ossm_step(s, cid, pipe, buf_st, st_off, buf_u, u_off, buf_alpha, alpha_off, buf_b, b_off, buf_dt, dt_off, buf_c, c_off, buf_y, y_off, n_oct) != 0 {
+        let _c = metal_cmd_cancel(s, cid)
+        return -1
+    }
+
+    metal_cmd_commit_sync(s, cid)
+}
+
+// ============================================================================
+// CUDA PTX & Driver ABI
+// ============================================================================
+
+pub fn emit_ossm_kernels_ptx_cstr() -> i64 with Alloc, Mut {
+    emit_ossm_ptx_sm80_cstr()
+}
+
+pub fn qwen3_cuda_ossm_step(
+    s: &CudaDriverSession,
+    hfn: i64,
+    d_st: i64,
+    d_u: i64,
+    d_alpha: i64,
+    d_b: i64,
+    d_dt: i64,
+    d_c: i64,
+    d_y: i64,
+    n_oct: i64
+) -> i64 with Alloc {
+    cuda_launch_8param_1d(s, hfn, n_oct, 1, d_st, d_u, d_alpha, d_b, d_dt, d_c, d_y, n_oct)
+}
+
+// ============================================================================
+// Internal CPU Neural Computation Helpers for Forward Pass
+// ============================================================================
+
+fn ossm_cpu_rmsnorm(
+    x_ptr: i64,
+    w_ptr: i64,
+    w_dtype: i32,
+    out_ptr: i64,
+    n_groups: i64,
+    dim: i64,
+    eps: f64
+) with Mut, Div, Panic {
+    if x_ptr <= 0 || w_ptr <= 0 || out_ptr <= 0 || n_groups <= 0 || dim <= 0 { return }
+    var g: i64 = 0
+    while g < n_groups {
+        let in_head = x_ptr + g * dim * 4
+        let out_head = out_ptr + g * dim * 4
+        var sum_sq: f64 = 0.0
+        var i: i64 = 0
+        while i < dim {
+            let v = ossm_read_f32(in_head, i)
+            sum_sq = sum_sq + v * v
+            i = i + 1
+        }
+        let inv_rms = 1.0 / sqrt(sum_sq / (dim as f64) + eps)
+        i = 0
+        while i < dim {
+            let v = ossm_read_f32(in_head, i)
+            let w = if w_dtype == 2 {
+                bf16_bits_to_f64_exact(ptr_read_u16_le(w_ptr, i * 2))
+            } else {
+                ossm_read_f32(w_ptr, i)
+            }
+            let res = v * inv_rms * w
+            ossm_write_f32(out_head, i, res)
+            i = i + 1
+        }
+        g = g + 1
+    }
+}
+
+fn ossm_cpu_gemv(
+    w_ptr: i64,
+    w_dtype: i32,
+    x_ptr: i64,
+    y_ptr: i64,
+    out_dim: i64,
+    in_dim: i64
+) with Mut, Div {
+    if w_ptr <= 0 || x_ptr <= 0 || y_ptr <= 0 || out_dim <= 0 || in_dim <= 0 { return }
+    let w_elem_bytes: i64 = if w_dtype == 2 { 2 } else { 4 }
+    var r: i64 = 0
+    while r < out_dim {
+        let row_p = w_ptr + r * in_dim * w_elem_bytes
+        var sum: f64 = 0.0
+        var c: i64 = 0
+        while c < in_dim {
+            let xv = ossm_read_f32(x_ptr, c)
+            let wv = if w_dtype == 2 {
+                bf16_bits_to_f64_exact(ptr_read_u16_le(row_p, c * 2))
+            } else {
+                ossm_read_f32(row_p, c)
+            }
+            sum = sum + wv * xv
+            c = c + 1
+        }
+        ossm_write_f32(y_ptr, r, sum)
+        r = r + 1
+    }
+}
+
+fn ossm_cpu_rope(
+    v_ptr: i64,
+    n_heads: i64,
+    head_dim: i64,
+    pos: i64,
+    theta: f64
+) with Mut, Div, Panic {
+    if v_ptr <= 0 || n_heads <= 0 || head_dim <= 0 { return }
+    let half = head_dim / 2
+    if half <= 0 { return }
+    var h: i64 = 0
+    while h < n_heads {
+        let h_base = v_ptr + h * head_dim * 4
+        var j: i64 = 0
+        while j < half {
+            let freq = 1.0 / pow(theta, (2.0 * (j as f64)) / (head_dim as f64))
+            let angle = (pos as f64) * freq
+            let cos_a = cos(angle)
+            let sin_a = sin(angle)
+            let x0 = ossm_read_f32(h_base, j)
+            let x1 = ossm_read_f32(h_base, j + half)
+            let y0 = x0 * cos_a - x1 * sin_a
+            let y1 = x1 * cos_a + x0 * sin_a
+            ossm_write_f32(h_base, j, y0)
+            ossm_write_f32(h_base, j + half, y1)
+            j = j + 1
+        }
+        h = h + 1
+    }
+}
+
+fn ossm_cpu_paged_gqa(
+    q_ptr: i64,
+    kv: &Qwen3PagedKv,
+    layer: i64,
+    out_ptr: i64,
+    n_q: i64,
+    n_kv: i64,
+    head_dim: i64,
+    pos: i64
+) with Mut, Div, Panic {
+    if q_ptr <= 0 || out_ptr <= 0 || n_q <= 0 || n_kv <= 0 || head_dim <= 0 || pos < 0 { return }
+    let scale = 1.0 / sqrt(head_dim as f64)
+    let group_size = n_q / n_kv
+    let seq_len = pos + 1
+
+    var qh: i64 = 0
+    while qh < n_q {
+        let kvh = qh / group_size
+        let q_head_ptr = q_ptr + qh * head_dim * 4
+
+        var max_s: f64 = -1e30
+        var t: i64 = 0
+        while t < seq_len {
+            var dot: f64 = 0.0
+            var d: i64 = 0
+            while d < head_dim {
+                let qd = ossm_read_f32(q_head_ptr, d)
+                let kd = qwen3_kv_read_k_f64(kv, layer, t, kvh, d)
+                dot = dot + qd * kd
+                d = d + 1
+            }
+            let s = dot * scale
+            if s > max_s { max_s = s }
+            t = t + 1
+        }
+
+        var sum_exp: f64 = 0.0
+        t = 0
+        while t < seq_len {
+            var dot: f64 = 0.0
+            var d: i64 = 0
+            while d < head_dim {
+                let qd = ossm_read_f32(q_head_ptr, d)
+                let kd = qwen3_kv_read_k_f64(kv, layer, t, kvh, d)
+                dot = dot + qd * kd
+                d = d + 1
+            }
+            let s = dot * scale
+            sum_exp = sum_exp + exp(s - max_s)
+            t = t + 1
+        }
+        if sum_exp <= 0.0 { sum_exp = 1.0 }
+
+        var d: i64 = 0
+        while d < head_dim {
+            var accum: f64 = 0.0
+            t = 0
+            while t < seq_len {
+                var dot: f64 = 0.0
+                var di: i64 = 0
+                while di < head_dim {
+                    let qd = ossm_read_f32(q_head_ptr, di)
+                    let kd = qwen3_kv_read_k_f64(kv, layer, t, kvh, di)
+                    dot = dot + qd * kd
+                    di = di + 1
+                }
+                let s = dot * scale
+                let weight = exp(s - max_s) / sum_exp
+                let vd = qwen3_kv_read_v_f64(kv, layer, t, kvh, d)
+                accum = accum + weight * vd
+                t = t + 1
+            }
+            ossm_write_f32(out_ptr, qh * head_dim + d, accum)
+            d = d + 1
+        }
+
+        qh = qh + 1
+    }
+}
+
+fn ossm_cpu_swiglu(gate_ptr: i64, up_ptr: i64, out_ptr: i64, inter_dim: i64) with Mut, Div {
+    if gate_ptr <= 0 || up_ptr <= 0 || out_ptr <= 0 || inter_dim <= 0 { return }
+    var j: i64 = 0
+    while j < inter_dim {
+        let g = ossm_read_f32(gate_ptr, j)
+        let u = ossm_read_f32(up_ptr, j)
+        let silu_g = g / (1.0 + exp(0.0 - g))
+        let out = silu_g * u
+        ossm_write_f32(out_ptr, j, out)
+        j = j + 1
+    }
+}
+
+fn ossm_cpu_vec_add(a_ptr: i64, b_ptr: i64, len: i64) with Mut, Div {
+    if a_ptr <= 0 || b_ptr <= 0 || len <= 0 { return }
+    var i: i64 = 0
+    while i < len {
+        let va = ossm_read_f32(a_ptr, i)
+        let vb = ossm_read_f32(b_ptr, i)
+        ossm_write_f32(a_ptr, i, va + vb)
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// Hybrid Forward Wrapper
+// ============================================================================
+
+fn ossm_model_write_top2_cpu(m: &Qwen3Model) -> i64 with Mut {
+    if !m.ok || m.cfg.vocab <= 0 { return 0 }
+    let a_base = page_arena_ptr(&m.arena)
+    let base = a_base + m.buf_logits_off
+    let out = a_base + m.buf_top2_off
+    var t1_id: i64 = 0
+    var t1_v = f32_bits_to_f64(ptr_read_u32_le(base, 0))
+    var t1_bits = ptr_read_u32_le(base, 0)
+    var t2_id: i64 = 0
+    var t2_v = t1_v
+    var t2_bits = t1_bits
+    if m.cfg.vocab >= 2 {
+        let b1 = ptr_read_u32_le(base, 4)
+        let v1 = f32_bits_to_f64(b1)
+        if v1 > t1_v {
+            t2_id = t1_id
+            t2_v = t1_v
+            t2_bits = t1_bits
+            t1_id = 1
+            t1_v = v1
+            t1_bits = b1
+        } else {
+            t2_id = 1
+            t2_v = v1
+            t2_bits = b1
+        }
+        var i: i64 = 2
+        while i < m.cfg.vocab {
+            let bi = ptr_read_u32_le(base, i * 4)
+            let v = f32_bits_to_f64(bi)
+            if v > t1_v {
+                t2_id = t1_id
+                t2_v = t1_v
+                t2_bits = t1_bits
+                t1_id = i
+                t1_v = v
+                t1_bits = bi
+            } else if v > t2_v {
+                t2_id = i
+                t2_v = v
+                t2_bits = bi
+            }
+            i = i + 1
+        }
+    }
+    let _w0 = ptr_write_i64_le(out, 0, t1_id)
+    let _w1 = ptr_write_i64_le(out, 8, t2_id)
+    let _w2 = ptr_write_u32_le(out, 16, t1_bits)
+    let _w3 = ptr_write_u32_le(out, 20, t2_bits)
+    0
+}
+
+pub fn qwen3_hybrid_forward_token_cpu_sidecar(
+    m: &Qwen3Model,
+    kv: &!Qwen3PagedKv,
+    ossm: &!Qwen3OssmState,
+    sidecar: &Qwen3OssmSidecar,
+    ossm_every: i64,
+    token_id: i64,
+    pos: i64,
+    compute_logits: bool,
+    last_assoc_out_ptr: i64
+) -> bool with Alloc, Mut, Div, Panic {
+    if !qwen3_model_is_ok(m) || !qwen3_kv_is_ok(kv) || token_id < 0 || token_id >= m.cfg.vocab || pos < 0 {
+        return false
+    }
+
+    let a_base = qwen3_model_work_ptr(m)
+    let buf_x = a_base + m.buf_x_off
+    let buf_h = a_base + m.buf_h_off
+    let buf_q = a_base + m.buf_q_off
+    let buf_k = a_base + m.buf_k_off
+    let buf_v = a_base + m.buf_v_off
+    let buf_attn_out = a_base + m.buf_attn_out_off
+    let buf_gate = a_base + m.buf_gate_off
+    let buf_up = a_base + m.buf_up_off
+    let buf_logits = a_base + m.buf_logits_off
+
+    let emb_ptr = ossm_model_tensor_host_ptr(m, 0)
+    let emb_dt = ossm_model_tensor_dtype(m, 0)
+    let emb_elem_b = if emb_dt == 2 { 2 } else { 4 }
+    let row_p = emb_ptr + token_id * m.cfg.hidden * emb_elem_b
+
+    var i: i64 = 0
+    while i < m.cfg.hidden {
+        let v = if emb_dt == 2 {
+            bf16_bits_to_f64_exact(ptr_read_u16_le(row_p, i * 2))
+        } else {
+            ossm_read_f32(row_p, i)
+        }
+        ossm_write_f32(buf_x, i, v)
+        i = i + 1
+    }
+
+    let kv_dim = m.cfg.n_kv * m.cfg.head_dim
+    let q_dim = m.cfg.n_q * m.cfg.head_dim
+
+    var has_any_ossm = false
+    var l: i64 = 0
+    while l < m.cfg.layers {
+        let slot_base = 3 + l * 11
+
+        let in_norm_p = ossm_model_tensor_host_ptr(m, slot_base + 0)
+        let in_norm_dt = ossm_model_tensor_dtype(m, slot_base + 0)
+        ossm_cpu_rmsnorm(buf_x, in_norm_p, in_norm_dt, buf_h, 1, m.cfg.hidden, m.cfg.eps)
+
+        let is_ossm = qwen3_hybrid_layer_is_ossm(l, ossm_every)
+        let has_sidecar_layer = is_ossm && sidecar.ok && qwen3_ossm_sidecar_has_layer(sidecar, l)
+
+        if has_sidecar_layer {
+            has_any_ossm = true
+            let meta_p = page_arena_ptr(&sidecar.meta)
+            let u_off = ptr_read_i64_le(meta_p, (l * 6 + 0) * 32 + 0)
+            let u_dt = ptr_read_i64_le(meta_p, (l * 6 + 0) * 32 + 16) as i32
+            let u_w_ptr = mapped_shard_ptr(&sidecar.shard) + u_off
+
+            let b_off = ptr_read_i64_le(meta_p, (l * 6 + 1) * 32 + 0)
+            let b_dt = ptr_read_i64_le(meta_p, (l * 6 + 1) * 32 + 16) as i32
+            let b_w_ptr = mapped_shard_ptr(&sidecar.shard) + b_off
+
+            let c_off = ptr_read_i64_le(meta_p, (l * 6 + 2) * 32 + 0)
+            let c_dt = ptr_read_i64_le(meta_p, (l * 6 + 2) * 32 + 16) as i32
+            let c_w_ptr = mapped_shard_ptr(&sidecar.shard) + c_off
+
+            let dt_off = ptr_read_i64_le(meta_p, (l * 6 + 3) * 32 + 0)
+            let dt_dt = ptr_read_i64_le(meta_p, (l * 6 + 3) * 32 + 16) as i32
+            let dt_w_ptr = mapped_shard_ptr(&sidecar.shard) + dt_off
+
+            let alpha_off = ptr_read_i64_le(meta_p, (l * 6 + 4) * 32 + 0)
+            let alpha_dt = ptr_read_i64_le(meta_p, (l * 6 + 4) * 32 + 16) as i32
+            let alpha_w_ptr = mapped_shard_ptr(&sidecar.shard) + alpha_off
+
+            let out_off = ptr_read_i64_le(meta_p, (l * 6 + 5) * 32 + 0)
+            let out_dt = ptr_read_i64_le(meta_p, (l * 6 + 5) * 32 + 16) as i32
+            let out_w_ptr = mapped_shard_ptr(&sidecar.shard) + out_off
+
+            let tail_base = m.cfg.layers * m.cfg.hidden * 4 + 128
+            let u_ptr = ossm.arena_ptr + tail_base + 0 * m.cfg.hidden * 4
+            let b_ptr = ossm.arena_ptr + tail_base + 1 * m.cfg.hidden * 4
+            let c_ptr = ossm.arena_ptr + tail_base + 2 * m.cfg.hidden * 4
+            let dt_ptr = ossm.arena_ptr + tail_base + 3 * m.cfg.hidden * 4
+            let alpha_ptr = ossm.arena_ptr + tail_base + 4 * m.cfg.hidden * 4
+            let y_ptr = ossm.arena_ptr + tail_base + 5 * m.cfg.hidden * 4
+
+            ossm_cpu_gemv(u_w_ptr, u_dt, buf_h, u_ptr, m.cfg.hidden, m.cfg.hidden)
+            ossm_cpu_gemv(b_w_ptr, b_dt, buf_h, b_ptr, m.cfg.hidden, m.cfg.hidden)
+            ossm_cpu_gemv(c_w_ptr, c_dt, buf_h, c_ptr, m.cfg.hidden, m.cfg.hidden)
+            ossm_cpu_gemv(dt_w_ptr, dt_dt, buf_h, dt_ptr, m.cfg.hidden, m.cfg.hidden)
+            ossm_cpu_gemv(alpha_w_ptr, alpha_dt, buf_h, alpha_ptr, m.cfg.hidden, m.cfg.hidden)
+
+            let step_ok = qwen3_ossm_step_cpu(ossm, l, u_ptr, alpha_ptr, b_ptr, dt_ptr, c_ptr, y_ptr)
+            if !step_ok { return false }
+
+            ossm_cpu_gemv(out_w_ptr, out_dt, y_ptr, buf_h, m.cfg.hidden, m.cfg.hidden)
+            ossm_cpu_vec_add(buf_x, buf_h, m.cfg.hidden)
+        } else {
+            let q_p = ossm_model_tensor_host_ptr(m, slot_base + 1)
+            let q_dt = ossm_model_tensor_dtype(m, slot_base + 1)
+            ossm_cpu_gemv(q_p, q_dt, buf_h, buf_q, q_dim, m.cfg.hidden)
+
+            let k_p = ossm_model_tensor_host_ptr(m, slot_base + 2)
+            let k_dt = ossm_model_tensor_dtype(m, slot_base + 2)
+            ossm_cpu_gemv(k_p, k_dt, buf_h, buf_k, kv_dim, m.cfg.hidden)
+
+            let v_p = ossm_model_tensor_host_ptr(m, slot_base + 3)
+            let v_dt = ossm_model_tensor_dtype(m, slot_base + 3)
+            ossm_cpu_gemv(v_p, v_dt, buf_h, buf_v, kv_dim, m.cfg.hidden)
+
+            if is_ossm && ossm.ok {
+                has_any_ossm = true
+                let u_ptr = buf_q
+                let b_ptr = buf_gate
+                let c_ptr = buf_gate + m.cfg.hidden * 4
+                let dt_ptr = buf_up
+                let alpha_ptr = buf_up + m.cfg.hidden * 4
+
+                var j: i64 = 0
+                while j < m.cfg.hidden {
+                    let kv_idx = if kv_dim > 0 { j % kv_dim } else { 0 }
+                    let kv_idx_dt = if kv_dim > 0 { (j + 4) % kv_dim } else { 0 }
+                    let bk = ossm_read_f32(buf_k, kv_idx)
+                    let ck = ossm_read_f32(buf_v, kv_idx)
+                    let dtk = ossm_read_f32(buf_v, kv_idx_dt)
+                    let alk = ossm_read_f32(buf_h, j)
+                    ossm_write_f32(b_ptr, j, bk)
+                    ossm_write_f32(c_ptr, j, ck)
+                    ossm_write_f32(dt_ptr, j, dtk)
+                    ossm_write_f32(alpha_ptr, j, alk)
+                    j = j + 1
+                }
+
+                let step_ok = qwen3_ossm_step_cpu(ossm, l, u_ptr, alpha_ptr, b_ptr, dt_ptr, c_ptr, buf_attn_out)
+                if !step_ok { return false }
+
+                if q_dim > m.cfg.hidden {
+                    var p_i = m.cfg.hidden
+                    while p_i < q_dim {
+                        ossm_write_f32(buf_attn_out, p_i, 0.0)
+                        p_i = p_i + 1
+                    }
+                }
+            } else {
+                let q_norm_p = ossm_model_tensor_host_ptr(m, slot_base + 5)
+                let q_norm_dt = ossm_model_tensor_dtype(m, slot_base + 5)
+                ossm_cpu_rmsnorm(buf_q, q_norm_p, q_norm_dt, buf_q, m.cfg.n_q, m.cfg.head_dim, m.cfg.eps)
+
+                let k_norm_p = ossm_model_tensor_host_ptr(m, slot_base + 6)
+                let k_norm_dt = ossm_model_tensor_dtype(m, slot_base + 6)
+                ossm_cpu_rmsnorm(buf_k, k_norm_p, k_norm_dt, buf_k, m.cfg.n_kv, m.cfg.head_dim, m.cfg.eps)
+
+                ossm_cpu_rope(buf_q, m.cfg.n_q, m.cfg.head_dim, pos, m.cfg.rope_theta)
+                ossm_cpu_rope(buf_k, m.cfg.n_kv, m.cfg.head_dim, pos, m.cfg.rope_theta)
+
+                let wk_ok = qwen3_kv_write_kv_f32_buf(kv, l, pos, buf_k, buf_v)
+                if !wk_ok { return false }
+
+                ossm_cpu_paged_gqa(buf_q, kv, l, buf_attn_out, m.cfg.n_q, m.cfg.n_kv, m.cfg.head_dim, pos)
+            }
+
+            let o_p = ossm_model_tensor_host_ptr(m, slot_base + 4)
+            let o_dt = ossm_model_tensor_dtype(m, slot_base + 4)
+            ossm_cpu_gemv(o_p, o_dt, buf_attn_out, buf_h, m.cfg.hidden, q_dim)
+            ossm_cpu_vec_add(buf_x, buf_h, m.cfg.hidden)
+        }
+
+        let post_p = ossm_model_tensor_host_ptr(m, slot_base + 7)
+        let post_dt = ossm_model_tensor_dtype(m, slot_base + 7)
+        ossm_cpu_rmsnorm(buf_x, post_p, post_dt, buf_h, 1, m.cfg.hidden, m.cfg.eps)
+
+        let gate_p = ossm_model_tensor_host_ptr(m, slot_base + 8)
+        let gate_dt = ossm_model_tensor_dtype(m, slot_base + 8)
+        ossm_cpu_gemv(gate_p, gate_dt, buf_h, buf_gate, m.cfg.inter, m.cfg.hidden)
+
+        let up_p = ossm_model_tensor_host_ptr(m, slot_base + 9)
+        let up_dt = ossm_model_tensor_dtype(m, slot_base + 9)
+        ossm_cpu_gemv(up_p, up_dt, buf_h, buf_up, m.cfg.inter, m.cfg.hidden)
+
+        ossm_cpu_swiglu(buf_gate, buf_up, buf_gate, m.cfg.inter)
+
+        let down_p = ossm_model_tensor_host_ptr(m, slot_base + 10)
+        let down_dt = ossm_model_tensor_dtype(m, slot_base + 10)
+        ossm_cpu_gemv(down_p, down_dt, buf_gate, buf_h, m.cfg.hidden, m.cfg.inter)
+        ossm_cpu_vec_add(buf_x, buf_h, m.cfg.hidden)
+
+        l = l + 1
+    }
+
+    if compute_logits {
+        let norm_p = ossm_model_tensor_host_ptr(m, 1)
+        let norm_dt = ossm_model_tensor_dtype(m, 1)
+        ossm_cpu_rmsnorm(buf_x, norm_p, norm_dt, buf_h, 1, m.cfg.hidden, m.cfg.eps)
+
+        let lm_p = ossm_model_tensor_host_ptr(m, 2)
+        let lm_dt = ossm_model_tensor_dtype(m, 2)
+        ossm_cpu_gemv(lm_p, lm_dt, buf_h, buf_logits, m.cfg.vocab, m.cfg.hidden)
+
+        let _top2 = ossm_model_write_top2_cpu(m)
+    }
+
+    if last_assoc_out_ptr != 0 && has_any_ossm {
+        if sidecar.ok {
+            let tail_base = m.cfg.layers * m.cfg.hidden * 4 + 128
+            let u_ptr = ossm.arena_ptr + tail_base + 0 * m.cfg.hidden * 4
+            let b_ptr = ossm.arena_ptr + tail_base + 1 * m.cfg.hidden * 4
+            let dt_ptr = ossm.arena_ptr + tail_base + 3 * m.cfg.hidden * 4
+            let assoc = qwen3_ossm_associator_l2(b_ptr, u_ptr, dt_ptr, ossm.n_oct)
+            ossm_write_f32(last_assoc_out_ptr, 0, assoc)
+        } else {
+            let u_ptr = buf_q
+            let b_ptr = buf_gate
+            let dt_ptr = buf_up
+            let assoc = qwen3_ossm_associator_l2(b_ptr, u_ptr, dt_ptr, ossm.n_oct)
+            ossm_write_f32(last_assoc_out_ptr, 0, assoc)
+        }
+    }
+
+    true
+}
+
+pub fn qwen3_hybrid_forward_token_cpu(
+    m: &Qwen3Model,
+    kv: &!Qwen3PagedKv,
+    ossm: &!Qwen3OssmState,
+    ossm_every: i64,
+    token_id: i64,
+    pos: i64,
+    last_assoc_out_ptr: i64
+) -> bool with Alloc, Mut, Div, Panic, IO {
+    let dummy = qwen3_ossm_sidecar_empty()
+    let res = qwen3_hybrid_forward_token_cpu_sidecar(m, kv, ossm, &dummy, ossm_every, token_id, pos, true, last_assoc_out_ptr)
+    let _fd = qwen3_ossm_sidecar_free(dummy)
+    res
+}
+
+fn ossm_metal_shard_buf(rt: &Qwen3MetalRunner, shard_idx: i64) -> i64 {
+    if shard_idx == 0 { return rt.b_s0 }
+    if shard_idx == 1 { return rt.b_s1 }
+    if shard_idx == 2 { return rt.b_s2 }
+    if shard_idx == 3 { return rt.b_s3 }
+    if shard_idx == 4 { return rt.b_s4 }
+    if shard_idx == 5 { return rt.b_s5 }
+    if shard_idx == 6 { return rt.b_s6 }
+    if shard_idx == 7 { return rt.b_s7 }
+    0
+}
+
+pub fn qwen3_hybrid_forward_token_metal_sidecar(
+    m: &Qwen3Model,
+    kv: &!Qwen3PagedKv,
+    ossm: &!Qwen3OssmState,
+    sidecar: &!Qwen3OssmSidecar,
+    rt: &Qwen3MetalRunner,
+    ossm_pipe: i64,
+    ossm_every: i64,
+    token_id: i64,
+    pos: i64,
+    compute_logits: bool,
+    last_assoc_out_ptr: i64
+) -> bool with Alloc, Mut, Div, Panic {
+    if !m.ok || !rt.ok || !qwen3_kv_is_ok(kv) || token_id < 0 || token_id >= m.cfg.vocab || pos < 0 {
+        return false
+    }
+    if !qwen3_kv_ensure_pos(kv, pos) {
+        return false
+    }
+
+    if ossm.ok && ossm.b_st <= 0 && metal_session_is_ok(&rt.sess) {
+        ossm.b_st = metal_buffer_nocopy(&rt.sess, ossm.arena_ptr, ossm.arena_len)
+    }
+    if sidecar.ok && sidecar.b_sidecar <= 0 && metal_session_is_ok(&rt.sess) {
+        sidecar.b_sidecar = metal_buffer_nocopy(&rt.sess, mapped_shard_ptr(&sidecar.shard), mapped_shard_len(&sidecar.shard))
+    }
+
+    var pipe_ossm = ossm_pipe
+    if pipe_ossm <= 0 && metal_session_is_ok(&rt.sess) {
+        let opipes = ossm_metal_pipelines_compile(&rt.sess)
+        pipe_ossm = opipes.pipe_step
+    }
+
+    let a_base = page_arena_ptr(&m.arena)
+    let buf_x = a_base + m.buf_x_off
+
+    let emb_ptr = ossm_model_tensor_host_ptr(m, 0)
+    let emb_dt = ossm_model_tensor_dtype(m, 0)
+    let emb_elem_b = if emb_dt == 2 { 2 } else { 4 }
+    let row_p = emb_ptr + token_id * m.cfg.hidden * emb_elem_b
+
+    var i: i64 = 0
+    while i < m.cfg.hidden {
+        let v = if emb_dt == 2 {
+            bf16_bits_to_f64_exact(ptr_read_u16_le(row_p, i * 2))
+        } else {
+            f32_bits_to_f64(ptr_read_u32_le(row_p, i * 4))
+        }
+        let _w = ptr_write_u32_le(buf_x, i * 4, f64_to_f32_bits(v))
+        i = i + 1
+    }
+
+    let eps_bits = f64_to_f32_bits(m.cfg.eps)
+    let theta_bits = f64_to_f32_bits(m.cfg.rope_theta)
+    let kv_dim = m.cfg.n_kv * m.cfg.head_dim
+    let q_dim = m.cfg.n_q * m.cfg.head_dim
+
+    var cid = metal_cmd_begin(&rt.sess)
+    if cid <= 0 { return false }
+
+    var has_any_ossm = false
+    var l: i64 = 0
+    while l < m.cfg.layers {
+        let slot_base = 3 + l * 11
+        let is_ossm = qwen3_hybrid_layer_is_ossm(l, ossm_every)
+        let has_sidecar_layer = is_ossm && sidecar.ok && qwen3_ossm_sidecar_has_layer(sidecar, l)
+
+        let in_norm_s = ossm_metal_shard_buf(rt, ossm_model_tensor_shard_idx(m, slot_base + 0))
+        let in_norm_off = ossm_model_tensor_data_off(m, slot_base + 0)
+        let in_norm_dt = ossm_model_tensor_dtype(m, slot_base + 0)
+        let in_norm_pipe = if in_norm_dt == 2 { rt.pipes.rmsnorm_bf16 } else { rt.pipes.rmsnorm_f32 }
+        if qwen3_metal_encode_rmsnorm(
+            &rt.sess, cid, in_norm_pipe,
+            rt.b_work, m.buf_x_off,
+            in_norm_s, in_norm_off,
+            rt.b_work, m.buf_h_off,
+            1, m.cfg.hidden, eps_bits
+        ) != 0 {
+            let _c = metal_cmd_cancel(&rt.sess, cid)
+            return false
+        }
+
+        if has_sidecar_layer && ossm.ok && ossm.b_st > 0 && sidecar.b_sidecar > 0 && pipe_ossm > 0 {
+            has_any_ossm = true
+            let meta_p = page_arena_ptr(&sidecar.meta)
+            let u_off = ptr_read_i64_le(meta_p, (l * 6 + 0) * 32 + 0)
+            let u_dt = ptr_read_i64_le(meta_p, (l * 6 + 0) * 32 + 16)
+            let u_pipe = if u_dt == 2 { rt.pipes.gemv_bf16 } else { rt.pipes.gemv_f32 }
+
+            let b_off = ptr_read_i64_le(meta_p, (l * 6 + 1) * 32 + 0)
+            let b_dt = ptr_read_i64_le(meta_p, (l * 6 + 1) * 32 + 16)
+            let b_pipe = if b_dt == 2 { rt.pipes.gemv_bf16 } else { rt.pipes.gemv_f32 }
+
+            let c_off = ptr_read_i64_le(meta_p, (l * 6 + 2) * 32 + 0)
+            let c_dt = ptr_read_i64_le(meta_p, (l * 6 + 2) * 32 + 16)
+            let c_pipe = if c_dt == 2 { rt.pipes.gemv_bf16 } else { rt.pipes.gemv_f32 }
+
+            let dt_off = ptr_read_i64_le(meta_p, (l * 6 + 3) * 32 + 0)
+            let dt_dt = ptr_read_i64_le(meta_p, (l * 6 + 3) * 32 + 16)
+            let dt_pipe = if dt_dt == 2 { rt.pipes.gemv_bf16 } else { rt.pipes.gemv_f32 }
+
+            let alpha_off = ptr_read_i64_le(meta_p, (l * 6 + 4) * 32 + 0)
+            let alpha_dt = ptr_read_i64_le(meta_p, (l * 6 + 4) * 32 + 16)
+            let alpha_pipe = if alpha_dt == 2 { rt.pipes.gemv_bf16 } else { rt.pipes.gemv_f32 }
+
+            let out_off = ptr_read_i64_le(meta_p, (l * 6 + 5) * 32 + 0)
+            let out_dt = ptr_read_i64_le(meta_p, (l * 6 + 5) * 32 + 16)
+            let out_pipe = if out_dt == 2 { rt.pipes.gemv_bf16 } else { rt.pipes.gemv_f32 }
+
+            let tail_base = m.cfg.layers * m.cfg.hidden * 4 + 128
+            let off_u = tail_base + 0 * m.cfg.hidden * 4
+            let off_b = tail_base + 1 * m.cfg.hidden * 4
+            let off_c = tail_base + 2 * m.cfg.hidden * 4
+            let off_dt = tail_base + 3 * m.cfg.hidden * 4
+            let off_alpha = tail_base + 4 * m.cfg.hidden * 4
+            let off_y = tail_base + 5 * m.cfg.hidden * 4
+
+            if qwen3_metal_encode_gemv(&rt.sess, cid, u_pipe, sidecar.b_sidecar, u_off, rt.b_work, m.buf_h_off, ossm.b_st, off_u, m.cfg.hidden, m.cfg.hidden) != 0 {
+                let _c = metal_cmd_cancel(&rt.sess, cid)
+                return false
+            }
+            if qwen3_metal_encode_gemv(&rt.sess, cid, b_pipe, sidecar.b_sidecar, b_off, rt.b_work, m.buf_h_off, ossm.b_st, off_b, m.cfg.hidden, m.cfg.hidden) != 0 {
+                let _c = metal_cmd_cancel(&rt.sess, cid)
+                return false
+            }
+            if qwen3_metal_encode_gemv(&rt.sess, cid, c_pipe, sidecar.b_sidecar, c_off, rt.b_work, m.buf_h_off, ossm.b_st, off_c, m.cfg.hidden, m.cfg.hidden) != 0 {
+                let _c = metal_cmd_cancel(&rt.sess, cid)
+                return false
+            }
+            if qwen3_metal_encode_gemv(&rt.sess, cid, dt_pipe, sidecar.b_sidecar, dt_off, rt.b_work, m.buf_h_off, ossm.b_st, off_dt, m.cfg.hidden, m.cfg.hidden) != 0 {
+                let _c = metal_cmd_cancel(&rt.sess, cid)
+                return false
+            }
+            if qwen3_metal_encode_gemv(&rt.sess, cid, alpha_pipe, sidecar.b_sidecar, alpha_off, rt.b_work, m.buf_h_off, ossm.b_st, off_alpha, m.cfg.hidden, m.cfg.hidden) != 0 {
+                let _c = metal_cmd_cancel(&rt.sess, cid)
+                return false
+            }
+
+            let st_off = qwen3_ossm_state_layer_off(ossm, l)
+            if qwen3_metal_encode_ossm_step(
+                &rt.sess, cid, pipe_ossm,
+                ossm.b_st, st_off,
+                ossm.b_st, off_u,
+                ossm.b_st, off_alpha,
+                ossm.b_st, off_b,
+                ossm.b_st, off_dt,
+                ossm.b_st, off_c,
+                ossm.b_st, off_y,
+                ossm.n_oct
+            ) != 0 {
+                let _c = metal_cmd_cancel(&rt.sess, cid)
+                return false
+            }
+
+            if qwen3_metal_encode_gemv(
+                &rt.sess, cid, out_pipe,
+                sidecar.b_sidecar, out_off,
+                ossm.b_st, off_y,
+                rt.b_work, m.buf_h_off,
+                m.cfg.hidden, m.cfg.hidden
+            ) != 0 {
+                let _c = metal_cmd_cancel(&rt.sess, cid)
+                return false
+            }
+
+            if qwen3_metal_encode_vec_add(
+                &rt.sess, cid, rt.pipes.vec_add,
+                rt.b_work, m.buf_x_off,
+                rt.b_work, m.buf_h_off,
+                m.cfg.hidden
+            ) != 0 {
+                let _c = metal_cmd_cancel(&rt.sess, cid)
+                return false
+            }
+        } else {
+            let q_s = ossm_metal_shard_buf(rt, ossm_model_tensor_shard_idx(m, slot_base + 1))
+            let q_off = ossm_model_tensor_data_off(m, slot_base + 1)
+            let q_dt = ossm_model_tensor_dtype(m, slot_base + 1)
+            let q_pipe = if q_dt == 2 { rt.pipes.gemv_bf16 } else { rt.pipes.gemv_f32 }
+            if qwen3_metal_encode_gemv(
+                &rt.sess, cid, q_pipe,
+                q_s, q_off,
+                rt.b_work, m.buf_h_off,
+                rt.b_work, m.buf_q_off,
+                q_dim, m.cfg.hidden
+            ) != 0 {
+                let _c = metal_cmd_cancel(&rt.sess, cid)
+                return false
+            }
+
+            let k_s = ossm_metal_shard_buf(rt, ossm_model_tensor_shard_idx(m, slot_base + 2))
+            let k_off = ossm_model_tensor_data_off(m, slot_base + 2)
+            let k_dt = ossm_model_tensor_dtype(m, slot_base + 2)
+            let k_pipe = if k_dt == 2 { rt.pipes.gemv_bf16 } else { rt.pipes.gemv_f32 }
+            if qwen3_metal_encode_gemv(
+                &rt.sess, cid, k_pipe,
+                k_s, k_off,
+                rt.b_work, m.buf_h_off,
+                rt.b_work, m.buf_k_off,
+                kv_dim, m.cfg.hidden
+            ) != 0 {
+                let _c = metal_cmd_cancel(&rt.sess, cid)
+                return false
+            }
+
+            let v_s = ossm_metal_shard_buf(rt, ossm_model_tensor_shard_idx(m, slot_base + 3))
+            let v_off = ossm_model_tensor_data_off(m, slot_base + 3)
+            let v_dt = ossm_model_tensor_dtype(m, slot_base + 3)
+            let v_pipe = if v_dt == 2 { rt.pipes.gemv_bf16 } else { rt.pipes.gemv_f32 }
+            if qwen3_metal_encode_gemv(
+                &rt.sess, cid, v_pipe,
+                v_s, v_off,
+                rt.b_work, m.buf_h_off,
+                rt.b_work, m.buf_v_off,
+                kv_dim, m.cfg.hidden
+            ) != 0 {
+                let _c = metal_cmd_cancel(&rt.sess, cid)
+                return false
+            }
+
+            if is_ossm && ossm.ok && ossm.b_st > 0 && pipe_ossm > 0 {
+                has_any_ossm = true
+                if metal_cmd_commit_sync(&rt.sess, cid) != 0 { return false }
+
+                let buf_h = a_base + m.buf_h_off
+                let buf_q = a_base + m.buf_q_off
+                let buf_k = a_base + m.buf_k_off
+                let buf_v = a_base + m.buf_v_off
+                let buf_gate = a_base + m.buf_gate_off
+                let buf_up = a_base + m.buf_up_off
+
+                let u_ptr = buf_q
+                let b_ptr = buf_gate
+                let c_ptr = buf_gate + m.cfg.hidden * 4
+                let dt_ptr = buf_up
+                let alpha_ptr = buf_up + m.cfg.hidden * 4
+
+                var j: i64 = 0
+                while j < m.cfg.hidden {
+                    let kv_idx = if kv_dim > 0 { j % kv_dim } else { 0 }
+                    let kv_idx_dt = if kv_dim > 0 { (j + 4) % kv_dim } else { 0 }
+                    let bk = ossm_read_f32(buf_k, kv_idx)
+                    let ck = ossm_read_f32(buf_v, kv_idx)
+                    let dtk = ossm_read_f32(buf_v, kv_idx_dt)
+                    let alk = ossm_read_f32(buf_h, j)
+                    ossm_write_f32(b_ptr, j, bk)
+                    ossm_write_f32(c_ptr, j, ck)
+                    ossm_write_f32(dt_ptr, j, dtk)
+                    ossm_write_f32(alpha_ptr, j, alk)
+                    j = j + 1
+                }
+
+                cid = metal_cmd_begin(&rt.sess)
+                if cid <= 0 { return false }
+
+                if qwen3_metal_encode_ossm_step(
+                    &rt.sess, cid, pipe_ossm,
+                    ossm.b_st, qwen3_ossm_state_layer_off(ossm, l),
+                    rt.b_work, m.buf_q_off,
+                    rt.b_work, m.buf_up_off + m.cfg.hidden * 4,
+                    rt.b_work, m.buf_gate_off,
+                    rt.b_work, m.buf_up_off,
+                    rt.b_work, m.buf_gate_off + m.cfg.hidden * 4,
+                    rt.b_work, m.buf_attn_out_off,
+                    ossm.n_oct
+                ) != 0 {
+                    let _c = metal_cmd_cancel(&rt.sess, cid)
+                    return false
+                }
+            } else {
+                let q_norm_s = ossm_metal_shard_buf(rt, ossm_model_tensor_shard_idx(m, slot_base + 5))
+                let q_norm_off = ossm_model_tensor_data_off(m, slot_base + 5)
+                let q_norm_dt = ossm_model_tensor_dtype(m, slot_base + 5)
+                let q_norm_pipe = if q_norm_dt == 2 { rt.pipes.rmsnorm_bf16 } else { rt.pipes.rmsnorm_f32 }
+                if qwen3_metal_encode_rmsnorm(
+                    &rt.sess, cid, q_norm_pipe,
+                    rt.b_work, m.buf_q_off,
+                    q_norm_s, q_norm_off,
+                    rt.b_work, m.buf_q_off,
+                    m.cfg.n_q, m.cfg.head_dim, eps_bits
+                ) != 0 {
+                    let _c = metal_cmd_cancel(&rt.sess, cid)
+                    return false
+                }
+
+                let k_norm_s = ossm_metal_shard_buf(rt, ossm_model_tensor_shard_idx(m, slot_base + 6))
+                let k_norm_off = ossm_model_tensor_data_off(m, slot_base + 6)
+                let k_norm_dt = ossm_model_tensor_dtype(m, slot_base + 6)
+                let k_norm_pipe = if k_norm_dt == 2 { rt.pipes.rmsnorm_bf16 } else { rt.pipes.rmsnorm_f32 }
+                if qwen3_metal_encode_rmsnorm(
+                    &rt.sess, cid, k_norm_pipe,
+                    rt.b_work, m.buf_k_off,
+                    k_norm_s, k_norm_off,
+                    rt.b_work, m.buf_k_off,
+                    m.cfg.n_kv, m.cfg.head_dim, eps_bits
+                ) != 0 {
+                    let _c = metal_cmd_cancel(&rt.sess, cid)
+                    return false
+                }
+
+                if qwen3_metal_encode_rope(
+                    &rt.sess, cid, rt.pipes.rope,
+                    rt.b_work, m.buf_q_off,
+                    m.cfg.n_q, m.cfg.head_dim, pos, theta_bits
+                ) != 0 {
+                    let _c = metal_cmd_cancel(&rt.sess, cid)
+                    return false
+                }
+
+                if qwen3_metal_encode_rope(
+                    &rt.sess, cid, rt.pipes.rope,
+                    rt.b_work, m.buf_k_off,
+                    m.cfg.n_kv, m.cfg.head_dim, pos, theta_bits
+                ) != 0 {
+                    let _c = metal_cmd_cancel(&rt.sess, cid)
+                    return false
+                }
+
+                if qwen3_metal_encode_kv_scatter(
+                    &rt.sess, cid, rt.pipes.kv_scatter,
+                    rt.b_work, m.buf_k_off,
+                    rt.b_work, m.buf_v_off,
+                    rt.b_kv,
+                    qwen3_kv_table_off(kv),
+                    qwen3_kv_k_layer_off(kv, l),
+                    qwen3_kv_v_layer_off(kv, l),
+                    m.cfg.n_kv * m.cfg.head_dim,
+                    pos,
+                    qwen3_kv_block_size(kv)
+                ) != 0 {
+                    let _c = metal_cmd_cancel(&rt.sess, cid)
+                    return false
+                }
+
+                if qwen3_metal_encode_paged_gqa(
+                    &rt.sess, cid, rt.pipes.paged_gqa,
+                    rt.b_work, m.buf_q_off,
+                    rt.b_kv,
+                    qwen3_kv_table_off(kv),
+                    qwen3_kv_k_layer_off(kv, l),
+                    qwen3_kv_v_layer_off(kv, l),
+                    rt.b_work, m.buf_attn_out_off,
+                    m.cfg.n_q, m.cfg.n_kv, m.cfg.head_dim,
+                    pos + 1,
+                    qwen3_kv_block_size(kv)
+                ) != 0 {
+                    let _c = metal_cmd_cancel(&rt.sess, cid)
+                    return false
+                }
+            }
+
+            let o_s = ossm_metal_shard_buf(rt, ossm_model_tensor_shard_idx(m, slot_base + 4))
+            let o_off = ossm_model_tensor_data_off(m, slot_base + 4)
+            let o_dt = ossm_model_tensor_dtype(m, slot_base + 4)
+            let o_pipe = if o_dt == 2 { rt.pipes.gemv_bf16 } else { rt.pipes.gemv_f32 }
+            if qwen3_metal_encode_gemv(
+                &rt.sess, cid, o_pipe,
+                o_s, o_off,
+                rt.b_work, m.buf_attn_out_off,
+                rt.b_work, m.buf_h_off,
+                m.cfg.hidden, q_dim
+            ) != 0 {
+                let _c = metal_cmd_cancel(&rt.sess, cid)
+                return false
+            }
+
+            if qwen3_metal_encode_vec_add(
+                &rt.sess, cid, rt.pipes.vec_add,
+                rt.b_work, m.buf_x_off,
+                rt.b_work, m.buf_h_off,
+                m.cfg.hidden
+            ) != 0 {
+                let _c = metal_cmd_cancel(&rt.sess, cid)
+                return false
+            }
+        }
+
+        let post_s = ossm_metal_shard_buf(rt, ossm_model_tensor_shard_idx(m, slot_base + 7))
+        let post_off = ossm_model_tensor_data_off(m, slot_base + 7)
+        let post_dt = ossm_model_tensor_dtype(m, slot_base + 7)
+        let post_pipe = if post_dt == 2 { rt.pipes.rmsnorm_bf16 } else { rt.pipes.rmsnorm_f32 }
+        if qwen3_metal_encode_rmsnorm(
+            &rt.sess, cid, post_pipe,
+            rt.b_work, m.buf_x_off,
+            post_s, post_off,
+            rt.b_work, m.buf_h_off,
+            1, m.cfg.hidden, eps_bits
+        ) != 0 {
+            let _c = metal_cmd_cancel(&rt.sess, cid)
+            return false
+        }
+
+        let gate_s = ossm_metal_shard_buf(rt, ossm_model_tensor_shard_idx(m, slot_base + 8))
+        let gate_off = ossm_model_tensor_data_off(m, slot_base + 8)
+        let gate_dt = ossm_model_tensor_dtype(m, slot_base + 8)
+        let gate_pipe = if gate_dt == 2 { rt.pipes.gemv_bf16 } else { rt.pipes.gemv_f32 }
+        if qwen3_metal_encode_gemv(
+            &rt.sess, cid, gate_pipe,
+            gate_s, gate_off,
+            rt.b_work, m.buf_h_off,
+            rt.b_work, m.buf_gate_off,
+            m.cfg.inter, m.cfg.hidden
+        ) != 0 {
+            let _c = metal_cmd_cancel(&rt.sess, cid)
+            return false
+        }
+
+        let up_s = ossm_metal_shard_buf(rt, ossm_model_tensor_shard_idx(m, slot_base + 9))
+        let up_off = ossm_model_tensor_data_off(m, slot_base + 9)
+        let up_dt = ossm_model_tensor_dtype(m, slot_base + 9)
+        let up_pipe = if up_dt == 2 { rt.pipes.gemv_bf16 } else { rt.pipes.gemv_f32 }
+        if qwen3_metal_encode_gemv(
+            &rt.sess, cid, up_pipe,
+            up_s, up_off,
+            rt.b_work, m.buf_h_off,
+            rt.b_work, m.buf_up_off,
+            m.cfg.inter, m.cfg.hidden
+        ) != 0 {
+            let _c = metal_cmd_cancel(&rt.sess, cid)
+            return false
+        }
+
+        if qwen3_metal_encode_swiglu(
+            &rt.sess, cid, rt.pipes.swiglu,
+            rt.b_work, m.buf_gate_off,
+            rt.b_work, m.buf_up_off,
+            rt.b_work, m.buf_gate_off,
+            m.cfg.inter
+        ) != 0 {
+            let _c = metal_cmd_cancel(&rt.sess, cid)
+            return false
+        }
+
+        let down_s = ossm_metal_shard_buf(rt, ossm_model_tensor_shard_idx(m, slot_base + 10))
+        let down_off = ossm_model_tensor_data_off(m, slot_base + 10)
+        let down_dt = ossm_model_tensor_dtype(m, slot_base + 10)
+        let down_pipe = if down_dt == 2 { rt.pipes.gemv_bf16 } else { rt.pipes.gemv_f32 }
+        if qwen3_metal_encode_gemv(
+            &rt.sess, cid, down_pipe,
+            down_s, down_off,
+            rt.b_work, m.buf_gate_off,
+            rt.b_work, m.buf_h_off,
+            m.cfg.hidden, m.cfg.inter
+        ) != 0 {
+            let _c = metal_cmd_cancel(&rt.sess, cid)
+            return false
+        }
+
+        if qwen3_metal_encode_vec_add(
+            &rt.sess, cid, rt.pipes.vec_add,
+            rt.b_work, m.buf_x_off,
+            rt.b_work, m.buf_h_off,
+            m.cfg.hidden
+        ) != 0 {
+            let _c = metal_cmd_cancel(&rt.sess, cid)
+            return false
+        }
+
+        l = l + 1
+    }
+
+    if compute_logits {
+        let norm_s = ossm_metal_shard_buf(rt, ossm_model_tensor_shard_idx(m, 1))
+        let norm_off = ossm_model_tensor_data_off(m, 1)
+        let norm_dt = ossm_model_tensor_dtype(m, 1)
+        let norm_pipe = if norm_dt == 2 { rt.pipes.rmsnorm_bf16 } else { rt.pipes.rmsnorm_f32 }
+        if qwen3_metal_encode_rmsnorm(
+            &rt.sess, cid, norm_pipe,
+            rt.b_work, m.buf_x_off,
+            norm_s, norm_off,
+            rt.b_work, m.buf_h_off,
+            1, m.cfg.hidden, eps_bits
+        ) != 0 {
+            let _c = metal_cmd_cancel(&rt.sess, cid)
+            return false
+        }
+
+        let lm_s = ossm_metal_shard_buf(rt, ossm_model_tensor_shard_idx(m, 2))
+        let lm_off = ossm_model_tensor_data_off(m, 2)
+        let lm_dt = ossm_model_tensor_dtype(m, 2)
+        let lm_pipe = if lm_dt == 2 { rt.pipes.gemv_bf16 } else { rt.pipes.gemv_f32 }
+        if qwen3_metal_encode_gemv(
+            &rt.sess, cid, lm_pipe,
+            lm_s, lm_off,
+            rt.b_work, m.buf_h_off,
+            rt.b_work, m.buf_logits_off,
+            m.cfg.vocab, m.cfg.hidden
+        ) != 0 {
+            let _c = metal_cmd_cancel(&rt.sess, cid)
+            return false
+        }
+
+        if qwen3_metal_encode_argmax_top2(
+            &rt.sess, cid, rt.pipes.argmax_top2,
+            rt.b_work, m.buf_logits_off,
+            rt.b_work, m.buf_top2_off,
+            m.cfg.vocab
+        ) != 0 {
+            let _c = metal_cmd_cancel(&rt.sess, cid)
+            return false
+        }
+    }
+
+    if metal_cmd_commit_sync(&rt.sess, cid) != 0 {
+        return false
+    }
+
+    if last_assoc_out_ptr != 0 && has_any_ossm {
+        if sidecar.ok {
+            let tail_base = m.cfg.layers * m.cfg.hidden * 4 + 128
+            let u_ptr = ossm.arena_ptr + tail_base + 0 * m.cfg.hidden * 4
+            let b_ptr = ossm.arena_ptr + tail_base + 1 * m.cfg.hidden * 4
+            let dt_ptr = ossm.arena_ptr + tail_base + 3 * m.cfg.hidden * 4
+            let assoc = qwen3_ossm_associator_l2(b_ptr, u_ptr, dt_ptr, ossm.n_oct)
+            ossm_write_f32(last_assoc_out_ptr, 0, assoc)
+        }
+    }
+
+    true
+}
+
+pub fn qwen3_hybrid_forward_token_metal(
+    m: &Qwen3Model,
+    kv: &!Qwen3PagedKv,
+    ossm: &!Qwen3OssmState,
+    rt: &Qwen3MetalRunner,
+    ossm_pipe: i64,
+    ossm_every: i64,
+    token_id: i64,
+    pos: i64,
+    last_assoc_out_ptr: i64
+) -> bool with Alloc, Mut, Div, Panic, IO {
+    var dummy = qwen3_ossm_sidecar_empty()
+    let res = qwen3_hybrid_forward_token_metal_sidecar(m, kv, ossm, &!dummy, rt, ossm_pipe, ossm_every, token_id, pos, true, last_assoc_out_ptr)
+    let _fd = qwen3_ossm_sidecar_free(dummy)
+    res
+}
+
+// ============================================================================
+// Artin-Awakened Dual-Register Octonion Primitives
+// ============================================================================
+
+struct OssmDualOctVal {
+    pub c0: f64,
+    pub c1: f64,
+    pub c2: f64,
+    pub c3: f64,
+    pub c4: f64,
+    pub c5: f64,
+    pub c6: f64,
+    pub c7: f64,
+}
+
+fn ossm_dual_oct_read(ptr: i64) -> OssmDualOctVal with Mut {
+    OssmDualOctVal {
+        c0: ossm_read_f32(ptr, 0),
+        c1: ossm_read_f32(ptr, 1),
+        c2: ossm_read_f32(ptr, 2),
+        c3: ossm_read_f32(ptr, 3),
+        c4: ossm_read_f32(ptr, 4),
+        c5: ossm_read_f32(ptr, 5),
+        c6: ossm_read_f32(ptr, 6),
+        c7: ossm_read_f32(ptr, 7),
+    }
+}
+
+fn ossm_dual_oct_write(ptr: i64, o: OssmDualOctVal) with Mut {
+    ossm_write_f32(ptr, 0, o.c0)
+    ossm_write_f32(ptr, 1, o.c1)
+    ossm_write_f32(ptr, 2, o.c2)
+    ossm_write_f32(ptr, 3, o.c3)
+    ossm_write_f32(ptr, 4, o.c4)
+    ossm_write_f32(ptr, 5, o.c5)
+    ossm_write_f32(ptr, 6, o.c6)
+    ossm_write_f32(ptr, 7, o.c7)
+}
+
+fn ossm_dual_oct_mul(a: OssmDualOctVal, b: OssmDualOctVal) -> OssmDualOctVal {
+    OssmDualOctVal {
+        c0: a.c0*b.c0 - a.c1*b.c1 - a.c2*b.c2 - a.c3*b.c3 - a.c4*b.c4 - a.c5*b.c5 - a.c6*b.c6 - a.c7*b.c7,
+        c1: a.c0*b.c1 + a.c1*b.c0 + a.c2*b.c3 - a.c3*b.c2 + a.c4*b.c5 - a.c5*b.c4 - a.c6*b.c7 + a.c7*b.c6,
+        c2: a.c0*b.c2 - a.c1*b.c3 + a.c2*b.c0 + a.c3*b.c1 + a.c4*b.c6 + a.c5*b.c7 - a.c6*b.c4 - a.c7*b.c5,
+        c3: a.c0*b.c3 + a.c1*b.c2 - a.c2*b.c1 + a.c3*b.c0 + a.c4*b.c7 - a.c5*b.c6 + a.c6*b.c5 - a.c7*b.c4,
+        c4: a.c0*b.c4 - a.c1*b.c5 - a.c2*b.c6 - a.c3*b.c7 + a.c4*b.c0 + a.c5*b.c1 + a.c6*b.c2 + a.c7*b.c3,
+        c5: a.c0*b.c5 + a.c1*b.c4 - a.c2*b.c7 + a.c3*b.c6 - a.c4*b.c1 + a.c5*b.c0 - a.c6*b.c3 + a.c7*b.c2,
+        c6: a.c0*b.c6 + a.c1*b.c7 + a.c2*b.c4 - a.c3*b.c5 - a.c4*b.c2 + a.c5*b.c3 + a.c6*b.c0 - a.c7*b.c1,
+        c7: a.c0*b.c7 - a.c1*b.c6 + a.c2*b.c5 + a.c3*b.c4 - a.c4*b.c3 - a.c5*b.c2 + a.c6*b.c1 + a.c7*b.c0,
+    }
+}
+
+pub fn qwen3_ossm_dual_associator_l2(
+    h_left_f32_ptr: i64,
+    h_right_f32_ptr: i64,
+    u_f32_ptr: i64,
+    n_oct: i64
+) -> f64 with Mut, Div, Panic {
+    if h_left_f32_ptr == 0 || h_right_f32_ptr == 0 || u_f32_ptr == 0 || n_oct <= 0 {
+        return 0.0
+    }
+    var sum_sq: f64 = 0.0
+    var c: i64 = 0
+    while c < n_oct {
+        let hl = ossm_dual_oct_read(h_left_f32_ptr + c * 32)
+        let hr = ossm_dual_oct_read(h_right_f32_ptr + c * 32)
+        let u = ossm_dual_oct_read(u_f32_ptr + c * 32)
+
+        let hl_hr = ossm_dual_oct_mul(hl, hr)
+        let left_assoc = ossm_dual_oct_mul(hl_hr, u)
+
+        let hr_u = ossm_dual_oct_mul(hr, u)
+        let right_assoc = ossm_dual_oct_mul(hl, hr_u)
+
+        let d0 = left_assoc.c0 - right_assoc.c0
+        let d1 = left_assoc.c1 - right_assoc.c1
+        let d2 = left_assoc.c2 - right_assoc.c2
+        let d3 = left_assoc.c3 - right_assoc.c3
+        let d4 = left_assoc.c4 - right_assoc.c4
+        let d5 = left_assoc.c5 - right_assoc.c5
+        let d6 = left_assoc.c6 - right_assoc.c6
+        let d7 = left_assoc.c7 - right_assoc.c7
+
+        sum_sq = sum_sq + d0*d0 + d1*d1 + d2*d2 + d3*d3 + d4*d4 + d5*d5 + d6*d6 + d7*d7
+        c = c + 1
+    }
+    sqrt(sum_sq)
+}
+
+pub fn qwen3_ossm_dual_step_cpu(
+    h_left_f32_ptr: i64,
+    h_right_f32_ptr: i64,
+    u_f32_ptr: i64,
+    decay_f32_ptr: i64,
+    parenthesize_gate_f32_ptr: i64,
+    c_f32_ptr: i64,
+    out_y_f32_ptr: i64,
+    n_oct: i64
+) -> bool with Mut {
+    if h_left_f32_ptr == 0 || h_right_f32_ptr == 0 || u_f32_ptr == 0
+        || decay_f32_ptr == 0 || parenthesize_gate_f32_ptr == 0
+        || c_f32_ptr == 0 || out_y_f32_ptr == 0 || n_oct <= 0 {
+        return false
+    }
+
+    var ch: i64 = 0
+    while ch < n_oct {
+        let hl_ptr = h_left_f32_ptr + ch * 32
+        let hr_ptr = h_right_f32_ptr + ch * 32
+        let u_ptr = u_f32_ptr + ch * 32
+        let decay_ptr = decay_f32_ptr + ch * 32
+        let gate_ptr = parenthesize_gate_f32_ptr + ch * 32
+        let c_ptr = c_f32_ptr + ch * 32
+        let y_ptr = out_y_f32_ptr + ch * 32
+
+        let hl = ossm_dual_oct_read(hl_ptr)
+        let hr = ossm_dual_oct_read(hr_ptr)
+        let u = ossm_dual_oct_read(u_ptr)
+        let c_val = ossm_dual_oct_read(c_ptr)
+
+        // decay = sigmoid(decay_f32_ptr[ch * 8 + 0]) matching qwen3_ossm_step_cpu convention
+        let raw_decay = ossm_read_f32(decay_ptr, 0)
+        let gamma = 1.0 / (1.0 + exp(0.0 - raw_decay))
+
+        // g = sigmoid(parenthesize_gate_f32_ptr[ch * 8 + 0]) parenthesization gate in (0, 1)
+        let raw_gate = ossm_read_f32(gate_ptr, 0)
+        let g = 1.0 / (1.0 + exp(0.0 - raw_gate))
+        let one_minus_g = 1.0 - g
+
+        // left_assoc = (H^(L) * H^(R)) * U
+        let hl_hr = ossm_dual_oct_mul(hl, hr)
+        let left_assoc = ossm_dual_oct_mul(hl_hr, u)
+
+        // right_assoc = H^(L) * (H^(R) * U)
+        let hr_u = ossm_dual_oct_mul(hr, u)
+        let right_assoc = ossm_dual_oct_mul(hl, hr_u)
+
+        // H_new^(L) = gamma * H^(L) + g * left_assoc + (1 - g) * right_assoc
+        let hl_new = OssmDualOctVal {
+            c0: gamma * hl.c0 + g * left_assoc.c0 + one_minus_g * right_assoc.c0,
+            c1: gamma * hl.c1 + g * left_assoc.c1 + one_minus_g * right_assoc.c1,
+            c2: gamma * hl.c2 + g * left_assoc.c2 + one_minus_g * right_assoc.c2,
+            c3: gamma * hl.c3 + g * left_assoc.c3 + one_minus_g * right_assoc.c3,
+            c4: gamma * hl.c4 + g * left_assoc.c4 + one_minus_g * right_assoc.c4,
+            c5: gamma * hl.c5 + g * left_assoc.c5 + one_minus_g * right_assoc.c5,
+            c6: gamma * hl.c6 + g * left_assoc.c6 + one_minus_g * right_assoc.c6,
+            c7: gamma * hl.c7 + g * left_assoc.c7 + one_minus_g * right_assoc.c7,
+        }
+
+        // H_new^(R) = gamma * H^(R) + U
+        let hr_new = OssmDualOctVal {
+            c0: gamma * hr.c0 + u.c0,
+            c1: gamma * hr.c1 + u.c1,
+            c2: gamma * hr.c2 + u.c2,
+            c3: gamma * hr.c3 + u.c3,
+            c4: gamma * hr.c4 + u.c4,
+            c5: gamma * hr.c5 + u.c5,
+            c6: gamma * hr.c6 + u.c6,
+            c7: gamma * hr.c7 + u.c7,
+        }
+
+        // Update dual octonion registers in place
+        ossm_dual_oct_write(hl_ptr, hl_new)
+        ossm_dual_oct_write(hr_ptr, hr_new)
+
+        // Y = C * H_new^(L)
+        let y_val = ossm_dual_oct_mul(c_val, hl_new)
+        ossm_dual_oct_write(y_ptr, y_val)
+
+        ch = ch + 1
+    }
+
+    true
+}
+

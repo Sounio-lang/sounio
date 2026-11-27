@@ -1,0 +1,140 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: LLM_PHASE0_METAL_NOCOPY_PASS
+//
+// Fase 0 witness (macOS ARM64 + real Metal): maps a 2.5 GiB sparse shard via
+// mmap_ro, binds both input shard and output PageArena with Metal NoCopy,
+// verifies [MTLBuffer contents] == host_ptr (zero-copy invariant), dispatches
+// bf16_to_f32 at byte offset 2415919104 (2.25 GiB > INT32_MAX), and checks
+// exact IEEE FP32 bits returned in the unified-memory arena.
+
+use llm::mmap::{
+    MappedShard, PageArena,
+    mapped_shard_is_ok, mapped_shard_ptr, mapped_shard_len,
+    page_arena_is_ok, page_arena_ptr, page_arena_len,
+    mapped_shard_open, mapped_shard_close,
+    page_arena_alloc, page_arena_free, page_arena_read_u32_le,
+}
+use llm::bf16_kernels::{emit_bf16_to_f32_msl}
+use llm::hal::{
+    MetalSession,
+    metal_session_is_ok, metal_session_open, metal_session_close,
+    metal_buffer_nocopy, metal_buffer_contents, metal_buffer_free,
+    metal_compile_msl, metal_dispatch_2buf_u64,
+}
+
+fn check_out_word(arena: &PageArena, idx: i64, expected: i64) -> bool {
+    let r = page_arena_read_u32_le(arena, idx * 4)
+    if !r.1 { return false }
+    r.0 == expected
+}
+
+fn cleanup_all(
+    shard: MappedShard,
+    arena: PageArena,
+    sess: MetalSession,
+    in_buf: i64,
+    out_buf: i64
+) -> i64 with IO, Mut {
+    if in_buf > 0 { let _f0 = metal_buffer_free(&sess, in_buf) }
+    if out_buf > 0 { let _f1 = metal_buffer_free(&sess, out_buf) }
+    let _sc = metal_session_close(sess)
+    let _ac = page_arena_free(arena)
+    let _mc = mapped_shard_close(shard)
+    0
+}
+
+fn run_metal_with_sess(
+    shard: &MappedShard,
+    arena: &PageArena,
+    sess: &MetalSession,
+    offset_225gib: i64
+) -> bool with IO, Mut, Alloc {
+    let s_ptr = mapped_shard_ptr(shard)
+    let s_len = mapped_shard_len(shard)
+    let a_ptr = page_arena_ptr(arena)
+    let a_len = page_arena_len(arena)
+
+    let in_buf = metal_buffer_nocopy(sess, s_ptr, s_len)
+    let out_buf = metal_buffer_nocopy(sess, a_ptr, a_len)
+    if in_buf <= 0 || out_buf <= 0 {
+        if in_buf > 0 { let _f0 = metal_buffer_free(sess, in_buf) }
+        if out_buf > 0 { let _f1 = metal_buffer_free(sess, out_buf) }
+        println("LLM_PHASE0_METAL_NOCOPY_FAIL: nocopy bind")
+        return false
+    }
+
+    if metal_buffer_contents(sess, in_buf) != s_ptr || metal_buffer_contents(sess, out_buf) != a_ptr {
+        let _f0 = metal_buffer_free(sess, in_buf)
+        let _f1 = metal_buffer_free(sess, out_buf)
+        println("LLM_PHASE0_METAL_NOCOPY_FAIL: zero-copy ptr mismatch")
+        return false
+    }
+
+    let pipe = metal_compile_msl(sess, emit_bf16_to_f32_msl(), "bf16_to_f32")
+    if pipe <= 0 {
+        let _f0 = metal_buffer_free(sess, in_buf)
+        let _f1 = metal_buffer_free(sess, out_buf)
+        println("LLM_PHASE0_METAL_NOCOPY_FAIL: compile msl")
+        return false
+    }
+
+    let rc = metal_dispatch_2buf_u64(sess, pipe, in_buf, offset_225gib, out_buf, 0, 6, 6, 6)
+    let _f0 = metal_buffer_free(sess, in_buf)
+    let _f1 = metal_buffer_free(sess, out_buf)
+    if rc != 0 {
+        println("LLM_PHASE0_METAL_NOCOPY_FAIL: dispatch")
+        return false
+    }
+
+    let ok0 = check_out_word(arena, 0, 0x3F800000)
+    let ok1 = check_out_word(arena, 1, 0xC0200000)
+    let ok2 = check_out_word(arena, 2, 0x40490000)
+    let ok3 = check_out_word(arena, 3, 0x00000000)
+    let ok4 = check_out_word(arena, 4, 0x80000000)
+    let ok5 = check_out_word(arena, 5, 0x477F0000)
+    if !(ok0 && ok1 && ok2 && ok3 && ok4 && ok5) {
+        println("LLM_PHASE0_METAL_NOCOPY_FAIL: bit mismatch")
+        return false
+    }
+    true
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
+    let small_a = page_arena_alloc(5000)
+    let small_ok = page_arena_is_ok(&small_a) && page_arena_len(&small_a) == 16384
+    let small_freed = page_arena_free(small_a) == 0
+    if !small_ok || !small_freed {
+        println("LLM_PHASE0_METAL_NOCOPY_FAIL: small arena alloc/free")
+        return 1
+    }
+
+    var shard_path = "/tmp/llm_phase0_shard.bin"
+    let cfg_file = "/tmp/sounio_llm_phase0_shard_path.txt"
+    if file_size(cfg_file) > 0 {
+        shard_path = read_file(cfg_file)
+    }
+
+    let offset_225gib: i64 = 2415919104
+    let shard = mapped_shard_open(shard_path)
+    let arena = page_arena_alloc(16384)
+    let sess = metal_session_open("")
+
+    var ok = false
+    if !mapped_shard_is_ok(&shard) || mapped_shard_len(&shard) < offset_225gib + 12 {
+        println("LLM_PHASE0_METAL_NOCOPY_FAIL: open shard")
+    } else if !page_arena_is_ok(&arena) {
+        println("LLM_PHASE0_METAL_NOCOPY_FAIL: alloc arena")
+    } else if !metal_session_is_ok(&sess) {
+        println("LLM_PHASE0_METAL_NOCOPY_FAIL: metal session")
+    } else {
+        ok = run_metal_with_sess(&shard, &arena, &sess, offset_225gib)
+    }
+
+    let _z = cleanup_all(shard, arena, sess, 0, 0)
+    if ok {
+        println("LLM_PHASE0_METAL_NOCOPY_PASS")
+        return 0
+    }
+    1
+}

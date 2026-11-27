@@ -1,0 +1,347 @@
+// stdlib::llm::qwen3_paged_kv — Block-paged FP32 KV cache for Qwen3 / Llama.
+//
+// Backed by a single PageArena. All sub-regions are 64-byte aligned.
+// Linear ownership: allocated once, borrowed with &! / &, freed with munmap.
+
+use llm::mmap::{PageArena, page_arena_alloc, page_arena_is_ok, page_arena_ptr, page_arena_len}
+use tensor2::convert::{f64_to_f32_bits, f32_bits_to_f64}
+
+pub linear struct Qwen3PagedKv {
+    pub arena_ptr: i64,
+    pub arena_len: i64,
+    pub table_off: i64,
+    pub free_off: i64,
+    pub k_base_off: i64,
+    pub v_base_off: i64,
+    pub n_layers: i64,
+    pub max_blocks: i64,
+    pub block_size: i64,
+    pub n_kv_heads: i64,
+    pub head_dim: i64,
+    pub seq_len: i64,
+    pub free_top: i64,
+    pub ok: bool,
+}
+
+fn align_up_64(x: i64) -> i64 with Div {
+    let rem = x % 64
+    if rem == 0 { x } else { x + (64 - rem) }
+}
+
+pub fn qwen3_kv_bf16_plan_bytes(n_layers: i64, max_seq: i64, n_kv_heads: i64, head_dim: i64) -> i64 {
+    if n_layers <= 0 || max_seq <= 0 || n_kv_heads <= 0 || head_dim <= 0 {
+        return 0
+    }
+    n_layers * max_seq * 2 * n_kv_heads * head_dim * 2
+}
+
+pub fn qwen3_kv_is_ok(kv: &Qwen3PagedKv) -> bool {
+    kv.ok
+}
+
+pub fn qwen3_kv_arena_ptr(kv: &Qwen3PagedKv) -> i64 {
+    kv.arena_ptr
+}
+
+pub fn qwen3_kv_arena_len(kv: &Qwen3PagedKv) -> i64 {
+    kv.arena_len
+}
+
+pub fn qwen3_kv_seq_len(kv: &Qwen3PagedKv) -> i64 {
+    kv.seq_len
+}
+
+pub fn qwen3_kv_block_size(kv: &Qwen3PagedKv) -> i64 {
+    kv.block_size
+}
+
+pub fn qwen3_kv_table_off(kv: &Qwen3PagedKv) -> i64 {
+    kv.table_off
+}
+
+pub fn qwen3_kv_free_off(kv: &Qwen3PagedKv) -> i64 {
+    kv.free_off
+}
+
+pub fn qwen3_kv_k_base_off(kv: &Qwen3PagedKv) -> i64 {
+    kv.k_base_off
+}
+
+pub fn qwen3_kv_v_base_off(kv: &Qwen3PagedKv) -> i64 {
+    kv.v_base_off
+}
+
+pub fn qwen3_kv_n_layers(kv: &Qwen3PagedKv) -> i64 {
+    kv.n_layers
+}
+
+pub fn qwen3_kv_max_blocks(kv: &Qwen3PagedKv) -> i64 {
+    kv.max_blocks
+}
+
+pub fn qwen3_kv_n_kv_heads(kv: &Qwen3PagedKv) -> i64 {
+    kv.n_kv_heads
+}
+
+pub fn qwen3_kv_head_dim(kv: &Qwen3PagedKv) -> i64 {
+    kv.head_dim
+}
+
+pub fn qwen3_kv_free_top(kv: &Qwen3PagedKv) -> i64 {
+    kv.free_top
+}
+
+pub fn qwen3_kv_used_blocks(kv: &Qwen3PagedKv) -> i64 {
+    kv.max_blocks - kv.free_top
+}
+
+pub fn qwen3_kv_k_layer_off(kv: &Qwen3PagedKv, layer: i64) -> i64 {
+    if !kv.ok || layer < 0 || layer >= kv.n_layers {
+        return 0
+    }
+    let layer_bytes = kv.max_blocks * kv.block_size * kv.n_kv_heads * kv.head_dim * 4
+    kv.k_base_off + layer * layer_bytes
+}
+
+pub fn qwen3_kv_v_layer_off(kv: &Qwen3PagedKv, layer: i64) -> i64 {
+    if !kv.ok || layer < 0 || layer >= kv.n_layers {
+        return 0
+    }
+    let layer_bytes = kv.max_blocks * kv.block_size * kv.n_kv_heads * kv.head_dim * 4
+    kv.v_base_off + layer * layer_bytes
+}
+
+pub fn qwen3_kv_alloc(
+    n_layers: i64,
+    max_blocks: i64,
+    block_size: i64,
+    n_kv_heads: i64,
+    head_dim: i64,
+) -> Qwen3PagedKv with IO, Mut, Div {
+    if n_layers <= 0 || max_blocks <= 0 || block_size <= 0 || n_kv_heads <= 0 || head_dim <= 0 {
+        return Qwen3PagedKv {
+            arena_ptr: 0,
+            arena_len: 0,
+            table_off: 0,
+            free_off: 0,
+            k_base_off: 0,
+            v_base_off: 0,
+            n_layers: n_layers,
+            max_blocks: max_blocks,
+            block_size: block_size,
+            n_kv_heads: n_kv_heads,
+            head_dim: head_dim,
+            seq_len: 0,
+            free_top: 0,
+            ok: false,
+        }
+    }
+
+    let table_off = 0
+    let table_bytes = max_blocks * 4
+    let free_off = align_up_64(table_off + table_bytes)
+    let free_bytes = max_blocks * 4
+    let k_base_off = align_up_64(free_off + free_bytes)
+    let layer_bytes = max_blocks * block_size * n_kv_heads * head_dim * 4
+    let k_total_bytes = n_layers * layer_bytes
+    let v_base_off = align_up_64(k_base_off + k_total_bytes)
+    let v_total_bytes = n_layers * layer_bytes
+    let total_bytes = v_base_off + v_total_bytes
+
+    let arena = page_arena_alloc(total_bytes)
+    let PageArena { ptr, len, ok } = arena
+
+    if !ok || ptr <= 0 {
+        return Qwen3PagedKv {
+            arena_ptr: 0,
+            arena_len: 0,
+            table_off: 0,
+            free_off: 0,
+            k_base_off: 0,
+            v_base_off: 0,
+            n_layers: n_layers,
+            max_blocks: max_blocks,
+            block_size: block_size,
+            n_kv_heads: n_kv_heads,
+            head_dim: head_dim,
+            seq_len: 0,
+            free_top: 0,
+            ok: false,
+        }
+    }
+
+    var b: i64 = 0
+    while b < max_blocks {
+        let _w = ptr_write_u32_le(ptr, table_off + b * 4, 4294967295)
+        b = b + 1
+    }
+
+    var i: i64 = 0
+    while i < max_blocks {
+        let phys_blk = (max_blocks - 1) - i
+        let _w = ptr_write_u32_le(ptr, free_off + i * 4, phys_blk)
+        i = i + 1
+    }
+
+    Qwen3PagedKv {
+        arena_ptr: ptr,
+        arena_len: len,
+        table_off: table_off,
+        free_off: free_off,
+        k_base_off: k_base_off,
+        v_base_off: v_base_off,
+        n_layers: n_layers,
+        max_blocks: max_blocks,
+        block_size: block_size,
+        n_kv_heads: n_kv_heads,
+        head_dim: head_dim,
+        seq_len: 0,
+        free_top: max_blocks,
+        ok: true,
+    }
+}
+
+pub fn qwen3_kv_free(kv: Qwen3PagedKv) -> i64 with IO, Mut {
+    let Qwen3PagedKv {
+        arena_ptr,
+        arena_len,
+        table_off: _t,
+        free_off: _f,
+        k_base_off: _k,
+        v_base_off: _v,
+        n_layers: _nl,
+        max_blocks: _mb,
+        block_size: _bs,
+        n_kv_heads: _nh,
+        head_dim: _hd,
+        seq_len: _sl,
+        free_top: _ft,
+        ok,
+    } = kv
+    if !ok || arena_ptr <= 0 || arena_len <= 0 {
+        return 0
+    }
+    munmap_ro(arena_ptr, arena_len)
+}
+
+pub fn qwen3_kv_ensure_pos(kv: &!Qwen3PagedKv, pos: i64) -> bool with Mut, Div {
+    if !kv.ok || pos < 0 {
+        return false
+    }
+    let logical_blk = pos / kv.block_size
+    if logical_blk >= kv.max_blocks {
+        return false
+    }
+    let cur_phys = ptr_read_u32_le(kv.arena_ptr, kv.table_off + logical_blk * 4)
+    if cur_phys == 4294967295 {
+        if kv.free_top <= 0 {
+            return false
+        }
+        kv.free_top = kv.free_top - 1
+        let new_phys = ptr_read_u32_le(kv.arena_ptr, kv.free_off + kv.free_top * 4)
+        let _w = ptr_write_u32_le(kv.arena_ptr, kv.table_off + logical_blk * 4, new_phys)
+    }
+    if pos + 1 > kv.seq_len {
+        kv.seq_len = pos + 1
+    }
+    true
+}
+
+pub fn qwen3_kv_truncate(kv: &!Qwen3PagedKv, new_len: i64) -> bool with Mut, Div {
+    if !kv.ok || new_len < 0 || new_len > kv.seq_len {
+        return false
+    }
+    let needed_blocks = if new_len == 0 { 0 } else { (new_len + kv.block_size - 1) / kv.block_size }
+    var blk = kv.max_blocks - 1
+    while blk >= needed_blocks {
+        let phys_blk = ptr_read_u32_le(kv.arena_ptr, kv.table_off + blk * 4)
+        if phys_blk != 4294967295 {
+            if kv.free_top < kv.max_blocks {
+                let _w1 = ptr_write_u32_le(kv.arena_ptr, kv.free_off + kv.free_top * 4, phys_blk)
+                kv.free_top = kv.free_top + 1
+            }
+            let _w2 = ptr_write_u32_le(kv.arena_ptr, kv.table_off + blk * 4, 4294967295)
+        }
+        blk = blk - 1
+    }
+    kv.seq_len = new_len
+    true
+}
+
+pub fn qwen3_kv_write_kv_f32_buf(
+    kv: &!Qwen3PagedKv,
+    layer: i64,
+    pos: i64,
+    k_f32_ptr: i64,
+    v_f32_ptr: i64,
+) -> bool with Mut, Div {
+    if !kv.ok || layer < 0 || layer >= kv.n_layers || pos < 0 {
+        return false
+    }
+    if k_f32_ptr <= 0 || v_f32_ptr <= 0 {
+        return false
+    }
+    if !qwen3_kv_ensure_pos(kv, pos) {
+        return false
+    }
+    let logical_blk = pos / kv.block_size
+    let slot = pos % kv.block_size
+    let phys_blk = ptr_read_u32_le(kv.arena_ptr, kv.table_off + logical_blk * 4)
+    if phys_blk == 4294967295 {
+        return false
+    }
+    let layer_bytes = kv.max_blocks * kv.block_size * kv.n_kv_heads * kv.head_dim * 4
+    let token_elem_base = ((phys_blk * kv.block_size) + slot) * kv.n_kv_heads * kv.head_dim
+    let k_dst_base = kv.k_base_off + layer * layer_bytes + token_elem_base * 4
+    let v_dst_base = kv.v_base_off + layer * layer_bytes + token_elem_base * 4
+    let n_words = kv.n_kv_heads * kv.head_dim
+    var i: i64 = 0
+    while i < n_words {
+        let kw = ptr_read_u32_le(k_f32_ptr, i * 4)
+        let _w1 = ptr_write_u32_le(kv.arena_ptr, k_dst_base + i * 4, kw)
+        let vw = ptr_read_u32_le(v_f32_ptr, i * 4)
+        let _w2 = ptr_write_u32_le(kv.arena_ptr, v_dst_base + i * 4, vw)
+        i = i + 1
+    }
+    true
+}
+
+pub fn qwen3_kv_read_k_f64(kv: &Qwen3PagedKv, layer: i64, pos: i64, kv_head: i64, d: i64) -> f64 with Mut, Div {
+    if !kv.ok || layer < 0 || layer >= kv.n_layers || pos < 0 || pos >= kv.seq_len {
+        return 0.0
+    }
+    if kv_head < 0 || kv_head >= kv.n_kv_heads || d < 0 || d >= kv.head_dim {
+        return 0.0
+    }
+    let logical_blk = pos / kv.block_size
+    let slot = pos % kv.block_size
+    let phys_blk = ptr_read_u32_le(kv.arena_ptr, kv.table_off + logical_blk * 4)
+    if phys_blk == 4294967295 {
+        return 0.0
+    }
+    let layer_bytes = kv.max_blocks * kv.block_size * kv.n_kv_heads * kv.head_dim * 4
+    let elem_idx = (((phys_blk * kv.block_size) + slot) * kv.n_kv_heads + kv_head) * kv.head_dim + d
+    let byte_off = kv.k_base_off + layer * layer_bytes + elem_idx * 4
+    let bits = ptr_read_u32_le(kv.arena_ptr, byte_off)
+    f32_bits_to_f64(bits)
+}
+
+pub fn qwen3_kv_read_v_f64(kv: &Qwen3PagedKv, layer: i64, pos: i64, kv_head: i64, d: i64) -> f64 with Mut, Div {
+    if !kv.ok || layer < 0 || layer >= kv.n_layers || pos < 0 || pos >= kv.seq_len {
+        return 0.0
+    }
+    if kv_head < 0 || kv_head >= kv.n_kv_heads || d < 0 || d >= kv.head_dim {
+        return 0.0
+    }
+    let logical_blk = pos / kv.block_size
+    let slot = pos % kv.block_size
+    let phys_blk = ptr_read_u32_le(kv.arena_ptr, kv.table_off + logical_blk * 4)
+    if phys_blk == 4294967295 {
+        return 0.0
+    }
+    let layer_bytes = kv.max_blocks * kv.block_size * kv.n_kv_heads * kv.head_dim * 4
+    let elem_idx = (((phys_blk * kv.block_size) + slot) * kv.n_kv_heads + kv_head) * kv.head_dim + d
+    let byte_off = kv.v_base_off + layer * layer_bytes + elem_idx * 4
+    let bits = ptr_read_u32_le(kv.arena_ptr, byte_off)
+    f32_bits_to_f64(bits)
+}

@@ -1,0 +1,42 @@
+// stdlib::llm::bf16_kernels — Deterministic PTX and Metal Shader Language
+// emitters for Phase 0 zero-copy BF16 -> FP32 kernel verification.
+//
+// Large kernel strings exceed the 384-byte compiler Name literal capacity if
+// written as a single string literal, so multi-line GPU kernels assemble cleanly
+// into a NUL-terminated heap C buffer via `bf16_cstr_append`.
+
+pub fn bf16_cstr_append(dst: i64, pos: i64, s: string) -> i64 with Mut {
+    let n = str_len(s)
+    var i: i64 = 0
+    while i < n {
+        let _w = ptr_write_u8(dst, pos + i, str_char_at(s, i))
+        i = i + 1
+    }
+    let _z = ptr_write_u8(dst, pos + n, 0)
+    pos + n
+}
+
+pub fn emit_bf16_to_f32_ptx_cstr() -> i64 with Alloc, Mut {
+    let buf = heap_alloc(2048) as i64
+    var p: i64 = 0
+    p = bf16_cstr_append(buf, p, ".version 8.0\n.target sm_80\n.address_size 64\n\n")
+    p = bf16_cstr_append(buf, p, ".visible .entry bf16_to_f32(\n    .param .u64 param_src,\n    .param .u64 param_dst,\n    .param .u64 param_n\n) {\n    .reg .pred %p<2>;\n    .reg .b32 %r<5>;\n    .reg .b64 %rd<7>;\n")
+    p = bf16_cstr_append(buf, p, "    ld.param.u64 %rd1, [param_src];\n    ld.param.u64 %rd2, [param_dst];\n    ld.param.u64 %rd3, [param_n];\n    mov.u32 %r1, %ctaid.x;\n    mov.u32 %r2, %ntid.x;\n    mov.u32 %r3, %tid.x;\n")
+    p = bf16_cstr_append(buf, p, "    mad.lo.u32 %r1, %r1, %r2, %r3;\n    cvt.u64.u32 %rd4, %r1;\n    setp.ge.u64 %p1, %rd4, %rd3;\n    @%p1 bra L_EXIT;\n    shl.b64 %rd5, %rd4, 1;\n    add.u64 %rd5, %rd1, %rd5;\n")
+    p = bf16_cstr_append(buf, p, "    ld.global.u16 %r4, [%rd5];\n    shl.b32 %r4, %r4, 16;\n    shl.b64 %rd6, %rd4, 2;\n    add.u64 %rd6, %rd2, %rd6;\n    st.global.u32 [%rd6], %r4;\nL_EXIT:\n    ret;\n}\n")
+    buf
+}
+
+pub fn emit_bf16_to_f32_msl() -> string {
+    "#include <metal_stdlib>\nusing namespace metal;\nkernel void bf16_to_f32(\n    device const ushort* src [[buffer(0)]],\n    device uint* dst [[buffer(1)]],\n    constant ulong& n [[buffer(2)]],\n    uint gid [[thread_position_in_grid]]) {\n    if ((ulong)gid >= n) { return; }\n    dst[gid] = ((uint)src[gid]) << 16;\n}\n"
+}
+
+pub fn emit_bf16_to_f32_msl_cstr() -> i64 with Alloc, Mut {
+    let buf = heap_alloc(1024) as i64
+    var p: i64 = 0
+    p = bf16_cstr_append(buf, p, "#include <metal_stdlib>\nusing namespace metal;\n")
+    p = bf16_cstr_append(buf, p, "kernel void bf16_to_f32(device const ushort* src [[buffer(0)]], ")
+    p = bf16_cstr_append(buf, p, "device uint* dst [[buffer(1)]], constant ulong& n [[buffer(2)]], ")
+    p = bf16_cstr_append(buf, p, "uint gid [[thread_position_in_grid]]) {\n    if ((ulong)gid >= n) { return; }\n    dst[gid] = ((uint)src[gid]) << 16;\n}\n")
+    buf
+}

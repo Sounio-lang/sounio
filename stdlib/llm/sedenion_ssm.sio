@@ -1,0 +1,756 @@
+// stdlib::llm::sedenion_ssm — Sedenion Delta State Space Models (SedenionDeltaSSM)
+//
+// Native Sounio implementation of 16-dimensional sedenion algebra (Cayley-Dickson k=4),
+// Stiefel manifold V_{7,2} parameterization, Moreno-Lagrange rank-4 projection,
+// state space delta step updates, and Metal GPU acceleration.
+
+use tensor2::convert::{f32_bits_to_f64, f64_to_f32_bits}
+use math::pure::{sqrt, exp, abs}
+use llm::hal::{
+    MetalSession,
+    metal_cmd_begin,
+    metal_cmd_cancel,
+    metal_cmd_set_buf,
+    metal_cmd_set_u64,
+    metal_cmd_dispatch_1d,
+    metal_cmd_commit_sync,
+    metal_compile_msl_ptr,
+}
+use llm::bf16_kernels::bf16_cstr_append
+
+// ============================================================================
+// Internal Types and Memory Helpers
+// ============================================================================
+
+struct SedOct {
+    c0: f64,
+    c1: f64,
+    c2: f64,
+    c3: f64,
+    c4: f64,
+    c5: f64,
+    c6: f64,
+    c7: f64,
+}
+
+fn sed_read_f32(ptr: i64, idx: i64) -> f64 with Mut {
+    f32_bits_to_f64(ptr_read_u32_le(ptr, idx * 4))
+}
+
+fn sed_write_f32(ptr: i64, idx: i64, val: f64) with Mut {
+    let _w = ptr_write_u32_le(ptr, idx * 4, f64_to_f32_bits(val))
+}
+
+fn sed_oct_conj(a: SedOct) -> SedOct {
+    SedOct {
+        c0: a.c0,
+        c1: 0.0 - a.c1,
+        c2: 0.0 - a.c2,
+        c3: 0.0 - a.c3,
+        c4: 0.0 - a.c4,
+        c5: 0.0 - a.c5,
+        c6: 0.0 - a.c6,
+        c7: 0.0 - a.c7,
+    }
+}
+
+fn sed_oct_mul(a: SedOct, b: SedOct) -> SedOct {
+    let a0 = a.c0
+    let a1 = a.c1
+    let a2 = a.c2
+    let a3 = a.c3
+    let a4 = a.c4
+    let a5 = a.c5
+    let a6 = a.c6
+    let a7 = a.c7
+
+    let b0 = b.c0
+    let b1 = b.c1
+    let b2 = b.c2
+    let b3 = b.c3
+    let b4 = b.c4
+    let b5 = b.c5
+    let b6 = b.c6
+    let b7 = b.c7
+
+    SedOct {
+        c0: a0*b0 - a1*b1 - a2*b2 - a3*b3 - a4*b4 - a5*b5 - a6*b6 - a7*b7,
+        c1: a0*b1 + a1*b0 + a2*b3 - a3*b2 + a4*b5 - a5*b4 - a6*b7 + a7*b6,
+        c2: a0*b2 + a2*b0 - a1*b3 + a3*b1 + a4*b6 - a6*b4 + a5*b7 - a7*b5,
+        c3: a0*b3 + a3*b0 + a1*b2 - a2*b1 + a4*b7 - a7*b4 - a5*b6 + a6*b5,
+        c4: a0*b4 + a4*b0 - a1*b5 + a5*b1 - a2*b6 + a6*b2 - a3*b7 + a7*b3,
+        c5: a0*b5 + a5*b0 + a1*b4 - a4*b1 - a2*b7 + a7*b2 + a3*b6 - a6*b3,
+        c6: a0*b6 + a6*b0 + a1*b7 - a7*b1 + a2*b4 - a4*b2 - a3*b5 + a5*b3,
+        c7: a0*b7 + a7*b0 - a1*b6 + a6*b1 + a2*b5 - a5*b2 + a3*b4 - a4*b3,
+    }
+}
+
+// ============================================================================
+// Public Sedenion Primitives
+// ============================================================================
+
+/// Exact Cayley-Dickson 16D sedenion product matching `stdlib/algebra/sedenion.sio`.
+/// Formula: (alo*hlo - conj(hhi)*ahi, hhi*alo + ahi*conj(hlo))
+/// Aliasing-safe even if out_ptr == a_ptr or out_ptr == b_ptr.
+pub fn sedenion_mul_f32(a_ptr: i64, b_ptr: i64, out_ptr: i64) with Mut {
+    if a_ptr == 0 || b_ptr == 0 || out_ptr == 0 {
+        return
+    }
+
+    let a_lo = SedOct {
+        c0: sed_read_f32(a_ptr, 0),
+        c1: sed_read_f32(a_ptr, 1),
+        c2: sed_read_f32(a_ptr, 2),
+        c3: sed_read_f32(a_ptr, 3),
+        c4: sed_read_f32(a_ptr, 4),
+        c5: sed_read_f32(a_ptr, 5),
+        c6: sed_read_f32(a_ptr, 6),
+        c7: sed_read_f32(a_ptr, 7),
+    }
+    let a_hi = SedOct {
+        c0: sed_read_f32(a_ptr, 8),
+        c1: sed_read_f32(a_ptr, 9),
+        c2: sed_read_f32(a_ptr, 10),
+        c3: sed_read_f32(a_ptr, 11),
+        c4: sed_read_f32(a_ptr, 12),
+        c5: sed_read_f32(a_ptr, 13),
+        c6: sed_read_f32(a_ptr, 14),
+        c7: sed_read_f32(a_ptr, 15),
+    }
+
+    let b_lo = SedOct {
+        c0: sed_read_f32(b_ptr, 0),
+        c1: sed_read_f32(b_ptr, 1),
+        c2: sed_read_f32(b_ptr, 2),
+        c3: sed_read_f32(b_ptr, 3),
+        c4: sed_read_f32(b_ptr, 4),
+        c5: sed_read_f32(b_ptr, 5),
+        c6: sed_read_f32(b_ptr, 6),
+        c7: sed_read_f32(b_ptr, 7),
+    }
+    let b_hi = SedOct {
+        c0: sed_read_f32(b_ptr, 8),
+        c1: sed_read_f32(b_ptr, 9),
+        c2: sed_read_f32(b_ptr, 10),
+        c3: sed_read_f32(b_ptr, 11),
+        c4: sed_read_f32(b_ptr, 12),
+        c5: sed_read_f32(b_ptr, 13),
+        c6: sed_read_f32(b_ptr, 14),
+        c7: sed_read_f32(b_ptr, 15),
+    }
+
+    // Lower 8: alo * blo - conj(bhi) * ahi
+    let p = sed_oct_mul(a_lo, b_lo)
+    let q = sed_oct_mul(sed_oct_conj(b_hi), a_hi)
+
+    // Upper 8: bhi * alo + ahi * conj(blo)
+    let r = sed_oct_mul(b_hi, a_lo)
+    let s = sed_oct_mul(a_hi, sed_oct_conj(b_lo))
+
+    sed_write_f32(out_ptr, 0, p.c0 - q.c0)
+    sed_write_f32(out_ptr, 1, p.c1 - q.c1)
+    sed_write_f32(out_ptr, 2, p.c2 - q.c2)
+    sed_write_f32(out_ptr, 3, p.c3 - q.c3)
+    sed_write_f32(out_ptr, 4, p.c4 - q.c4)
+    sed_write_f32(out_ptr, 5, p.c5 - q.c5)
+    sed_write_f32(out_ptr, 6, p.c6 - q.c6)
+    sed_write_f32(out_ptr, 7, p.c7 - q.c7)
+
+    sed_write_f32(out_ptr, 8, r.c0 + s.c0)
+    sed_write_f32(out_ptr, 9, r.c1 + s.c1)
+    sed_write_f32(out_ptr, 10, r.c2 + s.c2)
+    sed_write_f32(out_ptr, 11, r.c3 + s.c3)
+    sed_write_f32(out_ptr, 12, r.c4 + s.c4)
+    sed_write_f32(out_ptr, 13, r.c5 + s.c5)
+    sed_write_f32(out_ptr, 14, r.c6 + s.c6)
+    sed_write_f32(out_ptr, 15, r.c7 + s.c7)
+}
+
+/// Normalizes u across Im(O) slots 1..7 (fallback e1 if norm < 1e-8),
+/// Gram-Schmidt orthogonalizes w against u and normalizes across slots 9..15 (fallback orthogonal unit vector if degenerate),
+/// scales both halves by 1/sqrt(2) (slots 0 and 8 set to 0.0) so ||z||_2 == 1.0 and z in V_{7,2}.
+pub fn sedenion_stiefel_v72_f32(
+    u7_ptr: i64,
+    w7_ptr: i64,
+    z16_out_ptr: i64
+) -> bool with Mut, Div, Panic {
+    if u7_ptr == 0 || w7_ptr == 0 || z16_out_ptr == 0 {
+        return false
+    }
+
+    var u0 = sed_read_f32(u7_ptr, 0)
+    var u1 = sed_read_f32(u7_ptr, 1)
+    var u2 = sed_read_f32(u7_ptr, 2)
+    var u3 = sed_read_f32(u7_ptr, 3)
+    var u4 = sed_read_f32(u7_ptr, 4)
+    var u5 = sed_read_f32(u7_ptr, 5)
+    var u6 = sed_read_f32(u7_ptr, 6)
+
+    var w0 = sed_read_f32(w7_ptr, 0)
+    var w1 = sed_read_f32(w7_ptr, 1)
+    var w2 = sed_read_f32(w7_ptr, 2)
+    var w3 = sed_read_f32(w7_ptr, 3)
+    var w4 = sed_read_f32(w7_ptr, 4)
+    var w5 = sed_read_f32(w7_ptr, 5)
+    var w6 = sed_read_f32(w7_ptr, 6)
+
+    let u_norm_sq = u0 * u0 + u1 * u1 + u2 * u2 + u3 * u3 + u4 * u4 + u5 * u5 + u6 * u6
+    let u_norm = sqrt(u_norm_sq)
+
+    if u_norm < 1.0e-8 {
+        u0 = 1.0
+        u1 = 0.0
+        u2 = 0.0
+        u3 = 0.0
+        u4 = 0.0
+        u5 = 0.0
+        u6 = 0.0
+    } else {
+        let inv_u = 1.0 / u_norm
+        u0 = u0 * inv_u
+        u1 = u1 * inv_u
+        u2 = u2 * inv_u
+        u3 = u3 * inv_u
+        u4 = u4 * inv_u
+        u5 = u5 * inv_u
+        u6 = u6 * inv_u
+    }
+
+    // Gram-Schmidt orthogonalize w against u
+    let dot_uw = w0 * u0 + w1 * u1 + w2 * u2 + w3 * u3 + w4 * u4 + w5 * u5 + w6 * u6
+    w0 = w0 - dot_uw * u0
+    w1 = w1 - dot_uw * u1
+    w2 = w2 - dot_uw * u2
+    w3 = w3 - dot_uw * u3
+    w4 = w4 - dot_uw * u4
+    w5 = w5 - dot_uw * u5
+    w6 = w6 - dot_uw * u6
+
+    let w_norm_sq = w0 * w0 + w1 * w1 + w2 * w2 + w3 * w3 + w4 * w4 + w5 * w5 + w6 * w6
+    let w_norm = sqrt(w_norm_sq)
+
+    if w_norm < 1.0e-8 {
+        // Fallback to deterministic orthogonal unit vector
+        if abs(u0) < 0.5 {
+            w0 = 1.0
+            w1 = 0.0
+            w2 = 0.0
+            w3 = 0.0
+            w4 = 0.0
+            w5 = 0.0
+            w6 = 0.0
+        } else {
+            w0 = 0.0
+            w1 = 1.0
+            w2 = 0.0
+            w3 = 0.0
+            w4 = 0.0
+            w5 = 0.0
+            w6 = 0.0
+        }
+        let dot_fb = w0 * u0 + w1 * u1 + w2 * u2 + w3 * u3 + w4 * u4 + w5 * u5 + w6 * u6
+        w0 = w0 - dot_fb * u0
+        w1 = w1 - dot_fb * u1
+        w2 = w2 - dot_fb * u2
+        w3 = w3 - dot_fb * u3
+        w4 = w4 - dot_fb * u4
+        w5 = w5 - dot_fb * u5
+        w6 = w6 - dot_fb * u6
+        let wn = sqrt(w0 * w0 + w1 * w1 + w2 * w2 + w3 * w3 + w4 * w4 + w5 * w5 + w6 * w6)
+        let inv_wn = 1.0 / wn
+        w0 = w0 * inv_wn
+        w1 = w1 * inv_wn
+        w2 = w2 * inv_wn
+        w3 = w3 * inv_wn
+        w4 = w4 * inv_wn
+        w5 = w5 * inv_wn
+        w6 = w6 * inv_wn
+    } else {
+        let inv_w = 1.0 / w_norm
+        w0 = w0 * inv_w
+        w1 = w1 * inv_w
+        w2 = w2 * inv_w
+        w3 = w3 * inv_w
+        w4 = w4 * inv_w
+        w5 = w5 * inv_w
+        w6 = w6 * inv_w
+    }
+
+    let inv_sqrt2 = 1.0 / sqrt(2.0)
+
+    // Slot 0 and 8 set to 0.0
+    sed_write_f32(z16_out_ptr, 0, 0.0)
+    sed_write_f32(z16_out_ptr, 1, u0 * inv_sqrt2)
+    sed_write_f32(z16_out_ptr, 2, u1 * inv_sqrt2)
+    sed_write_f32(z16_out_ptr, 3, u2 * inv_sqrt2)
+    sed_write_f32(z16_out_ptr, 4, u3 * inv_sqrt2)
+    sed_write_f32(z16_out_ptr, 5, u4 * inv_sqrt2)
+    sed_write_f32(z16_out_ptr, 6, u5 * inv_sqrt2)
+    sed_write_f32(z16_out_ptr, 7, u6 * inv_sqrt2)
+
+    sed_write_f32(z16_out_ptr, 8, 0.0)
+    sed_write_f32(z16_out_ptr, 9, w0 * inv_sqrt2)
+    sed_write_f32(z16_out_ptr, 10, w1 * inv_sqrt2)
+    sed_write_f32(z16_out_ptr, 11, w2 * inv_sqrt2)
+    sed_write_f32(z16_out_ptr, 12, w3 * inv_sqrt2)
+    sed_write_f32(z16_out_ptr, 13, w4 * inv_sqrt2)
+    sed_write_f32(z16_out_ptr, 14, w5 * inv_sqrt2)
+    sed_write_f32(z16_out_ptr, 15, w6 * inv_sqrt2)
+
+    true
+}
+
+fn sedenion_lagrange_kill4_f32_scratch(
+    z16_ptr: i64,
+    v16_ptr: i64,
+    out16_ptr: i64,
+    scratch128_ptr: i64
+) with Mut {
+    let s0 = scratch128_ptr
+    let s1 = scratch128_ptr + 64
+
+    // Call 1: t1 = L_z(v) = z * v -> s0
+    sedenion_mul_f32(z16_ptr, v16_ptr, s0)
+
+    // Call 2: t2 = L_z(t1) = z * t1 -> s1
+    sedenion_mul_f32(z16_ptr, s0, s1)
+
+    // y = 3v + t2 -> s0
+    var i: i64 = 0
+    while i < 16 {
+        let vi = sed_read_f32(v16_ptr, i)
+        let t2i = sed_read_f32(s1, i)
+        sed_write_f32(s0, i, 3.0 * vi + t2i)
+        i = i + 1
+    }
+
+    // Call 3: t3 = L_z(y) = z * y -> s1
+    sedenion_mul_f32(z16_ptr, s0, s1)
+
+    // Call 4: t4 = L_z(t3) = z * t3 -> s0
+    sedenion_mul_f32(z16_ptr, s1, s0)
+
+    // P_4(z) v = v + 0.5 * t4 -> out16_ptr
+    i = 0
+    while i < 16 {
+        let vi = sed_read_f32(v16_ptr, i)
+        let t4i = sed_read_f32(s0, i)
+        sed_write_f32(out16_ptr, i, vi + 0.5 * t4i)
+        i = i + 1
+    }
+}
+
+/// Computes the exact Moreno-Lagrange rank-4 orthogonal projector:
+/// P_4(z) v = v + 1/2 L_z(L_z(3v + L_z(L_z v)))
+/// via 4 calls to sedenion_mul_f32 (free scratch arena cleanly!).
+pub fn sedenion_lagrange_kill4_f32(
+    z16_ptr: i64,
+    v16_ptr: i64,
+    out16_ptr: i64
+) with Alloc, Mut, Div, Panic {
+    if z16_ptr == 0 || v16_ptr == 0 || out16_ptr == 0 {
+        return
+    }
+
+    let scratch = heap_alloc(128) as i64
+    if scratch == 0 {
+        return
+    }
+    sedenion_lagrange_kill4_f32_scratch(z16_ptr, v16_ptr, out16_ptr, scratch)
+    heap_free(scratch as *mut u8)
+}
+
+/// For each channel c in 0..n_channels, builds z_c in V_{7,2} from u7[c*7..] and w7[c*7..],
+/// computes P_4(z_c)(v_c - h_c), applies beta_c = sigmoid(raw_beta[c]),
+/// updates h_c <- h_c + beta_c * P_4(z_c)(v_c - h_c) in place,
+/// and returns sqrt(sum_c ||P_4(z_c)(v_c - h_{old, c})||_2^2).
+/// Preallocates loop-invariant scratch buffers once outside the channel loop.
+pub fn sedenion_delta_step_cpu(
+    h_ptr: i64,
+    u7_ptr: i64,
+    w7_ptr: i64,
+    v16_ptr: i64,
+    beta_ptr: i64,
+    n_channels: i64
+) -> f64 with Alloc, Mut, Div, Panic {
+    if h_ptr == 0 || u7_ptr == 0 || w7_ptr == 0 || v16_ptr == 0 || beta_ptr == 0 || n_channels <= 0 {
+        return 0.0
+    }
+
+    let scratch = heap_alloc(320) as i64
+    if scratch == 0 {
+        return 0.0
+    }
+    let z_ptr = scratch
+    let diff_ptr = scratch + 64
+    let proj_ptr = scratch + 128
+    let lag_scratch = scratch + 192
+
+    var sum_norm_sq: f64 = 0.0
+    var c: i64 = 0
+    while c < n_channels {
+        let u_c_ptr = u7_ptr + c * 28
+        let w_c_ptr = w7_ptr + c * 28
+        let h_c_ptr = h_ptr + c * 64
+        let v_c_ptr = v16_ptr + c * 64
+
+        let _st = sedenion_stiefel_v72_f32(u_c_ptr, w_c_ptr, z_ptr)
+
+        // Compute diff: v_c - h_c
+        var i: i64 = 0
+        while i < 16 {
+            let vi = sed_read_f32(v_c_ptr, i)
+            let hi = sed_read_f32(h_c_ptr, i)
+            sed_write_f32(diff_ptr, i, vi - hi)
+            i = i + 1
+        }
+
+        // Project diff: P4(z_c)(v_c - h_c) using loop-invariant scratch
+        sedenion_lagrange_kill4_f32_scratch(z_ptr, diff_ptr, proj_ptr, lag_scratch)
+
+        // beta_c = sigmoid(raw_beta[c])
+        let raw_beta = sed_read_f32(beta_ptr, c)
+        let beta_c = 1.0 / (1.0 + exp(0.0 - raw_beta))
+
+        // Accumulate norm sq and update h_c in place
+        var ch_norm_sq: f64 = 0.0
+        i = 0
+        while i < 16 {
+            let p_i = sed_read_f32(proj_ptr, i)
+            ch_norm_sq = ch_norm_sq + p_i * p_i
+            let hi = sed_read_f32(h_c_ptr, i)
+            sed_write_f32(h_c_ptr, i, hi + beta_c * p_i)
+            i = i + 1
+        }
+        sum_norm_sq = sum_norm_sq + ch_norm_sq
+
+        c = c + 1
+    }
+
+    heap_free(scratch as *mut u8)
+    sqrt(sum_norm_sq)
+}
+
+/// Sedenion Gated Delta SSM CPU Step.
+/// Computes alpha = sigmoid(alpha_ptr[c]), beta = sigmoid(beta_ptr[c]),
+/// h_tilde = alpha * h_c, delta = v_c - h_tilde, builds z_c in V_{7,2} from u7_ptr and w7_ptr,
+/// updates h_c = h_tilde + beta * P_4(z_c) delta in place,
+/// and returns sqrt(sum_c ||P_4(z_c) delta||_2^2).
+/// Preallocates loop-invariant scratch buffers once outside the channel loop.
+pub fn sedenion_gated_delta_step_cpu(
+    h_ptr: i64,
+    u7_ptr: i64,
+    w7_ptr: i64,
+    v16_ptr: i64,
+    alpha_ptr: i64,
+    beta_ptr: i64,
+    n_channels: i64
+) -> f64 with Alloc, Mut, Div, Panic {
+    if h_ptr == 0 || u7_ptr == 0 || w7_ptr == 0 || v16_ptr == 0 || alpha_ptr == 0 || beta_ptr == 0 || n_channels <= 0 {
+        return 0.0
+    }
+
+    let scratch = heap_alloc(320) as i64
+    if scratch == 0 {
+        return 0.0
+    }
+    let z_ptr = scratch
+    let delta_ptr = scratch + 64
+    let proj_ptr = scratch + 128
+    let lag_scratch = scratch + 192
+
+    var sum_norm_sq: f64 = 0.0
+    var c: i64 = 0
+    while c < n_channels {
+        let u_c_ptr = u7_ptr + c * 28
+        let w_c_ptr = w7_ptr + c * 28
+        let h_c_ptr = h_ptr + c * 64
+        let v_c_ptr = v16_ptr + c * 64
+
+        let _st = sedenion_stiefel_v72_f32(u_c_ptr, w_c_ptr, z_ptr)
+
+        // alpha = sigmoid(alpha_ptr[c]), beta = sigmoid(beta_ptr[c])
+        let raw_alpha = sed_read_f32(alpha_ptr, c)
+        let alpha_c = 1.0 / (1.0 + exp(0.0 - raw_alpha))
+
+        let raw_beta = sed_read_f32(beta_ptr, c)
+        let beta_c = 1.0 / (1.0 + exp(0.0 - raw_beta))
+
+        // delta = v_c - h_tilde = v_c - alpha * h_c
+        var i: i64 = 0
+        while i < 16 {
+            let vi = sed_read_f32(v_c_ptr, i)
+            let hi = sed_read_f32(h_c_ptr, i)
+            let h_tilde_i = alpha_c * hi
+            sed_write_f32(delta_ptr, i, vi - h_tilde_i)
+            i = i + 1
+        }
+
+        // Project delta: P4(z_c) delta
+        sedenion_lagrange_kill4_f32_scratch(z_ptr, delta_ptr, proj_ptr, lag_scratch)
+
+        // Accumulate norm sq and update h_c = h_tilde + beta * P4(z_c) delta in place
+        var ch_norm_sq: f64 = 0.0
+        i = 0
+        while i < 16 {
+            let p_i = sed_read_f32(proj_ptr, i)
+            ch_norm_sq = ch_norm_sq + p_i * p_i
+            let hi = sed_read_f32(h_c_ptr, i)
+            let h_tilde_i = alpha_c * hi
+            sed_write_f32(h_c_ptr, i, h_tilde_i + beta_c * p_i)
+            i = i + 1
+        }
+        sum_norm_sq = sum_norm_sq + ch_norm_sq
+
+        c = c + 1
+    }
+
+    heap_free(scratch as *mut u8)
+    sqrt(sum_norm_sq)
+}
+
+// ============================================================================
+// Metal GPU Acceleration
+// ============================================================================
+
+pub struct SedenionMetalPipelines {
+    pub gated_delta_step: i64,
+    pub ok: bool,
+}
+
+pub fn sedenion_metal_pipelines_empty() -> SedenionMetalPipelines {
+    SedenionMetalPipelines {
+        gated_delta_step: 0,
+        ok: false,
+    }
+}
+
+pub fn emit_sedenion_ssm_msl_cstr() -> i64 with Alloc, Mut {
+    let buf = heap_alloc(16384) as i64
+    if buf == 0 {
+        return 0
+    }
+    var p: i64 = 0
+    p = bf16_cstr_append(buf, p, "#include <metal_stdlib>\nusing namespace metal;\n\n")
+    p = bf16_cstr_append(buf, p, "struct OctF32 {\n    float c0, c1, c2, c3, c4, c5, c6, c7;\n};\n\n")
+    p = bf16_cstr_append(buf, p, "static inline OctF32 msl_oct_conj(OctF32 a) {\n    OctF32 r;\n")
+    p = bf16_cstr_append(buf, p, "    r.c0 = a.c0;\n    r.c1 = 0.0f - a.c1;\n    r.c2 = 0.0f - a.c2;\n    r.c3 = 0.0f - a.c3;\n")
+    p = bf16_cstr_append(buf, p, "    r.c4 = 0.0f - a.c4;\n    r.c5 = 0.0f - a.c5;\n    r.c6 = 0.0f - a.c6;\n    r.c7 = 0.0f - a.c7;\n")
+    p = bf16_cstr_append(buf, p, "    return r;\n}\n\n")
+
+    p = bf16_cstr_append(buf, p, "static inline OctF32 msl_oct_mul(OctF32 a, OctF32 b) {\n    OctF32 r;\n")
+    p = bf16_cstr_append(buf, p, "    r.c0 = a.c0*b.c0 - a.c1*b.c1 - a.c2*b.c2 - a.c3*b.c3 - a.c4*b.c4 - a.c5*b.c5 - a.c6*b.c6 - a.c7*b.c7;\n")
+    p = bf16_cstr_append(buf, p, "    r.c1 = a.c0*b.c1 + a.c1*b.c0 + a.c2*b.c3 - a.c3*b.c2 + a.c4*b.c5 - a.c5*b.c4 - a.c6*b.c7 + a.c7*b.c6;\n")
+    p = bf16_cstr_append(buf, p, "    r.c2 = a.c0*b.c2 + a.c2*b.c0 - a.c1*b.c3 + a.c3*b.c1 + a.c4*b.c6 - a.c6*b.c4 + a.c5*b.c7 - a.c7*b.c5;\n")
+    p = bf16_cstr_append(buf, p, "    r.c3 = a.c0*b.c3 + a.c3*b.c0 + a.c1*b.c2 - a.c2*b.c1 + a.c4*b.c7 - a.c7*b.c4 - a.c5*b.c6 + a.c6*b.c5;\n")
+    p = bf16_cstr_append(buf, p, "    r.c4 = a.c0*b.c4 + a.c4*b.c0 - a.c1*b.c5 + a.c5*b.c1 - a.c2*b.c6 + a.c6*b.c2 - a.c3*b.c7 + a.c7*b.c3;\n")
+    p = bf16_cstr_append(buf, p, "    r.c5 = a.c0*b.c5 + a.c5*b.c0 + a.c1*b.c4 - a.c4*b.c1 - a.c2*b.c7 + a.c7*b.c2 + a.c3*b.c6 - a.c6*b.c3;\n")
+    p = bf16_cstr_append(buf, p, "    r.c6 = a.c0*b.c6 + a.c6*b.c0 + a.c1*b.c7 - a.c7*b.c1 + a.c2*b.c4 - a.c4*b.c2 - a.c3*b.c5 + a.c5*b.c3;\n")
+    p = bf16_cstr_append(buf, p, "    r.c7 = a.c0*b.c7 + a.c7*b.c0 - a.c1*b.c6 + a.c6*b.c1 + a.c2*b.c5 - a.c5*b.c2 + a.c3*b.c4 - a.c4*b.c3;\n")
+    p = bf16_cstr_append(buf, p, "    return r;\n}\n\n")
+
+    p = bf16_cstr_append(buf, p, "struct SedF32 {\n    OctF32 lo;\n    OctF32 hi;\n};\n\n")
+    p = bf16_cstr_append(buf, p, "static inline SedF32 msl_sed_mul(SedF32 a, SedF32 b) {\n")
+    p = bf16_cstr_append(buf, p, "    OctF32 p = msl_oct_mul(a.lo, b.lo);\n")
+    p = bf16_cstr_append(buf, p, "    OctF32 q = msl_oct_mul(msl_oct_conj(b.hi), a.hi);\n")
+    p = bf16_cstr_append(buf, p, "    OctF32 r = msl_oct_mul(b.hi, a.lo);\n")
+    p = bf16_cstr_append(buf, p, "    OctF32 s = msl_oct_mul(a.hi, msl_oct_conj(b.lo));\n")
+    p = bf16_cstr_append(buf, p, "    SedF32 res;\n")
+    p = bf16_cstr_append(buf, p, "    res.lo.c0 = p.c0 - q.c0;\n    res.lo.c1 = p.c1 - q.c1;\n    res.lo.c2 = p.c2 - q.c2;\n    res.lo.c3 = p.c3 - q.c3;\n")
+    p = bf16_cstr_append(buf, p, "    res.lo.c4 = p.c4 - q.c4;\n    res.lo.c5 = p.c5 - q.c5;\n    res.lo.c6 = p.c6 - q.c6;\n    res.lo.c7 = p.c7 - q.c7;\n")
+    p = bf16_cstr_append(buf, p, "    res.hi.c0 = r.c0 + s.c0;\n    res.hi.c1 = r.c1 + s.c1;\n    res.hi.c2 = r.c2 + s.c2;\n    res.hi.c3 = r.c3 + s.c3;\n")
+    p = bf16_cstr_append(buf, p, "    res.hi.c4 = r.c4 + s.c4;\n    res.hi.c5 = r.c5 + s.c5;\n    res.hi.c6 = r.c6 + s.c6;\n    res.hi.c7 = r.c7 + s.c7;\n")
+    p = bf16_cstr_append(buf, p, "    return res;\n}\n\n")
+
+    p = bf16_cstr_append(buf, p, "kernel void sedenion_gated_delta_step_f32(\n")
+    p = bf16_cstr_append(buf, p, "    device uchar* h_base [[buffer(0)]],\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* u7_base [[buffer(1)]],\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* w7_base [[buffer(2)]],\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* v16_base [[buffer(3)]],\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* alpha_base [[buffer(4)]],\n")
+    p = bf16_cstr_append(buf, p, "    device const uchar* beta_base [[buffer(5)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& h_off [[buffer(6)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& u7_off [[buffer(7)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& w7_off [[buffer(8)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& v16_off [[buffer(9)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& alpha_off [[buffer(10)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& beta_off [[buffer(11)]],\n")
+    p = bf16_cstr_append(buf, p, "    constant ulong& n_channels [[buffer(12)]],\n")
+    p = bf16_cstr_append(buf, p, "    uint gid [[thread_position_in_grid]]) {\n")
+    p = bf16_cstr_append(buf, p, "    if ((ulong)gid >= n_channels) return;\n")
+    p = bf16_cstr_append(buf, p, "    ulong c = (ulong)gid;\n\n")
+
+    p = bf16_cstr_append(buf, p, "    device float* h_ptr = (device float*)(h_base + h_off) + c * 16;\n")
+    p = bf16_cstr_append(buf, p, "    device const float* u7_ptr = (device const float*)(u7_base + u7_off) + c * 7;\n")
+    p = bf16_cstr_append(buf, p, "    device const float* w7_ptr = (device const float*)(w7_base + w7_off) + c * 7;\n")
+    p = bf16_cstr_append(buf, p, "    device const float* v16_ptr = (device const float*)(v16_base + v16_off) + c * 16;\n")
+    p = bf16_cstr_append(buf, p, "    device const float* alpha_ptr = (device const float*)(alpha_base + alpha_off) + c;\n")
+    p = bf16_cstr_append(buf, p, "    device const float* beta_ptr = (device const float*)(beta_base + beta_off) + c;\n\n")
+
+    p = bf16_cstr_append(buf, p, "    float u0 = u7_ptr[0]; float u1 = u7_ptr[1]; float u2 = u7_ptr[2]; float u3 = u7_ptr[3];\n")
+    p = bf16_cstr_append(buf, p, "    float u4 = u7_ptr[4]; float u5 = u7_ptr[5]; float u6 = u7_ptr[6];\n")
+    p = bf16_cstr_append(buf, p, "    float w0 = w7_ptr[0]; float w1 = w7_ptr[1]; float w2 = w7_ptr[2]; float w3 = w7_ptr[3];\n")
+    p = bf16_cstr_append(buf, p, "    float w4 = w7_ptr[4]; float w5 = w7_ptr[5]; float w6 = w7_ptr[6];\n\n")
+
+    p = bf16_cstr_append(buf, p, "    float u_norm_sq = u0*u0 + u1*u1 + u2*u2 + u3*u3 + u4*u4 + u5*u5 + u6*u6;\n")
+    p = bf16_cstr_append(buf, p, "    float u_norm = sqrt(u_norm_sq);\n")
+    p = bf16_cstr_append(buf, p, "    if (u_norm < 1.0e-8f) {\n")
+    p = bf16_cstr_append(buf, p, "        u0 = 1.0f; u1 = 0.0f; u2 = 0.0f; u3 = 0.0f; u4 = 0.0f; u5 = 0.0f; u6 = 0.0f;\n")
+    p = bf16_cstr_append(buf, p, "    } else {\n")
+    p = bf16_cstr_append(buf, p, "        float inv_u = 1.0f / u_norm;\n")
+    p = bf16_cstr_append(buf, p, "        u0 = u0 * inv_u; u1 = u1 * inv_u; u2 = u2 * inv_u; u3 = u3 * inv_u;\n")
+    p = bf16_cstr_append(buf, p, "        u4 = u4 * inv_u; u5 = u5 * inv_u; u6 = u6 * inv_u;\n")
+    p = bf16_cstr_append(buf, p, "    }\n\n")
+
+    p = bf16_cstr_append(buf, p, "    float dot_uw = w0*u0 + w1*u1 + w2*u2 + w3*u3 + w4*u4 + w5*u5 + w6*u6;\n")
+    p = bf16_cstr_append(buf, p, "    w0 = w0 - dot_uw * u0; w1 = w1 - dot_uw * u1; w2 = w2 - dot_uw * u2; w3 = w3 - dot_uw * u3;\n")
+    p = bf16_cstr_append(buf, p, "    w4 = w4 - dot_uw * u4; w5 = w5 - dot_uw * u5; w6 = w6 - dot_uw * u6;\n")
+    p = bf16_cstr_append(buf, p, "    float w_norm_sq = w0*w0 + w1*w1 + w2*w2 + w3*w3 + w4*w4 + w5*w5 + w6*w6;\n")
+    p = bf16_cstr_append(buf, p, "    float w_norm = sqrt(w_norm_sq);\n")
+    p = bf16_cstr_append(buf, p, "    if (w_norm < 1.0e-8f) {\n")
+    p = bf16_cstr_append(buf, p, "        if (abs(u0) < 0.5f) {\n")
+    p = bf16_cstr_append(buf, p, "            w0 = 1.0f; w1 = 0.0f; w2 = 0.0f; w3 = 0.0f; w4 = 0.0f; w5 = 0.0f; w6 = 0.0f;\n")
+    p = bf16_cstr_append(buf, p, "        } else {\n")
+    p = bf16_cstr_append(buf, p, "            w0 = 0.0f; w1 = 1.0f; w2 = 0.0f; w3 = 0.0f; w4 = 0.0f; w5 = 0.0f; w6 = 0.0f;\n")
+    p = bf16_cstr_append(buf, p, "        }\n")
+    p = bf16_cstr_append(buf, p, "        float dot_fb = w0*u0 + w1*u1 + w2*u2 + w3*u3 + w4*u4 + w5*u5 + w6*u6;\n")
+    p = bf16_cstr_append(buf, p, "        w0 = w0 - dot_fb * u0; w1 = w1 - dot_fb * u1; w2 = w2 - dot_fb * u2; w3 = w3 - dot_fb * u3;\n")
+    p = bf16_cstr_append(buf, p, "        w4 = w4 - dot_fb * u4; w5 = w5 - dot_fb * u5; w6 = w6 - dot_fb * u6;\n")
+    p = bf16_cstr_append(buf, p, "        float wn = sqrt(w0*w0 + w1*w1 + w2*w2 + w3*w3 + w4*w4 + w5*w5 + w6*w6);\n")
+    p = bf16_cstr_append(buf, p, "        float inv_wn = 1.0f / wn;\n")
+    p = bf16_cstr_append(buf, p, "        w0 = w0 * inv_wn; w1 = w1 * inv_wn; w2 = w2 * inv_wn; w3 = w3 * inv_wn;\n")
+    p = bf16_cstr_append(buf, p, "        w4 = w4 * inv_wn; w5 = w5 * inv_wn; w6 = w6 * inv_wn;\n")
+    p = bf16_cstr_append(buf, p, "    } else {\n")
+    p = bf16_cstr_append(buf, p, "        float inv_w = 1.0f / w_norm;\n")
+    p = bf16_cstr_append(buf, p, "        w0 = w0 * inv_w; w1 = w1 * inv_w; w2 = w2 * inv_w; w3 = w3 * inv_w;\n")
+    p = bf16_cstr_append(buf, p, "        w4 = w4 * inv_w; w5 = w5 * inv_w; w6 = w6 * inv_w;\n")
+    p = bf16_cstr_append(buf, p, "    }\n\n")
+
+    p = bf16_cstr_append(buf, p, "    float inv_sqrt2 = 0.7071067811865475f;\n")
+    p = bf16_cstr_append(buf, p, "    SedF32 z;\n")
+    p = bf16_cstr_append(buf, p, "    z.lo.c0 = 0.0f; z.lo.c1 = u0 * inv_sqrt2; z.lo.c2 = u1 * inv_sqrt2; z.lo.c3 = u2 * inv_sqrt2;\n")
+    p = bf16_cstr_append(buf, p, "    z.lo.c4 = u3 * inv_sqrt2; z.lo.c5 = u4 * inv_sqrt2; z.lo.c6 = u5 * inv_sqrt2; z.lo.c7 = u6 * inv_sqrt2;\n")
+    p = bf16_cstr_append(buf, p, "    z.hi.c0 = 0.0f; z.hi.c1 = w0 * inv_sqrt2; z.hi.c2 = w1 * inv_sqrt2; z.hi.c3 = w2 * inv_sqrt2;\n")
+    p = bf16_cstr_append(buf, p, "    z.hi.c4 = w3 * inv_sqrt2; z.hi.c5 = w4 * inv_sqrt2; z.hi.c6 = w5 * inv_sqrt2; z.hi.c7 = w6 * inv_sqrt2;\n\n")
+
+    p = bf16_cstr_append(buf, p, "    float alpha = 1.0f / (1.0f + exp(0.0f - alpha_ptr[0]));\n")
+    p = bf16_cstr_append(buf, p, "    float beta = 1.0f / (1.0f + exp(0.0f - beta_ptr[0]));\n\n")
+
+    p = bf16_cstr_append(buf, p, "    SedF32 delta;\n")
+    p = bf16_cstr_append(buf, p, "    delta.lo.c0 = v16_ptr[0] - alpha * h_ptr[0]; delta.lo.c1 = v16_ptr[1] - alpha * h_ptr[1];\n")
+    p = bf16_cstr_append(buf, p, "    delta.lo.c2 = v16_ptr[2] - alpha * h_ptr[2]; delta.lo.c3 = v16_ptr[3] - alpha * h_ptr[3];\n")
+    p = bf16_cstr_append(buf, p, "    delta.lo.c4 = v16_ptr[4] - alpha * h_ptr[4]; delta.lo.c5 = v16_ptr[5] - alpha * h_ptr[5];\n")
+    p = bf16_cstr_append(buf, p, "    delta.lo.c6 = v16_ptr[6] - alpha * h_ptr[6]; delta.lo.c7 = v16_ptr[7] - alpha * h_ptr[7];\n")
+    p = bf16_cstr_append(buf, p, "    delta.hi.c0 = v16_ptr[8] - alpha * h_ptr[8]; delta.hi.c1 = v16_ptr[9] - alpha * h_ptr[9];\n")
+    p = bf16_cstr_append(buf, p, "    delta.hi.c2 = v16_ptr[10] - alpha * h_ptr[10]; delta.hi.c3 = v16_ptr[11] - alpha * h_ptr[11];\n")
+    p = bf16_cstr_append(buf, p, "    delta.hi.c4 = v16_ptr[12] - alpha * h_ptr[12]; delta.hi.c5 = v16_ptr[13] - alpha * h_ptr[13];\n")
+    p = bf16_cstr_append(buf, p, "    delta.hi.c6 = v16_ptr[14] - alpha * h_ptr[14]; delta.hi.c7 = v16_ptr[15] - alpha * h_ptr[15];\n\n")
+
+    p = bf16_cstr_append(buf, p, "    SedF32 t1 = msl_sed_mul(z, delta);\n")
+    p = bf16_cstr_append(buf, p, "    SedF32 t2 = msl_sed_mul(z, t1);\n\n")
+
+    p = bf16_cstr_append(buf, p, "    SedF32 y;\n")
+    p = bf16_cstr_append(buf, p, "    y.lo.c0 = 3.0f * delta.lo.c0 + t2.lo.c0; y.lo.c1 = 3.0f * delta.lo.c1 + t2.lo.c1;\n")
+    p = bf16_cstr_append(buf, p, "    y.lo.c2 = 3.0f * delta.lo.c2 + t2.lo.c2; y.lo.c3 = 3.0f * delta.lo.c3 + t2.lo.c3;\n")
+    p = bf16_cstr_append(buf, p, "    y.lo.c4 = 3.0f * delta.lo.c4 + t2.lo.c4; y.lo.c5 = 3.0f * delta.lo.c5 + t2.lo.c5;\n")
+    p = bf16_cstr_append(buf, p, "    y.lo.c6 = 3.0f * delta.lo.c6 + t2.lo.c6; y.lo.c7 = 3.0f * delta.lo.c7 + t2.lo.c7;\n")
+    p = bf16_cstr_append(buf, p, "    y.hi.c0 = 3.0f * delta.hi.c0 + t2.hi.c0; y.hi.c1 = 3.0f * delta.hi.c1 + t2.hi.c1;\n")
+    p = bf16_cstr_append(buf, p, "    y.hi.c2 = 3.0f * delta.hi.c2 + t2.hi.c2; y.hi.c3 = 3.0f * delta.hi.c3 + t2.hi.c3;\n")
+    p = bf16_cstr_append(buf, p, "    y.hi.c4 = 3.0f * delta.hi.c4 + t2.hi.c4; y.hi.c5 = 3.0f * delta.hi.c5 + t2.hi.c5;\n")
+    p = bf16_cstr_append(buf, p, "    y.hi.c6 = 3.0f * delta.hi.c6 + t2.hi.c6; y.hi.c7 = 3.0f * delta.hi.c7 + t2.hi.c7;\n\n")
+
+    p = bf16_cstr_append(buf, p, "    SedF32 t3 = msl_sed_mul(z, y);\n")
+    p = bf16_cstr_append(buf, p, "    SedF32 t4 = msl_sed_mul(z, t3);\n\n")
+
+    p = bf16_cstr_append(buf, p, "    SedF32 proj;\n")
+    p = bf16_cstr_append(buf, p, "    proj.lo.c0 = delta.lo.c0 + 0.5f * t4.lo.c0; proj.lo.c1 = delta.lo.c1 + 0.5f * t4.lo.c1;\n")
+    p = bf16_cstr_append(buf, p, "    proj.lo.c2 = delta.lo.c2 + 0.5f * t4.lo.c2; proj.lo.c3 = delta.lo.c3 + 0.5f * t4.lo.c3;\n")
+    p = bf16_cstr_append(buf, p, "    proj.lo.c4 = delta.lo.c4 + 0.5f * t4.lo.c4; proj.lo.c5 = delta.lo.c5 + 0.5f * t4.lo.c5;\n")
+    p = bf16_cstr_append(buf, p, "    proj.lo.c6 = delta.lo.c6 + 0.5f * t4.lo.c6; proj.lo.c7 = delta.lo.c7 + 0.5f * t4.lo.c7;\n")
+    p = bf16_cstr_append(buf, p, "    proj.hi.c0 = delta.hi.c0 + 0.5f * t4.hi.c0; proj.hi.c1 = delta.hi.c1 + 0.5f * t4.hi.c1;\n")
+    p = bf16_cstr_append(buf, p, "    proj.hi.c2 = delta.hi.c2 + 0.5f * t4.hi.c2; proj.hi.c3 = delta.hi.c3 + 0.5f * t4.hi.c3;\n")
+    p = bf16_cstr_append(buf, p, "    proj.hi.c4 = delta.hi.c4 + 0.5f * t4.hi.c4; proj.hi.c5 = delta.hi.c5 + 0.5f * t4.hi.c5;\n")
+    p = bf16_cstr_append(buf, p, "    proj.hi.c6 = delta.hi.c6 + 0.5f * t4.hi.c6; proj.hi.c7 = delta.hi.c7 + 0.5f * t4.hi.c7;\n\n")
+
+    p = bf16_cstr_append(buf, p, "    h_ptr[0] = alpha * h_ptr[0] + beta * proj.lo.c0; h_ptr[1] = alpha * h_ptr[1] + beta * proj.lo.c1;\n")
+    p = bf16_cstr_append(buf, p, "    h_ptr[2] = alpha * h_ptr[2] + beta * proj.lo.c2; h_ptr[3] = alpha * h_ptr[3] + beta * proj.lo.c3;\n")
+    p = bf16_cstr_append(buf, p, "    h_ptr[4] = alpha * h_ptr[4] + beta * proj.lo.c4; h_ptr[5] = alpha * h_ptr[5] + beta * proj.lo.c5;\n")
+    p = bf16_cstr_append(buf, p, "    h_ptr[6] = alpha * h_ptr[6] + beta * proj.lo.c6; h_ptr[7] = alpha * h_ptr[7] + beta * proj.lo.c7;\n")
+    p = bf16_cstr_append(buf, p, "    h_ptr[8] = alpha * h_ptr[8] + beta * proj.hi.c0; h_ptr[9] = alpha * h_ptr[9] + beta * proj.hi.c1;\n")
+    p = bf16_cstr_append(buf, p, "    h_ptr[10] = alpha * h_ptr[10] + beta * proj.hi.c2; h_ptr[11] = alpha * h_ptr[11] + beta * proj.hi.c3;\n")
+    p = bf16_cstr_append(buf, p, "    h_ptr[12] = alpha * h_ptr[12] + beta * proj.hi.c4; h_ptr[13] = alpha * h_ptr[13] + beta * proj.hi.c5;\n")
+    p = bf16_cstr_append(buf, p, "    h_ptr[14] = alpha * h_ptr[14] + beta * proj.hi.c6; h_ptr[15] = alpha * h_ptr[15] + beta * proj.hi.c7;\n")
+    p = bf16_cstr_append(buf, p, "}\n\n")
+
+    buf
+}
+
+pub fn sedenion_metal_pipelines_compile(s: &MetalSession) -> SedenionMetalPipelines with Alloc, Mut {
+    if !s.ok { return sedenion_metal_pipelines_empty() }
+    let c_msl = emit_sedenion_ssm_msl_cstr()
+    if c_msl == 0 { return sedenion_metal_pipelines_empty() }
+    let p_step = metal_compile_msl_ptr(s, c_msl, "sedenion_gated_delta_step_f32")
+    heap_free(c_msl as *mut u8)
+    if p_step <= 0 {
+        return sedenion_metal_pipelines_empty()
+    }
+    SedenionMetalPipelines {
+        gated_delta_step: p_step,
+        ok: true,
+    }
+}
+
+pub fn sedenion_metal_gated_delta_step(
+    s: &MetalSession,
+    pipes: &SedenionMetalPipelines,
+    buf_h: i64,
+    h_off: i64,
+    buf_u7: i64,
+    u7_off: i64,
+    buf_w7: i64,
+    w7_off: i64,
+    buf_v16: i64,
+    v16_off: i64,
+    buf_alpha: i64,
+    alpha_off: i64,
+    buf_beta: i64,
+    beta_off: i64,
+    n_channels: i64
+) -> i64 {
+    if !s.ok || !pipes.ok || pipes.gated_delta_step <= 0
+        || buf_h <= 0 || buf_u7 <= 0 || buf_w7 <= 0
+        || buf_v16 <= 0 || buf_alpha <= 0 || buf_beta <= 0
+        || h_off < 0 || u7_off < 0 || w7_off < 0
+        || v16_off < 0 || alpha_off < 0 || beta_off < 0
+        || n_channels <= 0 {
+        return -1
+    }
+
+    let cid = metal_cmd_begin(s)
+    if cid <= 0 { return -1 }
+
+    if metal_cmd_set_buf(s, cid, 0, buf_h, 0) != 0
+        || metal_cmd_set_buf(s, cid, 1, buf_u7, 0) != 0
+        || metal_cmd_set_buf(s, cid, 2, buf_w7, 0) != 0
+        || metal_cmd_set_buf(s, cid, 3, buf_v16, 0) != 0
+        || metal_cmd_set_buf(s, cid, 4, buf_alpha, 0) != 0
+        || metal_cmd_set_buf(s, cid, 5, buf_beta, 0) != 0
+        || metal_cmd_set_u64(s, cid, 6, h_off) != 0
+        || metal_cmd_set_u64(s, cid, 7, u7_off) != 0
+        || metal_cmd_set_u64(s, cid, 8, w7_off) != 0
+        || metal_cmd_set_u64(s, cid, 9, v16_off) != 0
+        || metal_cmd_set_u64(s, cid, 10, alpha_off) != 0
+        || metal_cmd_set_u64(s, cid, 11, beta_off) != 0
+        || metal_cmd_set_u64(s, cid, 12, n_channels) != 0 {
+        let _c = metal_cmd_cancel(s, cid)
+        return -1
+    }
+
+    let group_threads = if n_channels < 32 { n_channels } else { 32 }
+    if metal_cmd_dispatch_1d(s, cid, pipes.gated_delta_step, n_channels, group_threads) != 0 {
+        let _c = metal_cmd_cancel(s, cid)
+        return -1
+    }
+
+    metal_cmd_commit_sync(s, cid)
+}
