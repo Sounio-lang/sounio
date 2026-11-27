@@ -25,6 +25,7 @@ echo 'PASS negative: missing timeout refused before compiler build'
     scripts/ci/knowledge_measure_variance_oracle.cpp -o "$WORK/variance-oracle"
 "$WORK/variance-oracle" > "$WORK/variance-oracle.log"
 for test in a64_tuple_call_snapshot a64_box_large_field_table \
+    madaros_macos_heap_builtins \
     a64_int_overflow_in_range \
     a64_array_element_borrow madaros_nested_float_array_rank \
     madaros_generic_hof_scalar_inference madaros_generic_bool_literal_inference \
