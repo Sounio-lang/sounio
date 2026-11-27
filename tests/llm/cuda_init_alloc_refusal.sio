@@ -1,0 +1,33 @@
+// Regression: invoke the real runner with a fake driver that injects OOM at
+// the second weight allocation. The gate checks the named refusal, exactly
+// two driver allocations and cleanup of the one successful allocation.
+use llm::mmap::{MappedShard, mapped_shard_open, mapped_shard_is_ok, page_arena_alloc, page_arena_is_ok}
+use llm::qwen3::{Qwen3Model, qwen3_cfg_0_6b, qwen3_cuda_runner_init_audit, qwen3_cuda_runner_is_ok, qwen3_cuda_runner_free, qwen3_model_free}
+
+fn empty_shard() -> MappedShard { MappedShard { ptr: 0, len: 0, ok: false } }
+
+fn main() -> i64 with IO, Mut, Panic, Alloc, Div {
+    if arg_count() != 2 { return 2 }
+    let s0 = mapped_shard_open(get_arg(0))
+    let s1 = mapped_shard_open(get_arg(0))
+    let s2 = mapped_shard_open(get_arg(0))
+    let arena = page_arena_alloc(64)
+    let valid = mapped_shard_is_ok(&s0) && mapped_shard_is_ok(&s1) && mapped_shard_is_ok(&s2) && page_arena_is_ok(&arena)
+    let m = Qwen3Model {
+        s0: s0, s1: s1, s2: s2, s3: empty_shard(), s4: empty_shard(),
+        s5: empty_shard(), s6: empty_shard(), s7: empty_shard(), arena: arena,
+        cfg: qwen3_cfg_0_6b(), n_shards: 3, table_off: 0, buf_x_off: 0,
+        buf_h_off: 0, buf_q_off: 0, buf_k_off: 0, buf_v_off: 0,
+        buf_attn_out_off: 0, buf_gate_off: 0, buf_up_off: 0,
+        buf_logits_off: 0, buf_logits_err_off: 0, buf_tmp_err_off: 0,
+        buf_top2_off: 0, ok: valid,
+    }
+    if !valid { let _f = qwen3_model_free(m); return 3 }
+    let rt = qwen3_cuda_runner_init_audit(&m, 1, get_arg(1), 0)
+    let refused = !qwen3_cuda_runner_is_ok(&rt)
+    let _r = qwen3_cuda_runner_free(rt)
+    let _m = qwen3_model_free(m)
+    if !refused { println("RUNNER_REFUSAL_FAIL"); return 4 }
+    println("RUNNER_REFUSAL_PASS")
+    0
+}
