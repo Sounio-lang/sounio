@@ -58,4 +58,19 @@ if [[ "$program_status" != 7 ]]; then
     echo "FAIL: CLI run returned $program_status; expected program exit 7" >&2
     exit 1
 fi
-echo 'PASS: native Madaros check, Mach-O arm64 build, CLI run, struct/reference mutation, signed integer loop, stdout, and exit propagation'
+ARGV_SOURCE="$ROOT_DIR/tests/native/madaros_macos_argv.sio"
+"$MADAROS_BIN" build "$ARGV_SOURCE" --target aarch64-macos -o "$GATE_DIR/argv-program" >"$GATE_DIR/argv-build.log" 2>&1
+file "$GATE_DIR/argv-program" | grep -Eq 'Mach-O 64-bit.*arm64'
+chmod +x "$GATE_DIR/argv-program"
+codesign -s - -f "$GATE_DIR/argv-program"
+codesign --verify "$GATE_DIR/argv-program"
+"$GATE_DIR/argv-program" alpha 'beta gamma' >"$GATE_DIR/argv.log"
+printf '2\nalpha\nbeta gamma\n' >"$GATE_DIR/argv.expected.log"
+diff -u "$GATE_DIR/argv.expected.log" "$GATE_DIR/argv.log"
+"$GATE_DIR/argv-program" >"$GATE_DIR/argv-zero.log"
+printf '0\n' >"$GATE_DIR/argv-zero.expected.log"
+diff -u "$GATE_DIR/argv-zero.expected.log" "$GATE_DIR/argv-zero.log"
+"$GATE_DIR/argv-program" '' >"$GATE_DIR/argv-empty.log"
+printf '1\n\n' >"$GATE_DIR/argv-empty.expected.log"
+diff -u "$GATE_DIR/argv-empty.expected.log" "$GATE_DIR/argv-empty.log"
+echo 'PASS: native Madaros check, Mach-O arm64 build, CLI run, struct/reference mutation, signed integer loop, stdout, exit propagation, and argv builtins'
