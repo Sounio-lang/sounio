@@ -34,6 +34,19 @@ e com teto de VRAM, com `//@ expect-stdout: ALL PASS`.
 | `kernels/vec_add.kretikos.ptx` | vec_add **emitido pelo compilador** (Kretikos), executado e verificado na L4 |
 | `hip_probe.sio` | Enumeração AMD via HIP/dlopen (execução aguarda R9700 livre) |
 
+## `silicon/` — imagens de máquina sem ptxas
+
+`silicon/` monta cubins sm_89 diretamente, instrução por instrução, a partir de
+codificações medidas (`nvidia/atlas.sio`), sem passar por PTX nem ptxas. O que
+entrega: `si_gemv_sm89` (GEMV de um bloco) e `si_gemv_grid_sm89` (GEMV multibloco,
+n ≤ 65535, k ≤ 4096; formas fora disso são recusadas). `ce_module_image` carrega a
+imagem no driver. AMD (RDNA) e Apple (AGX) só têm o esquema; o encoder recusa.
+
+- CI (só CPU): `tests/stdlib/hetero/test_silicon_image_digest.sio` fixa tamanho e
+  digest de cada imagem.
+- GPU (manual): `examples/silicon_probe.sio`, `examples/silicon_grid_probe.sio` e
+  `examples/silicon_shape_probe.sio` executam numa sm_89 real.
+
 Exemplos: `examples/hetero_probe_demo.sio`, `examples/hetero_gemm_demo.sio`,
 `examples/hetero_kernel_demo.sio` (verificação vs CPU + GFLOP/s medidos).
 Resultados e limitações: seção 8 do design doc.
