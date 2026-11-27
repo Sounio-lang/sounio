@@ -993,6 +993,122 @@ fn type_is_unresolved_type_param_in_tables(structs: *mut StructTable, enums: *mu
     true
 }
 
+// ============================================================
+// Trait bounds. `impl Trait for Type` pairs are recorded here, and the
+// FnDef whose body is being checked is remembered so that a method call on a
+// receiver of type parameter T resolves against T's declared bounds. Both live
+// outside the ~8MB Checker (copied by value on the legacy spine), as
+// CHECKER_USE_MODULE_* does.
+// ============================================================
+
+pub struct TbImplTable {
+    pub trait_names: [Name; 4096],
+    pub type_names: [Name; 4096],
+    pub type_kinds: [TypeKind; 4096],
+    pub count: i64,
+}
+
+var TB_IMPLS_PTR: i64 = 0
+// The FnDef whose body is being checked; 0 outside any function body.
+var TB_CUR_FNDEF: i64 = 0
+
+fn tb_impls() -> *mut TbImplTable with Mut, Panic, Div, Alloc {
+    if TB_IMPLS_PTR == 0 {
+        let t = heap_alloc(4194304) as *mut TbImplTable
+        if t == 0 as *mut TbImplTable {
+            return t
+        }
+        (*t).count = 0
+        TB_IMPLS_PTR = t as i64
+    }
+    TB_IMPLS_PTR as *mut TbImplTable
+}
+
+// Record `impl trait_name for ty`. Repeated collection passes record once.
+// Past 4096 pairs a pair is not recorded: the bound check then refuses it
+// (fail closed) rather than accepting an instantiation it cannot verify.
+fn tb_impl_note(trait_name: Name, ty: TypeEntry) with Mut, Panic, Div, Alloc {
+    if name_is_empty(trait_name) {
+        return
+    }
+    let t = tb_impls()
+    if t == 0 as *mut TbImplTable {
+        return
+    }
+    var i: i64 = 0
+    while i < (*t).count {
+        if name_eq((*t).trait_names[i as usize], trait_name) && (*t).type_kinds[i as usize] == ty.kind && name_eq((*t).type_names[i as usize], ty.name) {
+            return
+        }
+        i = i + 1
+    }
+    if (*t).count >= 4096 {
+        return
+    }
+    (*t).trait_names[(*t).count as usize] = trait_name
+    (*t).type_names[(*t).count as usize] = ty.name
+    (*t).type_kinds[(*t).count as usize] = ty.kind
+    (*t).count = (*t).count + 1
+}
+
+fn tb_type_implements(trait_name: Name, ty: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
+    let t = tb_impls()
+    if t == 0 as *mut TbImplTable {
+        return false
+    }
+    var i: i64 = 0
+    while i < (*t).count {
+        if name_eq((*t).trait_names[i as usize], trait_name) && (*t).type_kinds[i as usize] == ty.kind && name_eq((*t).type_names[i as usize], ty.name) {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// The declared type parameters of the function being checked.
+fn tb_cur_fn_type_params() -> Option<Box<TypeParamDefList> > with Mut, Panic, Div {
+    if TB_CUR_FNDEF == 0 {
+        return None
+    }
+    let fdp = TB_CUR_FNDEF as *mut FnDef
+    (*fdp).type_params
+}
+
+// (declared, bounds) of type parameter `tname` in `opt`.
+fn tb_lookup_type_param(opt: Option<Box<TypeParamDefList> >, tname: Name) -> (bool, Option<Box<TypeExprList> >) with Mut, Panic, Div {
+    var found = false
+    var res: Option<Box<TypeExprList> > = None
+    var cur = opt
+    var done = false
+    while !done {
+        match cur {
+            None => { done = true }
+            Some(node) => {
+                if name_eq((*node).head.name, tname) {
+                    found = true
+                    res = (*node).head.bounds
+                    done = true
+                } else {
+                    cur = (*node).tail
+                }
+            }
+        }
+    }
+    (found, res)
+}
+
+fn tb_type_param_buf_index(buf: TypeParamBuf, name: Name) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < buf.count {
+        if name_eq(buf.names[i], name) {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
 fn collect_fn_generic_names_from_type_in_tables(structs: *mut StructTable, enums: *mut EnumTable, ty: TypeEntry, buf: TypeParamBuf) -> TypeParamBuf with Mut, Panic, Div, Alloc {
     var result = buf
     if type_is_unresolved_type_param_in_tables(structs, enums, ty) {
@@ -1111,7 +1227,7 @@ fn setup_intrinsics(tbl: *mut FnSigTable) with Mut, Panic, Div, Alloc {
         effect_count: 0,
         is_kernel: false,
         is_epistemic_kernel: false,
-        is_extern: false,
+        is_extern: false, type_params: None,
         is_linear_closure: false,
         linear_capture_count: 0,
         epistemic_epsilon: 0.0 - 1.0,
@@ -1156,7 +1272,7 @@ fn setup_intrinsics(tbl: *mut FnSigTable) with Mut, Panic, Div, Alloc {
         effect_count: 0,
         is_kernel: false,
         is_epistemic_kernel: false,
-        is_extern: false,
+        is_extern: false, type_params: None,
         is_linear_closure: false,
         linear_capture_count: 0,
         epistemic_epsilon: 0.0 - 1.0,
@@ -1199,7 +1315,7 @@ fn setup_intrinsics(tbl: *mut FnSigTable) with Mut, Panic, Div, Alloc {
         effect_count: 0,
         is_kernel: false,
         is_epistemic_kernel: false,
-        is_extern: false,
+        is_extern: false, type_params: None,
         is_linear_closure: false,
         linear_capture_count: 0,
         epistemic_epsilon: 0.0 - 1.0,
@@ -1251,7 +1367,7 @@ fn setup_intrinsics(tbl: *mut FnSigTable) with Mut, Panic, Div, Alloc {
         effect_count: 0,
         is_kernel: false,
         is_epistemic_kernel: false,
-        is_extern: false,
+        is_extern: false, type_params: None,
         is_linear_closure: false,
         linear_capture_count: 0,
         epistemic_epsilon: 0.0 - 1.0,
@@ -1291,7 +1407,7 @@ fn setup_intrinsics(tbl: *mut FnSigTable) with Mut, Panic, Div, Alloc {
         effect_count: 0,
         is_kernel: false,
         is_epistemic_kernel: false,
-        is_extern: false,
+        is_extern: false, type_params: None,
         is_linear_closure: false,
         linear_capture_count: 0,
         epistemic_epsilon: 0.0 - 1.0,
@@ -1337,7 +1453,7 @@ fn setup_intrinsics(tbl: *mut FnSigTable) with Mut, Panic, Div, Alloc {
         effect_count: 0,
         is_kernel: false,
         is_epistemic_kernel: false,
-        is_extern: false,
+        is_extern: false, type_params: None,
         is_linear_closure: false,
         linear_capture_count: 0,
         epistemic_epsilon: 0.0 - 1.0,
@@ -1371,7 +1487,7 @@ fn setup_intrinsics(tbl: *mut FnSigTable) with Mut, Panic, Div, Alloc {
         effect_count: 0,
         is_kernel: false,
         is_epistemic_kernel: false,
-        is_extern: false,
+        is_extern: false, type_params: None,
         is_linear_closure: false,
         linear_capture_count: 0,
         epistemic_epsilon: 0.0 - 1.0,
@@ -1716,6 +1832,7 @@ fn ns_summary_find_def(sig_id: i64) -> FnDef with Mut, Panic, Div {
         span: Span { file_id: 0, start: 0, end: 0 },
         is_kernel: false,
         is_extern: false,
+        type_params: None,
     }
     var found = false
     var cur = NS_FN_DEF_HEAD
@@ -3048,7 +3165,7 @@ fn checker_lower_fn_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry wi
         effect_count: eff_pair.count,
         is_kernel: false,
         is_epistemic_kernel: false,
-        is_extern: false,
+        is_extern: false, type_params: None,
         is_linear_closure: false,
         linear_capture_count: 0,
         epistemic_epsilon: 0.0 - 1.0,
@@ -5198,7 +5315,7 @@ fn checker_collect_fn_def_inplace(c: *mut Checker, opt: Option<Box<FnDef> >, vis
                 effect_count: kernel_effect_count,
                 is_kernel: is_kernel_fn,
                 is_epistemic_kernel: has_epistemic_param,
-                is_extern: (*fd).is_extern,
+                is_extern: (*fd).is_extern, type_params: (*fd).type_params,
                 is_linear_closure: false,
                 linear_capture_count: 0,
                 epistemic_epsilon: 0.0 - 1.0,
@@ -7073,6 +7190,8 @@ fn checker_collect_item_inplace(c: *mut Checker, item: Item) with Mut, Panic, Di
         // Bridged to the by-value collect_impl_def (mirrors checker_check_impl_item_bridge);
         // its ~8MB SRET frame stays isolated in the bridge leaf.
         checker_collect_impl_item_bridge(c, item.impl_def)
+    } else if item.kind == ItemKind::ItemTrait {
+        checker_collect_trait_def_inplace(c, item.name, item.trait_def)
     } else if item.kind == ItemKind::ItemTypeAlias {
         checker_collect_type_alias_inplace(c, item.name, item.type_alias_ty)
     } else if item.kind == ItemKind::ItemUnit {
@@ -7691,6 +7810,7 @@ fn checker_check_impl_method_inplace(c: *mut Checker, item: Item) with Mut, Pani
             // lane. The semantic lookup disambiguates by TypeKind (TyUnknown vs TyI64),
             // so each impl body sees ITS OWN declared effects.
             (*c).current_fn_name = (*fd).name
+            TB_CUR_FNDEF = (fd as *mut FnDef) as i64
             e035_note_fn((*fd).name)
             let sig_id = fn_sig_table_find_method_semantic((*c).fn_sigs, (*c).current_impl_type, (*fd).name)
             if sig_id >= 0 {
@@ -7828,7 +7948,7 @@ fn checker_collect_impl_method_inplace(c: *mut Checker, item: Item, type_name: N
                 effect_count: fn_effect_count,
                 is_kernel: false,
                 is_epistemic_kernel: false,
-                is_extern: false,
+                is_extern: false, type_params: None,
                 is_linear_closure: false,
                 linear_capture_count: 0,
                 epistemic_epsilon: 0.0 - 1.0,
@@ -7858,10 +7978,127 @@ fn checker_collect_impl_methods_inplace(c: *mut Checker, opt: Option<Box<ItemLis
     }
 }
 
+
+// Does `arg` satisfy the bound named `trait_name`? An impl was recorded for
+// it, or it is a type parameter of the calling function that declares the
+// same bound (fn g<U: Lj>(u: U) { f::<U>(u) }). An erroneous argument has
+// already been reported and is not refused twice.
+fn checker_tb_arg_satisfies_inplace(c: *mut Checker, trait_name: Name, arg: TypeEntry) -> bool with Mut, Panic, Div, Alloc, IO {
+    if is_error_or_unknown(arg) {
+        return true
+    }
+    if tb_type_implements(trait_name, arg) {
+        return true
+    }
+    let lk = tb_lookup_type_param(tb_cur_fn_type_params(), arg.name)
+    if !lk.0 {
+        return false
+    }
+    var b = lk.1
+    while true {
+        match b {
+            None => { break }
+            Some(bn) => {
+                let bound_ty = checker_lower_type_expr_mut(c, (*bn).head)
+                if name_eq(bound_ty.name, trait_name) {
+                    return true
+                }
+                b = (*bn).tail
+            }
+        }
+    }
+    false
+}
+
+// E315 at the call site for every bound of the callee's type parameters that
+// its type argument does not satisfy. `generic_names` is the order in which
+// the turbofish was bound to names (the substitution's own order), so each
+// declared parameter finds its argument by name.
+fn checker_check_instantiation_bounds_inplace(c: *mut Checker, span: Span, tps: Option<Box<TypeParamDefList> >, generic_names: TypeParamBuf, args: TypeEntryList) with Mut, Panic, Div, Alloc, IO {
+    let n_args = type_entry_list_count_value(&args)
+    var cur = tps
+    while true {
+        match cur {
+            None => { break }
+            Some(node) => {
+                let idx = tb_type_param_buf_index(generic_names, (*node).head.name)
+                if idx >= 0 && idx < n_args {
+                    let arg = type_entry_list_nth(type_entry_list_clone(&args), idx)
+                    var b = (*node).head.bounds
+                    while true {
+                        match b {
+                            None => { break }
+                            Some(bn) => {
+                                let trait_ty = checker_lower_type_expr_mut(c, (*bn).head)
+                                if !checker_tb_arg_satisfies_inplace(c, trait_ty.name, arg) {
+                                    checker_report_error_at_inplace(c, span, 315, 0, 0, 0)
+                                }
+                                b = (*bn).tail
+                            }
+                        }
+                    }
+                }
+                cur = (*node).tail
+            }
+        }
+    }
+}
+
+// A method call whose receiver has the type of a declared type parameter T
+// of the function being checked: the method is the one some bound of T
+// declares, with Self (lowered as the trait's own named type when the trait
+// was collected) replaced by T. No bound declaring it is E316.
+fn checker_check_bounded_type_param_method_call_inplace(c: *mut Checker, e: Expr, base_ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let lk = tb_lookup_type_param(tb_cur_fn_type_params(), base_ty.name)
+    var b = lk.1
+    while true {
+        match b {
+            None => { break }
+            Some(bn) => {
+                let trait_ty = checker_lower_type_expr_mut(c, (*bn).head)
+                let sig_id = fn_sig_table_find_method((*c).fn_sigs, trait_ty.name, e.name)
+                if sig_id >= 0 {
+                    let sig = fn_sig_table_get((*c).fn_sigs, sig_id)
+                    var self_buf = empty_type_param_buf()
+                    self_buf = type_param_buf_push_unique(self_buf, trait_ty.name)
+                    let self_args = TypeEntryList { head: base_ty, tail: None }
+                    let effective_params = checker_substitute_fn_params(fn_param_list_clone(&sig.params), self_buf, type_entry_list_clone(&self_args))
+                    let effective_return_type = substitute_type_param(sig.return_type, self_buf, type_entry_list_clone(&self_args))
+                    checker_check_call_args_inplace(c, expr_list_handle(e.args), fn_param_list_handle(effective_params), sig.param_count, e.span, 0 - 1)
+                    checker_check_callee_effects_named_inplace(c, e.span, sig.effects, sig.effect_count, sig.name)
+                    checker_release_call_arg_borrows_inplace(c, e.args, effective_params)
+                    return effective_return_type
+                }
+                b = (*bn).tail
+            }
+        }
+    }
+    checker_report_error_at_inplace(c, e.span, 316, 0, 0, 0)
+    checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+    checker_release_call_arg_borrows_inplace(c, e.args, None)
+    ty_error()
+}
+
+// `trait Name { fn m(self, ..) -> Self; .. }`: each method signature is
+// registered as a method of the trait's own named type, with Self lowering
+// to it, so that a bound `T: Name` resolves `x.m(..)` for `x: T`.
+fn checker_collect_trait_def_inplace(c: *mut Checker, name: Name, opt: Option<Box<TraitItemDef> >) with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(td) => {
+            let saved_impl_type = (*c).current_impl_type
+            (*c).current_impl_type = ty_named(name)
+            checker_collect_impl_methods_inplace(c, (*td).methods, name)
+            (*c).current_impl_type = saved_impl_type
+        }
+        None => {}
+    }
+}
+
 fn checker_collect_impl_def_inplace(c: *mut Checker, opt: Option<Box<ImplDef> >) with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(id) => {
             let impl_ty = checker_lower_type_expr_mut(c, (*id).target_type)
+            tb_impl_note((*id).trait_name, impl_ty)
             (*c).current_impl_type = impl_ty
             checker_collect_impl_methods_inplace(c, (*id).methods, impl_ty.name)
             (*c).current_impl_type = ty_error()
@@ -8056,6 +8293,7 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
             // proven path ships. Revisit direct-read with a real return-mismatch
             // gate once `return <expr>` no longer crashes the check spine.
             (*c).current_fn_name = (*fd).name
+            TB_CUR_FNDEF = (fd as *mut FnDef) as i64
             e035_note_fn((*fd).name)
             // Defect B (docs/audit/MADAROS_PBPK28_NN_TENSOR_COMPILE_RUNTIME_DIVERGENCE_2026-08-17.md):
             // a bare-name fn_sig_table_find here is the exact same disease the
@@ -13048,7 +13286,7 @@ fn checker_check_closure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
         effect_count: inferred_effect_count,
         is_kernel: false,
         is_epistemic_kernel: false,
-        is_extern: false,
+        is_extern: false, type_params: None,
         is_linear_closure: capture_linear,
         linear_capture_count: capture_linear_count,
         epistemic_epsilon: capture_epsilon,
@@ -13274,6 +13512,7 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
                         }
                         effective_params = checker_substitute_fn_params(effective_params, generic_names, type_entry_list_clone(&lowered_type_args))
                         effective_return_type = substitute_type_param(sig.return_type, generic_names, type_entry_list_clone(&lowered_type_args))
+                        checker_check_instantiation_bounds_inplace(c, e.span, sig.type_params, generic_names, type_entry_list_clone(&lowered_type_args))
                     }
                 }
                 None => {}
@@ -13282,6 +13521,8 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
             checker_check_callee_effects_named_inplace(c, e.span, sig.effects, sig.effect_count, sig.name)
             checker_release_call_arg_borrows_inplace(c, e.args, effective_params)
             effective_return_type
+        } else if tb_lookup_type_param(tb_cur_fn_type_params(), base_ty.name).0 {
+            checker_check_bounded_type_param_method_call_inplace(c, e, base_ty)
         } else {
             checker_report_error_at_inplace(c, e.span, 11, 0, 0, 0)
             checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
@@ -13324,6 +13565,7 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
                         }
                         effective_params = checker_substitute_fn_params(effective_params, generic_names, type_entry_list_clone(&lowered_type_args))
                         effective_return_type = substitute_type_param(sig.return_type, generic_names, type_entry_list_clone(&lowered_type_args))
+                        checker_check_instantiation_bounds_inplace(c, e.span, sig.type_params, generic_names, type_entry_list_clone(&lowered_type_args))
                     }
                 }
                 None => {}
@@ -15549,6 +15791,7 @@ fn checker_check_call_direct_sig_generics_inplace(c: *mut Checker, e: Expr, dire
                 }
                 effective_params = checker_substitute_fn_params(effective_params, generic_names, type_entry_list_clone(&lowered_type_args))
                 effective_return_type = substitute_type_param(direct_sig.return_type, generic_names, type_entry_list_clone(&lowered_type_args))
+                checker_check_instantiation_bounds_inplace(c, e.span, direct_sig.type_params, generic_names, type_entry_list_clone(&lowered_type_args))
             }
         }
         None => {}
@@ -15865,6 +16108,7 @@ fn checker_check_call_indirect_inplace(c: *mut Checker, e: Expr, callee_is_local
                     }
                     effective_params = checker_substitute_fn_params(effective_params, generic_names, type_entry_list_clone(&lowered_type_args))
                     effective_return_type = substitute_type_param(sig.return_type, generic_names, type_entry_list_clone(&lowered_type_args))
+                    checker_check_instantiation_bounds_inplace(c, e.span, sig.type_params, generic_names, type_entry_list_clone(&lowered_type_args))
                 }
             }
             None => {}
@@ -23869,6 +24113,8 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 302 { print("`break` with a value is only allowed inside `loop`") }
     else if code == 308 { print("the `break` values of this `loop` have different types") }
     else if code == 310 { print("printing a Knowledge value would show its nominal value without its uncertainty and confidence; print a field instead (`k.value`, `k.variance`, `k.confidence`)") }
+    else if code == 315 { print("type argument does not implement a trait bound of the generic function's type parameter") }
+    else if code == 316 { print("no trait bound of this type parameter declares the method") }
     else if code == 314 { print("Knightian uncertainty (ε=⊥) cannot satisfy required confidence or error bound, or a named Knightian source has conflicting bounds") }
     else if code == 269 { print("a `where` refinement on Knowledge<T> is not enforced by this compiler yet: the predicate would be silently ignored, so it is refused") }
     else if code == 270 { print("`as string` does not convert a number, bool or char to text: no engine formats the value, so the cast is refused") }
@@ -28431,7 +28677,7 @@ impl Checker {
             effect_count: effect_count,
             is_kernel: false,
             is_epistemic_kernel: false,
-            is_extern: false,
+            is_extern: false, type_params: None,
             is_linear_closure: false,
             linear_capture_count: 0,
             epistemic_epsilon: 0.0 - 1.0,
@@ -30581,7 +30827,7 @@ impl Checker {
                     effect_count: kernel_effect_count,
                     is_kernel: is_kernel_fn,
                     is_epistemic_kernel: has_epistemic_param,
-                    is_extern: (*fd).is_extern,
+                    is_extern: (*fd).is_extern, type_params: (*fd).type_params,
                     is_linear_closure: false,
                     linear_capture_count: 0,
                     epistemic_epsilon: 0.0 - 1.0,
@@ -31582,6 +31828,7 @@ impl Checker {
                 let pair = self.lower_type_expr((*id).target_type)
                 var c = pair.0
                 let impl_ty = pair.1
+                tb_impl_note((*id).trait_name, impl_ty)
                 c.current_impl_type = impl_ty
                 c = c.collect_impl_methods((*id).methods, impl_ty.name)
                 c.current_impl_type = ty_error()
@@ -31631,7 +31878,7 @@ impl Checker {
                     effect_count: fn_effect_count,
                     is_kernel: false,
                     is_epistemic_kernel: false,
-                    is_extern: false,
+                    is_extern: false, type_params: None,
                     is_linear_closure: false,
                     linear_capture_count: 0,
                     epistemic_epsilon: 0.0 - 1.0,
@@ -31903,6 +32150,7 @@ impl Checker {
                 let pair = self.lower_type_expr((*id).target_type)
                 var c = pair.0
                 let impl_ty = pair.1
+                tb_impl_note((*id).trait_name, impl_ty)
                 c.current_impl_type = impl_ty
                 c = c.check_impl_methods((*id).methods)
                 c.current_impl_type = ty_error()
@@ -37567,7 +37815,7 @@ impl Checker {
             effect_count: inferred_effect_count,
             is_kernel: false,
             is_epistemic_kernel: false,
-            is_extern: false,
+            is_extern: false, type_params: None,
             is_linear_closure: capture_linear,
             linear_capture_count: capture_linear_count,
             epistemic_epsilon: capture_epsilon,
