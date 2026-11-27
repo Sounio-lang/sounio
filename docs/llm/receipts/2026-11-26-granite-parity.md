@@ -587,3 +587,84 @@ fails before and passes after, with the patched Madaros built from source.
 **NOT ESTABLISHED:** actual patched-compiler CUDA inference, the exact
 cause of job 29516's timeout, and the cross-GPU bit-identity prediction
 while candidate jobs remain pending. The original audit pin is unchanged.
+
+## 2026-11-27: R740 numerical campaign failure (coordinator audit)
+
+**OBSERVED (coordinator):** both R740 legs 29560 (Quadro RTX 8000, sm_75)
+and 29561 (RTX A5000, sm_86) printed `GRANITE_TOKEN_IDS_480_PASS`, the
+header, `[audit61440] resume_skip=0 max_tokens=128 max_seq=512 max_prompts=480`,
+then `AUDIT_61440_FAIL`. Each TSV contained only a header, no prompt
+records. Both audit processes were Zl with GPU utilization 0%. Unlike
+29553's completed L4 reference, this is a numerical-run failure, not a
+completed result. The existing exit watchdog was incomplete: it recognized
+only successful `AUDIT_61440_DONE`, leaving failure-marker zombies alive.
+
+**OBSERVED (Slurm readback):** 29559 RTX CPU/CUDA 49,155-tail control
+COMPLETED 0:0, 00:02:22, batch MaxRSS 3441356K; records `granite-tail-cpu-pass`,
+`r-exit-hang-workaround`, and `granite-tail-cuda-pass`. Both audit legs were
+RUNNING for 03:04:05 before cancellation; 29562 was PENDING. Canceled only
+29560, 29561, 29562 by ID. Batch MaxRSS was unavailable in the terminal
+accounting readback for the two canceled legs. The controller subsequently
+reported R740 `IDLE+DRAIN+DYNAMIC_NORM` with reason `Kill task failed
+(JobId=29561 StepId=batch) [root@2026-11-27T04:16:35]`. No node state was
+changed by this lane; coordinator notified. No new heavy job on dl380p or
+5860.
+
+**NOT ESTABLISHED:** root cause of `run_61440_cuda` returning false. Source
+inspection shows the absent `backend=cuda_audit` line precedes first-prompt
+processing and is conditional on both `qwen3_cuda_runner_is_ok(&rt)` and
+`page_arena_is_ok(&work_arena)` in `run_61440_cuda`; failure during runner
+initialization is a hypothesis, not a proven cause. Prior successful Qwen3
+RTX 8000 audit and Granite L4 audit are not evidence of the failed branch.
+No tuple comparison was possible, so prediction is **NOT TESTED**.
+
+### Binary identity anomaly
+
+The pinned source is still `ad4a505c1931d48552397089ca11d7cfaeabd988`.
+Accounting recorded audit binary digest prefixes `8c74378a1899` (L4),
+`5909057062c7` (RTX 8000), `d65d3dbf04cb` (A5000). All three registered the
+same corpus hash. **NOT ESTABLISHED:** whether those executable differences
+are path metadata, compiler nondeterminism, or actually different emitted
+instructions. The original L4 executable and Madaros binary were not
+retained by the earlier preservation (29639 confirmed unavailable); its
+verified build log, `inputs.sha256` and numerical TSV remain. CPU recovery
+job 29641 on D could not find the two failed R740 binaries, logs or TSVs in
+the shared stage; the R740-local recovery job 29638 is queued on the drained
+node. The coordinator's original observations above are retained separately
+from artifacts actually recovered by this lane. New failure traps preserve
+full audit and compiler files, inputs, logs and partial TSVs with a
+failure-specific SHA256 manifest, never treating partial TSVs as reference.
+
+### Diagnostic-only chain (no audit re-pin)
+
+The watchdog now detects `AUDIT_61440_FAIL`, `AUDIT_61440_INIT_FAIL` and
+other uppercase `*_FAIL` markers, kills only the owning child PID if
+necessary, records `r-audit-fail`, and exits nonzero. The tail runner has
+the corresponding failure-marker guard.
+
+Branch `diag/granite-cuda-init` at
+`a625788c03f20f687b5670e7f8d1cce327f88b51`, based on the pinned audit source,
+instruments session open, allocation and copy return codes, runner resources,
+and the precise failure branches in `run_61440_cuda`. It retains the original
+480-prompt tokenizer oracle check but runs at most one prompt for diagnosis;
+its distinct success marker is `GRANITE_DIAG_FIRST_PROMPT_PASS`, never the
+registered audit DONE marker. Build once on D, then use the same SHA-verified
+CPU-built diagnostic ELF on all three GPUs, to avoid confounding devices and
+compilers. No changed arithmetic is admitted to the audited source yet.
+
+| Job | Node / resource | Role |
+|---|---|---|
+| 29638 | R740 CPU-only, oversubscribe | Original artifact recovery, pending on drained node |
+| 29639 | R770 CPU-only | L4 artifact recovery, COMPLETED 0:0 |
+| 29640 | D CPU-only | Source-built Madaros and diagnostic ELF; checks |
+| 29641 | D CPU-only | Failed R740 shared-stage artifact recovery; COMPLETED 0:0, missing artifacts |
+| 29642 | R740 sm_75, 24G, oversubscribe | Diagnostic, afterok 29640 |
+| 29643 | R740 sm_86, 24G, oversubscribe | Diagnostic, afterok 29640 |
+| 29644 | R770 sm_89, 24G, oversubscribe | Same diagnostic ELF positive control, afterok 29640 |
+| 29645 | D CPU-only | Same-source same/path-different-build binary comparison |
+| 29646 | R770 CPU-only, 12G, oversubscribe | Independent binary reproducibility experiment |
+
+All jobs tagged `lane:llm-granite`; no source re-pin, no parity assertion
+from these diagnostics. If an audited-source fix is required, preregister
+it and rerun L4, RTX 8000, and A5000 using the identical source revision
+and preferably a single SHA-verified Linux ELF.

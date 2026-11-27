@@ -53,6 +53,13 @@ if [[ "${2:-cuda}" == cuda ]]; then
   SOUNIO_AUDIT_BACKEND=cuda SOUNIO_ADV_OUT="$work/cuda.bin" "$work/adv" > "$work/cuda.log" 2>&1 &
   pid=$!; rc=0; workaround=0
   while kill -0 "$pid" 2>/dev/null; do
+    if grep -Eq '(^|[[:space:]])[A-Z][A-Z0-9_]*_FAIL([[:space:]:]|$)' "$work/cuda.log"; then
+      grep -E '^(Name|State|Threads):' "/proc/$pid/status" > "$work/exit-hang-status.log" 2>/dev/null || true
+      kill -KILL "$pid" 2>/dev/null || true
+      wait "$pid" || rc=$?
+      rec r-audit-fail
+      exit 1
+    fi
     if complete_tail 2>/dev/null; then
       sleep 10
       if kill -0 "$pid" 2>/dev/null && complete_tail; then
@@ -65,6 +72,7 @@ if [[ "${2:-cuda}" == cuda ]]; then
     sleep 5
   done
   wait "$pid" || rc=$?
+  if grep -Eq '(^|[[:space:]])[A-Z][A-Z0-9_]*_FAIL([[:space:]:]|$)' "$work/cuda.log"; then rec r-audit-fail; exit 1; fi
   if (( workaround )); then
     [[ "$rc" -eq 137 ]] && complete_tail || exit 1
     rec r-exit-hang-workaround

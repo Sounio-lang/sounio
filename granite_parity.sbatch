@@ -70,7 +70,7 @@ mkdir -p "$WORK/home" || die mkdir
 ART="$(dirname "$MODEL_DIR")/audit-$JOB"
 mkdir -p "$ART" || die "artifact-directory"
 # Save failed-build diagnostics and partial TSV under a distinct name.
-trap 'rc=$?; if (( rc != 0 )); then cp "$WORK/"*.log "$ART/" 2>/dev/null || true; if [[ ! -s "$ART/cuda.tsv" && -s "$WORK/cuda.tsv" ]]; then cp "$WORK/cuda.tsv" "$ART/cuda.partial.tsv"; sha256sum "$ART/cuda.partial.tsv" > "$ART/partial.sha256"; fi; printf "%s\n" "$rc" > "$ART/exit-code"; fi' EXIT
+trap 'rc=$?; if (( rc != 0 )); then cp "$WORK/"*.log "$ART/" 2>/dev/null || true; for f in audit madaros inputs.sha256; do if [[ -f "$WORK/$f" ]]; then cp "$WORK/$f" "$ART/"; fi; done; if [[ ! -s "$ART/cuda.tsv" && -s "$WORK/cuda.tsv" ]]; then cp "$WORK/cuda.tsv" "$ART/cuda.partial.tsv"; sha256sum "$ART/cuda.partial.tsv" > "$ART/partial.sha256"; fi; printf "%s\n" "$rc" > "$ART/exit-code"; (cd "$ART" && find . -maxdepth 1 -type f ! -name "SHA256SUMS*" ! -name "failure.sha256*" -print0 | sort -z | xargs -0 -r sha256sum > failure.sha256.tmp && mv failure.sha256.tmp failure.sha256); fi' EXIT
 export HOME="$WORK/home" XDG_CACHE_HOME="$WORK/home/.cache"
 awk 'f { print } /^__CA_BUNDLE__$/ { f = 1 }' "$SELF" > "$CA"
 grep -q 'BEGIN CERTIFICATE' "$CA" 2>/dev/null || cp /etc/ssl/certs/ca-certificates.crt "$CA" 2>/dev/null || die "no CA"
@@ -121,11 +121,21 @@ complete_audit() {
   [[ -s "$WORK/cuda.tsv" && $(wc -l < "$WORK/cuda.tsv") -eq 481 ]] &&
   awk -F '\t' 'BEGIN{n=0;h=0} /^#/ {h++;next} {if(NF!=5 || $1!=n || $3!=128) exit 1; n++} END{if(n!=480 || h!=1) exit 1}' "$WORK/cuda.tsv"
 }
+audit_failure() {
+  grep -Eq '(^|[[:space:]])[A-Z][A-Z0-9_]*_FAIL([[:space:]:]|$)' "$WORK/run.log"
+}
 t0=$SECONDS; rc=0; workaround=0
 env SOUNIO_STDLIB_PATH="$D/stdlib" SOUNIO_AUDIT_BACKEND=cuda "$WORK/audit" --arch granite --model-dir "$MODEL_DIR" \
     --dtype bf16 --prompts 480 --tokens 128 --prompts-file "$PROMPTS_FILE" --prompt-ids "$PROMPT_IDS" --out "$WORK/cuda.tsv" < /dev/null > "$WORK/run.log" 2>&1 &
 pid=$!
 while kill -0 "$pid" 2>/dev/null; do
+  if audit_failure; then
+    grep -E '^(Name|State|Threads):' "/proc/$pid/status" > "$WORK/exit-hang-status.log" 2>/dev/null || true
+    kill -KILL "$pid" 2>/dev/null || true
+    wait "$pid" || rc=$?
+    rec r-audit-fail
+    die "audit-failure-marker"
+  fi
   if complete_audit 2>/dev/null; then
     sleep 10
     if kill -0 "$pid" 2>/dev/null && complete_audit; then
@@ -139,6 +149,7 @@ while kill -0 "$pid" 2>/dev/null; do
 done
 wait "$pid" || rc=$?
 rec "r-run-rc$rc-s$((SECONDS - t0))"
+if audit_failure; then rec r-audit-fail; die "audit-failure-marker"; fi
 if (( workaround )); then
   [[ "$rc" -eq 137 ]] && complete_audit || die "watchdog-incomplete"
   rec r-exit-hang-workaround
