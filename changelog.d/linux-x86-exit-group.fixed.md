@@ -1,0 +1,1 @@
+Linux x86-64 native programs now terminate all threads when `main` returns or a process-fatal path exits, preserving the requested exit status. Programs that load libraries with background threads, including CUDA, no longer hang solely because the entry trampoline used thread-local `exit` instead of `exit_group`.
