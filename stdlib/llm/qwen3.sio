@@ -68,6 +68,7 @@ use llm::hal::{
     cuda_module_get_fn,
     cuda_module_get_global,
     cuda_mem_alloc,
+    cuda_init_alloc,
     cuda_mem_free,
     cuda_memcpy_h2d,
     cuda_memcpy_d2h,
@@ -5760,14 +5761,21 @@ pub fn qwen3_cuda_runner_is_ok(rt: &Qwen3CudaRunner) -> bool {
     rt.ok
 }
 
-fn qwen3_cuda_upload_shard(sess: &CudaDriverSession, sh: &MappedShard, active: bool) -> i64 with Alloc {
-    if !active { return 0 }
+fn qwen3_cuda_upload_shard(sess: &CudaDriverSession, sh: &MappedShard, active: bool, admitted: &!bool) -> i64 with IO, Alloc, Mut {
+    if !active || !*admitted { return 0 }
     let slen = mapped_shard_len(sh)
     let sptr = mapped_shard_ptr(sh)
-    if slen <= 0 || sptr <= 0 { return 0 }
-    let dptr = cuda_mem_alloc(sess, slen)
+    if slen <= 0 || sptr <= 0 {
+        *admitted = false
+        print("CUDA_SHARD_MAPPING_REFUSED bytes="); print_int(slen); println("")
+        return 0
+    }
+    let dptr = cuda_init_alloc(sess, slen, "shard", admitted)
     if dptr == 0 { return 0 }
-    if cuda_memcpy_h2d(sess, dptr, sptr, slen) != 0 {
+    let copy_rc = cuda_memcpy_h2d(sess, dptr, sptr, slen)
+    if copy_rc != 0 {
+        *admitted = false
+        print("CUDA_SHARD_COPY_REFUSED bytes="); print_int(slen); print(" CUresult="); print_int(copy_rc); println("")
         let _f = cuda_mem_free(sess, dptr)
         return 0
     }
@@ -5908,14 +5916,14 @@ fn qwen3_cuda_runner_init_impl(
     }
 
     let up_shards = init_ok && !q4_only
-    let d_s0 = qwen3_cuda_upload_shard(&sess, &m.s0, up_shards && m.n_shards >= 1)
-    let d_s1 = qwen3_cuda_upload_shard(&sess, &m.s1, up_shards && m.n_shards >= 2)
-    let d_s2 = qwen3_cuda_upload_shard(&sess, &m.s2, up_shards && m.n_shards >= 3)
-    let d_s3 = qwen3_cuda_upload_shard(&sess, &m.s3, up_shards && m.n_shards >= 4)
-    let d_s4 = qwen3_cuda_upload_shard(&sess, &m.s4, up_shards && m.n_shards >= 5)
-    let d_s5 = qwen3_cuda_upload_shard(&sess, &m.s5, up_shards && m.n_shards >= 6)
-    let d_s6 = qwen3_cuda_upload_shard(&sess, &m.s6, up_shards && m.n_shards >= 7)
-    let d_s7 = qwen3_cuda_upload_shard(&sess, &m.s7, up_shards && m.n_shards >= 8)
+    let d_s0 = qwen3_cuda_upload_shard(&sess, &m.s0, up_shards && m.n_shards >= 1, &! init_ok)
+    let d_s1 = qwen3_cuda_upload_shard(&sess, &m.s1, up_shards && m.n_shards >= 2, &! init_ok)
+    let d_s2 = qwen3_cuda_upload_shard(&sess, &m.s2, up_shards && m.n_shards >= 3, &! init_ok)
+    let d_s3 = qwen3_cuda_upload_shard(&sess, &m.s3, up_shards && m.n_shards >= 4, &! init_ok)
+    let d_s4 = qwen3_cuda_upload_shard(&sess, &m.s4, up_shards && m.n_shards >= 5, &! init_ok)
+    let d_s5 = qwen3_cuda_upload_shard(&sess, &m.s5, up_shards && m.n_shards >= 6, &! init_ok)
+    let d_s6 = qwen3_cuda_upload_shard(&sess, &m.s6, up_shards && m.n_shards >= 7, &! init_ok)
+    let d_s7 = qwen3_cuda_upload_shard(&sess, &m.s7, up_shards && m.n_shards >= 8, &! init_ok)
 
     let total_slots = 3 + m.cfg.layers * 11
     let nonlin_meta_arena = if init_ok && q4_only {
@@ -5940,8 +5948,12 @@ fn qwen3_cuda_runner_init_impl(
             si = si + 1
         }
         nl_bytes = q4_soa_align_up_64(nl_bytes + 64)
-        d_nonlin = cuda_mem_alloc(&sess, nl_bytes)
-        nonlin_ok = page_arena_is_ok(&nonlin_meta_arena) && d_nonlin != 0
+        if !page_arena_is_ok(&nonlin_meta_arena) {
+            init_ok = false
+            println("CUDA_NONLIN_HOST_ARENA_REFUSED")
+        }
+        d_nonlin = cuda_init_alloc(&sess, nl_bytes, "nonlinear", &! init_ok)
+        nonlin_ok = init_ok && d_nonlin != 0
         if nonlin_ok {
             let nl_meta = page_arena_ptr(&nonlin_meta_arena)
             var cur_nl_off: i64 = 0
@@ -5966,17 +5978,18 @@ fn qwen3_cuda_runner_init_impl(
                 si = si + 1
             }
         }
+        if !nonlin_ok { init_ok = false }
     }
 
     let work_bytes = page_arena_len(&m.arena)
-    let d_work = if init_ok && work_bytes > 0 { cuda_mem_alloc(&sess, work_bytes) } else { 0 }
+    let d_work = cuda_init_alloc(&sess, work_bytes, "work", &! init_ok)
     let kv_dim = m.cfg.n_kv * m.cfg.head_dim
     let kv_bytes = if init_ok && kv_dim > 0 { align_up_64(m.cfg.layers * max_seq_cap * kv_dim * 4) } else { 0 }
-    let d_k_cache = if init_ok && kv_bytes > 0 { cuda_mem_alloc(&sess, kv_bytes) } else { 0 }
-    let d_v_cache = if init_ok && kv_bytes > 0 { cuda_mem_alloc(&sess, kv_bytes) } else { 0 }
+    let d_k_cache = cuda_init_alloc(&sess, kv_bytes, "key-cache", &! init_ok)
+    let d_v_cache = cuda_init_alloc(&sess, kv_bytes, "value-cache", &! init_ok)
 
     let rope_bytes = if init_ok && m.cfg.head_dim > 0 { align_up_64(max_seq_cap * m.cfg.head_dim * 4) } else { 0 }
-    let d_rope = if init_ok && rope_bytes > 0 { cuda_mem_alloc(&sess, rope_bytes) } else { 0 }
+    let d_rope = cuda_init_alloc(&sess, rope_bytes, "rope", &! init_ok)
     var rope_ok = d_rope != 0
     if init_ok && rope_ok {
         let h_rope = heap_alloc(rope_bytes) as i64

@@ -730,6 +730,36 @@ pub fn cuda_mem_alloc(s: &CudaDriverSession, bytes: i64) -> i64 with Alloc {
     dptr
 }
 
+// A runner initializer owns a sticky admission flag. Preserve the exact
+// driver result instead of collapsing a failed cuMemAlloc to a silent zero.
+// -1 denotes a local precondition/host scratch failure (no driver call).
+pub fn cuda_init_alloc_result(s: &CudaDriverSession, bytes: i64, stage: string, admitted: &!bool) -> (i64, i64) with IO, Alloc, Mut {
+    if !*admitted { return (0, -1) }
+    var rc: i64 = -1
+    var ptr: i64 = 0
+    if s.ok && s.fn_mem_alloc != 0 && bytes > 0 {
+        let box = heap_alloc(8) as i64
+        if box != 0 {
+            let _z = ptr_write_i64_le(box, 0, 0)
+            let f = s.fn_mem_alloc as fn(i64, i64) -> i64
+            rc = hal_c_i32(f(box, bytes))
+            ptr = ptr_read_i64_le(box, 0)
+            heap_free(box as *mut u8)
+        }
+    }
+    if rc != 0 || ptr == 0 {
+        *admitted = false
+        print("CUDA_DEVICE_ALLOC_REFUSED stage="); print(stage); print(" bytes="); print_int(bytes); print(" CUresult="); print_int(rc); println("")
+        return (0, rc)
+    }
+    (ptr, rc)
+}
+
+pub fn cuda_init_alloc(s: &CudaDriverSession, bytes: i64, stage: string, admitted: &!bool) -> i64 with IO, Alloc, Mut {
+    let result = cuda_init_alloc_result(s, bytes, stage, admitted)
+    result.0
+}
+
 pub fn cuda_mem_free(s: &CudaDriverSession, dptr: i64) -> i64 {
     if !s.ok || dptr == 0 { return -1 }
     let f = s.fn_mem_free as fn(i64) -> i64
