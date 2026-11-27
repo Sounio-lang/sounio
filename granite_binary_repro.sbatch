@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=granite-binary-repro
 #SBATCH --partition=all
+#SBATCH --exclude=dl380p-dl380p-proxmox,gpuorangefs-5860-proxmox
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=12G
 #SBATCH --gres=none

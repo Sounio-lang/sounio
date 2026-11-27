@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=granite-binary-recover
 #SBATCH --partition=gpu-orangefs
+#SBATCH --exclude=dl380p-dl380p-proxmox,gpuorangefs-5860-proxmox
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=2G
 #SBATCH --gres=none

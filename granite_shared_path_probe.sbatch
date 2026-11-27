@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=granite-path-probe
+#SBATCH --comment=lane:llm-granite
 #SBATCH --no-requeue
 #SBATCH --partition=all
+#SBATCH --exclude=dl380p-dl380p-proxmox,gpuorangefs-5860-proxmox
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=256M
 #SBATCH --gres=none

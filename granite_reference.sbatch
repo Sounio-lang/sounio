@@ -3,6 +3,7 @@
 #SBATCH --no-requeue
 #SBATCH --comment=lane:llm-granite
 #SBATCH --partition=all
+#SBATCH --exclude=dl380p-dl380p-proxmox,gpuorangefs-5860-proxmox
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=6G
 #SBATCH --gres=none

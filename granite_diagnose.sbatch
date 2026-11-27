@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=granite-diagnose
+#SBATCH --comment=lane:llm-granite
 #SBATCH --no-requeue
 #SBATCH --partition=all
-#SBATCH --nodelist=dl380p-dl380p-proxmox
+#SBATCH --nodelist=dl380-dl380-proxmox
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=256M
 #SBATCH --time=00:05:00

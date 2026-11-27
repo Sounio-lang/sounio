@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=granite-cpp-kit-repair
+#SBATCH --comment=lane:llm-granite
 #SBATCH --no-requeue
 #SBATCH --partition=all
 #SBATCH --nodelist=dl380-dl380-proxmox

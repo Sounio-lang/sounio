@@ -3,6 +3,7 @@
 #SBATCH --no-requeue
 #SBATCH --comment=lane:llm-granite
 #SBATCH --partition=gpu-orangefs
+#SBATCH --exclude=dl380p-dl380p-proxmox,gpuorangefs-5860-proxmox
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=12G
 #SBATCH --time=01:00:00
