@@ -36,6 +36,11 @@ done
 if kill -0 "$pid" 2>/dev/null; then
   grep -E '^(Name|State|Threads):' "/proc/$pid/status" > "$work/process-status.log" 2>/dev/null || true
   kill -KILL "$pid" 2>/dev/null || true
+  for ((attempt=0; attempt<10; attempt++)); do
+    if ! kill -0 "$pid" 2>/dev/null; then break; fi
+    sleep 1
+  done
+  if kill -0 "$pid" 2>/dev/null; then rec r-child-kill-timeout; exit 1; fi
 fi
 wait "$pid" || rc=$?
 rec "diag-process-rc-$rc"

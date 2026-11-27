@@ -668,3 +668,95 @@ All jobs tagged `lane:llm-granite`; no source re-pin, no parity assertion
 from these diagnostics. If an audited-source fix is required, preregister
 it and rerun L4, RTX 8000, and A5000 using the identical source revision
 and preferably a single SHA-verified Linux ELF.
+
+### 2026-11-27 follow-up: binary provenance established; R740 execution blocked
+
+**OBSERVED:** diagnostic build 29640 COMPLETED 0:0 on D, 00:01:59,
+batch MaxRSS 3532956K, with source-built Madaros, all three Sounio checks,
+and diagnostic ELF SHA256
+`532ff03113dad862ba271def036242211f5afc7e3cf71f08501333b1cb4afafe`.
+L4 job 29644 ran that exact ELF (R770, 00:02:11, MaxRSS 16088868K,
+COMPLETED 0:0), selecting sm_89 and 22563 MiB free at entry. It verified
+the 480-tokenizer-ID oracle, reported session/module readiness, and all four
+shard allocations/copies with return code 0 (4974661520, 1405169256,
+4991447808, 4970460032 bytes). Work (3801088), K/V caches (83886080 each)
+and RoPE (262144) allocations also returned 0. Runner resource checks were
+all 1, context sync 0, work arena 1, and
+`GRANITE_DIAG_FIRST_PROMPT_PASS backend=cuda new_prompts=1 TOTAL_CUDA_FMA_MIN_NORM_HITS=0`.
+The known pinned-exit bug required child SIGKILL (137) after that diagnostic
+marker; it is not a full numerical audit or an exit-group-fixed run.
+
+**OBSERVED:** the binary anomaly is reproducible without CUDA or a GPU
+allocation. Independent CPU jobs 29645 (D, COMPLETED 0:0, 00:04:28,
+MaxRSS 4676804K) and 29646 (R770, COMPLETED 0:0, 00:02:22,
+MaxRSS 4627008K) used exact pinned source. Both built source-derived
+Madaros twice in independently located checkouts. All four compiler
+executables had the same SHA256:
+`5df8c456cdb5db06bf48485b4ebfdbae518e39be4d50efa798b5d00ebdbd3659`.
+Repeated audit builds at one checkout path were bit-identical, including
+when output filenames changed. Moving only the source checkout from A to B
+changed the executable.
+
+| CPU build node | A1 = A2 SHA256 | B1 = B2 SHA256 |
+|---|---|---|
+| D | `85143950484b178283d5e95e714be119ca403b7bcd559ccb9d77fd1f94c299b6` | `cfe4ee4b1e850a05baa87ab7f79ff0b9758a6e8be2b82fa03e9d7d40dfe9b644` |
+| R770 | `dae790d39b35473fb75a71fd0028c6ce94bbeae3f21b347e4da0d80ada3a8e19` | `0b19f11898e4fa9eaeb03bfdb68e0532c059fe4717710e239119f292609517ee` |
+
+CPU verification job 29647 (D, COMPLETED 0:0, 00:00:03, MaxRSS 20024K)
+counted 1280 absolute checkout-path occurrences in each audit ELF. Replacing
+only the same-length absolute checkout path made the entire ELF identical
+within each node and across D/R770 (`PATH_ONLY_BYTE_DIFF-29645`,
+`PATH_ONLY_BYTE_DIFF-29646`, `CROSS_NODE_PATH_ONLY_BYTE_DIFF`,
+`CROSS_NODE_MADAROS_IDENTICAL`). First differing byte offsets were 4519,
+4966, 5413, 5742, 6278 (octal 101→102, ASCII A→B). Thus the different
+hashes arise from emitted absolute source paths, not GPU detection or
+nondeterministic Madaros binaries in these controlled builds.
+
+CPU reconstruction job 29648 (D, COMPLETED 0:0, 00:02:15, MaxRSS 6398424K)
+used that exact compiler and the original absolute checkout paths
+`/tmp/llm-granite-parity-<job>/src`, with the original source and options.
+It reconstructed the historical L4 full digest and both R740 observed
+48-bit prefixes. Full **reconstructed** digests:
+
+| Historical leg | Reconstructed SHA256 | Agreement with archived observation |
+|---|---|---|
+| 29553 L4 | `8c74378a189919e4733847a100a72e976120f4b48b261ccdffcbe25e08bbd04c` | Exact full SHA256 |
+| 29560 RTX 8000 | `5909057062c7fb2fe8ab3258f4abe5d98ed8e97d2e4af98a15a3d6a413506550` | Exact recorded prefix |
+| 29561 A5000 | `d65d3dbf04cb6e1b8e950764249d66bc0f724ab07af55141f32c3195918108e2` | Exact recorded prefix |
+
+Replacing only the historical source path in the reconstructed L4 ELF
+makes it byte-identical to each reconstructed R740 ELF. The original R740
+full hashes and raw binaries remain unavailable, so this is a successful
+reconstruction against recorded prefixes, not a claim of actual full
+R740 file readback. Job 29651 (D, 00:00:01, MaxRSS 6708K, COMPLETED 0:0)
+verified the original L4 `inputs.sha256` against staged actual bytes; the
+reconstructed L4 `build-audit.log` is byte-identical to the archived log,
+SHA256 `0d7d30c472a768d3ef7882fa8a23be8c5c463637890d96ab2d8dc9590951bbb0`.
+Evidence directories: `binary-repro-29645/`, `binary-repro-29646/`,
+`binary-compare-29647/`, and `binary-reconstruct-29648/` under the shared
+stage, with raw ELF hashes and log artifacts. The reconstructed L4 ELF
+can serve as a single byte-identical executable for future pinned CUDA
+legs without rebuilding on the GPU host, provided the failing branch
+requires no audited-source change.
+
+**NOT ESTABLISHED:** why the two historical R740 initializations failed.
+The instrumented diagnostic is proven executable on L4, but R740 remains
+`IDLE+DRAIN+DYNAMIC_NORM` (`Kill task failed (JobId=29561 StepId=batch)`).
+No node state intervention is authorized. The two queued diagnostic jobs
+29642/29643 were canceled and replaced with a bounded child-kill version
+(10-second reap check rather than indefinite `wait`). Their replacements
+use same verified diagnostic artifact, are 15-minute jobs, with
+`OverSubscribe=YES`, exact named GRES and `lane:llm-granite`:
+
+| Job | Node/GRES | State at readback |
+|---|---|---|
+| 29638 | R740 CPU binary recovery | PENDING (ReqNodeNotAvail) |
+| 29649 | R740 RTX 8000 diagnostic | PENDING (ReqNodeNotAvail) |
+| 29650 | R740 A5000 diagnostic | PENDING (ReqNodeNotAvail) |
+
+The campaign runner and tail runner also bound child reap time and record
+`r-child-kill-timeout` as a failure rather than waiting indefinitely.
+**No source fix, new numerical pin, or audit rerun is authorized by the
+current evidence.** The failure-branch diagnostic must execute on R740
+first; if a source fix is required, all three legs will be rerun from a
+new preregistered pin. Cross-GPU prediction remains **NOT TESTED**.

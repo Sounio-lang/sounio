@@ -124,6 +124,16 @@ complete_audit() {
 audit_failure() {
   grep -Eq '(^|[[:space:]])[A-Z][A-Z0-9_]*_FAIL([[:space:]:]|$)' "$WORK/run.log"
 }
+stop_audit_child() {
+  local child=$1
+  kill -KILL "$child" 2>/dev/null || true
+  for ((attempt=0; attempt<10; attempt++)); do
+    if ! kill -0 "$child" 2>/dev/null; then return 0; fi
+    sleep 1
+  done
+  rec r-child-kill-timeout
+  return 1
+}
 t0=$SECONDS; rc=0; workaround=0
 env SOUNIO_STDLIB_PATH="$D/stdlib" SOUNIO_AUDIT_BACKEND=cuda "$WORK/audit" --arch granite --model-dir "$MODEL_DIR" \
     --dtype bf16 --prompts 480 --tokens 128 --prompts-file "$PROMPTS_FILE" --prompt-ids "$PROMPT_IDS" --out "$WORK/cuda.tsv" < /dev/null > "$WORK/run.log" 2>&1 &
@@ -131,16 +141,16 @@ pid=$!
 while kill -0 "$pid" 2>/dev/null; do
   if audit_failure; then
     grep -E '^(Name|State|Threads):' "/proc/$pid/status" > "$WORK/exit-hang-status.log" 2>/dev/null || true
-    kill -KILL "$pid" 2>/dev/null || true
-    wait "$pid" || rc=$?
     rec r-audit-fail
+    stop_audit_child "$pid" || die "audit-failure-child-unreaped"
+    wait "$pid" || rc=$?
     die "audit-failure-marker"
   fi
   if complete_audit 2>/dev/null; then
     sleep 10
     if kill -0 "$pid" 2>/dev/null && complete_audit; then
       grep -E '^(Name|State|Threads):' "/proc/$pid/status" > "$WORK/exit-hang-status.log" 2>/dev/null || true
-      kill -KILL "$pid" || die "watchdog-kill"
+      stop_audit_child "$pid" || die "watchdog-kill"
       workaround=1
       break
     fi

@@ -50,21 +50,31 @@ if [[ "${2:-cuda}" == cuda ]]; then
     [[ -s "$work/cuda.bin" && $(stat -c %s "$work/cuda.bin") -eq $expected ]] &&
     [[ $(od -An -tx1 -N16 "$work/cuda.bin" | tr -d ' \n') == 4146545a01000000030000000b000000 ]]
   }
+  stop_tail_child() {
+    local child=$1
+    kill -KILL "$child" 2>/dev/null || true
+    for ((attempt=0; attempt<10; attempt++)); do
+      if ! kill -0 "$child" 2>/dev/null; then return 0; fi
+      sleep 1
+    done
+    rec r-child-kill-timeout
+    return 1
+  }
   SOUNIO_AUDIT_BACKEND=cuda SOUNIO_ADV_OUT="$work/cuda.bin" "$work/adv" > "$work/cuda.log" 2>&1 &
   pid=$!; rc=0; workaround=0
   while kill -0 "$pid" 2>/dev/null; do
     if grep -Eq '(^|[[:space:]])[A-Z][A-Z0-9_]*_FAIL([[:space:]:]|$)' "$work/cuda.log"; then
       grep -E '^(Name|State|Threads):' "/proc/$pid/status" > "$work/exit-hang-status.log" 2>/dev/null || true
-      kill -KILL "$pid" 2>/dev/null || true
-      wait "$pid" || rc=$?
       rec r-audit-fail
+      stop_tail_child "$pid" || exit 1
+      wait "$pid" || rc=$?
       exit 1
     fi
     if complete_tail 2>/dev/null; then
       sleep 10
       if kill -0 "$pid" 2>/dev/null && complete_tail; then
         grep -E '^(Name|State|Threads):' "/proc/$pid/status" > "$work/exit-hang-status.log" 2>/dev/null || true
-        kill -KILL "$pid"
+        stop_tail_child "$pid" || exit 1
         workaround=1
         break
       fi
