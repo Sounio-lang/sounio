@@ -26,6 +26,13 @@ git init -q src
 git -C src fetch -q --depth 1 https://github.com/Sounio-lang/sounio.git "$1"
 git -C src checkout -q --detach FETCH_HEAD
 [[ $(git -C src rev-parse HEAD) == "$1" ]]
+# For baseline reproduction only, overlay the identical test files, not engine source.
+if [[ -n "${3:-}" ]]; then
+  git -C src fetch -q --depth 1 https://github.com/Sounio-lang/sounio.git "$3"
+  [[ $(git -C src rev-parse FETCH_HEAD) == "$3" ]]
+  git -C src checkout -q FETCH_HEAD -- tests/llm/cuda_init_alloc_refusal.sio tests/llm/cuda_init_alloc_refusal_mock.cpp
+  rec "test-overlay-$3"
+fi
 rec "source-$1"
 cd src
 bash scripts/ci/build_modular_madaros.sh "$work/madaros" > "$work/build-madaros.log" 2>&1
