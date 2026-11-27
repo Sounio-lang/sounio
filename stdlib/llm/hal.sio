@@ -460,7 +460,7 @@ fn hal_parse_env_nonneg_i64(cstr_ptr: i64, fallback: i64) -> i64 {
     acc
 }
 
-pub fn cuda_session_open(driver_path: string, ordinal: i64) -> CudaDriverSession with Alloc, Mut {
+pub fn cuda_session_open(driver_path: string, ordinal: i64) -> CudaDriverSession with IO, Alloc, Mut {
     var lib: i64 = 0
     if str_len(driver_path) > 0 {
         lib = hal_dlopen_str(driver_path, 1)
@@ -473,7 +473,7 @@ pub fn cuda_session_open(driver_path: string, ordinal: i64) -> CudaDriverSession
             lib = hal_dlopen_str("libcuda.so.1", 1)
         }
     }
-    if lib == 0 { return cuda_session_empty() }
+    if lib == 0 { println("GRANITE_DIAG_SESSION_DLOPEN_FAIL"); return cuda_session_empty() }
 
     let fn_init = hal_dlsym_str(lib, "cuInit")
     let fn_dev_get = hal_dlsym_str(lib, "cuDeviceGet")
@@ -501,12 +501,15 @@ pub fn cuda_session_open(driver_path: string, ordinal: i64) -> CudaDriverSession
         || fn_mod_load_data == 0 || fn_mod_unload == 0 || fn_mod_get_fn == 0
         || fn_mem_alloc == 0 || fn_mem_free == 0 || fn_memcpy_h2d == 0
         || fn_memcpy_d2h == 0 || fn_launch_kernel == 0 || fn_ctx_sync == 0 {
+        println("GRANITE_DIAG_SESSION_SYMBOLS_FAIL")
         let _c = dlclose(lib as *mut u8)
         return cuda_session_empty()
     }
 
     let cu_init = fn_init as fn(i32) -> i64
-    if hal_c_i32(cu_init(0)) != 0 {
+    let init_rc = hal_c_i32(cu_init(0))
+    if init_rc != 0 {
+        print("GRANITE_DIAG_SESSION_CUINIT_FAIL rc="); print_int(init_rc); println("")
         let _c = dlclose(lib as *mut u8)
         return cuda_session_empty()
     }
@@ -520,7 +523,9 @@ pub fn cuda_session_open(driver_path: string, ordinal: i64) -> CudaDriverSession
     let scratch = heap_alloc(16) as i64
     let _z0 = ptr_write_i64_le(scratch, 0, 0)
     let cu_dev_get = fn_dev_get as fn(i64, i32) -> i64
-    if hal_c_i32(cu_dev_get(scratch, eff_ord as i32)) != 0 {
+    let dev_rc = hal_c_i32(cu_dev_get(scratch, eff_ord as i32))
+    if dev_rc != 0 {
+        print("GRANITE_DIAG_SESSION_DEVICE_FAIL ordinal="); print_int(eff_ord); print(" rc="); print_int(dev_rc); println("")
         heap_free(scratch as *mut u8)
         let _c = dlclose(lib as *mut u8)
         return cuda_session_empty()
@@ -545,7 +550,9 @@ pub fn cuda_session_open(driver_path: string, ordinal: i64) -> CudaDriverSession
 
     let _z1 = ptr_write_i64_le(scratch, 0, 0)
     let cu_ctx_create = fn_ctx_create as fn(i64, i32, i32) -> i64
-    if hal_c_i32(cu_ctx_create(scratch, 0 as i32, dev_id as i32)) != 0 {
+    let ctx_rc = hal_c_i32(cu_ctx_create(scratch, 0 as i32, dev_id as i32))
+    if ctx_rc != 0 {
+        print("GRANITE_DIAG_SESSION_CONTEXT_FAIL rc="); print_int(ctx_rc); println("")
         heap_free(scratch as *mut u8)
         let _c = dlclose(lib as *mut u8)
         return cuda_session_empty()

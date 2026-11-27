@@ -5793,14 +5793,30 @@ pub fn qwen3_cuda_runner_is_ok(rt: &Qwen3CudaRunner) -> bool {
     rt.ok
 }
 
-fn qwen3_cuda_upload_shard(sess: &CudaDriverSession, sh: &MappedShard, active: bool) -> i64 with Alloc, Mut {
+// Diagnostic branch only: retain CUDA allocation result, including exact driver rc.
+fn qwen3_cuda_diag_alloc(sess: &CudaDriverSession, bytes: i64, label: string) -> i64 with IO, Alloc, Mut {
+    if !cuda_session_is_ok(sess) || bytes <= 0 { return 0 }
+    let box = heap_alloc(8) as i64
+    let _z = ptr_write_i64_le(box, 0, 0)
+    let f = sess.fn_mem_alloc as fn(i64, i64) -> i64
+    let rc = (f(box, bytes) as i32) as i64
+    let ptr = ptr_read_i64_le(box, 0)
+    heap_free(box as *mut u8)
+    print("GRANITE_DIAG_ALLOC label="); print(label); print(" bytes="); print_int(bytes); print(" rc="); print_int(rc); println("")
+    if rc != 0 { return 0 }
+    ptr
+}
+
+fn qwen3_cuda_upload_shard(sess: &CudaDriverSession, sh: &MappedShard, active: bool) -> i64 with IO, Alloc, Mut {
     if !active { return 0 }
     let slen = mapped_shard_len(sh)
     let sptr = mapped_shard_ptr(sh)
-    if slen <= 0 || sptr <= 0 { return 0 }
-    let dptr = cuda_mem_alloc(sess, slen)
+    if slen <= 0 || sptr <= 0 { println("GRANITE_DIAG_SHARD_MAPPING_FAIL"); return 0 }
+    let dptr = qwen3_cuda_diag_alloc(sess, slen, "shard")
     if dptr == 0 { return 0 }
-    if cuda_memcpy_h2d(sess, dptr, sptr, slen) != 0 {
+    let copy_rc = cuda_memcpy_h2d(sess, dptr, sptr, slen)
+    print("GRANITE_DIAG_SHARD_COPY bytes="); print_int(slen); print(" rc="); print_int(copy_rc); println("")
+    if copy_rc != 0 {
         let _f = cuda_mem_free(sess, dptr)
         return 0
     }
@@ -5839,6 +5855,7 @@ fn qwen3_cuda_runner_init_impl(
 ) -> Qwen3CudaRunner with IO, Alloc, Mut, Div, Panic {
     let sess = cuda_session_open(driver_path, ordinal)
     var init_ok = m.ok && cuda_session_is_ok(&sess) && max_seq_cap > 0
+    print("GRANITE_DIAG_SESSION model="); print_int(if m.ok { 1 } else { 0 }); print(" session="); print_int(if cuda_session_is_ok(&sess) { 1 } else { 0 }); print(" sm="); print_int(cuda_session_sm_version(&sess)); print(" max_seq="); print_int(max_seq_cap); println("")
 
     var hmod: i64 = 0
     var fn_embed: i64 = 0
@@ -5940,6 +5957,7 @@ fn qwen3_cuda_runner_init_impl(
         }
     }
 
+    print("GRANITE_DIAG_MODULE_AND_SYMBOLS ready="); print_int(if init_ok { 1 } else { 0 }); print(" shards="); print_int(m.n_shards); println("")
     let up_shards = init_ok && !q4_only
     let d_s0 = qwen3_cuda_upload_shard(&sess, &m.s0, up_shards && m.n_shards >= 1)
     let d_s1 = qwen3_cuda_upload_shard(&sess, &m.s1, up_shards && m.n_shards >= 2)
@@ -6002,20 +6020,22 @@ fn qwen3_cuda_runner_init_impl(
     }
 
     let work_bytes = page_arena_len(&m.arena)
-    let d_work = if init_ok && work_bytes > 0 { cuda_mem_alloc(&sess, work_bytes) } else { 0 }
+    let d_work = if init_ok && work_bytes > 0 { qwen3_cuda_diag_alloc(&sess, work_bytes, "work") } else { 0 }
     let kv_dim = m.cfg.n_kv * m.cfg.head_dim
     let kv_bytes = if init_ok && kv_dim > 0 { align_up_64(m.cfg.layers * max_seq_cap * kv_dim * 4) } else { 0 }
-    let d_k_cache = if init_ok && kv_bytes > 0 { cuda_mem_alloc(&sess, kv_bytes) } else { 0 }
-    let d_v_cache = if init_ok && kv_bytes > 0 { cuda_mem_alloc(&sess, kv_bytes) } else { 0 }
+    let d_k_cache = if init_ok && kv_bytes > 0 { qwen3_cuda_diag_alloc(&sess, kv_bytes, "key-cache") } else { 0 }
+    let d_v_cache = if init_ok && kv_bytes > 0 { qwen3_cuda_diag_alloc(&sess, kv_bytes, "value-cache") } else { 0 }
 
     let rope_bytes = if init_ok && m.cfg.head_dim > 0 { align_up_64(max_seq_cap * m.cfg.head_dim * 4) } else { 0 }
-    let d_rope = if init_ok && rope_bytes > 0 { cuda_mem_alloc(&sess, rope_bytes) } else { 0 }
+    let d_rope = if init_ok && rope_bytes > 0 { qwen3_cuda_diag_alloc(&sess, rope_bytes, "rope") } else { 0 }
     var rope_ok = d_rope != 0
     if init_ok && rope_ok {
         let h_rope = heap_alloc(rope_bytes) as i64
         if h_rope == 0 || !qwen3_fill_rope_table(h_rope, max_seq_cap, m.cfg.head_dim, m.cfg.rope_theta) {
+            println("GRANITE_DIAG_ROPE_GENERATOR_FAIL")
             rope_ok = false
         } else if cuda_memcpy_h2d(&sess, d_rope, h_rope, rope_bytes) != 0 {
+            println("GRANITE_DIAG_ROPE_COPY_FAIL")
             rope_ok = false
         }
         if h_rope != 0 { heap_free(h_rope as *mut u8) }
@@ -6029,9 +6049,10 @@ fn qwen3_cuda_runner_init_impl(
             && (m.n_shards <= 4 || d_s4 != 0) && (m.n_shards <= 5 || d_s5 != 0)
             && (m.n_shards <= 6 || d_s6 != 0) && (m.n_shards <= 7 || d_s7 != 0)
     }
-    let ok = init_ok && shards_ok && d_work != 0 && d_k_cache != 0 && d_v_cache != 0 && rope_ok
-        && (!use_audit_ptx || d_fma_audit_hits != 0)
-        && cuda_ctx_sync(&sess) == 0
+    let resources_ok = init_ok && shards_ok && d_work != 0 && d_k_cache != 0 && d_v_cache != 0 && rope_ok && (!use_audit_ptx || d_fma_audit_hits != 0)
+    let sync_rc = if resources_ok { cuda_ctx_sync(&sess) } else { -1 }
+    let ok = resources_ok && sync_rc == 0
+    print("GRANITE_DIAG_RUNNER init="); print_int(if init_ok { 1 } else { 0 }); print(" shards="); print_int(if shards_ok { 1 } else { 0 }); print(" work="); print_int(if d_work != 0 { 1 } else { 0 }); print(" key="); print_int(if d_k_cache != 0 { 1 } else { 0 }); print(" value="); print_int(if d_v_cache != 0 { 1 } else { 0 }); print(" rope="); print_int(if rope_ok { 1 } else { 0 }); print(" hits="); print_int(if d_fma_audit_hits != 0 { 1 } else { 0 }); print(" sync_rc="); print_int(sync_rc); println("")
 
     let rt = Qwen3CudaRunner {
         sess: sess,

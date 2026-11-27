@@ -574,6 +574,7 @@ fn run_61440_cuda(
     let work_arena = page_arena_alloc(prompt_cap * 2 + tokens_cap * 8 + out_cap * 2 + 256)
 
     var ok = qwen3_cuda_runner_is_ok(&rt) && page_arena_is_ok(&work_arena)
+    print("GRANITE_DIAG_AUDIT_INIT runner="); print_int(if qwen3_cuda_runner_is_ok(&rt) { 1 } else { 0 }); print(" arena="); print_int(if page_arena_is_ok(&work_arena) { 1 } else { 0 }); println("")
     var done_prompts: i64 = 0
     var total_fma_hits: i64 = 0
 
@@ -592,9 +593,9 @@ fn run_61440_cuda(
 
         var pidx: i64 = 0
         while ok {
-            if max_prompts > 0 && pidx >= max_prompts { break }
+            if pidx >= 1 { break } // diagnostic only: never produce a 61440 audit
             let ll = next_prompt_from_shard(shard, slen, bi_ptr, line_ptr, prompt_cap)
-            if ll < 0 { ok = false; break }
+            if ll < 0 { println("GRANITE_DIAG_PROMPT_READ_FAIL"); ok = false; break }
             if ll == 0 { break }
 
             if pidx < resume_skip {
@@ -603,12 +604,13 @@ fn run_61440_cuda(
             }
 
             let chat_len = if tok.granite { granite_format_audit_chat_bytes(line_ptr, ll, chat_ptr, prompt_cap) } else { qwen3_format_chat_bytes(0, 0, line_ptr, ll, true, false, chat_ptr, prompt_cap) }
-            if chat_len <= 0 { ok = false; break }
+            if chat_len <= 0 { println("GRANITE_DIAG_CHAT_FAIL"); ok = false; break }
             let n_prompt = qwen3_encode_bytes(tok, chat_ptr, chat_len, tok_ptr, tokens_cap)
-            if n_prompt <= 0 || n_prompt + max_tokens > max_seq { ok = false; break }
+            if n_prompt <= 0 || n_prompt + max_tokens > max_seq { println("GRANITE_DIAG_TOKEN_LENGTH_FAIL"); ok = false; break }
 
-            if !qwen3_cuda_audit_reset_fma_hits(&rt) { ok = false; break }
+            if !qwen3_cuda_audit_reset_fma_hits(&rt) { println("GRANITE_DIAG_FMA_RESET_FAIL"); ok = false; break }
             if !qwen3_forward_batch_bf16_cuda_mode(m, &rt, tok_ptr, 0, n_prompt, false, true, 0, false) {
+                println("GRANITE_DIAG_PREFILL_FAIL")
                 ok = false
                 break
             }
@@ -619,6 +621,7 @@ fn run_61440_cuda(
             while step < max_tokens {
                 let kv_pos = n_prompt + step - 1
                 if !qwen3_forward_token_cuda_opt(m, &rt, prev_tok, kv_pos, true) {
+                    print("GRANITE_DIAG_DECODE_FAIL step="); print_int(step); println("")
                     ok = false
                     break
                 }
@@ -628,19 +631,19 @@ fn run_61440_cuda(
             if !ok { break }
             let ent_len = ptr_read_i64_le(pos_ptr, 0)
             let fma_delta = qwen3_cuda_audit_read_fma_hits(&rt)
-            if fma_delta < 0 { ok = false; break }
+            if fma_delta < 0 { println("GRANITE_DIAG_FMA_READ_FAIL"); ok = false; break }
             total_fma_hits = total_fma_hits + fma_delta
 
             begin_prompt_line(out_ptr, pos_ptr, pidx, n_prompt, max_tokens, fma_delta)
             var hp = ptr_read_i64_le(pos_ptr, 0)
-            if hp + ent_len + 2 >= out_cap { ok = false; break }
+            if hp + ent_len + 2 >= out_cap { println("GRANITE_DIAG_OUTPUT_CAP_FAIL"); ok = false; break }
             var ei: i64 = 0
             while ei < ent_len {
                 let _wc = ptr_write_u8(out_ptr, hp + ei, ptr_read_u8(ent_ptr, ei))
                 ei = ei + 1
             }
             let _wp = ptr_write_i64_le(pos_ptr, 0, hp + ent_len)
-            if !finalize_prompt_line(of, out_ptr, pos_ptr, out_cap) { ok = false; break }
+            if !finalize_prompt_line(of, out_ptr, pos_ptr, out_cap) { println("GRANITE_DIAG_OUTPUT_WRITE_FAIL"); ok = false; break }
 
             done_prompts = done_prompts + 1
             pidx = pidx + 1
@@ -654,11 +657,11 @@ fn run_61440_cuda(
         }
     }
 
-    if max_prompts > 0 && done_prompts + resume_skip != max_prompts { ok = false }
+    if done_prompts != 1 { ok = false }
     let _fw = page_arena_free(work_arena)
     let _fr = qwen3_cuda_runner_free(rt)
     if ok {
-        print("AUDIT_61440_DONE backend=cuda new_prompts=")
+        print("GRANITE_DIAG_FIRST_PROMPT_PASS backend=cuda new_prompts=")
         print_int(done_prompts)
         print(" TOTAL_CUDA_FMA_MIN_NORM_HITS=")
         print_int(total_fma_hits)
