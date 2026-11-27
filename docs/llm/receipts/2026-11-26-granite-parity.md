@@ -760,3 +760,51 @@ The campaign runner and tail runner also bound child reap time and record
 current evidence.** The failure-branch diagnostic must execute on R740
 first; if a source fix is required, all three legs will be rerun from a
 new preregistered pin. Cross-GPU prediction remains **NOT TESTED**.
+
+## 2026-11-27 05:55 UTC: VRAM-contention prediction (registered before diagnostic submission)
+
+**OBSERVED (coordinator):** R740 is double-booked between Slurm and
+Kubernetes GPU services outside Slurm. The coordinator identified pods
+`beagle/llamacpp-coder-a5000` holding the RTX A5000 and
+`vllm-r1-rtx8000/llamacpp-prover` holding the Quadro RTX 8000. The Slurm
+worker's `nvidia-smi` reported 20549 MiB used on the A5000 and 37185 MiB
+used on the RTX 8000 with no living Slurm audit process. Corresponding
+free VRAM was approximately 3.5 GiB and 11 GiB, respectively. The
+coordinator killed the remaining live CUDA threads of 29560/29561
+(558836/558844); this lane did not perform that cleanup. R740 remains
+`IDLE+DRAIN` with `Kill task failed (JobId=29561 StepId=batch)`. Resuming the
+node or changing the Kubernetes services is the founder's decision, not
+an action for this lane.
+
+**PREDICTION (preregistered):** conditional on the same contention at
+execution, the first failed device allocation on **both** sm_75 and sm_86
+will return CUDA_ERROR_OUT_OF_MEMORY (`CUresult=2` from `cuMemAlloc_v2`),
+leading to runner initialization failure and zero prompt records. The
+four verified Granite BF16 shard sizes sum to 16,341,738,616 bytes
+(15.2194 GiB), before the work/KV/RoPE allocations or module/context memory.
+The A5000 is predicted to fail during shard loading, plausibly the first
+4,974,661,520-byte shard; the RTX 8000 cannot hold all four at the observed
+free capacity, so a later shard allocation is a likely failure. Exact
+allocation index is not preregistered because service occupancy can vary.
+The prior L4 control is consistent with this explanation but does not
+prove the R740 cause.
+
+Diagnostic-only source `ae078834a4e8a3204200509dfd179aab9b2d0124` adds
+64-bit `cuMemGetInfo_v2` free/total bytes and query CUresult after module
+initialization, before the first shard and before every explicit allocation.
+The diagnostic allocator already prints the exact requested bytes and
+`cuMemAlloc_v2` return code. Both replacement R740 submissions carry this
+prediction in the job header; the numerical audit source pin and corpus
+remain unchanged. The old pending 29649/29650 were canceled to replace
+their immutable scripts before either ran. No Kubernetes service or node
+state was modified.
+
+**NOT ESTABLISHED:** the actual R740 failing operation or causal diagnosis.
+Comparison criteria: the target context must be the requested sm, the
+`cuMemGetInfo_v2` query must succeed under comparable insufficient free
+memory, the first failed allocation must return 2, and the terminal audit
+failure must leave only the header. A different first failure code under
+these conditions refutes the preregistered allocation mechanism for that
+run. If occupancy has changed or the measurement/target context is absent,
+report the precondition as not established, not a historical refutation.
+No full numerical comparison may be inferred from a diagnostic.
