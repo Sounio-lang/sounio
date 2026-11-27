@@ -1,0 +1,1 @@
+CUDA inference initialization now reports the failing allocation stage, byte count and driver result, and stops allocating further runner resources after a refusal. Previously an out-of-memory response during weight upload could trigger more allocations and a later nonspecific runner failure.
