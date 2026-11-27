@@ -1,10 +1,64 @@
+<!-- docs:meta
+topic_id: repo.docs.llm.receipts.2026-11-26-granite-parity
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.llm.receipts.2026-11-26-granite-parity
+-->
+
 # N-10 — Granite-3.1-8B cross-backend parity receipt (2026-11-26)
 
-**Status at 13:08 UTC: CPU controls PASS; staged checkpoint verified; GPU
-prediction NOT TESTED.** This is an interim accounting receipt, not a claim
-of cross-GPU or Metal identity. The original dependency chain became dead when kit job 29286 failed; it has been superseded by the replacement chain recorded below.
-No 61,440-token artifact is available yet; no drift or mismatch count can be
-reported as zero. The registered prediction remains unchanged.
+**OBSERVED · Final CUDA verdict, 2026-11-27.** The registered prediction held
+for both comparisons. Across 480 prompts × 128 greedy decoding steps per GPU,
+the L4, Quadro RTX 8000 and RTX A5000 produced byte-identical TSV files.
+Both invocations of `cmp_61440` returned 0 with `CROSS_BACKEND_IDENTICAL`.
+Token ID, runner-up ID, top-1 bits, second-logit bits, margin bits and
+provenance all matched at every step. Maximum margin drift, maximum margin
+bit delta and the CUDA FMA minimum-normal hit count were all zero.
+
+| Job | Node and device | Slurm state | Wall | Batch MaxRSS |
+|---|---|---|---:|---:|
+| 29553 | gpuorangefs-r770-proxmox · L4 (sm_89), reference | CANCELLED after completed output was preserved | 02:26:23 | 15042524K |
+| 29660 | gpuorangefs-multi-r740-proxmox · Quadro RTX 8000 (sm_75) | COMPLETED 0:0 | 01:23:00 | 117060K |
+| 29661 | gpuorangefs-multi-r740-proxmox · RTX A5000 (sm_86) | COMPLETED 0:0 | 01:05:54 | 106904K |
+| 29662 | dl380-dl380-proxmox · collector | COMPLETED 0:0 | 00:00:03 | 28080K |
+| 29734 | dl380-dl380-proxmox · independent artifact readback | COMPLETED 0:0 | 00:00:02 | 32476K |
+
+The unchanged numerical source was `ad4a505c1931d48552397089ca11d7cfaeabd988`.
+All three run logs ended with `AUDIT_61440_DONE` for 480 new prompts.
+The R740 watchdog reaped each child with status 137 after validating the
+completion marker and complete TSV. Both batch jobs then ran the comparator.
+The wall times include the watchdog and, for 29553, the post-completion hang.
+MaxRSS is the Slurm batch-step value. Job 29734 verified all three stored
+artifact manifests, the collector checksum and 481 lines per file, then
+compared each complete TSV against the preserved reference with `cmp`.
+
+| Artifact relative to `/orangefs/training/llm-granite-n10/` | SHA256 |
+|---|---|
+| `l4-ref-29553/cuda.tsv`, `audit-29660/cuda.tsv`, `audit-29661/cuda.tsv` (each) | `74b22db3f82221c5550593f2ce73f9b8430e8723ca219e45ce73b62b6c7c5fc5` |
+| Token columns, all three TSVs | `331b0a2fdb6906535e34c51857568c0ba524a345e7538d1bb20527a3a73d5fc8` |
+| Audit ELF used by all three GPUs | `8c74378a189919e4733847a100a72e976120f4b48b261ccdffcbe25e08bbd04c` |
+| `cpp-tools-29518/cmp_61440` | `4072e34b5bb725bfcf6c5f09cf95a3783ecb208bd52fc59f0cb4cb2d7afecb8a` |
+| `audit-29660/cmp.out`, `audit-29661/cmp.out` (each) | `a307b229e6b296f8a5fad55e8ed3be9d8bd5cd18c2ad1838693d283518494eca` |
+| `granite_480_prompts.txt` | `e14ac28d67b08146f5640c08a820620ceffcf0734527e1699d158245a58f85bf` |
+| `granite_480_prompt_ids.tsv` | `739880da2d40ff74b9a409f8a76d22d22ebc146b1afdb14007ae095512b8c22e` |
+| `l4-ref-29553/run.log` | `cee2bfcb33d786b04072f18f2062fae751dbe65c74c0a6d0f6ff8da957b21eef` |
+| `audit-29660/run.log` | `9b0358c525c6dfb44dd9c335d803601752f29c0865aa32643fc170b39dad83b9` |
+| `audit-29661/run.log` | `f6bde21289fe9a23c4201878adf863f96734faca09597d715a6445b909e4bd25` |
+| `cluster-receipt-29662.txt` | `9f5e963fdb87bc725382c4abb2570a5b0fe6dd77fcab418a52912effac9c5039` |
+
+**NOT ESTABLISHED · Metal M5 Max.** The Mac lane can compare its run against
+`REF_TSV=/orangefs/training/llm-granite-n10/l4-ref-29553/cuda.tsv` with
+the digest above. The original Qwen3 61,440-token prompt corpus was lost.
+The committed Granite replacement and its independent tokenization oracle
+were fixed before the first Granite GPU audit.
+
+The chronological entries below preserve the original failures, predictions
+and state at each observation. The final verdict above supersedes their
+pending statuses. Driver allocation failures were localized in jobs 29653
+and 29654. The allocator fix is tracked in [PR #3754](https://github.com/Sounio-lang/sounio/pull/3754)
+and the Linux thread-group exit fix in [PR #3752](https://github.com/Sounio-lang/sounio/pull/3752).
 
 ## Source and contract
 
@@ -47,7 +101,7 @@ training directory:
 /orangefs/training/llm-granite-n10/granite-3.1-8b-instruct
 ```
 
-3.6.1 against `huggingface.co/ibm-granite/granite-3.1-8b-instruct`, ran
+The staging job used Git LFS 3.6.1 against `huggingface.co/ibm-granite/granite-3.1-8b-instruct`, ran
 `git lfs fsck`, wrote `MODEL_REVISION` and `SHA256SUMS`, and ran
 `sha256sum -c SHA256SUMS` successfully, under `set -euo pipefail`.
 It downloaded the weights once. No model weights were committed to GitHub.
@@ -63,9 +117,7 @@ The four shard SHA256 values, in order:
 - `f02784b72391fa04e9b986313c1a1720ce88f0eb40f7ae81fa0daadc93049457`
 - `9d86d201ff8e73d8a46e92b543c9dd44f133e60b35ccada4a76439af62f22212`
 
-Direct visibility
-from r740/r770 has not yet been measured (GPU slots unavailable); the r740
-ops job checks the shared manifest before running.
+The completed R740 and R770 audit legs verified the same shared manifest before inference.
 
 The first CPU-only staging attempt (29219) failed because its `/orangefs`
 was an unmounted container overlay. On `dl380-dl380`, 29236 confirmed an

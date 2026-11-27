@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.llm.granite-step0
+authority: repo_only
+audience: users
+last_validated: unvalidated
+validated_by: none
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.llm.granite-step0
+-->
+
 # Granite-3.1-8B vs Qwen3-8B: forward-pass differences (Step 0, 2026-11-26)
 Source: config.json of ibm-granite/granite-3.1-8b-instruct and Qwen/Qwen3-8B (Hub, 2026-11-26).
 Modeling code verified against [Transformers v4.48.3 Granite](https://github.com/huggingface/transformers/blob/v4.48.3/src/transformers/models/granite/modeling_granite.py).
