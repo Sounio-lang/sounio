@@ -846,3 +846,35 @@ emit a supported/refuted/not-established classification from the actual
 measured memory and allocation return codes, and preserve logs and
 manifest in `diag-run-<job>/`. The founder's node/service decision is the
 external blocker. No full audit resubmission or numerical re-pin.
+
+## 2026-11-27 06:25 UTC: OOM prediction supported on both R740 GPUs
+
+**OBSERVED (Slurm accounting):** both jobs printed
+`R740_OOM_PREDICTION_SUPPORTED`, terminal `AUDIT_61440_FAIL`, header-only
+output, and runner `init=1 shards=0`. The preregistered prediction held:
+
+| Job / GPU | Device free before shards (bytes) | Total (bytes) | First failed allocation | CUresult | Wall / MaxRSS |
+|---|---:|---:|---|---:|---|
+| 29653 RTX 8000 sm_75 | 8,394,571,776 | 47,559,868,416 | third shard, 4,991,447,808 bytes | 2 | 00:01:09 / 126948K |
+| 29654 A5000 sm_86 | 3,517,972,480 | 25,285,623,808 | first shard, 4,974,661,520 bytes | 2 | 00:01:05 / 349716K |
+
+Both diagnostic batches completed 0:0 because they successfully captured
+the expected refusal, not because inference succeeded. **SUPPORTED**:
+contention-caused VRAM exhaustion at device weight allocation is the
+localized failing operation in these diagnostic reproductions. The
+historical silent initialization failure is consistent with this mechanism;
+no historical driver rc was retained. The diagnostic also identified an
+independent fail-reporting defect: initialization continued to allocate
+other resources after failed shard allocation, then returned runner false
+without a specific production-facing reason. That correction belongs to a
+separate PR, not the pinned audit source.
+
+**OBSERVED (coordinator):** by founder authorization both external GPU
+services were scaled to zero replicas; afterward A5000 1383 MiB used,
+RTX 8000 3 MiB used. Slurm readback confirms R740 `IDLE+DYNAMIC_NORM`.
+The coordinator owns restoring services; this lane has not changed node
+or service state. The numerical prediction and original audit pin remain
+unchanged. New admission requires at least 16,513,574,008 free bytes:
+16,341,738,616 shard bytes + 3,801,088 work + two 83,886,080 KV arenas +
+262,144 RoPE bytes. Query is `cuMemGetInfo_v2` in the selected CUDA context,
+with exact SM and return status checked before audit launch.
