@@ -107,9 +107,16 @@ own_run_selection() {
   command -v gh >/dev/null 2>&1 || { skip "$c" "gh not on PATH"; return 1; }
   local run_id job_id log keys k v reused="" err
   err="$(mktemp)"; trap 'rm -f "$err"' RETURN
-  run_id="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$c&event=pull_request&status=completed&per_page=30" \
-      --jq "[.workflow_runs[] | select(.path == \".github/workflows/ci.yml\" and .head_sha == \"$c\" and .conclusion == \"success\" and any(.pull_requests[]; .number == $CI_PR_NUMBER)) | .id] | first // empty"  2>"$err")" || { skip "$c" "runs query failed: $(head -c 200 "$err")"; return 1; }
-  [[ "$run_id" =~ ^[0-9]+$ ]] || { skip "$c" "no successful pull_request run of ci.yml listing PR $CI_PR_NUMBER"; return 1; }
+  # One line per green pull_request run of ci.yml for this head: "<id> <PR numbers>".
+  # Kept apart so that "no green run" and "a green run that does not list
+  # this PR" give different reasons (review of #3753); both still refuse.
+  local runs
+  runs="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$c&event=pull_request&status=completed&per_page=30" \
+      --jq "[.workflow_runs[] | select(.path == \".github/workflows/ci.yml\" and .head_sha == \"$c\" and .conclusion == \"success\")] | .[] | \"\\(.id) \\([.pull_requests[].number | tostring] | join(\",\"))\"" 2>"$err")" \
+    || { skip "$c" "runs query failed: $(head -c 200 "$err")"; return 1; }
+  [[ -n "$runs" ]] || { skip "$c" "no successful pull_request run of ci.yml for this head"; return 1; }
+  run_id="$(awk -v pr="$CI_PR_NUMBER" '{ n = split($2, a, ","); for (i = 1; i <= n; i++) if (a[i] == pr) { print $1; exit } }' <<<"$runs")"
+  [[ "$run_id" =~ ^[0-9]+$ ]] || { skip "$c" "green run(s) $(awk '{printf "%s[prs=%s] ", $1, ($2 == "" ? "none" : $2)}' <<<"$runs")do not list PR $CI_PR_NUMBER"; return 1; }
   job_id="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs?per_page=100" \
       --jq '[.jobs[] | select(.name == "Impact" and .conclusion == "success") | .id] | first // empty'  2>"$err")" || { skip "$c" "jobs query failed for run $run_id: $(head -c 200 "$err")"; return 1; }
   [[ "$job_id" =~ ^[0-9]+$ ]] || { skip "$c" "run $run_id has no successful Impact job"; return 1; }

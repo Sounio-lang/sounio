@@ -493,3 +493,65 @@ trap 'rm -rf "$reuse_dir" "$reuse_dir2"' EXIT
     || { echo "impact-ci-selftest: control 13: no skip reason for ${r:0:10}: $why" >&2; exit 1; }
   echo "IMPACT_REUSE_TESTED_TREE_SELFTEST_PASS controls=3"
 )
+
+# The API leg itself (review of #3753), through a stub `gh` on PATH. The stub
+# ignores --jq and answers each endpoint with what the real filter would print.
+# STUB_RUNS is the runs-query output ("<id> <prs>" lines); STUB_FAIL=runs makes
+# that call exit 1. Every refusal must say why, and none may reuse a verdict.
+reuse_dir3="$(mktemp -d)"
+trap 'rm -rf "$reuse_dir" "$reuse_dir2" "$reuse_dir3"' EXIT
+(
+  set -e
+  cd "$reuse_dir3"
+  G=(-c user.name=t -c user.email=t@t)
+  mkdir -p bin repo
+  cat >bin/gh <<'STUB'
+#!/usr/bin/env bash
+url="$2"
+case "$url" in
+  *"/actions/runs?"*)
+    [[ "${STUB_FAIL:-}" == runs ]] && { echo "HTTP 403: Resource not accessible by integration" >&2; exit 1; }
+    printf '%s\n' "${STUB_RUNS:-}" | sed '/^$/d' ;;
+  *"/jobs?"*) echo 77 ;;
+  *"/actions/jobs/77/logs") cat "$STUB_LOG" ;;
+  *) exit 1 ;;
+esac
+STUB
+  chmod +x bin/gh
+  cd repo
+  git init -q -b main .
+  mkdir -p self-hosted docs; echo a >self-hosted/a.sio
+  git add -A; git "${G[@]}" commit -q -m base
+  base=$(git rev-parse HEAD)
+  git checkout -q -b pr
+  echo a2 >self-hosted/a.sio; git "${G[@]}" commit -q -am "R"
+  r=$(git rev-parse HEAD)
+  echo d >docs/n.md; git add -A; git "${G[@]}" commit -q -m "H: docs only"
+  h=$(git rev-parse HEAD)
+  log="$reuse_dir3/impact.log"
+  { echo "2026-11-27T00:00:00.0Z HEAD is now at 1234567 Merge $r into $base"
+    for k in docs website compiler runtime stdlib tests lean bootstrap math ontology clinical sio full; do
+      echo "2026-11-27T00:00:00.0Z $k=true"; done
+    echo "2026-11-27T00:00:00.0Z reused_from="; } >"$log"
+  sel() {  # sel -> "<stdout>|<stderr>"
+    local o e
+    e="$( { o="$(PATH="$reuse_dir3/bin:$PATH" GITHUB_REPOSITORY=o/r CI_PR_NUMBER=42 STUB_LOG="$log" \
+        CI_HEAD_SHA="$h" CI_REUSE_REQUIRED="compiler docs" \
+        bash "$ROOT_DIR/scripts/ci/ci_reuse_green_ancestor.sh")"; printf '%s' "$o" >"$reuse_dir3/out"; } 2>&1 )"
+    printf '%s|%s' "$(cat "$reuse_dir3/out")" "$e"
+  }
+  want() {  # want <control> <stdout> <stderr substring>
+    local got; got="$(STUB_RUNS="$STUB_RUNS" STUB_FAIL="${STUB_FAIL:-}" sel)"
+    [[ "${got%%|*}" == "$2" && "${got#*|}" == *"$3"* ]] \
+      || { echo "impact-ci-selftest: control $1: got stdout='${got%%|*}' stderr='${got#*|}'" >&2; exit 1; }
+  }
+  # 14. A green run exists but does not list this PR: refused, and named so.
+  STUB_RUNS="900 " want 14 "" "green run(s) 900[prs=none] do not list PR 42"
+  # 15. The runs call fails: refused, with the API's own error text.
+  STUB_RUNS="" STUB_FAIL=runs want 15 "" "runs query failed: HTTP 403"
+  # 16. No green run at all: refused, with a different reason than 14.
+  STUB_RUNS="" want 16 "" "no successful pull_request run of ci.yml for this head"
+  # 17. Every predicate holds through the API leg: R is reused.
+  STUB_RUNS="$(printf '900 7\n901 42')" want 17 "$r" ""
+  echo "IMPACT_REUSE_API_SELFTEST_PASS controls=4"
+)
