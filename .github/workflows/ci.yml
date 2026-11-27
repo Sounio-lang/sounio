@@ -36,6 +36,14 @@ jobs:
     name: Impact
     runs-on: ubuntu-24.04
     timeout-minutes: 10  # #2443: measured max 4.0 min over the same window
+    # checks: read lets the classifier ask whether an earlier head of this PR
+    # (actions: read: its CI run and that run's Impact log)
+    # already passed CI Decision (scripts/ci/ci_reuse_green_ancestor.sh, run
+    # by classify_ci_impact.sh and covered by impact_ci_selftest.sh).
+    permissions:
+      contents: read
+      checks: read
+      actions: read
     outputs:
       docs: ${{ steps.classify.outputs.docs }}
       website: ${{ steps.classify.outputs.website }}
@@ -50,6 +58,10 @@ jobs:
       clinical: ${{ steps.classify.outputs.clinical }}
       sio: ${{ steps.classify.outputs.sio }}
       full: ${{ steps.classify.outputs.full }}
+      reused_from: ${{ steps.classify.outputs.reused_from }}
+      policy_compiler: ${{ steps.classify.outputs.policy_compiler }}
+      policy_runtime: ${{ steps.classify.outputs.policy_runtime }}
+      policy_stdlib: ${{ steps.classify.outputs.policy_stdlib }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -60,6 +72,8 @@ jobs:
         env:
           CI_EVENT_NAME: ${{ github.event_name }}
           CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          GH_TOKEN: ${{ github.token }}
+          CI_PR_NUMBER: ${{ github.event.pull_request.number }}
           CI_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
         run: bash scripts/ci/classify_ci_impact.sh
       - name: Classifier self-test
@@ -78,9 +92,11 @@ jobs:
           CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           CI_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_CREATED_AT: ${{ github.event.pull_request.created_at }}
-          IMPACT_COMPILER: ${{ steps.classify.outputs.compiler }}
-          IMPACT_RUNTIME: ${{ steps.classify.outputs.runtime }}
-          IMPACT_STDLIB: ${{ steps.classify.outputs.stdlib }}
+          # Policy gate: the full BASE..HEAD classification (policy_*), never the
+          # reduced one a reused verdict schedules jobs by.
+          IMPACT_COMPILER: ${{ steps.classify.outputs.policy_compiler }}
+          IMPACT_RUNTIME: ${{ steps.classify.outputs.policy_runtime }}
+          IMPACT_STDLIB: ${{ steps.classify.outputs.policy_stdlib }}
         run: bash scripts/ci/changelog_fragment_gate.sh
       # The lean_single fallback dispatch had no committed coverage: every
       # existing gate either forces the engine or pins SOUNIO_TEST_SOUC_BIN,
@@ -130,6 +146,13 @@ jobs:
         run: node scripts/ci/contracts_parallel_contract.mjs "$GITHUB_WORKSPACE" --selftest
       - name: Deep-science worker failure controls
         run: node scripts/ci/deep_science_partition_contract.mjs "$PWD" --selftest
+      # The gen2 fixed-point rung runs on the DARWIN cluster, not here (#3746).
+      # A compiler source (the tree hash of self-hosted/) reaches main only with
+      # a committed Slurm receipt in docs/evidence/gen2-fixpoint/.
+      - name: gen2 fixed-point receipt — controls
+        run: bash scripts/ci/gen2_receipt_gate.sh --selftest
+      - name: gen2 fixed-point receipt for this compiler source
+        run: bash scripts/ci/gen2_receipt_gate.sh
       - name: Workflow gate reference ratchet before expensive jobs
         run: bash scripts/ci/gate_workflow_reference_ratchet.sh
       - name: E041 meaning agrees across registry, diagnostics and docs
@@ -994,7 +1017,7 @@ jobs:
         if: matrix.shard == 'core-c'
         run: |
           set -euo pipefail
-          command -v qemu-aarch64-static >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user-static; }
+          command -v qemu-aarch64-static >/dev/null || bash scripts/ci/apt_ensure.sh qemu-user-static
           SOUNIO_LEAN_SINGLE_BIN=/tmp/lean_b.elf TIMEOUT_SECS=180 \
             bash scripts/ci/a64_epistemic_variance_parity_gate.sh
       - name: checker_init_in_place assigns every Checker field (#2966)
@@ -1615,9 +1638,7 @@ jobs:
           git config --get remote.origin.partialclonefilter || true
       - name: Provision toolchain (DARWIN runner)
         if: runner.environment == 'self-hosted'
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends gcc g++ nodejs libc6-dev python3 file util-linux xz-utils make >/dev/null
+        run: bash scripts/ci/apt_ensure.sh gcc g++ nodejs libc6-dev python3 file util-linux xz-utils make
       - name: Use the shared DARWIN Madaros cache
         if: runner.environment == 'self-hosted'
         run: |
@@ -2486,11 +2507,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install independent C++23 reference dependencies
-        run: |
-          printf '%s\n' 'https://archive.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
-          apt_options=(-o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=3 -o APT::Update::Error-Mode=any)
-          timeout 300 sudo apt-get "${apt_options[@]}" update
-          timeout 300 sudo apt-get "${apt_options[@]}" install -y --no-install-recommends g++ libboost-dev libquadmath0 jq
+        run: bash scripts/ci/apt_ensure.sh g++ libboost-dev libquadmath0 jq
       - name: Run independent reference and mutant controls
         env:
           STDLIB_DEEP_GROUP: reference-controls
@@ -2947,11 +2964,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install independent C++23 reference dependencies
-        run: |
-          printf '%s\n' 'https://archive.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
-          apt_options=(-o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=3 -o APT::Update::Error-Mode=any)
-          timeout 300 sudo apt-get "${apt_options[@]}" update
-          timeout 300 sudo apt-get "${apt_options[@]}" install -y --no-install-recommends g++ libboost-dev libquadmath0 jq
+        run: bash scripts/ci/apt_ensure.sh g++ libboost-dev libquadmath0 jq
       - name: Receipt and required-job tamper controls
         run: |
           bash scripts/ci/stdlib_deep_compiler_receipt.sh selftest
@@ -3309,6 +3322,9 @@ jobs:
     timeout-minutes: 10  # #2443: measured max 1.7 min over the same window
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          filter: blob:none
       - uses: actions/setup-node@v4
         with:
           node-version: '22'

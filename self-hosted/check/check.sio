@@ -458,6 +458,11 @@ pub struct Checker {
     pub ns_branch_depth: i64,
     pub ns_reassigned_names: [Name; 64],
     pub ns_reassigned_count: i64,
+    // ---- EPI-006 step 3b: Named Knightian uncertainty sources --------------
+    // Kept apart from the aleatory ns_table / noise_set_id lane.
+    pub knight_ns_table: *mut NoiseSetTable,
+    pub knight_sources: *mut KnightSourceTable,
+    pub last_call_arg_ks: i64,
     // Sticky: set when ns_reassigned_names overflows its 64-slot cap inside a
     // branch context (a 65th distinct reassigned Knowledge var cannot be
     // recorded). At the depth-0 merge this forces EVERY live TyKnowledge
@@ -1380,7 +1385,360 @@ fn setup_intrinsics(tbl: *mut FnSigTable) with Mut, Panic, Div, Alloc {
     let _ = fn_sig_table_add(tbl, seq_sig)
 }
 
+// ============================================================
+// Interprocedural source-identity summaries & per-binding struct field sets
+// ============================================================
+//
+// Demand-driven per-function summaries for both static uncertainty lanes:
+//   - Aleatory GUM noise_set_id (signed param bitmasks: pos, neg; opaque = pos|neg)
+//   - Named Knightian knight_set_id (param bitmask + callee's own interned set)
+// Fail-closed: recursion (state == 2), indirect calls, externs, closures,
+// internal aleatory measure() draws, globals, loops, or capacity overflows
+// widen to unknown (-1).
+
+struct NsFnDefNode {
+    sig_id: i64,
+    def: FnDef,
+    next: Option<Box<NsFnDefNode> >,
+}
+
+struct NsSumVal {
+    ns_valid: i64,
+    ns_pos: i64,
+    ns_neg: i64,
+    ns_fresh: i64,
+    ks_valid: i64,
+    ks_mask: i64,
+    ks_own: i64,
+    is_k: i64,
+}
+
+let NS_SUMMARY_CAP: i64 = 65536
+var NS_SUMMARY_GEN: i64 = 1
+var NS_SUM_GEN: [i64; 65536] = [0; 65536]
+var NS_SUM_STATE: [i64; 65536] = [0; 65536]
+var NS_SUM_MOD: [i64; 65536] = [0; 65536]
+var NS_SUM_PARAM_COUNT: [i64; 65536] = [0; 65536]
+var NS_SUM_RET_PRECISE: [i64; 65536] = [0; 65536]
+var NS_SUM_NS_VALID: [i64; 65536] = [0; 65536]
+var NS_SUM_NS_POS: [i64; 65536] = [0; 65536]
+var NS_SUM_NS_NEG: [i64; 65536] = [0; 65536]
+var NS_SUM_NS_FRESH: [i64; 65536] = [0; 65536]
+var NS_SUM_KS_VALID: [i64; 65536] = [0; 65536]
+var NS_SUM_KS_MASK: [i64; 65536] = [0; 65536]
+var NS_SUM_KS_OWN: [i64; 65536] = [0; 65536]
+var NS_FN_DEF_HEAD: Option<Box<NsFnDefNode> > = None
+
+// Summary evaluator flat stacks (keeps ns_sum_eval_* frames tiny).
+let NS_SUM_ENV_CAP: i64 = 512
+var NS_SUM_ENV_TOP: i64 = 0
+var NS_SUM_ENV_NAME: [Name; 512]
+var NS_SUM_ENV_NS_VALID: [i64; 512] = [0; 512]
+var NS_SUM_ENV_NS_POS: [i64; 512] = [0; 512]
+var NS_SUM_ENV_NS_NEG: [i64; 512] = [0; 512]
+var NS_SUM_ENV_NS_FRESH: [i64; 512] = [0; 512]
+var NS_SUM_ENV_KS_VALID: [i64; 512] = [0; 512]
+var NS_SUM_ENV_KS_MASK: [i64; 512] = [0; 512]
+var NS_SUM_ENV_KS_OWN: [i64; 512] = [0; 512]
+var NS_SUM_ENV_ISK: [i64; 512] = [0; 512]
+
+let NS_SUM_FLD_CAP: i64 = 256
+var NS_SUM_FLD_TOP: i64 = 0
+var NS_SUM_FLD_VAR: [Name; 256]
+var NS_SUM_FLD_NAME: [Name; 256]
+var NS_SUM_FLD_NS_VALID: [i64; 256] = [0; 256]
+var NS_SUM_FLD_NS_POS: [i64; 256] = [0; 256]
+var NS_SUM_FLD_NS_NEG: [i64; 256] = [0; 256]
+var NS_SUM_FLD_NS_FRESH: [i64; 256] = [0; 256]
+var NS_SUM_FLD_KS_VALID: [i64; 256] = [0; 256]
+var NS_SUM_FLD_KS_MASK: [i64; 256] = [0; 256]
+var NS_SUM_FLD_KS_OWN: [i64; 256] = [0; 256]
+
+// Nested call-argument stack (32 frames * 16 args = 512 slots).
+let NS_CALL_DEPTH_CAP: i64 = 32
+let NS_CALL_MAX_ARGS: i64 = 16
+var NS_CALL_DEPTH: i64 = 0
+var NS_CALL_ARG_NS: [i64; 512] = [-1; 512]
+var NS_CALL_ARG_KS: [i64; 512] = [0; 512]
+var NS_CALL_ARG_ISK: [i64; 512] = [0; 512]
+var NS_CALL_ARG_COUNT: [i64; 32] = [0; 32]
+var NS_CALL_ARG_OVERFLOW: [i64; 32] = [0; 32]
+
+// Per-binding struct field static sets (reset per checked function body).
+let NS_FIELD_CAP: i64 = 512
+var NS_FIELD_COUNT: i64 = 0
+var NS_FIELD_OVERFLOW: bool = false
+var NS_FIELD_VAR: [Name; 512]
+var NS_FIELD_NAME: [Name; 512]
+var NS_FIELD_SCOPE: [i64; 512] = [0; 512]
+var NS_FIELD_NS: [i64; 512] = [-1; 512]
+var NS_FIELD_KS: [i64; 512] = [0; 512]
+
+// Scratch capturing Knowledge fields of the most recent struct literal.
+let NS_LIT_CAP: i64 = 32
+var NS_LIT_VALID: bool = false
+var NS_LIT_OVERFLOW: bool = false
+var NS_LIT_COUNT: i64 = 0
+var NS_LIT_NAME: [Name; 32]
+var NS_LIT_NS: [i64; 32] = [-1; 32]
+var NS_LIT_KS: [i64; 32] = [0; 32]
+
+// Branch-mutated struct fields (merged at checker_merge_ns_reassigned_inplace).
+let NS_FBR_CAP: i64 = 64
+var NS_FBR_COUNT: i64 = 0
+var NS_FBR_OVERFLOW: bool = false
+var NS_FBR_VAR: [Name; 64]
+var NS_FBR_FIELD: [Name; 64]
+var NS_FBR_WHOLE: [i64; 64] = [0; 64]
+var NS_FBR_KS: [i64; 64] = [0; 64]
+
+fn ns_summary_reset() with Mut {
+    NS_SUMMARY_GEN = NS_SUMMARY_GEN + 1
+    NS_FN_DEF_HEAD = None
+    NS_SUM_ENV_TOP = 0
+    NS_SUM_FLD_TOP = 0
+}
+
+fn ns_call_args_reset() with Mut {
+    NS_CALL_DEPTH = 0
+}
+
+fn ns_call_args_push() with Mut, Panic, Div {
+    let d = NS_CALL_DEPTH
+    NS_CALL_DEPTH = d + 1
+    if d >= 0 && d < NS_CALL_DEPTH_CAP {
+        NS_CALL_ARG_COUNT[d as usize] = 0
+        NS_CALL_ARG_OVERFLOW[d as usize] = 0
+        var i: i64 = 0
+        while i < NS_CALL_MAX_ARGS {
+            let slot = (d * NS_CALL_MAX_ARGS + i) as usize
+            NS_CALL_ARG_NS[slot] = 0 - 1
+            NS_CALL_ARG_KS[slot] = 0
+            NS_CALL_ARG_ISK[slot] = 0
+            i = i + 1
+        }
+    }
+}
+
+fn ns_call_args_pop() with Mut {
+    if NS_CALL_DEPTH > 0 {
+        NS_CALL_DEPTH = NS_CALL_DEPTH - 1
+    }
+}
+
+fn ns_call_args_record(idx: i64, is_k: bool, ns_id: i64, ks_id: i64) with Mut, Panic, Div {
+    let d = NS_CALL_DEPTH - 1
+    if d < 0 || d >= NS_CALL_DEPTH_CAP { return }
+    if idx >= 0 && idx < NS_CALL_MAX_ARGS {
+        let slot = (d * NS_CALL_MAX_ARGS + idx) as usize
+        NS_CALL_ARG_ISK[slot] = if is_k { 1 } else { 0 }
+        NS_CALL_ARG_NS[slot] = ns_id
+        NS_CALL_ARG_KS[slot] = ks_id
+        if idx + 1 > NS_CALL_ARG_COUNT[d as usize] {
+            NS_CALL_ARG_COUNT[d as usize] = idx + 1
+        }
+    } else {
+        NS_CALL_ARG_OVERFLOW[d as usize] = 1
+    }
+}
+
+fn ns_field_reset() with Mut {
+    NS_FIELD_COUNT = 0
+    NS_FIELD_OVERFLOW = false
+    NS_LIT_VALID = false
+    NS_LIT_OVERFLOW = false
+    NS_LIT_COUNT = 0
+    NS_FBR_COUNT = 0
+    NS_FBR_OVERFLOW = false
+}
+
+fn ns_field_pop_scope(new_depth: i64) with Mut, Panic, Div {
+    var w: i64 = 0
+    var i: i64 = 0
+    while i < NS_FIELD_COUNT {
+        if NS_FIELD_SCOPE[i as usize] <= new_depth {
+            if w != i {
+                NS_FIELD_VAR[w as usize] = NS_FIELD_VAR[i as usize]
+                NS_FIELD_NAME[w as usize] = NS_FIELD_NAME[i as usize]
+                NS_FIELD_SCOPE[w as usize] = NS_FIELD_SCOPE[i as usize]
+                NS_FIELD_NS[w as usize] = NS_FIELD_NS[i as usize]
+                NS_FIELD_KS[w as usize] = NS_FIELD_KS[i as usize]
+            }
+            w = w + 1
+        }
+        i = i + 1
+    }
+    NS_FIELD_COUNT = w
+}
+
+fn ns_field_clear_var_at_scope(var_name: Name, scope: i64) with Mut, Panic, Div {
+    var w: i64 = 0
+    var i: i64 = 0
+    while i < NS_FIELD_COUNT {
+        if !(NS_FIELD_SCOPE[i as usize] == scope && name_eq(NS_FIELD_VAR[i as usize], var_name)) {
+            if w != i {
+                NS_FIELD_VAR[w as usize] = NS_FIELD_VAR[i as usize]
+                NS_FIELD_NAME[w as usize] = NS_FIELD_NAME[i as usize]
+                NS_FIELD_SCOPE[w as usize] = NS_FIELD_SCOPE[i as usize]
+                NS_FIELD_NS[w as usize] = NS_FIELD_NS[i as usize]
+                NS_FIELD_KS[w as usize] = NS_FIELD_KS[i as usize]
+            }
+            w = w + 1
+        }
+        i = i + 1
+    }
+    NS_FIELD_COUNT = w
+}
+
+fn ns_field_set(var_name: Name, scope: i64, field_name: Name, ns_id: i64, ks_id: i64) with Mut, Panic, Div {
+    var i: i64 = NS_FIELD_COUNT - 1
+    while i >= 0 {
+        if NS_FIELD_SCOPE[i as usize] == scope && name_eq(NS_FIELD_VAR[i as usize], var_name) && name_eq(NS_FIELD_NAME[i as usize], field_name) {
+            NS_FIELD_NS[i as usize] = ns_id
+            NS_FIELD_KS[i as usize] = ks_id
+            return
+        }
+        i = i - 1
+    }
+    if NS_FIELD_COUNT >= NS_FIELD_CAP {
+        NS_FIELD_OVERFLOW = true
+        return
+    }
+    let idx = NS_FIELD_COUNT
+    NS_FIELD_VAR[idx as usize] = var_name
+    NS_FIELD_NAME[idx as usize] = field_name
+    NS_FIELD_SCOPE[idx as usize] = scope
+    NS_FIELD_NS[idx as usize] = ns_id
+    NS_FIELD_KS[idx as usize] = ks_id
+    NS_FIELD_COUNT = idx + 1
+}
+
+// The entry for field `field_name` of the binding of `var_name` that lives at
+// `bind_scope` (the scope of the binding the name resolves to). Returns the
+// index, or -1 when that binding has no tracked entry for the field. The scope
+// must match EXACTLY: an outer binding of the same name is a different object,
+// and reading its set for a shadowing binding that is untracked (a struct
+// returned by a call, say) would bypass the Unknown fallback. Measured before
+// this rule: an inner `let h = mk(3)` (a recursive callee, Unknown) read the outer
+// `h.k` = {a}, and `h.k + b` was accepted while the same code under another name
+// was refused with E230.
+fn ns_field_find_innermost(var_name: Name, field_name: Name, bind_scope: i64) -> i64 with Mut, Panic, Div {
+    if bind_scope < 0 { return 0 - 1 }
+    var i: i64 = NS_FIELD_COUNT - 1
+    while i >= 0 {
+        if NS_FIELD_SCOPE[i as usize] == bind_scope && name_eq(NS_FIELD_VAR[i as usize], var_name) && name_eq(NS_FIELD_NAME[i as usize], field_name) {
+            return i
+        }
+        i = i - 1
+    }
+    0 - 1
+}
+
+fn ns_field_record_branch_mut(var_name: Name, field_name: Name, whole: i64, ks_id: i64) with Mut, Panic, Div {
+    if NS_FBR_COUNT < NS_FBR_CAP {
+        let idx = NS_FBR_COUNT
+        NS_FBR_VAR[idx as usize] = var_name
+        NS_FBR_FIELD[idx as usize] = field_name
+        NS_FBR_WHOLE[idx as usize] = whole
+        NS_FBR_KS[idx as usize] = ks_id
+        NS_FBR_COUNT = idx + 1
+    } else {
+        NS_FBR_OVERFLOW = true
+    }
+}
+
+fn ns_field_widen_var_entries(c: *mut Checker, var_name: Name) with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < NS_FIELD_COUNT {
+        if name_eq(NS_FIELD_VAR[i as usize], var_name) {
+            NS_FIELD_NS[i as usize] = 0 - 1
+            NS_FIELD_KS[i as usize] = 0 - 1
+        }
+        i = i + 1
+    }
+    if (*c).ns_branch_depth > 0 {
+        ns_field_record_branch_mut(var_name, empty_name(), 1, 0 - 1)
+    }
+}
+
+fn ns_field_copy_var(src_name: Name, src_scope: i64, dst_name: Name, dst_scope: i64) with Mut, Panic, Div {
+    // Copy only the entries of the binding `src_name` resolves to (src_scope);
+    // an outer binding of the same name is a different object.
+    if src_scope < 0 { return }
+    let limit = NS_FIELD_COUNT
+    var j: i64 = 0
+    while j < limit {
+        if name_eq(NS_FIELD_VAR[j as usize], src_name) && NS_FIELD_SCOPE[j as usize] == src_scope {
+            ns_field_set(dst_name, dst_scope, NS_FIELD_NAME[j as usize], NS_FIELD_NS[j as usize], NS_FIELD_KS[j as usize])
+        }
+        j = j + 1
+    }
+}
+
+fn ns_summary_register_fn(sig_id: i64, mod_id: i64, param_count: i64, ret_precise: i64, fd: FnDef) with Mut, Panic, Div, Alloc {
+    if sig_id < 0 || sig_id >= NS_SUMMARY_CAP { return }
+    NS_SUM_GEN[sig_id as usize] = NS_SUMMARY_GEN
+    NS_SUM_STATE[sig_id as usize] = 1
+    NS_SUM_MOD[sig_id as usize] = mod_id
+    NS_SUM_PARAM_COUNT[sig_id as usize] = param_count
+    NS_SUM_RET_PRECISE[sig_id as usize] = ret_precise
+    NS_SUM_NS_VALID[sig_id as usize] = 0
+    NS_SUM_NS_POS[sig_id as usize] = 0
+    NS_SUM_NS_NEG[sig_id as usize] = 0
+    NS_SUM_NS_FRESH[sig_id as usize] = 0
+    NS_SUM_KS_VALID[sig_id as usize] = 0
+    NS_SUM_KS_MASK[sig_id as usize] = 0
+    NS_SUM_KS_OWN[sig_id as usize] = 0
+    NS_FN_DEF_HEAD = Some(Box::new(NsFnDefNode { sig_id: sig_id, def: fd, next: NS_FN_DEF_HEAD }))
+}
+
+fn ns_summary_has_def(sig_id: i64) -> bool with Mut, Panic, Div {
+    var cur = NS_FN_DEF_HEAD
+    while true {
+        match cur {
+            Some(node) => {
+                if (*node).sig_id == sig_id { return true }
+                cur = (*node).next
+            }
+            None => break
+        }
+    }
+    false
+}
+
+fn ns_summary_find_def(sig_id: i64) -> FnDef with Mut, Panic, Div {
+    var fd = FnDef {
+        name: empty_name(),
+        params: None,
+        return_type: None,
+        effects: None,
+        body: Block { stmts: None, span: Span { file_id: 0, start: 0, end: 0 } },
+        span: Span { file_id: 0, start: 0, end: 0 },
+        is_kernel: false,
+        is_extern: false,
+    }
+    var found = false
+    var cur = NS_FN_DEF_HEAD
+    while !found {
+        match cur {
+            Some(node) => {
+                if (*node).sig_id == sig_id {
+                    fd = (*node).def
+                    found = true
+                } else {
+                    cur = (*node).next
+                }
+            }
+            None => break
+        }
+    }
+    fd
+}
+
 pub fn checker_new() -> Checker with Mut, Panic, Div, Alloc {
+    ns_summary_reset()
+    ns_call_args_reset()
+    ns_field_reset()
     let c = Checker {
         env: type_env_new(),
         borrows: borrow_env_new(),
@@ -1491,6 +1849,9 @@ pub fn checker_new() -> Checker with Mut, Panic, Div, Alloc {
         ns_reassigned_names: [empty_name(); 64],
         ns_reassigned_count: 0,
         ns_reassigned_overflow: false,
+        knight_ns_table: ns_table_alloc(),
+        knight_sources: knight_source_table_alloc(),
+        last_call_arg_ks: ns_arg_sentinel(),
         fx: fx_frame_table_alloc(),
         fx_op_params: fx_op_param_table_alloc(),
     }
@@ -1506,6 +1867,9 @@ pub fn checker_init_in_place(raw: *mut Checker) with Mut, Panic, Div, Alloc {
     // before its own collect-items pass, so this is the correct, single
     // reset point for CHECKER_USE_MODULE_HASH (see its own comment).
     checker_use_module_reset()
+    ns_summary_reset()
+    ns_call_args_reset()
+    ns_field_reset()
     // Assigned, not reset in place: `raw` is fresh heap_alloc memory, and in a
     // Madaros-built compiler the `env` field is a reference that is still null
     // there, so type_env_reset_into(&!(*raw).env) would write through handle 0.
@@ -1627,6 +1991,9 @@ pub fn checker_init_in_place(raw: *mut Checker) with Mut, Panic, Div, Alloc {
     (*raw).ns_reassigned_names = [empty_name(); 64]
     (*raw).ns_reassigned_count = 0
     (*raw).ns_reassigned_overflow = false
+    (*raw).knight_ns_table = ns_table_alloc()
+    (*raw).knight_sources = knight_source_table_alloc()
+    (*raw).last_call_arg_ks = ns_arg_sentinel()
     (*raw).fx = fx_frame_table_alloc()
     (*raw).fx_op_params = fx_op_param_table_alloc()
 }
@@ -1739,6 +2106,9 @@ fn checker_store_from_value(dst: *mut Checker, src: Checker) with Mut, Panic, Di
     (*dst).ns_reassigned_names = src.ns_reassigned_names
     (*dst).ns_reassigned_count = src.ns_reassigned_count
     (*dst).ns_reassigned_overflow = src.ns_reassigned_overflow
+    (*dst).knight_ns_table = src.knight_ns_table
+    (*dst).knight_sources = src.knight_sources
+    (*dst).last_call_arg_ks = src.last_call_arg_ks
     (*(*dst).fx).perf_ops = (*src.fx).perf_ops
     (*(*dst).fx).perf_owner = (*src.fx).perf_owner
     (*(*dst).fx).perf_count = (*src.fx).perf_count
@@ -2431,12 +2801,13 @@ fn checker_lower_knowledge_type_mut(c: *mut Checker, opt: Option<Box<KnowledgeTy
             }
             var eps_val: f64 = -1.0
             var eps_mode: i64 = 0
+            var knight_set: i64 = ns_empty()
             match info.epsilon {
                 Some(eb) => {
                     let bound = *eb
                     if bound.value == 0.0 - 2.0 && bound.op == CompareOp::CmpEq {
-                        // `ε=⊥`: Knightian ignorance (mode 3), no numeric bound.
-                        eps_mode = 3
+                        // `ε=⊥`: Knightian ignorance — carried in knight_set_id, no numeric bound.
+                        knight_set = ns_unknown()
                     } else if bound.value < 0.0 || bound.value > 1.0 {
                         checker_note_type_error_mut(c)
                     } else {
@@ -2453,6 +2824,7 @@ fn checker_lower_knowledge_type_mut(c: *mut Checker, opt: Option<Box<KnowledgeTy
             // exactly the engine that matters. Lane: SOUNIO-KNOWLEDGE-BOUNDARY-PROVENANCE.
             var ty = ty_knowledge(inner_ty, eps_val)
             ty.knowledge_epsilon_mode = eps_mode
+            ty.knight_set_id = knight_set
             let prov = meta.provenance
             ty.knowledge_provenance_kind = prov.kind
             let val_cond = meta.validity
@@ -4285,14 +4657,29 @@ fn checker_report_undeclared_inplace(c: *mut Checker, span: Span, ident: Name) w
     print("\n")
 }
 
+fn checker_type_requires_precise(ty: TypeEntry) -> bool {
+    is_epistemic_type(ty)
+        && ty.knight_set_id == 0
+        && (ty.knowledge_epsilon_mode == 1
+            || ty.knowledge_epsilon_mode == 2
+            || ty.knowledge_epsilon >= 0.0)
+}
+
+fn checker_is_knightian_into_precise(provided: TypeEntry, required: TypeEntry) -> bool {
+    is_epistemic_type(provided)
+        && provided.knight_set_id != 0
+        && checker_type_requires_precise(required)
+}
+
 fn checker_report_mismatch_inplace(c: *mut Checker, span: Span, code: i64, expected: TypeEntry, got: TypeEntry) with Mut, IO, Panic, Div, Alloc {
+    let emit_code = if checker_is_knightian_into_precise(got, expected) { 314 } else { code }
     (*c).error_count = (*c).error_count + 1
     (*c).had_error = true
     (*c).diag_emitted = true
     print("error[E")
-    if code < 100 { print("0") }
-    if code < 10 { print("0") }
-    print_int(code)
+    if emit_code < 100 { print("0") }
+    if emit_code < 10 { print("0") }
+    print_int(emit_code)
     print("]")
     // WHERE, for the same reason E035 needed it. This reporter carries a Span,
     // but for assignment statements that span is unusable: every E002 in the
@@ -4314,7 +4701,7 @@ fn checker_report_mismatch_inplace(c: *mut Checker, span: Span, code: i64, expec
     if got.kind == TypeKind::TyContest && expected.kind != TypeKind::TyContest {
         print("cannot implicitly coerce contested evidence into this type")
     } else {
-        print_error_message(code)
+        print_error_message(emit_code)
     }
     print("\n   |\n   = expected ")
     print_type_name(expected)
@@ -4322,11 +4709,11 @@ fn checker_report_mismatch_inplace(c: *mut Checker, span: Span, code: i64, expec
     print_type_name(got)
     print("\n")
     // The wording lean_single prints, so a compile-fail pattern pins both engines.
-    if got.kind == TypeKind::TyKnowledge && got.knowledge_epsilon_mode == 3 && expected.kind == TypeKind::TyKnowledge && expected.knowledge_epsilon_mode != 3 && expected.knowledge_epsilon >= 0.0 {
+    if checker_is_knightian_into_precise(got, expected) {
         print("   = note: Knightian uncertainty (ε=⊥) cannot satisfy required confidence or error bound\n")
     }
-    print_error_help(code)
-    print_error_note(code)
+    print_error_help(emit_code)
+    print_error_note(emit_code)
 }
 
 fn checker_report_unobserved_print_inplace(c: *mut Checker, span: Span) with Mut, IO, Panic, Div {
@@ -4841,6 +5228,10 @@ fn checker_collect_fn_def_inplace(c: *mut Checker, opt: Option<Box<FnDef> >, vis
                 proj = (false, 0 - 1)
             }
             ns_proj_table_set((*c).ns_proj, sig_id, proj.0, proj.1)
+            if !(*fd).is_extern && ret_ty.kind == TypeKind::TyKnowledge {
+                let ret_prec = if checker_type_requires_precise(ret_ty) { 1 } else { 0 }
+                ns_summary_register_fn(sig_id, (*c).current_module_id, param_count, ret_prec, *fd)
+            }
             // Functions are NOT bound in env — they live in the chunked fn_sigs and resolve via
             // the fn_sigs fallback in checker_check_ident_expr_inplace. Binding ~15K module-level
             // fns into the ONE shared env (check_modules_verdict_boot4) overflowed bindings[4096],
@@ -7319,6 +7710,7 @@ fn checker_check_impl_method_inplace(c: *mut Checker, item: Item) with Mut, Pani
             }
             (*c).multitest_count = 0
             (*c).multitest_corrected = false
+            ns_field_reset()
             type_env_push_scope_mut(&!(*c).env)
             borrow_push_scope_mut(&!(*c).borrows)
             checker_push_const_scope_inplace(c)
@@ -7709,6 +8101,7 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
                 (*c).multitest_corrected = saved_multitest_corrected
                 return
             }
+            ns_field_reset()
             type_env_push_scope_mut(&!(*c).env)
             borrow_push_scope_mut(&!(*c).borrows)
             checker_push_const_scope_inplace(c)
@@ -7757,6 +8150,7 @@ fn checker_check_block_inplace(c: *mut Checker, blk: Block) -> TypeEntry with Mu
     checker_pop_const_scope_inplace(c)
     borrow_pop_scope_mut(&!(*c).borrows)
     type_env_pop_scope_mut(&!(*c).env)
+    ns_field_pop_scope((*c).env.scope_depth)
     result_ty
 }
 
@@ -9758,8 +10152,8 @@ fn checker_knowledge_binary_lowerable(e: Expr, left_ty: TypeEntry, right_ty: Typ
                 Some(rbox) => {
                     let lk = (*lbox).kind
                     let rk = (*rbox).kind
-                    let l_ok = lk == ExprKind::ExprIdent || lk == ExprKind::ExprCall || lk == ExprKind::ExprBinary
-                    let r_ok = rk == ExprKind::ExprIdent || rk == ExprKind::ExprCall || rk == ExprKind::ExprBinary
+                    let l_ok = lk == ExprKind::ExprIdent || lk == ExprKind::ExprCall || lk == ExprKind::ExprBinary || lk == ExprKind::ExprFieldAccess
+                    let r_ok = rk == ExprKind::ExprIdent || rk == ExprKind::ExprCall || rk == ExprKind::ExprBinary || rk == ExprKind::ExprFieldAccess
                     l_ok && r_ok
                 }
                 None => false,
@@ -9910,6 +10304,14 @@ fn checker_check_correlated_on_binary_inplace(c: *mut Checker, e: Expr, left_ty:
     }
     var has_effect = false
     if need {
+        // Pure-Knightian operands (no aleatory measurement sources, non-empty
+        // Knightian set) do not invoke GUM independence: their affine dependency
+        // algebra handles shared slots like `x - x` symbolically.
+        if !force && is_knowledge_type(left_ty) && is_knowledge_type(right_ty)
+            && left_ty.noise_set_id == ns_empty() && right_ty.noise_set_id == ns_empty()
+            && (left_ty.knight_set_id != ns_empty() || right_ty.knight_set_id != ns_empty()) {
+            return false
+        }
         let corr_id: i64 = 29
         has_effect = has_effect_id((*c).current_effects, (*c).current_effect_count, corr_id)
         if !has_effect {
@@ -10066,14 +10468,14 @@ fn checker_check_binary_knowledge_refusals_inplace(c: *mut Checker, span: Span, 
 fn checker_finish_binary_knowledge_result_inplace(c: *mut Checker, span: Span, op: BinaryOp, left_ty: TypeEntry, right_ty: TypeEntry, correlated_same_slot_add: bool) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let left_inner = if is_knowledge_type(left_ty) { knowledge_inner(left_ty) } else { left_ty }
     let right_inner = if is_knowledge_type(right_ty) { knowledge_inner(right_ty) } else { right_ty }
-    var knowledge_result = knowledge_binary_result(op, left_ty, right_ty, (*c).ns_table)
+    var knowledge_result = knowledge_binary_result(op, left_ty, right_ty, (*c).ns_table, (*c).knight_ns_table)
     if knowledge_result.kind == TypeKind::TyError {
         checker_report_error_at_inplace(c, span, 36, 0, 0, 0)
     }
     // W4: the union above may have exhausted the interning table. That
     // saturates to unknown, which is sound but turns every later E230 into
     // an unexplained refusal -- so say it out loud, once per overflow event.
-    if ns_table_overflow_take((*c).ns_table) {
+    if ns_table_overflow_take((*c).ns_table) || ns_table_overflow_take((*c).knight_ns_table) {
         checker_report_error_at_inplace(c, span, 179, 0, 0, 0)
     }
     // N3: anti-garbling gate. An independence-assuming op over operands whose
@@ -10442,6 +10844,8 @@ fn checker_merge_ns_reassigned_inplace(c: *mut Checker) with Mut, Panic, Div, IO
         if (*c).ns_branch_depth == 0 {
             (*c).ns_reassigned_count = 0
             (*c).ns_reassigned_overflow = false
+            NS_FBR_COUNT = 0
+            NS_FBR_OVERFLOW = false
         }
         return
     }
@@ -10456,6 +10860,27 @@ fn checker_merge_ns_reassigned_inplace(c: *mut Checker) with Mut, Panic, Div, IO
             checker_ns_trace_emit("env_join", forced.noise_set_id)
         }
         i = i + 1
+    }
+    var fi: i64 = 0
+    while fi < NS_FBR_COUNT {
+        let fvar = NS_FBR_VAR[fi as usize]
+        if NS_FBR_WHOLE[fi as usize] != 0 {
+            var k: i64 = 0
+            while k < NS_FIELD_COUNT {
+                if name_eq(NS_FIELD_VAR[k as usize], fvar) {
+                    NS_FIELD_NS[k as usize] = 0 - 1
+                    NS_FIELD_KS[k as usize] = 0 - 1
+                }
+                k = k + 1
+            }
+        } else {
+            let fidx = ns_field_find_innermost(fvar, NS_FBR_FIELD[fi as usize], type_env_lookup_scope(&(*c).env, fvar))
+            if fidx >= 0 {
+                NS_FIELD_NS[fidx as usize] = 0 - 1
+                NS_FIELD_KS[fidx as usize] = ns_union((*c).knight_ns_table, NS_FIELD_KS[fidx as usize], NS_FBR_KS[fi as usize])
+            }
+        }
+        fi = fi + 1
     }
     if (*c).ns_branch_depth == 0 {
         // Overflow fallback: the recorded-name list could not hold every
@@ -10476,7 +10901,17 @@ fn checker_merge_ns_reassigned_inplace(c: *mut Checker) with Mut, Panic, Div, IO
             }
             (*c).ns_reassigned_overflow = false
         }
+        if NS_FBR_OVERFLOW {
+            var fk: i64 = 0
+            while fk < NS_FIELD_COUNT {
+                NS_FIELD_NS[fk as usize] = 0 - 1
+                NS_FIELD_KS[fk as usize] = 0 - 1
+                fk = fk + 1
+            }
+            NS_FBR_OVERFLOW = false
+        }
         (*c).ns_reassigned_count = 0
+        NS_FBR_COUNT = 0
     }
 }
 
@@ -10562,6 +10997,12 @@ fn checker_check_if_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut
                 if !checker_ns_sabotage_join() {
                     joined.noise_set_id = ns_union((*c).ns_table, then_ty.noise_set_id, else_ty.noise_set_id)
                 }
+                joined.knight_set_id = ns_union((*c).knight_ns_table, then_ty.knight_set_id, else_ty.knight_set_id)
+                if joined.knight_set_id != ns_empty() {
+                    joined.knowledge_epsilon = 0.0 - 1.0
+                    joined.knowledge_epsilon_mode = 0
+                    joined.knowledge_conf = 0.0 - 1.0
+                }
                 checker_ns_trace_emit("if_join", joined.noise_set_id)
             }
             // env-φ (round 3): force top on any Knowledge var REASSIGNED
@@ -10594,6 +11035,118 @@ fn checker_check_if_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut
     }
 }
 
+// Loop pre-widen. A loop body is checked once, but it runs 0+ times. A use of a
+// binding inside the body may therefore see the value the PREVIOUS iteration
+// assigned, not the pre-loop value. checker_merge_ns_reassigned_inplace widens
+// a reassigned Knowledge binding to Unknown only AFTER the body, which leaves
+// every in-body use before the reassignment reading the pre-loop set. Before
+// call summaries became precise that hole was hidden: calls returned Unknown
+// anyway. Measured on #3748 at 33f953e3e1: with
+// `acc = fwd(a)` before the loop and `let cur = fwd(a); cur - acc; acc = cur`
+// inside, the checker judged `cur - acc` over {a} and {a} as the same exact
+// identity and accepted, and the program printed Var 2.0 instead of 0. So every
+// Knowledge binding the body (re)assigns, and every tracked field of a struct
+// binding it assigns through, is widened to Unknown BEFORE the body is checked.
+fn checker_loop_prewiden_name(c: *mut Checker, nm: Name) with Mut, Panic, Div, Alloc, IO {
+    if !type_env_has_binding(&(*c).env, nm) { return }
+    let cur_ty = type_env_lookup(&(*c).env, nm)
+    if cur_ty.kind == TypeKind::TyKnowledge {
+        var forced = cur_ty
+        forced.noise_set_id = 0 - 1
+        type_env_bind_mut(&!(*c).env, nm, forced, true)
+        checker_ns_trace_emit("loop_prewiden", forced.noise_set_id)
+    } else if cur_ty.kind == TypeKind::TyNamed {
+        ns_field_widen_var_entries(c, nm)
+    }
+}
+
+fn checker_loop_prewiden_target(c: *mut Checker, t: &Expr, depth: i64) with Mut, Panic, Div, Alloc, IO {
+    if depth > 96 { return }
+    if (*t).kind == ExprKind::ExprIdent {
+        checker_loop_prewiden_name(c, (*t).name)
+        return
+    }
+    match (*t).left {
+        Some(x) => { checker_loop_prewiden_target(c, &(*x), depth + 1) }
+        None => {}
+    }
+}
+
+fn checker_loop_prewiden_expr(c: *mut Checker, e: &Expr, depth: i64) with Mut, Panic, Div, Alloc, IO {
+    if depth > 96 { return }
+    match (*e).left {
+        Some(x) => { checker_loop_prewiden_expr(c, &(*x), depth + 1) }
+        None => {}
+    }
+    match (*e).right {
+        Some(x) => { checker_loop_prewiden_expr(c, &(*x), depth + 1) }
+        None => {}
+    }
+    match (*e).else_expr {
+        Some(x) => { checker_loop_prewiden_expr(c, &(*x), depth + 1) }
+        None => {}
+    }
+    match (*e).block {
+        Some(b) => { checker_loop_prewiden_stmts(c, &(*b).stmts, depth + 1) }
+        None => {}
+    }
+    var args = &(*e).args
+    while true {
+        match *args {
+            Some(a) => {
+                checker_loop_prewiden_expr(c, &(*a).head, depth + 1)
+                args = &(*a).tail
+            }
+            None => break
+        }
+    }
+    var arms = &(*e).arms
+    while true {
+        match *arms {
+            Some(al) => {
+                match (*al).head.guard {
+                    Some(g) => { checker_loop_prewiden_expr(c, &(*g), depth + 1) }
+                    None => {}
+                }
+                checker_loop_prewiden_expr(c, &(*al).head.body, depth + 1)
+                arms = &(*al).tail
+            }
+            None => break
+        }
+    }
+}
+
+fn checker_loop_prewiden_stmts(c: *mut Checker, opt: &Option<Box<StmtList> >, depth: i64) with Mut, Panic, Div, Alloc, IO {
+    if depth > 96 { return }
+    var cur = opt
+    while true {
+        match *cur {
+            Some(sl) => {
+                if (*sl).head.kind == StmtKind::StmtAssign {
+                    match (*sl).head.target {
+                        Some(t) => { checker_loop_prewiden_target(c, &(*t), depth + 1) }
+                        None => {}
+                    }
+                }
+                match (*sl).head.expr {
+                    Some(x) => { checker_loop_prewiden_expr(c, &(*x), depth + 1) }
+                    None => {}
+                }
+                cur = &(*sl).tail
+            }
+            None => break
+        }
+    }
+}
+
+fn checker_loop_prewiden_block(c: *mut Checker, blk: &Option<Box<Block> >) with Mut, Panic, Div, Alloc, IO {
+    if checker_ns_sabotage_join() { return }
+    match *blk {
+        Some(b) => { checker_loop_prewiden_stmts(c, &(*b).stmts, 0) }
+        None => {}
+    }
+}
+
 // *mut ExprWhile handler — FULL transcription of check_while_expr (16436), not a bridge:
 // the condition and the loop body block are both checked via the *mut spine so a nested
 // enum path-expr anywhere in the condition or body reaches checker_check_path_expr_inplace
@@ -10603,6 +11156,8 @@ fn checker_check_if_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut
 // release_exclusive_borrows before the body — is faithful to the by-value original.
 // While is SIMPLER than if: it has NO refine_cond_env narrowing, so none is added here.
 fn checker_check_while_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    // The condition is re-evaluated each iteration, so it is widened too.
+    checker_loop_prewiden_block(c, &e.block)
     // Condition (via the *mut spine). Must be bool.
     let cond_ty = checker_check_opt_expr_inplace(c, e.left)
     if !is_error_or_unknown(cond_ty) && !is_bool_type(cond_ty) {
@@ -10645,6 +11200,7 @@ fn checker_check_while_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
 // Keep the original depth guard, borrow release, body check and unit result.
 // Unlike the existing inplace while handler, this does not add NS widening.
 fn checker_check_loop_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    checker_loop_prewiden_block(c, &e.block)
     if (*c).loop_depth >= MAX_LOOP_DEPTH {
         checker_report_error_at_inplace(c, e.span, 62, (*c).loop_depth, MAX_LOOP_DEPTH, 0)
         return ty_error()
@@ -10666,6 +11222,7 @@ fn checker_check_loop_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
 // limit on for-in; body type discarded).
 fn checker_check_for_in_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let _iter_ty = checker_check_opt_expr_inplace(c, e.left)
+    checker_loop_prewiden_block(c, &e.block)
     type_env_push_scope_mut(&!(*c).env)
     borrow_push_scope_mut(&!(*c).borrows)
     checker_push_const_scope_inplace(c)
@@ -10963,6 +11520,9 @@ fn checker_check_unary_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
     if e.un_op == UnaryOp::OpRef || e.un_op == UnaryOp::OpRefMut {
         let borrow_name = checker_borrow_place_name(c, e.left)
         if borrow_name.len > 0 {
+            if e.un_op == UnaryOp::OpRefMut {
+                ns_field_widen_var_entries(c, borrow_name)
+            }
             let code = checker_take_borrow_inplace(c, borrow_name, e.un_op == UnaryOp::OpRefMut)
             if code != 0 {
                 checker_report_error_at_inplace(c, e.span, code, 0, 0, 0)
@@ -11112,12 +11672,49 @@ fn checker_check_field_access_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
         let struct_idx = struct_table_find((*c).structs, base_ty.name)
         if struct_idx >= 0 {
             let si = struct_table_get((*c).structs, struct_idx)
-            let field_ty = field_info_list_find(si.fields, e.name)
+            var field_ty = field_info_list_find(si.fields, e.name)
             let field_exists = field_info_list_has(si.fields, e.name)
             if field_ty.kind == TypeKind::TyError && !field_exists {
                 checker_report_no_field_inplace(c, e.span, e.name, base_ty)
             } else if field_exists && (*c).enforce_visibility && !checker_field_visible_inplace(c, struct_idx, e.name) {
                 checker_report_error_at_inplace(c, e.span, 259, 0, 0, 0)
+            } else if field_exists && field_ty.kind == TypeKind::TyKnowledge {
+                var tracked_field = false
+                match e.left {
+                    Some(bexpr) => {
+                        if (*bexpr).kind == ExprKind::ExprIdent && !NS_FIELD_OVERFLOW {
+                            let fslot = ns_field_find_innermost((*bexpr).name, e.name, type_env_lookup_scope(&(*c).env, (*bexpr).name))
+                            if fslot >= 0 {
+                                tracked_field = true
+                                if !checker_ns_sabotage() {
+                                    field_ty.noise_set_id = NS_FIELD_NS[fslot as usize]
+                                }
+                                if NS_FIELD_KS[fslot as usize] != ns_empty() || field_ty.knight_set_id == ns_empty() {
+                                    field_ty.knight_set_id = NS_FIELD_KS[fslot as usize]
+                                }
+                            }
+                        } else if (*bexpr).kind == ExprKind::ExprStructLit && NS_LIT_VALID && !NS_LIT_OVERFLOW {
+                            var li: i64 = 0
+                            while li < NS_LIT_COUNT {
+                                if name_eq(NS_LIT_NAME[li as usize], e.name) {
+                                    tracked_field = true
+                                    if !checker_ns_sabotage() {
+                                        field_ty.noise_set_id = NS_LIT_NS[li as usize]
+                                    }
+                                    if NS_LIT_KS[li as usize] != ns_empty() || field_ty.knight_set_id == ns_empty() {
+                                        field_ty.knight_set_id = NS_LIT_KS[li as usize]
+                                    }
+                                    break
+                                }
+                                li = li + 1
+                            }
+                        }
+                    }
+                    None => {}
+                }
+                if !tracked_field && !checker_type_requires_precise(field_ty) {
+                    field_ty.knight_set_id = ns_unknown()
+                }
             }
             field_ty
         } else {
@@ -11150,6 +11747,13 @@ fn checker_check_field_access_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
             // defect (reproduced on both the unpatched and patched Madaros); `.confidence`
             // reads the correct value and is what the darwin_pbpk sources use.
             ty_f64()
+        } else if name_eq_lit(e.name, "iv") {
+            // Certified Knightian interval enclosure `(lo, hi): (f64, f64)` (EPI-006 step 3b).
+            // Ungated like `.variance`/`.confidence`: reads the uncertainty channel itself.
+            ty_tuple(TypeEntryList {
+                head: ty_f64(),
+                tail: Some(Box::new(TypeEntryList { head: ty_f64(), tail: None })),
+            })
         } else {
             checker_report_no_field_inplace(c, e.span, e.name, base_ty)
             ty_error()
@@ -11433,6 +12037,12 @@ fn checker_check_match_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                         if !checker_ns_sabotage_join() {
                             result_ty.noise_set_id = ns_union((*c).ns_table, result_ty.noise_set_id, arm_ty.noise_set_id)
                         }
+                        result_ty.knight_set_id = ns_union((*c).knight_ns_table, result_ty.knight_set_id, arm_ty.knight_set_id)
+                        if result_ty.knight_set_id != ns_empty() {
+                            result_ty.knowledge_epsilon = 0.0 - 1.0
+                            result_ty.knowledge_epsilon_mode = 0
+                            result_ty.knowledge_conf = 0.0 - 1.0
+                        }
                     }
                 }
                 cursor = (*list).tail
@@ -11682,6 +12292,9 @@ fn knowledge_struct_lit_apply_fields(base: TypeEntry, fields: Option<Box<StructF
 }
 
 fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    NS_LIT_VALID = false
+    NS_LIT_OVERFLOW = false
+    NS_LIT_COUNT = 0
     let struct_name = checker_copy_string_list_to_name(e.path.segments)
     let struct_idx = struct_table_find((*c).structs, struct_name)
     if struct_idx >= 0 {
@@ -11771,6 +12384,12 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                         if init_count != mono_si.field_count {
                             checker_report_error_at_inplace(c, e.span, 46, 0, 0, 0)
                         } else {
+                            var lit_idx_g: [i64; 32] = [-1; 32]
+                            var lit_ns_g: [i64; 32] = [-1; 32]
+                            var lit_ks_g: [i64; 32] = [0; 32]
+                            var lit_n_g: i64 = 0
+                            var lit_ov_g = false
+                            var fi_pos_g: i64 = 0
                             var cur_v = e.fields
                             var done_v = false
                             while !done_v {
@@ -11791,7 +12410,18 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                                             if !field_init_ok {
                                                 checker_report_mismatch_inplace(c, (*list).head.value.span, 16, field_ty, val_init_ty)
                                             }
+                                            if field_ty.kind == TypeKind::TyKnowledge && val_init_ty.kind == TypeKind::TyKnowledge {
+                                                if lit_n_g < NS_LIT_CAP {
+                                                    lit_idx_g[lit_n_g as usize] = fi_pos_g
+                                                    lit_ns_g[lit_n_g as usize] = val_init_ty.noise_set_id
+                                                    lit_ks_g[lit_n_g as usize] = if val_init_ty.knight_set_id != ns_empty() { val_init_ty.knight_set_id } else { field_ty.knight_set_id }
+                                                    lit_n_g = lit_n_g + 1
+                                                } else {
+                                                    lit_ov_g = true
+                                                }
+                                            }
                                         }
+                                        fi_pos_g = fi_pos_g + 1
                                         cur_v = (*list).tail
                                     }
                                     None => {
@@ -11799,6 +12429,28 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                                     }
                                 }
                             }
+                            NS_LIT_COUNT = 0
+                            NS_LIT_OVERFLOW = lit_ov_g
+                            var pub_g: i64 = 0
+                            var walk_g = e.fields
+                            var gpos: i64 = 0
+                            while pub_g < lit_n_g {
+                                match walk_g {
+                                    Some(wl) => {
+                                        if gpos == lit_idx_g[pub_g as usize] {
+                                            NS_LIT_NAME[NS_LIT_COUNT as usize] = (*wl).head.name
+                                            NS_LIT_NS[NS_LIT_COUNT as usize] = lit_ns_g[pub_g as usize]
+                                            NS_LIT_KS[NS_LIT_COUNT as usize] = lit_ks_g[pub_g as usize]
+                                            NS_LIT_COUNT = NS_LIT_COUNT + 1
+                                            pub_g = pub_g + 1
+                                        }
+                                        gpos = gpos + 1
+                                        walk_g = (*wl).tail
+                                    }
+                                    None => break
+                                }
+                            }
+                            NS_LIT_VALID = true
                         }
                     }
                     ty_named(mangled)
@@ -11814,6 +12466,12 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                 checker_report_error_at_inplace(c, e.span, 46, 0, 0, 0)
                 return ty_named(struct_name)
             }
+            var lit_idx_ng: [i64; 32] = [-1; 32]
+            var lit_ns_ng: [i64; 32] = [-1; 32]
+            var lit_ks_ng: [i64; 32] = [0; 32]
+            var lit_n_ng: i64 = 0
+            var lit_ov_ng = false
+            var fi_pos_ng: i64 = 0
             var cur = e.fields
             var done = false
             while !done {
@@ -11834,7 +12492,18 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                             if !field_init_ok {
                                 checker_report_mismatch_inplace(c, (*list).head.value.span, 16, field_ty, init_ty)
                             }
+                            if field_ty.kind == TypeKind::TyKnowledge && init_ty.kind == TypeKind::TyKnowledge {
+                                if lit_n_ng < NS_LIT_CAP {
+                                    lit_idx_ng[lit_n_ng as usize] = fi_pos_ng
+                                    lit_ns_ng[lit_n_ng as usize] = init_ty.noise_set_id
+                                    lit_ks_ng[lit_n_ng as usize] = if init_ty.knight_set_id != ns_empty() { init_ty.knight_set_id } else { field_ty.knight_set_id }
+                                    lit_n_ng = lit_n_ng + 1
+                                } else {
+                                    lit_ov_ng = true
+                                }
+                            }
                         }
+                        fi_pos_ng = fi_pos_ng + 1
                         cur = (*list).tail
                     }
                     None => {
@@ -11842,6 +12511,28 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                     }
                 }
             }
+            NS_LIT_COUNT = 0
+            NS_LIT_OVERFLOW = lit_ov_ng
+            var pub_ng: i64 = 0
+            var walk_ng = e.fields
+            var ngpos: i64 = 0
+            while pub_ng < lit_n_ng {
+                match walk_ng {
+                    Some(wl) => {
+                        if ngpos == lit_idx_ng[pub_ng as usize] {
+                            NS_LIT_NAME[NS_LIT_COUNT as usize] = (*wl).head.name
+                            NS_LIT_NS[NS_LIT_COUNT as usize] = lit_ns_ng[pub_ng as usize]
+                            NS_LIT_KS[NS_LIT_COUNT as usize] = lit_ks_ng[pub_ng as usize]
+                            NS_LIT_COUNT = NS_LIT_COUNT + 1
+                            pub_ng = pub_ng + 1
+                        }
+                        ngpos = ngpos + 1
+                        walk_ng = (*wl).tail
+                    }
+                    None => break
+                }
+            }
+            NS_LIT_VALID = true
             // The same array local may not initialise two fields.
             //
             // `Trajectory { speakers: zi, hashes: zi, ... }` reads as "both start
@@ -11931,8 +12622,10 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
             var k_struct_result = ty_knowledge(value_ty, 0.0 - 1.0)
             if is_knowledge_type(value_ty) {
                 k_struct_result.noise_set_id = value_ty.noise_set_id
+                k_struct_result.knight_set_id = value_ty.knight_set_id
             } else {
                 k_struct_result.noise_set_id = ns_empty()
+                k_struct_result.knight_set_id = ns_empty()
             }
             // Parse validity/epsilon fields if present in struct literal (shared with
             // the by-value twin, check_knowledge_struct_lit, via this pure helper).
@@ -12720,6 +13413,7 @@ fn call_expr_should_bridge_by_value(e: Expr) -> bool with Mut, Panic, Div, Alloc
     if call_expr_is_builtin_rollback_transition(e.left) { return true }
     if call_expr_is_builtin_lift_knowledge(e.left) { return true }
     if call_expr_is_builtin_measure(e.left) { return true }
+    if call_expr_is_builtin_knight(e.left) { return true }
     // sign(a, b) is the knowledge contest. sign(x) is math/pure's unary f64.
     if call_expr_is_builtin_sign(e.left) && expr_list_handle_count(expr_list_handle(e.args)) == 2 { return true }
     if call_expr_is_builtin_variance_of(e.left) { return true }
@@ -12889,11 +13583,16 @@ fn checker_check_call_args_inplace(c: *mut Checker, args: ExprListHandle, params
             (*c).suppress_linear_consume_depth = (*c).suppress_linear_consume_depth + 1
         }
         let arg_ty = checker_check_expr_inplace(c, arg_expr)
+        ns_call_args_record(idx, arg_ty.kind == TypeKind::TyKnowledge, arg_ty.noise_set_id, arg_ty.knight_set_id)
+        if implicit_borrow && param_info.ty.kind == TypeKind::TyRefMut {
+            ns_field_widen_var_entries(c, arg_expr.name)
+        }
         // N2 (REQ-5, codex ruling 2026-08-23): capture ONLY the argument at
         // the callee's proven-projection parameter index -- never "last
         // Knowledge arg wins" (that was fail-open; see the fn comment above).
         if idx == ns_watch_idx && arg_ty.kind == TypeKind::TyKnowledge {
             (*c).last_call_arg_ns = arg_ty.noise_set_id
+            (*c).last_call_arg_ks = arg_ty.knight_set_id
         }
         if suppress_arg_consume && (*c).suppress_linear_consume_depth > 0 {
             (*c).suppress_linear_consume_depth = (*c).suppress_linear_consume_depth - 1
@@ -13103,6 +13802,890 @@ fn checker_check_measure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
     // requirement.
     result.knowledge_provenance_kind = PROVENANCE_KIND_MEASURED
     result
+}
+
+// Compile-time numeric literal evaluation for knight("name", lo, hi) bounds.
+// Supports float literals, int literals, unary negation (`-1.0`, `-1`), and
+// binary subtraction (`0.0 - 1.0`, `0 - 1`).
+fn checker_knight_const_f64(opt: Option<Box<Expr> >) -> (bool, f64) with Mut, Panic, Div {
+    match opt {
+        None => (false, 0.0)
+        Some(e) => {
+            if (*e).kind == ExprKind::ExprFloatLit {
+                return (true, (*e).float_val)
+            }
+            if (*e).kind == ExprKind::ExprIntLit {
+                return (true, (*e).int_val as f64)
+            }
+            if (*e).kind == ExprKind::ExprUnary && (*e).un_op == UnaryOp::OpNeg {
+                let inner = checker_knight_const_f64((*e).left)
+                if inner.0 { return (true, 0.0 - inner.1) }
+                return (false, 0.0)
+            }
+            if (*e).kind == ExprKind::ExprBinary && (*e).bin_op == BinaryOp::OpSub {
+                let l = checker_knight_const_f64((*e).left)
+                let r = checker_knight_const_f64((*e).right)
+                if l.0 && r.0 { return (true, l.1 - r.1) }
+                return (false, 0.0)
+            }
+            (false, 0.0)
+        }
+    }
+}
+
+fn checker_check_knight_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    // knight("name", lo, hi) -> Knowledge<f64> carrying a named Knightian source.
+    let argc = expr_list_handle_count(expr_list_handle(e.args))
+    let first_arg = expr_list_head(e.args)
+    let second_arg = expr_list_second(e.args)
+    let third_arg = expr_list_third(e.args)
+    let _name_ty = checker_check_opt_expr_inplace(c, first_arg)
+    let lo_ty = checker_check_opt_expr_inplace(c, second_arg)
+    let hi_ty = checker_check_opt_expr_inplace(c, third_arg)
+    if argc != 3 {
+        checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        return ty_error()
+    }
+    if !is_error_or_unknown(lo_ty) && !is_numeric_type(lo_ty) {
+        checker_report_mismatch_inplace(c, e.span, 9, ty_f64(), lo_ty)
+    }
+    if !is_error_or_unknown(hi_ty) && !is_numeric_type(hi_ty) {
+        checker_report_mismatch_inplace(c, e.span, 9, ty_f64(), hi_ty)
+    }
+    var has_name = false
+    var src_name = empty_name()
+    match first_arg {
+        Some(a0) => {
+            if (*a0).kind == ExprKind::ExprStringLit {
+                src_name = ast_string_lit_payload((*a0).name)
+                if src_name.len > 0 { has_name = true }
+            }
+        }
+        None => {}
+    }
+    var result = ty_knowledge(ty_f64(), 0.0 - 1.0)
+    result.noise_set_id = ns_empty()
+    if !has_name {
+        checker_report_error_at_inplace(c, e.span, 314, 0, 0, 0)
+        print("   = note: knight() requires a non-empty string literal source name\n")
+        result.knight_set_id = ns_unknown()
+        return result
+    }
+    let lo_c = checker_knight_const_f64(second_arg)
+    let hi_c = checker_knight_const_f64(third_arg)
+    let both_known = lo_c.0 && hi_c.0
+    if !both_known {
+        checker_report_error_at_inplace(c, e.span, 314, 0, 0, 0)
+        print("   = note: knight() requires finite compile-time constant bounds\n")
+        result.knight_set_id = ns_unknown()
+        return result
+    }
+    if !((lo_c.1 - lo_c.1) == 0.0) || !((hi_c.1 - hi_c.1) == 0.0) {
+        checker_report_error_at_inplace(c, e.span, 314, 0, 0, 0)
+        print("   = note: knight() bounds must be finite\n")
+        result.knight_set_id = ns_unknown()
+        return result
+    }
+    if lo_c.1 > hi_c.1 {
+        checker_report_error_at_inplace(c, e.span, 314, 0, 0, 0)
+        print("   = note: knight() lower bound exceeds upper bound\n")
+        result.knight_set_id = ns_unknown()
+        return result
+    }
+    let reg = knight_source_register((*c).knight_sources, src_name, lo_c.1, hi_c.1, true)
+    let src_id = reg.0
+    let status = reg.1
+    if status == 1 {
+        checker_report_error_at_inplace(c, e.span, 314, 0, 0, 0)
+        print("   = note: Knightian source declared with conflicting bounds\n")
+    } else if status == 2 {
+        checker_report_error_at_inplace(c, e.span, 178, 0, 0, 0)
+    }
+    result.knight_set_id = if src_id >= 0 { ns_singleton((*c).knight_ns_table, src_id) } else { ns_unknown() }
+    if ns_table_overflow_take((*c).knight_ns_table) {
+        checker_report_error_at_inplace(c, e.span, 179, 0, 0, 0)
+    }
+    result
+}
+
+// ============================================================
+// Interprocedural source-identity summary evaluator
+// ============================================================
+
+fn ns_sum_fresh_negate(f: i64) -> i64 {
+    let p = if (f & 1) != 0 { 2 } else { 0 }
+    let n = if (f & 2) != 0 { 1 } else { 0 }
+    let o = f & 4
+    p | n | o
+}
+
+fn ns_sum_val_empty(is_k: i64) -> NsSumVal {
+    NsSumVal {
+        ns_valid: 1,
+        ns_pos: 0,
+        ns_neg: 0,
+        ns_fresh: 0,
+        ks_valid: 1,
+        ks_mask: 0,
+        ks_own: 0,
+        is_k: is_k,
+    }
+}
+
+fn ns_sum_val_top(is_k: i64) -> NsSumVal {
+    NsSumVal {
+        ns_valid: 0,
+        ns_pos: 0,
+        ns_neg: 0,
+        ns_fresh: 0,
+        ks_valid: 0,
+        ks_mask: 0,
+        ks_own: 0 - 1,
+        is_k: is_k,
+    }
+}
+
+fn ns_sum_val_join(c: *mut Checker, a: NsSumVal, b: NsSumVal) -> NsSumVal with Mut, Panic, Div {
+    let nsv = if a.ns_valid == 1 && b.ns_valid == 1 { 1 } else { 0 }
+    var ksv = if a.ks_valid == 1 && b.ks_valid == 1 { 1 } else { 0 }
+    var kown = if ksv == 1 { ns_union((*c).knight_ns_table, a.ks_own, b.ks_own) } else { ns_unknown() }
+    if kown < 0 { ksv = 0 }
+    NsSumVal {
+        ns_valid: nsv,
+        ns_pos: a.ns_pos | b.ns_pos,
+        ns_neg: a.ns_neg | b.ns_neg,
+        ns_fresh: a.ns_fresh | b.ns_fresh,
+        ks_valid: ksv,
+        ks_mask: a.ks_mask | b.ks_mask,
+        ks_own: kown,
+        is_k: if a.is_k == 1 || b.is_k == 1 { 1 } else { 0 },
+    }
+}
+
+fn ns_sum_env_push(name: Name, v: NsSumVal) with Mut, Panic, Div {
+    if NS_SUM_ENV_TOP >= NS_SUM_ENV_CAP { return }
+    let idx = NS_SUM_ENV_TOP as usize
+    NS_SUM_ENV_NAME[idx] = name
+    NS_SUM_ENV_NS_VALID[idx] = v.ns_valid
+    NS_SUM_ENV_NS_POS[idx] = v.ns_pos
+    NS_SUM_ENV_NS_NEG[idx] = v.ns_neg
+    NS_SUM_ENV_NS_FRESH[idx] = v.ns_fresh
+    NS_SUM_ENV_KS_VALID[idx] = v.ks_valid
+    NS_SUM_ENV_KS_MASK[idx] = v.ks_mask
+    NS_SUM_ENV_KS_OWN[idx] = v.ks_own
+    NS_SUM_ENV_ISK[idx] = v.is_k
+    NS_SUM_ENV_TOP = NS_SUM_ENV_TOP + 1
+}
+
+fn ns_sum_env_find(base: i64, name: Name) -> i64 with Mut, Panic, Div {
+    var i = NS_SUM_ENV_TOP - 1
+    while i >= base {
+        if name_eq(NS_SUM_ENV_NAME[i as usize], name) { return i }
+        i = i - 1
+    }
+    0 - 1
+}
+
+fn ns_sum_env_get(idx: i64) -> NsSumVal with Mut, Panic, Div {
+    let u = idx as usize
+    NsSumVal {
+        ns_valid: NS_SUM_ENV_NS_VALID[u],
+        ns_pos: NS_SUM_ENV_NS_POS[u],
+        ns_neg: NS_SUM_ENV_NS_NEG[u],
+        ns_fresh: NS_SUM_ENV_NS_FRESH[u],
+        ks_valid: NS_SUM_ENV_KS_VALID[u],
+        ks_mask: NS_SUM_ENV_KS_MASK[u],
+        ks_own: NS_SUM_ENV_KS_OWN[u],
+        is_k: NS_SUM_ENV_ISK[u],
+    }
+}
+
+fn ns_sum_env_set_at(idx: i64, v: NsSumVal) with Mut, Panic, Div {
+    let u = idx as usize
+    NS_SUM_ENV_NS_VALID[u] = v.ns_valid
+    NS_SUM_ENV_NS_POS[u] = v.ns_pos
+    NS_SUM_ENV_NS_NEG[u] = v.ns_neg
+    NS_SUM_ENV_NS_FRESH[u] = v.ns_fresh
+    NS_SUM_ENV_KS_VALID[u] = v.ks_valid
+    NS_SUM_ENV_KS_MASK[u] = v.ks_mask
+    NS_SUM_ENV_KS_OWN[u] = v.ks_own
+    NS_SUM_ENV_ISK[u] = v.is_k
+}
+
+fn ns_sum_fld_set(fbase: i64, var_name: Name, field_name: Name, v: NsSumVal) with Mut, Panic, Div {
+    var i = NS_SUM_FLD_TOP - 1
+    while i >= fbase {
+        if name_eq(NS_SUM_FLD_VAR[i as usize], var_name) && name_eq(NS_SUM_FLD_NAME[i as usize], field_name) {
+            let u = i as usize
+            NS_SUM_FLD_NS_VALID[u] = v.ns_valid
+            NS_SUM_FLD_NS_POS[u] = v.ns_pos
+            NS_SUM_FLD_NS_NEG[u] = v.ns_neg
+            NS_SUM_FLD_NS_FRESH[u] = v.ns_fresh
+            NS_SUM_FLD_KS_VALID[u] = v.ks_valid
+            NS_SUM_FLD_KS_MASK[u] = v.ks_mask
+            NS_SUM_FLD_KS_OWN[u] = v.ks_own
+            return
+        }
+        i = i - 1
+    }
+    if NS_SUM_FLD_TOP >= NS_SUM_FLD_CAP { return }
+    let u = NS_SUM_FLD_TOP as usize
+    NS_SUM_FLD_VAR[u] = var_name
+    NS_SUM_FLD_NAME[u] = field_name
+    NS_SUM_FLD_NS_VALID[u] = v.ns_valid
+    NS_SUM_FLD_NS_POS[u] = v.ns_pos
+    NS_SUM_FLD_NS_NEG[u] = v.ns_neg
+    NS_SUM_FLD_NS_FRESH[u] = v.ns_fresh
+    NS_SUM_FLD_KS_VALID[u] = v.ks_valid
+    NS_SUM_FLD_KS_MASK[u] = v.ks_mask
+    NS_SUM_FLD_KS_OWN[u] = v.ks_own
+    NS_SUM_FLD_TOP = NS_SUM_FLD_TOP + 1
+}
+
+fn ns_sum_fld_find(fbase: i64, var_name: Name, field_name: Name) -> i64 with Mut, Panic, Div {
+    var i = NS_SUM_FLD_TOP - 1
+    while i >= fbase {
+        if name_eq(NS_SUM_FLD_VAR[i as usize], var_name) && name_eq(NS_SUM_FLD_NAME[i as usize], field_name) {
+            return i
+        }
+        i = i - 1
+    }
+    0 - 1
+}
+
+fn ns_sum_fld_get(idx: i64) -> NsSumVal with Mut, Panic, Div {
+    let u = idx as usize
+    NsSumVal {
+        ns_valid: NS_SUM_FLD_NS_VALID[u],
+        ns_pos: NS_SUM_FLD_NS_POS[u],
+        ns_neg: NS_SUM_FLD_NS_NEG[u],
+        ns_fresh: NS_SUM_FLD_NS_FRESH[u],
+        ks_valid: NS_SUM_FLD_KS_VALID[u],
+        ks_mask: NS_SUM_FLD_KS_MASK[u],
+        ks_own: NS_SUM_FLD_KS_OWN[u],
+        is_k: 1,
+    }
+}
+
+fn ns_sum_fld_widen_var(fbase: i64, var_name: Name) with Mut, Panic, Div {
+    var i = NS_SUM_FLD_TOP - 1
+    while i >= fbase {
+        if name_eq(NS_SUM_FLD_VAR[i as usize], var_name) {
+            let u = i as usize
+            NS_SUM_FLD_NS_VALID[u] = 0
+            NS_SUM_FLD_NS_FRESH[u] = 0
+            NS_SUM_FLD_KS_VALID[u] = 0
+            NS_SUM_FLD_KS_OWN[u] = 0 - 1
+        }
+        i = i - 1
+    }
+}
+
+var NS_SUM_RET_HAS: [i64; 32] = [0; 32]
+var NS_SUM_RET_NS_VALID: [i64; 32] = [1; 32]
+var NS_SUM_RET_NS_POS: [i64; 32] = [0; 32]
+var NS_SUM_RET_NS_NEG: [i64; 32] = [0; 32]
+var NS_SUM_RET_NS_FRESH: [i64; 32] = [0; 32]
+var NS_SUM_RET_KS_VALID: [i64; 32] = [1; 32]
+var NS_SUM_RET_KS_MASK: [i64; 32] = [0; 32]
+var NS_SUM_RET_KS_OWN: [i64; 32] = [0; 32]
+
+fn ns_sum_ret_acc_join(c: *mut Checker, depth: i64, v: NsSumVal) with Mut, Panic, Div {
+    if depth < 0 || depth >= 32 { return }
+    let u = depth as usize
+    if NS_SUM_RET_HAS[u] == 0 {
+        NS_SUM_RET_HAS[u] = 1
+        NS_SUM_RET_NS_VALID[u] = v.ns_valid
+        NS_SUM_RET_NS_POS[u] = v.ns_pos
+        NS_SUM_RET_NS_NEG[u] = v.ns_neg
+        NS_SUM_RET_NS_FRESH[u] = v.ns_fresh
+        NS_SUM_RET_KS_VALID[u] = v.ks_valid
+        NS_SUM_RET_KS_MASK[u] = v.ks_mask
+        NS_SUM_RET_KS_OWN[u] = v.ks_own
+    } else {
+        let cur = NsSumVal {
+            ns_valid: NS_SUM_RET_NS_VALID[u],
+            ns_pos: NS_SUM_RET_NS_POS[u],
+            ns_neg: NS_SUM_RET_NS_NEG[u],
+            ns_fresh: NS_SUM_RET_NS_FRESH[u],
+            ks_valid: NS_SUM_RET_KS_VALID[u],
+            ks_mask: NS_SUM_RET_KS_MASK[u],
+            ks_own: NS_SUM_RET_KS_OWN[u],
+            is_k: 1,
+        }
+        let j = ns_sum_val_join(c, cur, v)
+        NS_SUM_RET_NS_VALID[u] = j.ns_valid
+        NS_SUM_RET_NS_POS[u] = j.ns_pos
+        NS_SUM_RET_NS_NEG[u] = j.ns_neg
+        NS_SUM_RET_NS_FRESH[u] = j.ns_fresh
+        NS_SUM_RET_KS_VALID[u] = j.ks_valid
+        NS_SUM_RET_KS_MASK[u] = j.ks_mask
+        NS_SUM_RET_KS_OWN[u] = j.ks_own
+    }
+}
+
+fn ns_sum_eval_opt_expr(c: *mut Checker, opt: Option<Box<Expr> >, ebase: i64, fbase: i64, mod_id: i64, in_branch: bool, depth: i64) -> NsSumVal with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(eb) => ns_sum_eval_expr(c, *eb, ebase, fbase, mod_id, in_branch, depth)
+        None => ns_sum_val_empty(0)
+    }
+}
+
+fn ns_sum_eval_expr(c: *mut Checker, e: Expr, ebase: i64, fbase: i64, mod_id: i64, in_branch: bool, depth: i64) -> NsSumVal with Mut, Panic, Div, Alloc, IO {
+    if depth >= 32 { return ns_sum_val_top(1) }
+    if e.kind == ExprKind::ExprIntLit || e.kind == ExprKind::ExprFloatLit
+        || e.kind == ExprKind::ExprBoolTrue || e.kind == ExprKind::ExprBoolFalse
+        || e.kind == ExprKind::ExprStringLit || e.kind == ExprKind::ExprCharLit {
+        return ns_sum_val_empty(0)
+    }
+    if e.kind == ExprKind::ExprIdent {
+        let idx = ns_sum_env_find(ebase, e.name)
+        if idx >= 0 {
+            return ns_sum_env_get(idx)
+        }
+        if ast_global_is_exact_f64_literal(e.name) {
+            return ns_sum_val_empty(0)
+        }
+        return ns_sum_val_top(1)
+    }
+    if e.kind == ExprKind::ExprUnary {
+        let ov = ns_sum_eval_opt_expr(c, e.left, ebase, fbase, mod_id, in_branch, depth)
+        if e.un_op == UnaryOp::OpRefMut {
+            match e.left {
+                Some(le) => {
+                    if (*le).kind == ExprKind::ExprIdent {
+                        let eidx = ns_sum_env_find(ebase, (*le).name)
+                        if eidx >= 0 { ns_sum_env_set_at(eidx, ns_sum_val_top(1)) }
+                        ns_sum_fld_widen_var(fbase, (*le).name)
+                    }
+                }
+                None => {}
+            }
+            return ns_sum_val_empty(0)
+        }
+        if ov.is_k == 0 { return ns_sum_val_empty(0) }
+        if e.un_op == UnaryOp::OpNeg {
+            return NsSumVal {
+                ns_valid: ov.ns_valid,
+                ns_pos: ov.ns_neg,
+                ns_neg: ov.ns_pos,
+                ns_fresh: ns_sum_fresh_negate(ov.ns_fresh),
+                ks_valid: ov.ks_valid,
+                ks_mask: ov.ks_mask,
+                ks_own: ov.ks_own,
+                is_k: 1,
+            }
+        }
+        return ns_sum_val_top(1)
+    }
+    if e.kind == ExprKind::ExprBinary {
+        let lv = ns_sum_eval_opt_expr(c, e.left, ebase, fbase, mod_id, in_branch, depth)
+        let rv = ns_sum_eval_opt_expr(c, e.right, ebase, fbase, mod_id, in_branch, depth)
+        if lv.is_k == 0 && rv.is_k == 0 {
+            return ns_sum_val_empty(0)
+        }
+        let nsv = if lv.ns_valid == 1 && rv.ns_valid == 1 { 1 } else { 0 }
+        var ksv = if lv.ks_valid == 1 && rv.ks_valid == 1 { 1 } else { 0 }
+        var kown = if ksv == 1 { ns_union((*c).knight_ns_table, lv.ks_own, rv.ks_own) } else { ns_unknown() }
+        if kown < 0 { ksv = 0 }
+        var np: i64 = 0
+        var nn: i64 = 0
+        var nf: i64 = 0
+        if e.bin_op == BinaryOp::OpAdd {
+            np = lv.ns_pos | rv.ns_pos
+            nn = lv.ns_neg | rv.ns_neg
+            nf = lv.ns_fresh | rv.ns_fresh
+        } else if e.bin_op == BinaryOp::OpSub {
+            np = lv.ns_pos | rv.ns_neg
+            nn = lv.ns_neg | rv.ns_pos
+            nf = lv.ns_fresh | ns_sum_fresh_negate(rv.ns_fresh)
+        } else {
+            let m = lv.ns_pos | lv.ns_neg | rv.ns_pos | rv.ns_neg
+            np = m
+            nn = m
+            nf = if (lv.ns_fresh | rv.ns_fresh) != 0 { 4 } else { 0 }
+        }
+        return NsSumVal {
+            ns_valid: nsv,
+            ns_pos: np,
+            ns_neg: nn,
+            ns_fresh: nf,
+            ks_valid: ksv,
+            ks_mask: lv.ks_mask | rv.ks_mask,
+            ks_own: kown,
+            is_k: 1,
+        }
+    }
+    if e.kind == ExprKind::ExprFieldAccess {
+        if name_eq_lit(e.name, "value") || name_eq_lit(e.name, "variance")
+            || name_eq_lit(e.name, "confidence") || name_eq_lit(e.name, "epsilon")
+            || name_eq_lit(e.name, "iv") {
+            return ns_sum_val_empty(0)
+        }
+        match e.left {
+            Some(be) => {
+                if (*be).kind == ExprKind::ExprIdent {
+                    let fidx = ns_sum_fld_find(fbase, (*be).name, e.name)
+                    if fidx >= 0 {
+                        return ns_sum_fld_get(fidx)
+                    }
+                } else if (*be).kind == ExprKind::ExprStructLit {
+                    var sf = (*be).fields
+                    while true {
+                        match sf {
+                            Some(fl) => {
+                                if name_eq((*fl).head.name, e.name) {
+                                    return ns_sum_eval_expr(c, (*fl).head.value, ebase, fbase, mod_id, in_branch, depth)
+                                }
+                                sf = (*fl).tail
+                            }
+                            None => break
+                        }
+                    }
+                }
+            }
+            None => {}
+        }
+        return ns_sum_val_top(1)
+    }
+    if e.kind == ExprKind::ExprStructLit {
+        let sname = checker_copy_string_list_to_name(e.path.segments)
+        if name_eq_lit(sname, "Knowledge") {
+            var cur = e.fields
+            while true {
+                match cur {
+                    Some(fl) => {
+                        if name_eq_lit((*fl).head.name, "value") {
+                            let vv = ns_sum_eval_expr(c, (*fl).head.value, ebase, fbase, mod_id, in_branch, depth)
+                            if vv.is_k == 1 { return vv }
+                            return ns_sum_val_empty(1)
+                        }
+                        cur = (*fl).tail
+                    }
+                    None => break
+                }
+            }
+            return ns_sum_val_empty(1)
+        }
+        return ns_sum_val_empty(0)
+    }
+    if e.kind == ExprKind::ExprCall {
+        var callee_name = empty_name()
+        var is_named = false
+        match e.left {
+            Some(ce) => {
+                if (*ce).kind == ExprKind::ExprIdent {
+                    callee_name = (*ce).name
+                    is_named = true
+                } else if (*ce).kind == ExprKind::ExprPath {
+                    callee_name = checker_copy_string_list_tail_to_name((*ce).path.segments)
+                    is_named = true
+                }
+            }
+            None => {}
+        }
+        if !is_named {
+            return ns_sum_val_top(1)
+        }
+        if name_eq_lit(callee_name, "measure") {
+            // ADR-032 decision 3: sources the body creates get a fresh identity
+            // per call, so two calls never produce residues that cancel, while
+            // the same call's result still carries a non-empty source.
+            return NsSumVal {
+                ns_valid: 1,
+                ns_pos: 0,
+                ns_neg: 0,
+                ns_fresh: 1,
+                ks_valid: 1,
+                ks_mask: 0,
+                ks_own: 0,
+                is_k: 1,
+            }
+        }
+        if name_eq_lit(callee_name, "Knowledge") {
+            let v0 = ns_sum_eval_opt_expr(c, expr_list_head(e.args), ebase, fbase, mod_id, in_branch, depth)
+            if v0.is_k == 1 { return v0 }
+            return ns_sum_val_empty(1)
+        }
+        if name_eq_lit(callee_name, "knight") {
+            let a0 = expr_list_head(e.args)
+            let a1 = expr_list_second(e.args)
+            let a2 = expr_list_third(e.args)
+            var has_nm = false
+            var snm = empty_name()
+            match a0 {
+                Some(ne) => {
+                    if (*ne).kind == ExprKind::ExprStringLit {
+                        snm = ast_string_lit_payload((*ne).name)
+                        if snm.len > 0 { has_nm = true }
+                    }
+                }
+                None => {}
+            }
+            let lo_c = checker_knight_const_f64(a1)
+            let hi_c = checker_knight_const_f64(a2)
+            if has_nm && lo_c.0 && hi_c.0 && ((lo_c.1 - lo_c.1) == 0.0) && ((hi_c.1 - hi_c.1) == 0.0) && lo_c.1 <= hi_c.1 {
+                let reg = knight_source_register((*c).knight_sources, snm, lo_c.1, hi_c.1, true)
+                if reg.1 == 0 && reg.0 >= 0 {
+                    let kh = ns_singleton((*c).knight_ns_table, reg.0)
+                    if kh >= 0 {
+                        return NsSumVal {
+                            ns_valid: 1,
+                            ns_pos: 0,
+                            ns_neg: 0,
+                            ns_fresh: 0,
+                            ks_valid: 1,
+                            ks_mask: 0,
+                            ks_own: kh,
+                            is_k: 1,
+                        }
+                    }
+                }
+            }
+            return NsSumVal {
+                ns_valid: 1,
+                ns_pos: 0,
+                ns_neg: 0,
+                ns_fresh: 0,
+                ks_valid: 0,
+                ks_mask: 0,
+                ks_own: 0 - 1,
+                is_k: 1,
+            }
+        }
+        let csid = fn_sig_table_find_prefer_module((*c).fn_sigs, callee_name, mod_id)
+        if csid < 0 || csid >= NS_SUMMARY_CAP {
+            return ns_sum_val_top(1)
+        }
+        let csig = fn_sig_table_get((*c).fn_sigs, csid)
+        if csig.return_type.kind != TypeKind::TyKnowledge {
+            return ns_sum_val_empty(0)
+        }
+        if NS_SUM_GEN[csid as usize] != NS_SUMMARY_GEN {
+            return ns_sum_val_top(1)
+        }
+        // Recursion (direct or mutual): state == 2 -> fail closed!
+        if NS_SUM_STATE[csid as usize] == 2 {
+            return ns_sum_val_top(1)
+        }
+        checker_ensure_fn_summary_inplace(c, csid, depth + 1)
+        if NS_SUM_STATE[csid as usize] != 3 {
+            return ns_sum_val_top(1)
+        }
+        var arg_nsv: [i64; 16] = [0; 16]
+        var arg_nsp: [i64; 16] = [0; 16]
+        var arg_nsn: [i64; 16] = [0; 16]
+        var arg_nsf: [i64; 16] = [0; 16]
+        var arg_ksv: [i64; 16] = [0; 16]
+        var arg_ksm: [i64; 16] = [0; 16]
+        var arg_kso: [i64; 16] = [0; 16]
+        var ac: i64 = 0
+        var cur_a = e.args
+        while true {
+            match cur_a {
+                Some(al) => {
+                    let av = ns_sum_eval_expr(c, (*al).head, ebase, fbase, mod_id, in_branch, depth)
+                    if ac < 16 {
+                        arg_nsv[ac as usize] = av.ns_valid
+                        arg_nsp[ac as usize] = av.ns_pos
+                        arg_nsn[ac as usize] = av.ns_neg
+                        arg_nsf[ac as usize] = av.ns_fresh
+                        arg_ksv[ac as usize] = av.ks_valid
+                        arg_ksm[ac as usize] = av.ks_mask
+                        arg_kso[ac as usize] = av.ks_own
+                    }
+                    ac = ac + 1
+                    cur_a = (*al).tail
+                }
+                None => break
+            }
+        }
+        let cpc = NS_SUM_PARAM_COUNT[csid as usize]
+        var r_nsv = NS_SUM_NS_VALID[csid as usize]
+        var r_nsp: i64 = 0
+        var r_nsn: i64 = 0
+        var r_nsf: i64 = NS_SUM_NS_FRESH[csid as usize]
+        if r_nsv == 1 {
+            if cpc > 16 || ac > 16 {
+                r_nsv = 0
+            } else {
+                var pi: i64 = 0
+                while pi < cpc && pi < ac {
+                    let bit: i64 = ((1 as i64) << (pi as u8)) as i64
+                    let pp = (NS_SUM_NS_POS[csid as usize] & bit) != 0
+                    let pn = (NS_SUM_NS_NEG[csid as usize] & bit) != 0
+                    if pp || pn {
+                        if arg_nsv[pi as usize] == 0 {
+                            r_nsv = 0
+                        } else if pp && pn {
+                            let m = arg_nsp[pi as usize] | arg_nsn[pi as usize]
+                            r_nsp = r_nsp | m
+                            r_nsn = r_nsn | m
+                            if arg_nsf[pi as usize] != 0 { r_nsf = r_nsf | 4 }
+                        } else if pp {
+                            r_nsp = r_nsp | arg_nsp[pi as usize]
+                            r_nsn = r_nsn | arg_nsn[pi as usize]
+                            r_nsf = r_nsf | arg_nsf[pi as usize]
+                        } else {
+                            r_nsp = r_nsp | arg_nsn[pi as usize]
+                            r_nsn = r_nsn | arg_nsp[pi as usize]
+                            r_nsf = r_nsf | ns_sum_fresh_negate(arg_nsf[pi as usize])
+                        }
+                    }
+                    pi = pi + 1
+                }
+            }
+        }
+        var r_ksv = NS_SUM_KS_VALID[csid as usize]
+        var r_ksm: i64 = 0
+        var r_kso: i64 = NS_SUM_KS_OWN[csid as usize]
+        if r_ksv == 1 {
+            if cpc > 16 || ac > 16 {
+                r_ksv = 0
+                r_kso = 0 - 1
+            } else {
+                var pj: i64 = 0
+                while pj < cpc && pj < ac {
+                    let bit: i64 = ((1 as i64) << (pj as u8)) as i64
+                    if (NS_SUM_KS_MASK[csid as usize] & bit) != 0 {
+                        if arg_ksv[pj as usize] == 0 {
+                            r_ksv = 0
+                            r_kso = 0 - 1
+                        } else {
+                            r_ksm = r_ksm | arg_ksm[pj as usize]
+                            r_kso = ns_union((*c).knight_ns_table, r_kso, arg_kso[pj as usize])
+                            if r_kso < 0 { r_ksv = 0 }
+                        }
+                    }
+                    pj = pj + 1
+                }
+            }
+        } else if NS_SUM_RET_PRECISE[csid as usize] == 1 {
+            r_ksv = 1
+            r_ksm = 0
+            r_kso = 0
+        } else {
+            r_kso = 0 - 1
+        }
+        return NsSumVal {
+            ns_valid: r_nsv,
+            ns_pos: r_nsp,
+            ns_neg: r_nsn,
+            ns_fresh: r_nsf,
+            ks_valid: r_ksv,
+            ks_mask: r_ksm,
+            ks_own: r_kso,
+            is_k: 1,
+        }
+    }
+    if e.kind == ExprKind::ExprIf {
+        let _cv = ns_sum_eval_opt_expr(c, e.left, ebase, fbase, mod_id, in_branch, depth)
+        let tv = match e.block {
+            Some(tb) => ns_sum_eval_block(c, *tb, ebase, fbase, mod_id, true, depth)
+            None => ns_sum_val_empty(0)
+        }
+        let ev = match e.else_expr {
+            Some(ee) => ns_sum_eval_expr(c, *ee, ebase, fbase, mod_id, true, depth)
+            None => ns_sum_val_empty(0)
+        }
+        return ns_sum_val_join(c, tv, ev)
+    }
+    if e.kind == ExprKind::ExprBlock {
+        match e.block {
+            Some(blk) => return ns_sum_eval_block(c, *blk, ebase, fbase, mod_id, in_branch, depth)
+            None => return ns_sum_val_empty(0)
+        }
+    }
+    if e.kind == ExprKind::ExprReturn {
+        let rv = ns_sum_eval_opt_expr(c, e.left, ebase, fbase, mod_id, in_branch, depth)
+        ns_sum_ret_acc_join(c, depth, rv)
+        return rv
+    }
+    if e.kind == ExprKind::ExprWhile || e.kind == ExprKind::ExprLoop {
+        match e.block {
+            Some(lb) => {
+                let _ = ns_sum_eval_block(c, *lb, ebase, fbase, mod_id, true, depth)
+            }
+            None => {}
+        }
+        return ns_sum_val_empty(0)
+    }
+    ns_sum_val_top(1)
+}
+
+fn ns_sum_eval_block(c: *mut Checker, blk: Block, ebase: i64, fbase: i64, mod_id: i64, in_branch: bool, depth: i64) -> NsSumVal with Mut, Panic, Div, Alloc, IO {
+    let saved_etop = NS_SUM_ENV_TOP
+    let saved_ftop = NS_SUM_FLD_TOP
+    var last = ns_sum_val_empty(0)
+    var cur = blk.stmts
+    while true {
+        match cur {
+            Some(sl) => {
+                let s = (*sl).head
+                if s.kind == StmtKind::StmtLet || s.kind == StmtKind::StmtVar {
+                    let iv = ns_sum_eval_opt_expr(c, s.expr, ebase, fbase, mod_id, in_branch, depth)
+                    ns_sum_env_push(s.name, iv)
+                    match s.expr {
+                        Some(ie) => {
+                            if (*ie).kind == ExprKind::ExprStructLit {
+                                var sf = (*ie).fields
+                                while true {
+                                    match sf {
+                                        Some(fl) => {
+                                            let fv = ns_sum_eval_expr(c, (*fl).head.value, ebase, fbase, mod_id, in_branch, depth)
+                                            if fv.is_k == 1 {
+                                                ns_sum_fld_set(fbase, s.name, (*fl).head.name, fv)
+                                            }
+                                            sf = (*fl).tail
+                                        }
+                                        None => break
+                                    }
+                                }
+                            } else if (*ie).kind == ExprKind::ExprIdent {
+                                let lim = NS_SUM_FLD_TOP
+                                var fi = fbase
+                                while fi < lim {
+                                    if name_eq(NS_SUM_FLD_VAR[fi as usize], (*ie).name) {
+                                        ns_sum_fld_set(fbase, s.name, NS_SUM_FLD_NAME[fi as usize], ns_sum_fld_get(fi))
+                                    }
+                                    fi = fi + 1
+                                }
+                            }
+                        }
+                        None => {}
+                    }
+                    last = ns_sum_val_empty(0)
+                } else if s.kind == StmtKind::StmtAssign {
+                    let vv = ns_sum_eval_opt_expr(c, s.expr, ebase, fbase, mod_id, in_branch, depth)
+                    match s.target {
+                        Some(te) => {
+                            if (*te).kind == ExprKind::ExprIdent {
+                                let eidx = ns_sum_env_find(ebase, (*te).name)
+                                if eidx >= 0 {
+                                    if in_branch {
+                                        ns_sum_env_set_at(eidx, ns_sum_val_top(1))
+                                    } else {
+                                        let oldv = ns_sum_env_get(eidx)
+                                        ns_sum_env_set_at(eidx, ns_sum_val_join(c, oldv, vv))
+                                    }
+                                }
+                                ns_sum_fld_widen_var(fbase, (*te).name)
+                            } else if (*te).kind == ExprKind::ExprFieldAccess {
+                                match (*te).left {
+                                    Some(be) => {
+                                        if (*be).kind == ExprKind::ExprIdent {
+                                            let fidx = ns_sum_fld_find(fbase, (*be).name, (*te).name)
+                                            if in_branch || fidx < 0 {
+                                                ns_sum_fld_set(fbase, (*be).name, (*te).name, ns_sum_val_top(1))
+                                            } else {
+                                                let oldf = ns_sum_fld_get(fidx)
+                                                ns_sum_fld_set(fbase, (*be).name, (*te).name, ns_sum_val_join(c, oldf, vv))
+                                            }
+                                        }
+                                    }
+                                    None => {}
+                                }
+                            }
+                        }
+                        None => {}
+                    }
+                    last = ns_sum_val_empty(0)
+                } else {
+                    last = ns_sum_eval_opt_expr(c, s.expr, ebase, fbase, mod_id, in_branch, depth)
+                }
+                cur = (*sl).tail
+            }
+            None => break
+        }
+    }
+    NS_SUM_ENV_TOP = saved_etop
+    NS_SUM_FLD_TOP = saved_ftop
+    last
+}
+
+fn checker_ensure_fn_summary_inplace(c: *mut Checker, sig_id: i64, depth: i64) with Mut, Panic, Div, Alloc, IO {
+    if sig_id < 0 || sig_id >= NS_SUMMARY_CAP { return }
+    if NS_SUM_GEN[sig_id as usize] != NS_SUMMARY_GEN { return }
+    let st = NS_SUM_STATE[sig_id as usize]
+    if st == 3 || st == 2 || st == 0 { return }
+    if depth >= 32 {
+        NS_SUM_NS_VALID[sig_id as usize] = 0
+        NS_SUM_NS_FRESH[sig_id as usize] = 0
+        NS_SUM_KS_VALID[sig_id as usize] = 0
+        NS_SUM_KS_OWN[sig_id as usize] = 0 - 1
+        NS_SUM_STATE[sig_id as usize] = 3
+        return
+    }
+    if !ns_summary_has_def(sig_id) {
+        NS_SUM_NS_VALID[sig_id as usize] = 0
+        NS_SUM_NS_FRESH[sig_id as usize] = 0
+        NS_SUM_KS_VALID[sig_id as usize] = 0
+        NS_SUM_KS_OWN[sig_id as usize] = 0 - 1
+        NS_SUM_STATE[sig_id as usize] = 3
+        return
+    }
+    NS_SUM_STATE[sig_id as usize] = 2
+    let fd = ns_summary_find_def(sig_id)
+    let sig = fn_sig_table_get((*c).fn_sigs, sig_id)
+    let ebase = NS_SUM_ENV_TOP
+    let fbase = NS_SUM_FLD_TOP
+    NS_SUM_RET_HAS[depth as usize] = 0
+    var pcur = sig.params
+    var pidx: i64 = 0
+    while true {
+        match pcur {
+            Some(pl) => {
+                if (*pl).head.ty.kind == TypeKind::TyKnowledge {
+                    if pidx < 16 {
+                        let bit: i64 = ((1 as i64) << (pidx as u8)) as i64
+                        ns_sum_env_push((*pl).head.name, NsSumVal {
+                            ns_valid: 1,
+                            ns_pos: bit,
+                            ns_neg: 0,
+                            ns_fresh: 0,
+                            ks_valid: 1,
+                            ks_mask: bit,
+                            ks_own: 0,
+                            is_k: 1,
+                        })
+                    } else {
+                        ns_sum_env_push((*pl).head.name, ns_sum_val_top(1))
+                    }
+                } else {
+                    ns_sum_env_push((*pl).head.name, ns_sum_val_empty(0))
+                }
+                pidx = pidx + 1
+                pcur = (*pl).tail
+            }
+            None => break
+        }
+    }
+    let tail_v = ns_sum_eval_block(c, fd.body, ebase, fbase, NS_SUM_MOD[sig_id as usize], false, depth)
+    var final_v = tail_v
+    if NS_SUM_RET_HAS[depth as usize] != 0 {
+        let acc_v = NsSumVal {
+            ns_valid: NS_SUM_RET_NS_VALID[depth as usize],
+            ns_pos: NS_SUM_RET_NS_POS[depth as usize],
+            ns_neg: NS_SUM_RET_NS_NEG[depth as usize],
+            ns_fresh: NS_SUM_RET_NS_FRESH[depth as usize],
+            ks_valid: NS_SUM_RET_KS_VALID[depth as usize],
+            ks_mask: NS_SUM_RET_KS_MASK[depth as usize],
+            ks_own: NS_SUM_RET_KS_OWN[depth as usize],
+            is_k: 1,
+        }
+        // If body ends in an explicit return, tail_v is already joined into acc_v.
+        final_v = ns_sum_val_join(c, acc_v, tail_v)
+    }
+    NS_SUM_ENV_TOP = ebase
+    NS_SUM_FLD_TOP = fbase
+    NS_SUM_NS_VALID[sig_id as usize] = final_v.ns_valid
+    NS_SUM_NS_POS[sig_id as usize] = final_v.ns_pos
+    NS_SUM_NS_NEG[sig_id as usize] = final_v.ns_neg
+    NS_SUM_NS_FRESH[sig_id as usize] = final_v.ns_fresh
+    NS_SUM_KS_VALID[sig_id as usize] = final_v.ks_valid
+    NS_SUM_KS_MASK[sig_id as usize] = final_v.ks_mask
+    NS_SUM_KS_OWN[sig_id as usize] = final_v.ks_own
+    NS_SUM_STATE[sig_id as usize] = 3
 }
 
 // seq_new() -> Seq<_>. Element type comes from the binding annotation
@@ -14170,9 +15753,12 @@ fn checker_check_call_direct_sig_inplace(c: *mut Checker, e: Expr, direct_sig_id
     // proven-projection verdict (fail-closed: not-a-projection -> -1,
     // "watch nothing").
     let outer_arg_ns_d = (*c).last_call_arg_ns
+    let outer_arg_ks_d = (*c).last_call_arg_ks
     (*c).last_call_arg_ns = ns_arg_sentinel()
+    (*c).last_call_arg_ks = ns_arg_sentinel()
     let ns_proj_d = ns_proj_table_get((*c).ns_proj, direct_sig_id)
     let ns_watch_d = if ns_proj_d.0 { ns_proj_d.1 } else { 0 - 1 }
+    ns_call_args_push()
     checker_check_call_args_inplace(
         c,
         expr_list_handle(e.args),
@@ -14185,11 +15771,15 @@ fn checker_check_call_direct_sig_inplace(c: *mut Checker, e: Expr, direct_sig_id
     checker_check_confidence_gate_inplace(c, e, direct_sig.epistemic_min_confidence)
     checker_release_call_arg_borrows_inplace(c, e.args, effective_params)
     if refused_unimplemented {
+        ns_call_args_pop()
         (*c).last_call_arg_ns = outer_arg_ns_d
+        (*c).last_call_arg_ks = outer_arg_ks_d
         return ty_error()
     }
-    let ns_result = checker_propagate_call_result_ns_inplace(c, effective_return_type, ns_proj_d.0)
+    let ns_result = checker_propagate_call_result_ns_with_sig_inplace(c, effective_return_type, direct_sig_id, ns_proj_d.0, e.span)
+    ns_call_args_pop()
     (*c).last_call_arg_ns = outer_arg_ns_d
+    (*c).last_call_arg_ks = outer_arg_ks_d
     ns_result
 }
 
@@ -14935,6 +16525,9 @@ fn checker_check_call_metric_forms_inplace(c: *mut Checker, e: Expr) -> (bool, T
     if call_expr_is_builtin_measure(e.left) {
         return (true, checker_check_measure_expr_inplace(c, e))
     }
+    if call_expr_is_builtin_knight(e.left) {
+        return (true, checker_check_knight_expr_inplace(c, e))
+    }
     let merge_kind = call_expr_merge_kind(e.left)
     if merge_kind >= 0 {
         return (true, checker_check_merge_expr_inplace(c, e, merge_kind))
@@ -15447,17 +17040,150 @@ pub fn checker_ns_sabotage_join() -> bool with IO, Mut, Panic, Div {
 // ns_watch_idx there). SOUNIO_NS_SABOTAGE_CALL_PROJ=1 disables the
 // preservation specifically -- even a genuine ident(x) then collapses to
 // top, which is the per-rule negative control.
+fn checker_alloc_fresh_ns_inplace(c: *mut Checker, span: Span) -> i64 with IO, Mut, Panic, Div, Alloc {
+    if checker_ns_sabotage() { return ns_empty() }
+    let src = (*c).ns_source_issued
+    (*c).ns_source_issued = src + 1
+    if src >= ns_source_cap() {
+        checker_report_error_at_inplace(c, span, 178, 0, 0, 0)
+    }
+    let h = ns_singleton((*c).ns_table, src)
+    if ns_table_overflow_take((*c).ns_table) {
+        checker_report_error_at_inplace(c, span, 179, 0, 0, 0)
+    }
+    h
+}
+
+fn checker_propagate_call_result_ns_with_sig_inplace(c: *mut Checker, ret_ty: TypeEntry, sig_id: i64, is_projection: bool, call_span: Span) -> TypeEntry with IO, Mut, Panic, Div, Alloc {
+    var carried = ret_ty
+    if carried.kind == TypeKind::TyKnowledge {
+        let has_summary = sig_id >= 0 && sig_id < NS_SUMMARY_CAP && NS_SUM_GEN[sig_id as usize] == NS_SUMMARY_GEN
+        if has_summary {
+            checker_ensure_fn_summary_inplace(c, sig_id, 0)
+        }
+        let d = NS_CALL_DEPTH - 1
+        // Aleatory noise_set_id propagation via summary (fail-closed on sabotage,
+        // recursion, overflow, or unsupported callee body; fresh sources per call).
+        if checker_ns_sabotage_call_proj() {
+            carried.noise_set_id = 0 - 1
+        } else if has_summary && NS_SUM_STATE[sig_id as usize] == 3 && NS_SUM_NS_VALID[sig_id as usize] == 1 {
+            let pc = NS_SUM_PARAM_COUNT[sig_id as usize]
+            let ppos = NS_SUM_NS_POS[sig_id as usize]
+            let pneg = NS_SUM_NS_NEG[sig_id as usize]
+            let pfresh = NS_SUM_NS_FRESH[sig_id as usize]
+            var acc_ns = ns_empty()
+            var ok_params = true
+            if ppos != 0 || pneg != 0 {
+                if d < 0 || d >= NS_CALL_DEPTH_CAP || NS_CALL_ARG_OVERFLOW[d as usize] != 0 || pc > NS_CALL_MAX_ARGS {
+                    acc_ns = ns_unknown()
+                    ok_params = false
+                } else {
+                    var i: i64 = 0
+                    while i < pc {
+                        let bit: i64 = ((1 as i64) << (i as u8)) as i64
+                        let pp = (ppos & bit) != 0
+                        let pn = (pneg & bit) != 0
+                        if pp || pn {
+                            let slot = (d * NS_CALL_MAX_ARGS + i) as usize
+                            if NS_CALL_ARG_ISK[slot] == 0 {
+                                acc_ns = ns_unknown()
+                            } else {
+                                let a_ns = NS_CALL_ARG_NS[slot]
+                                if pp && pn {
+                                    let opq = ns_union_opaque((*c).ns_table, a_ns, ns_empty())
+                                    acc_ns = ns_union((*c).ns_table, acc_ns, opq)
+                                } else if pp {
+                                    acc_ns = ns_union((*c).ns_table, acc_ns, a_ns)
+                                } else {
+                                    acc_ns = ns_union_sub((*c).ns_table, acc_ns, a_ns)
+                                }
+                            }
+                        }
+                        i = i + 1
+                    }
+                }
+            }
+            if ok_params && pfresh != 0 {
+                if (pfresh & 1) != 0 {
+                    let fp = checker_alloc_fresh_ns_inplace(c, call_span)
+                    acc_ns = ns_union((*c).ns_table, acc_ns, fp)
+                }
+                if (pfresh & 2) != 0 {
+                    let fnh = checker_alloc_fresh_ns_inplace(c, call_span)
+                    acc_ns = ns_union_sub((*c).ns_table, acc_ns, fnh)
+                }
+                if (pfresh & 4) != 0 {
+                    let fo = checker_alloc_fresh_ns_inplace(c, call_span)
+                    let opq_f = ns_union_opaque((*c).ns_table, fo, ns_empty())
+                    acc_ns = ns_union((*c).ns_table, acc_ns, opq_f)
+                }
+                if ns_table_overflow_take((*c).ns_table) {
+                    checker_report_error_at_inplace(c, call_span, 179, 0, 0, 0)
+                }
+            }
+            carried.noise_set_id = acc_ns
+        } else if is_projection && (*c).last_call_arg_ns != ns_arg_sentinel() {
+            carried.noise_set_id = (*c).last_call_arg_ns
+        } else {
+            carried.noise_set_id = 0 - 1
+        }
+        // Knightian knight_set_id propagation via summary (fail-closed: an invalid
+        // or absent summary on an unannotated return widens knight_set_id to
+        // unknown (-1), which precise requirements refuse with E314; a precise
+        // declared return already enforced empty knight_set_id at the callee's
+        // return sites).
+        if has_summary && NS_SUM_STATE[sig_id as usize] == 3 && NS_SUM_KS_VALID[sig_id as usize] == 1 {
+            let pc = NS_SUM_PARAM_COUNT[sig_id as usize]
+            let kmask = NS_SUM_KS_MASK[sig_id as usize]
+            var acc_ks = NS_SUM_KS_OWN[sig_id as usize]
+            if kmask != 0 {
+                if d < 0 || d >= NS_CALL_DEPTH_CAP || NS_CALL_ARG_OVERFLOW[d as usize] != 0 || pc > NS_CALL_MAX_ARGS {
+                    acc_ks = ns_unknown()
+                } else {
+                    var j: i64 = 0
+                    while j < pc {
+                        let bit: i64 = ((1 as i64) << (j as u8)) as i64
+                        if (kmask & bit) != 0 {
+                            let slot = (d * NS_CALL_MAX_ARGS + j) as usize
+                            if NS_CALL_ARG_ISK[slot] == 0 {
+                                acc_ks = ns_unknown()
+                            } else {
+                                acc_ks = ns_union((*c).knight_ns_table, acc_ks, NS_CALL_ARG_KS[slot])
+                            }
+                        }
+                        j = j + 1
+                    }
+                }
+            }
+            if acc_ks != ns_empty() || carried.knight_set_id == ns_empty() {
+                carried.knight_set_id = acc_ks
+            }
+        } else if is_projection && (*c).last_call_arg_ks != ns_arg_sentinel() {
+            if (*c).last_call_arg_ks != ns_empty() || carried.knight_set_id == ns_empty() {
+                carried.knight_set_id = (*c).last_call_arg_ks
+            }
+        } else if !checker_type_requires_precise(ret_ty) {
+            carried.knight_set_id = ns_unknown()
+        }
+        checker_ns_trace_emit("call", carried.noise_set_id)
+    }
+    carried
+}
+
 fn checker_propagate_call_result_ns_inplace(c: *mut Checker, ret_ty: TypeEntry, is_projection: bool) -> TypeEntry with IO, Mut, Panic, Div {
     var carried = ret_ty
     if carried.kind == TypeKind::TyKnowledge {
         if is_projection && !checker_ns_sabotage_call_proj() && (*c).last_call_arg_ns != ns_arg_sentinel() {
             carried.noise_set_id = (*c).last_call_arg_ns
         } else {
-            // Not a proven projection (the general, dangerous-if-narrowed
-            // case), OR the projection rule itself is sabotaged, OR a
-            // projection fn whose projected-parameter argument was not
-            // Knowledge-typed (sentinel never overwritten) -- top either way.
             carried.noise_set_id = 0 - 1
+        }
+        if is_projection && (*c).last_call_arg_ks != ns_arg_sentinel() {
+            if (*c).last_call_arg_ks != ns_empty() || carried.knight_set_id == ns_empty() {
+                carried.knight_set_id = (*c).last_call_arg_ks
+            }
+        } else if !checker_type_requires_precise(ret_ty) {
+            carried.knight_set_id = ns_unknown()
         }
         checker_ns_trace_emit("call", carried.noise_set_id)
     }
@@ -16063,6 +17789,8 @@ fn checker_check_call_arg_knowledge_boundary_inplace(c: *mut Checker, arg_ty: Ty
             checker_report_error_at_inplace(c, call_span, 244, 0, 0, 0)
         } else if !validity_subsumes(knowledge_meta_validity(pmeta2), knowledge_meta_validity(rmeta2)) {
             checker_report_error_at_inplace(c, call_span, 265, 0, 0, 0)
+        } else if checker_is_knightian_into_precise(provided_ty, expected_ty) {
+            // Already reported with E314 by checker_report_mismatch_inplace.
         } else {
             checker_report_error_at_inplace(c, call_span, 36, 0, 0, 0) // E036: epsilon bound violation
         }
@@ -17040,6 +18768,7 @@ fn checker_check_let_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
             // Carry the inferred RHS's noise_set_id through the ascription.
             if ann_ty.kind == TypeKind::TyKnowledge && init_ty.kind == TypeKind::TyKnowledge {
                 bind_ty.noise_set_id = init_ty.noise_set_id
+                bind_ty.knight_set_id = if init_ty.knight_set_id != ns_empty() { init_ty.knight_set_id } else { ann_ty.knight_set_id }
             }
         }
     }
@@ -17066,6 +18795,23 @@ fn checker_check_let_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
     }
     type_env_bind_mut(&!(*c).env, s.name, bind_ty, false)
     type_env_set_last_conf(&(*c).env, let_conf)
+    ns_field_clear_var_at_scope(s.name, (*c).env.scope_depth)
+    if bind_ty.kind == TypeKind::TyNamed {
+        match s.expr {
+            Some(init_e) => {
+                if (*init_e).kind == ExprKind::ExprStructLit && NS_LIT_VALID && !NS_LIT_OVERFLOW {
+                    var li: i64 = 0
+                    while li < NS_LIT_COUNT {
+                        ns_field_set(s.name, (*c).env.scope_depth, NS_LIT_NAME[li as usize], NS_LIT_NS[li as usize], NS_LIT_KS[li as usize])
+                        li = li + 1
+                    }
+                } else if (*init_e).kind == ExprKind::ExprIdent {
+                    ns_field_copy_var((*init_e).name, type_env_lookup_scope(&(*c).env, (*init_e).name), s.name, (*c).env.scope_depth)
+                }
+            }
+            None => {}
+        }
+    }
     if const_pair.0 != 0 {
         checker_const_int_bind_value_inplace(c, s.name, const_pair.1)
     } else {
@@ -17149,6 +18895,7 @@ fn checker_check_var_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
             // inferred RHS rather than resetting it to the annotation's -1.
             if ann_ty.kind == TypeKind::TyKnowledge && init_ty.kind == TypeKind::TyKnowledge {
                 bind_ty.noise_set_id = init_ty.noise_set_id
+                bind_ty.knight_set_id = if init_ty.knight_set_id != ns_empty() { init_ty.knight_set_id } else { ann_ty.knight_set_id }
             }
         }
     }
@@ -17158,6 +18905,23 @@ fn checker_check_var_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
         checker_check_const_int_range_inplace(c, s.span, const_pair.1, bind_ty)
     }
     type_env_bind_mut(&!(*c).env, s.name, bind_ty, true)
+    ns_field_clear_var_at_scope(s.name, (*c).env.scope_depth)
+    if bind_ty.kind == TypeKind::TyNamed {
+        match s.expr {
+            Some(init_e) => {
+                if (*init_e).kind == ExprKind::ExprStructLit && NS_LIT_VALID && !NS_LIT_OVERFLOW {
+                    var li: i64 = 0
+                    while li < NS_LIT_COUNT {
+                        ns_field_set(s.name, (*c).env.scope_depth, NS_LIT_NAME[li as usize], NS_LIT_NS[li as usize], NS_LIT_KS[li as usize])
+                        li = li + 1
+                    }
+                } else if (*init_e).kind == ExprKind::ExprIdent {
+                    ns_field_copy_var((*init_e).name, type_env_lookup_scope(&(*c).env, (*init_e).name), s.name, (*c).env.scope_depth)
+                }
+            }
+            None => {}
+        }
+    }
     if const_pair.0 != 0 {
         checker_const_int_bind_value_inplace(c, s.name, const_pair.1)
     } else {
@@ -17454,6 +19218,7 @@ fn checker_check_assign_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with
                     if (*c).ns_branch_depth > 0 {
                         var forced = target_ty
                         forced.noise_set_id = 0 - 1
+                        forced.knight_set_id = ns_union((*c).knight_ns_table, target_ty.knight_set_id, val_ty.knight_set_id)
                         type_env_bind_mut(&!(*c).env, (*target).name, forced, true)
                         if (*c).ns_reassigned_count < 64 {
                             (*c).ns_reassigned_names[(*c).ns_reassigned_count as usize] = (*target).name
@@ -17469,8 +19234,39 @@ fn checker_check_assign_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with
                     } else {
                         var rebound = target_ty
                         rebound.noise_set_id = ns_union((*c).ns_table, target_ty.noise_set_id, val_ty.noise_set_id)
+                        rebound.knight_set_id = ns_union((*c).knight_ns_table, target_ty.knight_set_id, val_ty.knight_set_id)
                         type_env_bind_mut(&!(*c).env, (*target).name, rebound, true)
                         checker_ns_trace_emit("reassign_join", rebound.noise_set_id)
+                    }
+                }
+                if target_ty.kind == TypeKind::TyNamed {
+                    ns_field_widen_var_entries(c, (*target).name)
+                }
+            } else if (*target).kind == ExprKind::ExprFieldAccess {
+                if target_ty.kind == TypeKind::TyKnowledge && val_ty.kind == TypeKind::TyKnowledge && !checker_ns_sabotage_join() {
+                    match (*target).left {
+                        Some(fbase) => {
+                            if (*fbase).kind == ExprKind::ExprIdent {
+                                let fslot = ns_field_find_innermost((*fbase).name, (*target).name, type_env_lookup_scope(&(*c).env, (*fbase).name))
+                                let old_ns = if fslot >= 0 { NS_FIELD_NS[fslot as usize] } else { 0 - 1 }
+                                let old_ks = if fslot >= 0 { NS_FIELD_KS[fslot as usize] } else { target_ty.knight_set_id }
+                                let merged_ks = ns_union((*c).knight_ns_table, old_ks, val_ty.knight_set_id)
+                                if (*c).ns_branch_depth > 0 {
+                                    if fslot >= 0 {
+                                        NS_FIELD_NS[fslot as usize] = 0 - 1
+                                        NS_FIELD_KS[fslot as usize] = merged_ks
+                                    }
+                                    ns_field_record_branch_mut((*fbase).name, (*target).name, 0, val_ty.knight_set_id)
+                                } else {
+                                    let merged_ns = ns_union((*c).ns_table, old_ns, val_ty.noise_set_id)
+                                    if fslot >= 0 {
+                                        NS_FIELD_NS[fslot as usize] = merged_ns
+                                        NS_FIELD_KS[fslot as usize] = merged_ks
+                                    }
+                                }
+                            }
+                        }
+                        None => {}
                     }
                 }
             }
@@ -18766,7 +20562,7 @@ fn print_type_name(ty: TypeEntry) with IO, Mut, Panic, Div, Alloc {
                 // (no float printing in Poseidon VM)
                 print(", eps=")
                 print_milli_ratio(ty.knowledge_epsilon)
-            } else if ty.knowledge_epsilon_mode == 3 {
+            } else if ty.knight_set_id != 0 {
                 print(", ε=⊥")
             }
             print(">")
@@ -22073,6 +23869,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 302 { print("`break` with a value is only allowed inside `loop`") }
     else if code == 308 { print("the `break` values of this `loop` have different types") }
     else if code == 310 { print("printing a Knowledge value would show its nominal value without its uncertainty and confidence; print a field instead (`k.value`, `k.variance`, `k.confidence`)") }
+    else if code == 314 { print("Knightian uncertainty (ε=⊥) cannot satisfy required confidence or error bound, or a named Knightian source has conflicting bounds") }
     else if code == 269 { print("a `where` refinement on Knowledge<T> is not enforced by this compiler yet: the predicate would be silently ignored, so it is refused") }
     else if code == 270 { print("`as string` does not convert a number, bool or char to text: no engine formats the value, so the cast is refused") }
     else if code == 263 { print("qualified call is ambiguous: this qualifier names a module you `use`d, but also collides with an unrelated struct/enum method of the same name, and the compiler cannot yet guarantee which one runs") }
@@ -23085,6 +24882,18 @@ fn call_expr_is_builtin_measure(opt: Option<Box<Expr> >) -> bool with Mut, Panic
                 return false
             }
             name_matches_str7((*expr).name, 109, 101, 97, 115, 117, 114, 101)
+        }
+        None => false
+    }
+}
+
+fn call_expr_is_builtin_knight(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent {
+                return false
+            }
+            name_eq_lit((*expr).name, "knight")
         }
         None => false
     }
@@ -24276,8 +26085,10 @@ fn check_return_expr_knowledge_subsumes(ontology_items: Option<Box<ItemList> >, 
     let eps_ok = epsilon_subsumes_call_boundary(
         epsilon_provided_view(provided, knowledge_meta_epsilon(pmeta), required.knowledge_epsilon_mode),
         provided.knowledge_epsilon_mode,
+        provided.knight_set_id,
         knowledge_meta_epsilon(rmeta),
-        required.knowledge_epsilon_mode
+        required.knowledge_epsilon_mode,
+        required.knight_set_id
     )
     if !eps_ok {
         return false
@@ -24330,8 +26141,10 @@ fn checker_knowledge_subsumes(c: *mut Checker, provided: TypeEntry, required: Ty
     let eps_ok = epsilon_subsumes_call_boundary(
         epsilon_provided_view(provided, knowledge_meta_epsilon(pmeta), required.knowledge_epsilon_mode),
         provided.knowledge_epsilon_mode,
+        provided.knight_set_id,
         knowledge_meta_epsilon(rmeta),
-        required.knowledge_epsilon_mode
+        required.knowledge_epsilon_mode,
+        required.knight_set_id
     )
     if !eps_ok {
         return false
@@ -24359,13 +26172,22 @@ fn checker_knowledge_epsilon_join(c: *mut Checker, a: TypeEntry, b: TypeEntry) -
     var bn = b
     an.knowledge_epsilon = 0.0 - 1.0
     an.knowledge_epsilon_mode = 0
+    an.knight_set_id = ns_empty()
     bn.knowledge_epsilon = 0.0 - 1.0
     bn.knowledge_epsilon_mode = 0
+    bn.knight_set_id = ns_empty()
     if !checker_knowledge_subsumes(c, an, bn) || !checker_knowledge_subsumes(c, bn, an) {
         return (false, a)
     }
     var joined = a
-    if a.knowledge_epsilon_mode == b.knowledge_epsilon_mode && a.knowledge_epsilon >= 0.0 && b.knowledge_epsilon >= 0.0 && a.knowledge_epsilon_mode != 3 {
+    joined.knight_set_id = ns_union((*c).knight_ns_table, a.knight_set_id, b.knight_set_id)
+    if joined.knight_set_id != ns_empty() {
+        joined.knowledge_epsilon = 0.0 - 1.0
+        joined.knowledge_epsilon_mode = 0
+        joined.knowledge_conf = 0.0 - 1.0
+        return (true, joined)
+    }
+    if a.knowledge_epsilon_mode == b.knowledge_epsilon_mode && a.knowledge_epsilon >= 0.0 && b.knowledge_epsilon >= 0.0 {
         if a.knowledge_epsilon_mode == 0 {
             joined.knowledge_epsilon = if a.knowledge_epsilon > b.knowledge_epsilon { a.knowledge_epsilon } else { b.knowledge_epsilon }
         } else if a.knowledge_epsilon_mode == 2 {
@@ -30267,6 +32089,7 @@ impl Checker {
                 // inferred RHS rather than resetting it to the annotation's -1.
                 if ann_ty.kind == TypeKind::TyKnowledge && init_ty.kind == TypeKind::TyKnowledge {
                     bind_ty.noise_set_id = init_ty.noise_set_id
+                    bind_ty.knight_set_id = if init_ty.knight_set_id != ns_empty() { init_ty.knight_set_id } else { ann_ty.knight_set_id }
                 }
             }
         }
@@ -30338,6 +32161,7 @@ impl Checker {
                 // inferred RHS rather than resetting it to the annotation's -1.
                 if ann_ty.kind == TypeKind::TyKnowledge && init_ty.kind == TypeKind::TyKnowledge {
                     bind_ty.noise_set_id = init_ty.noise_set_id
+                    bind_ty.knight_set_id = if init_ty.knight_set_id != ns_empty() { init_ty.knight_set_id } else { ann_ty.knight_set_id }
                 }
             }
         }
@@ -30818,13 +32642,13 @@ impl Checker {
             if kk_both && kk_arith && !kk_hyper && !correlated_same_slot_add && !checker_is_knowledge_ident_add(e, left_ty, right_ty) && !checker_knowledge_binary_lowerable(e, left_ty, right_ty) {
                 c = c.report_error_at(e.span, 245, 0, 0, 0)
             }
-            var knowledge_result = knowledge_binary_result(e.bin_op, left_ty, right_ty, c.ns_table)
+            var knowledge_result = knowledge_binary_result(e.bin_op, left_ty, right_ty, c.ns_table, c.knight_ns_table)
             if knowledge_result.kind == TypeKind::TyError {
                 c = c.report_error_at(e.span, 36, 0, 0, 0)
             }
             // W4: mirror of the in-place spine -- interning-table exhaustion is
             // reported (E179), never silently degraded to "unknown".
-            if ns_table_overflow_take(c.ns_table) {
+            if ns_table_overflow_take(c.ns_table) || ns_table_overflow_take(c.knight_ns_table) {
                 c = c.report_error_at(e.span, 179, 0, 0, 0)
             }
             // N3: anti-garbling gate (value path). Mirrors the in-place path so
@@ -31302,6 +33126,11 @@ impl Checker {
             } else if name_matches_str10(e.name, 99, 111, 110, 102, 105, 100, 101, 110, 99, 101) {
                 // "confidence" — IR field 2.
                 (c, ty_f64())
+            } else if name_eq_lit(e.name, "iv") {
+                (c, ty_tuple(TypeEntryList {
+                    head: ty_f64(),
+                    tail: Some(Box::new(TypeEntryList { head: ty_f64(), tail: None })),
+                }))
             } else {
                 c = c.report_no_field(e.span, e.name, base_ty)
                 (c, ty_error())
@@ -31969,6 +33798,9 @@ impl Checker {
         }
         if call_expr_is_builtin_measure(e.left) {
             return self.check_measure_expr(e)
+        }
+        if call_expr_is_builtin_knight(e.left) {
+            return self.check_knight_expr(e)
         }
         if call_expr_is_builtin_sign(e.left) && expr_list_handle_count(expr_list_handle(e.args)) == 2 {
             return self.check_sign_expr(e)
@@ -34054,6 +35886,66 @@ impl Checker {
         (c, result)
     }
 
+    fn check_knight_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        var c = self
+        let argc = expr_list_handle_count(expr_list_handle(e.args))
+        let first_arg = expr_list_head(e.args)
+        let second_arg = expr_list_second(e.args)
+        let third_arg = expr_list_third(e.args)
+        let p0 = c.check_opt_expr(first_arg)
+        c = p0.0
+        let p1 = c.check_opt_expr(second_arg)
+        c = p1.0
+        let p2 = c.check_opt_expr(third_arg)
+        c = p2.0
+        if argc != 3 {
+            c = c.report_error_at(e.span, 10, 0, 0, 0)
+            return (c, ty_error())
+        }
+        var has_name = false
+        var src_name = empty_name()
+        match first_arg {
+            Some(a0) => {
+                if (*a0).kind == ExprKind::ExprStringLit {
+                    src_name = ast_string_lit_payload((*a0).name)
+                    if src_name.len > 0 { has_name = true }
+                }
+            }
+            None => {}
+        }
+        var result = ty_knowledge(ty_f64(), 0.0 - 1.0)
+        result.noise_set_id = ns_empty()
+        if !has_name {
+            c = c.report_error_at(e.span, 314, 0, 0, 0)
+            result.knight_set_id = ns_unknown()
+            return (c, result)
+        }
+        let lo_c = checker_knight_const_f64(second_arg)
+        let hi_c = checker_knight_const_f64(third_arg)
+        let both_known = lo_c.0 && hi_c.0
+        if !both_known {
+            c = c.report_error_at(e.span, 314, 0, 0, 0)
+            result.knight_set_id = ns_unknown()
+            return (c, result)
+        }
+        if !((lo_c.1 - lo_c.1) == 0.0) || !((hi_c.1 - hi_c.1) == 0.0) || lo_c.1 > hi_c.1 {
+            c = c.report_error_at(e.span, 314, 0, 0, 0)
+            result.knight_set_id = ns_unknown()
+            return (c, result)
+        }
+        let reg = knight_source_register(c.knight_sources, src_name, lo_c.1, hi_c.1, true)
+        if reg.1 == 1 {
+            c = c.report_error_at(e.span, 314, 0, 0, 0)
+        } else if reg.1 == 2 {
+            c = c.report_error_at(e.span, 178, 0, 0, 0)
+        }
+        result.knight_set_id = if reg.0 >= 0 { ns_singleton(c.knight_ns_table, reg.0) } else { ns_unknown() }
+        if ns_table_overflow_take(c.knight_ns_table) {
+            c = c.report_error_at(e.span, 179, 0, 0, 0)
+        }
+        (c, result)
+    }
+
     fn check_knowledge_ctor_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         // Knowledge(v, e=<confidence>, prov=<provenance>) -> Knowledge<T>; by-value twin of
         // checker_check_knowledge_ctor_expr_inplace.
@@ -34413,8 +36305,10 @@ impl Checker {
         let eps_ok = epsilon_subsumes_call_boundary(
             epsilon_provided_view(provided_ty, knowledge_meta_epsilon(pm), expected_ty.knowledge_epsilon_mode),
             provided_ty.knowledge_epsilon_mode,
+            provided_ty.knight_set_id,
             knowledge_meta_epsilon(rm),
-            expected_ty.knowledge_epsilon_mode
+            expected_ty.knowledge_epsilon_mode,
+            expected_ty.knight_set_id
         )
         let val_ok = validity_subsumes(knowledge_meta_validity(pm), knowledge_meta_validity(rm))
         let prov_ok = provenance_subsumes(knowledge_meta_provenance(pm), knowledge_meta_provenance(rm))
@@ -34431,6 +36325,8 @@ impl Checker {
             self.report_error_at(call_span, 244, 0, 0, 0)
         } else if !val_ok {
             self.report_error_at(call_span, 265, 0, 0, 0)
+        } else if checker_is_knightian_into_precise(provided_ty, expected_ty) {
+            self.report_error_at(call_span, 314, 0, 0, 0)
         } else {
             self.report_error_at(call_span, 36, 0, 0, 0)
         }
@@ -34525,8 +36421,10 @@ impl Checker {
                 return epsilon_subsumes_call_boundary(
                     epsilon_provided_view(got_ty, knowledge_meta_epsilon(pm), exp_ty.knowledge_epsilon_mode),
                     got_ty.knowledge_epsilon_mode,
+                    got_ty.knight_set_id,
                     knowledge_meta_epsilon(rm),
-                    exp_ty.knowledge_epsilon_mode
+                    exp_ty.knowledge_epsilon_mode,
+                    exp_ty.knight_set_id
                 ) && validity_subsumes(knowledge_meta_validity(pm), knowledge_meta_validity(rm))
                   && provenance_subsumes(knowledge_meta_provenance(pm), knowledge_meta_provenance(rm))
             }

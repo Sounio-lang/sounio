@@ -4,6 +4,7 @@ module ir::lower
 
 use parser::ast::*
 use ir::ir::*
+use ir::knight_ir::{KnightRuntimeIds, ir_ensure_knight_runtime}
 use ir::numeric_payload::{ir_wide_compile_pool_reset, ir_wide_compile_pool_intern_low}
 use check::specializer::{spec_dce_filter_with_global_marks, spec_dce_global_marks_ready, spec_item_module_lookup, spec_item_module_populated, spec_item_module_overflowed}
 use io::trace::*
@@ -2882,8 +2883,49 @@ fn fo_ref_alias_truncate(n: i64) with Mut, Panic, Div {
     if n >= 0 && n < FO_REF_ALIAS_COUNT { FO_REF_ALIAS_COUNT = n }
 }
 
+// Per-function sensitivity cache keyed by lowered Knowledge IR register.
+// Preserves multi-channel FO sensitivities across Knowledge binary ops,
+// Knowledge-returning tangent-clone calls, and struct-field round trips (N-04).
+let FO_KREG_MAX: i64 = 128
+var FO_KREG_COUNT: i64 = 0
+var FO_KREG_REG: [i64; 128] = [-1; 128]
+var FO_KREG_SENS: [i64; 8192] = [-1; 8192]
+
+fn fo_kreg_sens_reset() with Mut {
+    FO_KREG_COUNT = 0
+}
+
+fn fo_kreg_sens_slot(reg: i64) -> i64 with Mut, Panic, Div {
+    if reg < 0 { return 0 - 1 }
+    var i: i64 = FO_KREG_COUNT - 1
+    while i >= 0 {
+        if FO_KREG_REG[i as usize] == reg {
+            return i
+        }
+        i = i - 1
+    }
+    0 - 1
+}
+
+fn fo_kreg_sens_store(reg: i64, sens: [i64; 64]) with Mut, Panic, Div {
+    if reg < 0 { return }
+    var slot: i64 = fo_kreg_sens_slot(reg)
+    if slot < 0 {
+        if FO_KREG_COUNT >= FO_KREG_MAX { return }
+        slot = FO_KREG_COUNT
+        FO_KREG_REG[slot as usize] = reg
+        FO_KREG_COUNT = slot + 1
+    }
+    var k: i64 = 0
+    while k < FO_MAX_CH {
+        FO_KREG_SENS[(slot * FO_MAX_CH + k) as usize] = sens[k as usize]
+        k = k + 1
+    }
+}
+
 fn fo_field_sens_reset() with Mut {
     FO_FIELD_SENS_COUNT = 0
+    fo_kreg_sens_reset()
     FO_ARRAY_COUNT = 0
     FO_CONTAINER_KNOWLEDGE_SEEN = false
     fo_ref_alias_reset()
@@ -12575,6 +12617,27 @@ fn lower_type_expr_is_integer(te: &TypeExpr) -> bool with Mut, Panic, Div {
 // query in the body. Everything else keeps the existing call-site analysis.
 // Parameter kinds (TG_PKIND): 0 integer/bool, 1 f64, 2 Knowledge, 3 struct,
 // 4 function.
+// True when the body of `fd` is exactly one expression statement whose
+// expression is a binary operation or a call.
+fn tg_kret_body_is_tail_expr(fd: &FnDef) -> bool with Mut, Panic, Div {
+    match (*fd).body.stmts {
+        Some(sl) => {
+            match (*sl).tail {
+                Some(_) => { return false }
+                None => {}
+            }
+            if (*sl).head.kind != StmtKind::StmtExpr { return false }
+            match (*sl).head.expr {
+                Some(x) => {
+                    return (*x).kind == ExprKind::ExprBinary || (*x).kind == ExprKind::ExprCall
+                }
+                None => { return false }
+            }
+        }
+        None => { return false }
+    }
+}
+
 fn tg_note(name: Name, fd: &FnDef, self_type: Name) with Mut, Panic, Div, Alloc {
     if (*fd).is_extern || (*fd).is_kernel { return }
     tg_fn_note(name, fd)
@@ -12584,15 +12647,28 @@ fn tg_note(name: Name, fd: &FnDef, self_type: Name) with Mut, Panic, Div, Alloc 
     match (*fd).return_type {
         Some(rt) => {
             if !lower_type_expr_is_f64(&(*rt)) {
-                // A struct by value: its scalar f64 fields are the outputs. The
-                // type is validated at the first call (tg_out_layout), where the
-                // layout registry is available.
-                if (*rt).kind != TypeExprKind::TypeNamed { return }
-                let rn = lower_param_struct_type_name(&(*rt))
-                if rn.len <= 0 { return }
-                if ir_name_eq_lit(rn, "f128") || ir_name_eq_lit(rn, "f256") || ir_name_eq_lit(rn, "Knowledge") { return }
-                ret_kind = 1
-                ret_type = ir_intern_name(rn)
+                if (*rt).kind == TypeExprKind::TypeKnowledge && lower_type_expr_knowledge_value_float(&(*rt)) == 1 {
+                    // A Knowledge return goes through the tangent path only when
+                    // the body is one tail expression the re-lowering reads
+                    // exactly (Knowledge arithmetic or a call). A body with a
+                    // `let`, or one that rebuilds the result as a struct literal,
+                    // gave a zero-sensitivity answer here that overrode the
+                    // callee's runtime variance: `knowledge_branded_return`
+                    // printed variance 0 instead of 4.04. Those bodies keep the
+                    // runtime variance (a fresh channel: conservative).
+                    if !tg_kret_body_is_tail_expr(fd) { return }
+                    ret_kind = 2
+                } else {
+                    // A struct by value: its scalar f64 fields are the outputs. The
+                    // type is validated at the first call (tg_out_layout), where the
+                    // layout registry is available.
+                    if (*rt).kind != TypeExprKind::TypeNamed { return }
+                    let rn = lower_param_struct_type_name(&(*rt))
+                    if rn.len <= 0 { return }
+                    if ir_name_eq_lit(rn, "f128") || ir_name_eq_lit(rn, "f256") || ir_name_eq_lit(rn, "Knowledge") { return }
+                    ret_kind = 1
+                    ret_type = ir_intern_name(rn)
+                }
             }
         }
         None => { return }
@@ -18851,7 +18927,7 @@ impl Lowerer {
     fn tg_out_layout(self, tgi: i64) -> bool with Mut, Panic, Div, Alloc {
         TG_O_N = 0
         if !tg_idx_valid(tgi) { return false }
-        if TG_RET[tgi as usize] == 0 {
+        if TG_RET[tgi as usize] == 0 || TG_RET[tgi as usize] == 2 {
             TG_O_N = 1
             return true
         }
@@ -18915,7 +18991,7 @@ impl Lowerer {
     // after tg_layout: it reads TG_L_N.
     fn tg_ret_ok(self, tgi: i64) -> bool with Mut, Panic, Div, Alloc {
         if !tg_idx_valid(tgi) { return false }
-        if TG_RET[tgi as usize] == 0 { return true }
+        if TG_RET[tgi as usize] == 0 || TG_RET[tgi as usize] == 2 { return true }
         if self.so_enabled && self.tg_pick_ord(tgi, TG_L_N) != 2 { return false }
         self.tg_out_layout(tgi)
     }
@@ -19802,6 +19878,7 @@ impl Lowerer {
         lo = arr_pair.0
         let arr = arr_pair.1
         let is_sret = TG_RET[tgi as usize] == 1
+        let is_kret = TG_RET[tgi as usize] == 2
         var nout: i64 = 1
         if is_sret {
             if !lo.tg_out_layout(tgi) { return (lo, 0 - 1) }
@@ -19821,9 +19898,9 @@ impl Lowerer {
         lo = pc.lo
         lo.pending_variance_reg = -1
         var ci = ir_call(dst, cid, cname, pc.args, pc.argc)
-        if !is_sret { ci.imm_flags = IR_FLOAT_REG_MARKER_FLAG }
+        if !is_sret && !is_kret { ci.imm_flags = IR_FLOAT_REG_MARKER_FLAG }
         lo = lo.emit(ci)
-        if !is_sret { lo = lo.emit(ir_mark_float_reg(dst)) }
+        if !is_sret && !is_kret { lo = lo.emit(ir_mark_float_reg(dst)) }
         var slot_i: i64 = 0 - 1
         if TG_SITE_N < TG_SITE_MAX {
             slot_i = TG_SITE_N
@@ -19997,6 +20074,20 @@ impl Lowerer {
             lo = lo.emit(ldm)
             lo = lo.emit(ir_mark_float_reg(mr.1))
             TG_SITE_M[slot_i as usize] = mr.1
+        }
+        if is_kret && slot_i >= 0 {
+            let cv = lo.tg_call_variance(e, false)
+            lo = cv.0
+            if cv.1 >= 0 && lo.fo_expr_has_sens() {
+                lo = lo.bind_variance_for_base_reg(dst, cv.1)
+                lo.pending_variance_reg = cv.1
+                var pk: i64 = 0
+                while pk < FO_MAX_CH {
+                    lo.fo_pending_sens[pk as usize] = lo.fo_expr_sens[pk as usize]
+                    pk = pk + 1
+                }
+                fo_kreg_sens_store(dst, lo.fo_expr_sens)
+            }
         }
         (lo, dst)
     }
@@ -31297,14 +31388,28 @@ impl Lowerer {
             if (*e).bin_op == BinaryOp::OpMul {
                 let lhs_val_pair = lo.lower_opt_expr_ref(&(*e).left)
                 lo = lhs_val_pair.0
-                let lhs_fp = lo.so_value_as_f64(lhs_val_pair.1, lo.opt_expr_result_is_float_ref(&(*e).left))
-                lo = lhs_fp.0
-                let lhs_v = lhs_fp.1
+                var lhs_v: i64 = 0 - 1
+                if lo.opt_expr_is_knowledge_operand_ref(&(*e).left) {
+                    let lkp = lo.kn_fget(lhs_val_pair.1, 0, make_name("value"))
+                    lo = lkp.0
+                    lhs_v = lkp.1
+                } else {
+                    let lhs_fp = lo.so_value_as_f64(lhs_val_pair.1, lo.opt_expr_result_is_float_ref(&(*e).left))
+                    lo = lhs_fp.0
+                    lhs_v = lhs_fp.1
+                }
                 let rhs_val_pair = lo.lower_opt_expr_ref(&(*e).right)
                 lo = rhs_val_pair.0
-                let rhs_fp = lo.so_value_as_f64(rhs_val_pair.1, lo.opt_expr_result_is_float_ref(&(*e).right))
-                lo = rhs_fp.0
-                let rhs_v = rhs_fp.1
+                var rhs_v: i64 = 0 - 1
+                if lo.opt_expr_is_knowledge_operand_ref(&(*e).right) {
+                    let rkp = lo.kn_fget(rhs_val_pair.1, 0, make_name("value"))
+                    lo = rkp.0
+                    rhs_v = rkp.1
+                } else {
+                    let rhs_fp = lo.so_value_as_f64(rhs_val_pair.1, lo.opt_expr_result_is_float_ref(&(*e).right))
+                    lo = rhs_fp.0
+                    rhs_v = rhs_fp.1
+                }
                 if lo.so_enabled {
                     lo = lo.so_combine_hess_mul(hL, hR, sL, sR, lhs_v, rhs_v)
                 }
@@ -31314,14 +31419,28 @@ impl Lowerer {
             if (*e).bin_op == BinaryOp::OpDiv {
                 let lhs_val_pair = lo.lower_opt_expr_ref(&(*e).left)
                 lo = lhs_val_pair.0
-                let lhs_fp = lo.so_value_as_f64(lhs_val_pair.1, lo.opt_expr_result_is_float_ref(&(*e).left))
-                lo = lhs_fp.0
-                let lhs_v = lhs_fp.1
+                var lhs_v: i64 = 0 - 1
+                if lo.opt_expr_is_knowledge_operand_ref(&(*e).left) {
+                    let lkp = lo.kn_fget(lhs_val_pair.1, 0, make_name("value"))
+                    lo = lkp.0
+                    lhs_v = lkp.1
+                } else {
+                    let lhs_fp = lo.so_value_as_f64(lhs_val_pair.1, lo.opt_expr_result_is_float_ref(&(*e).left))
+                    lo = lhs_fp.0
+                    lhs_v = lhs_fp.1
+                }
                 let rhs_val_pair = lo.lower_opt_expr_ref(&(*e).right)
                 lo = rhs_val_pair.0
-                let rhs_fp = lo.so_value_as_f64(rhs_val_pair.1, lo.opt_expr_result_is_float_ref(&(*e).right))
-                lo = rhs_fp.0
-                let rhs_v = rhs_fp.1
+                var rhs_v: i64 = 0 - 1
+                if lo.opt_expr_is_knowledge_operand_ref(&(*e).right) {
+                    let rkp = lo.kn_fget(rhs_val_pair.1, 0, make_name("value"))
+                    lo = rkp.0
+                    rhs_v = rkp.1
+                } else {
+                    let rhs_fp = lo.so_value_as_f64(rhs_val_pair.1, lo.opt_expr_result_is_float_ref(&(*e).right))
+                    lo = rhs_fp.0
+                    rhs_v = rhs_fp.1
+                }
                 if lo.so_enabled {
                     lo = lo.so_combine_hess_div(hL, hR, sL, sR, lhs_v, rhs_v)
                 } else {
@@ -31545,15 +31664,40 @@ impl Lowerer {
                 match (*e).left {
                     Some(base_expr) => {
                         // RC-B: `(a * b).value` over Knowledge names reads the variance the
-                        // Knowledge arm stored for the product.
+                        // Knowledge arm stored for the product, keeping its multi-channel sens.
                         if (*base_expr).kind == ExprKind::ExprBinary && self.expr_is_knowledge_ident_tree_ref(&(*base_expr)) {
                             let kb = self.lower_expr_ref(&(*base_expr))
+                            let kslot = fo_kreg_sens_slot(kb.1)
+                            if kslot >= 0 {
+                                var lo_kb = kb.0.so_clear_expr_hess()
+                                var kk: i64 = 0
+                                while kk < FO_MAX_CH {
+                                    lo_kb.fo_expr_sens[kk as usize] = FO_KREG_SENS[(kslot * FO_MAX_CH + kk) as usize]
+                                    kk = kk + 1
+                                }
+                                if lo_kb.fo_expr_has_sens() {
+                                    return lo_kb.fo_emit_var_from_sens()
+                                }
+                            }
                             let kv = kb.0.lookup_variance_for_base_reg(kb.1)
                             if kv >= 0 {
                                 return (kb.0.so_clear_expr_hess().fo_seed_from_variance(kv, 0 - 1), kv)
                             }
                         }
+                        if (*base_expr).kind == ExprKind::ExprCall {
+                            let tgv_k = self.tg_call_variance(&(*base_expr), false)
+                            if tgv_k.1 >= 0 {
+                                return tgv_k
+                            }
+                        }
                         if (*base_expr).kind == ExprKind::ExprIdent {
+                            // N-04: prefer bound multi-channel sensitivities for derived Knowledge
+                            // locals (e.g. `let s = a + b`, `let t = twice(a)`, `let r = h.k`)
+                            // before falling back to seeding a fresh independent channel from field 1.
+                            let lo_ls = inl_let.0.fo_load_local_sens((*base_expr).name).so_load_local_hess((*base_expr).name)
+                            if lo_ls.fo_expr_has_sens() {
+                                return lo_ls.fo_emit_var_from_sens()
+                            }
                             let base_reg = inl_let.0.lookup_local((*base_expr).name)
                             if base_reg >= 0 {
                                 let carried = inl_let.0.lookup_variance_for_field(base_reg, 0)
@@ -32110,6 +32254,14 @@ impl Lowerer {
 
     fn expr_call_return_knowledge_value_float_ref(self, expr: &Expr) -> i64 with Mut, Panic, Div, Alloc {
         if (*expr).kind == ExprKind::ExprCall {
+            match (*expr).left {
+                Some(callee_k) => {
+                    if (*callee_k).kind == ExprKind::ExprIdent && ir_name_eq_lit((*callee_k).name, "knight") {
+                        return 1
+                    }
+                }
+                None => {}
+            }
             let fn_id = self.expr_call_callee_fn_id_ref(expr)
             if fn_id >= 0 && fn_id < self.module.fn_count {
                 return ir_fn_get(&(*self.module), fn_id as usize).return_kn_value_float
@@ -33117,6 +33269,13 @@ impl Lowerer {
     }
 
     fn field_is_float_for_base_ref(self, base_opt: &Option<Box<Expr>>, field_name: Name) -> bool with Mut, Panic, Div, Alloc {
+        let tidx = lower_name_tuple_index(field_name)
+        if tidx >= 0 {
+            let tmask = self.opt_base_tuple_float_mask_ref(base_opt) & 4294967295
+            if tmask != 0 && (tmask >> (tidx as i32)) % 2 == 1 {
+                return true
+            }
+        }
         if ir_name_eq_lit(field_name, "value") {
             let kn = self.field_base_kn_value_float_ref(base_opt)
             if kn == 0 { return false }
@@ -34120,6 +34279,9 @@ impl Lowerer {
     fn opt_base_tuple_float_mask_ref(self, base_opt: &Option<Box<Expr>>) -> i64 with Mut, Panic, Div, Alloc {
         match *base_opt {
             Some(base_expr) => {
+                if (*base_expr).kind == ExprKind::ExprFieldAccess && ir_name_eq_lit((*base_expr).name, "iv") {
+                    return 3
+                }
                 if (*base_expr).kind == ExprKind::ExprIdent {
                     return self.lookup_local_tuple_float_mask((*base_expr).name)
                 }
@@ -39804,6 +39966,13 @@ impl Lowerer {
                             lo = lo.bind_local_struct_type(s.name, make_name("Knowledge"), false)
                             lowerer_bind_kn_value_float_mut(&! lo, s.name, 1)
                         }
+                        if (*rhs).kind == ExprKind::ExprFieldAccess && lo.expr_is_knowledge_operand_ref(&(*rhs)) {
+                            lo = lo.bind_local_struct_type(s.name, make_name("Knowledge"), false)
+                            lowerer_bind_kn_value_float_mut(&! lo, s.name, 1)
+                        }
+                        if (*rhs).kind == ExprKind::ExprFieldAccess && ir_name_eq_lit((*rhs).name, "iv") {
+                            lo = lo.bind_local_tuple_float_mask(s.name, 3)
+                        }
                     }
                     None => {}
                 }
@@ -39952,6 +40121,11 @@ impl Lowerer {
                             }
                         }
                         None => false,
+                    }
+                    // knight("name", lo, hi) -> Knowledge<f64>
+                    if ir_name_eq_lit(callee_struct_name, "knight") {
+                        lo = lo.bind_local_struct_type(s.name, make_name("Knowledge"), false)
+                        lowerer_bind_kn_value_float_mut(&! lo, s.name, 1)
                     }
                     // measure(...) → Knowledge (return-name lookup often misses builtins)
                     if ir_name_is_measure(callee_struct_name) {
@@ -42091,15 +42265,27 @@ impl Lowerer {
                     // just bytes in an aggregate. Nested literals recurse naturally,
                     // because lowering the inner literal runs this same loop against
                     // the inner base reg.
-                    let fv = lo.lower_expr_variance_ref(&(*list).head.value)
-                    lo = fv.0
-                    if fv.1 >= 0 {
-                        lo = lo.bind_variance_for_field(base_reg, named_field_idx, fv.1)
-                        if TG_NPCH > 0 && lo.current_fn == TG_CLONE_FN {
-                            // Inside a tangent clone the field keeps its tangent
-                            // row, so a returned local reads it back exactly.
-                            lo = lo.fo_field_sens_store(lo.variance_field_key(base_reg, named_field_idx))
-                            if TG_ACTIVE_ORD == 2 {
+                    let kreg_slot = fo_kreg_sens_slot(vreg)
+                    if kreg_slot >= 0 {
+                        var krc: i64 = 0
+                        while krc < FO_MAX_CH {
+                            lo.fo_expr_sens[krc as usize] = FO_KREG_SENS[(kreg_slot * FO_MAX_CH + krc) as usize]
+                            krc = krc + 1
+                        }
+                        let kv_reg = lo.lookup_variance_for_base_reg(vreg)
+                        if kv_reg >= 0 {
+                            lo = lo.bind_variance_for_field(base_reg, named_field_idx, kv_reg)
+                        }
+                        lo = lo.fo_field_sens_store(lo.variance_field_key(base_reg, named_field_idx))
+                    } else {
+                        let fv = lo.lower_expr_variance_ref(&(*list).head.value)
+                        lo = fv.0
+                        if fv.1 >= 0 {
+                            lo = lo.bind_variance_for_field(base_reg, named_field_idx, fv.1)
+                            if lo.fo_expr_has_sens() {
+                                lo = lo.fo_field_sens_store(lo.variance_field_key(base_reg, named_field_idx))
+                            }
+                            if TG_NPCH > 0 && lo.current_fn == TG_CLONE_FN && TG_ACTIVE_ORD == 2 {
                                 lo = lo.fo_field_hess_store(lo.variance_field_key(base_reg, named_field_idx))
                             }
                         }
@@ -43360,13 +43546,24 @@ impl Lowerer {
             match (*e).left {
                 Some(callee) => {
                     if (*callee).kind == ExprKind::ExprIdent {
-                        if name_eq_lit((*callee).name, "measure") || name_eq_lit((*callee).name, "Knowledge") { return true }
+                        if name_eq_lit((*callee).name, "measure") || name_eq_lit((*callee).name, "Knowledge") || name_eq_lit((*callee).name, "knight") { return true }
                     }
                 }
                 None => {}
             }
             if self.expr_call_return_knowledge_value_float_ref(e) >= 0 { return true }
             return ir_name_eq_lit(self.expr_call_return_struct_name_ref(e), "Knowledge")
+        }
+        if (*e).kind == ExprKind::ExprFieldAccess {
+            match (*e).left {
+                Some(owner) => {
+                    let owner_ty = self.expr_receiver_struct_type_ref(&(*owner))
+                    if owner_ty.len > 0 && lower_kn_field_kind(owner_ty, (*e).name) == 1 {
+                        return true
+                    }
+                }
+                None => {}
+            }
         }
         if (*e).kind == ExprKind::ExprBinary {
             if (*e).bin_op != BinaryOp::OpAdd && (*e).bin_op != BinaryOp::OpSub
@@ -43422,7 +43619,7 @@ impl Lowerer {
     // the Knowledge (x) Knowledge GUM arm: with variance 0 and confidence 1 on
     // the constant side it reduces to c^2 va (*), va (+ -), va / c^2 (k / c),
     // c^2 vb / b^4 (c / k), and min(conf, 1) = conf.
-    fn lower_knowledge_scalar_arith(self, op: BinaryOp, lhs: i64, rhs: i64, k_on_left: bool, dst: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+    fn lower_knowledge_scalar_arith_with_exprs(self, op: BinaryOp, lhs: i64, rhs: i64, e_left: &Option<Box<Expr>>, e_right: &Option<Box<Expr>>, k_on_left: bool, dst: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
         let scalar = if k_on_left { rhs } else { lhs }
         let hp = lo.fresh_reg()
@@ -43438,16 +43635,28 @@ impl Lowerer {
         lo = lo.emit(ir_field_set(hp.1, 0, scalar, make_name("value")))
         lo = lo.emit(ir_field_set(hp.1, 1, zp.1, make_name("variance")))
         lo = lo.emit(ir_field_set(hp.1, 2, op1.1, make_name("confidence")))
+        let no_expr: Option<Box<Expr>> = None
         if k_on_left {
-            return lo.lower_knowledge_binary_arith(op, lhs, hp.1, dst)
+            return lo.lower_knowledge_binary_arith_with_exprs(op, lhs, hp.1, e_left, &no_expr, false, true, dst)
         }
-        lo.lower_knowledge_binary_arith(op, hp.1, rhs, dst)
+        lo.lower_knowledge_binary_arith_with_exprs(op, hp.1, rhs, &no_expr, e_right, true, false, dst)
     }
 
     // Knowledge operand tree whose leaves are all bound names (no call), so it
     // can be lowered a second time for its variance without re-running effects.
     fn expr_is_knowledge_ident_tree_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
         if (*e).kind == ExprKind::ExprIdent { return self.expr_is_knowledge_operand_ref(e) }
+        if (*e).kind == ExprKind::ExprFieldAccess {
+            match (*e).left {
+                Some(owner) => {
+                    let owner_ty = self.expr_receiver_struct_type_ref(&(*owner))
+                    if owner_ty.len > 0 && lower_kn_field_kind(owner_ty, (*e).name) == 1 {
+                        return true
+                    }
+                }
+                None => {}
+            }
+        }
         if (*e).kind == ExprKind::ExprBinary {
             if !self.expr_is_knowledge_operand_ref(e) { return false }
             match (*e).left {
@@ -43487,6 +43696,43 @@ impl Lowerer {
         (lo, p.1)
     }
 
+    fn fo_load_k_operand_sens(self, reg: i64, opt_e: &Option<Box<Expr>>, is_scalar_wrap: bool) -> (Lowerer, bool) with Mut, Panic, Div, Alloc, IO {
+        var lo = self.fo_clear_expr_sens()
+        if is_scalar_wrap {
+            return (lo, false)
+        }
+        let kslot = fo_kreg_sens_slot(reg)
+        if kslot >= 0 {
+            var any = false
+            var k: i64 = 0
+            while k < FO_MAX_CH {
+                let r = FO_KREG_SENS[(kslot * FO_MAX_CH + k) as usize]
+                lo.fo_expr_sens[k as usize] = r
+                if r >= 0 { any = true }
+                k = k + 1
+            }
+            if any { return (lo, true) }
+        }
+        match *opt_e {
+            Some(be) => {
+                if (*be).kind == ExprKind::ExprIdent {
+                    lo = lo.fo_load_local_sens((*be).name)
+                    if lo.fo_expr_has_sens() {
+                        return (lo, true)
+                    }
+                    let kp = lo.lower_knowledge_variance_for_ident((*be).name)
+                    lo = kp.0
+                    if kp.1 >= 0 && !fo_variance_is_static_zero(&lo, kp.1) {
+                        lo = lo.fo_seed_from_variance(kp.1, 0 - 1)
+                        return (lo, true)
+                    }
+                }
+            }
+            None => {}
+        }
+        (lo.fo_clear_expr_sens(), false)
+    }
+
     // Knowledge (op) Knowledge for + - * /. Operands are independent sources
     // (E230 refuses every pair the checker cannot prove disjoint), so the
     // first-order GUM propagation needs no covariance term:
@@ -43494,9 +43740,9 @@ impl Lowerer {
     //   *       var = b^2 va + a^2 vb
     //   /       var = va / b^2 + a^2 vb / b^4
     // confidence = min(ca, cb) (formal/KnowledgeArithmeticSoundness.lean,
-    // spec semantic_types.tex T-Knowledge-Binary). The result is a fresh
-    // channel: its variance register seeds a new first-order source.
-    fn lower_knowledge_binary_arith(self, op: BinaryOp, lhs: i64, rhs: i64, dst: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+    // spec semantic_types.tex T-Knowledge-Binary). Preserves multi-channel
+    // FO sensitivities across operations (N-04).
+    fn lower_knowledge_binary_arith_with_exprs(self, op: BinaryOp, lhs: i64, rhs: i64, e_left: &Option<Box<Expr>>, e_right: &Option<Box<Expr>>, lhs_is_scalar: bool, rhs_is_scalar: bool, dst: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
         let a_p = lo.kn_fget(lhs, 0, make_name("value"))
         lo = a_p.0
@@ -43567,9 +43813,60 @@ impl Lowerer {
         lo = lo.emit(ir_field_set(dst, 0, rv.1, make_name("value")))
         lo = lo.emit(ir_field_set(dst, 1, var_reg, make_name("variance")))
         lo = lo.emit(ir_field_set(dst, 2, cm, make_name("confidence")))
+        // EPI-006 step 3b: propagate certified Knightian affine form (slot 63).
+        // Fast-paths in 3 instructions when neither operand carries Knightian uncertainty.
+        let rids_kn = ir_ensure_knight_runtime(&! (*lo.module))
+        let op_code_kn: i64 = if op == BinaryOp::OpAdd { 0 } else if op == BinaryOp::OpSub { 1 } else if op == BinaryOp::OpMul { 2 } else { 3 }
+        let opc_p = lo.fresh_reg()
+        lo = opc_p.0
+        lo = lo.emit(ir_load_imm(opc_p.1, op_code_kn))
+        let kret_p = lo.fresh_reg()
+        lo = kret_p.0
+        let kargs: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_cons(
+            opc_p.1,
+            Some(Box::new(ir_reg_list_cons(
+                lhs,
+                Some(Box::new(ir_reg_list_cons(
+                    rhs,
+                    Some(Box::new(ir_reg_list_single(dst))),
+                ))),
+            ))),
+        )))
+        lo = lo.emit(ir_call(kret_p.1, rids_kn.fid_binop, make_name("__sounio_knight_binop"), kargs, 4))
         lo = lo.bind_variance_for_base_reg(dst, var_reg)
         lo.pending_variance_reg = var_reg
-        lo = lo.fo_seed_from_variance(var_reg, 0 - 1)
+        // N-04: propagate multi-channel FO sensitivities instead of seeding a
+        // fresh independent channel whenever either operand carries sensitivities.
+        let l_sens = lo.fo_load_k_operand_sens(lhs, e_left, lhs_is_scalar)
+        lo = l_sens.0
+        let has_L = l_sens.1
+        var sL = lo.fo_snapshot_expr_sens()
+        let r_sens = lo.fo_load_k_operand_sens(rhs, e_right, rhs_is_scalar)
+        lo = r_sens.0
+        let has_R = r_sens.1
+        var sR = lo.fo_snapshot_expr_sens()
+        if has_L || has_R {
+            if !has_L && !lhs_is_scalar && !fo_variance_is_static_zero(&lo, va) {
+                lo = lo.fo_seed_from_variance(va, 0 - 1)
+                sL = lo.fo_snapshot_expr_sens()
+            }
+            if !has_R && !rhs_is_scalar && !fo_variance_is_static_zero(&lo, vb) {
+                lo = lo.fo_seed_from_variance(vb, 0 - 1)
+                sR = lo.fo_snapshot_expr_sens()
+            }
+            if op == BinaryOp::OpAdd {
+                lo = lo.fo_combine_sens_addsub(sL, sR, false)
+            } else if op == BinaryOp::OpSub {
+                lo = lo.fo_combine_sens_addsub(sL, sR, true)
+            } else if op == BinaryOp::OpMul {
+                lo = lo.fo_combine_sens_mul(sL, sR, a, b)
+            } else {
+                lo = lo.fo_combine_sens_div(sL, sR, a, b)
+            }
+            fo_kreg_sens_store(dst, lo.fo_expr_sens)
+        } else {
+            lo = lo.fo_seed_from_variance(var_reg, 0 - 1)
+        }
         var k: i64 = 0
         while k < FO_MAX_CH {
             lo.fo_pending_sens[k as usize] = lo.fo_expr_sens[k as usize]
@@ -43645,6 +43942,7 @@ impl Lowerer {
         lo11.pending_variance_reg = variance_reg
         // Seed FO channel so `let k = measure(...)` then k.value shares the same σ² channel.
         lo11 = lo11.fo_seed_from_variance(variance_reg, 0 - 1)
+        fo_kreg_sens_store(dst_reg, lo11.fo_expr_sens)
         var mk: i64 = 0
         while mk < FO_MAX_CH {
             lo11.fo_pending_sens[mk as usize] = lo11.fo_expr_sens[mk as usize]
@@ -43652,6 +43950,112 @@ impl Lowerer {
         }
 
         (lo11, dst_reg)
+    }
+
+    // EPI-006 step 3b: knight("name", lo, hi) -> Knowledge<f64> carrying a
+    // named Knightian affine source in slot 63, midpoint in slot 0, variance 0.
+    fn lower_knight_call_ref(self, _span: Span, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if FO_FN_OBSERVES { FO_CONTAINER_KNOWLEDGE_SEEN = true }
+        fo_require_uncertainty_tracking()
+        var lo = self
+        var name_reg: i64 = 0 - 1
+        var lo_reg: i64 = 0 - 1
+        var hi_reg: i64 = 0 - 1
+        match *args {
+            Some(l0) => {
+                let p0 = lo.lower_expr_ref(&(*l0).head)
+                lo = p0.0
+                name_reg = p0.1
+                match (*l0).tail {
+                    Some(l1) => {
+                        let a1_is_f = lo.expr_result_is_float_ref(&(*l1).head)
+                        let p1 = lo.lower_expr_ref(&(*l1).head)
+                        lo = p1.0
+                        lo_reg = p1.1
+                        if !a1_is_f {
+                            let z1p = lo.fresh_reg()
+                            lo = z1p.0
+                            lo = lo.emit(ir_load_float(z1p.1, 0.0))
+                            lo = lo.emit(ir_mark_float_reg(z1p.1))
+                            let c1p = lo.fresh_reg()
+                            lo = c1p.0
+                            lo = lo.emit(ir_binop_typed(c1p.1, lo_reg, BinaryOp::OpAdd, z1p.1, false, true))
+                            lo = lo.emit(ir_mark_float_reg(c1p.1))
+                            lo_reg = c1p.1
+                        } else {
+                            lo = lo.emit(ir_mark_float_reg(lo_reg))
+                        }
+                        match (*l1).tail {
+                            Some(l2) => {
+                                let a2_is_f = lo.expr_result_is_float_ref(&(*l2).head)
+                                let p2 = lo.lower_expr_ref(&(*l2).head)
+                                lo = p2.0
+                                hi_reg = p2.1
+                                if !a2_is_f {
+                                    let z2p = lo.fresh_reg()
+                                    lo = z2p.0
+                                    lo = lo.emit(ir_load_float(z2p.1, 0.0))
+                                    lo = lo.emit(ir_mark_float_reg(z2p.1))
+                                    let c2p = lo.fresh_reg()
+                                    lo = c2p.0
+                                    lo = lo.emit(ir_binop_typed(c2p.1, hi_reg, BinaryOp::OpAdd, z2p.1, false, true))
+                                    lo = lo.emit(ir_mark_float_reg(c2p.1))
+                                    hi_reg = c2p.1
+                                } else {
+                                    lo = lo.emit(ir_mark_float_reg(hi_reg))
+                                }
+                            }
+                            None => {}
+                        }
+                    }
+                    None => {}
+                }
+            }
+            None => {}
+        }
+        if name_reg < 0 {
+            let dp = lo.emit_unit()
+            return dp
+        }
+        if lo_reg < 0 {
+            let lp = lo.fresh_reg()
+            lo = lp.0
+            lo = lo.emit(ir_load_float(lp.1, 0.0))
+            lo = lo.emit(ir_mark_float_reg(lp.1))
+            lo_reg = lp.1
+        }
+        if hi_reg < 0 {
+            let hp = lo.fresh_reg()
+            lo = hp.0
+            lo = lo.emit(ir_load_float(hp.1, 0.0))
+            lo = lo.emit(ir_mark_float_reg(hp.1))
+            hi_reg = hp.1
+        }
+        let rids = ir_ensure_knight_runtime(&! (*lo.module))
+        let dst_p = lo.fresh_reg()
+        lo = dst_p.0
+        let dst_reg = dst_p.1
+        let kargs: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_cons(
+            name_reg,
+            Some(Box::new(ir_reg_list_cons(
+                lo_reg,
+                Some(Box::new(ir_reg_list_single(hi_reg))),
+            ))),
+        )))
+        lo = lo.emit(ir_call(dst_reg, rids.fid_new, make_name("__sounio_knight_new"), kargs, 3))
+        let vp = lo.fresh_reg()
+        lo = vp.0
+        lo = lo.emit(ir_load_float(vp.1, 0.0))
+        lo = lo.emit(ir_mark_float_reg(vp.1))
+        lo = lo.bind_variance_for_base_reg(dst_reg, vp.1)
+        lo.pending_variance_reg = vp.1
+        lo = lo.fo_seed_from_variance(vp.1, 0 - 1)
+        var mk: i64 = 0
+        while mk < FO_MAX_CH {
+            lo.fo_pending_sens[mk as usize] = lo.fo_expr_sens[mk as usize]
+            mk = mk + 1
+        }
+        (lo, dst_reg)
     }
 
     // Knowledge(v, e=<confidence>, prov=<provenance>) -> Knowledge<f64> struct construction.
@@ -45978,6 +46382,7 @@ impl Lowerer {
             || ir_name_is_transition_step_count(callee_name)
             || ir_name_is_lift_knowledge(callee_name)
             || ir_name_is_measure(callee_name)
+            || ir_name_eq_lit(callee_name, "knight")
             || (self.name_is_sign(callee_name) && count_expr_list_ref(&e.args) == 2)
             || ir_name_is_knowledge_ctor(callee_name)
             || self.name_is_variance_of(callee_name)
@@ -46093,6 +46498,9 @@ impl Lowerer {
         }
         if ir_name_is_measure(callee_name) {
             return self.lower_measure_call_ref(e.span, &e.args)
+        }
+        if ir_name_eq_lit(callee_name, "knight") {
+            return self.lower_knight_call_ref(e.span, &e.args)
         }
         if ir_name_is_knowledge_ctor(callee_name) {
             return self.lower_knowledge_ctor_call_ref(e.span, &e.args)
@@ -47212,6 +47620,23 @@ impl Lowerer {
                 lo_k6 = lo_k6.emit(ir_field_set(dst, 0, result_value_reg, make_name("value")))
                 lo_k6 = lo_k6.emit(ir_field_set(dst, 1, result_variance_reg, make_name("variance")))
                 var lo_k7 = lo_k6.emit(ir_field_set(dst, 2, conf_reg, make_name("confidence")))
+                let rids_ss = ir_ensure_knight_runtime(&! (*lo_k7.module))
+                let opc_ss = lo_k7.fresh_reg()
+                lo_k7 = opc_ss.0
+                lo_k7 = lo_k7.emit(ir_load_imm(opc_ss.1, 0))
+                let kret_ss = lo_k7.fresh_reg()
+                lo_k7 = kret_ss.0
+                let kargs_ss: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_cons(
+                    opc_ss.1,
+                    Some(Box::new(ir_reg_list_cons(
+                        lhs,
+                        Some(Box::new(ir_reg_list_cons(
+                            lhs,
+                            Some(Box::new(ir_reg_list_single(dst))),
+                        ))),
+                    ))),
+                )))
+                lo_k7 = lo_k7.emit(ir_call(kret_ss.1, rids_ss.fid_binop, make_name("__sounio_knight_binop"), kargs_ss, 4))
                 lo_k7 = lo_k7.bind_variance_for_base_reg(dst, result_variance_reg)
                 lo_k7.pending_variance_reg = result_variance_reg
                 lo_k7 = lo_k7.fo_seed_from_variance(result_variance_reg, 0 - 1)
@@ -47239,7 +47664,7 @@ impl Lowerer {
                 lowerer_mark_hard_error(&! lo_kf_refuse)
                 return (lo_kf_refuse, dst)
             }
-            return lo3.lower_knowledge_scalar_arith(e.bin_op, lhs, rhs, k_left, dst)
+            return lo3.lower_knowledge_scalar_arith_with_exprs(e.bin_op, lhs, rhs, &e.left, &e.right, k_left, dst)
         }
         if e.bin_op == BinaryOp::OpAdd || e.bin_op == BinaryOp::OpSub || e.bin_op == BinaryOp::OpMul || e.bin_op == BinaryOp::OpDiv {
             let hid = lowerer_find_hyper_expr_id_for_span_ref(&lo3, e.span)
@@ -47249,7 +47674,7 @@ impl Lowerer {
                 if (*lo3.module).epistemic.hyper_exprs[hid as usize].op_kind == 21 { kk_tagged = true } else { kk_other = true }
             }
             if !kk_other && lo3.opt_expr_is_knowledge_operand_ref(&e.left) && lo3.opt_expr_is_knowledge_operand_ref(&e.right) {
-                return lo3.lower_knowledge_binary_arith(e.bin_op, lhs, rhs, dst)
+                return lo3.lower_knowledge_binary_arith_with_exprs(e.bin_op, lhs, rhs, &e.left, &e.right, false, false, dst)
             }
             if kk_tagged {
                 print("error: Madaros cannot classify the operands of a Knowledge arithmetic expression (the checker admitted it as Knowledge<f64> (x) Knowledge<f64>); bind each operand to a local first, e.g. `let a: Knowledge<f64> = ...` (fail-closed; the handles would otherwise lower as scalars)\n")
@@ -48159,6 +48584,14 @@ impl Lowerer {
         // version changed nothing measurable.
         var lo1 = lo1_pre
         var base = base_pre
+        if ir_name_eq_lit(e.name, "iv") && (lo1.opt_expr_is_knowledge_operand_ref(&e.left) || lo1.field_base_kn_value_float_ref(&e.left) >= 0) {
+            let rids_iv = ir_ensure_knight_runtime(&! (*lo1.module))
+            let iv_dst_p = lo1.fresh_reg()
+            lo1 = iv_dst_p.0
+            let iv_args: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_single(base)))
+            lo1 = lo1.emit(ir_call(iv_dst_p.1, rids_iv.fid_iv, make_name("__sounio_knight_iv"), iv_args, 1))
+            return (lo1, iv_dst_p.1)
+        }
         if ir_name_eq_lit(e.name, "value") {
             let kn_marker = lo1.field_base_kn_value_float_ref(&e.left)
             if kn_marker == 2 || kn_marker == -2 {
@@ -48401,21 +48834,57 @@ impl Lowerer {
             match e.left {
                 Some(base_expr) => {
                     if (*base_expr).kind == ExprKind::ExprIdent {
-                        let vpair = lo3.lower_knowledge_variance_for_ident((*base_expr).name)
-                        lo3 = vpair.0
-                        if vpair.1 >= 0 {
+                        let lo_ls = lo3.fo_load_local_sens((*base_expr).name)
+                        if lo_ls.fo_expr_has_sens() {
+                            lo3 = lo_ls
                             lo3.fo_container_note_projection((*base_expr).name)
-                            lo3.pending_variance_reg = vpair.1
-                            lo3 = lo3.fo_seed_from_variance(vpair.1, 0 - 1)
-                            var pk: i64 = 0
-                            while pk < FO_MAX_CH {
-                                lo3.fo_pending_sens[pk as usize] = lo3.fo_expr_sens[pk as usize]
-                                pk = pk + 1
+                            let vpair_s = lo3.lower_knowledge_variance_for_ident((*base_expr).name)
+                            lo3 = vpair_s.0
+                            if vpair_s.1 >= 0 {
+                                lo3.pending_variance_reg = vpair_s.1
+                            }
+                            var pk0: i64 = 0
+                            while pk0 < FO_MAX_CH {
+                                lo3.fo_pending_sens[pk0 as usize] = lo3.fo_expr_sens[pk0 as usize]
+                                pk0 = pk0 + 1
+                            }
+                        } else {
+                            let vpair = lo3.lower_knowledge_variance_for_ident((*base_expr).name)
+                            lo3 = vpair.0
+                            if vpair.1 >= 0 {
+                                lo3.fo_container_note_projection((*base_expr).name)
+                                lo3.pending_variance_reg = vpair.1
+                                lo3 = lo3.fo_seed_from_variance(vpair.1, 0 - 1)
+                                var pk: i64 = 0
+                                while pk < FO_MAX_CH {
+                                    lo3.fo_pending_sens[pk as usize] = lo3.fo_expr_sens[pk as usize]
+                                    pk = pk + 1
+                                }
                             }
                         }
                     }
                 }
                 _ => {}
+            }
+        } else {
+            // N-04: struct field holding a Knowledge value preserves its stored
+            // per-field multi-channel FO sensitivities across load into local/expr.
+            let fkey = lo3.variance_field_key(base, fidx)
+            let fslot = lo3.fo_field_sens_slot(fkey)
+            if fslot >= 0 {
+                var fk: i64 = 0
+                while fk < FO_MAX_CH {
+                    let sreg = FO_FIELD_SENS[(fslot * FO_MAX_CH + fk) as usize]
+                    lo3.fo_expr_sens[fk as usize] = sreg
+                    lo3.fo_pending_sens[fk as usize] = sreg
+                    fk = fk + 1
+                }
+                fo_kreg_sens_store(dst, lo3.fo_expr_sens)
+                let fv_reg = lo3.lookup_variance_for_field(base, fidx)
+                if fv_reg >= 0 {
+                    lo3 = lo3.bind_variance_for_base_reg(dst, fv_reg)
+                    lo3.pending_variance_reg = fv_reg
+                }
             }
         }
         (lo3, dst)
@@ -51301,10 +51770,16 @@ impl Lowerer {
             print_int(dst)
             print("\n")
         }
-        lo = lo.emit(ir_alloc(dst, lo.aggregate_storage_bytes(count_struct_fields_ref(&e.fields))))
-        lo = lo.ensure_struct_literal_layout_ref(ir_path_first_name(e.path), &e.fields)
-        lo = lo.lower_struct_fields_ref(dst, ir_path_first_name(e.path), &e.fields, 0)
-        if ir_name_eq_lit(ir_path_first_name(e.path), "Knowledge") {
+        let lit_struct_name = ir_path_first_name(e.path)
+        let lit_alloc_tag = if ir_name_eq_lit(lit_struct_name, "Knowledge") {
+            0
+        } else {
+            lo.aggregate_storage_bytes(count_struct_fields_ref(&e.fields))
+        }
+        lo = lo.emit(ir_alloc(dst, lit_alloc_tag))
+        lo = lo.ensure_struct_literal_layout_ref(lit_struct_name, &e.fields)
+        lo = lo.lower_struct_fields_ref(dst, lit_struct_name, &e.fields, 0)
+        if ir_name_eq_lit(lit_struct_name, "Knowledge") {
             lo = lo.lower_knowledge_literal_variance(dst, &e.fields)
         }
         (lo, dst)
