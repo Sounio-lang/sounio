@@ -331,6 +331,60 @@ fn a64m_open_file_info() with Mut, Panic, Div {
     a64m_branch(failed, A64M_LEN, 0)
     a64m_word(0x910303FF)
 }
+// Raw heap ABI (rescued macOS lowering): the payload begins 16 bytes after
+// the mapping base; header words hold logical size and mapped length.
+// Darwin rounds to its 16 KiB pages; the x86 ABI's alignment and failure
+// semantics are otherwise unchanged.
+fn a64m_heap_alloc() with Mut, Panic, Div {
+    a64m_word(0xD10043FF) // sub sp,sp,#16
+    a64m_word(0xF100001F) // cmp x0,#0
+    let bad_sz = A64M_LEN
+    a64m_word(0x54000000)
+    a64m_word(0xF90003E0) // save logical size
+    a64m_imm(9, 16399) // 16 + 16383
+    a64m_imm(10, -16384)
+    a64m_word(0x8B090001) // add x1,x0,x9
+    a64m_word(0xF100003F) // cmp x1,#0 (signed overflow)
+    let ovf_sz = A64M_LEN
+    a64m_word(0x54000000)
+    a64m_word(0x8A0A0021) // and x1,x1,x10
+    a64m_word(0xF90007E1) // save mapped length
+    a64m_imm(0, 0)
+    a64m_imm(2, 3) // PROT_READ | PROT_WRITE
+    a64m_imm(3, 0x1002) // MAP_PRIVATE | MAP_ANON (Darwin)
+    a64m_imm(4, -1)
+    a64m_imm(5, 0)
+    a64m_imm(16, 197) // SYS_mmap
+    a64m_word(0xD4001001)
+    let ok = A64M_LEN
+    a64m_word(0x54000000)
+    a64m_word(0xF94003E9) // ldr x9,[sp]
+    a64m_word(0xF94007EA) // ldr x10,[sp,#8]
+    a64m_word(0xF9000009) // str x9,[x0]
+    a64m_word(0xF900040A) // str x10,[x0,#8]
+    a64m_word(0x91004000) // add x0,x0,#16
+    let done = A64M_LEN
+    a64m_word(0x14000000)
+    let fail = A64M_LEN
+    a64m_imm(0, 0)
+    a64m_branch(bad_sz, fail, 15) // <= 0
+    a64m_branch(ovf_sz, fail, 15)
+    a64m_branch(ok, fail, 4) // Darwin syscall error: carry set
+    a64m_branch(done, A64M_LEN, 0)
+    a64m_word(0x910043FF) // add sp,sp,#16
+}
+fn a64m_heap_free() with Mut, Panic, Div {
+    a64m_word(0xF100001F) // cmp x0,#0
+    let null_ptr = A64M_LEN
+    a64m_word(0x54000000)
+    a64m_word(0xD1004000) // sub x0,x0,#16 (mapping base)
+    a64m_word(0xF9400401) // ldr x1,[x0,#8] (mapped length)
+    a64m_imm(16, 73) // SYS_munmap
+    a64m_word(0xD4001001)
+    let done = A64M_LEN
+    a64m_imm(0, 0)
+    a64m_branch(null_ptr, done, 2)
+}
 fn a64m_file_size() with Mut, Panic, Div {
     a64m_word(0xD10043FF)
     a64m_open_file_info()
@@ -596,6 +650,15 @@ fn a64m_import_call(symbol: string) -> bool with Mut, Panic, Div {
     a64m_word(0xF94001CE | ((id * 8 / 8) << 10)) // ldr x14,[x14,#id*8]
     a64m_word(0xD63F01C0)
     true
+}
+// The Linux backend resolves these three C ABI symbols via libdl/GOT.
+// Darwin exports them from libSystem: use the existing checked dyld import
+// table and keep integer/pointer arguments and results in GPRs.
+fn a64m_system_dl(name: string, argc: i64) -> bool with Mut, Panic, Div {
+    if name == "dlopen" && argc == 2 { return a64m_import_call("dlopen") }
+    if name == "dlsym" && argc == 2 { return a64m_import_call("dlsym") }
+    if name == "dlclose" && argc == 1 { return a64m_import_call("dlclose") }
+    false
 }
 fn a64m_string_address(reg: i64, text: string) with Mut, Panic, Div {
     a64m_word(0x10000040 | reg) // adr reg,+8
@@ -1170,7 +1233,13 @@ fn a64m_emit_instr(module: &IrModule, func: &IrFunction, ii: i64) -> bool with I
         if instr.arg_count > 8 { return false }
         let cleanup = a64m_args(at, instr.arg_count)
         let external_name = ir_name_at(instr.name_id)
-        if !a64m_system_math(str_from_bytes(external_name.buf, external_name.len), instr.arg_count) { return false }
+        let ext_symbol = str_from_bytes(external_name.buf, external_name.len)
+        if a64m_system_dl(ext_symbol, instr.arg_count) {
+            if cleanup > 0 { a64m_word(0x910003FF | (cleanup << 10)) }
+            a64m_store(0, instr.dst)
+            return !A64M_ERROR
+        }
+        if !a64m_system_math(ext_symbol, instr.arg_count) { return false }
         if cleanup > 0 { a64m_word(0x910003FF | (cleanup << 10)) }
         a64m_store(0, instr.dst)
         if instr.dst >= 0 { A64M_FLOAT[instr.dst as usize] = true; A64M_INT[instr.dst as usize] = false }
@@ -1255,6 +1324,12 @@ fn a64m_emit_instr(module: &IrModule, func: &IrFunction, ii: i64) -> bool with I
             a64m_file_size()
         } else if target.instr_count == 0 && name == "read_file" {
             a64m_read_file()
+        } else if target.instr_count == 0 && instr.arg_count == 1 && name == "heap_alloc" {
+            a64m_heap_alloc()
+        } else if target.instr_count == 0 && instr.arg_count == 1 && name == "heap_free" {
+            a64m_heap_free()
+        } else if target.instr_count == 0 && a64m_system_dl(name, instr.arg_count) {
+            // Rescued C ABI dynamic-loader lowering; no float conversion.
         } else if target.instr_count == 0 && (name == "floor" || name == "ffi_floor" || name == "ceil" || name == "ffi_ceil") {
             a64m_word(0x9E670000)
             if name == "floor" || name == "ffi_floor" { a64m_word(0x1E654000) }
