@@ -1,7 +1,7 @@
 <!-- docs:meta
 topic_id: repo.docs.llm.receipts.2026-11-27-cuda-init-allocation-refusal
 authority: repo_only
-audience: contributors
+audience: users
 last_validated: unvalidated
 validated_by: none
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.llm.receipts.2026-11-27-cuda-init-allocation-refusal

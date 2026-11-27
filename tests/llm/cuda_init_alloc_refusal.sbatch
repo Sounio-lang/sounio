@@ -47,11 +47,13 @@ rc=0
 timeout -k 2s 30s "$work/probe" "$work/shard.bin" "$work/libmockcuda.so" > "$work/run.log" 2>&1 || rc=$?
 while IFS= read -r l; do rec "$l"; done < "$work/run.log"
 rec "probe-rc-$rc"
-sha256sum "$work/madaros" "$work/probe" "$work/libmockcuda.so" "$work/run.log" > "$art/SHA256SUMS"
-[[ "$rc" -eq 0 ]] && grep -qx RUNNER_REFUSAL_PASS "$work/run.log"
+cp "$work/madaros" "$work/probe" "$work/libmockcuda.so" "$work/run.log" "$art/"
+(cd "$art" && sha256sum madaros probe libmockcuda.so run.log > SHA256SUMS)
+[[ "$rc" -eq 0 ]]
+grep -qx RUNNER_REFUSAL_PASS "$work/run.log"
 if [[ "${2:-after}" == before ]]; then
-  ! grep -q CUDA_DEVICE_ALLOC_REFUSED "$work/run.log"
-  [[ $(grep -c '^FAKE_ALLOC_CALL=' "$work/run.log") -gt 2 ]]
+  if grep -q CUDA_DEVICE_ALLOC_REFUSED "$work/run.log"; then exit 1; fi
+  grep -qx 'FAKE_CTX_DESTROY allocations=7 frees=6' "$work/run.log"
   rec BASELINE_SILENT_CONTINUATION_REPRODUCED
 else
   grep -qx 'CUDA_DEVICE_ALLOC_REFUSED stage=shard bytes=64 CUresult=2' "$work/run.log"
