@@ -878,3 +878,35 @@ unchanged. New admission requires at least 16,513,574,008 free bytes:
 16,341,738,616 shard bytes + 3,801,088 work + two 83,886,080 KV arenas +
 262,144 RoPE bytes. Query is `cuMemGetInfo_v2` in the selected CUDA context,
 with exact SM and return status checked before audit launch.
+
+### Restored-capacity comparison campaign (unchanged numerical pin)
+
+The C++23 admission-only driver probe was built and boundary self-tested
+on D by 29659 (COMPLETED 0:0, 00:01:16, MaxRSS 1424500K), SHA256
+`a071e1af496b4c8650745e974420a35b2dd120ab256f2eef7dbe09fa462771ba`.
+The probe measures free and total bytes in the selected CUDA context,
+verifies actual SM, and refuses insufficient capacity with
+`r-vram-insufficient` before audit launch. It is not in the inference path.
+The exact reconstructed L4 ELF
+`/orangefs/training/llm-granite-n10/binary-reconstruct-29648/audit-29553`
+(SHA256 `8c74378a189919e4733847a100a72e976120f4b48b261ccdffcbe25e08bbd04c`)
+is used on both R740 legs; the original L4 run header carries the same
+hash. The preserved L4 TSV is independently pinned to
+`74b22db3f82221c5550593f2ce73f9b8430e8723ca219e45ce73b62b6c7c5fc5`.
+No change to `ad4a505c1931d48552397089ca11d7cfaeabd988` nor the registered
+numerical prediction; the watchdog and preflight are outside the engine.
+
+| Job | Resource | State | VRAM admission free / total bytes |
+|---|---|---|---|
+| 29660 | R740 RTX 8000 sm_75, 48G host, OverSubscribe=YES | RUNNING | 47,384,821,760 / 47,559,868,416; rc=0 PASS |
+| 29661 | R740 A5000 sm_86, 48G host, OverSubscribe=YES | RUNNING | 23,616,159,744 / 25,285,623,808; rc=0 PASS |
+| 29662 | D CPU collector | PENDING afterany 29659, 29660, 29661 | n/a |
+
+Both legs recorded the full identical L4 binary hash in Slurm and passed
+16,513,574,008-byte admission. Coordinator notified of job IDs for service
+restoration after both terminate. Collector output is
+`/orangefs/training/llm-granite-n10/cluster-receipt-29662.txt`; both legs
+are directly compared with `l4-ref-29553/cuda.tsv`. **NOT ESTABLISHED:**
+comparison results until these jobs complete. No allocator-refusal source
+changes admitted into this audit; the independent production refusal
+change and its regression are tracked outside the parity campaign.
