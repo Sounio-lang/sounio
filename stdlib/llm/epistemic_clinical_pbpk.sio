@@ -70,25 +70,31 @@ pub struct ClinicalEpistemicPriors {
     pub rho_cl_fu: f64,
 }
 
-pub struct EpistemicDecisionReceipt {
-    pub regime: i64,
-    pub val_initial: f64,
-    pub val_final: f64,
-    pub err_initial: f64,
-    pub err_final: f64,
-    pub err_sound_initial: f64,
-    pub err_sound_final: f64,
-    pub u_physical: f64,
-    pub u_ep: f64,
-    pub u_al: f64,
-    pub auc_lower_bound: f64,
-    pub auc_upper_bound: f64,
-    pub s_cl: f64,
-    pub s_kp: f64,
-    pub s_fu: f64,
-    pub compute_refined: bool,
-    pub clinical_abstained: bool,
-    pub authorized: bool,
+// Opaque: only clinical_pbpk_evaluate_gate builds one (lie corpus item 1c).
+// The flags are for reporting; acting needs epr_authorization, which re-derives
+// the authorization from the stored enclosure and window.
+struct EpistemicDecisionReceipt {
+    regime: i64,
+    val_initial: f64,
+    val_final: f64,
+    err_initial: f64,
+    err_final: f64,
+    err_sound_initial: f64,
+    err_sound_final: f64,
+    u_physical: f64,
+    u_ep: f64,
+    u_al: f64,
+    auc_lower_bound: f64,
+    auc_upper_bound: f64,
+    s_cl: f64,
+    s_kp: f64,
+    s_fu: f64,
+    compute_refined: bool,
+    clinical_abstained: bool,
+    authorized: bool,
+    auc_encl: SoundEnclosure,
+    auc_min: f64,
+    auc_max: f64,
 }
 
 struct Rp3State {
@@ -808,8 +814,64 @@ pub fn clinical_pbpk_evaluate_gate(
         compute_refined: compute_refined,
         clinical_abstained: clinical_abstained,
         authorized: authorized,
+        auc_encl: auc_encl,
+        auc_min: auc_min,
+        auc_max: auc_max,
     }
 }
+
+// Read-only views of the receipt. Plain values: reporting only.
+pub fn epr_regime(r: EpistemicDecisionReceipt) -> i64 { return r.regime }
+pub fn epr_val_initial(r: EpistemicDecisionReceipt) -> f64 { return r.val_initial }
+pub fn epr_val_final(r: EpistemicDecisionReceipt) -> f64 { return r.val_final }
+pub fn epr_err_initial(r: EpistemicDecisionReceipt) -> f64 { return r.err_initial }
+pub fn epr_err_final(r: EpistemicDecisionReceipt) -> f64 { return r.err_final }
+pub fn epr_err_sound_initial(r: EpistemicDecisionReceipt) -> f64 { return r.err_sound_initial }
+pub fn epr_err_sound_final(r: EpistemicDecisionReceipt) -> f64 { return r.err_sound_final }
+pub fn epr_u_physical(r: EpistemicDecisionReceipt) -> f64 { return r.u_physical }
+pub fn epr_u_ep(r: EpistemicDecisionReceipt) -> f64 { return r.u_ep }
+pub fn epr_u_al(r: EpistemicDecisionReceipt) -> f64 { return r.u_al }
+pub fn epr_auc_lower_bound(r: EpistemicDecisionReceipt) -> f64 { return r.auc_lower_bound }
+pub fn epr_auc_upper_bound(r: EpistemicDecisionReceipt) -> f64 { return r.auc_upper_bound }
+pub fn epr_s_cl(r: EpistemicDecisionReceipt) -> f64 { return r.s_cl }
+pub fn epr_s_kp(r: EpistemicDecisionReceipt) -> f64 { return r.s_kp }
+pub fn epr_s_fu(r: EpistemicDecisionReceipt) -> f64 { return r.s_fu }
+pub fn epr_compute_refined(r: EpistemicDecisionReceipt) -> bool { return r.compute_refined }
+pub fn epr_clinical_abstained(r: EpistemicDecisionReceipt) -> bool { return r.clinical_abstained }
+pub fn epr_authorized(r: EpistemicDecisionReceipt) -> bool { return r.authorized }
+pub fn epr_auc_enclosure(r: EpistemicDecisionReceipt) -> SoundEnclosure { return r.auc_encl }
+pub fn epr_auc_min(r: EpistemicDecisionReceipt) -> f64 { return r.auc_min }
+pub fn epr_auc_max(r: EpistemicDecisionReceipt) -> f64 { return r.auc_max }
+
+// A SafeAuthorization is generic: it says an enclosure fits a window, nothing
+// about where the enclosure came from (anyone can build one from se_point).
+// PbpkAuthorization is opaque and minted only by epr_authorization from a
+// receipt the gate produced, so a consumer that takes it can only be reached
+// through clinical_pbpk_evaluate_gate. Synthetic research witness only.
+struct PbpkAuthorization {
+    tok: SafeAuthorization,
+}
+
+// True iff epr_authorization would succeed: the gate authorized and the stored
+// enclosure, widened by the stored ep and al, fits the stored window.
+pub fn epr_can_authorize(r: EpistemicDecisionReceipt) -> bool with Panic {
+    if !r.authorized { return false }
+    return se_fits_window(r.auc_encl, r.u_ep, r.u_al, r.auc_min, r.auc_max)
+}
+
+// The only way to act on a receipt. Re-derives the token from the stored
+// enclosure; se_authorize_window panics unless the widened enclosure fits the
+// stored window, so a receipt never yields a token its enclosure does not justify.
+pub fn epr_authorization(r: EpistemicDecisionReceipt) -> PbpkAuthorization with Panic {
+    assert(r.authorized)
+    return PbpkAuthorization { tok: se_authorize_window(r.auc_encl, r.u_ep, r.u_al, r.auc_min, r.auc_max) }
+}
+
+pub fn pbpk_auth_window_lo(a: PbpkAuthorization) -> f64 { return sa_window_lo(a.tok) }
+pub fn pbpk_auth_window_hi(a: PbpkAuthorization) -> f64 { return sa_window_hi(a.tok) }
+
+// A PBPK authorization is also a valid generic one; the converse is refused.
+pub fn pbpk_auth_as_generic(a: PbpkAuthorization) -> SafeAuthorization { return a.tok }
 
 pub fn clinical_pbpk_compare_naive_text_mc() -> bool with Mut, Div, Panic {
     let p = clinical_pbpk_default_params()

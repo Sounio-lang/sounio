@@ -35,6 +35,15 @@ use llm::epistemic_clinical_pbpk::{
     clinical_pbpk_evaluate_gate,
     clinical_pbpk_compare_naive_text_mc,
     auc_error_bound_is_sound,
+    epr_regime,
+    epr_authorized,
+    epr_compute_refined,
+    epr_clinical_abstained,
+    epr_err_initial,
+    epr_err_final,
+    epr_err_sound_initial,
+    epr_err_sound_final,
+    epr_can_authorize,
 }
 use llm::qwen3_ossm::{
     qwen3_ossm_dual_associator_l2,
@@ -151,7 +160,7 @@ fn test_epistemic_pbpk_regimes_and_witness() -> bool with Mut, Div, Panic {
         3.0,
         5.0
     )
-    let r1_ok = (r1.regime == 1) && (!r1.compute_refined) && (!r1.clinical_abstained) && r1.authorized && (r1.err_sound_initial < 0.001)
+    let r1_ok = (epr_regime(r1) == 1) && (!epr_compute_refined(r1)) && (!epr_clinical_abstained(r1)) && epr_authorized(r1) && (epr_err_sound_initial(r1) < 0.001)
 
     // Regime 2: Numerical Auto Refine — heuristic rad over budget prompts
     // refinement; the proven enclosure then authorizes.
@@ -166,7 +175,7 @@ fn test_epistemic_pbpk_regimes_and_witness() -> bool with Mut, Div, Panic {
         3.0,
         6.0
     )
-    let r2_ok = (r2.regime == 2) && r2.compute_refined && (!r2.clinical_abstained) && r2.authorized && (r2.err_final < r2.err_initial) && (r2.err_sound_final < 0.001)
+    let r2_ok = (epr_regime(r2) == 2) && epr_compute_refined(r2) && (!epr_clinical_abstained(r2)) && epr_authorized(r2) && (epr_err_final(r2) < epr_err_initial(r2)) && (epr_err_sound_final(r2) < 0.001)
 
     // Cross-check: RK4 (kept) stays inside the old loose bound and lands
     // near the closed-form value (the old norm bound must exceed the
@@ -196,7 +205,7 @@ fn test_epistemic_pbpk_regimes_and_witness() -> bool with Mut, Div, Panic {
         3.0,
         5.0
     )
-    let r3_ok = (r3.regime == 3) && r3.compute_refined && r3.clinical_abstained && (!r3.authorized)
+    let r3_ok = (epr_regime(r3) == 3) && epr_compute_refined(r3) && epr_clinical_abstained(r3) && (!epr_authorized(r3))
 
     // Regime 4: Double Refine Then Abstain (rad-only). Window centred on the
     // refined value with half-width below the closed-form enclosure (~5e-11);
@@ -214,7 +223,7 @@ fn test_epistemic_pbpk_regimes_and_witness() -> bool with Mut, Div, Panic {
         val_rf - margin,
         val_rf + margin
     )
-    let r4_ok = (r4.regime == 4) && r4.compute_refined && r4.clinical_abstained && (!r4.authorized) && (r4.err_sound_final > margin)
+    let r4_ok = (epr_regime(r4) == 4) && epr_compute_refined(r4) && epr_clinical_abstained(r4) && (!epr_authorized(r4)) && (epr_err_sound_final(r4) > margin)
 
     // Regime 5: Aleatory Abstain (no TDM). al alone breaches [3, 5] while ep
     // alone fits: measuring again cannot help, so no new measurement is asked.
@@ -229,7 +238,7 @@ fn test_epistemic_pbpk_regimes_and_witness() -> bool with Mut, Div, Panic {
         3.0,
         5.0
     )
-    let r5_ok = (r5.regime == 5) && (r5.regime != 3) && r5.compute_refined && r5.clinical_abstained && (!r5.authorized)
+    let r5_ok = (epr_regime(r5) == 5) && (epr_regime(r5) != 3) && epr_compute_refined(r5) && epr_clinical_abstained(r5) && (!epr_authorized(r5))
 
     // Attribution guard: same window, ep-only breach stays TDM (never regime 5).
     let r5b = clinical_pbpk_evaluate_gate(
@@ -243,7 +252,7 @@ fn test_epistemic_pbpk_regimes_and_witness() -> bool with Mut, Div, Panic {
         3.0,
         5.0
     )
-    let r5b_ok = (r5b.regime == 3) && (r5b.regime != 5)
+    let r5b_ok = (epr_regime(r5b) == 3) && (epr_regime(r5b) != 5)
 
     // Al crosses alone but measurement can still help (centre in val +- ep can
     // fit with +- al): TDM, not do-not-measure. Cut ep below the fit point
@@ -259,7 +268,7 @@ fn test_epistemic_pbpk_regimes_and_witness() -> bool with Mut, Div, Panic {
         -10.0,
         5.0
     )
-    let r6_ok = (r6.regime == 3) && (r6.regime != 5)
+    let r6_ok = (epr_regime(r6) == 3) && (epr_regime(r6) != 5)
     let r6b = clinical_pbpk_evaluate_gate(
         &p,
         &small_priors,
@@ -271,7 +280,7 @@ fn test_epistemic_pbpk_regimes_and_witness() -> bool with Mut, Div, Panic {
         -10.0,
         5.0
     )
-    let r6b_ok = (r6b.regime == 5) && (r6b.regime != 3)
+    let r6b_ok = (epr_regime(r6b) == 5) && (epr_regime(r6b) != 3)
 
     // Neither ep nor al crosses alone, both together do: TDM.
     let r7 = clinical_pbpk_evaluate_gate(
@@ -285,14 +294,17 @@ fn test_epistemic_pbpk_regimes_and_witness() -> bool with Mut, Div, Panic {
         3.0,
         5.0
     )
-    let r7_ok = (r7.regime == 3) && r7.clinical_abstained && (!r7.authorized)
+    let r7_ok = (epr_regime(r7) == 3) && epr_clinical_abstained(r7) && (!epr_authorized(r7))
 
     // SYNTHETIC_RESEARCH_WITNESS_NOT_MEDICAL_GUIDANCE guard: kept verbatim in
     // stdlib/llm/epistemic_clinical_pbpk.sio (const + header comment); not
     // asserted here because the ARM64 backend cannot lower str_eq.
     let witness_pass = clinical_pbpk_compare_naive_text_mc()
 
-    tag_ok && r1_ok && r2_ok && cross_ok && r3_ok && r4_ok && r5_ok && r5b_ok && r6_ok && r6b_ok && r7_ok && witness_pass
+    // The receipt re-derives its authorization: safe (r1) and refined-authorized
+    // (r2) receipts can act; every abstaining receipt cannot.
+    let rederive_ok = epr_can_authorize(r1) && epr_can_authorize(r2) && (!epr_can_authorize(r3)) && (!epr_can_authorize(r4)) && (!epr_can_authorize(r5)) && (!epr_can_authorize(r7))
+    tag_ok && r1_ok && r2_ok && cross_ok && r3_ok && r4_ok && r5_ok && r5b_ok && r6_ok && r6b_ok && r7_ok && rederive_ok && witness_pass
 }
 
 // ----------------------------------------------------------------------------

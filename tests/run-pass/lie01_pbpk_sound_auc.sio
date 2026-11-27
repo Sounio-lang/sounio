@@ -10,16 +10,17 @@
 //   - SAFE when the window fits; no authorization when the window is
 //     narrower than the enclosure, even with ep = al = 0
 //   - se_div and the exact helpers enclose what they claim
+//   - acting needs epr_authorization(receipt), passed to dispense()
 
 use epistemic::sound_enclosure::*
-use llm::epistemic_clinical_pbpk::{
-    ClinicalEpistemicPriors,
-    ClinicalPbpkParams,
-    clinical_pbpk_default_params,
-    clinical_pbpk_auc_enclosure,
-    clinical_pbpk_auc_closed,
-    clinical_pbpk_simulate_auc,
-    clinical_pbpk_evaluate_gate,
+// Glob import: the opaque PbpkAuthorization name resolves through a glob, the
+// same pattern the lie01 compile-fail witnesses use.
+use llm::epistemic_clinical_pbpk::*
+
+// Acting on a decision takes the PBPK token, not a flag and not a generic
+// SafeAuthorization (lie corpus item 1c).
+fn dispense(a: PbpkAuthorization) -> f64 {
+    return pbpk_auth_window_hi(a) - pbpk_auth_window_lo(a)
 }
 
 fn main() -> i64 with IO, Mut, Div, Panic {
@@ -65,20 +66,25 @@ fn main() -> i64 with IO, Mut, Div, Panic {
     // Gate: SAFE through the token on a fitting window.
     let priors = ClinicalEpistemicPriors { cl_var: 1.0, kp_var: 0.0001, fu_var: 0.000025, rho_cl_fu: 0.0 }
     let r_ok = clinical_pbpk_evaluate_gate(&p, &priors, 5.0, 0.05, 0.0, 0.0, 0.0, 3.0, 5.0)
-    if !(r_ok.regime == 1 && r_ok.authorized) { fails = fails + 1 }
-    if !(r_ok.auc_lower_bound >= 3.0 && r_ok.auc_upper_bound <= 5.0) { fails = fails + 1 }
+    if !(epr_regime(r_ok) == 1 && epr_authorized(r_ok)) { fails = fails + 1 }
+    if !(epr_auc_lower_bound(r_ok) >= 3.0 && epr_auc_upper_bound(r_ok) <= 5.0) { fails = fails + 1 }
+    // The receipt re-derives the token from its stored enclosure and window.
+    if !epr_can_authorize(r_ok) { fails = fails + 1 }
+    if !(dispense(epr_authorization(r_ok)) == 2.0) { fails = fails + 1 }
 
     // Gate: a window centred on the enclosure but narrower than it never
     // authorizes, even with ep = al = 0 and after refinement.
     let zero_priors = ClinicalEpistemicPriors { cl_var: 0.0, kp_var: 0.0, fu_var: 0.0, rho_cl_fu: 0.0 }
     let half = width * 0.25
     let r_tight = clinical_pbpk_evaluate_gate(&p, &zero_priors, 5.0, 0.05, 0.0, 0.0, 0.0, mid - half, mid + half)
-    if r_tight.authorized { fails = fails + 1 }
-    if r_tight.regime == 1 || r_tight.regime == 2 { fails = fails + 1 }
+    if epr_authorized(r_tight) { fails = fails + 1 }
+    if epr_can_authorize(r_tight) { fails = fails + 1 }
+    if epr_regime(r_tight) == 1 || epr_regime(r_tight) == 2 { fails = fails + 1 }
 
     // Negative half-widths are not uncertainties: never authorize.
     let r_neg = clinical_pbpk_evaluate_gate(&p, &zero_priors, 5.0, 0.05, 0.0, 0.0, -0.5, 3.0, 5.0)
-    if r_neg.authorized { fails = fails + 1 }
+    if epr_authorized(r_neg) { fails = fails + 1 }
+    if epr_can_authorize(r_neg) { fails = fails + 1 }
 
     if fails == 0 {
         println("LIE01_PBPK_SOUND_AUC_PASS")
