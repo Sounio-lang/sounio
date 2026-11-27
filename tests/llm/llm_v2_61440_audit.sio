@@ -13,6 +13,7 @@ use llm::raw_memory::{ptr_read_i64_le, ptr_read_u32_le, ptr_read_u8, ptr_write_i
 
 use llm::mmap::{
     PageArena,
+    llm_errno_ptr,
     MappedShard,
     page_arena_alloc,
     page_arena_free,
@@ -57,6 +58,7 @@ use llm::qwen3::{
     qwen3_model_free,
     qwen3_model_is_ok,
     qwen3_model_cfg,
+    qwen3_model_n_shards,
     qwen3_metal_runner_init,
     qwen3_metal_runner_free,
     qwen3_metal_runner_is_ok,
@@ -100,9 +102,10 @@ fn cstr_from_str(s: string) -> i64 with Alloc, Mut {
     buf
 }
 
-fn out_open_append(path_ptr: i64) -> OutFile with Alloc, Mut {
+fn out_open_append(path_ptr: i64) -> OutFile with IO, Alloc, Mut {
     let h = dlopen(0 as *mut u8, 1) as i64
     if h == 0 {
+        println("AUDIT_INIT_DETAIL out_open_append dlopen_failed errno=unavailable")
         return OutFile { libc_h: 0, fp: 0, fn_fwrite: 0, fn_fflush: 0, fn_fclose: 0, ok: false }
     }
     let s_fopen = cstr_from_str("fopen")
@@ -119,14 +122,20 @@ fn out_open_append(path_ptr: i64) -> OutFile with Alloc, Mut {
     heap_free(s_fflush as *mut u8)
     heap_free(s_fclose as *mut u8)
     if r_fopen == 0 || r_fwrite == 0 || r_fflush == 0 || r_fclose == 0 {
+        println("AUDIT_INIT_DETAIL out_open_append dlsym_failed errno=unavailable")
         heap_free(s_mode as *mut u8)
         let _c = dlclose(h as *mut u8)
         return OutFile { libc_h: 0, fp: 0, fn_fwrite: 0, fn_fflush: 0, fn_fclose: 0, ok: false }
     }
     let fopen_fn = r_fopen as fn(i64, i64) -> i64
+    let ep = llm_errno_ptr(h as *mut u8)
     let fp = fopen_fn(path_ptr, s_mode)
+    let e = if fp == 0 && ep != 0 { ptr_read_u32_le(ep, 0) } else { -1 }
     heap_free(s_mode as *mut u8)
     if fp == 0 {
+        print("AUDIT_INIT_DETAIL out_open_append fopen_failed errno=")
+        print_int(e)
+        println("")
         let _c = dlclose(h as *mut u8)
         return OutFile { libc_h: 0, fp: 0, fn_fwrite: 0, fn_fflush: 0, fn_fclose: 0, ok: false }
     }
@@ -773,7 +782,9 @@ fn verify_granite_prompt_ids(tok: &Qwen3Tokenizer, prompts: &MappedShard, slen: 
 pub fn main() -> i64 with IO, Alloc, Mut, Div, Panic {
     let force_cuda = env_equals("SOUNIO_AUDIT_BACKEND", "cuda")
     let probe_sess = metal_session_open("")
-    let use_metal = (!force_cuda) && metal_session_is_ok(&probe_sess)
+    let metal_ok = metal_session_is_ok(&probe_sess)
+    let use_metal = (!force_cuda) && metal_ok
+    let metal_requested = (!force_cuda) && hal_getenv_ptr("SOUNIO_METAL_RUNTIME") != 0
     let _cp = metal_session_close(probe_sess)
 
     let model_buf = heap_alloc(4096) as i64
@@ -822,14 +833,31 @@ pub fn main() -> i64 with IO, Alloc, Mut, Div, Panic {
     heap_free(has_hdr_box as *mut u8)
 
     let m = qwen3_model_open((model_buf as *mut u8) as string)
+    if granite { print("AUDIT_INIT_MODEL_SHARDS="); print_int(qwen3_model_n_shards(&m)); println("") }
     let tok = if granite { granite_tokenizer_load((tok_buf as *mut u8) as string) } else { qwen3_tokenizer_load((tok_buf as *mut u8) as string) }
     let shard = mapped_shard_open((prompts_buf as *mut u8) as string)
     let slen = if mapped_shard_is_ok(&shard) { mapped_shard_len(&shard) } else { 0 }
     let of = out_open_append(out_buf)
 
-    var ok = qwen3_model_is_ok(&m) && qwen3_tokenizer_is_ok(&tok)
-        && mapped_shard_is_ok(&shard) && slen > 0 && of.ok
-        && max_tokens > 0 && max_seq > max_tokens && qwen3_model_cfg(&m).granite == granite
+    // Check independently: a failed model must not hide a failed tokenizer,
+    // prompt mapping, output open, shape or architecture predicate.
+    var ok = true
+    if !qwen3_model_is_ok(&m) { println("AUDIT_INIT_PREDICATE_FAIL qwen3_model_is_ok"); ok = false }
+    if !qwen3_tokenizer_is_ok(&tok) { println("AUDIT_INIT_PREDICATE_FAIL qwen3_tokenizer_is_ok"); ok = false }
+    if !mapped_shard_is_ok(&shard) {
+        println("AUDIT_INIT_PREDICATE_FAIL mapped_shard_is_ok(prompts)")
+        print("AUDIT_INIT_DETAIL prompts file_size=")
+        print_int(file_size((prompts_buf as *mut u8) as string))
+        println(" (native file_size; errno unavailable)")
+        ok = false
+    }
+    if slen <= 0 { println("AUDIT_INIT_PREDICATE_FAIL slen>0"); ok = false }
+    if !of.ok { println("AUDIT_INIT_PREDICATE_FAIL of.ok"); ok = false }
+    if max_tokens <= 0 { println("AUDIT_INIT_PREDICATE_FAIL max_tokens>0"); ok = false }
+    if max_seq <= max_tokens { println("AUDIT_INIT_PREDICATE_FAIL max_seq>max_tokens"); ok = false }
+    if qwen3_model_cfg(&m).granite != granite { println("AUDIT_INIT_PREDICATE_FAIL cfg.granite==granite"); ok = false }
+    // An explicitly requested Metal runtime must not silently run CUDA instead.
+    if metal_requested && !metal_ok { println("AUDIT_INIT_PREDICATE_FAIL metal_session_is_ok"); ok = false }
 
     if ok && granite {
         ok = verify_granite_prompt_ids(&tok, &shard, slen, ref_buf)
