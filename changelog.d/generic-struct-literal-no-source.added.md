@@ -1,0 +1,1 @@
+A generic struct literal whose type parameter is determined by no field and no turbofish (`Pair { d: 3.0 }` for `struct Pair<A, B> { d: f64 }`) is refused with the new E317, naming no placeholder instance. A turbofish with the wrong number of arguments, or one that names a type the fields contradict, is refused with the new E318.

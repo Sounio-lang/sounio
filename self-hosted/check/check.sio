@@ -6530,6 +6530,36 @@ fn checker_name_is_type_param_in_scope(c: *mut Checker, name: Name) -> bool with
     false
 }
 
+// `a` is `base` or an instance name of it (`base__...`).
+fn lit_name_is_own_instance(a: Name, base: Name) -> bool with Mut, Panic, Div {
+    if a.len < base.len {
+        return false
+    }
+    var i: i64 = 0
+    while i < base.len {
+        if a.buf[i as usize] != base.buf[i as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    if a.len == base.len {
+        return true
+    }
+    if a.len >= base.len + 2 && a.buf[base.len as usize] == 95 && a.buf[(base.len + 1) as usize] == 95 {
+        return true
+    }
+    false
+}
+
+// A struct literal's parameter `pname` is the in-scope parameter of the same name when the literal sits in
+// the struct's own impl (`impl HeapVec<T> { .. HeapVec { .. } }`) or in a fn that declares `pname`.
+fn lit_param_in_scope(c: *mut Checker, struct_name: Name, pname: Name) -> bool with Mut, Panic, Div, Alloc {
+    if (*c).current_impl_type.kind == TypeKind::TyNamed && lit_name_is_own_instance((*c).current_impl_type.name, struct_name) {
+        return true
+    }
+    tb_lookup_type_param(tb_cur_fn_type_params(), pname).0
+}
+
 fn checker_unit_index_for(c: *mut Checker, name: Name) -> i64 with Mut, Panic, Div, Alloc {
     (*c).units.find(name)
 }
@@ -12546,6 +12576,7 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
             // Pass 1: infer type params from field initializers (infer_type_params_from_fields
             // 16642). Walk the field list via the *mut spine, recording each inferred type into
             // a per-template-param slot, exactly as the by-value original.
+            let lit_err0 = (*c).error_count
             var inferred = InferBuf { args: [ty_error(); 8] }
             var cur_inf = e.fields
             var done_inf = false
@@ -12564,6 +12595,64 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                         done_inf = true
                     }
                 }
+            }
+
+            // A parameter no field mentions has no source in the fields. It takes its type from
+            // the literal's own turbofish (`Pair::<Na, Cl> { .. }`). With neither, the literal
+            // does not say what it is: E317 (unless a parameter of the same name is in scope), instead of naming an instance after a placeholder
+            // (`Pair__T__T`) that no declaration can match. A turbofish that disagrees with
+            // what the fields give, or has the wrong count, is E318.
+            var lit_targ_n: i64 = 0
+            var lit_tf_count = e.type_args
+            var lit_tf_done = false
+            while !lit_tf_done {
+                match lit_tf_count {
+                    Some(tl) => {
+                        lit_targ_n = lit_targ_n + 1
+                        lit_tf_count = (*tl).tail
+                    }
+                    None => {
+                        lit_tf_done = true
+                    }
+                }
+            }
+            var lit_bad = false
+            if lit_targ_n > 0 && lit_targ_n != si.type_param_count {
+                checker_report_error_at_inplace(c, e.span, 318, 0, 0, 0)
+                lit_bad = true
+            } else {
+                var lit_tf_cur = e.type_args
+                var lit_pi: i64 = 0
+                while lit_pi < si.type_param_count {
+                    var lit_tf_ty = ty_error()
+                    match lit_tf_cur {
+                        Some(tl) => {
+                            lit_tf_ty = checker_lower_type_expr_mut(c, (*tl).head)
+                            lit_tf_cur = (*tl).tail
+                        }
+                        None => {}
+                    }
+                    if inferred.args[lit_pi as usize].kind == TypeKind::TyError {
+                        if lit_targ_n > 0 {
+                            inferred.args[lit_pi as usize] = lit_tf_ty
+                        } else if lit_param_in_scope(c, si.name, si.type_param_names[lit_pi as usize]) {
+                            // Inside a generic body the struct's parameter is the in-scope parameter of
+                            // the same name (`impl HeapVec<T> { .. HeapVec { .. } }`), the convention the
+                            // specializer already uses. Only outside one is the literal sourceless.
+                            inferred.args[lit_pi as usize] = ty_named(si.type_param_names[lit_pi as usize])
+                        } else if (*c).error_count == lit_err0 {
+                            checker_report_error_at_inplace(c, e.span, 317, 0, 0, 0)
+                            lit_bad = true
+                        }
+                    } else if lit_targ_n > 0 && lit_tf_ty.kind != TypeKind::TyError && !types_equal(inferred.args[lit_pi as usize], lit_tf_ty) {
+                        checker_report_error_at_inplace(c, e.span, 318, 0, 0, 0)
+                        lit_bad = true
+                    }
+                    lit_pi = lit_pi + 1
+                }
+            }
+            if lit_bad {
+                return ty_error()
             }
 
             // Build the TypeEntryList from inferred args, in reverse (finalize 16671-16677).
@@ -24115,6 +24204,8 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 310 { print("printing a Knowledge value would show its nominal value without its uncertainty and confidence; print a field instead (`k.value`, `k.variance`, `k.confidence`)") }
     else if code == 315 { print("type argument does not implement a trait bound of the generic function's type parameter") }
     else if code == 316 { print("no trait bound of this type parameter declares the method") }
+    else if code == 317 { print("a type parameter of this generic struct literal is determined by no field and no turbofish") }
+    else if code == 318 { print("the turbofish of this struct literal has the wrong number of type arguments, or names a type its fields contradict") }
     else if code == 314 { print("Knightian uncertainty (ε=⊥) cannot satisfy required confidence or error bound, or a named Knightian source has conflicting bounds") }
     else if code == 269 { print("a `where` refinement on Knowledge<T> is not enforced by this compiler yet: the predicate would be silently ignored, so it is refused") }
     else if code == 270 { print("`as string` does not convert a number, bool or char to text: no engine formats the value, so the cast is refused") }
