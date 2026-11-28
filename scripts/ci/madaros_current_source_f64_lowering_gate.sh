@@ -115,6 +115,10 @@ wait_knowledge_runtime() {
       [[ ! -f "$gate_dir/worker.log" ]] || cat "$gate_dir/worker.log" >&2
       return 1
     fi
+    if [[ "${1:-}" == poll ]]; then
+      echo "[madaros-f64-lowering] knowledge-runtime worker still running; final receipt collection is required"
+      return 0
+    fi
     if (( SECONDS - started >= timeout_seconds )); then
       [[ -f "$receipt" ]] && break
       echo "[madaros-f64-lowering] FAIL: timed out waiting for knowledge-runtime receipt" >&2
@@ -141,6 +145,7 @@ wait_knowledge_runtime() {
 case "${1:-}" in
   --knowledge-runtime-worker) knowledge_runtime_worker; exit $? ;;
   --start-knowledge-runtime) start_knowledge_runtime; exit $? ;;
+  --poll-knowledge-runtime) wait_knowledge_runtime poll; exit $? ;;
   --wait-knowledge-runtime) wait_knowledge_runtime; exit $? ;;
 esac
 
