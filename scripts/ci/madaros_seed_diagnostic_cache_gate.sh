@@ -57,6 +57,22 @@ for stage in seed madaros; do
   before="$(call_count)"
   madaros_cache_build_locked "$stage" "$stage-clean" "$out" "$TEST_DIR/compiler" input "$out" >"$TEST_DIR/hit.log" 2>&1
   [[ "$(call_count)" == "$before" ]] || fail "$stage clean hit rebuilt"
+  # A hit reports the producer stored with the entry, not this process: mark
+  # the stored manifest and require the copied-out sidecar to carry the mark.
+  entry="$SOUNIO_MADAROS_CACHE/$stage/$stage-clean"
+  [[ -s "$entry/toolchain" ]] || fail "$stage store lacks producer toolchain"
+  cmp -s "$entry/toolchain" "$out.toolchain" || fail "$stage miss sidecar differs from stored producer toolchain"
+  sed -i 's/^host_kernel=.*/host_kernel=producer-kernel-fixture/' "$entry/toolchain"
+  madaros_cache_build_locked "$stage" "$stage-clean" "$out" "$TEST_DIR/compiler" input "$out" >"$TEST_DIR/hit-producer.log" 2>&1
+  [[ "$(call_count)" == "$before" ]] || fail "$stage producer-marked hit rebuilt"
+  grep -Fxq 'host_kernel=producer-kernel-fixture' "$out.toolchain" || fail "$stage hit relabelled the producer toolchain"
+  # An entry stored before producer manifests existed cannot say who built it.
+  mv "$entry/toolchain" "$TEST_DIR/toolchain.saved"
+  madaros_cache_build_locked "$stage" "$stage-clean" "$out" "$TEST_DIR/compiler" input "$out" >"$TEST_DIR/no-toolchain.log" 2>&1
+  [[ "$(call_count)" != "$before" ]] || fail "$stage entry without producer toolchain accepted"
+  grep -q 'no producer toolchain' "$TEST_DIR/no-toolchain.log" || fail "$stage missing-toolchain rebuild evidence"
+  [[ -s "$entry/toolchain" ]] || fail "$stage rebuild did not restore producer toolchain"
+  before="$(call_count)"
   rm "$SOUNIO_MADAROS_CACHE/$stage/$stage-clean/diagnostic.receipt"
   madaros_cache_build_locked "$stage" "$stage-clean" "$out" "$TEST_DIR/compiler" input "$out" >"$TEST_DIR/legacy.log" 2>&1
   [[ "$(call_count)" != "$before" ]] || fail "$stage legacy cache accepted"
@@ -74,6 +90,16 @@ for stage in seed madaros; do
     if [[ "$mode" == failed ]]; then [[ "$rc" == 23 ]] || fail "$stage lost status 23"; fi
   done
 done
+# CI restores caches by prefix, so an entry built by an older orchestration
+# script can be offered to a newer one: the script bytes must move both keys.
+printf 'x\n' > "$TEST_DIR/lean.sio"
+seed_before="$(madaros_seed_key "$TEST_DIR/compiler" "$TEST_DIR/lean.sio")"
+build_before="$(madaros_build_key "$TEST_DIR/compiler" fixture-tree)"
+cp "$TEST_DIR/scripts/ci/build_modular_madaros.sh" "$TEST_DIR/build.saved"
+printf '\n# changed\n' >> "$TEST_DIR/scripts/ci/build_modular_madaros.sh"
+[[ "$(madaros_seed_key "$TEST_DIR/compiler" "$TEST_DIR/lean.sio")" != "$seed_before" ]] || fail 'build-script change left the seed key unchanged'
+[[ "$(madaros_build_key "$TEST_DIR/compiler" fixture-tree)" != "$build_before" ]] || fail 'build-script change left the Madaros key unchanged'
+cp "$TEST_DIR/build.saved" "$TEST_DIR/scripts/ci/build_modular_madaros.sh"
 # The real modular wrapper must propagate the helper refusal and must accept
 # a clean simulated compile through the provided-seed route.
 export SOUC_BIN="$TEST_DIR/compiler" MOCK_MODE=stderr
@@ -84,6 +110,7 @@ fi
 export MOCK_MODE=clean
 bash "$TEST_DIR/scripts/ci/build_modular_madaros.sh" "$TEST_DIR/wrapper.elf" >"$TEST_DIR/wrapper-clean.log" 2>&1
 [[ -s "$TEST_DIR/wrapper.elf" ]] || fail 'wrapper rejected clean output'
+[[ -s "$TEST_DIR/wrapper.elf.toolchain" ]] || fail 'wrapper output lacks its producer toolchain'
 # Exercise the wrapper's derived-seed path as well as a supplied seed.
 unset SOUC_BIN SOUNIO_SOUC_BIN
 mkdir -p "$TEST_DIR/bin"
@@ -96,4 +123,4 @@ fi
 export MOCK_MODE=clean
 bash "$TEST_DIR/scripts/ci/build_modular_madaros.sh" "$TEST_DIR/derived.elf" >"$TEST_DIR/derived-clean.log" 2>&1
 [[ -s "$TEST_DIR/derived.elf" ]] || fail 'derived wrapper rejected clean output'
-echo 'PASS: seed and Madaros reject rc0 diagnostics; clean hits require receipts; legacy and mismatched receipts rebuild; scanner errors fail closed; failures preserve status; provided and derived seed wrappers reject E200 and accept clean simulations'
+echo 'PASS: seed and Madaros reject rc0 diagnostics; clean hits require receipts and carry the stored producer toolchain; entries without one rebuild; the build script moves both keys; legacy and mismatched receipts rebuild; scanner errors fail closed; failures preserve status; provided and derived seed wrappers reject E200 and accept clean simulations'

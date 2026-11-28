@@ -87,20 +87,45 @@ madaros_env_fingerprint() {
     } | sha256sum | cut -c1-64
 }
 
-# Stage 1 key: bootstrap ELF bytes + lean_single.sio bytes + build env.
-madaros_seed_key() {  # <bootstrap-elf> <lean-src>
-    printf 'seed-v2\n%s\n%s\n%s\n' "$(_mc_sha "$1")" "$(_mc_sha "$2")" "$(madaros_env_fingerprint)" \
-        | sha256sum | cut -c1-64
+# The orchestration script decides how each stage is invoked (flags, stack,
+# seed route). CI restores caches by prefix (restore-keys), so an entry built by
+# an older script can be offered to a newer one; keying on its bytes makes that
+# a miss instead of a hit attributed to the wrong producer.
+madaros_build_script_sha() {
+    _mc_sha "$(_mc_root)/scripts/ci/build_modular_madaros.sh"
 }
 
-# Stage 2 key: seed ELF bytes + whole tree + build env. (main.sio is inside
+# Producer metadata for a stage artifact. Written at store time by the process
+# that ran the build and kept in the cache entry, so a hit reports the runner
+# and script that produced the bytes, not whichever runner copied them out.
+# host_kernel/glibc/bash are descriptive: the bootstrap ELF is statically
+# linked and does its own code generation, so they do not feed the output and
+# are deliberately not key fields (they would turn every runner image bump into
+# a full rebuild). Everything that does feed it is keyed.
+madaros_toolchain_manifest() {
+    printf 'host_os=%s\n' "$(uname -s)"
+    printf 'host_arch=%s\n' "$(uname -m)"
+    printf 'host_kernel=%s\n' "$(uname -r)"
+    printf 'glibc=%s\n' "$(getconf GNU_LIBC_VERSION 2>/dev/null || echo unavailable)"
+    printf 'bash=%s\n' "$(bash --version | head -n1)"
+    printf 'build_script_sha256=%s\n' "$(madaros_build_script_sha)"
+    printf 'build_env_sha256=%s\n' "$(madaros_env_fingerprint)"
+}
+
+# Stage 1 key: bootstrap ELF bytes + lean_single.sio bytes + build env + script.
+madaros_seed_key() {  # <bootstrap-elf> <lean-src>
+    printf 'seed-v3\n%s\n%s\n%s\n%s\n' "$(_mc_sha "$1")" "$(_mc_sha "$2")" "$(madaros_env_fingerprint)" \
+        "$(madaros_build_script_sha)" | sha256sum | cut -c1-64
+}
+
+# Stage 2 key: seed ELF bytes + whole tree + build env + script. (main.sio is inside
 # the tree.)
 # Pass the tree key explicitly (and export it as MADAROS_CACHE_TREE_AT_KEY for
 # madaros_cache_build_locked) so the key and the store check refer to the SAME
 # tree snapshot; without it the tree is hashed here, once.
 madaros_build_key() {  # <seed-elf> [tree-key]
-    printf 'madaros-v2\n%s\n%s\n%s\n' "$(_mc_sha "$1")" "${2:-$(madaros_tree_key)}" "$(madaros_env_fingerprint)" \
-        | sha256sum | cut -c1-64
+    printf 'madaros-v3\n%s\n%s\n%s\n%s\n' "$(_mc_sha "$1")" "${2:-$(madaros_tree_key)}" "$(madaros_env_fingerprint)" \
+        "$(madaros_build_script_sha)" | sha256sum | cut -c1-64
 }
 
 # Imported E200 can leave rc=0 and a nonempty ELF. Only a captured clean log
@@ -134,6 +159,10 @@ madaros_cache_get() {
             echo "[madaros-cache] unverified diagnostics $stage/$key -- rebuilding" >&2
             return 1
         fi
+        if [[ ! -s "$dir/toolchain" || -L "$dir/toolchain" ]]; then
+            echo "[madaros-cache] no producer toolchain for $stage/$key -- rebuilding" >&2
+            return 1
+        fi
     fi
     mkdir -p "$(dirname "$out")" || return 1
     if ! cp --reflink=auto -f "$dir/artifact" "$out" || ! chmod +x "$out" ||
@@ -141,6 +170,13 @@ madaros_cache_get() {
         echo "[madaros-cache] copy of $stage/$key to $out failed -- treating as a miss" >&2
         rm -f "$out"
         return 1
+    fi
+    if [[ "$stage" == seed || "$stage" == madaros ]]; then
+        if ! cp -f "$dir/toolchain" "$out.toolchain"; then
+            echo "[madaros-cache] copy of $stage/$key toolchain failed -- treating as a miss" >&2
+            rm -f "$out" "$out.toolchain"
+            return 1
+        fi
     fi
     touch "$dir" 2>/dev/null || true   # LRU marker
     echo "[madaros-cache] HIT $stage/$key (built $(cat "$dir/built" 2>/dev/null || echo '?'))" >&2
@@ -169,6 +205,12 @@ madaros_cache_put() {
     _mc_sha "$tmp/artifact" > "$tmp/artifact.sha256"
     if [[ "$stage" == seed || "$stage" == madaros ]]; then
         printf 'e200-clean-v1 %s\n' "$(_mc_sha "$tmp/artifact")" > "$tmp/diagnostic.receipt"
+        if [[ ! -s "$art.toolchain" ]]; then
+            echo "[madaros-cache] refusing store without producer toolchain: $stage/$key" >&2
+            rm -rf "$tmp"
+            return 1
+        fi
+        cp -f "$art.toolchain" "$tmp/toolchain"
     fi
     date -u +%Y-%m-%dT%H:%M:%SZ > "$tmp/built"
     ( cd "$(_mc_root)" && { git rev-parse --short HEAD 2>/dev/null || echo nogit; } ) > "$tmp/head"
@@ -214,6 +256,8 @@ madaros_cache_usable() {
 # then build and store. Returns the build command's status.
 madaros_cache_build_locked() {
     local stage="$1" key="$2" out="$3"; shift 3
+    # A sidecar left by an earlier build of this path must never describe this one.
+    rm -f "$out.toolchain"
     madaros_cache_get "$stage" "$key" "$out" && return 0
     local lib; lib="$(_mc_root)/scripts/dev/madaros-cache.sh"
     # Tree the key was derived from. Callers that derive the key from a tree
@@ -242,19 +286,21 @@ madaros_cache_build_locked() {
         "$@" >"$build_log" 2>&1 || build_rc=$?
         cat "$build_log"
         if [[ "$build_rc" -ne 0 ]]; then
-            rm -f "$out"
+            rm -f "$out" "$out.toolchain"
             exit "$build_rc"
         fi
         if ! madaros_build_log_clean "$build_log"; then
             echo "error: build emitted undeclared-local E200 diagnostics; refusing artifact" >&2
-            rm -f "$out"
+            rm -f "$out" "$out.toolchain"
             exit 1
         fi
         if [[ ! -s "$out" ]]; then
             echo "error: build produced no artifact: $out" >&2
-            rm -f "$out"
+            rm -f "$out" "$out.toolchain"
             exit 1
         fi
+        # This process ran the build, so its environment is the producer'"'"'s.
+        madaros_toolchain_manifest > "$out.toolchain" || { rm -f "$out" "$out.toolchain"; exit 1; }
         if [[ "$(madaros_tree_key)" == "$tree_before" && "$tree_before" == "$MADAROS_CACHE_TREE_AT_KEY" ]]; then
             madaros_cache_put "$stage" "$key" "$out" "$build_log" || exit $?
         else
