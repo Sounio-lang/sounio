@@ -26,7 +26,7 @@ runs:
 function check(w,a){
  assert.equal(a,expectedAction,'receipt action changed: review the execution contract explicitly');
  function job(name){const match=w.match(new RegExp('^  '+name+':\\n([\\s\\S]*?)(?=^  [a-zA-Z0-9_-]+:|$(?![\\s\\S]))','m'));assert(match,'missing '+name);return match[1];}
- for(const consumer of ['madaros-witness-gate','gate-wave-0','madaros-current-source-deref-f64','stdlib-deep-science','sco-current-source']){
+ for(const consumer of ['madaros-corpus-regression','madaros-witness-gate','gate-wave-0','madaros-current-source-deref-f64','stdlib-deep-science','sco-current-source']){
   const b=job(consumer);
   assert(b.includes('    needs: [impact, fast-checks, current-source-madaros]\n'),consumer+' must depend directly on producer');
   assert.equal(b.split('      - uses: ./.github/actions/current-source-madaros\n').length,2,consumer+' must verify exactly once');
@@ -41,12 +41,25 @@ function check(w,a){
  assert(producer.includes('bash scripts/ci/build_modular_madaros.sh /tmp/madaros-ci.elf'),'missing source build');
  assert(producer.includes('stdlib_deep_compiler_receipt.sh prepare'),'missing producer receipt');
  assert(producer.includes('uses: actions/upload-artifact@v4'),'missing upload');
+ const corpus=job('madaros-corpus-regression');
+ for (const input of ['SOUNIO_MADAROS_CORPUS_SHARD: ${{ strategy.job-index }}',
+                      'SOUNIO_MADAROS_CORPUS_SHARDS: ${{ strategy.job-total }}']) {
+   assert(corpus.includes(input),'corpus partition must use the actual matrix: '+input);
+ }
+ const lowering=job('madaros-current-source-deref-f64');
+ const poll=lowering.indexOf('--poll-knowledge-runtime');
+ const rung=lowering.indexOf('run: bash scripts/ci/madaros_fixed_point_gate.sh');
+ const wait=lowering.indexOf('--wait-knowledge-runtime');
+ assert(poll>=0 && poll<rung && rung<wait,'poll before self-compile and collect the final receipt afterwards');
  assert(!job('madaros-current-source-deref-f64').includes('sco_exact_integral_center_gate.sh'),'SCO still serializes f64');
  for(const gate of ['sco_stack_contract.sh','sco_step4_runtime_gate.sh','sco_corpus_gate.sh','sco_etau_install_gate.sh','sco_strategy_probe_gate.sh','sco_egraph_metadata_gate.sh','sco_exact_integral_center_gate.sh'])assert(job('sco-current-source').includes(gate),'dropped '+gate);
 }
 check(workflow,action);
 if(process.argv[3]==='--selftest'){
  const mutations=[
+ [workflow.replace('SOUNIO_MADAROS_CORPUS_SHARD: ${{ strategy.job-index }}','SOUNIO_MADAROS_CORPUS_SHARD: 0'),action],
+ [workflow.replace('--poll-knowledge-runtime','true'),action],
+ [workflow.replace('--wait-knowledge-runtime','true'),action],
  [workflow.replace('needs: [impact, fast-checks, current-source-madaros]','needs: impact'),action],
  [workflow.replace('needs: [impact, fast-checks]','needs: impact'),action],
  [workflow.replace('      - uses: ./.github/actions/current-source-madaros\n',''),action],

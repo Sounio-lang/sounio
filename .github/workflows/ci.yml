@@ -2073,32 +2073,6 @@ jobs:
         env:
           MADAROS_RAW_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
         run: bash scripts/ci/madaros_opt_chained_call_gate.sh
-      - name: Madaros compiles Madaros (ratcheted rung)
-        # gen2 + gen3 are two more full self-compiles (~40 min, in swap on a 16 GB
-        # runner). Whether Madaros reaches its fixed point depends on the compiler
-        # sources AND on the stdlib modules it imports: main.sio uses
-        # compiler::ontology (stdlib/compiler/ontology/), and self-hosted/ also
-        # imports stdlib pkg, mem, hardware and random. So it runs on compiler or
-        # stdlib changes; a tests/docs-only change cannot move it.
-        #
-        # POST-MERGE ONLY (2026-09-25). Measured on PRs #2688-#2690: the rung is
-        # one gen1 self-compile of main.sio taking 56-62 min (gen3 then SIGSEGVs
-        # in ~8 s, rung `run` as recorded). On pull_request and merge_group that
-        # hour sat on the critical path of every compiler PR, twice (PR run, then
-        # queue run). It now runs on push to main, nightly and manual dispatch;
-        # a red result on main opens an issue (job fixed-point-regression-alert)
-        # instead of blocking the merge. Trade-off, stated plainly: a PR can now
-        # land that lowers into_acc_done or the rung; it is caught on the next
-        # main run, not before merge. Force it on a branch with workflow_dispatch.
-        id: rung
-        if: (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && (needs.impact.outputs.compiler == 'true' || needs.impact.outputs.stdlib == 'true' || needs.impact.outputs.full == 'true')
-        env:
-          MADAROS_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
-          SOUNIO_MADAROS_FP_DIR: /tmp/sounio-madaros-current-source-f64-lowering/fixed-point
-          # Keep the reusable gate's local default at 40, but retain the
-          # independently reproduced progress in CI.
-          SOUNIO_MADAROS_FP_MIN_INTO_ACC_DONE: "122"
-        run: bash scripts/ci/madaros_fixed_point_gate.sh
       - name: Run changed Madaros tests with the current-source compiler
         env:
           SOUNIO_MADAROS_CHANGED_TESTS_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
@@ -2143,6 +2117,35 @@ jobs:
         env:
           SOUNIO_MADAROS_STACK_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
         run: bash scripts/ci/madaros_nested_call_stack_gate.sh
+      - name: Check for an early knowledge runtime failure before self-compiling
+        if: runner.environment == 'self-hosted'
+        run: bash scripts/ci/madaros_current_source_f64_lowering_gate.sh --poll-knowledge-runtime
+      - name: Madaros compiles Madaros (ratcheted rung)
+        # gen2 + gen3 are two more full self-compiles (~40 min, in swap on a 16 GB
+        # runner). Whether Madaros reaches its fixed point depends on the compiler
+        # sources AND on the stdlib modules it imports: main.sio uses
+        # compiler::ontology (stdlib/compiler/ontology/), and self-hosted/ also
+        # imports stdlib pkg, mem, hardware and random. So it runs on compiler or
+        # stdlib changes; a tests/docs-only change cannot move it.
+        #
+        # POST-MERGE ONLY (2026-09-25). Measured on PRs #2688-#2690: the rung is
+        # one gen1 self-compile of main.sio taking 56-62 min (gen3 then SIGSEGVs
+        # in ~8 s, rung `run` as recorded). On pull_request and merge_group that
+        # hour sat on the critical path of every compiler PR, twice (PR run, then
+        # queue run). It now runs on push to main, nightly and manual dispatch;
+        # a red result on main opens an issue (job fixed-point-regression-alert)
+        # instead of blocking the merge. Trade-off, stated plainly: a PR can now
+        # land that lowers into_acc_done or the rung; it is caught on the next
+        # main run, not before merge. Force it on a branch with workflow_dispatch.
+        id: rung
+        if: (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && (needs.impact.outputs.compiler == 'true' || needs.impact.outputs.stdlib == 'true' || needs.impact.outputs.full == 'true')
+        env:
+          MADAROS_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+          SOUNIO_MADAROS_FP_DIR: /tmp/sounio-madaros-current-source-f64-lowering/fixed-point
+          # Keep the reusable gate's local default at 40, but retain the
+          # independently reproduced progress in CI.
+          SOUNIO_MADAROS_FP_MIN_INTO_ACC_DONE: "122"
+        run: bash scripts/ci/madaros_fixed_point_gate.sh
       # The run-pass corpus under Madaros is measured by the separate job
       # madaros-corpus-regression (scripts/ci/madaros_corpus_regression_gate.sh),
       # which CI Decision requires. It is not run here.
@@ -2571,14 +2574,23 @@ jobs:
   # fails under this pull request's Madaros turns the pull request red.
   # Refresh the baseline with SOUNIO_MADAROS_CORPUS_REFRESH=1.
   madaros-corpus-regression:
-    name: Madaros Corpus Regression
+    name: Madaros Corpus Regression (${{ matrix.shard }})
     needs: [impact, fast-checks, current-source-madaros]
     if: needs.impact.outputs.compiler == 'true' || needs.impact.outputs.runtime == 'true' || needs.impact.outputs.stdlib == 'true' || needs.impact.outputs.tests == 'true' || needs.impact.outputs.full == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/current-source-madaros
+      - name: Check corpus partition and timeout controls
+        if: strategy.job-index == 0
+        run: |
+          bash scripts/ci/madaros_corpus_shard_selftest.sh
+          bash scripts/ci/madaros_corpus_timeout_selftest.sh
       - name: Run tests/run-pass under this PR's Madaros against the baseline
         env:
           SOUNIO_MADAROS_CORPUS_BIN: ${{ runner.temp }}/stdlib-deep-compiler/madaros.elf
@@ -2589,13 +2601,14 @@ jobs:
           # exhaustion. The gate itself warns that too many workers get compiler
           # processes killed.
           SOUNIO_TEST_JOBS: 2
+          SOUNIO_MADAROS_CORPUS_SHARD: ${{ strategy.job-index }}
+          SOUNIO_MADAROS_CORPUS_SHARDS: ${{ strategy.job-total }}
           # Every compile also runs the merge lookups linearly and refuses on any
           # disagreement with the per-name index (module_frontend.sio). A
           # divergence shows up here as a new compile failure with its message.
           SOUNIO_IR_FN_INDEX_VERIFY: "1"
         run: |
           set -o pipefail
-          bash scripts/ci/madaros_corpus_timeout_selftest.sh
           bash scripts/ci/madaros_corpus_regression_gate.sh 2>&1 | tee "$RUNNER_TEMP/madaros-corpus.log"
       - name: Summarise
         if: always()
@@ -2604,7 +2617,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: madaros-corpus-${{ github.sha }}-${{ github.run_attempt }}
+          name: madaros-corpus-${{ matrix.shard }}-${{ github.sha }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/madaros-corpus.log
           retention-days: 14
 

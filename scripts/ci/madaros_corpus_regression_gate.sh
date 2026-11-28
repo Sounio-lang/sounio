@@ -34,6 +34,7 @@
 #   SOUNIO_MADAROS_CORPUS_REFRESH=1 ...   # rewrite the baseline instead of comparing
 
 set -uo pipefail
+export LC_ALL=C
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
@@ -47,6 +48,15 @@ fail() {
   echo "[madaros-corpus] FAIL: $*" >&2
   exit 1
 }
+
+# The default invocation still compares (or refreshes) the entire corpus.
+[[ ${SOUNIO_MADAROS_CORPUS_SHARD+x} == ${SOUNIO_MADAROS_CORPUS_SHARDS+x} ]] \
+  || fail "invalid shard configuration: set both shard index and count"
+SHARD="${SOUNIO_MADAROS_CORPUS_SHARD-0}"
+SHARDS="${SOUNIO_MADAROS_CORPUS_SHARDS-1}"
+[[ "$SHARD" =~ ^(0|[1-9][0-9]{0,2})$ && "$SHARDS" =~ ^[1-9][0-9]{0,2}$ ]] && (( SHARD < SHARDS )) \
+  || fail "invalid shard $SHARD of $SHARDS"
+[[ "$SHARDS" == 1 || "$REFRESH" != 1 ]] || fail "baseline refresh requires the full corpus"
 
 [[ -n "$MADAROS" ]] || fail "SOUNIO_MADAROS_CORPUS_BIN must name a current-source Madaros ELF"
 [[ -x "$MADAROS" ]] || fail "not executable: $MADAROS"
@@ -99,13 +109,18 @@ corpus_is_program() {
     head -n 8 "$f" | grep -qE '^//@[[:space:]]*ignore\b' && return 1
     grep -qE '^[[:space:]]*(pub[[:space:]]+)?fn[[:space:]]+main[[:space:]]*\(' "$f"
 }
-mapfile -t ALL_SIO < <(ls tests/run-pass/*.sio 2>/dev/null | sort)
+# Bash glob order is byte-stable with LC_ALL=C. Stripe the same checkout
+# across runners before inspecting files, so each source is read on one shard.
+shopt -s nullglob
+ALL_SIO=(tests/run-pass/*.sio)
 PROGRAMS=()
 skipped=0
-for f in "${ALL_SIO[@]}"; do
+for ((i=SHARD; i<${#ALL_SIO[@]}; i+=SHARDS)); do
+    f=${ALL_SIO[i]}
     if corpus_is_program "$f"; then PROGRAMS+=("$f"); else skipped=$((skipped + 1)); fi
 done
 [[ ${#PROGRAMS[@]} -gt 0 ]] || fail "no programs found under tests/run-pass"
+echo "[madaros-corpus] shard: $SHARD of $SHARDS"
 echo "[madaros-corpus] programs: ${#PROGRAMS[@]} (skipped $skipped: //@ ignore or no fn main)"
 
 # Dynlink run-pass programs compile, then the dynamic loader exits 127 unless
@@ -213,7 +228,7 @@ export MADAROS WORK
 : > "$WORK/crashed.txt"
 printf '%s\n' "${PROGRAMS[@]}" \
   | xargs -P "$JOBS" -I{} "$WORK/run_one.sh" {} \
-  | sort > "$WORK/actual.txt"
+  | sort > "$WORK/actual.txt" || fail "corpus worker pipeline failed -- no verdict"
 
 # Completeness floor: every selected program must have heartbeated. A dead
 # xargs or a broken run_one leaves actual.txt empty, which the comparison
@@ -294,6 +309,13 @@ fi
 [[ -f "$BASELINE" ]] || fail "missing baseline $BASELINE -- generate it with SOUNIO_MADAROS_CORPUS_REFRESH=1"
 
 grep -vE '^[[:space:]]*#' "$BASELINE" | grep -vE '^[[:space:]]*$' | sort > "$WORK/baseline.txt"
+
+if (( SHARDS > 1 )); then
+  # Only this shard can report a previously failing program as fixed.
+  awk 'NR == FNR { selected[$0] = 1; next } $1 in selected' \
+    "$WORK/ran.txt" "$WORK/baseline.txt" > "$WORK/shard-baseline.txt" || fail "cannot select shard baseline"
+  mv "$WORK/shard-baseline.txt" "$WORK/baseline.txt" || fail "cannot install shard baseline"
+fi
 
 comm -13 "$WORK/baseline.txt" "$WORK/actual.txt" > "$WORK/new.txt"
 comm -23 "$WORK/baseline.txt" "$WORK/actual.txt" > "$WORK/fixed.txt"
